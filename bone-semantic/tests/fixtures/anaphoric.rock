@@ -1,0 +1,29 @@
+//! Anaphoric ident `^name`: the explicit opt-in for reading the CALLER's
+//! binding from inside a macro body. Bare idents in a macro body are
+//! hygiene-renamed; `^name` escapes that rename, so after expansion it is an
+//! ordinary reference to the caller-scope `name` and resolves/types exactly
+//! like a plain ident read. Execution-level coverage: tests/macros/anaphoric.rock.
+
+// `^x` reads the caller's local `x` (int).
+//- anaphoric_reads_caller_local
+macro grab_x() -> int {
+    ^x
+}
+fn f() -> int {
+    let x = 7
+    let r = grab_x()
+      //^ int
+    r
+}
+
+// the caller-local's type flows through unchanged.
+//- anaphoric_propagates_caller_type
+macro grab() -> bool {
+    ^flag
+}
+fn f() -> bool {
+    let flag = true
+    let r = grab()
+      //^ bool
+    r
+}

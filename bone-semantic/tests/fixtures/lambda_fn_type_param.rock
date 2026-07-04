@@ -1,0 +1,11 @@
+//! A lambda with a function-type parameter must build its own type without a
+//! cross-arena shallow copy of the param's Function node -- that dangles the
+//! nested fn-type's child indices -> cyclic resolve -> stack overflow. Build
+//! the lambda's param/ret types via `reify`.
+
+//- lambda_fn_type_param
+fn f() -> int {
+    let h = (cb: fn(int) -> bool) => true
+    5
+  //^ int
+}

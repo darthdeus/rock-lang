@@ -1,0 +1,26 @@
+//! @no_check
+//! Parenthesized expressions: `(e)`. No HIR node -- lowering just unwraps to the
+//! inner expr, so `(e)` has exactly `e`'s type. Marker on the binding.
+
+//- paren_int
+fn f() -> int {
+    let x = (5)
+      //^ int
+    5
+}
+
+// nested parens unwrap all the way down
+//- paren_nested
+fn f() -> int {
+    let x = ((5))
+      //^ int
+    5
+}
+
+// a paren around a comparison still types as the inner expr (bool)
+//- paren_bool
+fn f() -> bool {
+    let b = (1 < 2)
+      //^ bool
+    b
+}

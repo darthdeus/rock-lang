@@ -1,0 +1,40 @@
+//! Position-based `match` typing -- same rule A as
+//! if_statement_vs_value.rock: arm tails join only when the match is used
+//! as a value; in statement position arms are checked independently and
+//! their values discarded. (rock still joins statement-position arms;
+//! intended divergence until rock adopts rule A.)
+
+//- stmt_match_mismatched_arms
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let x = 1
+    match x {
+        1 => { gives_bool() }
+        _ => { x = 2 }
+    }
+    let y = x
+      //^ int
+    y
+}
+
+//- value_match_uniform
+fn f() -> int {
+    let x = 1
+    let u = match x {
+        1 => 10,
+        _ => 20,
+    }
+      //^ int
+    u
+}
+
+//- value_match_mismatched_fail @fail
+fn f() -> int {
+    let x = 1
+    let u = match x {
+        1 => 10,
+        _ => "s",
+    }
+      //^ int
+    x
+}

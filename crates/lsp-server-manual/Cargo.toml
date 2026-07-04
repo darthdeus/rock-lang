@@ -1,0 +1,18 @@
+[package]
+name = "lsp-server-manual"
+version = "0.7.9"
+edition = "2024"
+description = "Generic LSP server scaffold. Fork of lsp-server 0.7.9 with hand-rolled serde (no serde_derive)."
+license = "MIT OR Apache-2.0"
+
+[lints]
+workspace = true
+
+[lib]
+name = "lsp_server"
+
+[dependencies]
+crossbeam-channel = "0.5.15"
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

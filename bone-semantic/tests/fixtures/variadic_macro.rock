@@ -1,0 +1,34 @@
+//! Variadic macros: `macro f(x: expr, rest: ...expr)` captures the trailing
+//! args; the body forwards them via `...rest`, which is splat-expanded and
+//! re-dispatched on post-splat arity until a base-case (0-arg) overload.
+//! (Operator-free so it needs no stdlib `__op_add` — the recursion + base
+//! case is what's under test, not arithmetic.) Verified vs rock
+//! (tests/macros/basic.rock exercises the arithmetic form).
+
+//- variadic_capture_picks_first
+macro first_of() -> int { 0 }
+macro first_of(x: expr, rest: ...expr) -> int { x }
+fn f() -> int {
+    let r = first_of(7, 8, 9)
+      //^ int
+    r
+}
+
+//- variadic_splat_recurse_to_base
+macro drain() -> int { 0 }
+macro drain(x: expr, rest: ...expr) -> int { drain(...rest) }
+fn f() -> int {
+    // drain(7,8,9) -> drain(8,9) -> drain(9) -> drain() -> 0
+    let r = drain(7, 8, 9)
+      //^ int
+    r
+}
+
+//- variadic_empty_uses_base
+macro count() -> int { 0 }
+macro count(x: expr, rest: ...expr) -> int { x }
+fn f() -> int {
+    let r = count()
+      //^ int
+    r
+}

@@ -1,0 +1,35 @@
+//! @no_check
+//! Logical negation: `!e`. Operand must be `bool`; result is `bool`.
+//! Needs `Expr::Not` HIR + lowering (`ExprKind::Not`) + inference
+//! (unify operand with bool, yield bool).
+
+//- not_bool_literal
+fn f() -> bool {
+    let b = !true
+      //^ bool
+    b
+}
+
+// operand can be any bool-typed expr, not just a literal
+//- not_of_comparison
+fn f() -> bool {
+    let b = !(1 < 2)
+      //^ bool
+    b
+}
+
+// double negation stays bool
+//- not_double
+fn f() -> bool {
+    let b = !!true
+      //^ bool
+    b
+}
+
+// negating a non-bool must fail
+//- not_int_fail @fail
+fn f() -> bool {
+    let b = !5
+      //^ bool
+    b
+}

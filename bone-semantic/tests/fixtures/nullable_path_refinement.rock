@@ -1,0 +1,32 @@
+//! Path refinement on field paths and `&&` chains. bone narrows only a local
+//! `Var != null` (detect_null_narrow); these need (a) narrowing a FIELD path
+//! `m.inner` inside `if m.inner != null`, and (b) `&&`-chained conditions where
+//! later clauses see earlier narrowings. Verified vs rock (path_refinement_*).
+
+// field-path narrowing: inside `if m.inner != null`, `m.inner` is non-null.
+//- refine_field_path
+struct Inner { v: int }
+struct Mid { inner: Inner? }
+fn f(m: Mid) -> int {
+    if m.inner != null {
+        let r = m.inner.v
+          //^ int
+        r
+    } else {
+        0
+    }
+}
+
+// `&&` chain: `m != null && m.inner != null` narrows both.
+//- refine_and_chain
+struct Inner { v: int }
+struct Mid { inner: Inner? }
+fn f(m: Mid?) -> int {
+    if m != null && m.inner != null {
+        let r = m.inner.v
+          //^ int
+        r
+    } else {
+        0
+    }
+}

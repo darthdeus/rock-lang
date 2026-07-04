@@ -1,0 +1,18 @@
+//! Position queries on INTERFACE type positions that belong to no BodyOwner:
+//! enum variant payload types and newtype wrapped types. These live in the
+//! module's interface index, not any body's node index (invariant I1 — they
+//! are interface; bone-inc B7). Body-owned positions are covered by
+//! hover_non_function_bodies.rock.
+
+//- hover_enum_payload_type
+enum Shape {
+    Dot,
+    Box(int),
+      //^ int
+}
+fn f() -> Shape { Shape::Dot }
+
+//- hover_newtype_wrapped_type
+newtype Meters(float)
+             //^ float
+fn f() -> float { 1.5 }

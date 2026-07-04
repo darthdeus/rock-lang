@@ -1,0 +1,35 @@
+//! `_G.X` source form: a module-root global access that bypasses local shadows.
+//! bone lowers `_G.X` as a field access on a `_G` value -> "Undefined global
+//! `_G`". Fix: in lowering, a `_G`-based field access resolves the field name
+//! directly as a global (`Expr::Global(field)`), which naturally bypasses scope.
+//! Covers read and write (the assign target lowers through the same arm).
+//! Verified vs rock (tests/macros/global_access_form.rock).
+
+// read: `_G.X` has the global's type.
+//- g_read
+global G_READ: int = 5
+fn f() -> int {
+    let r = _G.G_READ
+      //^ int
+    r
+}
+
+// read bypasses a local of the same name (globals aren't scoped).
+//- g_read_bypasses_shadow
+global G_SHADOW: int = 5
+fn f() -> int {
+    let G_SHADOW = 11
+    let r = _G.G_SHADOW
+      //^ int
+    r
+}
+
+// write: `_G.X = v` assigns the global; the value must match its type.
+//- g_write
+global G_WRITE: int = 0
+fn f() -> int {
+    _G.G_WRITE = 10
+    let r = _G.G_WRITE
+      //^ int
+    r
+}

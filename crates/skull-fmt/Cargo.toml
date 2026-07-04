@@ -1,0 +1,15 @@
+[package]
+name = "skull-fmt"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+rock-core = { path = "../rock-core" }
+rock-tokenizer = { path = "../rock-tokenizer" }
+skull-parser = { path = "../../skull-parser" }
+comfy-la-arena = { workspace = true }
+ustr = { workspace = true }
+ordered-float = { workspace = true }

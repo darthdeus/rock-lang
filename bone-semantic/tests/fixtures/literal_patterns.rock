@@ -1,0 +1,39 @@
+//! Literal patterns in `match`: `match n { 0 => .., 1 => .., _ => .. }`. bone's
+//! lower_pattern_value rejects `Pattern::Literal` ("Unsupported pattern:
+//! Literal(...)"). The scrutinee type must unify with each literal's type
+//! (int/string/bool); arm bodies join to the result. Verified vs rock.
+
+// int literal arms.
+//- match_int_literal
+fn f(n: int) -> int {
+    let r = match n {
+        0 => 10,
+        1 => 20,
+        _ => 0,
+    }
+      //^ int
+    r
+}
+
+// string literal arms.
+//- match_string_literal
+fn f(s: string) -> int {
+    let r = match s {
+        "a" => 1,
+        "b" => 2,
+        _ => 0,
+    }
+      //^ int
+    r
+}
+
+// literal arms mixed with an ident binding (catch-all that binds).
+//- match_literal_with_binding
+fn f(n: int) -> int {
+    let r = match n {
+        0 => 100,
+        other => other,
+    }
+      //^ int
+    r
+}

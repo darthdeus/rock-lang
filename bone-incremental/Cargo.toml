@@ -1,0 +1,18 @@
+[package]
+name = "bone-incremental"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bone-semantic = { path = "../bone-semantic" }
+skull-parser = { path = "../skull-parser" }
+
+rustc-hash = { workspace = true }
+ustr = { workspace = true }
+rust-lapper = { workspace = true }
+comfy-la-arena = { workspace = true }
+smallvec = { workspace = true }
+itertools = { workspace = true }
+
+[lints]
+workspace = true

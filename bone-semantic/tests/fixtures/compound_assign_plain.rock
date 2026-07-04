@@ -1,0 +1,52 @@
+//! Plain (non-safe-nav) compound assignment: `a += b`, `a -= b`, `a *= b`, ...
+//! The op is resolved as `__op_X(target, rhs)` over the target + rhs types and
+//! the result written back to the target; the statement itself is unit. The
+//! safe-nav shape (`x?.h += b`) keeps a single receiver eval and is the separate
+//! case in `safenav_compound_assign.rock`. Ops are user-defined here so the
+//! fixture type-checks without stdlib (primitive `+=` resolves a stdlib op).
+
+// `v += w` resolves the in-scope `__op_add(V2, V2)`; `v` stays V2.
+//- compound_struct_add
+struct V2 { x: int, y: int }
+fn __op_add(a: V2, b: V2) -> V2 { return a }
+fn f() -> int {
+    let v = V2 { x: 1, y: 2 }
+    v += V2 { x: 3, y: 4 }
+    let r = v.x
+      //^ int
+    r
+}
+
+// `-=` resolves `__op_sub`.
+//- compound_struct_sub
+struct V2 { x: int, y: int }
+fn __op_sub(a: V2, b: V2) -> V2 { return a }
+fn f() -> int {
+    let v = V2 { x: 5, y: 5 }
+    v -= V2 { x: 1, y: 1 }
+    let r = v.y
+      //^ int
+    r
+}
+
+// mixed rhs type: `v *= 3` resolves `__op_mul(V2, int) -> V2`.
+//- compound_mixed_rhs_op
+struct V2 { x: int, y: int }
+fn __op_mul(a: V2, s: int) -> V2 { return a }
+fn f() -> int {
+    let v = V2 { x: 1, y: 1 }
+    v *= 3
+    let r = v.x
+      //^ int
+    r
+}
+
+// no `__op_add(V2, int)` overload — rejected.
+//- compound_no_overload @fail
+struct V2 { x: int, y: int }
+fn __op_add(a: V2, b: V2) -> V2 { return a }
+fn f() -> int {
+    let v = V2 { x: 1, y: 1 }
+    v += 5
+    v.x
+}

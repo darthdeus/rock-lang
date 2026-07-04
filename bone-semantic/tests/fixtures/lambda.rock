@@ -1,0 +1,74 @@
+//! @no_check
+//! Lambda expressions synthesize a function type `(P...) -> R`. This slice is
+//! pure synthesis: params must be annotated, the body's type becomes the return
+//! type. (Bidirectional propagation of expected param types from a call site or
+//! an annotated slot is a later slice.) Exercises the HIR `Expr::Lambda` node,
+//! the `TypeExpr::Function` construction, and its `render`.
+//! Marker on the `let` binding holding the lambda.
+
+//- lambda_identity
+fn f() -> int {
+    let g = (x: int) => x
+      //^ fn(int) -> int
+    5
+}
+
+// the body's type drives the return type
+//- lambda_to_bool
+fn f() -> int {
+    let g = (x: int) => x < 5
+      //^ fn(int) -> bool
+    5
+}
+
+//- lambda_two_params
+fn f() -> int {
+    let g = (x: int, y: int) => x
+      //^ fn(int, int) -> int
+    5
+}
+
+//- lambda_zero_params
+fn f() -> int {
+    let g = () => 5
+      //^ fn() -> int
+    5
+}
+
+// the body may reference outer bindings; the type flows through (capture is a
+// runtime concern, irrelevant to the function type)
+//- lambda_captures_outer
+fn f() -> int {
+    let n = 10
+    let g = (x: int) => x < n
+      //^ fn(int) -> bool
+    5
+}
+
+// param annotation types resolve nominal types too
+//- lambda_struct_param
+struct Point { x: int, y: int }
+fn f() -> int {
+    let g = (p: Point) => p.x
+      //^ fn(Point) -> int
+    5
+}
+
+// a return value whose type is itself a lambda nests the function type
+//- lambda_returns_lambda
+fn f() -> int {
+    let g = (x: int) => (y: int) => x
+      //^ fn(int) -> fn(int) -> int
+    5
+}
+
+// the lambda body is type-checked: an ordering op on a bool body must fail
+//- lambda_body_type_error @fail
+fn f() -> int {
+    let g = (x: bool) => x < x
+      //^ fn(bool) -> bool
+    5
+}
+
+// unannotated params with no expected-type slot are inferred (body /
+// application constraints), not rejected -- see lambda_nonarg.rock

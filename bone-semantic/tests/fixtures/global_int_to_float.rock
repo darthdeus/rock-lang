@@ -1,0 +1,12 @@
+//! Global initializer numeric widening: `global g: float = 0` -- the int
+//! literal must widen to the declared float. bone checks global inits with
+//! `unify(vty, declared)` (semantic_passes.rs), which has no int->float
+//! widening; should use `coerce`. Verified vs rock.
+
+//- global_int_to_float
+global g: float = 0
+fn f() -> int {
+    let x = g
+      //^ float
+    5
+}

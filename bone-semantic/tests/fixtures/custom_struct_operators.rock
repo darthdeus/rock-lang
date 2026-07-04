@@ -1,0 +1,71 @@
+//! Custom unary operators and newtype operator forwarding. rock's rule
+//! (rock-semantic/.../function_calls/operator_support.rs):
+//!   - int/float       -> builtin intrinsic (unary `-`, `!` on bool)
+//!   - newtype N(W)     -> unary `-`/`!` returns N; ordering forwards to W
+//!                         (W must be numeric, else rejected)
+//!   - other types      -> dispatch to a `__unm` / `__not` function by name,
+//!                         result is that function's return type (e.g. `-Vec2`)
+//! bone has no codegen, so only the result TYPE matters here.
+//! Verified vs rock (tests/operators_comprehensive.rock, tests/newtypes.rock).
+
+// `-Vec2` dispatches to the user `__unm(Vec2) -> Vec2`.
+//- struct_unary_minus
+struct Vec2 { x: int, y: int }
+// body is arithmetic-free on purpose: the fixture harness loads no stdlib, so
+// `0 - v.x` (folds to `__op_sub`) would not resolve. bone only type-checks the
+// body; its result type (Vec2) is what `-v` dispatch depends on.
+fn __unm(v: Vec2) -> Vec2 {
+    Vec2 { x: v.x, y: v.y }
+}
+fn f() -> Vec2 {
+    let v = Vec2 { x: 3, y: 4 }
+    let n = -v
+      //^ Vec2
+    n
+}
+
+// `!BoolWrapper` dispatches to the user `__not(BoolWrapper) -> BoolWrapper`.
+//- struct_not
+struct BoolWrapper { v: bool }
+fn __not(b: BoolWrapper) -> BoolWrapper {
+    BoolWrapper { v: !b.v }
+}
+fn f() -> BoolWrapper {
+    let b = BoolWrapper { v: true }
+    let n = !b
+      //^ BoolWrapper
+    n
+}
+
+// Unary `-` on a numeric newtype forwards through the wrapper; result is the
+// newtype itself.
+//- newtype_unary_minus
+newtype Temperature(int)
+fn f() -> Temperature {
+    let t = Temperature(25)
+    let n = -t
+      //^ Temperature
+    n
+}
+
+// Ordering on a numeric newtype forwards to the inner type; result is bool.
+//- newtype_ordering
+newtype Score(int)
+fn f() -> bool {
+    let a = Score(100)
+    let b = Score(200)
+    let r = a < b
+      //^ bool
+    r
+}
+
+// Ordering on a non-numeric newtype is rejected: the inner type (`string`) is
+// not orderable. (rock: "Ordering comparisons are only supported for numeric
+// types".)
+//- newtype_string_ordering_rejected @fail
+newtype Name(string)
+fn f() -> bool {
+    let a = Name("a")
+    let b = Name("b")
+    a < b
+}

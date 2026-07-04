@@ -1,0 +1,37 @@
+//! Calling a fn-typed parameter (callback). `f(x)` where `f: fn(A) -> B` resolves
+//! the callee to a LOCAL binding (not a top-level fn), checks each arg against A
+//! (with coercion), and yields B. Needed for the higher-order stdlib fns
+//! (map/filter/find/any/all/sort) whose Rock bodies invoke their fn params.
+
+//- call_fn_param
+fn apply<T, U>(x: T, f: fn(T) -> U) -> U {
+    let r = f(x)
+      //^ U
+    r
+}
+
+//- call_predicate
+fn check<T>(x: T, p: fn(T) -> bool) -> bool {
+    let r = p(x)
+      //^ bool
+    r
+}
+
+//- call_fn_param_concrete
+fn run(f: fn(int) -> int) -> int {
+    let r = f(5)
+      //^ int
+    r
+}
+
+// calling a non-function local is an error
+//- call_non_fn_fail @fail
+fn f(x: int) -> int {
+    x(5)
+}
+
+// wrong arity calling a fn value
+//- call_fn_wrong_arity_fail @fail
+fn apply<T, U>(f: fn(T) -> U, x: T) -> U {
+    f(x, x)
+}

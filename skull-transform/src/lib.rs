@@ -1,0 +1,1432 @@
+//! Coroutine transform: a `co fn` (lowered to a cell CFG with `Term::Yield`)
+//! becomes an ordinary stackless state-machine `__step` function plus a
+//! constructor, per `docs/stackless-coroutines.md` (decision 6). No LuaJIT
+//! coroutines.
+//!
+//! The cell model SIMPLIFIES this vs the old SSA backend: **only cells cross a
+//! yield** (values are single-block), so there is NO value spill/reload and NO
+//! "block-param value crossing a suspend" case. The frame (state-table fields)
+//! is just cells — rendered as `s.<field>` by `skull-codegen-lua`'s `FrameCtx`,
+//! so the transform doesn't even rewrite cell Load/Store; it only:
+//!   1. turns each `Term::Yield { value, resume }` block into `s.__state = k;
+//!      return value` (the `resume` block becomes a dispatch target),
+//!   2. turns a normal `return v` into `s.__return = v; s.__state = -1; return`,
+//!   3. rewrites `CoroSetInner(x)` (the `yield*` pseudo-op) to `s.__inner = x`,
+//!   4. prepends a dispatch entry that branches on `s.__state` to the resume
+//!      block for each state (falling through to the original entry for state 0).
+//!
+//! Frame = every cell except the state table `s` and `__resume_arg` (the step's
+//! two params). This is a correct over-approximation (hoisting a block-local
+//! cell to `s` is still correct; precise liveness is a later perf refinement —
+//! the plan's P2). The constructor seeds only the declared param fields.
+
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+
+use bone_semantic::inference::Workspace;
+use comfy_la_arena::{Idx, RawIdx};
+use skull_codegen_lua::{emit_named_framed, mangled, CodegenCtx, FrameCtx};
+use skull_mir::mir::*;
+
+mod inline;
+pub use inline::{inline_functions, InlineCache, SpliceRecord};
+
+const STATE: &str = "__state";
+
+/// Dead-code elimination over a [`MirFunc`] (a CFG->CFG cleanup, run before emit).
+/// Removes, to a fixpoint: (a) pure value-producing insts with no users — the
+/// dead `Load`/`Const`/arith/`Field` left by the cell-model's literal lowering;
+/// (b) `Store` to a cell that is never `Load`ed anywhere — the dead result cells
+/// of statement-position control flow. Side-effecting insts (`Call`/`CallValue`/
+/// `CallMulti`/`StoreField`/`StoreIndex`/`StoreGlobal`/`MapNext`/`ArrayPush`/
+/// coroutine ops) are always kept (an unused call result still runs the call).
+/// This shrinks LuaJIT's snapshot width (fewer live locals at a side-exit), the
+/// named trigger of skull's trace-cache thrash. Scans ALL blocks (incl. closure
+/// sub-CFGs in the same arena), so a value/cell used only inside a lambda body
+/// is correctly seen as live.
+pub fn dce(func: &mut MirFunc) {
+    dce_core(func, None);
+}
+
+/// DCE, optionally fusing a copy-prop substitution into the count scan: when
+/// `subst` is `Some`, each inst's value operands (and each terminator's) are
+/// remapped through it as they are counted, so the post-substitution reference
+/// counts fall out of the same walk that DCE needs anyway — no separate
+/// full-arena remap pass. With `None` it is plain DCE over the current program.
+fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
+    let ni = func.insts.len();
+    let nc = func.cells.len();
+    // Reference counts over the CURRENT program (dense, raw-id keyed): live value
+    // uses per inst, `Load(c)` count per cell, and stores per cell (for the CSR
+    // index below). A value/store dies when its count reaches 0; removing an inst
+    // decrements the counts of what it referenced, cascading via a worklist — so
+    // the load->store->value chains the cell model leaves converge in ONE pass
+    // instead of the old fixpoint's ~2.2 full re-scans.
+    let mut use_count = vec![0u32; ni];
+    let mut load_count = vec![0u32; nc];
+    let mut store_n = vec![0u32; nc];
+    {
+        // Split the `&mut MirFunc` into independent field borrows so a `Store`
+        // value can be remapped in `insts` while iterating `blocks` (a term is
+        // remapped through `&mut b.term`). Cells/opcodes are never rewritten, so
+        // the Load/Store accounting below is unaffected by the substitution.
+        let MirFunc { blocks, insts, .. } = &mut *func;
+        for (_, b) in blocks.iter_mut() {
+            for &i in &b.insts {
+                if let Some(s) = subst {
+                    remap_inst(&mut insts[i], &|x| resolve_subst(s, x));
+                }
+                value_operands(&insts[i], &mut |op| use_count[raw(op) as usize] += 1);
+                match &insts[i] {
+                    Inst::Load(c) => load_count[raw(*c) as usize] += 1,
+                    Inst::Store { cell, .. } => store_n[raw(*cell) as usize] += 1,
+                    _ => {}
+                }
+            }
+            if let Some(s) = subst {
+                remap_term(&mut b.term, &|x| resolve_subst(s, x));
+            }
+            // Terminator operands are permanent uses (terms are never removed), so
+            // their +1 is never decremented — a value used by a term stays live.
+            term_uses_each(&b.term, &mut |v| use_count[raw(v) as usize] += 1);
+        }
+    }
+
+    // CSR: stores grouped by cell, so a cell whose last `Load` is removed cascades
+    // its now-dead stores in O(stores-of-that-cell).
+    let mut store_off = vec![0u32; nc + 1];
+    for c in 0..nc {
+        store_off[c + 1] = store_off[c] + store_n[c];
+    }
+    let mut store_list = vec![0u32; store_off[nc] as usize];
+    let mut fill = store_off.clone();
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            if let Inst::Store { cell, .. } = &func.insts[i] {
+                let c = raw(*cell) as usize;
+                store_list[fill[c] as usize] = raw(i);
+                fill[c] += 1;
+            }
+        }
+    }
+
+    // Seed the worklist with everything dead in the initial program, then cascade.
+    let mut dead = vec![false; ni];
+    let mut work: Vec<Idx<Inst>> = Vec::new();
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            if is_dead_rc(&func.insts[i], i, &use_count, &load_count) {
+                dead[raw(i) as usize] = true;
+                work.push(i);
+            }
+        }
+    }
+    while let Some(i) = work.pop() {
+        // Each value operand of the removed inst loses a use; a value that hits
+        // zero (and is pure) is itself now dead.
+        value_operands(&func.insts[i], &mut |op| {
+            let k = raw(op) as usize;
+            use_count[k] = use_count[k].saturating_sub(1);
+            if !dead[k] && use_count[k] == 0 && is_dead_value(&func.insts[op]) {
+                dead[k] = true;
+                work.push(op);
+            }
+        });
+        // Removing a `Load` drops its cell's load count; a cell with no remaining
+        // loads makes its stores dead (their value operands then cascade on pop).
+        if let Inst::Load(c) = &func.insts[i] {
+            let ck = raw(*c) as usize;
+            load_count[ck] = load_count[ck].saturating_sub(1);
+            if load_count[ck] == 0 {
+                for si in store_off[ck]..store_off[ck + 1] {
+                    let s = Idx::from_raw(RawIdx::from_u32(store_list[si as usize]));
+                    if !dead[raw(s) as usize] {
+                        dead[raw(s) as usize] = true;
+                        work.push(s);
+                    }
+                }
+            }
+        }
+    }
+
+    // Single filter pass; `retain` reuses each block's allocation.
+    let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
+    for bid in block_ids {
+        let mut insts = std::mem::take(&mut func.blocks[bid].insts);
+        insts.retain(|&i| !dead[raw(i) as usize]);
+        func.blocks[bid].insts = insts;
+    }
+}
+
+/// Value operands a terminator reads (the live-use contribution of a `Term`).
+fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
+    match term {
+        Term::Return(vs) => vs.iter().for_each(|v| push(*v)),
+        Term::Branch { cond, .. } => push(*cond),
+        Term::Switch { discr, .. } => push(*discr),
+        Term::Yield { values, .. } => values.iter().for_each(|v| push(*v)),
+        _ => {}
+    }
+}
+
+/// Whether a value-producing inst is pure enough that an unused result is dead.
+/// `Call`/`CallValue` run for effect; an `Index` read is bounds-checked (errors),
+/// so a discarded result must still execute.
+fn is_dead_value(inst: &Inst) -> bool {
+    !matches!(inst, Inst::Call { .. } | Inst::CallValue { .. } | Inst::Index { .. })
+        && inst.produces_value()
+}
+
+/// The pre-emit MIR cleanup: copy-propagate intra-block loads, then DCE the dead
+/// loads/values/stores they leave. Run per-function in `mir_emit`.
+///
+/// The two passes are FUSED: copy-prop's substitution is applied as DCE's count
+/// scan walks each inst, so the value-operand remap (`remap_inst` over every
+/// inst) and the use-counting share one traversal instead of two back-to-back.
+/// The standalone `copy_propagate` / `dce` keep their independent behavior.
+pub fn cleanup(func: &mut MirFunc) {
+    scalarize_native_buffer_stores(func);
+    scalarize_struct_cells(func);
+    let subst = copy_propagate_subst(func);
+    dce_core(func, subst.as_deref());
+}
+
+/// Scalarize `buf[i] = <value-struct literal>` for a `NativeBuffer<value>`.
+///
+/// `StoreIndex { kind: NativeBuffer, value: MakeValueStruct }` otherwise builds
+/// the WHOLE nested cdata (`Vertex_ct(Vec2_ct(..), Color_ct(..), ..)`) and copies
+/// it into the slot -- ~5 cdata allocations per element that don't sink across
+/// the buffer store. rock instead grabs the slot reference and writes each leaf
+/// field in place (`slot.pos.x = ..`), allocating nothing. This is the mag
+/// HUD/text glyph-quad path (`queue_ui_text_with_font`'s
+/// `verts[ci+N] = make_text_vertex(..)`).
+///
+/// Rewrite the store to `slot = buf[i]` (a bounds-checked `__nb_checked_get`,
+/// same as the original `__nb_checked_set`) followed by per-leaf `StoreField`s,
+/// descending into nested value-struct fields via `Field(slot, name)` (FFI
+/// returns a reference for aggregate fields, so the writes go through). The dead
+/// `MakeValueStruct`s fall to DCE. Only fires when the stored value is a literal
+/// `MakeValueStruct` -- an opaque cdata (a variable) is copied whole as before.
+pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
+    // (store inst, base, index, value-MakeValueStruct) for each rewritable store.
+    let targets: Vec<(Idx<Inst>, Idx<Inst>, Idx<Inst>, Idx<Inst>)> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .filter_map(|i| match &func.insts[i] {
+            Inst::StoreIndex { base, index, value, kind: ContainerKind::NativeBuffer }
+                if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) =>
+            {
+                Some((i, *base, *index, *value))
+            }
+            _ => None,
+        })
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
+    for (store_i, base, index, value) in targets {
+        let slot = func.insts.alloc(Inst::Index { base, index, kind: ContainerKind::NativeBuffer });
+        let mut new = vec![slot];
+        gen_leaf_stores(func, slot, value, &mut new);
+        replacement.insert(store_i, new);
+    }
+    let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
+    for bid in block_ids {
+        if !func.blocks[bid].insts.iter().any(|i| replacement.contains_key(i)) {
+            continue;
+        }
+        let old = std::mem::take(&mut func.blocks[bid].insts);
+        let mut new = Vec::with_capacity(old.len());
+        for i in old {
+            match replacement.get(&i) {
+                Some(ins) => new.extend_from_slice(ins),
+                None => new.push(i),
+            }
+        }
+        func.blocks[bid].insts = new;
+    }
+}
+
+/// Emit one `StoreField(slot, field, value)` per IMMEDIATE field of `mvs` (a
+/// `MakeValueStruct`). Does NOT descend into nested value-struct fields: a
+/// nested field's value is assigned whole (`slot.pos = Vec2_ct(x, y)`), matching
+/// rock. The nested ctor then SINKS on the trace (it never escapes -- only its
+/// bytes are copied into the slot). Recursing instead (`slot.pos.x = x`) would
+/// READ `slot.pos`, and indexing an aggregate cdata field allocates a reference
+/// cdata per access -- the very allocation we are removing.
+fn gen_leaf_stores(func: &mut MirFunc, slot: Idx<Inst>, mvs: Idx<Inst>, out: &mut Vec<Idx<Inst>>) {
+    let Inst::MakeValueStruct { fields, .. } = &func.insts[mvs] else {
+        return;
+    };
+    let fields = fields.clone();
+    for (fname, op) in fields {
+        out.push(func.insts.alloc(Inst::StoreField { base: slot, field: fname, value: op }));
+    }
+}
+
+/// A scalarizable aggregate ctor's identity, consistent across all stores to one
+/// cell (a cell holds one type). The rewrite is identical for all; the variant
+/// only distinguishes the ctor instructions for the consistency check.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StructId {
+    /// `MakeValueStruct` -- an immutable `value` cdata.
+    Value(ustr::Ustr),
+    /// `MakeStruct` -- a mutable plain-struct table (`ty` is the `__ty` nominal,
+    /// `None` for a foreign nominal).
+    Plain(Option<ustr::Ustr>),
+    /// `MakeEnum` -- a payload-variant enum table (`{__variant, __ty, [i]=..}`).
+    /// Keyed by the ENUM name (`__ty`), so every variant of one enum stored to a
+    /// cell is consistent (the field union covers all variants' payload slots).
+    Enum(ustr::Ustr),
+}
+
+/// The source of a scalarized field's value: an existing operand, or a string
+/// CONST to materialize (an enum table bakes `__variant`/`__ty` as literals, not
+/// operands, so splitting it must emit the `Const(Str)` insts).
+enum FieldSrc {
+    Operand(Idx<Inst>),
+    ConstStr(ustr::Ustr),
+}
+
+/// If `inst` is a scalarizable aggregate ctor, its identity + logical field list.
+/// A `value`/plain struct's fields are its declared (name, operand) pairs. An
+/// enum's are `__variant`/`__ty` (string consts) + one `_<i>` per positional
+/// payload + each record-payload field by name -- the table's runtime keys (the
+/// payload is at positional Lua index `[i+1]`, read via `TupleIndex`, named `_<i>`
+/// here so a `match` payload read rewrites to the same field cell).
+///
+/// `enum_hint` is the cell's enum name (from its `MakeEnum` stores). A unit
+/// variant of a MIXED enum is stored as a reference to a shared singleton GLOBAL
+/// `__rock_enum_<E>_<V>` (not a `MakeEnum`); given `enum_hint = E` we recognize it
+/// as the same enum's ctor with fields `{__variant=V, __ty=E}` (no payload), so a
+/// cell mixing payload + unit variants stays uniform and splits. The hint is what
+/// disambiguates `V` from `E` in the underscore-joined global name.
+fn ctor_fields(
+    inst: &Inst,
+    enum_hint: Option<ustr::Ustr>,
+) -> Option<(StructId, Vec<(ustr::Ustr, FieldSrc)>)> {
+    let op = |fs: &[(ustr::Ustr, Idx<Inst>)]| {
+        fs.iter().map(|(n, v)| (*n, FieldSrc::Operand(*v))).collect::<Vec<_>>()
+    };
+    match inst {
+        Inst::MakeValueStruct { name, fields } => Some((StructId::Value(*name), op(fields))),
+        Inst::MakeStruct { ty, fields } => Some((StructId::Plain(*ty), op(fields))),
+        Inst::MakeEnum { tag, ty, positional, named } => {
+            let mut f = vec![
+                (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(*tag)),
+                (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(*ty)),
+            ];
+            for (i, p) in positional.iter().enumerate() {
+                f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
+            }
+            for (n, v) in named {
+                f.push((*n, FieldSrc::Operand(*v)));
+            }
+            Some((StructId::Enum(*ty), f))
+        }
+        // A unit-variant singleton ref of the cell's enum: `__rock_enum_<E>_<V>`.
+        Inst::Global(g) => {
+            let e = enum_hint?;
+            let variant = g.as_str().strip_prefix(&format!("__rock_enum_{e}_"))?;
+            Some((
+                StructId::Enum(e),
+                vec![
+                    (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(ustr::Ustr::from(variant))),
+                    (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(e)),
+                ],
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Scalar replacement of struct cells (SROA) -- both `value` cdata and plain
+/// `struct` tables. A cell whose every `Store` is a struct ctor of one
+/// consistent type and whose every `Load` feeds ONLY `Field` reads / `StoreField`
+/// writes never needs the aggregate: split it into one cell per declared field,
+/// turning the ctor store into per-field stores, each `Field` read into a plain
+/// field-cell `Load`, and each `StoreField` write into a field-cell `Store`. The
+/// now-unreferenced ctor and whole-cell `Load`s die in the `cleanup` DCE that
+/// runs right after.
+///
+/// skull already unboxes value structs WITHIN a body (`ValueRepr::Group`), but a
+/// `@pure`/`@inline` helper that returns a struct is lowered standalone and packs
+/// its return; the MIR inliner then splices that packed ctor into the caller,
+/// where the field reads land in branch arms (other blocks). The value model is
+/// single-block, so the per-field VALUES can't cross the branch -- but per-field
+/// CELLS can, which is exactly how rock scalarizes (`pos` -> `pos__x`/`pos__y`).
+///
+/// For `value` structs this removes a cdata that LuaJIT cannot sink across a
+/// side-trace split (the mag `mag.grid.floors_walls` regression). For plain
+/// structs it removes a Lua TABLE that LuaJIT's SINK only elides on a compiled
+/// trace -- in the interpreter (mag's aborted HUD/text loops) the table
+/// allocates every iteration; rock scalarizes it to per-field locals so it pays
+/// 0 even interpreted. Plain structs are MUTABLE, so `StoreField` writes are
+/// legal (they become field-cell stores); any WHOLE-struct use (pass-by-value,
+/// `==`, return, store as another aggregate's field) escapes and keeps the table
+/// -- a struct that never escapes has no observable identity, so dropping it is
+/// sound (rock proves it). Runs to a fixpoint so nested value structs (a field
+/// cell that itself holds a ctor) peel too.
+pub fn scalarize_struct_cells(func: &mut MirFunc) {
+    while scalarize_struct_cells_once(func) {}
+}
+
+/// One SROA round; returns whether it rewrote anything (drives the fixpoint).
+fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
+    let nc = func.cells.len();
+    // A cell is a candidate iff every store to it is a struct ctor of one
+    // consistent type. `cand[c]`: None = not yet seen / disqualified, Some(id) =
+    // all stores so far are that struct. `cand_fields[c]` is its declared field
+    // set, used to reject a `Field`/`StoreField` of an undeclared field (e.g. a
+    // `__ty` reflective read) -- splitting one would read a never-stored cell.
+    let mut cand: Vec<Option<StructId>> = vec![None; nc];
+    let mut cand_fields: Vec<Option<HashSet<ustr::Ustr>>> = vec![None; nc];
+    let mut disq = vec![false; nc];
+    let mut has_store = vec![false; nc];
+    for c in &func.params {
+        disq[raw(*c) as usize] = true; // params are the Lua signature; never split
+    }
+    if let Some(ra) = func.resume_arg {
+        disq[raw(ra) as usize] = true;
+    }
+    // A cell defined by anything OTHER than a `Store` (a call multi-return dest, a
+    // closure param, a map-iteration variable) has no struct ctor to split, so it
+    // must stay whole.
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            match &func.insts[i] {
+                Inst::CallMulti { dests, .. } => {
+                    dests.iter().for_each(|c| disq[raw(*c) as usize] = true)
+                }
+                Inst::Lambda { params, .. } => {
+                    params.iter().for_each(|c| disq[raw(*c) as usize] = true)
+                }
+                Inst::MapNext { key_cell, val_cell, .. } => {
+                    disq[raw(*key_cell) as usize] = true;
+                    disq[raw(*val_cell) as usize] = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    // Per-cell enum name from its `MakeEnum` stores -- the hint that lets a
+    // unit-variant singleton-ref store (`__rock_enum_<E>_<V>`) be recognized as the
+    // same enum's ctor (it carries no `ty` of its own). A cell with no `MakeEnum`
+    // store has `None` and so never matches a singleton (all-singleton cells don't
+    // allocate -- nothing to scalarize). Conflicting enums leave the first; the
+    // `StructId` consistency check then disqualifies the cell.
+    let mut cell_enum: Vec<Option<ustr::Ustr>> = vec![None; nc];
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            if let Inst::Store { cell, value } = &func.insts[i] {
+                if let Inst::MakeEnum { ty, .. } = &func.insts[*value] {
+                    cell_enum[raw(*cell) as usize].get_or_insert(*ty);
+                }
+            }
+        }
+    }
+    // Only the main CFG -- a cell touched inside a closure body is opaque (the
+    // closure may run on any call), so leave it whole.
+    let main: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+    for (bid, b) in func.blocks.iter() {
+        let in_main = main.contains(&bid);
+        for &i in &b.insts {
+            if let Inst::Store { cell, value } = &func.insts[i] {
+                let ck = raw(*cell) as usize;
+                has_store[ck] = true;
+                if !in_main {
+                    disq[ck] = true;
+                    continue;
+                }
+                match ctor_fields(&func.insts[*value], cell_enum[ck]) {
+                    Some((id, fields)) => {
+                        if cand[ck].is_some_and(|n| n != id) {
+                            disq[ck] = true;
+                        } else {
+                            cand[ck] = Some(id);
+                            cand_fields[ck]
+                                .get_or_insert_with(HashSet::default)
+                                .extend(fields.iter().map(|(n, _)| *n));
+                        }
+                    }
+                    None => disq[ck] = true,
+                }
+            }
+        }
+    }
+
+    // A `Load` of a candidate cell may be used ONLY as a `Field`/`StoreField`
+    // base of a declared field. Map each such load to its cell, then scan every
+    // operand use: any other consumer means the whole struct escapes -> disqualify.
+    let mut load_cell: HashMap<Idx<Inst>, Idx<Cell>> = HashMap::default();
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            if let Inst::Load(c) = &func.insts[i] {
+                let ck = raw(*c) as usize;
+                if cand[ck].is_some() && !disq[ck] {
+                    load_cell.insert(i, *c);
+                }
+            }
+        }
+    }
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            value_operands(&func.insts[i], &mut |op| {
+                if let Some(&c) = load_cell.get(&op) {
+                    let known = |f: &ustr::Ustr| {
+                        cand_fields[raw(c) as usize].as_ref().is_some_and(|s| s.contains(f))
+                    };
+                    let ok = match &func.insts[i] {
+                        Inst::Field { base, field } => *base == op && known(field),
+                        Inst::StoreField { base, field, .. } => *base == op && known(field),
+                        // An enum positional payload read: `v[index+1]`, named `_<index>`.
+                        Inst::TupleIndex { base, index } => {
+                            *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
+                        }
+                        _ => false,
+                    };
+                    if !ok {
+                        disq[raw(c) as usize] = true;
+                    }
+                }
+            });
+        }
+        term_uses_each(&b.term, &mut |op| {
+            if let Some(&c) = load_cell.get(&op) {
+                disq[raw(c) as usize] = true; // a load used by a terminator escapes
+            }
+        });
+    }
+
+    // `k < nc` guards the field cells `get_field_cell` allocates during the
+    // rewrite (a `StoreField`->`Store` rewrite emits a `Store` to a fresh field
+    // cell that the later `store_expansions` scan sees): they are never candidates
+    // this round, and indexing the round's `nc`-sized arrays with them would panic.
+    let is_cand = |c: Idx<Cell>| {
+        let k = raw(c) as usize;
+        k < nc && cand[k].is_some() && !disq[k] && has_store[k]
+    };
+    if (0..nc).all(|k| !(cand[k].is_some() && !disq[k] && has_store[k])) {
+        return false;
+    }
+
+    // Allocate per-field cells on demand: (orig cell, field name) -> field cell.
+    let mut field_cell: HashMap<(Idx<Cell>, ustr::Ustr), Idx<Cell>> = HashMap::default();
+    let mut get_field_cell =
+        |func: &mut MirFunc, c: Idx<Cell>, f: ustr::Ustr| -> Idx<Cell> {
+            *field_cell.entry((c, f)).or_insert_with(|| {
+                let base = func.cells[c].name.map(|n| n.as_str().to_string());
+                let name = base.map(|b| ustr::Ustr::from(&format!("{b}__{f}")));
+                func.new_cell(name)
+            })
+        };
+
+    // Rewrite `Field { base: load(cand), field }` in place into `Load(field_cell)`,
+    // and `StoreField { base: load(cand), field, value }` into `Store(field_cell,
+    // value)`. Re-check `is_cand`: `load_cell` is not pruned as cells get
+    // disqualified mid-analysis, so a cell escaping via a non-projection use (e.g.
+    // whole-struct `==`) keeps its aggregate, and its field accesses must stay on
+    // it -- rewriting them without expanding the store gives an uninit cell.
+    let field_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr)> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .filter_map(|i| match &func.insts[i] {
+            Inst::Field { base, field } => load_cell
+                .get(base)
+                .copied()
+                .filter(|&c| is_cand(c))
+                .map(|c| (i, c, *field)),
+            _ => None,
+        })
+        .collect();
+    for (i, c, field) in field_rewrites {
+        let fc = get_field_cell(func, c, field);
+        func.insts[i] = Inst::Load(fc);
+    }
+    // Same for an enum positional payload read `TupleIndex { base, index }` ->
+    // `Load(field_cell "_<index>")` (the `match`-with-binding payload extract).
+    let tuple_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr)> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .filter_map(|i| match &func.insts[i] {
+            Inst::TupleIndex { base, index } => load_cell
+                .get(base)
+                .copied()
+                .filter(|&c| is_cand(c))
+                .map(|c| (i, c, ustr::Ustr::from(&format!("_{index}")))),
+            _ => None,
+        })
+        .collect();
+    for (i, c, field) in tuple_rewrites {
+        let fc = get_field_cell(func, c, field);
+        func.insts[i] = Inst::Load(fc);
+    }
+    let storefield_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr, Idx<Inst>)> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .filter_map(|i| match &func.insts[i] {
+            Inst::StoreField { base, field, value } => load_cell
+                .get(base)
+                .copied()
+                .filter(|&c| is_cand(c))
+                .map(|c| (i, c, *field, *value)),
+            _ => None,
+        })
+        .collect();
+    for (i, c, field, value) in storefield_rewrites {
+        let fc = get_field_cell(func, c, field);
+        func.insts[i] = Inst::Store { cell: fc, value };
+    }
+
+    // Expand each `Store { cand, ctor }` into per-field stores. Collect first
+    // (immutable read of the ctor fields), then rebuild the affected blocks.
+    let store_expansions: Vec<(Idx<Inst>, Idx<Cell>, Vec<(ustr::Ustr, FieldSrc)>)> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .filter_map(|i| match &func.insts[i] {
+            Inst::Store { cell, value } if is_cand(*cell) => {
+                ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
+                    .map(|(_, fields)| (i, *cell, fields))
+            }
+            _ => None,
+        })
+        .collect();
+    // old store inst -> the per-field store insts that replace it (in order). An
+    // enum's `__variant`/`__ty` are `ConstStr` (baked literals, not operands), so
+    // materialize the `Const(Str)` inst here before storing it to the field cell.
+    let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
+    for (store_i, c, fields) in store_expansions {
+        let mut news = Vec::with_capacity(fields.len());
+        for (fname, src) in fields {
+            let fval = match src {
+                FieldSrc::Operand(v) => v,
+                // A materialized const is a NEW value-producing inst: it must be
+                // spliced into the block (in `news`) BEFORE the store that reads it,
+                // or it floats free of any block and regalloc/codegen never emit it.
+                FieldSrc::ConstStr(s) => {
+                    let cv = func.insts.alloc(Inst::Const(Lit::Str(s)));
+                    news.push(cv);
+                    cv
+                }
+            };
+            let fc = get_field_cell(func, c, fname);
+            news.push(func.insts.alloc(Inst::Store { cell: fc, value: fval }));
+        }
+        replacement.insert(store_i, news);
+    }
+    if !replacement.is_empty() {
+        let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
+        for bid in block_ids {
+            if !func.blocks[bid].insts.iter().any(|i| replacement.contains_key(i)) {
+                continue;
+            }
+            let old = std::mem::take(&mut func.blocks[bid].insts);
+            let mut new = Vec::with_capacity(old.len());
+            for i in old {
+                match replacement.get(&i) {
+                    Some(news) => new.extend_from_slice(news),
+                    None => new.push(i),
+                }
+            }
+            func.blocks[bid].insts = new;
+        }
+    }
+    true
+}
+
+/// Intra-block copy propagation: the cell model emits a `Load(c)` for every use
+/// of a binding even when its value is already in hand, leaving
+/// `c = v; r = c; r2 = c` churn. Within ONE block a cell's value is stable until
+/// the next `Store` to it (cells are plain locals, not aliased — only `Store{cell}`
+/// changes one), and a value is single-block (born+consumed in its block, design
+/// invariant), so replacing a `Load(c)` with the value last stored to `c` EARLIER
+/// IN THE SAME BLOCK is sound with no dominance/coroutine-spill hazard. The now-
+/// dead `Load`s (and any store to a now-unloaded cell) are removed by [`dce`].
+/// Cross-block loads are left untouched (conservative — a later mem2reg, P7).
+pub fn copy_propagate(func: &mut MirFunc) {
+    let Some(subst) = copy_propagate_subst(func) else {
+        return;
+    };
+    let m = |x: Idx<Inst>| resolve_subst(&subst, x);
+    for (_, inst) in func.insts.iter_mut() {
+        remap_inst(inst, &m);
+    }
+    for (_, b) in func.blocks.iter_mut() {
+        remap_term(&mut b.term, &m);
+    }
+}
+
+/// The copy-propagation ANALYSIS: build the value->value substitution table
+/// without applying it. Returns `None` when there is nothing to substitute (the
+/// common case for small bodies), so callers skip the remap entirely. Shared by
+/// the standalone [`copy_propagate`] (which then remaps the whole arena) and
+/// [`cleanup`] (which folds the remap into DCE's count scan).
+fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
+    // A cell STORED inside a closure body can be mutated indirectly by ANY call
+    // (the call may invoke that closure — e.g. `with_callback(() => { count = .. })`),
+    // so its cached value is not stable across calls. Exclude such cells entirely
+    // (treat as opaque). Closure bodies are the blocks NOT reachable from entry.
+    let main: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+    // Dense per-id side-tables (raw-keyed) replace the Idx HashMaps/HashSets:
+    // `escaping` cell flag, `subst` value->value chain, and per-block `cur`
+    // cell->value. `cur` is reset between blocks via a touched-list so the clear
+    // stays O(stores-in-block), not O(cells).
+    let mut escaping = vec![false; func.cells.len()];
+    for (bid, b) in func.blocks.iter() {
+        if main.contains(&bid) {
+            continue;
+        }
+        for &i in &b.insts {
+            if let Inst::Store { cell, .. } = &func.insts[i] {
+                escaping[raw(*cell) as usize] = true;
+            }
+        }
+    }
+    let mut subst: Vec<Option<Idx<Inst>>> = vec![None; func.insts.len()];
+    let mut any_subst = false;
+    let mut cur: Vec<Option<Idx<Inst>>> = vec![None; func.cells.len()];
+    let mut touched: Vec<usize> = Vec::new();
+    for (_, b) in func.blocks.iter() {
+        for &t in &touched {
+            cur[t] = None;
+        }
+        touched.clear();
+        for &id in &b.insts {
+            match &func.insts[id] {
+                Inst::Store { cell, value } if !escaping[raw(*cell) as usize] => {
+                    let v = resolve_subst(&subst, *value);
+                    let ck = raw(*cell) as usize;
+                    if cur[ck].is_none() {
+                        touched.push(ck);
+                    }
+                    cur[ck] = Some(v);
+                }
+                Inst::Load(c) => {
+                    if let Some(v) = cur[raw(*c) as usize] {
+                        subst[raw(id) as usize] = Some(v);
+                        any_subst = true;
+                    }
+                }
+                // `Field(<value-struct ctor>, f) -> the ctor's operand for f`. A
+                // `value` cdata (incl. a cdata ENUM, which packs to a `MakeValueStruct`
+                // `<Enum>_ct(tag, _0)`) is IMMUTABLE, so its field is always the
+                // construction operand -- sound to forward regardless of intervening
+                // code. Kills the repack-to-match cdata: a scalar-ABI enum param that
+                // `match` rebuilds (`X_ct(tag,_0).__tag`) folds to the tag leaf, and the
+                // now-dead ctor DCEs. (Plain `MakeStruct` is a MUTABLE table -- a
+                // `StoreField` could change it -- so it is NOT forwarded here.)
+                Inst::Field { base, field } => {
+                    let (base, field) = (*base, *field);
+                    let rb = resolve_subst(&subst, base);
+                    if let Inst::MakeValueStruct { fields, .. } = &func.insts[rb] {
+                        if let Some((_, op)) = fields.iter().find(|(n, _)| *n == field) {
+                            subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                            any_subst = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    any_subst.then_some(subst)
+}
+
+/// Follow a copy-prop substitution chain to its final value (guards self-loops).
+fn resolve_subst(subst: &[Option<Idx<Inst>>], mut x: Idx<Inst>) -> Idx<Inst> {
+    while let Some(y) = subst[raw(x) as usize] {
+        if y == x {
+            break;
+        }
+        x = y;
+    }
+    x
+}
+
+/// Whether instruction `i` is removable given the current reference counts: a
+/// pure value-producing inst with no users (`use_count == 0`), or a `Store` to a
+/// never-loaded cell (`load_count == 0`). `Call`/`CallValue` produce a value but
+/// have side effects, so an unused result does NOT make them dead; a bounds-
+/// checked `Index` read can error, so a discarded read must still run.
+fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) -> bool {
+    match inst {
+        Inst::Call { .. } | Inst::CallValue { .. } | Inst::Index { .. } => false,
+        Inst::Store { cell, .. } => load_count[raw(*cell) as usize] == 0,
+        _ if inst.produces_value() => use_count[raw(i) as usize] == 0,
+        _ => false,
+    }
+}
+
+/// Field name for a frame cell in the state table.
+fn raw<T>(i: Idx<T>) -> u32 {
+    i.into_raw().into()
+}
+
+struct CoroLowered {
+    step: MirFunc,
+    s_cell: Idx<Cell>,
+    frame_cells: HashSet<Idx<Cell>>,
+    /// Declared param cells (constructor seeds a state-table field for each).
+    params: Vec<Idx<Cell>>,
+    num_states: usize,
+    /// `on_killed`/`on_resume`/`on_hot_reload` hooks peeled to the constructor:
+    /// `(kind, lambda inst)`. The lambda still lives in `step`'s arenas (rendered
+    /// by the ctor via `emit_lambda`), just removed from every block's inst list.
+    hooks: Vec<(CoroHookKind, Idx<Inst>)>,
+    /// Frame layout stamp: the ctor writes it (`__layout`), the step's entry
+    /// checks it. See `layout_stamp_canon` for what it hashes.
+    layout_hash: i64,
+}
+
+/// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
+/// exactly representable in a Lua number.
+fn fnv1a32(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// Append `inst` to block `bid` of `f`, returning its id.
+fn emit(f: &mut MirFunc, bid: Idx<Block>, inst: Inst) -> Idx<Inst> {
+    let id = f.insts.alloc(inst);
+    f.blocks[bid].insts.push(id);
+    id
+}
+
+/// Successor blocks of a terminator (NOT closure entries — those are operands).
+/// Visit each successor block of `term` (callback form — no per-call `Vec`
+/// alloc; the sole caller, `top_level_blocks`, only iterates).
+pub(crate) fn term_succs(term: &Term, mut f: impl FnMut(Idx<Block>)) {
+    match term {
+        Term::Goto(b) => f(*b),
+        Term::Branch { then_bb, else_bb, .. } => {
+            f(*then_bb);
+            f(*else_bb);
+        }
+        Term::Switch { cases, default, .. } => {
+            for (_, b) in cases {
+                f(*b);
+            }
+            f(*default);
+        }
+        Term::Yield { resume, .. } => f(*resume),
+        Term::Return(_) | Term::Unreachable => {}
+    }
+}
+
+/// Blocks reachable from the function entry via terminators — the co-fn's own
+/// CFG, EXCLUDING closure sub-blocks (reached only through `Inst::Lambda`).
+pub(crate) fn top_level_blocks(f: &MirFunc) -> Vec<Idx<Block>> {
+    let mut seen = HashSet::default();
+    seen.reserve(f.blocks.len());
+    let mut stack = vec![f.entry];
+    seen.insert(f.entry);
+    let mut order = Vec::with_capacity(f.blocks.len());
+    while let Some(b) = stack.pop() {
+        order.push(b);
+        term_succs(&f.blocks[b].term, |s| {
+            if seen.insert(s) {
+                stack.push(s);
+            }
+        });
+    }
+    order
+}
+
+/// Value operands an instruction READS, pushed to `push` (callback form — avoids
+/// a per-inst `Vec` allocation in the dce hot loop).
+pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
+    let mut p = |x: &Idx<Inst>| push(*x);
+    match inst {
+        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
+        | Inst::CoroHook { .. } => {}
+        Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
+        | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
+        | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
+        | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
+        | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
+        | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
+        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b) => { p(a); p(b); }
+        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x)
+        | Inst::CoroSetInner(x) => p(x),
+        Inst::Format { value, .. } => p(value),
+        Inst::FormatDyn { value, fmt } => { p(value); p(fmt); }
+        Inst::Call { args, .. } => args.iter().for_each(&mut p),
+        Inst::CallMulti { args, .. } => args.iter().for_each(&mut p),
+        Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
+        Inst::MakeTuple(vs) | Inst::MakeArray(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
+        Inst::MakeStruct { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
+        Inst::MakeValueStruct { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
+        Inst::MakeEnum { positional, named, .. } => {
+            positional.iter().for_each(&mut p);
+            named.iter().for_each(|(_, a)| p(a));
+        }
+        Inst::MakeEnumDyn { tag, positional, named, .. } => {
+            p(tag);
+            positional.iter().for_each(&mut p);
+            named.iter().for_each(|(_, a)| p(a));
+        }
+        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => p(base),
+        Inst::Index { base, index, .. } => { p(base); p(index); }
+        Inst::Len { base, .. } => p(base),
+        Inst::Store { value, .. } => p(value),
+        Inst::StoreField { base, value, .. } => { p(base); p(value); }
+        Inst::StoreIndex { base, index, value, .. } => { p(base); p(index); p(value); }
+        Inst::StoreGlobal { value, .. } => p(value),
+        Inst::ArrayPush { arr, value, .. } => { p(arr); p(value); }
+        Inst::MapNext { table, .. } => p(table),
+    }
+}
+
+/// Remap an instruction's value operands through `m`.
+pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
+    let mut f = |x: &mut Idx<Inst>| *x = m(*x);
+    match inst {
+        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
+        | Inst::CoroHook { .. } => {}
+        Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
+        | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
+        | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
+        | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
+        | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
+        | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
+        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b) => { f(a); f(b); }
+        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x)
+        | Inst::CoroSetInner(x) => f(x),
+        Inst::Format { value, .. } => f(value),
+        Inst::FormatDyn { value, fmt } => { f(value); f(fmt); }
+        Inst::Call { args, .. } => args.iter_mut().for_each(&mut f),
+        Inst::CallMulti { args, .. } => args.iter_mut().for_each(&mut f),
+        Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
+        Inst::MakeTuple(vs) | Inst::MakeArray(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
+        Inst::MakeStruct { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
+        Inst::MakeValueStruct { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
+        Inst::MakeEnum { positional, named, .. } => {
+            positional.iter_mut().for_each(&mut f);
+            named.iter_mut().for_each(|(_, a)| f(a));
+        }
+        Inst::MakeEnumDyn { tag, positional, named, .. } => {
+            f(tag);
+            positional.iter_mut().for_each(&mut f);
+            named.iter_mut().for_each(|(_, a)| f(a));
+        }
+        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => f(base),
+        Inst::Index { base, index, .. } => { f(base); f(index); }
+        Inst::Len { base, .. } => f(base),
+        Inst::Store { value, .. } => f(value),
+        Inst::StoreField { base, value, .. } => { f(base); f(value); }
+        Inst::StoreIndex { base, index, value, .. } => { f(base); f(index); f(value); }
+        Inst::StoreGlobal { value, .. } => f(value),
+        Inst::ArrayPush { arr, value, .. } => { f(arr); f(value); }
+        Inst::MapNext { table, .. } => f(table),
+    }
+}
+
+/// Value operand of a terminator (the only ones are `cond`/`discr`/return value).
+fn term_value(term: &Term) -> Option<Idx<Inst>> {
+    match term {
+        // Coroutine returns are single/zero by the time spill runs (a co fn never
+        // scalarizes its completion value); the first covers it.
+        Term::Return(vs) => vs.first().copied(),
+        Term::Branch { cond, .. } => Some(*cond),
+        Term::Switch { discr, .. } => Some(*discr),
+        Term::Yield { values, .. } => values.first().copied(),
+        _ => None,
+    }
+}
+
+pub(crate) fn remap_term(term: &mut Term, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
+    match term {
+        Term::Return(vs) => vs.iter_mut().for_each(|v| *v = m(*v)),
+        Term::Branch { cond: v, .. } | Term::Switch { discr: v, .. } => *v = m(*v),
+        Term::Yield { values, .. } => values.iter_mut().for_each(|v| *v = m(*v)),
+        _ => {}
+    }
+}
+
+fn vfield(v: Idx<Inst>) -> ustr::Ustr {
+    ustr::Ustr::from(format!("v{}", raw(v)).as_str())
+}
+
+/// Spill every CROSS-BLOCK value (defined in one block, used in another) to the
+/// state table at its def and reload it at each using block — so a value that
+/// outlives a yield (a loop-carried collection/bound, a multi-yield arg)
+/// survives the suspend/resume. (P2 — "only cells cross a yield" — is an
+/// over-statement: lowering routes some data through values; this is the
+/// canonical stackless spill, documented as a finding.) `protect` are param-like
+/// values never spilled. Returns the sorted spill field names (`v<N>`) — an
+/// input to the frame layout stamp.
+fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) -> Vec<String> {
+    // def block of every value.
+    let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
+    for &bid in block_ids {
+        for &id in &step.blocks[bid].insts {
+            if step.insts[id].produces_value() {
+                def_block.insert(id, bid);
+            }
+        }
+    }
+    // frame_values = values used in a block other than where defined.
+    let mut frame_values: HashSet<Idx<Inst>> = HashSet::default();
+    for &bid in block_ids {
+        let mut used: Vec<Idx<Inst>> = Vec::new();
+        for &id in &step.blocks[bid].insts {
+            value_operands(&step.insts[id], &mut |v| used.push(v));
+        }
+        used.extend(term_value(&step.blocks[bid].term));
+        for v in used {
+            if def_block.get(&v).copied() != Some(bid) {
+                frame_values.insert(v);
+            }
+        }
+    }
+    if frame_values.is_empty() {
+        return Vec::new();
+    }
+
+    for &bid in block_ids {
+        // Reloads needed in this block: frame values used here but defined
+        // elsewhere. Sorted for deterministic output.
+        let mut used_here: Vec<Idx<Inst>> = Vec::new();
+        {
+            let mut seen = HashSet::default();
+            for &id in &step.blocks[bid].insts {
+                value_operands(&step.insts[id], &mut |v| {
+                    if frame_values.contains(&v) && def_block.get(&v).copied() != Some(bid) && seen.insert(v) {
+                        used_here.push(v);
+                    }
+                });
+            }
+            if let Some(v) = term_value(&step.blocks[bid].term) {
+                if frame_values.contains(&v) && def_block.get(&v).copied() != Some(bid) && seen.insert(v) {
+                    used_here.push(v);
+                }
+            }
+        }
+        used_here.sort_by_key(|v| raw(*v));
+
+        let old: Vec<Idx<Inst>> = std::mem::take(&mut step.blocks[bid].insts);
+        let mut reload: HashMap<Idx<Inst>, Idx<Inst>> = HashMap::default();
+        let mut new_list: Vec<Idx<Inst>> = Vec::new();
+        for v in used_here {
+            let sv = step.insts.alloc(Inst::Load(s_cell));
+            let rv = step.insts.alloc(Inst::Field { base: sv, field: vfield(v) });
+            new_list.push(sv);
+            new_list.push(rv);
+            reload.insert(v, rv);
+        }
+        let m = |x: Idx<Inst>| reload.get(&x).copied().unwrap_or(x);
+        for id in old {
+            remap_inst(&mut step.insts[id], &m);
+            new_list.push(id);
+            // Spill right after a frame value's def.
+            if frame_values.contains(&id) && def_block.get(&id) == Some(&bid) {
+                let sv = step.insts.alloc(Inst::Load(s_cell));
+                let st = step.insts.alloc(Inst::StoreField { base: sv, field: vfield(id), value: id });
+                new_list.push(sv);
+                new_list.push(st);
+            }
+        }
+        step.blocks[bid].insts = new_list;
+        let mut term = step.blocks[bid].term.clone();
+        remap_term(&mut term, &m);
+        step.blocks[bid].term = term;
+    }
+    let mut names: Vec<String> = frame_values.iter().map(|&v| vfield(v).as_str().to_string()).collect();
+    names.sort();
+    names
+}
+
+/// Transform a lowered `co fn` into its `__step` state machine + frame info.
+fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldChannel>) -> CoroLowered {
+    let frame_slot_channel = channel.is_some();
+    let mut step = func.clone();
+    let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
+    let params = func.params.clone();
+    let s_cell = step.new_cell(Some(ustr::Ustr::from("s")));
+
+    // Frame = all cells except the two step params (s, __resume_arg).
+    let frame_cells: HashSet<Idx<Cell>> = step
+        .cells
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|&c| c != s_cell && c != resume_arg)
+        .collect();
+
+    // Only the co-fn's TOP-LEVEL blocks are transformed — NOT closure sub-blocks
+    // (which share the arena but are their own CFGs, reached via `Inst::Lambda`,
+    // not terminator successors). A closure body must keep its own `return`s and
+    // never get coroutine state machinery; it reads captured frame cells as
+    // `s.<field>` purely via codegen's `FrameCtx`.
+    let orig_blocks: Vec<Idx<Block>> = top_level_blocks(&step);
+
+    // 0. Peel `on_killed`/`on_resume` hook registrations to the constructor so a
+    // kill before the first resume still fires (the body would otherwise run the
+    // registration only on first resume). Both the `CoroHook` effect and its
+    // lambda `Inst` are removed from every block's inst list; the lambda stays in
+    // the arena (the ctor renders it via `emit_lambda`).
+    let mut hooks: Vec<(CoroHookKind, Idx<Inst>)> = Vec::new();
+    let mut hook_lambdas: HashSet<Idx<Inst>> = HashSet::default();
+    for &bid in &orig_blocks {
+        for &id in &step.blocks[bid].insts {
+            if let Inst::CoroHook { kind, lambda } = step.insts[id] {
+                hooks.push((kind, lambda));
+                hook_lambdas.insert(lambda);
+            }
+        }
+    }
+    if !hooks.is_empty() {
+        for &bid in &orig_blocks {
+            step.blocks[bid]
+                .insts
+                .retain(|&id| !matches!(step.insts[id], Inst::CoroHook { .. }) && !hook_lambdas.contains(&id));
+        }
+    }
+
+    // 1. Rewrite `CoroSetInner(x)` -> `s.__inner = x` (rebuild affected blocks).
+    for &bid in &orig_blocks {
+        let has = step.blocks[bid]
+            .insts
+            .iter()
+            .any(|&i| matches!(step.insts[i], Inst::CoroSetInner(_)));
+        if !has {
+            continue;
+        }
+        let old: Vec<Idx<Inst>> = std::mem::take(&mut step.blocks[bid].insts);
+        for id in old {
+            if let Inst::CoroSetInner(x) = step.insts[id] {
+                let sv = step.insts.alloc(Inst::Load(s_cell));
+                step.blocks[bid].insts.push(sv);
+                let store = step.insts.alloc(Inst::StoreField {
+                    base: sv,
+                    field: ustr::Ustr::from("__inner"),
+                    value: x,
+                });
+                step.blocks[bid].insts.push(store);
+            } else {
+                step.blocks[bid].insts.push(id);
+            }
+        }
+    }
+
+    // 2. Yields: `s.__state = k; return value`. Record (resume block) per state.
+    // Per state, also record the yielded variant tag when statically known (a
+    // `Const` tag leaf) -- a layout-stamp input that catches cross-variant yield
+    // reordering, which cell/spill/state-count hashing alone cannot see.
+    let mut resume_of_state: Vec<Idx<Block>> = Vec::new();
+    let mut state_tags: Vec<String> = Vec::new();
+    let mut yield_blocks: HashSet<Idx<Block>> = HashSet::default();
+    for &bid in &orig_blocks {
+        if let Term::Yield { values, resume } = &step.blocks[bid].term {
+            let values = values.clone();
+            let resume = *resume;
+            let k = resume_of_state.len() as i64 + 1;
+            resume_of_state.push(resume);
+            let tag = values
+                .first()
+                .and_then(|&v| match &step.insts[v] {
+                    Inst::Const(Lit::Str(s)) => Some(s.as_str().to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "dyn".to_string());
+            state_tags.push(tag);
+            yield_blocks.insert(bid);
+            // Frame-slot channel (flat-enum yield): write the leaves to reused
+            // `s.__y*` slots and return nothing (0 alloc per yield). The consumer
+            // reads the slots at the concrete resume site. Otherwise the value(s)
+            // multi-return directly (scalar / bare yield -- no box to remove).
+            if frame_slot_channel {
+                for (i, &v) in values.iter().enumerate() {
+                    let sv = emit(&mut step, bid, Inst::Load(s_cell));
+                    emit(&mut step, bid, Inst::StoreField { base: sv, field: skull_mir::lower::yield_slot(i), value: v });
+                }
+            }
+            let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k)));
+            let sv = emit(&mut step, bid, Inst::Load(s_cell));
+            emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from(STATE), value: kc });
+            step.blocks[bid].term = if frame_slot_channel { Term::Return(Vec::new()) } else { Term::Return(values) };
+        }
+    }
+    let num_states = resume_of_state.len();
+
+    // 3. Normal returns -> stash `s.__return`, mark terminal (-1), bare return.
+    for &bid in &orig_blocks {
+        if yield_blocks.contains(&bid) {
+            continue;
+        }
+        let ret_val = match &step.blocks[bid].term {
+            // A co fn's completion value is single (never scalarized); take it.
+            Term::Return(vs) => Some(vs.first().copied()),
+            _ => None,
+        };
+        if let Some(v0) = ret_val {
+            if let Some(v) = v0 {
+                let sv = emit(&mut step, bid, Inst::Load(s_cell));
+                emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from("__return"), value: v });
+            }
+            let dc = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
+            let sv2 = emit(&mut step, bid, Inst::Load(s_cell));
+            emit(&mut step, bid, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: dc });
+            step.blocks[bid].term = Term::Return(Vec::new());
+        }
+    }
+
+    // 3b. Spill cross-block values (loop-carried collections/bounds, multi-yield
+    // args) so they survive a suspend/resume — see `spill_cross_block_values`.
+    let spill_fields = spill_cross_block_values(&mut step, s_cell, &orig_blocks);
+
+    // 3c. Frame layout stamp. Hash everything that fixes the frame's field
+    // meanings + the state numbering: (cell idx, source name) pairs, the spill
+    // field set, per-state variant tags, and the yield-channel shape. Body
+    // LOGIC/values/spans are deliberately excluded so a layout-stable edit keeps
+    // live coroutines running (the live-update feature). The ctor writes the
+    // stamp; the step's entry (below) rejects a frame with a different one --
+    // through `error()`, so the pcall in `__advance` turns it into a clean
+    // errored kill (docs/coroutine-allocation-plan.md "Layout drift").
+    let mut canon = String::new();
+    {
+        use std::fmt::Write as _;
+        for (id, cell) in step.cells.iter() {
+            if frame_cells.contains(&id) {
+                let _ = write!(canon, "c{}:{};", raw(id), cell.name.map(|n| n.as_str().to_string()).unwrap_or_default());
+            }
+        }
+        for f in &spill_fields {
+            let _ = write!(canon, "{f};");
+        }
+        for (i, t) in state_tags.iter().enumerate() {
+            let _ = write!(canon, "s{i}:{t};");
+        }
+        match channel {
+            Some(ch) => {
+                let _ = write!(canon, "ch:{}:{}", ch.enum_name, ch.tuple_width);
+                for rf in &ch.record_fields {
+                    let _ = write!(canon, ":{rf}");
+                }
+            }
+            None => canon.push_str("ch:-"),
+        }
+    }
+    let layout_hash = fnv1a32(&canon) as i64;
+
+    // 4. Dispatch entry: read s.__state, branch to each resume block; fall
+    // through to the original entry (state 0). A chain of one block per state.
+    let orig_entry = step.entry;
+    if num_states == 0 {
+        let d = step.new_block();
+        step.blocks[d].term = Term::Goto(orig_entry);
+        step.entry = d;
+    } else {
+        // Build check blocks bottom-up so each `else` targets the next check.
+        let check_blocks: Vec<Idx<Block>> = (0..num_states).map(|_| step.new_block()).collect();
+        for k in 0..num_states {
+            let bid = check_blocks[k];
+            let sv = emit(&mut step, bid, Inst::Load(s_cell));
+            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k as i64 + 1)));
+            let eq = emit(&mut step, bid, Inst::Eq(st, kc));
+            let else_bb = if k + 1 < num_states { check_blocks[k + 1] } else { orig_entry };
+            step.blocks[bid].term = Term::Branch { cond: eq, then_bb: resume_of_state[k], else_bb };
+        }
+        step.entry = check_blocks[0];
+    }
+
+    // 4b. Layout-stamp check ABOVE the dispatch: a frame written by a
+    // different layout (a live coroutine surviving a layout-shifting reload)
+    // must not be driven -- raise instead; `__advance`'s pcall turns it into a
+    // clean errored kill (on_killed fires, last_error explains, the poller
+    // logs). A fresh coroutine always matches (ctor + step emitted together).
+    {
+        let dispatch = step.entry;
+        let chk = step.new_block();
+        let sv = emit(&mut step, chk, Inst::Load(s_cell));
+        let lay = emit(&mut step, chk, Inst::Field { base: sv, field: ustr::Ustr::from("__layout") });
+        let kc = emit(&mut step, chk, Inst::Const(Lit::Int(layout_hash)));
+        let ne = emit(&mut step, chk, Inst::NotEq(lay, kc));
+        let raise = step.new_block();
+        let err_fn = emit(&mut step, raise, Inst::Global(ustr::Ustr::from("error")));
+        let msg = emit(
+            &mut step,
+            raise,
+            Inst::Const(Lit::Str(ustr::Ustr::from(
+                format!("coroutine killed: frame layout changed by hot reload ({})", func.name).as_str(),
+            ))),
+        );
+        emit(&mut step, raise, Inst::CallValue { callee: err_fn, args: vec![msg] });
+        // Unreachable (error() raised); a terminator is still required.
+        step.blocks[raise].term = Term::Goto(dispatch);
+        step.blocks[chk].term = Term::Branch { cond: ne, then_bb: raise, else_bb: dispatch };
+        step.entry = chk;
+    }
+
+    // 5. The step is an ordinary fn `(s, __resume_arg)`.
+    step.name = ustr::Ustr::from(format!("{}__step", func.name).as_str());
+    step.params = vec![s_cell, resume_arg];
+    step.is_coroutine = false;
+    step.resume_arg = None;
+
+    CoroLowered { step, s_cell, frame_cells, params, num_states, hooks, layout_hash }
+}
+
+/// Emit a `co fn` as its stackless `__step` (via the dumb printer, with a frame
+/// context) + the stdlib Coroutine constructor.
+pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func: &MirFunc) -> String {
+    let name = mangled(ws, ctx, self_ref);
+    // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
+    // per yield); the channel's shape drives both the slot writes (transform) and
+    // the generic/boxed `resume()` rebuild (constructor).
+    let channel = ws.module(self_ref.module).functions[self_ref.func]
+        .return_ty
+        .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
+    let lowered = transform_coroutine(func, channel.as_ref());
+    let frame = FrameCtx { s_cell: lowered.s_cell, fields: lowered.frame_cells.iter().copied().collect() };
+    let step_name = format!("{name}__step");
+    let step_lua = emit_named_framed(ws, ctx, &step_name, &lowered.step, Some(&frame));
+    // Terminal-cleanup defers: each detached copy (`if flag { flag = false;
+    // <body> }`) emits as a standalone `<name>__defer<k>(s)` over the SAME
+    // frame naming (shared cell arena + FrameCtx). The ctor stores them by
+    // value (`__defers` table) so a stale coroutine runs its own layout's
+    // cleanup; `__rock_coroutine_run_defers` iterates LIFO with per-body pcall.
+    let mut defer_luas = String::new();
+    for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {
+        let mut dfn = lowered.step.clone();
+        dfn.entry = *entry;
+        dfn.params = vec![lowered.s_cell];
+        let dname = format!("{name}__defer{k}");
+        defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&frame)));
+    }
+    let ctor = emit_constructor(ws, ctx, &name, &step_name, &lowered, &frame, channel.as_ref());
+    let _ = lowered.num_states;
+    format!("{step_lua}{defer_luas}{ctor}")
+}
+
+/// The constructor: build the state table (seed param fields + relocated
+/// on_killed/on_resume hooks) and return IT as the handle -- the object IS the
+/// frame, with `__`-prefixed method fields (`__resume`/`__result`/
+/// `__last_error`/`__status`/`__kill`/`__fire_hot_reload`, plus `__advance` on
+/// the frame-slot channel) driving the shared `<name>__step`. Method fields
+/// can't collide with user state: frame cells render as `c<N>`/`v<N>`. The
+/// state table is named `c<raw(s_cell)>` (NOT `s`) so a hook lambda
+/// referencing a frame cell renders `c<s>.c<field>` — the same name the
+/// step's `FrameCtx` produces.
+fn emit_constructor(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    name: &str,
+    step_name: &str,
+    lowered: &CoroLowered,
+    frame: &FrameCtx,
+    channel: Option<&skull_mir::lower::YieldChannel>,
+) -> String {
+    use std::fmt::Write as _;
+    let svar = format!("c{}", raw(lowered.s_cell));
+    let param_fields: Vec<String> = lowered.params.iter().map(|p| format!("c{}", raw(*p))).collect();
+    let mut init = vec![
+        "__ty = \"Coroutine\"".to_string(),
+        format!("{STATE} = 0"),
+        format!("__layout = {}", lowered.layout_hash),
+    ];
+    for pf in &param_fields {
+        init.push(format!("{pf} = {pf}"));
+    }
+    // Terminal-cleanup defer fns, stored BY VALUE (site order; runners iterate
+    // in reverse for LIFO) -- a stale frame must run ITS OWN layout's cleanup,
+    // never the current code's (the step is name-resolved, cleanup is not).
+    let n_defers = lowered.step.coro_defers.len();
+    if n_defers > 0 {
+        let list: Vec<String> = (0..n_defers).map(|k| format!("{name}__defer{k}")).collect();
+        init.push(format!("__defers = {{ {} }}", list.join(", ")));
+    }
+
+    // Hook prologue: `c<s>.__on_killed = function() .. end`. The lambda lives in
+    // the step's arenas (peeled from the body); render it inline with the frame.
+    let mut prologue = String::new();
+    for (kind, lambda) in &lowered.hooks {
+        let field = kind.slot();
+        if let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] {
+            let lam = skull_codegen_lua::emit_lambda(ws, ctx, &lowered.step, *entry, params, Some(frame));
+            let _ = writeln!(prologue, "  {svar}.{field} = {lam}");
+        }
+    }
+
+    // The pure readers (result/status/last_error/kill/fire_hot_reload) are NOT
+    // fields: they live in the stdlib as shared fns reading the frame directly
+    // (`c.__return`, `c.__state`, `__rock_coroutine_kill`). Only the step-bound
+    // methods remain per-construction. Each takes the object explicitly
+    // (`c.__X(c, ...)`) and reads ONLY its `s` param -- the bodies are already
+    // shared-fn-shaped, so hoisting them out of the ctor (Part B closure
+    // elimination) is a ctor-only change, no consumer churn.
+
+    // Frame-slot channel: the step writes yield leaves to reused `s.__y*` slots
+    // and returns nothing. The OBJECT IS THE FRAME (one table per creation):
+    // `__advance(s, arg)` steps (returns done-bool) and a concrete consumer reads
+    // the `__y*` leaves threaded off the object itself (0 alloc). The
+    // generic/boxed `__resume` rebuilds one `{__variant}` box from the slots --
+    // same external `Y?` for erased consumers (correct, allocates, rare).
+    if let Some(ch) = channel {
+        let mut box_fields = format!(
+            "{{__variant = s.{tag}, __ty = {ty}",
+            tag = skull_mir::lower::yield_slot(0),
+            ty = skull_codegen_lua::lua_string(ch.enum_name.as_str()),
+        );
+        for i in 0..ch.tuple_width {
+            let _ = write!(box_fields, ", s.{}", skull_mir::lower::yield_slot(1 + i));
+        }
+        for (j, rf) in ch.record_fields.iter().enumerate() {
+            let _ = write!(box_fields, ", {rf} = s.{}", skull_mir::lower::yield_slot(1 + ch.tuple_width + j));
+        }
+        box_fields.push('}');
+        // `__advance`/`__resume` are PER-CO-FN top-level fns (emitted once, next
+        // to the step), stored in the table literal as plain fn-value fields --
+        // zero closures per creation. Hot-reload staleness is identical to the
+        // closure form: a live object's stale v0 fn values resolve the step (and
+        // `{name}__advance`) by GLOBAL name at call time, so a BodyOnly overlay's
+        // new step is picked up mid-flight (guarded by
+        // `live_flat_enum_coroutine_survives_overlay_and_threads_new_body`).
+        return format!(
+            "function {name}__advance(s, arg)\n\
+             \x20 if s.{STATE} < 0 then return true end\n\
+             \x20 if s.__on_resume then s.__on_resume() end\n\
+             \x20 local ok, err = pcall({step_name}, s, arg)\n\
+             \x20 if not ok then s.{STATE} = -2; s.__error = err; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed() end; return true end\n\
+             \x20 return s.{STATE} < 0\n\
+             end\n\
+             function {name}__resume(s, arg)\n\
+             \x20 if {name}__advance(s, arg) then return nil end\n\
+             \x20 return {box_fields}\n\
+             end\n\
+             function {name}({paramlist})\n\
+             \x20 local {svar} = {{ {fields}, __advance = {name}__advance, __resume = {name}__resume }}\n\
+             {prologue}\
+             \x20 return {svar}\n\
+             end\n",
+            paramlist = param_fields.join(", "),
+            fields = init.join(", "),
+        );
+    }
+
+    format!(
+        "function {name}__resume(s, arg)\n\
+         \x20 if s.{STATE} < 0 then return nil end\n\
+         \x20 if s.__on_resume then s.__on_resume() end\n\
+         \x20 local ok, val = pcall({step_name}, s, arg)\n\
+         \x20 if not ok then s.{STATE} = -2; s.__error = val; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed() end; return nil end\n\
+         \x20 return val\n\
+         end\n\
+         function {name}({paramlist})\n\
+         \x20 local {svar} = {{ {fields}, __resume = {name}__resume }}\n\
+         {prologue}\
+         \x20 return {svar}\n\
+         end\n",
+        paramlist = param_fields.join(", "),
+        fields = init.join(", "),
+    )
+}

@@ -1,0 +1,58 @@
+//! A file reached via a non-canonical path spelling must resolve to the SAME
+//! module as the canonical one -- not a second copy.
+//!
+//! On Windows this is the load-bearing case: project discovery canonicalizes
+//! file paths to the `\\?\C:\...` extended-length form, but an LSP client sends
+//! the URI-decoded `C:\...` spelling to `update`/queries. Keyed verbatim, the
+//! same file lands under two keys -> the session loads `struct Camera` twice ->
+//! "duplicate struct `Camera` across modules", and every read query misses the
+//! module. (Found by the `test-windows` CI tier via `repro_camera_crash`.)
+//!
+//! Reproduced cross-platform here by injecting a `/./` segment, which
+//! `canonicalize` collapses but a verbatim string key preserves.
+
+use bone_query::BoneWorkspace;
+
+#[test]
+fn noncanonical_path_does_not_duplicate_module() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let cam = repo.join("stone/engine/systems/camera.rock");
+    let canon = fs_err::canonicalize(&cam).expect("camera.rock canonicalizes").to_string_lossy().to_string();
+    let text = std::fs::read_to_string(&cam).expect("camera.rock is readable");
+
+    // The SAME file, spelled with a redundant `/./` segment -- collapses under
+    // canonicalize, survives a verbatim string key.
+    let noncanon = format!("{}/stone/./engine/systems/camera.rock", repo.to_string_lossy());
+
+    let mut bone = BoneWorkspace::new();
+    bone.load_project(&canon); // session keyed by the canonical path
+    let diags = bone.update(&noncanon, text); // must reuse that module, not add a copy
+
+    let dup: Vec<_> = diags
+        .iter()
+        .flat_map(|(_, d)| d)
+        .filter(|d| d.message.contains("duplicate struct"))
+        .collect();
+    assert!(dup.is_empty(), "non-canonical path duplicated the module: {dup:?}");
+}
+
+#[test]
+fn read_queries_resolve_via_noncanonical_path() {
+    // A read query (semantic_tokens) issued with a non-canonical path spelling
+    // must find the module discovery keyed canonically -- else Windows LSP
+    // hover/completion/tokens all silently return empty.
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let cam = repo.join("stone/engine/systems/camera.rock");
+    let canon = fs_err::canonicalize(&cam).expect("camera.rock canonicalizes").to_string_lossy().to_string();
+    let text = std::fs::read_to_string(&cam).expect("camera.rock is readable");
+    let noncanon = format!("{}/stone/./engine/systems/camera.rock", repo.to_string_lossy());
+
+    let mut bone = BoneWorkspace::new();
+    bone.load_project(&canon);
+    let _ = bone.update(&canon, text);
+
+    let via_canon = bone.semantic_tokens(&canon).data.len();
+    let via_noncanon = bone.semantic_tokens(&noncanon).data.len();
+    assert!(via_canon > 0, "canonical path should yield tokens");
+    assert_eq!(via_noncanon, via_canon, "non-canonical path must resolve to the same module");
+}

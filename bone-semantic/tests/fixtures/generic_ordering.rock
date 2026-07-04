@@ -1,0 +1,44 @@
+//! Ordering operators (`< <= > >=`) on a generic type parameter `T` are allowed:
+//! the operands must unify and the result is bool, but orderability is deferred
+//! (bone does not monomorphize, and rock accepts `max<T>` with no constraint).
+//! Concrete non-numeric operands (string, bool) stay rejected -- rock defines no
+//! `operator <` for them.
+
+//- generic_ordering_max
+fn max<T>(a: T, b: T) -> T {
+    if a > b { a } else { b }
+}
+fn f() -> int {
+    let r = max(5, 3)
+      //^ int
+    r
+}
+
+//- generic_lt_yields_bool
+fn lt<T>(a: T, b: T) -> bool {
+    a < b
+}
+fn f() -> bool {
+    let r = lt(1, 2)
+      //^ bool
+    r
+}
+
+// numeric ordering still works
+//- int_ordering
+fn f(a: int, b: int) -> bool {
+    let r = a < b
+      //^ bool
+    r
+}
+
+// concrete non-numeric ordering stays rejected
+//- string_ordering_fail @fail
+fn f() -> bool {
+    "a" < "b"
+}
+
+//- bool_ordering_fail @fail
+fn f() -> bool {
+    true < false
+}

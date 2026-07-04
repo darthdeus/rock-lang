@@ -1,0 +1,20 @@
+//! `u.0` on a newtype unwraps the wrapped value (`UserId(int)` -> `.0` is int).
+//! bone's TupleIndex inference only handles tuples ("cannot index a non-tuple
+//! type UserId"). Fix: a newtype base indexes into its `wrapped` types (with
+//! generic subst). Verified vs rock.
+
+//- newtype_unwrap_index
+newtype UserId(int)
+fn f(u: UserId) -> int {
+    let r = u.0
+      //^ int
+    r
+}
+
+//- newtype_unwrap_string
+newtype Tag(string)
+fn f(t: Tag) -> int {
+    let r = t.0
+      //^ string
+    5
+}

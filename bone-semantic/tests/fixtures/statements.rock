@@ -1,0 +1,18 @@
+//! @no_check
+//! Smoke: a nested block as a non-first statement type-checks.
+//!
+//! NOTE: this does NOT catch the statement-range-leak bug (inner `let b` leaking
+//! into the outer block's statement range) — that's type-invisible. The leak is
+//! pinned by the structural test `nested_block_does_not_leak_into_outer_statements`
+//! in src/lib.rs.
+
+//- nested_block_statement
+fn f() -> int {
+    let a = 1
+    let c = {
+        let b = 2
+        b
+    }
+    c
+  //^ int
+}

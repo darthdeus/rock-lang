@@ -1,0 +1,41 @@
+//! @no_check
+//! Safe navigation: `x?.field`. The receiver is peeled of one nullable layer,
+//! the field is looked up on the inner (struct) type, and the result is wrapped
+//! back into a nullable. Needs `Expr::SafeNav` HIR + lowering
+//! (`ExprKind::SafeNavigation`) + inference (reusing struct-field resolution).
+
+//- safe_nav_field
+struct Point { x: int, y: int }
+fn f(p: Point?) -> int {
+    let v = p?.x
+      //^ int?
+    5
+}
+
+// the field's own type is preserved, then made nullable
+//- safe_nav_bool_field
+struct Flags { on: bool }
+fn f(p: Flags?) -> int {
+    let v = p?.on
+      //^ bool?
+    5
+}
+
+// chaining: each `?.` step stays a single nullable layer (no `T??`)
+//- safe_nav_chain
+struct Inner { n: int }
+struct Outer { inner: Inner }
+fn f(o: Outer?) -> int {
+    let v = o?.inner?.n
+      //^ int?
+    5
+}
+
+// a missing field still errors through safe-nav
+//- safe_nav_missing_field @fail
+struct Point { x: int, y: int }
+fn f(p: Point?) -> int {
+    let v = p?.z
+      //^ int?
+    5
+}

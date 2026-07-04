@@ -1,0 +1,15 @@
+//! Lambda arg to an OVERLOADED fn. Overload selection pre-infers args to score
+//! candidates, but a lambda can't be typed until the overload (hence the
+//! expected param type) is chosen. Skip lambda args during scoring (neutral
+//! placeholder), pick the overload from the other args, then check_args pushes
+//! the expected param type into the lambda.
+
+//- lambda_to_overloaded_fn
+struct Box { v: int }
+fn pick(xs: [int], f: fn(int) -> int) -> int { 0 }
+fn pick(xs: [Box], f: fn(Box) -> int) -> int { 0 }
+fn g() -> int {
+    let r = pick([1, 2, 3], x => x)
+      //^ int
+    r
+}

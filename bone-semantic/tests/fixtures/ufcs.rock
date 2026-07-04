@@ -1,0 +1,33 @@
+//! @no_check
+//! UFCS method-call syntax: `x.foo(a)` desugars to `foo(x, a)` (receiver becomes
+//! the first argument). Parses as a FunctionCall whose callee is a FieldAccess;
+//! lowering prepends the receiver and routes through normal call resolution.
+
+//- ufcs_no_args
+fn inc(x: int) -> int { x }
+fn f() -> int {
+    let n = 5
+    let r = n.inc()
+      //^ int
+    r
+}
+
+// receiver + explicit args: `n.add_them(10)` == `add_them(n, 10)`.
+//- ufcs_with_args
+fn add_them(x: int, y: int) -> int { x }
+fn f() -> int {
+    let n = 5
+    let r = n.add_them(10)
+      //^ int
+    r
+}
+
+// the receiver is type-checked against the first parameter.
+//- ufcs_receiver_mismatch @fail
+fn takes_int(x: int) -> int { x }
+fn f() -> int {
+    let b = true
+    let r = b.takes_int()
+      //^ int
+    r
+}

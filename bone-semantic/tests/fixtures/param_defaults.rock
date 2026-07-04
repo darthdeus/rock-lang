@@ -1,0 +1,71 @@
+//! Function param defaults are inferred at DEFINITION, in the fn's own gamma:
+//! (a) a default that doesn't fit the declared param type is rejected (rock
+//! rejects `x: int = "oops"`); (b) a default calling an overloaded fn records
+//! its overload resolution in the fn's BodyInference (skull's callee-side
+//! default fill lowers the default expr with that inference — without the
+//! entry the call can't be mangled and the fn gaps).
+//!
+//! The @fail section carries a caret annotation of the type it WOULD have if
+//! the bad default were accepted, so a wrong-acceptance surfaces as "@fail
+//! but passed" (RED) instead of a "no annotations" harness error.
+
+//- param_default_type_mismatch @fail
+fn f(x: int = "oops") -> int {
+    return x
+}
+fn use_f() -> int {
+    let r = f()
+      //^ int
+    return r
+}
+
+//- param_default_overloaded_call
+struct V2 { x: float, y: float }
+fn mk() -> V2 {
+    return V2 { x: 0.0, y: 0.0 }
+}
+fn mk(x: float, y: float) -> V2 {
+    return V2 { x: x, y: y }
+}
+fn draw(pos: V2, offset: V2 = mk()) -> float {
+    return offset.x
+}
+fn use_it() -> float {
+    let r = draw(V2 { x: 1.0, y: 2.0 })
+      //^ float
+    return r
+}
+
+//- param_default_widens_int_to_float
+fn scale(factor: float = 2) -> float {
+    return factor
+}
+fn use_scale() -> float {
+    let s = scale()
+      //^ float
+    return s
+}
+
+// Params are NOT in scope inside defaults (rock: "defaults are injected at
+// the call site and other params are not in scope"), so a default referencing
+// a sibling param is rejected...
+//- param_default_refs_param @fail
+fn f2(a: int = 1, b: int = a) -> int {
+    let r = b
+      //^ int
+    return r
+}
+
+// ...and a param named after a global fn does NOT shadow it in its own
+// default — `color` here is the global fn, unambiguously (the stone pattern
+// `color: Color = color(0, 0, 0, 0)`).
+//- param_default_shadowing_name_resolves_to_fn
+struct Color2 { r: int }
+fn color2(r: int) -> Color2 {
+    return Color2 { r: r }
+}
+fn paint(color2: Color2 = color2(7)) -> int {
+    let r = color2.r
+      //^ int
+    return r
+}

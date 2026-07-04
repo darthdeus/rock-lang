@@ -1,0 +1,28 @@
+//! Joining a nullable with its base type is the LUB `T?` (verified vs rock):
+//! `int? == int` type-checks, `[a, 1]` infers `[int?]`, but ordering a
+//! nullable (`int? < int`) is still rejected ("Cannot compare nullable").
+//! The bug: `join` fell through to `unify`, which can't unify `int?` with
+//! `int`. Fix lives in `join` (peel either/both nullable, join inners,
+//! re-wrap once), so equality accepts and ordering's orderable-check rejects.
+
+// Equality across nullable boundary type-checks (result is bool).
+//- nullable_eq_nonnull
+fn f(a: int?) -> bool {
+    let r = a == 1
+      //^ bool
+    r
+}
+
+// Array element join of int? and int is int?.
+//- nullable_array_lub
+fn f(a: int?) -> int {
+    let xs = [a, 1]
+      //^ [int?]
+    5
+}
+
+// Ordering a nullable is still rejected.
+//- nullable_ordering_rejected @fail
+fn f(a: int?) -> bool {
+    a < 1
+}

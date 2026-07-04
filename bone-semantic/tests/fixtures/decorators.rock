@@ -1,0 +1,53 @@
+//! `deco init name(params) { body }` definitions are lowered and their bodies
+//! ARE type-checked, with the magic `target` bound to the `__DecoTarget` struct
+//! (fields name/params/func) and the decorator params in scope. `@deco`
+//! annotations on functions are accepted; the function type-checks normally.
+//!
+//! These sections run standalone (no stdlib), so each defines `__DecoTarget`
+//! locally and the bodies avoid stdlib calls.
+
+// The decorator body type-checks: `target.name` is string, `target.func` is
+// any, and the module type-checks clean.
+//- deco_body_checks
+struct __DecoTarget { name: string, params: [string], func: any }
+deco init reg {
+    let n: string = target.name
+    let fp = target.func
+}
+fn f(x: int) -> int {
+    x
+  //^ int
+}
+
+// Decorator params are in scope in the body and carry their declared type
+// (the body would not type-check if `stage` were unbound or not int).
+//- deco_param_typed
+struct __DecoTarget { name: string, params: [string], func: any }
+deco init staged(stage: int = 100) {
+    let s: int = stage
+}
+fn h(y: int) -> int {
+    y
+  //^ int
+}
+
+// A `@deco`-annotated function still type-checks normally.
+//- decorated_fn_checks
+struct __DecoTarget { name: string, params: [string], func: any }
+deco init reg {
+    let n: string = target.name
+}
+@reg
+fn g(n: int) -> int {
+    let x = n
+      //^ int
+    x
+}
+
+// The body IS type-checked: assigning the string `target.name` to an `int`
+// local is a type error, so this section must fail.
+//- deco_body_type_error @fail
+struct __DecoTarget { name: string, params: [string], func: any }
+deco init bad {
+    let n: int = target.name
+}

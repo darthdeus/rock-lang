@@ -1,0 +1,51 @@
+//! @no_check
+
+//- int_literal
+fn f() -> int { 5 }
+              //^ int
+
+//- bool_literal
+fn f() -> bool { true }
+               //^ bool
+
+//- float_literal
+fn f() -> float { 1.5 }
+                //^ float
+                // ^ float
+                //  ^ float
+                //^^^ float
+
+//- block_types
+fn f() -> float { 1.5 }
+             // ^ float
+             //       ^ float
+
+//- marker_outside_node_SHOULD_FAIL @fail
+fn f() -> float { 1.5 }
+             //      ^ float
+
+//- two_params
+fn add(x: int, y: int) -> int { y }
+     //^ int   ^ int            ^ int
+
+//- return_type
+fn f() -> int { 5 }
+        //^ int
+
+//- empty_block
+fn f() -> () { }
+           //^ ()
+
+//- return_type
+fn f() -> int {
+    return 5
+  //^^^^^^ int
+}
+
+// //- nested_block
+// fn f() -> int {
+//     return 1
+//     { return 2 }
+//     return 3
+//               //^ int
+// }

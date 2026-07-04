@@ -1,0 +1,30 @@
+//! @no_check
+//! Tuple-literal expressions: `(a, b)` infers to `(A, B)`. Heterogeneous — each
+//! element keeps its own type (no element-unify, unlike arrays). Needs an
+//! `Expr::Tuple` variant + lowering (reuse `lower_exprs`) + inference (infer each
+//! element, build a `Tuple` type from the element types). Fails today at lowering
+//! ("unsupported expr").
+//!
+//! Marker on the `let` binding (its inferred type).
+
+//- tuple_literal_pair
+fn f() -> int {
+    let t = (1, true)
+      //^ (int, bool)
+    5
+}
+
+//- tuple_literal_three
+fn f() -> int {
+    let t = (1, true, "hi")
+      //^ (int, bool, string)
+    5
+}
+
+// element is itself a tuple -> recursion through inference
+//- tuple_literal_nested
+fn f() -> int {
+    let t = ((1, 2), true)
+      //^ ((int, int), bool)
+    5
+}

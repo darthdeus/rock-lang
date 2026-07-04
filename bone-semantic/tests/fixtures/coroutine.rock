@@ -1,0 +1,48 @@
+//! Coroutine typecheck (Step 1): `co fn ... -> Coroutine<Y>` + `yield e`.
+//! `yield e` checks `e` against the yield type Y (first param of the declared
+//! Coroutine return type). `Coroutine<Y>` synthesizes to `Coroutine<Y, Unit,
+//! Unit>` so it matches the stdlib `resume<Y,R,N>` signature (resume/.resume()
+//! itself is exercised by the full suite, which has stdlib).
+
+//- co_fn_yield_ok
+co fn echo() -> Coroutine<string> {
+    yield "hello"
+    yield "world"
+}
+fn carrier() -> int {
+    let x = 5
+      //^ int
+    x
+}
+
+// yield value type must match the coroutine's yield type Y.
+//- co_fn_yield_type_mismatch @fail
+co fn bad() -> Coroutine<string> {
+    yield 42
+}
+
+// `yield* inner()` delegates: inner must be a Coroutine whose yield type Y'
+// flows into the outer Y. The delegate expression's value is the inner's R.
+//- yield_star
+co fn inner() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+co fn outer() -> Coroutine<int> {
+    yield 0
+    yield* inner()
+}
+fn carrier() -> int {
+    let x = 5
+      //^ int
+    x
+}
+
+// yield* over a coroutine whose yield type mismatches the outer is rejected.
+//- yield_star_type_mismatch @fail
+co fn inner_str() -> Coroutine<string> {
+    yield "a"
+}
+co fn outer_int() -> Coroutine<int> {
+    yield* inner_str()
+}

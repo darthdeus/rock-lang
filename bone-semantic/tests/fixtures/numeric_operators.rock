@@ -1,0 +1,45 @@
+//! Operator overload resolution with int->float widening. `a - b` parses to
+//! `__op_sub(a, b)`; with `(int,int)` and `(float,float)` overloads defined,
+//! selection picks the exact match when possible, else the int->float widening
+//! one. Requires: resolve_callee returns ALL candidates + arg-type scoring
+//! (exact beats widen), plus the `coerce` predicate (see coercion.rock).
+
+// int - float: (int,int) is NoFit (float arg), (float,float) widens the int arg.
+//- sub_int_float_widens
+operator(lua) -(a: int, b: int) -> int = "return a - b"
+operator(lua) -(a: float, b: float) -> float = "return a - b"
+fn f(x: float) -> float {
+    let r = 1 - x
+      //^ float
+    r
+}
+
+// int - int: exact (int,int) beats the all-widen (float,float).
+//- sub_int_int_stays_int
+operator(lua) -(a: int, b: int) -> int = "return a - b"
+operator(lua) -(a: float, b: float) -> float = "return a - b"
+fn f() -> int {
+    let r = 1 - 2
+      //^ int
+    r
+}
+
+// float - float: must select (float,float), not the first-defined (int,int).
+//- sub_float_float
+operator(lua) -(a: int, b: int) -> int = "return a - b"
+operator(lua) -(a: float, b: float) -> float = "return a - b"
+fn f(a: float, b: float) -> float {
+    let r = a - b
+      //^ float
+    r
+}
+
+// float - int: float arg can't widen to int, int arg widens to float -> (float,float).
+//- sub_float_int_widens
+operator(lua) -(a: int, b: int) -> int = "return a - b"
+operator(lua) -(a: float, b: float) -> float = "return a - b"
+fn f(x: float) -> float {
+    let r = x - 1
+      //^ float
+    r
+}

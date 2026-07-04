@@ -1,0 +1,41 @@
+//! @no_check
+//!
+//! Array-literal expressions: `[1, 2, 3]` infers to `[int]` (App Array).
+//! Needs an `Expr::Array` variant + lowering + element-type inference (unify the
+//! element types together, wrap the result in the Array ctor). Fails today at
+//! lowering ("Unsupported expr").
+//!
+//! Marker sits on the `let` binding name (its inferred type). Functions return
+//! `int` via a trailing `5` so the (unchecked) body-vs-return path is irrelevant.
+
+//- array_literal_int
+fn f() -> int {
+    let xs = [1, 2, 3]
+      //^ [int]
+    5
+}
+
+//- array_literal_bool
+fn f() -> int {
+    let xs = [true, false]
+      //^ [bool]
+    5
+}
+
+// element types are themselves arrays -> recursion through inference
+//- array_literal_nested
+fn f() -> int {
+    let xs = [[1, 2], [3]]
+      //^ [[int]]
+    5
+}
+
+// heterogeneous elements must fail: unifying the element types rejects int vs bool.
+// (marker is what it WOULD render as if elements were wrongly not unified, so this
+//  also catches "just took the first element's type")
+//- array_literal_heterogeneous @fail
+fn f() -> int {
+    let xs = [1, true]
+      //^ [int]
+    5
+}

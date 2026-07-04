@@ -1,0 +1,28 @@
+//! @no_check
+//! If-expressions: `if cond { a } else { b }`. The condition must be `bool`, and
+//! the two branches unify to the result type. `infer_expr` has
+//! `Expr::If => todo!()` and lowering rejects `ExprKind::If`, so these fail today
+//! at lowering. Marker on the `let` binding (the if's result type).
+
+//- if_basic
+fn f() -> int {
+    let x = if true { 1 } else { 2 }
+      //^ int
+    x
+}
+
+// branches disagree (int vs string) -> must fail once branch unify lands
+//- if_branch_mismatch @fail
+fn f() -> int {
+    let x = if true { 1 } else { "hi" }
+      //^ int
+    x
+}
+
+// condition is int, not bool -> must fail once cond is checked
+//- if_cond_not_bool @fail
+fn f() -> int {
+    let x = if 5 { 1 } else { 2 }
+      //^ int
+    x
+}

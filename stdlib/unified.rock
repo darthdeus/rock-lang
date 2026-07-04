@@ -1,0 +1,2770 @@
+// Rock standard library
+
+// Empty type used as the default `R` for `Coroutine<Y, R = Unit>`.
+// See docs/yield-star-and-dual-arity-plan.md (PR-β / D3a). Future
+// work may replace this with a compiler-builtin keyword (D3b).
+struct Unit {}
+
+// The `target` object available inside a `deco init` body. The runtime
+// table skull emits (name/params/func) is shaped to match; bone types the
+// magic `target` binding as this struct so `target.name`/`target.func`
+// type-check.
+struct __DecoTarget {
+    name: string,
+    params: [string],
+    func: any,
+}
+
+struct ArenaEntry<T> {
+    data: T,
+    index: int,
+    generation: int,
+    is_occupied: bool,
+}
+
+@pure @inline inline(lua) fn int(value: int) -> int = "return value"
+
+@pure fn int(value: float) -> int { return floor(value) as int }
+
+fn is_nan(value: float) -> bool {
+    // NaN is the only value that is not equal to itself
+    return value != value
+}
+
+// Native arrays in Rock are denoted with ![...] syntax. These are plain Lua
+// tables (1-indexed). Generic over T so value-typed elements (e.g. ![V2])
+// flow without going through `any` (value types refuse `any` boxing).
+inline(lua) fn array_len<T>(arr: ![T]) -> int = "return #arr"
+inline(lua) fn array_push<T>(arr: ![T], value: T) = "arr[#arr + 1] = value"
+@inline inline(lua) fn array_pop<T>(arr: ![T]) -> T = "table.remove(arr)"
+inline(lua) fn array_clear<T>(arr: ![T]) = "for i = #arr, 1, -1 do arr[i] = nil end"
+
+// Bounds-checked native-array read. `arr[i]` on native arrays (![T])
+// compiles to this helper so it returns T (not T?) with an error on
+// out-of-range. Matches the unified `x[i] -> T / x.get(i) -> T?`
+// surface across collection types.
+@nomangle inline(lua) fn __narr_get_checked(arr: any, i: int) -> any = """
+    local v = arr[i + 1]
+    if v == nil then
+        error("Native array index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(#arr) .. ")")
+    end
+    return v
+"""
+
+// Native arrays don't need a dedicated `.get()` — `arr[i]` already
+// returns `T?` (Lua table miss = nil), which matches the unified
+// `.get() -> T?` contract from the other collection types.
+
+// ============================================================================
+// FFI out-parameter buffers
+// ============================================================================
+//
+// Many C APIs take `int*` / `float*` for out-parameters. LuaJIT handles these
+// with `ffi.new("int[1]")` single-element arrays. The `ffi_out_*` constructors
+// return raw cdata typed as `Ptr<T>` (the same phantom used for
+// NativeBuffer<T>.ptr) so externs can declare the exact pointer variant they
+// accept — passing `Ptr<int>` where `Ptr<float>` is expected is a compile
+// error. There is no wrapper struct; the "FfiOut" name lives only in the
+// constructor identifiers.
+//
+// Usage:
+//   let w = ffi_out_int()
+//   let h = ffi_out_int()
+//   stone_get_image_size(handle, w, h)  // extern takes (int, Ptr<int>, Ptr<int>)
+//   return IVec2 { x: w.read(), y: h.read() }
+
+@inline inline(lua) fn __ffi_new_int_1() -> Ptr<int> = 'return ffi.new("int[1]")'
+@inline inline(lua) fn __ffi_new_float_1() -> Ptr<float> = 'return ffi.new("float[1]")'
+
+fn ffi_out_int() -> Ptr<int> { return __ffi_new_int_1() }
+fn ffi_out_float() -> Ptr<float> { return __ffi_new_float_1() }
+
+inline(lua) fn read(p: Ptr<int>) -> int = "return p[0]"
+inline(lua) fn read(p: Ptr<float>) -> float = "return p[0]"
+
+// ============================================================================
+// Typed pointer phantoms — close the Rock-side FFI hole
+// ============================================================================
+//
+// `Ptr<T>` and the sized variants (PtrU8/PtrI8/PtrU16/PtrI16/PtrU32) are
+// empty phantom structs. At runtime they carry raw LuaJIT cdata (no
+// wrapper table — the inline(lua) constructors return the cdata directly
+// and Rock's static typing is nominal). At compile time they give
+// extern(ffi) signatures the power to say "this argument must be a
+// float* (not an int*, not a uint8_t*)" without runtime cost.
+//
+// NativeBuffer<T>.ptr is typed as Ptr<T>; sized variants' .ptr fields use
+// the distinct phantom variant. Pre-existing use of .ptr at call sites
+// keeps working — the runtime value is still cdata, the Rock type just
+// became more specific.
+
+struct Ptr<T> { }
+struct PtrU8  { }
+struct PtrI8  { }
+struct PtrU16 { }
+struct PtrI16 { }
+struct PtrU32 { }
+
+// ============================================================================
+// NativeBuffer<T> — typed contiguous ffi buffers
+// ============================================================================
+//
+// Wraps an `ffi.new("T[?]", n)` cdata with a phantom type parameter. Enables
+// type-safe construction + indexed read/write for bulk numeric buffers, while
+// still passing through to C FFI externs as a raw pointer via `.ptr`.
+//
+// Usage:
+//   let verts = native_buffer_float(14 * vertex_count)
+//   nb_set(verts, 0, 1.0)
+//   stone_submit_verts(verts.ptr, verts.len)  // extern takes (Ptr<float>, int)
+//
+// Bounds: reads/writes past `len` yield LuaJIT garbage; indexing is 0-based.
+// T ∈ {int, float}; extend with more primitives as needed.
+
+struct NativeBuffer<T> {
+    ptr: Ptr<T>,
+    len: int,
+}
+
+@nomangle inline(lua) fn __nb_alloc_float(n: int) -> Ptr<float> = 'return ffi.new("float[?]", n)'
+@nomangle inline(lua) fn __nb_alloc_int(n: int) -> Ptr<int> = 'return ffi.new("int[?]", n)'
+
+fn native_buffer_float(n: int) -> NativeBuffer<float> {
+    return NativeBuffer { ptr: __nb_alloc_float(n), len: n }
+}
+fn native_buffer_int(n: int) -> NativeBuffer<int> {
+    return NativeBuffer { ptr: __nb_alloc_int(n), len: n }
+}
+
+// Single-hop accessors: the inline(lua) body reaches into the Rock struct's
+// .ptr field directly. This avoids the extra Lua call frame a wrapper would
+// introduce and lets LuaJIT fold the field load + ffi index in one trace.
+inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
+inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
+
+// Safe accessor matching the unified `.get(i) -> T?` surface used across
+// all collection types. Returns null on out-of-range; `buf[i]` is the
+// direct-access counterpart.
+inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
+    if i < 0 or i >= b.len then return nil end
+    return b.ptr[i]
+"""
+inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end
+    return b.ptr[i]
+"""
+
+// ============================================================================
+// Windowed statistics -- one Metric per measured series.
+// ----------------------------------------------------------------------------
+// Holds a trailing window of `cap` samples plus its live summary
+// (mean/stddev/min/max/p50/p90/p99). `sorted` stays ascending so order stats
+// are index lookups; `ring` is insertion order, giving the oldest sample to
+// evict and the raw per-frame signal for plots. metric_add recomputes the
+// summary in O(cap) with zero allocation and uniform cost, so a reader can
+// pull p99 every frame without perturbing what it measures.
+// Design: docs/effective-fps-and-stats-plan.md.
+// ============================================================================
+
+value StatSummary {
+    mean: float,
+    stddev: float,
+    min: float,
+    max: float,
+    p50: float,
+    p90: float,
+    p99: float,
+    n: int,
+}
+
+struct Metric {
+    name: string,
+    cap: int,
+    ring: NativeBuffer<float>,    // insertion order (eviction + raw plot source)
+    sorted: NativeBuffer<float>,  // same values, ascending (order stats)
+    head: int,
+    count: int,
+    // Live summary -- overwritten in place by every metric_add.
+    mean: float,
+    stddev: float,
+    min: float,
+    max: float,
+    p50: float,
+    p90: float,
+    p99: float,
+}
+
+fn metric_new(name: string, cap: int) -> Metric {
+    return Metric {
+        name: name,
+        cap: cap,
+        ring: native_buffer_float(cap),
+        sorted: native_buffer_float(cap),
+        head: 0,
+        count: 0,
+        mean: 0.0,
+        stddev: 0.0,
+        min: 0.0,
+        max: 0.0,
+        p50: 0.0,
+        p90: 0.0,
+        p99: 0.0,
+    }
+}
+
+// round(p/100 * (n-1)), clamped to n-1. `min` isn't provably @pure, so the
+// clamp is spelled out.
+@pure
+fn metric_percentile_index(p: int, n: int) -> int {
+    if n <= 1 { return 0 }
+    let idx = (p * (n - 1) + 50) / 100
+    if idx > n - 1 { return n - 1 }
+    return idx
+}
+
+// Only called from metric_add, which adds a sample first, so count >= 1.
+fn metric_recompute(m: Metric) {
+    let n = m.count
+    let sum = 0.0
+    let sum_sq = 0.0
+    for i in 0..n {
+        let x = nb_get(m.sorted, i)
+        sum = sum + x
+        sum_sq = sum_sq + x * x
+    }
+    let nf = n as float
+    let mean = sum / nf
+    m.mean = mean
+    // Clamp guards float cancellation in the sum_sq - mean^2 variance form.
+    m.stddev = sqrt(max(0.0, sum_sq / nf - mean * mean))
+    m.min = nb_get(m.sorted, 0)
+    m.max = nb_get(m.sorted, n - 1)
+    m.p50 = nb_get(m.sorted, metric_percentile_index(50, n))
+    m.p90 = nb_get(m.sorted, metric_percentile_index(90, n))
+    m.p99 = nb_get(m.sorted, metric_percentile_index(99, n))
+}
+
+// Add one sample: maintain the ascending `sorted` window (evict oldest if
+// full, insert the new value) and the insertion-order `ring`, then recompute
+// the summary fields. O(cap), zero allocation, uniform cost per call.
+fn metric_add(m: Metric, v: float) {
+    let evicting = m.count >= m.cap
+
+    // `len` = valid length of `sorted` after any eviction, before inserting v.
+    let len = if evicting {
+        // Remove the oldest sample (ring[head]) from sorted: linear scan for
+        // its slot, then shift left. Equality is exact -- ring and sorted hold
+        // the same bit-for-bit float32 (both written via nb_set).
+        let old = nb_get(m.ring, m.head)
+        let oi = 0
+        for i in 0..m.count {
+            if nb_get(m.sorted, i) == old {
+                oi = i
+                break
+            }
+        }
+        for i in oi..(m.count - 1) {
+            nb_set(m.sorted, i, nb_get(m.sorted, i + 1))
+        }
+        m.count - 1
+    } else {
+        m.count
+    }
+
+    // Ascending insert position for v in sorted[0..len); shift the tail right.
+    let ins = len
+    for i in 0..len {
+        if v < nb_get(m.sorted, i) {
+            ins = i
+            break
+        }
+    }
+    let j = len
+    while j > ins {
+        nb_set(m.sorted, j, nb_get(m.sorted, j - 1))
+        j = j - 1
+    }
+    nb_set(m.sorted, ins, v)
+
+    // Insertion-order ring + cursor.
+    nb_set(m.ring, m.head, v)
+    m.head = (m.head + 1) % m.cap
+    if !evicting {
+        m.count = m.count + 1
+    }
+
+    metric_recompute(m)
+}
+
+// Snapshot the live fields into a value struct -- for serializers (JSON/pretty)
+// that pass a whole summary around. Not used on the per-frame hot path, where
+// callers read m.mean / m.p99 directly.
+fn metric_snapshot(m: Metric) -> StatSummary {
+    return StatSummary {
+        mean: m.mean,
+        stddev: m.stddev,
+        min: m.min,
+        max: m.max,
+        p50: m.p50,
+        p90: m.p90,
+        p99: m.p99,
+        n: m.count,
+    }
+}
+
+// Read the i-th most recent sample from a Metric's insertion-order ring
+// (i=0 is newest). For plotting the raw signal as a time-series. Caller
+// guarantees 0 <= i < m.count.
+fn metric_recent(m: Metric, i: int) -> float {
+    let idx = ((m.head - 1 - i) % m.cap + m.cap) % m.cap
+    return nb_get(m.ring, idx)
+}
+
+// NativeBuffer<T: value> — user-supplied allocator pattern
+// --------------------------------------------------------
+// The ffi.cdef for every `value` struct is emitted automatically, so
+// `ffi.new("Vec2[?]", n)` is a valid LuaJIT allocation. There's no
+// generic `native_buffer_value<T: value>(n)` in the stdlib because
+// Rock doesn't (yet) have compile-time access to a type's cdef name
+// from within a generic body; instead, each value struct that wants
+// native-buffer storage declares its own alloc+accessors:
+//
+//     value Vec2 { x: float, y: float }
+//
+//     @nomangle inline(lua)
+//     fn __nb_alloc_Vec2(n: int) -> Ptr<Vec2> = 'return ffi.new("Vec2[?]", n)'
+//
+//     fn native_buffer_vec2(n: int) -> NativeBuffer<Vec2> {
+//         return NativeBuffer { ptr: __nb_alloc_Vec2(n), len: n }
+//     }
+//
+//     inline(lua) fn nb_get(b: NativeBuffer<Vec2>, i: int) -> Vec2 = "return b.ptr[i]"
+//     inline(lua) fn nb_set(b: NativeBuffer<Vec2>, i: int, v: Vec2) = "b.ptr[i] = v"
+//
+// At runtime: elements are stored contiguously as Vec2 cdata (AoS).
+// `buf[i]` returns a cdata ref to the element (no copy); field reads
+// go through LuaJIT's ffi indexing. `buf[i] = v` copies the struct
+// field-wise. See tests/native_buffer_value.rock for the exercise.
+
+// ----------------------------------------------------------------------------
+// Sized-storage NativeBuffer variants (distinct-struct phantoms)
+// ----------------------------------------------------------------------------
+//
+// These are distinct struct types backed by smaller C integer sizes. Same
+// shape as NativeBuffer<int> at runtime (struct with `.ptr` + `.len`), but
+// the Rock type system treats them as incompatible — passing a
+// NativeBufferU8 where NativeBufferI16 is expected is a compile error.
+//
+// This is the ergonomic way to get phantom-style safety. Indexing surfaces
+// as plain `int` (no newtype wrapping), because LuaJIT auto-converts
+// uint8_t/int16_t/etc. to Lua number on read and truncates on write.
+//
+// Variants:
+//   NativeBufferU8   / native_buffer_u8(n)   uint8_t[?]   — pixel bytes (RGBA)
+//   NativeBufferI8   / native_buffer_i8(n)   int8_t[?]
+//   NativeBufferU16  / native_buffer_u16(n)  uint16_t[?]  — short indices
+//   NativeBufferI16  / native_buffer_i16(n)  int16_t[?]   — audio samples
+//   NativeBufferU32  / native_buffer_u32(n)  uint32_t[?]  — packed colors, indices
+//
+// Element type is `int` for all of them. `.ptr` is typed as distinct
+// `PtrU8`/`PtrI8`/`PtrU16`/`PtrI16`/`PtrU32` phantoms so extern signatures
+// can declare the exact variant they accept — passing `PtrI16` where
+// `PtrU8` is expected is a compile error.
+
+struct NativeBufferU8  { ptr: PtrU8,  len: int }
+struct NativeBufferI8  { ptr: PtrI8,  len: int }
+struct NativeBufferU16 { ptr: PtrU16, len: int }
+struct NativeBufferI16 { ptr: PtrI16, len: int }
+struct NativeBufferU32 { ptr: PtrU32, len: int }
+
+@nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return ffi.new("uint8_t[?]", n)'
+@nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return ffi.new("int8_t[?]", n)'
+@nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return ffi.new("uint16_t[?]", n)'
+@nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
+@nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
+
+fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
+fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
+fn native_buffer_u16(n: int) -> NativeBufferU16 { return NativeBufferU16 { ptr: __nb_alloc_u16(n), len: n } }
+fn native_buffer_i16(n: int) -> NativeBufferI16 { return NativeBufferI16 { ptr: __nb_alloc_i16(n), len: n } }
+fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: __nb_alloc_u32(n), len: n } }
+
+// Single-hop accessors per variant. All surface as int (LuaJIT handles
+// the C<->Lua number conversion at the ffi boundary). One nb_get + nb_set
+// pair per NativeBuffer phantom variant.
+inline(lua) fn nb_get(b: NativeBufferU8,  i: int) -> int = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
+inline(lua) fn nb_get(b: NativeBufferI8,  i: int) -> int = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
+inline(lua) fn nb_get(b: NativeBufferU16, i: int) -> int = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
+inline(lua) fn nb_get(b: NativeBufferI16, i: int) -> int = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
+inline(lua) fn nb_get(b: NativeBufferU32, i: int) -> int = "return b.ptr[i]"
+inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
+
+// Safe `.get(i) -> int?` per variant. Codegen for `buf[i]` emits the
+// bounds-checked helper `__nb_checked_get` (type-agnostic on struct).
+inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end; return b.ptr[i]
+"""
+inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end; return b.ptr[i]
+"""
+inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end; return b.ptr[i]
+"""
+inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end; return b.ptr[i]
+"""
+inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end; return b.ptr[i]
+"""
+
+// Debug-mode bounds-checked access. The compiler emits calls to these in
+// non-release builds instead of direct buf.ptr[i] access. Release builds
+// (`--release` or `ROCK_RELEASE=1`) skip the check entirely and emit raw
+// ffi access, preserving zero-overhead semantics.
+@nomangle inline(lua) fn __nb_checked_get(buf: any, i: int) -> any = """
+    if i < 0 or i >= buf.len then
+        error("NativeBuffer index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(buf.len) .. ")")
+    end
+    return buf.ptr[i]
+"""
+
+@nomangle inline(lua) fn __nb_checked_set(buf: any, i: int, v: any) = """
+    if i < 0 or i >= buf.len then
+        error("NativeBuffer index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(buf.len) .. ")")
+    end
+    buf.ptr[i] = v
+"""
+
+// True when this build was compiled with --release or ROCK_RELEASE=1.
+// Set by the compiler in the BUILTIN module's init_code. Useful for
+// tests that need to gate expectations on compile mode, and for
+// conditionally expensive invariant checks at the source level.
+@nomangle inline(lua) fn is_release_mode() -> bool = "return _G.__ROCK_RELEASE == true"
+
+struct Arena<T> {
+    entries: [ArenaEntry<T>],
+    free_indices: [int],
+    occupied_count: int = 0,
+}
+
+struct Entity<T> {
+    // `_`-prefixed: implementation details, hidden from member completion. Use
+    // the method API (`get`/`remove`/`equals`/...), not the fields.
+    _arena: Arena<T>,
+    _index: int,
+    _generation: int,
+}
+
+// ============================================================================
+// Type System Runtime
+// ============================================================================
+//
+// Types are registered by the compiler, not at runtime. `codegen_pass.rs`
+// emits monomorphized `__op_eq_TypeName` and
+// `_G.__ROCK_TYPE_TABLE["TypeName"]` (field metadata used by reflection).
+// The `stdlib_code` slot pre-seeds the type table as empty so lookups are
+// safe during the bootstrap window before the init_code runs.
+
+// Get the Rock type of a table value from its direct `__ty` tag. Every
+// struct/newtype/Vec carries it (set by __rock_create_struct / vec_new /
+// skull's literal emission); there is no metatable. cdata `value` structs
+// are not tables -- they reflect via __ROCK_TYPE_TABLE + ffi.istype, not here.
+@nomangle inline(lua) fn __rock_get_type(obj: any) -> string? = """
+    if type(obj) ~= "table" then
+        return nil
+    end
+    return obj.__ty
+"""
+
+// Register a callback to fire after each hot reload. Two forms:
+//   - `on_hot_reload(f)` stores a function VALUE — for closures / anonymous
+//     callbacks. The value is captured once, so an EDITED body does not
+//     propagate (the closure is fixed). Fine when the callback CODE is stable
+//     and only its effect must re-run (buff reapply, cache rehydration).
+//   - `on_hot_reload_by_name(name)` stores a global NAME, re-resolved via
+//     `_G[name]` at every fire — so an edited body of that global DOES
+//     propagate (the name-lookup trick coroutine step fns use). The `@on_reload`
+//     deco uses this form, which is why `@on_reload` requires `@nomangle` (the
+//     Lua global must equal the source name for `_G[name]` to resolve).
+//
+// Semantics:
+//   - Callbacks fire in FIFO order of registration.
+//   - The registry PERSISTS across firings; it is cleared only by
+//     `__rock_clear_hot_reload_callbacks()` (which `clear_all_systems()` calls
+//     at the start of a FULL reload, before `dofile` re-runs every `@on_reload`
+//     deco-init). A body-edit OVERLAY never re-runs those deco-inits, so a fire
+//     that consumed the list would leave it empty after the first light reload
+//     and never fire again — the registration must survive every reload.
+//   - The fire step iterates a COPY, so a callback that registers during the
+//     pass lands in the next firing, not this one.
+//   - The engine hot-reload pipeline invokes
+//     `__rock_fire_hot_reload_callbacks()` after `dofile()` completes.
+@nomangle inline(lua) fn on_hot_reload(f: fn() -> ()) = """
+    if not _G.__rock_on_hot_reload then
+        _G.__rock_on_hot_reload = {}
+    end
+    _G.__rock_on_hot_reload[#_G.__rock_on_hot_reload + 1] = f
+"""
+
+// Register a hot-reload callback by its GLOBAL NAME (re-resolved each fire), so
+// an edited callback body propagates. The `@on_reload` deco uses this.
+@nomangle inline(lua) fn on_hot_reload_by_name(name: string) = """
+    if not _G.__rock_on_hot_reload then
+        _G.__rock_on_hot_reload = {}
+    end
+    _G.__rock_on_hot_reload[#_G.__rock_on_hot_reload + 1] = name
+"""
+
+// Fire every registered on_hot_reload callback. Iterates a COPY and does NOT
+// clear the list (see on_hot_reload's doc). A STRING entry is a global name,
+// resolved via `_G[name]` at fire time (name-lookup → edited bodies propagate);
+// a missing name is logged once and skipped (the global was renamed/removed, or
+// mangled — `@on_reload` requires `@nomangle` to keep it stable). A non-string
+// entry is a function value, called directly.
+@nomangle inline(lua) fn __rock_fire_hot_reload_callbacks() = """
+    local src = _G.__rock_on_hot_reload or {}
+    local cbs = {}
+    for i = 1, #src do cbs[i] = src[i] end
+    for i = 1, #cbs do
+        local entry = cbs[i]
+        if type(entry) == "string" then
+            local f = _G[entry]
+            if f then
+                f()
+            else
+                _G.__rock_hot_reload_missing = _G.__rock_hot_reload_missing or {}
+                if not _G.__rock_hot_reload_missing[entry] then
+                    _G.__rock_hot_reload_missing[entry] = true
+                    __stone_log(0, "HOTRELOAD", "on_reload callback '" .. entry .. "' is not a global (renamed/mangled? @on_reload needs @nomangle); skipping")
+                end
+            end
+        else
+            entry()
+        end
+    end
+"""
+
+// Reset the on_hot_reload callback list. Called by engine `clear_all_systems()`
+// at the start of a hot reload — mirrors the behavior of clearing
+// INIT_SYSTEMS/DRAW_SYSTEMS/etc, so callbacks that were registered via
+// mechanisms that re-run during dofile (e.g. the @on_reload decorator)
+// don't accumulate duplicates.
+@nomangle inline(lua) fn __rock_clear_hot_reload_callbacks() = """
+    _G.__rock_on_hot_reload = {}
+"""
+
+// @on_reload — a function decorator that registers the decorated function
+// as a hot-reload callback. The deco-init body runs on every function
+// definition, so after `clear_all_systems()` wipes the list and the engine
+// re-runs the script, the decorated function re-registers itself.
+//
+// Registers BY NAME (not value), so editing the decorated function's body and
+// hot-reloading runs the NEW body — the global is re-resolved at fire time.
+// This requires the function to be `@nomangle` (the Lua global must equal the
+// source name); a missing `@nomangle` is a compile error.
+//
+// This is the canonical way to hook into hot reload for global state
+// that needs to refresh after reload — top-level `on_hot_reload(f)` calls
+// don't work for this purpose because they live in __rock_main, which is
+// HOT_RELOAD-guarded and skipped on reload.
+//
+// Example:
+//   @nomangle
+//   @on_reload
+//   fn reapply_buffs() {
+//       for p in ALL_PLAYERS { p.buffs.reapply() }
+//   }
+deco init on_reload {
+    on_hot_reload_by_name(target.name)
+}
+
+// Program entry wrapper. The assembler emits a single call to this at the
+// very end of the compiled output, passing the user's `main` function as an
+// argument. Skips under hot reload (the reload path re-runs top-level code
+// but must not re-enter main), catches Ctrl+C cleanly, and re-raises other
+// errors with their original message so stack traces point at the real fault.
+@nomangle inline(lua) fn __rock_main_wrapper(main_fn: any) = """
+    if _G.HOT_RELOAD then return end
+    local ok, err = pcall(main_fn)
+    if not ok then
+        if type(err) == "string" and err:find("interrupted!") then
+            os.exit(0)
+        else
+            error(err, 0)
+        end
+    end
+"""
+
+// Generic operator functions using different names to avoid compiler conflicts
+@nomangle inline(lua) fn __op_eq(a: any, b: any) -> bool = """
+    -- Primitive fast path
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return a == b
+    end
+
+    -- Same reference
+    if a == b then return true end
+
+    local type_a = __rock_get_type(a)
+    local type_b = __rock_get_type(b)
+
+    -- Different Rock types are never equal
+    if type_a and type_b and type_a ~= type_b then
+        return false
+    end
+
+    -- Every Rock struct and enum has a monomorphized __op_eq_<TypeName>
+    -- generated by the compiler (semantic/codegen_pass.rs). Use it.
+    if type_a then
+        local type_specific_eq = _G["__op_eq_" .. type_a]
+        if type_specific_eq then
+            return type_specific_eq(a, b)
+        end
+    end
+
+    -- Fallback for untyped tables (tuples, anonymous Lua tables).
+    for k, v in pairs(a) do
+        if k ~= "__ty" then
+            if not __op_eq(v, b[k]) then
+                return false
+            end
+        end
+    end
+    for k, v in pairs(b) do
+        if k ~= "__ty" and a[k] == nil then
+            return false
+        end
+    end
+    return true
+"""
+
+@nomangle inline(lua) fn __op_ne(a: any, b: any) -> bool = """
+    return not __op_eq(a, b)
+"""
+
+// Nullable-guarded structural equality. Emitted by operators.rs
+// (guard_call) for `Foo? == Foo` / `Entity<T>? == Entity<T>` where one
+// side may be nil and `eqfn` (the monomorphized __op_eq_<Name>)
+// dereferences fields. A named top-level fn -- NOT an inline closure:
+// a real call evaluates `a`/`b` exactly once (the original IIFE's
+// purpose) with zero per-eval closure allocation, and unlike `FNEW`
+// it is JIT-traceable. NOT @inline: inlining would textually duplicate
+// the operand expressions and reintroduce double-evaluation.
+@nomangle inline(lua) fn __rock_eq_guarded(a: any, b: any, eqfn: any) -> bool = """
+    return (a == b) or (a ~= nil and b ~= nil and eqfn(a, b))
+"""
+
+// Tag a newly-created struct table with its type. Emitted by structs.rs for
+// every struct literal in user code. `__ty` is the single, direct type marker
+// (same scheme as Vec and every other value) -- `__rock_get_type` reads it,
+// `__op_eq`/inspect/serialize dispatch off it. No metatable: the old
+// `__ROCK_METATABLES` mechanism was a pure `__rock_type` tag with no
+// metamethods, redundant with `__ty`, and is gone
+// (docs/skull-vec-representation-divergence.md).
+@nomangle inline(lua) fn __rock_create_struct(typeName: string, fields: any) -> any = """
+    local obj = fields or {}
+    obj.__ty = typeName
+    return obj
+"""
+
+// Runtime value for a range literal that escapes its for-loop iter-expression
+// (e.g. `let r = 0..10; for x in r {}`). In the in-place case
+// `for x in 0..10 {}`, loops.rs strips the `__range(a,b)` marker and emits a
+// native numeric for — this function body is unreachable there. Returns a
+// Vec-shaped `{data, len}` so __rock_iter_vec_simple can iterate the result.
+@nomangle inline(lua) fn __range(start_val: int, end_val: int) -> any = """
+    local t = {}
+    for i = start_val, end_val - 1 do
+        table.insert(t, i)
+    end
+    return { data = t, len = end_val - start_val }
+"""
+
+// Comparison operators
+// Define the generic equality function that will be called by __op_eq
+// Simplified direct equality - no more runtime type string manipulation!
+// With monomorphization, most generic cases are resolved at compile time.
+// This handles the remaining runtime cases with simple direct dispatch.
+
+// Operators are functions. These primitive ones are pure and inline
+// to native Lua ops (the parser lowers `a + b` to `__op_add(a, b)`;
+// @inline inline(lua) splices the body back so hot loops stay native).
+// Concrete primitive ==/!= overloads so resolution is exact (no
+// ambiguity vs the `any` fallback). Operators are ordinary overloaded
+// functions now; precise overloads replace the old operator-registry
+// special disambiguation.
+@pure @inline operator(lua) ==(a: int, b: int) -> bool = "return a == b"
+@pure @inline operator(lua) ==(a: float, b: float) -> bool = "return a == b"
+@pure @inline operator(lua) ==(a: bool, b: bool) -> bool = "return a == b"
+@pure @inline operator(lua) !=(a: int, b: int) -> bool = "return a ~= b"
+@pure @inline operator(lua) !=(a: float, b: float) -> bool = "return a ~= b"
+@pure @inline operator(lua) !=(a: bool, b: bool) -> bool = "return a ~= b"
+@pure @inline operator(lua) ==(a: any, b: any) -> bool = "return a == b"
+@pure @inline operator(lua) !=(a: any, b: any) -> bool = "return a ~= b"
+
+// Arithmetic operators
+@pure @inline operator(lua) +(a: int, b: int) -> int = "return a + b"
+@pure @inline operator(lua) +(a: float, b: float) -> float = "return a + b"
+@pure @inline operator(lua) -(a: int, b: int) -> int = "return a - b"
+@pure @inline operator(lua) -(a: float, b: float) -> float = "return a - b"
+@pure @inline operator(lua) *(a: int, b: int) -> int = "return a * b"
+@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
+@pure @inline operator(lua) /(a: int, b: int) -> int = "return math.floor(a / b)"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+@pure @inline operator(lua) %(a: int, b: int) -> int = "return a % b"
+@pure @inline operator(lua) %(a: float, b: float) -> float = "return a % b"
+
+// Less than, greater than operators
+@pure @inline operator(lua) <(a: int, b: int) -> bool = "return a < b"
+@pure @inline operator(lua) <(a: float, b: float) -> bool = "return a < b"
+@pure @inline operator(lua) <=(a: int, b: int) -> bool = "return a <= b"
+@pure @inline operator(lua) <=(a: float, b: float) -> bool = "return a <= b"
+@pure @inline operator(lua) >(a: int, b: int) -> bool = "return a > b"
+@pure @inline operator(lua) >(a: float, b: float) -> bool = "return a > b"
+@pure @inline operator(lua) >=(a: int, b: int) -> bool = "return a >= b"
+@pure @inline operator(lua) >=(a: float, b: float) -> bool = "return a >= b"
+
+// Logical operators
+@pure @inline operator(lua) &&(a: bool, b: bool) -> bool = "return a and b"
+@pure @inline operator(lua) ||(a: bool, b: bool) -> bool = "return a or b"
+
+// Unary operators
+@pure @inline operator(lua) -(a: int) -> int = "return -a"
+@pure @inline operator(lua) -(a: float) -> float = "return -a"
+@pure @inline operator(lua) !(a: bool) -> bool = "return not a"
+@pure @inline operator(lua) ~(a: int) -> int = "return bit.bnot(a)"
+
+// String concatenation
+@pure @inline operator(lua) +(a: string, b: string) -> string = "return a .. b"
+@pure @inline operator(lua) ==(a: string, b: string) -> bool = "return a == b"
+@pure @inline operator(lua) !=(a: string, b: string) -> bool = "return a ~= b"
+
+// Bitwise operators (integers only)
+@pure @inline operator(lua) &(a: int, b: int) -> int = "return bit.band(a, b)"
+@pure @inline operator(lua) |(a: int, b: int) -> int = "return bit.bor(a, b)"
+@pure @inline operator(lua) ^(a: int, b: int) -> int = "return bit.bxor(a, b)"
+@pure @inline operator(lua) <<(a: int, b: int) -> int = "return bit.lshift(a, b)"
+@pure @inline operator(lua) >>(a: int, b: int) -> int = "return bit.rshift(a, b)"
+
+// Note: Type-specific equality functions for structs, enums, and newtypes
+// are now automatically generated during compilation. Container types
+// (Vec, Map, Option, etc.) will also use automatic generation.
+
+// Removed predefined equality functions: __op_eq_vec, __op_eq_map, __op_eq_option, __op_eq_tuple2, __op_eq_arena
+
+// Safe navigation (?.field, ?.method(), ?.let) is handled natively by the
+// compiler — no runtime functions needed. The codegen emits inline nil checks.
+
+// Print function
+// Use native print but with our own float formatting
+// `@debug_impure`: observable side effect, but debug-only. `@pure`
+// functions that transitively call `print` get demoted with a warning
+// (rather than a hard error) so a `print(x)` dropped into a pure
+// helper for debugging doesn't force stripping the annotation.
+@debug_impure
+extern(lua) fn print(args: ...any)
+
+// Helper to ensure float formatting
+fn print_float(value: float) { print(to_string(value)) }
+
+// ============================================================================
+// Logging System
+// ============================================================================
+// Log levels: 0=error, 1=warn, 2=info, 3=debug, 4=trace
+// Control via STONE_LOG env var: error|warn|info|debug|trace (or 0-4)
+// Default is info level
+
+global __stone_log_level: int = -1
+
+@nomangle inline(lua) fn __stone_log_init() = """
+    -- Phase 4: the level lives in the one logger (rock-log). Sync it
+    -- via the FFI bridge each call so runtime changes (--verbose / the
+    -- stone_log_set_level bridge) apply. Before ffi.load (`_G.stone`
+    -- nil) — i.e. logging from a Lua `global X = {...}` initializer
+    -- that runs before stone_init() — keep an info default; the
+    -- defensive nil/<0 guard preserves the contract for that ordering
+    -- edge (see tests/log_once_global_init.rock). No more Lua-side
+    -- STONE_LOG parse (rock-log owns the single parser).
+    if _G.stone ~= nil then
+        __stone_log_level = stone.stone_log_get_level()
+    elseif __stone_log_level == nil or __stone_log_level < 0 then
+        __stone_log_level = 2
+    end
+"""
+
+// Single emit point. Routes into the one logger (rock-log) via the
+// FFI bridge so the whole game process shares one sink/level/format.
+// Pre-ffi.load (early global-init before stone_init) the cdylib isn't
+// loaded yet, so fall back to print() -- without this, early Rock logs
+// would error on the nil `_G.stone`.
+@nomangle inline(lua) fn __stone_emit(level: int, category: string, msg: string) = """
+    if _G.stone ~= nil then
+        stone.stone_log(level, category or "", msg)
+    elseif category and #category > 0 then
+        print("[" .. category .. "] " .. msg)
+    else
+        print(msg)
+    end
+"""
+
+@nomangle inline(lua) fn __stone_log(level: int, category: string, msg: string) = """
+    __stone_log_init()
+    if level > __stone_log_level then return end
+    __stone_emit(level, category, msg)
+"""
+
+fn log_error(category: string, msg: string) { __stone_log(0, category, msg) }
+fn log_warn(category: string, msg: string) { __stone_log(1, category, msg) }
+fn log_info(category: string, msg: string) { __stone_log(2, category, msg) }
+fn log_debug(category: string, msg: string) { __stone_log(3, category, msg) }
+fn log_trace(category: string, msg: string) { __stone_log(4, category, msg) }
+
+// Sets the ONE level source (rock-log via the FFI bridge) so it
+// affects all gating — Rust + Rock — not just this Lua global.
+// Pre-ffi.load it only updates the local default.
+inline(lua) fn log_set_level(level: int) = """
+    if _G.stone ~= nil then stone.stone_log_set_level(level) end
+    __stone_log_level = level
+"""
+fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
+
+// ----------------------------------------------------------------------
+// log_once / log_throttled — error-level logging with per-call-site dedup
+// ----------------------------------------------------------------------
+// log_once fires once per call site; subsequent calls from the same site
+// are silently dropped. log_throttled fires at most once per interval per
+// call site. Both use `__SITE__` (via macro shim) to derive a stable
+// per-site key — `__SITE__` resolves to "file:line" of the *user's* call,
+// even through wrappers and other macros.
+//
+// Two overloads each: the 2-arg form auto-injects __SITE__; the explicit
+// 3-arg form takes a user-supplied site key (used by tests to share a
+// dedup key across physical lines).
+//
+// State (Lua globals, lazily initialized):
+//   __stone_log_dedup    — set of sites that have already fired log_once
+//   __stone_log_throttle — site -> last-fire-timestamp (seconds)
+
+@nomangle inline(lua) fn _log_once_impl(category: string, msg: string, site: string) = """
+    __stone_log_init()
+    -- log_once is error-class / always-on by design (see the header
+    -- comment + tests/log_once.rock: log_set_level(0) must still
+    -- fire). Original gate semantics preserved: `0 > level` is never
+    -- true (min level 0), so it always fires; emit at level 0 so the
+    -- rock-log path doesn't gate it either.
+    if 0 > __stone_log_level then return end
+    if __stone_log_dedup == nil then __stone_log_dedup = {} end
+    if __stone_log_dedup[site] then return end
+    __stone_log_dedup[site] = true
+    __stone_emit(0, category, msg)
+"""
+
+macro log_once(category: expr, msg: expr) {
+    _log_once_impl(category, msg, __SITE__)
+}
+
+macro log_once(category: expr, msg: expr, site: expr) {
+    _log_once_impl(category, msg, site)
+}
+
+// Mockable-now seam used by log_throttled and exposed for deterministic tests.
+@nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, category: string, msg: string, interval_sec: float, site: string) = """
+    __stone_log_init()
+    -- error-class / always-on, same as _log_once_impl (preserves the
+    -- original `0 > level` semantics + tests/log_once.rock contract).
+    if 0 > __stone_log_level then return end
+    if __stone_log_throttle == nil then __stone_log_throttle = {} end
+    local last = __stone_log_throttle[site]
+    if last ~= nil and (now_sec - last) < interval_sec then return end
+    __stone_log_throttle[site] = now_sec
+    __stone_emit(0, category, msg)
+"""
+
+macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_sec: expr) {
+    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, __SITE__)
+}
+
+macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_sec: expr, site: expr) {
+    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site)
+}
+
+// Now-source seam for log_throttled. Stone's runner sets this each frame to
+// the engine `time` global (real wall-clock seconds since game start) via
+// stone_log_set_now(); non-Stone Rock programs leave it nil and fall back
+// to os.clock() so something still works without the engine running.
+@nomangle inline(lua) fn stone_log_set_now(now_sec: float) = """
+    __stone_log_now_override = now_sec
+"""
+
+@nomangle inline(lua) fn stone_log_clear_now() = """
+    __stone_log_now_override = nil
+"""
+
+@nomangle inline(lua) fn __stone_log_now() -> float = """
+    if __stone_log_now_override ~= nil then return __stone_log_now_override end
+    return os.clock()
+"""
+
+// Wall-clock variant; thin wrapper around the mockable seam.
+@nomangle inline(lua) fn _log_throttled_impl(category: string, msg: string, interval_sec: float, site: string) = """
+    _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site)
+"""
+
+macro log_throttled(category: expr, msg: expr, interval_sec: expr) {
+    _log_throttled_impl(category, msg, interval_sec, __SITE__)
+}
+
+macro log_throttled(category: expr, msg: expr, interval_sec: expr, site: expr) {
+    _log_throttled_impl(category, msg, interval_sec, site)
+}
+
+// Clear all dedup + throttle state. Called from tests; can be wired into
+// hot reload later if it becomes useful.
+@nomangle inline(lua) fn log_reset_dedup() = """
+    __stone_log_dedup = {}
+    __stone_log_throttle = {}
+"""
+
+// Number of unique sites currently remembered by log_once. Used in tests.
+@nomangle inline(lua) fn log_dedup_count() -> int = """
+    if __stone_log_dedup == nil then return 0 end
+    local n = 0
+    for _ in pairs(__stone_log_dedup) do n = n + 1 end
+    return n
+"""
+
+// Error handling
+extern(lua) fn error(message: string)
+
+// Note: Lua has built-in tostring(), declare as extern
+extern(lua) fn tostring(value: any) -> string
+
+// Method versions of tostring for basic types
+fn to_string(value: int) -> string { return tostring(value) }
+
+fn to_string(value: float) -> string {
+    let str_value = tostring(value)
+    // Ensure floats always show decimal point for Lua compatibility
+    if find(str_value, ".") == -1 { return str_value + ".0" }
+    return str_value
+}
+
+// `to_string(string)` is the identity via @expand — does NOT allocate.
+@inline inline(lua) fn to_string(value: string) -> string = "return value"
+
+fn to_string(value: bool) -> string { return tostring(value) }
+
+// Generic to_string function that handles any type including nullable/nil values
+@nomangle inline(lua) fn to_string(value: any) -> string = """
+    if value == nil then
+        return "nil"
+    end
+    -- For tables (structs, arrays, etc.), use Rock's inspect for type-aware formatting
+    if type(value) == "table" then
+        return inspect(value)  -- This calls the Rock stdlib inspect function
+    end
+    return tostring(value)
+"""
+
+// Assert functions
+fn assert(condition: bool, message: string) {
+    if !condition { error(message) }
+}
+
+// Single parameter assert overload
+fn assert(condition: bool) {
+    if !condition { error("Assertion failed") }
+}
+
+// Assert equality/inequality, inline-expanded at the call site so
+// failures surface with the caller's span instead of a stdlib frame.
+// Args are let-bound once each to preserve fn-call semantics for
+// side-effecting expressions like `assert_eq(next_counter(), 1)`.
+macro assert_eq(actual: expr, expected: expr, message: expr = "Values should be equal") {
+    let __actual = actual
+    let __expected = expected
+    if !(__actual == __expected) {
+        error("Assertion failed: " + tostring(message) + " (expected: " + tostring(__expected) + ", got: " + tostring(__actual) + ")")
+    }
+}
+
+macro assert_ne(actual: expr, expected: expr, message: expr = "Values should not be equal") {
+    let __actual = actual
+    let __expected = expected
+    if __actual == __expected {
+        error("Assertion failed: " + tostring(message) + " (both values are: " + tostring(__actual) + ")")
+    }
+}
+
+// versions that use direct comparison - only use for primitive types!
+fn assert_eq_simple<T>(actual: T, expected: T, message: string = "Values should be equal") {
+    if !(actual == expected) {
+        let error_msg = "Assertion failed: " + tostring(message) + " (expected: " + tostring(expected) + ", got: " + tostring(actual) + ")"
+        error(error_msg)
+    }
+}
+
+fn assert_ne_simple<T>(actual: T, expected: T, message: string = "Values should not be equal") {
+    if actual == expected {
+        let error_msg = "Assertion failed: " + tostring(message) + " (both values are: " + tostring(actual) + ")"
+        error(error_msg)
+    }
+}
+
+fn assert_true(condition: bool, message: string = "Expected true") {
+    if !condition {
+        let error_msg = "Assertion failed: " + tostring(message)
+        error(error_msg)
+    }
+}
+
+fn assert_false(condition: bool, message: string = "Expected false") {
+    if condition {
+        let error_msg = "Assertion failed: " + tostring(message)
+        error(error_msg)
+    }
+}
+
+fn assert_not_null<T>(value: T?, message: string = "Expected non-null value") {
+    if value == null {
+        let error_msg = "Assertion failed: " + tostring(message)
+        error(error_msg)
+    }
+}
+
+fn assert_null<T>(value: T?, message: string = "Expected null value") {
+    if value != null {
+        let error_msg = "Assertion failed: " + tostring(message)
+        error(error_msg)
+    }
+}
+
+// Range functions
+
+// Iterator function
+inline(lua) fn iter(collection: any) -> any = """
+local collection_type = type(collection)
+
+if collection_type == "table" then
+-- Check if it's already an iterator (has vec/arena/map and index fields)
+if (collection.vec and collection.index ~= nil) or
+   (collection.arena and collection.index ~= nil) or
+   (collection.map and collection.index ~= nil) then
+    -- Already an iterator, return as-is
+    return collection
+-- Check if it's a Vec
+elseif collection.data and collection.len and type(collection.len) == "number" then
+    return { vec = collection, index = 0 }
+-- Check if it's an Arena
+elseif collection.entries and collection.free_indices then
+    return { arena = collection, index = 0 }
+-- Otherwise treat as Map
+else
+    return { map = collection, keys = nil, index = 0 }
+end
+end
+
+-- Fallback
+return { map = collection, keys = nil, index = 0 }
+"""
+
+// Simplified iterator functions - each returns a simple iterator function
+@nomangle inline(lua) fn __rock_iter_arena(collection: any) -> any = """
+local iter_index = 0
+return function()
+    while iter_index < vec_len(collection.entries) do
+        local entry_wrapped = vec_get(collection.entries, iter_index)
+        iter_index = iter_index + 1
+        if entry_wrapped and entry_wrapped ~= nil then
+            -- Unwrap the entry (vec_get returns wrapped values)
+            local entry = entry_wrapped
+            if type(entry_wrapped) == "table" and entry_wrapped.__wrapped then
+                entry = entry_wrapped.__wrapped
+            end
+            if entry and entry.is_occupied then
+                local entity = __rock_create_struct("Entity", { _arena = collection, _index = entry.index, _generation = entry.generation })
+                return {entity, entry.data}
+            end
+        end
+    end
+    return nil
+end
+"""
+
+// Simple iteration for Arena - returns just data values for "for data in arena" patterns
+@nomangle inline(lua) fn __rock_iter_arena_simple(collection: any) -> any = """
+local iter_index = 0
+return function()
+    while iter_index < vec_len(collection.entries) do
+        local entry_wrapped = vec_get(collection.entries, iter_index)
+        iter_index = iter_index + 1
+        if entry_wrapped and entry_wrapped ~= nil then
+            -- Unwrap the entry (vec_get returns wrapped values)
+            local entry = entry_wrapped
+            if type(entry_wrapped) == "table" and entry_wrapped.__wrapped then
+                entry = entry_wrapped.__wrapped
+            end
+            if entry and entry.is_occupied then
+                return entry.data
+            end
+        end
+    end
+    return nil
+end
+"""
+
+@nomangle inline(lua) fn __rock_iter_vec(collection: any) -> any = """
+if type(collection) == "function" then return collection end
+local iter_index = 0
+return function()
+    if iter_index >= collection.len then
+        return nil
+    end
+    local idx = iter_index
+    iter_index = iter_index + 1
+    return {idx, collection.data[idx + 1]}
+end
+"""
+
+// Simple iteration for Vec - returns just values for "for value in vec" patterns
+// Passthrough: if collection is already a closure iterator, return it as-is.
+// This allows enumerate() to return closures that the for-loop wraps transparently.
+@nomangle inline(lua) fn __rock_iter_vec_simple(collection: any) -> any = """
+if type(collection) == "function" then return collection end
+local iter_index = 0
+return function()
+    if iter_index >= collection.len then
+        return nil
+    end
+    iter_index = iter_index + 1
+    return collection.data[iter_index]
+end
+"""
+
+@nomangle inline(lua) fn __rock_iter_map(collection: any) -> any = """
+local keys = {}
+for k, _ in pairs(collection) do
+    table.insert(keys, k)
+end
+local iter_index = 0
+return function()
+    iter_index = iter_index + 1
+    if iter_index > #keys then
+        return nil
+    end
+    local key = keys[iter_index]
+    return {key, collection[key]}
+end
+"""
+
+// THE Vec constructor. Two roles, one function:
+//   - typed (`-> [T]`): the type checker resolves `[...]` / `[]` literals to a
+//     `vec_new` call so a Vec is `[T]`, not `any`. rock codegen also lowers
+//     literals to this call (rock-codegen/src/anf/emit.rs); skull inlines the
+//     table directly and never calls it.
+//   - `@nomangle`: a single fixed name, so `inline(lua)` bodies that need an
+//     empty Vec to push into call `vec_new()` directly.
+// Emits the SAME shape skull uses for literals: a bare table with a direct
+// `__ty = "Vec"` tag and NO metatable, so every Vec has one representation
+// regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
+// it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
+// UFCS). See docs/skull-vec-representation-divergence.md.
+@nomangle inline(lua) fn vec_new<T>() -> [T] = """
+    return { data = {}, len = 0, __ty = "Vec" }
+"""
+
+// Hot enough that the call frame matters — mag's outline-overlay loop
+// calls this 3-6x per iteration over OUTLINE_MAX_ENTRIES. Body
+// translated from the Rock equivalent
+// `{ vec.len = vec.len + 1; table_set(vec.data, vec.len, item) }`.
+// See docs/jit-fnew-codegen-investigation.md §"Fourth pass".
+@nomangle @inline inline(lua) fn vec_push<T>(vec: [T], item: T) = """
+    vec.len = vec.len + 1
+    vec.data[vec.len] = item
+"""
+
+@nomangle fn vec_get<T>(vec: [T], index: int) -> T? {
+    if index < 0 || index >= vec.len {
+        return null
+    }
+    return cast(table_get(vec.data, index + 1))
+}
+
+// Safe accessor matching the unified `.get(i) -> T?` surface across all
+// collection types. `v[i]` is the direct counterpart.
+fn get<T>(vec: [T], index: int) -> T? {
+    return vec_get(vec, index)
+}
+
+@nomangle fn vec_set<T>(vec: [T], index: int, value: T) {
+    if index >= 0 && index < vec.len {
+        table_set(vec.data, index + 1, value)
+    }
+}
+
+@nomangle fn vec_len<T>(vec: [T]) -> int {
+    return vec.len
+}
+
+// Bare-name UFCS wrappers for the 5 codegen-tied @nomangle vec_* fns.
+// Codegen emits `vec_push`/`vec_get`/`vec_set`/`vec_len`/`vec_new` by
+// literal name (Lua codegen lowers `xs[i]`, `[a,b,c]`, etc. to those
+// calls), so the underlying functions stay @nomangle with the prefix
+// name. Users still write `xs.push(x)`/`xs.len()`/etc. — these
+// wrappers are how those dot-form calls resolve.
+@inline fn push<T>(vec: [T], item: T) { vec_push(vec, item) }
+@inline fn set<T>(vec: [T], index: int, value: T) { vec_set(vec, index, value) }
+@inline fn len<T>(vec: [T]) -> int { return vec_len(vec) }
+
+
+fn pop<T>(vec: [T]) -> T? {
+    if vec.len == 0 {
+        return null
+    }
+    let value: T? = cast(table_get(vec.data, vec.len))
+    table_unset(vec.data, vec.len)
+    vec.len = vec.len - 1
+    return value
+}
+
+fn is_empty<T>(vec: [T]) -> bool {
+    return vec.len == 0
+}
+
+fn clear<T>(vec: [T]) {
+    for i in 0..vec.len {
+        table_unset(vec.data, i + 1)
+    }
+    vec.len = 0
+}
+
+fn remove_at<T>(vec: [T], index: int) -> T? {
+    if index < 0 || index >= vec.len {
+        return null
+    }
+    let value: T? = cast(table_get(vec.data, index + 1))
+    for i in index..(vec.len - 1) {
+        table_set(vec.data, i + 1, table_get(vec.data, i + 2))
+    }
+    table_unset(vec.data, vec.len)
+    vec.len = vec.len - 1
+    return value
+}
+
+fn swap_remove<T>(vec: [T], index: int) -> T? {
+    if index < 0 || index >= vec.len {
+        return null
+    }
+    let value: T? = cast(table_get(vec.data, index + 1))
+    if index + 1 < vec.len {
+        table_set(vec.data, index + 1, table_get(vec.data, vec.len))
+    }
+    table_unset(vec.data, vec.len)
+    vec.len = vec.len - 1
+    return value
+}
+
+// Generic enumerate combinator — wraps any closure iterator with a 0-based index counter.
+@nomangle inline(lua) fn __rock_enumerate(iter_fn: any) -> any = """
+    local idx = 0
+    return function()
+        local val = iter_fn()
+        if val == nil then return nil end
+        local result = {idx, val}
+        idx = idx + 1
+        return result
+    end
+"""
+
+// Closure iterator for native Lua tables (![...] syntax).
+@nomangle inline(lua) fn __rock_iter_native_array(arr: any) -> any = """
+    local iter_index = 0
+    local len = #arr
+    return function()
+        if iter_index >= len then return nil end
+        iter_index = iter_index + 1
+        return arr[iter_index]
+    end
+"""
+
+// enumerate() returns a lazy closure iterator yielding (index, value) pairs.
+// Each overload has a type-specific body — no runtime dispatch needed.
+
+inline(lua) fn enumerate<T>(collection: [T]) -> [(int, T)] = """
+    return __rock_enumerate(__rock_iter_vec_simple(collection))
+"""
+
+inline(lua) fn enumerate<T>(collection: Arena<T>) -> [(int, (Entity<T>, T))] = """
+    return __rock_enumerate(__rock_iter_arena(collection))
+"""
+
+inline(lua) fn enumerate<K, V>(collection: Map<K, V>) -> [(int, (K, V))] = """
+    return __rock_enumerate(__rock_iter_map(collection))
+"""
+
+// NativeBuffer enumerate: for-loop codegen intercepts `for ... in enumerate(buf)`
+// via unwrap_enumerate_expr and emits a direct numeric loop reading buf.ptr[i].
+// This overload only runs if enumerate(buf) is called from a non-for-loop
+// context (e.g. stored in a variable) — it materializes the tuples into a Vec.
+inline(lua) fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] = """
+    local out = vec_new()
+    local n = collection.len
+    local ptr = collection.ptr
+    for i = 0, n - 1 do
+        out.len = out.len + 1
+        out.data[out.len] = { i, ptr[i] }
+    end
+    return out
+"""
+
+// Sized NativeBuffer variants: type-checker stubs so `enumerate(buf)`
+// typechecks; the for-loop codegen intercepts and emits a direct numeric
+// loop, so the body is only reached if enumerate is called from a
+// non-for-loop context (rare). Macro-generated — one invocation per
+// phantom variant.
+inline(lua) fn enumerate(collection: NativeBufferU8) -> [(int, int)] = """
+    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
+    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    return out
+"""
+inline(lua) fn enumerate(collection: NativeBufferI8) -> [(int, int)] = """
+    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
+    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    return out
+"""
+inline(lua) fn enumerate(collection: NativeBufferU16) -> [(int, int)] = """
+    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
+    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    return out
+"""
+inline(lua) fn enumerate(collection: NativeBufferI16) -> [(int, int)] = """
+    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
+    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    return out
+"""
+inline(lua) fn enumerate(collection: NativeBufferU32) -> [(int, int)] = """
+    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
+    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    return out
+"""
+
+// rev() reverses any [T] into a new Vec, iterating in reverse order.
+// enumerate<T>([T]) returns a Lua closure at runtime (not a materialized Vec),
+// so the type() dispatch is live for rev(enumerate(v)).
+inline(lua) fn rev<T>(collection: [T]) -> [T] = """
+    local data, len
+    if type(collection) == "function" then
+        data = {}
+        len = 0
+        while true do
+            local item = collection()
+            if item == nil then break end
+            len = len + 1
+            data[len] = item
+        end
+    else
+        data = collection.data
+        len = collection.len
+    end
+    local result_data = {}
+    for i = len, 1, -1 do
+        result_data[len - i + 1] = data[i]
+    end
+    return { data = result_data, len = len }
+"""
+
+// Null coalesce operator
+inline(lua) fn __op_null_coalesce<T>(a: T?, b: T) -> T = """
+    if a == nil then return b else return a end
+"""
+
+// Overload for nullable ?? nullable -> nullable
+inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
+    if a == nil then return b else return a end
+"""
+
+// Unwrap functions for nullable types (moved early to support vec functions)
+@nomangle inline(lua) fn is_null(value: any) -> bool = "return value == nil"
+
+// Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
+@inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
+
+@nomangle fn unwrap<T>(value: T?) -> T {
+    if value != null { return value }
+    error("unwrap() called on null value\n" + __debug_traceback())
+    return phantom()
+}
+
+@nomangle fn unwrap_or<T>(value: T?, alt: T) -> T {
+    return value ?? alt
+}
+
+fn expect<T>(value: T?, message: string) -> T {
+    if value != null { return value }
+    error("expect() failed: " + message + "\n" + __debug_traceback())
+    return phantom()
+}
+
+// Common utility functions
+fn max<T>(a: T, b: T) -> T {
+    if a > b { return a } else { return b }
+}
+
+fn min<T>(a: T, b: T) -> T {
+    if a < b { return a } else { return b }
+}
+
+
+@pure fn clamp(value: float, min: float, max: float) -> float {
+    if value < min {
+        return min
+    } else if value > max {
+        return max
+    } else {
+        return value
+    }
+}
+
+// Type introspection functions
+@inline inline(lua) fn typeof(x: any) -> string = "type(x)"
+
+// Historical aliases for `float(int)`. All three — `float`, `int_to_float`,
+// `to_float` — are `@expand("$1")` identities, substituted at call sites
+// with zero runtime cost. `float(int)` is the canonical name.
+@pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
+@pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
+
+inline(lua) fn float_to_int(value: float) -> int = """
+    if type(value) ~= "number" then
+        error("Expected a number, got " .. type(value))
+    end
+    return math.floor(value)
+"""
+
+@inline fn to_int(value: float) -> int { return float_to_int(value) }
+
+@nomangle inline(lua) fn deepcopy<T>(obj: T) -> T = """
+    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
+        for _, info in pairs(_G.__ROCK_C_STRUCT) do
+            if ffi.istype(info.name, obj) then
+                return info.copy(obj)
+            end
+        end
+        return obj
+    end
+    if type(obj) ~= "table" then
+        return obj
+    end
+
+    local copy = {}
+    for k, v in pairs(obj) do
+        -- copy *both* key and value, in case either is a table.
+        -- The `__ty` tag is a regular field, so it's copied here too --
+        -- no metatable to reattach (Rock values carry no metatables).
+        copy[deepcopy(k)] = deepcopy(v)
+    end
+
+    return copy
+"""
+
+// Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
+// the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
+// at each call site with zero overhead. See docs/compiler-architecture.md.
+@inline inline(lua) fn cast<T>(value: any) -> T = "return value"
+@inline inline(lua) fn transmute<A, B>(x: A) -> B = "return x"
+
+// int and float are both `number` in Lua — this cast is a no-op at runtime.
+// `@expand("$1")` substitutes the argument expression at the call site with
+// zero function-call overhead. Confirmed in tmp/codegen_expand.lua: calls
+// vanish entirely in the generated Lua.
+@pure @inline inline(lua) fn float(value: int) -> float = "return value"
+
+// Coroutine support functions
+// Global resume function for method call rewrite - will be overridden by coroutine object methods
+// Type parameters: Y = yield type, R = return type (returned via
+// `.result()`), N = resume-arg type (lands with resume-with-value
+// per docs/coroutine-resume-with-value-plan.md).
+// `Coroutine<Y>` resolves to `Coroutine<Y, Unit, Unit>` via PR-α
+// default-type-params + PR-A arity bump; `.resume()` shape stays
+// `Y?` regardless of R (D2a Unit-elision), with the typed return
+// value on `.result()`.
+inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
+    return c.__resume(c)
+"""
+
+// Unified resume: 2-arg overload for `N != Unit`. Same name as the
+// arg-less form -- Rock's overload-by-arity picks the right one at
+// the call site (`c.resume()` -> 1-arg; `c.resume(arg)` -> 2-arg).
+// The body's `let x = yield V` reads `arg` here on the next pump.
+//
+// Polish B (`b06199ca0`) rejects the arg-less form when N != Unit
+// at compile time -- the 2-arg form is the only valid resume there.
+// For N = Unit, both forms compile; the 2-arg form is rarely useful
+// (no `let x = yield V` exists for the body to bind), so prefer the
+// arg-less form there.
+inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
+    return c.__resume(c, arg)
+"""
+
+// PR-γ: read the value stashed by `return expr` at a co fn's
+// terminal. Returns null when the coroutine is still suspended, was
+// killed, or fell off without a value-bearing return. For
+// `R = Unit` coroutines (the default), `R?` is `Unit?` and is always
+// null in practice — same observable as before.
+inline(lua) fn result<Y, R, N>(c: Coroutine<Y, R, N>) -> R? = """
+    return c.__return
+"""
+
+inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
+    if c.__state == -2 then return "errored" elseif c.__state < 0 then return "dead" else return "suspended" end
+"""
+
+// D6b: read the error message captured when a step-fn raised during a
+// `.resume()`. Returns `null` when the coroutine is suspended, dead
+// (killed), or completed normally. The runtime puts the coroutine into
+// the new "errored" terminal state on a step-fn raise; status() reports
+// "errored", subsequent resumes return null, and last_error() reads
+// whatever the body's `error("...")` raised. Avoid name collision with
+// the stdlib `extern(lua) fn error(message: string)` (the panic-style
+// thrower) -- that's a parking note from the design discussion.
+inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
+    return c.__error
+"""
+
+// Kill a coroutine. Fires the on_killed hook (if registered) and
+// transitions state to terminal. Further resumes return nil. Idempotent:
+// calling kill twice only fires the hook once.
+// Run a dying coroutine's still-pending terminal defers, LIFO, each body
+// pcall'd so one failing defer is logged and the rest still run. `__defers`
+// holds the per-site defer fns BY VALUE (creation-time), so a stale frame
+// (hot-reload stamp-kill) runs cleanup matching ITS layout. @nomangle: called
+// from __rock_coroutine_kill's inline body and from compiler-emitted ctors.
+@nomangle inline(lua) fn __rock_coroutine_run_defers(c: any) = """
+    if not c.__defers then return end
+    for i = #c.__defers, 1, -1 do
+        local ok, err = pcall(c.__defers[i], c)
+        if not ok then __stone_log(0, "CO", "coroutine defer failed during cleanup: " .. tostring(err)) end
+    end
+"""
+
+// Recursive kill core: terminal-mark, chain into the delegated inner
+// (`yield*` stores it at `__inner`), run pending terminal defers, fire the
+// on_killed hook. @nomangle: calls ITSELF by name and is called from kill()'s
+// inline(lua) body.
+@nomangle inline(lua) fn __rock_coroutine_kill(c: any) = """
+    if c.__state < 0 then return end
+    c.__state = -1
+    if c.__inner then __rock_coroutine_kill(c.__inner) end
+    __rock_coroutine_run_defers(c)
+    if c.__on_killed then c.__on_killed() end
+"""
+
+inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
+    __rock_coroutine_kill(c)
+"""
+
+// Fire the on_hot_reload hook on a live coroutine instance (if declared
+// and not already terminal). The engine's coroutine poller drives this
+// on every hot reload across all polled coroutines. Safe to call on any
+// handle — dead or hook-less coroutines no-op.
+inline(lua) fn fire_hot_reload<Y, R, N>(c: Coroutine<Y, R, N>) = """
+    if c.__state >= 0 and c.__on_hot_reload then
+        c.__on_hot_reload()
+    end
+"""
+
+// Register a closure to run at the start of every .resume() call on this
+// coroutine instance. MUST be called inside a co fn body — the compiler
+// relocates this call to constructor-time so the hook fires on the first
+// resume too. Invoking outside a co fn body is a runtime error.
+inline(lua) fn on_resume(f: fn() -> ()) = """
+    error("on_resume can only be called inside a co fn body")
+"""
+
+// Register a closure to run when the handle's .kill() is invoked. MUST
+// be called inside a co fn body. Invoking outside is a runtime error.
+inline(lua) fn on_killed(f: fn() -> ()) = """
+    error("on_killed can only be called inside a co fn body")
+"""
+
+// Low-level Lua table operations for implementing [T]
+inline(lua) fn table_new() -> any = """return {}"""
+
+@inline inline(lua) fn table_insert(tbl: any, value: any) = "table.insert(tbl, value)"
+
+@inline inline(lua) fn table_insert_at(tbl: any, index: int, value: any) = "table.insert(tbl, index, value)"
+
+// Trampoline primitives — these are one-line Lua bodies that the JIT
+// can't see through when emitted as a function (frame inlining tripped
+// `loop unroll limit reached` in per-frame paths like vec_push /
+// vec_get). Marked `@inline inline(lua)` so codegen splices the body
+// at every call site instead of emitting + calling. See
+// docs/function-and-inlining-design.md and
+// docs/jit-fnew-codegen-investigation.md §"Fourth pass".
+@inline inline(lua) fn table_len(tbl: any) -> int = """
+    return #tbl
+"""
+
+@inline inline(lua) fn table_get(tbl: any, index: any) -> any = """
+    return tbl[index]
+"""
+
+@inline inline(lua) fn table_set(tbl: any, index: any, value: any) = """
+    tbl[index] = value
+"""
+
+// Field references (key paths). `f: FieldOf<T, V>` is the interned field name
+// at runtime; `o[f]` == `o.field` since skull emits named struct keys. The
+// `.field` literal is compile-checked against T's declaration (invariant in V).
+@inline inline(lua) fn field_get<T, V>(o: T, f: FieldOf<T, V>) -> V = """
+    return o[f]
+"""
+
+@inline inline(lua) fn field_set<T, V>(o: T, f: FieldOf<T, V>, v: V) = """
+    o[f] = v
+"""
+
+@inline inline(lua) fn table_unset(tbl: any, index: any) = """
+    tbl[index] = nil
+"""
+
+inline(lua) fn table_clear(tbl: any) = """
+    for k in pairs(tbl) do
+        tbl[k] = nil
+    end
+"""
+
+inline(lua) fn table_copy(tbl: any) -> any = """
+    local copy = {}
+    for k, v in pairs(tbl) do
+        copy[k] = v
+    end
+    return copy
+"""
+
+inline(lua) fn table_copy_array(tbl: any) -> any = """
+    local copy = {}
+    for i = 1, #tbl do
+        copy[i] = tbl[i]
+    end
+    return copy
+"""
+
+inline(lua) fn table_new_with_size(size: int) -> any = """
+    local tbl = {}
+    for i = 1, size do
+        tbl[i] = false  -- Pre-allocate with false values
+    end
+    return tbl
+"""
+
+@inline inline(lua) fn table_remove(t: any, key: any) -> any = "table.remove(t, key)"
+
+// Global constants
+global PI: float = 3.141592653589793
+
+// Assert function overloads are defined earlier in the file to avoid duplicates
+
+// Inspect function for debugging — pretty-prints any value.
+// cycle_detect=true (default) tracks visited tables to detect cycles.
+// precision=-1 (default) means no float precision formatting.
+// Module-level recursive helper. Hoisted out of `inspect` so each call
+// doesn't allocate a fresh pair of upvalue-capturing closures
+// (`_itbl` / `format_value`) — that closure construction tripped
+// LuaJIT's FNEW abort on every table-shaped inspect call. State that
+// the old closures captured (`visited`, `precision`) is now passed
+// explicitly. See docs/jit-fnew-codegen-investigation.md.
+@nomangle inline(lua) fn __rock_inspect_value(v: any, indent: string, path: string, visited: any, precision: int) -> string = """
+    local vt = type(v)
+    if vt == "string" then
+        return "\"" .. v .. "\""
+    elseif vt == "number" then
+        if precision >= 0 and v ~= math.floor(v) then
+            return string.format("%." .. precision .. "f", v)
+        end
+        return tostring(v)
+    elseif vt ~= "table" then
+        return tostring(v)
+    end
+
+    -- table case
+    local t = v
+    if visited then
+        if visited[t] then
+            return "<CYCLE: " .. visited[t] .. ">"
+        end
+        visited[t] = path
+    end
+
+    local type_name = __rock_get_type(t)
+
+    -- Vec type
+    if type_name == "Vec" and t.data and t.len then
+        local parts = {}
+        for i = 1, t.len do
+            parts[i] = __rock_inspect_value(t.data[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
+        end
+        if visited then visited[t] = nil end
+        if #parts == 0 then return "Vec { }" end
+        return "Vec { " .. table.concat(parts, ", ") .. " }"
+    end
+
+    -- Check if sequential array
+    local is_array = true
+    local max_index = 0
+    local count = 0
+    for k, _ in pairs(t) do
+        count = count + 1
+        if type(k) ~= "number" or k ~= math.floor(k) or k < 1 then
+            is_array = false
+            break
+        end
+        max_index = math.max(max_index, k)
+    end
+    is_array = is_array and count == max_index
+
+    local result
+    if is_array then
+        if max_index == 0 then
+            if visited then visited[t] = nil end
+            return "{}"
+        end
+        local parts = {}
+        for i = 1, max_index do
+            parts[i] = __rock_inspect_value(t[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
+        end
+        result = "{ " .. table.concat(parts, ", ") .. " }"
+    else
+        -- Collect and sort keys, skipping metadata
+        local keys = {}
+        for k, _ in pairs(t) do
+            if k ~= "__variant" and k ~= "__ty" and k ~= "variant" and k ~= "__tag" then
+                keys[#keys + 1] = k
+            end
+        end
+        table.sort(keys, __rock_inspect_key_lt)
+
+        local variant = t.__variant or t.variant
+
+        -- Unit enum variant
+        if type_name and variant and #keys == 0 then
+            if visited then visited[t] = nil end
+            return type_name .. "::" .. variant
+        end
+
+        -- Header
+        local header
+        if type_name and variant then
+            header = type_name .. "::" .. variant
+        elseif type_name then
+            header = type_name
+        else
+            header = ""
+        end
+
+        if #keys <= 2 then
+            -- Compact single-line
+            local parts = {}
+            for i, k in ipairs(keys) do
+                local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+                parts[i] = key_str .. " = " .. __rock_inspect_value(t[k], indent, path .. "." .. tostring(k), visited, precision)
+            end
+            if header ~= "" then
+                result = header .. " { " .. table.concat(parts, ", ") .. " }"
+            else
+                result = "{ " .. table.concat(parts, ", ") .. " }"
+            end
+        else
+            -- Multi-line
+            local lines = {}
+            for _, k in ipairs(keys) do
+                local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
+                lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(t[k], indent .. "  ", path .. "." .. tostring(k), visited, precision)
+            end
+            local body = table.concat(lines, ",\n")
+            if header ~= "" then
+                result = header .. " {\n" .. body .. "\n" .. indent .. "}"
+            else
+                result = "{\n" .. body .. "\n" .. indent .. "}"
+            end
+        end
+    end
+
+    if visited then visited[t] = nil end
+    return result
+"""
+
+// Hoisted sort comparator — module-level so `table.sort` doesn't allocate
+// a fresh closure per inspect call. (FNEW abort, same root cause.)
+@nomangle inline(lua) fn __rock_inspect_key_lt(a: any, b: any) -> bool = """
+    return tostring(a) < tostring(b)
+"""
+
+@nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
+    if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
+        for _, info in pairs(_G.__ROCK_C_STRUCT) do
+            if ffi.istype(info.name, obj) then
+                return info.inspect(obj)
+            end
+        end
+        return tostring(obj)
+    end
+
+    -- Primitive fast path — avoids touching the table-case helper at all.
+    local obj_type = type(obj)
+    if obj_type ~= "table" then
+        if obj_type == "string" then
+            return "\"" .. obj .. "\""
+        elseif obj_type == "number" and precision >= 0 and obj ~= math.floor(obj) then
+            return string.format("%." .. precision .. "f", obj)
+        else
+            return tostring(obj)
+        end
+    end
+
+    local visited = cycle_detect and {} or nil
+    return __rock_inspect_value(obj, "", "root", visited, precision)
+"""
+
+// Thin wrapper kept for compiler codegen compatibility (incremental.rs emits inspect_formatted calls).
+@nomangle inline(lua) fn inspect_formatted(obj: any, precision: int) -> string = """
+    return inspect(obj, true, precision)
+"""
+
+// Smart float formatting for `"{x}"` interpolation: scientific for
+// very small/large magnitudes; up to 4 decimals otherwise, trailing
+// zeros and trailing decimal point trimmed. Module-level (not an
+// IIFE per interpolation) so LuaJIT can trace per-frame string
+// building without an FNEW abort. See
+// docs/jit-fnew-codegen-investigation.md open thread #5.
+@nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
+    local av = math.abs(v)
+    if av ~= 0 and (av < 0.0001 or av >= 1000000) then
+        return string.format("%.2g", v)
+    else
+        local s = string.format("%.4f", v)
+        s = s:gsub("0+$", "")
+        s = s:gsub("%.$", "")
+        return s
+    end
+"""
+
+
+// Math functions
+// random / random_range / random_int / random_seed read and mutate
+// Lua's RNG state — NotPure, intentionally no @pure.
+@inline inline(lua) fn random() -> float = "math.random()"
+fn random_range(min: float, max: float) -> float { return random() * (max - min) + min }
+// Uses SplitMix64 (see runtime bootstrap in rock/src/backend/lua/assembler.rs)
+// so the stream is bit-identical across architectures — `math.random` is not.
+inline(lua) fn random_int(min: int, max: int) -> int = """
+    local r = max - min
+    if r <= 0 then return min end
+    local z = __rock_rng_next()
+    return tonumber(z % ffi.cast("uint64_t", r)) + min
+"""
+inline(lua) fn random_seed(seed: int) = """
+    math.randomseed(seed)
+    __rock_rng_seed(seed)
+"""
+@pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
+@pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
+@pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
+@pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
+@pure @inline inline(lua) fn atan2(x: float, y: float) -> float = "math.atan2(x, y)"
+@pure fn round(x: float) -> float { return floor(x + 0.5) }
+@pure fn round_to_places(x: float, places: int) -> float {
+    let mult = pow(10.0, float(places))
+    return floor(x * mult + 0.5) / mult
+}
+@pure @inline inline(lua) fn abs(x: float) -> float = "math.abs(x)"
+@pure @inline inline(lua) fn abs(x: int) -> int = "math.abs(x)"
+
+@pure fn sign(x: int) -> int {
+    if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
+}
+@pure @inline inline(lua) fn floor(x: float) -> float = "math.floor(x)"
+@pure @inline inline(lua) fn ceil(x: float) -> float = "math.ceil(x)"
+
+// Miscellaneous functions
+inline(lua) fn get_os() -> string = """
+    -- Returns the operating system: "Windows", "Linux", "OSX", or "Other"
+    if jit then
+        return jit.os
+    else
+        -- Fallback for non-LuaJIT environments
+        if package.config:sub(1,1) == '\\' then
+            return "Windows"
+        else
+            return "Linux"  -- Could be any Unix-like OS
+        end
+    end
+"""
+
+inline(lua) fn phantom<T>() -> T = """return nil"""
+inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
+inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
+inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""
+
+fn char_to_byte(c: string) -> int { return byte(c, 0) }
+
+
+// FFI helper functions for LuaJIT FFI interop
+@inline inline(lua) fn ffi_new(ty: string) -> any = "ffi.new(ty)"
+
+inline(lua) fn ffi_new_array(ty: string, size: int) -> any = """
+    return ffi.new(ty .. "[" .. size .. "]")
+"""
+
+@inline inline(lua) fn ffi_new_with_init(ty: string, init: any) -> any = "ffi.new(ty, init)"
+
+@inline inline(lua) fn ffi_sizeof(ty: string) -> int = "ffi.sizeof(ty)"
+
+@inline inline(lua) fn ffi_typeof(ty: string) -> any = "ffi.typeof(ty)"
+
+@inline inline(lua) fn ffi_cast(ty: string, obj: any) -> any = "ffi.cast(ty, obj)"
+
+inline(lua) fn ffi_null() -> any = """
+    return nil
+"""
+
+inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
+    if len then
+        return ffi.string(ptr, len)
+    else
+        return ffi.string(ptr)
+    end
+"""
+
+inline(lua) fn ffi_copy(dst: any, src: any, len: int?) = """
+    if len then
+        ffi.copy(dst, src, len)
+    else
+        ffi.copy(dst, src)
+    end
+"""
+
+inline(lua) fn ffi_fill(dst: any, len: int, value: int?) = """
+    if value then
+        ffi.fill(dst, len, value)
+    else
+        ffi.fill(dst, len)
+    end
+"""
+
+inline(lua) fn ffi_cdef(def: string) = """
+    _G._ffi_defined = _G._ffi_defined or {}
+    if not _G._ffi_defined[def] then
+        ffi.cdef(def)
+        _G._ffi_defined[def] = true
+    end
+"""
+
+
+// Map operations
+fn map_new<K, V>() -> Map<K, V> {
+    transmute(table_new())
+}
+
+fn insert<K, V>(map: Map<K, V>, key: K, value: V) {
+    map[key] = value
+}
+
+@nomangle @inline inline(lua) fn get<K, V>(map: Map<K, V>, key: K) -> V? = """
+    return map[key]
+"""
+
+// (The `.get(k)` UFCS surface for Map<K,V> resolves through `get`
+// above — the naming convention `map_*` is what `m.get(k)` prefers. No
+// separate `get<K,V>` overload needed.)
+
+// Checked map read: emitted by the compiler for `m[key]` syntax on
+// Map<K, V>. Returns V directly and errors if the key is missing.
+// (`.get(key)` stays for the safe V? variant.)
+@nomangle fn __map_get_checked(map: any, key: any) -> any {
+    let v = table_get(map, key)
+    assert(!is_null(v), "Map key not found")
+    v
+}
+
+fn remove<K, V>(map: Map<K, V>, key: K) -> V? {
+    let old = get(map, key)
+    table_unset(map, key)
+    old
+}
+
+fn contains<K, V>(map: Map<K, V>, key: K) -> bool {
+    get(map, key) != null
+}
+
+fn len<K, V>(map: Map<K, V>) -> int {
+    let count = 0
+    for (k, v) in map {
+        count = count + 1
+    }
+    count
+}
+
+
+fn clear<K, V>(map: Map<K, V>) {
+    for (k, v) in map {
+        table_unset(map, k)
+    }
+}
+
+fn keys<K, V>(map: Map<K, V>) -> [K] {
+    let keys: [K] = []
+    for (k, v) in map {
+        vec_push(keys, k)
+    }
+    sort(keys, (k: K) => tostring(k))
+    return keys
+}
+
+fn values<K, V>(map: Map<K, V>) -> [V] {
+    let keys = keys(map)
+    let values: [V] = []
+    for k in keys {
+        vec_push(values, map[k])
+    }
+    return values
+}
+
+fn to_array<K, V>(map: Map<K, V>) -> [(K, V)] {
+    let keys = keys(map)
+    let result: [(K, V)] = []
+    for k in keys {
+        vec_push(result, (k, map[k]))
+    }
+    return result
+}
+
+// Additional Map operations
+
+// Get value or insert default if key doesn't exist
+fn get_or_insert<K, V>(map: Map<K, V>, key: K, default_value: V) -> V {
+    let existing = get(map, key)
+    if existing != null {
+        return existing
+    }
+    map[key] = default_value
+    default_value
+}
+
+// Update existing value only if key exists, returns old value if it existed
+fn update<K, V>(map: Map<K, V>, key: K, value: V) -> V? {
+    let old = get(map, key)
+    if old != null {
+        map[key] = value
+    }
+    old
+}
+
+// Insert or update value (upsert), returns old value if it existed
+fn upsert<K, V>(map: Map<K, V>, key: K, value: V) -> V? {
+    let old = get(map, key)
+    map[key] = value
+    old
+}
+
+// Range functions
+
+// Backing implementation of the `a..b` and `a..b..step` range operators.
+// Codegen desugars `a..b` to `__rock_range(a, b, 1)`.
+// step > 0: forward [min, max); step < 0: backward (max, min]; step == 0: empty.
+@nomangle fn __rock_range(min: int, max: int, step: int = 1) -> [int] {
+    let result: [int] = []
+    if step == 0 { return result }
+    if step > 0 {
+        let i = min
+        while i < max {
+            result.push(i)
+            i = i + step
+        }
+    } else {
+        let i = min
+        while i > max {
+            result.push(i)
+            i = i + step
+        }
+    }
+    return result
+}
+
+// count evenly-spaced floats from start to end, inclusive on both ends.
+// linspace(0.0, 1.0, 5) -> [0.0, 0.25, 0.5, 0.75, 1.0]
+// Uses index-based arithmetic (start + i*step) to avoid drift over many points.
+fn linspace(start: float, end_val: float, count: int) -> [float] {
+    let result: [float] = []
+    if count <= 0 { return result }
+    if count == 1 {
+        result.push(start)
+        return result
+    }
+    let step = (end_val - start) / float(count - 1)
+    for i in 0..count {
+        result.push(start + float(i) * step)
+    }
+    return result
+}
+
+// float values from start up to (but not including) end_val, spaced by step.
+// float_range(0.0, 1.0, 0.25) -> [0.0, 0.25, 0.5, 0.75]
+// Negative step iterates downward: float_range(10.0, 0.0, -3.0) -> [10.0, 7.0, 4.0, 1.0]
+fn float_range(start: float, end_val: float, step: float) -> [float] {
+    let result: [float] = []
+    if step == 0.0 { return result }
+    if step > 0.0 {
+        let x = start
+        while x < end_val {
+            result.push(x)
+            x = x + step
+        }
+    } else {
+        let x = start
+        while x > end_val {
+            result.push(x)
+            x = x + step
+        }
+    }
+    return result
+}
+
+// Vec<T> — Rock's growable array type. `[T]` is syntactic sugar for
+// `Vec<T>` (they are the same type). Backed by a plain Lua table in
+// `data` (1-indexed) plus an explicit `len` so vec_* functions don't
+// rely on `#t` which is unreliable for tables with holes.
+struct Vec<T> {
+    data: any,
+    len: int,
+}
+
+// Vec operations
+
+fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {
+    let result: [U] = []
+
+    for item in vec {
+        vec_push(result, f(item))
+    }
+
+    return result
+}
+
+fn filter<T>(vec: [T], predicate: fn(T) -> bool) -> [T] {
+    let result: [T] = []
+
+    for item in vec {
+        if predicate(item) { vec_push(result, item) }
+    }
+
+    return result
+}
+
+fn reduce<T, U>(vec: [T], initial: U, f: (U, T) -> U) -> U {
+    let result = initial
+    for item in vec {
+        result = f(result, item)
+    }
+    return result
+}
+
+fn fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
+    let result = initial
+
+    // Process array in reverse order
+    let i = vec_len(vec) - 1
+    while i >= 0 {
+        result = f(vec[i], result)
+        i = i - 1
+    }
+    return result
+}
+
+fn vec_new_with_capacity<T>(capacity: int) -> [T] {
+    return Vec { data: table_new_with_size(capacity), len: 0 }
+}
+
+fn capacity<T>(vec: [T]) -> int { return table_len(vec.data) }
+
+fn insert_at<T>(vec: [T], index: int, value: T) {
+    if index < 0 || index > vec.len { error("Error: Index out of bounds") }
+
+    // Convert 0-based to 1-based for Lua
+    let lua_index = index + 1
+    table_insert_at(vec.data, lua_index, value)
+    vec.len += 1
+}
+
+fn clone<T>(vec: [T]) -> [T] {
+    return Vec { data: table_copy_array(vec.data), len: vec.len }
+}
+
+fn find<T>(vec: [T], predicate: fn(T) -> bool) -> T? {
+    for item in vec {
+        if predicate(item) { return item }
+    }
+    return null
+}
+
+fn any<T>(vec: [T], predicate: fn(T) -> bool) -> bool {
+    for item in vec {
+        if predicate(item) { return true }
+    }
+    return false
+}
+
+fn all<T>(vec: [T], predicate: fn(T) -> bool) -> bool {
+    for item in vec {
+        if !predicate(item) { return false }
+    }
+    return true
+}
+
+inline(lua) fn sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+    table.sort(vec.data, function(a, b)
+        return key_fn(a) < key_fn(b)
+    end)
+"""
+
+fn sample<T>(vec: [T]) -> T? {
+    let len = vec_len(vec)
+    if len == 0 { return null }
+    let index = random_int(0, len)
+    return vec_get(vec, index)
+}
+
+@pure fn lerp(a: float, b: float, t: float) -> float { return a + (b - a) * t }
+
+
+fn ease_in_quad(t: float) -> float { return t * t }
+
+fn ease_out_quad(t: float) -> float {
+    let inv = 1 - t
+    return 1 - inv * inv
+}
+
+fn ease_in_out_quad(t: float) -> float {
+    if t < 0.5 {
+        return 2.0 * t * t
+    } else {
+        // (-2t + 2)^2 / 2.0 = (2 - 2t)^2 / 2.0
+        let x = 2.0 - 2.0 * t
+        return 1 - (x * x) / 2.0
+    }
+}
+
+fn ease_in_cubic(t: float) -> float { return t * t * t }
+
+fn ease_out_cubic(t: float) -> float {
+    let inv = 1 - t
+    return 1 - inv * inv * inv
+}
+
+fn ease_in_out_cubic(t: float) -> float {
+    if t < 0.5 {
+        return 4.0 * t * t * t
+    } else {
+        let x = 2.0 - 2.0 * t
+        return 1 - (x * x * x) / 2.0
+    }
+}
+
+// Quartic
+fn ease_in_quart(t: float) -> float { return t * t * t * t }
+
+fn ease_out_quart(t: float) -> float {
+    let inv = 1 - t
+    return 1 - inv * inv * inv * inv
+}
+
+fn ease_in_out_quart(t: float) -> float {
+    if t < 0.5 {
+        return 8.0 * t * t * t * t
+    } else {
+        let x = 2.0 - 2.0 * t
+        return 1 - (x * x * x * x) / 2.0
+    }
+}
+
+// Quintic
+fn ease_in_quint(t: float) -> float { return t * t * t * t * t }
+
+fn ease_out_quint(t: float) -> float {
+    let inv = 1 - t
+    return 1 - inv * inv * inv * inv * inv
+}
+
+fn ease_in_out_quint(t: float) -> float {
+    if t < 0.5 {
+        return 16.0 * t * t * t * t * t
+    } else {
+        let x = 2.0 - 2.0 * t
+        return 1 - (x * x * x * x * x) / 2.0
+    }
+}
+
+// Sine
+fn ease_in_sine(t: float) -> float { return 1 - cos(t * PI / 2.0) }
+
+fn ease_out_sine(t: float) -> float { return sin(t * PI / 2.0) }
+
+fn ease_in_out_sine(t: float) -> float { return -1 * (cos(PI * t) - 1) / 2.0 }
+
+// Exponential
+fn ease_in_expo(t: float) -> float {
+    if t == 0 { return 0.0 } else { return pow(2.0, 10.0 * t - 10.0) }
+}
+
+fn ease_out_expo(t: float) -> float {
+    if t >= 1 { return 1.0 } else { return 1 - pow(2.0, -10.0 * t) }
+}
+
+fn ease_in_out_expo(t: float) -> float {
+    if t == 0 {
+        return 0.0
+    } else {
+        if t >= 1 {
+            return 1.0
+        } else {
+            if t < 0.5 {
+                return pow(2.0, 20.0 * t - 10.0) / 2.0
+            } else {
+                return (2.0 - pow(2.0, -20.0 * t + 10.0)) / 2.0
+            }
+        }
+    }
+}
+
+// Circular
+fn ease_in_circ(t: float) -> float { return 1.0 - sqrt(1.0 - t * t) }
+
+fn ease_out_circ(t: float) -> float { return sqrt(1.0 - (t - 1.0) * (t - 1.0)) }
+
+fn ease_in_out_circ(t: float) -> float {
+    if t < 0.5 {
+        return (1.0 - sqrt(1.0 - (2.0 * t) * (2.0 * t))) / 2.0
+    } else {
+        return (sqrt(1.0 - (2.0 - 2.0 * t) * (2.0 - 2.0 * t)) + 1.0) / 2.0
+    }
+}
+
+
+// Arena functions
+fn entity_new<T>(arena: Arena<T>, index: int, generation: int) -> Entity<T> {
+    assert(index >= 0, "entity_new::Entity index is invalid")
+    assert(generation >= 0, "Entity generation is invalid")
+
+    return Entity { _arena: arena, _index: index, _generation: generation }
+}
+
+fn get<T>(entity: Entity<T>) -> T? { return get(entity._arena, entity) }
+
+fn equals<T>(a: Entity<T>, b: Entity<T>) -> bool {
+    return a._index == b._index && a._generation == b._generation
+}
+
+fn arena_entry_new<T>(data: T, index: int, generation: int) -> ArenaEntry<T> {
+    return ArenaEntry {
+        data: data,
+        index: index,
+        generation: generation,
+        is_occupied: true,
+    }
+}
+
+fn arena_new<T>() -> Arena<T> {
+    return Arena { entries: [], free_indices: [], occupied_count: 0 }
+}
+
+// Helper functions for arena
+fn arena_pop_free_index(free_indices: [int]) -> int { return pop(free_indices).unwrap() }
+
+fn arena_get_generation_at<T>(entries: [ArenaEntry<T>], index: int) -> int {
+    if index >= 0 && index < vec_len(entries) {
+        let entry = vec_get(entries, index)
+        if !is_null(entry) { return entry.unwrap().generation }
+    }
+    return 0
+}
+
+fn insert<T>(arena: Arena<T>, value: T) -> Entity<T> {
+    let index: int = 0
+    let generation: int = 0
+
+    // Work around type inference issue by avoiding pop/vec_get in same function
+    let has_free_indices: bool = vec_len(arena.free_indices) > 0
+    if has_free_indices {
+        index = arena_pop_free_index(arena.free_indices)
+        generation = arena_get_generation_at(arena.entries, index) + 1
+        vec_set(arena.entries, index, arena_entry_new(value, index, generation))
+    } else {
+        generation = 0
+        index = vec_len(arena.entries)
+        vec_push(arena.entries, arena_entry_new(value, index, generation))
+    }
+
+    arena.occupied_count = arena.occupied_count + 1
+    return entity_new(arena, index, generation)
+}
+
+fn get<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
+    let index: int = entity._index
+    let entry: ArenaEntry<T>? = vec_get(arena.entries, index)
+    if is_null(entry) {
+        return null
+    } else {
+        let e: ArenaEntry<T> = entry.unwrap()
+        let occupied: bool = e.is_occupied
+
+        if !occupied {
+            return null
+        } else {
+            if e.generation != entity._generation { return null } else { return e.data }
+        }
+    }
+}
+
+fn contains<T>(arena: Arena<T>, entity: Entity<T>) -> bool {
+    let entry = vec_get(arena.entries, entity._index)
+    if is_null(entry) {
+        return false
+    }
+    let e = entry.unwrap()
+    return e.is_occupied && e.generation == entity._generation
+}
+
+fn remove<T>(entity: Entity<T>) -> T? {
+    remove(entity._arena, entity)
+}
+
+fn remove<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
+    let index = entity._index
+    let entry = vec_get(arena.entries, index)
+    if is_null(entry) {
+        return null
+    } else {
+        let e = entry.unwrap()
+
+        if e.is_occupied && e.generation == entity._generation {
+            e.is_occupied = false
+            vec_push(arena.free_indices, index)
+            arena.occupied_count = arena.occupied_count - 1
+            return e.data
+        } else {
+            return null
+        }
+    }
+}
+
+fn len<T>(arena: Arena<T>) -> int {
+    return arena.occupied_count
+}
+
+
+fn clear<T>(arena: Arena<T>) {
+    arena.entries = []
+    arena.free_indices = []
+    arena.occupied_count = 0
+}
+
+fn random<T>(arena: Arena<T>) -> (Entity<T>, T)? {
+    let len = len(arena)
+    if len == 0 { return null }
+
+    // random_int is half-open [min, max), so use `len` not `len - 1`
+    // to make the last occupied slot reachable.
+    let random_index = random_int(0, len)
+    let current_count = 0
+    let entries_len = vec_len(arena.entries)
+
+    for i in 0..entries_len {
+        let entry = vec_get(arena.entries, i)
+        if !is_null(entry) && entry.unwrap().is_occupied {
+            if current_count == random_index {
+                let unwrapped_entry = entry.unwrap()
+                let entity = Entity { _arena: arena, _index: unwrapped_entry.index, _generation: unwrapped_entry.generation }
+                return (entity, unwrapped_entry.data)
+            }
+            current_count += 1
+        }
+    }
+
+    return null
+}
+
+// Arena functional methods
+
+fn filter<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> [(Entity<T>, T)] {
+    let result: [(Entity<T>, T)] = []
+    for (e, item) in arena {
+        if predicate(item) { vec_push(result, (e, item)) }
+    }
+    return result
+}
+
+fn map<T, U>(arena: Arena<T>, f: fn(T) -> U) -> [(Entity<T>, U)] {
+    let result: [(Entity<T>, U)] = []
+    for (e, item) in arena {
+        vec_push(result, (e, f(item)))
+    }
+    return result
+}
+
+fn find<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> (Entity<T>, T)? {
+    for (e, item) in arena {
+        if predicate(item) { return (e, item) }
+    }
+    return null
+}
+
+fn any<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> bool {
+    for (_, item) in arena {
+        if predicate(item) { return true }
+    }
+    return false
+}
+
+fn all<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> bool {
+    for (_, item) in arena {
+        if !predicate(item) { return false }
+    }
+    return true
+}
+
+// String manipulation functions
+@inline inline(lua) fn length(s: string) -> int = "string.len(s)"
+
+// UFCS alias: "hello".len() resolves to len("hello")
+fn len(s: string) -> int { length(s) }
+
+
+inline(lua) fn substring(s: string, start: int, end_idx: int) -> string = """
+    -- Rock uses 0-based indexing, Lua uses 1-based
+    return string.sub(s, start + 1, end_idx)
+"""
+
+inline(lua) fn split(s: string, delimiter: string) -> [string] = """
+    local result = vec_new()
+    local pattern = delimiter:gsub("([^%w])", "%%%1")  -- escape special characters
+    for match in (s..delimiter):gmatch("(.-)"..pattern) do
+        result.len = result.len + 1
+        result.data[result.len] = match
+    end
+    return result
+"""
+
+inline(lua) fn trim(s: string) -> string = """
+    return (s:gsub("^%s*(.-)%s*$", "%1"))
+"""
+
+@inline inline(lua) fn upper(s: string) -> string = "string.upper(s)"
+
+@inline inline(lua) fn lower(s: string) -> string = "string.lower(s)"
+
+inline(lua) fn contains(s: string, substr: string) -> bool = """
+    return string.find(s, substr, 1, true) ~= nil
+"""
+
+inline(lua) fn starts_with(s: string, prefix: string) -> bool = """
+    return string.sub(s, 1, string.len(prefix)) == prefix
+"""
+
+inline(lua) fn ends_with(s: string, suffix: string) -> bool = """
+    return suffix == "" or string.sub(s, -string.len(suffix)) == suffix
+"""
+
+inline(lua) fn replace(s: string, old: string, new: string) -> string = """
+    local escaped_old = old:gsub("([%%^$()%.%[%]*+%-?])", "%%%1")
+    local escaped_new = new:gsub("%%", "%%%%")
+    return (s:gsub(escaped_old, escaped_new))
+"""
+
+inline(lua) fn find(s: string, substr: string) -> int = """
+    local pos = string.find(s, substr, 1, true)
+    if pos then
+        return pos - 1  -- Convert to 0-based index
+    else
+        return -1
+    end
+"""
+
+@inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
+
+inline(lua) fn byte(s: string, index: int) -> int = """
+    return string.byte(s, index + 1) or 0  -- Convert to 1-based, return 0 if out of bounds
+"""
+
+inline(lua) fn char_at(s: string, index: int) -> string = """
+    if index < 0 or index >= string.len(s) then
+        return ""
+    end
+    return string.sub(s, index + 1, index + 1)  -- Convert to 1-based indexing
+"""
+
+@inline inline(lua) fn repeat(s: string, count: int) -> string = "string.rep(s, count)"
+
+fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
+inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
+
+// Runtime helper used by the string-interpolation codegen to pad a
+// formatted value to `width` characters. `align` is one of "<", ">",
+// "^", "=" (bare ">" and "=" are treated identically here — sign-aware
+// zero-pad is handled earlier in codegen for numeric types, so by the
+// time we reach this helper `=` is effectively `>`). `fill` is any
+// single character. When `#s >= width`, returns `s` unchanged (never
+// truncates — matches Python's format-spec behavior).
+//
+// Called by generated code; do not invoke directly.
+@nomangle
+inline(lua) fn __rock_fmt_pad(s: string, width: int, align: string, fill: string) -> string = """
+    s = tostring(s)
+    local n = #s
+    if n >= width then return s end
+    local pad = width - n
+    if align == "<" then
+        return s .. string.rep(fill, pad)
+    elseif align == "^" then
+        local left = math.floor(pad / 2)
+        return string.rep(fill, left) .. s .. string.rep(fill, pad - left)
+    else
+        return string.rep(fill, pad) .. s
+    end
+"""
+
+// Insert `sep` every `group` digits from the right of the integer
+// portion of the numeric string `s`. Python convention: `,` / `_` with
+// decimal uses group=3; `_` with hex/oct/bin uses group=4 (nibble
+// grouping). Preserves optional leading sign and any fractional part.
+// Called by generated code; do not invoke directly.
+@nomangle
+inline(lua) fn __rock_fmt_grouping(s: string, sep: string, group: int) -> string = """
+    local sign, num, frac = s:match("^([%+%-]?)(%w+)(%.?.*)$")
+    if not num then return s end
+    local pattern = "(" .. string.rep(".", group) .. ")"
+    local reversed = num:reverse():gsub(pattern, "%1" .. sep)
+    if reversed:sub(-#sep) == sep then
+        reversed = reversed:sub(1, -#sep - 1)
+    end
+    return sign .. reversed:reverse() .. frac
+"""
+
+// `{x:b}` binary conversion (string.format has no %b): floor, sign,
+// repeated %2. Called by generated interpolation code; do not invoke directly.
+@nomangle
+inline(lua) fn __rock_fmt_binary(n: int) -> string = """
+    local __n = math.floor(n)
+    if __n == 0 then return "0" end
+    local __neg = __n < 0
+    if __neg then __n = -__n end
+    local __s = ""
+    while __n > 0 do __s = (__n % 2) .. __s; __n = math.floor(__n / 2) end
+    return (__neg and "-" or "") .. __s
+"""
+
+// `{x:.P%}` percent conversion: x*100 with P decimals + literal `%`
+// (P < 0 means the default 6). Called by generated interpolation code.
+@nomangle
+inline(lua) fn __rock_fmt_percent(v: float, p: int) -> string = """
+    local __p = p
+    if __p < 0 then __p = 6 end
+    return string.format("%." .. __p .. "f", v * 100) .. "%"
+"""
+
+// Left-align `s` in a field of `width` chars by appending spaces. Returns
+// `s` unchanged when `#s >= width` (never truncates).
+inline(lua) fn pad_right(s: string, width: int) -> string = """
+    local len = #s
+    if len >= width then return s end
+    return s .. string.rep(" ", width - len)
+"""
+
+// Right-align `s` in a field of `width` chars by prepending spaces. Returns
+// `s` unchanged when `#s >= width` (never truncates).
+inline(lua) fn pad_left(s: string, width: int) -> string = """
+    local len = #s
+    if len >= width then return s end
+    return string.rep(" ", width - len) .. s
+"""
+
+// Format a float as a string with exactly `decimals` fractional digits,
+// right-aligned in a field of `width` chars (use 0 to skip padding).
+// Wraps `string.format("%<width>.<decimals>f", v)`.
+inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
+    return string.format("%" .. tostring(width) .. "." .. tostring(decimals) .. "f", v)
+"""
+
+// Pattern-based string matching (Lua patterns, not regex)
+@inline inline(lua) fn string_match(s: string, pattern: string) -> string? = "string.match(s, pattern)"
+
+// Lazy iterator over all matches of pattern in s — works directly in for-loops
+@inline inline(lua) fn gmatch(s: string, pattern: string) -> fn() -> string? = "string.gmatch(s, pattern)"
+
+// Pattern-based replacement (use replace for literal replacement)
+inline(lua) fn gsub(s: string, pattern: string, replacement: string) -> string = """
+    return (string.gsub(s, pattern, replacement))
+"""
+
+// Join a vector of strings with a separator. Named `join` because
+// the receiver is `[string]` — Rock's UFCS convention keys the method
+// namespace off the first parameter's type, so `strings.join(", ")`
+// should dispatch through `vec_*` to match what LSP completion offers.
+inline(lua) fn join(parts: [string], separator: string) -> string = """
+    return table.concat(parts.data, separator, 1, parts.len)
+"""
+
+// Split a string into lines
+fn lines(s: string) -> [string] {
+    return split(s, "\n")
+}
+
+// Parse a decimal integer from a string. Returns null if the string is not a valid integer.
+fn parse_int(s: string) -> int? {
+    let f = parse_float(s)
+    if f == null { return null }
+    return int(floor(f.unwrap()))
+}
+
+// Parse a float from a string. Returns null if the string is not a valid number.
+@inline inline(lua) fn parse_float(s: string) -> float? = "tonumber(s)"
+
+// Read an environment variable by name. Returns null if the variable is not set.
+@inline inline(lua) fn env_var(name: string) -> string? = "os.getenv(name)"
+
+// Read an env var as int. Returns `default_val` if unset or unparseable.
+fn get_env_int(var: string, default_val: int) -> int {
+    let v = env_var(var)
+    if v == null { return default_val }
+    return parse_int(v.unwrap()) ?? default_val
+}
+
+// Read an env var as float. Returns `default_val` if unset or unparseable.
+fn get_env_float(var: string, default_val: float) -> float {
+    let v = env_var(var)
+    if v == null { return default_val }
+    return parse_float(v.unwrap()) ?? default_val
+}
+
+// TODO: format_lua is an escape hatch for printf-style formatting.
+// When Rock's string interpolation supports all common format specifiers
+// (including %q for Lua-style quoting), this should be removed.
+@inline inline(lua) fn format_lua(fmt: string, arg: any) -> string = "string.format(fmt, arg)"
+
+// `match` is a Rock keyword, can't define `fn match` for string —
+// callers use `string_match(s, p)` directly.
+
+// Structure to hold function call info with stage
+struct FunctionCallInfo {
+    name: string,
+    stage: int,
+}
+

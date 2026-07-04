@@ -1,0 +1,45 @@
+//! Overloaded-call argument re-inference (the "expression inferred twice" bug).
+//! bone infers each argument of an OVERLOADED call twice: once in synth to get
+//! arg types for select_overload (inference.rs ~1119), once via check_expr for
+//! the final check (~1182). A sub-expr whose type isn't stable across the two
+//! passes -- classically a `null` operand, which gets a fresh nullable var each
+//! pass -- records two non-equal types on the same node, tripping the
+//! assign_expr_type guard ("inferred twice: was `int?`, now `null?`").
+//!
+//! Real rock accepts all of these (no such guard; an arg may be visited in
+//! synth then check). Fix is bone's call: infer args once, OR relax the guard
+//! to accept a unify-compatible re-assign. See the canonical real-suite files
+//! (implicit_return_bug.rock etc.) which hit this through `assert(x != null, ..)`.
+
+// canonical: overloaded callee + a `null` comparison in argument position.
+//- overloaded_arg_null_compare
+fn pick(b: bool) -> int { return 0 }
+fn pick(b: bool, x: int) -> int { return x }
+fn f() -> int {
+    let r: int? = 5
+    let z = pick(r != null)
+      //^ int
+    z
+}
+
+// the nullable can be a struct type too (mirrors `Container?` in the suite).
+//- overloaded_arg_null_compare_struct
+struct Box { v: int }
+fn use(b: bool) -> int { return 0 }
+fn use(b: bool, tag: int) -> int { return tag }
+fn f(c: Box?) -> int {
+    let z = use(c != null)
+      //^ int
+    z
+}
+
+// control: the SAME comparison outside an overloaded call already type-checks
+// (single-candidate callee -> args inferred once).
+//- single_candidate_arg_null_compare_ok
+fn only(b: bool) -> int { return 0 }
+fn f() -> int {
+    let r: int? = 5
+    let z = only(r != null)
+      //^ int
+    z
+}

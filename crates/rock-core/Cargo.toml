@@ -1,0 +1,18 @@
+[package]
+name = "rock-core"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+ariadne = { workspace = true }
+fs-err = { workspace = true }
+atomic_refcell = { workspace = true }
+ustr = { workspace = true }
+itertools = { workspace = true }
+rustc-hash = { workspace = true }
+tracing = { workspace = true }
+colored = { workspace = true }

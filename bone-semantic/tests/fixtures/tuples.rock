@@ -1,0 +1,81 @@
+//! @no_check
+//!
+//! Tuple type lowering, substitution, and unification.
+//!
+//! Marker conventions:
+//!   - param tuples: marker sits on the binding name `p` (its declared type),
+//!     not inside the annotation. `type_at` returns the smallest interval, so a
+//!     caret on an inner `int` would resolve to that `int`, not the tuple.
+//!   - return tuples: marker on the comma — inside the tuple node, outside any
+//!     element node.
+//!   - call results: marker on the callee name (matches generics.rock `id(5)`).
+//!
+//! Render format: `(int, int)` — parens, `, ` separator.
+//!
+//! Helper bodies are real (`pair` builds `(x, x)`, `fst` projects `p.0`), so they
+//! agree with their declared returns once body-vs-return checking lands.
+
+// --- lower + render tuple type annotations ---
+
+//- tuple_param
+fn f(p: (int, int)) -> int { 5 }
+   //^ (int, int)
+
+//- tuple_param_mixed
+fn f(p: (int, bool)) -> int { 5 }
+   //^ (int, bool)
+
+//- tuple_param_three
+fn f(p: (int, bool, string)) -> int { 5 }
+   //^ (int, bool, string)
+
+// nested tuple exercises recursive lowering + render
+//- tuple_param_nested
+fn f(p: ((int, int), bool)) -> int { 5 }
+   //^ ((int, int), bool)
+
+//- tuple_return
+fn f() -> (int, int) { (1, 2) }
+            //^ (int, int)
+
+// --- substitute through a generic call returning a tuple ---
+
+//- tuple_generic_return
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn f() -> (int, int) { pair(5) }
+                     //^ (int, int)
+
+//- tuple_generic_return_bool
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn f() -> (bool, bool) { pair(true) }
+                       //^ (bool, bool)
+
+// --- unify compound vs compound ---
+
+// monomorphic param tuple unified against a generic call result
+//- tuple_unify_monomorphic
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn takes(p: (int, int)) -> int { 5 }
+fn f() -> int { takes(pair(5)) }
+              //^ int
+
+// generic param tuple (U, U) unified against (int, int), binds U := int
+//- tuple_unify_generic
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn fst<U>(p: (U, U)) -> U { p.0 }
+fn f() -> int { fst(pair(5)) }
+              //^ int
+
+// element mismatch: (int, int) arg vs (int, bool) param fails at unify
+//- tuple_unify_mismatch @fail
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn takes(p: (int, bool)) -> int { 5 }
+fn f() -> int { takes(pair(5)) }
+              //^ int
+
+// length mismatch: 2-tuple arg vs 3-tuple param fails at unify
+//- tuple_unify_length_mismatch @fail
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn takes3(p: (int, int, int)) -> int { 5 }
+fn f() -> int { takes3(pair(5)) }
+              //^ int

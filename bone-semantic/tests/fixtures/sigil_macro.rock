@@ -1,0 +1,49 @@
+//! Parametrized item-macros with sigil substitution: `ident` params
+//! substitute into declaration names, `ty` params into type positions,
+//! and the `!()` sigil call form lets a generic `Foo<int>` reach a `ty`
+//! slot (the `<` would otherwise parse as comparison). Implemented in
+//! `bone/src/macro_expansion.rs` (`expand_item_macro` + `subst_in_item`).
+
+//- ident_name_into_struct
+// `Name: ident` substitutes into the spliced struct's own name, so the
+// emitted `struct Name { x: int }` becomes `struct Holder { x: int }`.
+macro decl_pair(Name: ident) {
+    struct Name { x: int }
+}
+decl_pair(Holder)
+fn use_it() -> int {
+    let h = Holder { x: 7 }
+    let v = h.x
+      //^ int
+    v
+}
+
+//- ty_into_field_type
+// `Elem: ty` substitutes into the field's type position: `v: Elem`
+// becomes `v: string` for this invocation.
+macro decl_holder(Name: ident, Elem: ty) {
+    struct Name { v: Elem }
+}
+decl_holder(StrHolder, string)
+fn use_it() -> string {
+    let h = StrHolder { v: "hi" }
+    let s = h.v
+      //^ string
+    s
+}
+
+//- generic_ty_arg_via_sigil
+// The headline sigil case: `Box1<int>` as a `ty` arg only parses via the
+// `!()` form (the cursor-backtracking type-arg parser), recovered to an
+// `App` TypeExpr by `expr_to_type_expr` and spliced into the field type.
+struct Box1<T> { v: T }
+macro wrap(Name: ident, Elem: ty) {
+    struct Name { v: Elem }
+}
+wrap!(BoxHolder, Box1<int>)
+fn use_it() -> int {
+    let h = BoxHolder { v: Box1 { v: 9 } }
+    let inner = h.v.v
+        //^ int
+    inner
+}

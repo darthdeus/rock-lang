@@ -1,0 +1,26 @@
+//! `?.method()` (safe-nav UFCS call): the receiver is peeled of one nullable
+//! layer, the method is resolved as a UFCS call with the peeled receiver as the
+//! first argument, and the result is wrapped back into a nullable. bone parses
+//! this as `FunctionCall { func: SafeNavigation(recv, method), .. }` and rejects
+//! it ("Only ident-based fn calls are supported, got SafeNavigation").
+//! Bodies avoid operators (no stdlib in the fixture harness). Verified vs rock.
+
+// zero-arg method: T? -> method(T) -> R -> R?
+//- safenav_method_call
+struct Box { v: int }
+fn get_v(b: Box) -> int { return b.v }
+fn f(b: Box?) -> int {
+    let r = b?.get_v()
+      //^ int?
+    5
+}
+
+// method with an extra positional argument.
+//- safenav_method_with_arg
+struct Box { v: int }
+fn pick(b: Box, n: int) -> int { return n }
+fn f(b: Box?) -> int {
+    let r = b?.pick(3)
+      //^ int?
+    5
+}

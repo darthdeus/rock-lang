@@ -1,0 +1,25 @@
+//! Bitwise/shift operators (`& | ^ << >>`) and `~` are int->int. Unlike
+//! `+`/`-` they are NOT desugared to `__op_*` calls -- they stay as HIR
+//! BinOp / BitNot -- so they need no stdlib. Verified vs rock.
+
+//- bitwise_binops
+fn f() -> int {
+    let a = 4 & 6
+      //^ int
+    let b = a | 1
+      //^ int
+    let c = b ^ 2
+      //^ int
+    let d = c << 3
+      //^ int
+    let e = d >> 1
+      //^ int
+    e
+}
+
+//- bitnot
+fn f() -> int {
+    let x = ~0
+      //^ int
+    x
+}

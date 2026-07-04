@@ -1,0 +1,75 @@
+//! @no_check
+//! For loops: `for x in iter { body }`. The loop variable binds to the iterable's
+//! element type (range -> int, `[T]` -> T). The `for` itself is a statement (unit).
+
+//- for_range
+fn f() -> int {
+    for i in 0..10 {
+        let x = i
+          //^ int
+    }
+    5
+}
+
+//- for_array
+fn f(xs: [int]) -> int {
+    for x in xs {
+        let y = x
+          //^ int
+    }
+    5
+}
+
+// Iterating a `Map<K, V>` yields `(K, V)` pairs. Binding the loop var to a
+// single name binds the whole tuple.
+//- for_map_single
+fn f(m: Map<int, string>) -> int {
+    for kv in m {
+        let pair = kv
+          //^ (int, string)
+    }
+    5
+}
+
+// A tuple pattern destructures each pair: `k` binds the key, `v` the value.
+//- for_tuple_map
+fn f(m: Map<int, string>) -> int {
+    for (k, v) in m {
+        let a = k
+          //^ int
+        let b = v
+          //^ string
+    }
+    5
+}
+
+// Tuple patterns also destructure an array of tuples element-wise.
+//- for_tuple_array
+fn f(xs: [(int, string)]) -> int {
+    for (a, b) in xs {
+        let p = a
+          //^ int
+        let q = b
+          //^ string
+    }
+    5
+}
+
+// Pattern arity must match the element's tuple arity. A `Map<K, V>` yields a
+// 2-tuple; a 3-binding pattern must be rejected.
+//- for_tuple_arity_mismatch @fail
+fn f(m: Map<int, string>) -> int {
+    for (a, b, c) in m {
+        let p = a
+    }
+    5
+}
+
+// Destructuring a non-tuple element with a tuple pattern must be rejected.
+//- for_tuple_on_scalar @fail
+fn f(xs: [int]) -> int {
+    for (a, b) in xs {
+        let p = a
+    }
+    5
+}

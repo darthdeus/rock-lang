@@ -1,0 +1,14 @@
+//! Continue/Break statements inside a loop body type-check as unit.
+//! Lowering already produces Statement::{Break,Continue} (lower.rs); inference
+//! must treat them as no-ops rather than hitting the catch-all comp_error.
+
+//- continue_break
+fn f(xs: [int], stop: bool) -> int {
+    for x in xs {
+        if stop { break }
+        if stop { continue }
+        let y = x
+          //^ int
+    }
+    5
+}

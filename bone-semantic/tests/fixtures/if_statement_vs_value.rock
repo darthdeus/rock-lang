@@ -1,0 +1,295 @@
+//! Position-based `if` typing (rule A, adopted 2026-06-10):
+//!   - STATEMENT position (value discarded): branches are checked
+//!     independently, tail values are discarded, no join, else optional.
+//!     Discarded positions: Statement::Expr / Defer, for/while bodies,
+//!     branch blocks of a discarded if/match, and the body tail of a fn
+//!     with no declared return (or a coroutine).
+//!   - VALUE position (let init, return, fn tail with declared return,
+//!     args, ...): a final `else` is REQUIRED and all branch tails
+//!     (incl. else) must unify; the if's type is the joined type.
+//! Same rule for `if let` (sections below) and `match`
+//! (match_statement_vs_value.rock).
+//! INTENDED divergences from rock until rock adopts rule A:
+//!   - rock joins branch tails even in statement position (it rejects
+//!     stmt_open_chain_mismatched_tails and stmt_closed_mismatched_tails)
+//!   - rock's check_if never requires an else, so a no-else if in value
+//!     position type-checks and produces nil at runtime -- bone rejects.
+
+// the mag shape (screenshot_scenes.rock): open chain, every branch tail
+// the same non-unit type, value discarded
+//- stmt_open_chain_uniform_tails
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let x = 1
+    if x == 1 {
+        gives_bool()
+    } else if x == 2 {
+        gives_bool()
+    } else if x == 3 {
+        gives_bool()
+    }
+    let y = x
+      //^ int
+    y
+}
+
+//- stmt_open_chain_mismatched_tails
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let x = 1
+    if x == 1 {
+        gives_bool()
+    } else if x == 2 {
+        x = 3
+    }
+    let y = x
+      //^ int
+    y
+}
+
+// the pop/push shape: closed chain, mismatched tails, value discarded
+//- stmt_closed_mismatched_tails
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let x = 1
+    if x == 1 {
+        gives_bool()
+    } else {
+        x = 2
+    }
+    let y = x
+      //^ int
+    y
+}
+
+// the anvil shape (main.rock render): branch block of a discarded if ends
+// with an inner open if whose tail is non-unit
+//- stmt_nested_open_if_bool_tail
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let x = 1
+    if x == 1 {
+        if x < 5 {
+            gives_bool()
+        }
+    } else if x == 2 {
+        x = 3
+    }
+    let y = x
+      //^ int
+    y
+}
+
+//- stmt_while_body_tail_mismatched_if
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let x = 1
+    while x < 3 {
+        x = 5
+        if x == 1 {
+            gives_bool()
+        } else {
+            x = 2
+        }
+    }
+    let y = x
+      //^ int
+    y
+}
+
+//- stmt_for_body_tail_mismatched_if
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let x = 1
+    for i in 0..3 {
+        if i == 1 {
+            gives_bool()
+        } else {
+            x = 2
+        }
+    }
+    let y = x
+      //^ int
+    y
+}
+
+// fn with no declared return: the body tail is a discarded position
+//- stmt_fn_tail_no_ret_mismatched_if
+fn gives_bool() -> bool { true }
+fn f() {
+    let x = 1
+      //^ int
+    if x == 1 {
+        gives_bool()
+    } else {
+        x = 2
+    }
+}
+
+// value position requires an else; today bone types this `()` (the
+// annotation matches, making the section pass and trip @fail) -- after the
+// fix it must be a "missing else" error
+//- value_let_no_else_fail @fail
+fn gives_int() -> int { 42 }
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { gives_int() }
+      //^ ()
+    x
+}
+
+//- value_let_annotated_no_else_fail @fail
+fn gives_int() -> int { 42 }
+fn f() -> int {
+    let x = 1
+    let v: int = if x == 1 { gives_int() }
+      //^ int
+    x
+}
+
+//- value_let_open_chain_fail @fail
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { 10 } else if x == 2 { 20 }
+      //^ int
+    x
+}
+
+//- value_let_closed_uniform
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { 10 } else { 20 }
+      //^ int
+    u
+}
+
+//- value_let_closed_mismatched_fail @fail
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { 10 } else { "s" }
+      //^ int
+    x
+}
+
+//- value_fn_tail_closed
+fn f(x: int) -> int {
+    let y = x
+      //^ int
+    if y == 1 {
+        10
+    } else {
+        20
+    }
+}
+
+//- value_fn_tail_no_else_fail @fail
+fn f(x: int) -> int {
+    if x == 1 {
+        10
+    }
+}
+
+// statement if-let: non-unit then tail, no else, discarded
+//- stmt_iflet_nonunit_tail
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let m: int? = 42
+    if let n = m {
+        gives_bool()
+    }
+    let y = 1
+      //^ int
+    y
+}
+
+// value if-let without else; today bone types this `()` (annotation
+// matches, trips @fail) -- after the fix it must be a "missing else" error
+//- value_iflet_no_else_fail @fail
+fn f() -> int {
+    let m: int? = 42
+    let u = if let n = m { n }
+      //^ ()
+    1
+}
+
+//- value_iflet_closed
+fn f() -> int {
+    let m: int? = 42
+    let u = if let n = m { n } else { 0 }
+      //^ int
+    u
+}
+
+// a lambda checked against `fn()` (unit return) has a discarded body tail,
+// like a fn with no declared return -- the with_shader callback shape
+// (stone/engine/rendering/draw_list.rock flush body)
+//- lambda_arg_unit_ret_tail_if
+fn gives_bool() -> bool { true }
+fn run(cb: fn()) -> int {
+    cb()
+    1
+}
+fn f() -> int {
+    let r = run(() => {
+        let x = 1
+        if x == 1 {
+            gives_bool()
+        }
+    })
+    let y = r
+      //^ int
+    y
+}
+
+//- lambda_annotated_unit_ret_tail_if
+fn gives_bool() -> bool { true }
+fn f() -> int {
+    let g: fn() = () => {
+        let x = 1
+        if x == 1 {
+            gives_bool()
+        }
+    }
+    let y = 1
+      //^ int
+    y
+}
+
+//- lambda_field_unit_ret_tail_if
+fn gives_bool() -> bool { true }
+struct Hooks { cb: fn() }
+fn f() -> int {
+    let h = Hooks { cb: () => {
+        let x = 1
+        if x == 1 {
+            gives_bool()
+        }
+    } }
+    let y = 1
+      //^ int
+    y
+}
+
+// an expected NON-unit return keeps the lambda body in value position
+//- lambda_arg_int_ret_no_else_fail @fail
+fn run(cb: fn() -> int) -> int { cb() }
+fn f() -> int {
+    let r = run(() => {
+        let x = 1
+        if x == 1 { 42 }
+    })
+      //^ int
+    r
+}
+
+// an unconstrained lambda's body stays in value position (strict: its
+// return type is inferred from the tail)
+//- lambda_bare_no_else_fail @fail
+fn f() -> int {
+    let g = () => {
+        let x = 1
+        if x == 1 { 42 }
+    }
+      //^ fn() -> int
+    1
+}

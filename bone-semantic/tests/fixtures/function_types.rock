@@ -1,0 +1,46 @@
+//! @no_check
+//! Function types in annotation position: `(P...) -> R`. These DO parse
+//! (`TypeExprKind::Function`), so this slice is independent of lambdas: it pins
+//! `lower_type_expr`'s Function arm (currently a `comp_error!` stub) and
+//! `render`'s Function arm (currently a `{:?}` debug stub). Markers sit on the
+//! parameter name whose declared type is the function type.
+
+//- fn_type_param
+fn f(g: (int) -> int) -> int {
+   //^ fn(int) -> int
+    5
+}
+
+//- fn_type_two_params
+fn f(g: (int, bool) -> int) -> int {
+   //^ fn(int, bool) -> int
+    5
+}
+
+//- fn_type_zero_params
+fn f(g: () -> int) -> int {
+   //^ fn() -> int
+    5
+}
+
+// the return type may itself be a function type (right-associative nesting)
+//- fn_type_nested_ret
+fn f(g: (int) -> (int) -> bool) -> int {
+   //^ fn(int) -> fn(int) -> bool
+    5
+}
+
+// param/return positions may be nominal types
+//- fn_type_nominal
+struct Point { x: int, y: int }
+fn f(g: (Point) -> int) -> int {
+   //^ fn(Point) -> int
+    5
+}
+
+// a function type may be a parameter inside another function type
+//- fn_type_higher_order
+fn f(g: ((int) -> int) -> int) -> int {
+   //^ fn(fn(int) -> int) -> int
+    5
+}

@@ -1,0 +1,23 @@
+//! `?.let { }` (SafeNavigationLet): the receiver is peeled of one nullable
+//! layer, the unwrapped value is bound (name derived from the receiver -- `x`
+//! here) in the block scope, the block body is typed, and the result is wrapped
+//! back into a nullable. Mirrors the `?.field` peel/rewrap but with a block.
+//! bone drops it into the unsupported-expr catch-all. Bodies avoid operators
+//! (no stdlib in the fixture harness). Verified vs rock (safenav_tests.rock).
+
+// the block returns the unwrapped value directly: T? -> T -> T?
+//- safenav_let_identity
+fn f(x: int?) -> int {
+    let r = x?.let { x }
+      //^ int?
+    5
+}
+
+// the block projects a field of the unwrapped struct.
+//- safenav_let_field
+struct Point { x: int, y: int }
+fn f(p: Point?) -> int {
+    let r = p?.let { p.x }
+      //^ int?
+    5
+}

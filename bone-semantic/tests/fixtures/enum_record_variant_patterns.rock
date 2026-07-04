@@ -1,0 +1,27 @@
+//! Enum record-variant patterns: `Shape::Circle { r }` (qualified) and bare
+//! `Circle { r }` (unqualified). These lower to `Pattern::Record` (already in,
+//! for structs) but with an ENUM scrutinee, so the Record check arm must detect
+//! an enum and resolve the variant's `VariantPayload::Record` field types
+//! instead of calling struct_field_ty. Verified vs rock.
+
+//- enum_record_qualified
+enum Shape { Circle { r: int }, Square { side: int } }
+fn f(s: Shape) -> int {
+    let v = match s {
+        Shape::Circle { r } => r,
+        Shape::Square { side } => side,
+    }
+      //^ int
+    v
+}
+
+//- enum_record_unqualified
+enum Shape { Circle { r: int }, Square { side: int } }
+fn f(s: Shape) -> int {
+    let v = match s {
+        Circle { r } => r,
+        Square { side } => side,
+    }
+      //^ int
+    v
+}

@@ -1,0 +1,67 @@
+//! A lambda checked against a NULLABLE function-type param `(() -> ())?` must
+//! be treated like the non-nullable `() -> ()` case: its unit return means the
+//! body tail is DISCARDED (statement position), so a no-`else` `if`/`if let`
+//! tail is legal. bone's `check_expr` lambda arm matched `TypeExpr::Function`
+//! directly on the expected type, so a `Nullable(Function)` param slipped
+//! through -- the expected return wasn't propagated and the tail wrongly landed
+//! in value position ("if let without else cannot be used as a value").
+//! The fix looks through the `Nullable` wrapper before the `Function` match.
+//! Non-nullable counterparts live in if_statement_vs_value.rock
+//! (lambda_arg_unit_ret_tail_if); these are the nullable-param variants.
+
+// no-else `if` tail against a nullable unit-return fn param
+//- lambda_nullable_arg_unit_ret_tail_if
+fn gives_bool() -> bool { true }
+fn run(cb: (() -> ())?) -> int {
+    if let c = cb { c() }
+    1
+}
+fn f() -> int {
+    let r = run(() => {
+        let x = 1
+        if x == 1 {
+            gives_bool()
+        }
+    })
+    let y = r
+      //^ int
+    y
+}
+
+// no-else `if let` tail -- the exact poll_co_field clear-closure shape
+//- lambda_nullable_arg_unit_ret_tail_iflet
+fn gives_bool() -> bool { true }
+fn run(cb: (() -> ())?) -> int {
+    if let c = cb { c() }
+    1
+}
+fn f() -> int {
+    let opt: int? = 5
+    let r = run(() => {
+        if let m = opt {
+            gives_bool()
+        }
+    })
+    let y = r
+      //^ int
+    y
+}
+
+// the default-valued form (`(() -> ())? = null`), poll_co_owned's real signature
+//- lambda_nullable_default_arg_unit_ret_tail_iflet
+fn gives_bool() -> bool { true }
+fn run(cb: (() -> ())? = null) -> int {
+    if let c = cb { c() }
+    1
+}
+fn f() -> int {
+    let opt: int? = 5
+    let r = run(() => {
+        if let m = opt {
+            gives_bool()
+        }
+    })
+    let y = r
+      //^ int
+    y
+}

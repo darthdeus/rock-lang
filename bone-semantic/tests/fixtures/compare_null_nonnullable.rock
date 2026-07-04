@@ -1,0 +1,60 @@
+//! Comparing a value KNOWN to be non-null against `null` (`x == null` /
+//! `x != null`) is a TYPE ERROR -- `null` can't inhabit it, so the check is dead
+//! code. "Known non-null" is flow-sensitive: a declared non-nullable type, OR a
+//! nullable refined to non-null by a guard or an (in-scope) assignment. Consistent
+//! with bone's rejection of `??` / `?.` on a non-nullable. Stricter than rock,
+//! which only narrows via guards (so rock accepts the assignment case). Nullable
+//! types are the valid case; `any` and unresolved generics are exempt.
+
+//- compare_nonnull_neq_null @fail
+fn f(x: int) -> bool {
+    x != null
+}
+
+//- compare_nonnull_eq_null @fail
+fn f(x: int) -> bool {
+    x == null
+}
+
+// a struct value is non-nullable too.
+//- compare_nonnull_struct_to_null @fail
+struct S { v: int }
+fn f(x: S) -> bool {
+    x != null
+}
+
+// a nullable FIELD refined to non-null by a same-scope assignment is also dead
+// to check (the bitgun / path_refinement pattern, but in one scope).
+//- compare_assignment_refined_field_to_null @fail
+struct Inner { v: int }
+struct Top { inner: Inner? }
+fn f(t: Top) -> bool {
+    t.inner = Inner { v: 1 }
+    return t.inner != null
+}
+
+// a nullable IS comparable to null -- the normal null check, still allowed.
+//- compare_nullable_to_null_ok
+fn f(x: int?) -> bool {
+    let r = x != null
+      //^ bool
+    r
+}
+
+// `any` is exempt -- it could be null at runtime.
+//- compare_any_to_null_ok
+fn f(x: any) -> bool {
+    let r = x != null
+      //^ bool
+    r
+}
+
+// a nullable assigned null is still nullable -- the check is valid.
+//- compare_after_null_assignment_ok
+struct S { v: int }
+fn f(x: S?) -> bool {
+    x = null
+    let r = x != null
+      //^ bool
+    r
+}

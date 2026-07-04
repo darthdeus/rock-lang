@@ -1,0 +1,32 @@
+//! `const` globals are read-only: reassigning one (`FOO = ...`) is a compile
+//! error. A mutable `global` stays writable. This matches the hot-reload model
+//! -- a const re-initializes from its literal every reload, so rebinding it in
+//! code is meaningless (and would be silently clobbered on the next reload).
+//! Field/index writes THROUGH a const value are out of scope here (a separate
+//! decision). Mutable `global` writes are unrestricted.
+//! Design: docs/skull-const-hot-reload-plan.md.
+//!
+//! Compound assignment (`FOO += 1`) goes through the same check but desugars to
+//! a stdlib `__op_add` call this bare (no-stdlib) harness can't resolve, so it's
+//! pinned with stdlib in `rock-cli/src/bone_backend.rs::const_globals_are_read_only`.
+//! Each section reads the global into `r` (a valid `//^` anchor) so the ONLY
+//! thing that can make a `@fail` section fail is the write itself.
+
+//- assign_to_const @fail
+const FOO: int = 5
+fn f() -> int {
+    let r = FOO
+      //^ int
+    FOO = 6
+    return r
+}
+
+// control: a mutable global remains writable.
+//- mutable_global_assign_ok
+global BAR: int = 5
+fn f() -> int {
+    let r = BAR
+      //^ int
+    BAR = 6
+    return r
+}

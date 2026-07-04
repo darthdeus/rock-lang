@@ -1,0 +1,46 @@
+//! Overload resolution: among same-named candidates, pick the one whose params
+//! best fit the argument types. Exact beats int->float widen beats T->any; no
+//! viable candidate or an equal-best tie is an error. Numeric int/float cases
+//! live in numeric_operators.rock.
+
+// Non-operator overloads selected by argument type.
+//- select_by_arg_type
+fn pick(x: int) -> int { x }
+fn pick(x: bool) -> bool { x }
+fn f() -> bool {
+    let r = pick(true)
+      //^ bool
+    r
+}
+
+// Exact match preferred over the any fallback.
+//- exact_preferred_over_any
+fn pick(x: int) -> int { x }
+fn pick(x: any) -> any { x }
+fn f() -> int {
+    let r = pick(5)
+      //^ int
+    r
+}
+
+// T -> any is the last-resort fallback (needs an `any` fit tier).
+//- any_fallback
+fn pick(x: int) -> int { x }
+fn pick(x: any) -> any { x }
+fn f() -> any {
+    let r = pick("hi")
+      //^ any
+    r
+}
+
+// No candidate accepts the argument types.
+//- no_viable_fail @fail
+fn pick(x: int) -> int { x }
+fn pick(x: bool) -> bool { x }
+fn f() -> int { pick("hi") }
+
+// Two candidates fit equally well -> ambiguous.
+//- ambiguous_fail @fail
+fn amb(x: any, y: int) -> int { 0 }
+fn amb(x: int, y: any) -> int { 1 }
+fn f() -> int { amb(2, 3) }

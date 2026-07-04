@@ -1,0 +1,23 @@
+//! Variadic params (`fn f(xs: ...int)`): extra positional args beyond the fixed
+//! params are absorbed by the variadic param (each coerced to its element type).
+//! bone caps args at the declared count ("Too many positional arguments,
+//! expected at most N"). Needs an `is_variadic` flag on Function + the call
+//! path (reorder_call_args / resolve_named_call) allowing surplus positionals.
+//! Verified vs rock (print is `...any`).
+
+//- variadic_call
+fn collect(xs: ...int) -> int { return 0 }
+fn f() -> int {
+    let r = collect(1, 2, 3)
+      //^ int
+    r
+}
+
+// zero variadic args is allowed.
+//- variadic_empty
+fn collect(xs: ...int) -> int { return 0 }
+fn f() -> int {
+    let r = collect()
+      //^ int
+    r
+}

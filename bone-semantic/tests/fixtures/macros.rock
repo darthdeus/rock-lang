@@ -1,0 +1,117 @@
+//! Expr-position macro expansion. A `macro f(p: expr) { body }` is expanded
+//! away BEFORE type-checking: each call `f(arg)` is replaced by the macro body
+//! with `p` substituted by `arg`. Macro DEFINITIONS are then dropped -- they
+//! are not typed entities (their `expr`/`ident` params are meta-types, not real
+//! types; lowering a macro def as a regular fn is exactly what choked stdlib
+//! loading on "Unknown type name ident/expr"). Overload selection is by arity;
+//! trailing params with defaults widen the matchable arity range.
+//!
+//! Bodies here stay self-contained (comparisons / blocks / lets only) so they
+//! typecheck without stdlib. Real stdlib macros (assert_eq, log_*) reference
+//! `error`/`tostring`/`+` and are covered by the probe_stdlib_first_wall harness.
+
+// Single-arg macro, body is one expression. `pos(n)` -> `n > 0`.
+//- macro_single_arg
+macro pos(x: expr) {
+    x > 0
+}
+fn f(n: int) -> bool {
+    let r = pos(n)
+      //^ bool
+    r
+}
+
+// Two args substituted positionally.
+//- macro_two_args
+macro lt(a: expr, b: expr) {
+    a < b
+}
+fn f(n: int, m: int) -> bool {
+    let r = lt(n, m)
+      //^ bool
+    r
+}
+
+// A param referenced more than once is substituted at each occurrence.
+//- macro_repeated_param
+macro eq_self(x: expr) {
+    x == x
+}
+fn f(n: int) -> bool {
+    let r = eq_self(n)
+      //^ bool
+    r
+}
+
+// Block-bodied macro in statement position expands to its statements.
+//- macro_block_stmt
+macro stash(v: expr) {
+    let kept = v
+}
+fn f() -> int {
+    stash(5)
+    7
+  //^ int
+}
+
+// A default-valued trailing param: callable with or without it.
+//- macro_default_param
+macro ge(x: expr, lo: expr = 0) {
+    x > lo
+}
+fn f(n: int) -> bool {
+    let a = ge(n)
+      //^ bool
+    let b = ge(n, 3)
+      //^ bool
+    a
+}
+
+// Arity overloads: dispatch by argument count.
+//- macro_arity_overload
+macro pick(a: expr) {
+    a > 0
+}
+macro pick(a: expr, b: expr) {
+    a > b
+}
+fn f(n: int, m: int) -> bool {
+    let one = pick(n)
+      //^ bool
+    let two = pick(n, m)
+      //^ bool
+    one
+}
+
+// An UNCALLED macro definition is dropped, not type-checked.
+//- macro_def_dropped
+macro unused(x: expr) {
+    x > 0
+}
+fn f() -> int {
+    5
+  //^ int
+}
+
+// Macros expanding macros: `outer(n)` -> `inner(n)` -> `n == n`.
+//- macro_nested
+macro inner(x: expr) {
+    x == x
+}
+macro outer(x: expr) {
+    inner(x)
+}
+fn f(n: int) -> bool {
+    let r = outer(n)
+      //^ bool
+    r
+}
+
+// Calling a macro with no matching arity must fail.
+//- macro_arity_mismatch @fail
+macro one(a: expr) {
+    a > 0
+}
+fn f(n: int) -> bool {
+    one(n, n)
+}

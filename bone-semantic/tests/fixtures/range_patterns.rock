@@ -1,0 +1,40 @@
+//! Range patterns in `match`: `0..=3`, `4..7`, `..0`, `100..`. bone's
+//! lower_pattern_value rejects `PatternKind::Range`. Each present bound's type
+//! must unify with the scrutinee (int here); the pattern binds nothing; the
+//! `inclusive` flag is irrelevant to typing. Arm bodies join to the result.
+//! Verified vs rock.
+
+// inclusive bounded ranges.
+//- match_inclusive_range
+fn f(n: int) -> int {
+    let r = match n {
+        0..=3 => 1,
+        4..=7 => 2,
+        _ => 0,
+    }
+      //^ int
+    r
+}
+
+// exclusive bounded range.
+//- match_exclusive_range
+fn f(n: int) -> int {
+    let r = match n {
+        0..10 => 1,
+        _ => 0,
+    }
+      //^ int
+    r
+}
+
+// unbounded forms: `..end` (no start) and `start..` (no end).
+//- match_unbounded_range
+fn f(n: int) -> int {
+    let r = match n {
+        ..0 => 1,
+        100.. => 2,
+        _ => 0,
+    }
+      //^ int
+    r
+}

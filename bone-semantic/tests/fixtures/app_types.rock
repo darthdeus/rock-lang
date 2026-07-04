@@ -1,0 +1,57 @@
+//! @no_check
+//!
+//! Type-constructor application: `[T]` (Array), `Map<K, V>`, and named generics
+//! all lower to one `App { ctor, params }` (ctor = TypeCtor::Array | Map | ...).
+//!
+//! Marker conventions (same as tuples.rock):
+//!   - param types: marker on the binding name `p` (its declared type), to dodge
+//!     `type_at`'s smallest-interval rule (a caret inside `[int]` would resolve
+//!     to the inner `int`).
+//!   - call results: marker on the callee name.
+//!
+//! Render is the sugar form: `[int]`, `[[int]]`, `Map<string, int>`.
+//!
+//! `wrap` builds a real `[x]`, so its body agrees with the declared `[T]` return
+//! once body-vs-return checking lands.
+
+// --- lower + render App type annotations ---
+
+//- array_param
+fn f(p: [int]) -> int { 5 }
+   //^ [int]
+
+//- array_nested
+fn f(p: [[int]]) -> int { 5 }
+   //^ [[int]]
+
+//- map_param
+fn f(p: Map<string, int>) -> int { 5 }
+   //^ Map<string, int>
+
+// array of a tuple exercises App-over-Tuple nesting
+//- array_of_tuple
+fn f(p: [(int, bool)]) -> int { 5 }
+   //^ [(int, bool)]
+
+// --- substitute through a generic call returning an App ---
+
+//- array_generic_return
+fn wrap<T>(x: T) -> [T] { [x] }
+fn f() -> [int] { wrap(5) }
+                //^ [int]
+
+// --- unify App vs App ---
+
+// [int] arg unified against [int] param
+//- array_unify_monomorphic
+fn wrap<T>(x: T) -> [T] { [x] }
+fn takes(p: [int]) -> int { 5 }
+fn f() -> int { takes(wrap(5)) }
+              //^ int
+
+// element mismatch: [int] arg vs [bool] param must fail at unify
+//- array_unify_element_mismatch @fail
+fn wrap<T>(x: T) -> [T] { [x] }
+fn takes(p: [bool]) -> int { 5 }
+fn f() -> int { takes(wrap(5)) }
+              //^ int

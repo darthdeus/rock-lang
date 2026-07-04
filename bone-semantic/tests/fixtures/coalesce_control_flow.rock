@@ -1,0 +1,46 @@
+//! `cond ?? return/break/continue` -- a control-flow expr in value
+//! position. rock types `return`/`break`/`continue` as Never (bottom), so
+//! `T? ?? <never>` collapses to the peeled inner T: `g` is `int`, NOT
+//! `never` (the Never short-circuit in `join`). bone lowers these to HIR
+//! `Return`/`Break`/`Continue` and infers them as `builtins.never()`.
+//! (Each section is self-contained + operator-free -- fixtures don't load
+//! stdlib.) Verified vs rock.
+
+//- coalesce_return_bare
+fn f() {
+    let x: int? = 42
+    let g = x ?? return
+      //^ int
+}
+
+//- coalesce_return_value
+fn f() -> int {
+    let x: int? = 42
+    let g = x ?? return 0
+      //^ int
+    g
+}
+
+//- coalesce_break
+fn f() -> int {
+    let result = 0
+    for i in 0..10 {
+        let v: int? = i
+        let g = v ?? break
+          //^ int
+        result = g
+    }
+    result
+}
+
+//- coalesce_continue
+fn f() -> int {
+    let result = 0
+    for i in 0..5 {
+        let v: int? = i
+        let g = v ?? continue
+          //^ int
+        result = g
+    }
+    result
+}

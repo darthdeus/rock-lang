@@ -1,0 +1,15 @@
+//! Regression: identity lambda `x => x` over an UNCONSTRAINED element var
+//! (empty collection) used to bind an infer var to itself in `unify`'s
+//! substitution map (no same-var guard), so `resolve` looped -> stack overflow.
+//! `unify` now no-ops when both sides resolve to the same infer var.
+//! (Minimal stdlib-free analogue of `tests/vec_sort_test.rock`'s empty-vec sort.)
+
+//- identity_lambda_unconstrained_elem
+fn mk<T>() -> [T] { [] }
+fn use_key<T, K>(xs: [T], key: fn(T) -> K) -> int { 0 }
+fn f() -> int {
+    let xs = mk()
+    let r = use_key(xs, x => x)
+      //^ int
+    r
+}

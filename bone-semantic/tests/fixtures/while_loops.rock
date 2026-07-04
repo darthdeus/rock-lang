@@ -1,0 +1,23 @@
+//! @no_check
+//! While loops: `while cond { body }`. The condition must be `bool`; the body is
+//! checked; the `while` is a statement (unit).
+
+//- while_basic
+fn f() -> int {
+    let i = 0
+    while i < 10 {
+        let x = i
+          //^ int
+    }
+    5
+}
+
+// the condition must be bool.
+//- while_cond_not_bool @fail
+fn f() -> int {
+    while 5 {
+        let x = 1
+          //^ int
+    }
+    5
+}

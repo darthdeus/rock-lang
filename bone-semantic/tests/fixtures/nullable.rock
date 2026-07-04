@@ -1,0 +1,104 @@
+//! @no_check
+//! Nullable types: `T?`. A dedicated `TypeExpr::Nullable { inner }` wrapper
+//! (NOT a flag, NOT `App(Nullable)`). Slices, simplest first:
+//!   1. annotation lowering + render (`let x: int? = ...` -> `int?`)
+//!   2. widening: a non-null value unifies into a nullable slot (`int` -> `int?`)
+//!   3. `null` literal + widening into any nullable; rejected by a non-null slot
+//!   4. `??` null-coalesce unwraps the nullable to its inner type
+//!   5. narrowing: `if x != null { x }` sees `x` as the inner (non-null) type
+//! Marker sits on the binding / expression whose type is under test.
+
+// --- slice 1: annotation lowering + render ---------------------------------
+
+//- nullable_annotation
+fn f() -> int {
+    let x: int? = 5
+      //^ int?
+    5
+}
+
+// --- slice 2: widening a non-null value into a nullable slot ----------------
+
+// `5` is `int`; the declared slot is `int?`; the value widens to fit.
+//- nullable_widen_value
+fn f() -> int {
+    let x: int? = 5
+    let y: int? = x
+      //^ int?
+    5
+}
+
+// --- slice 3: the `null` literal -------------------------------------------
+
+//- nullable_null_value
+fn f() -> int {
+    let x: int? = null
+      //^ int?
+    5
+}
+
+// `null` must NOT satisfy a non-nullable slot.
+//- nullable_null_to_int @fail
+fn f() -> int {
+    let x: int = null
+      //^ int
+    5
+}
+
+// --- slice 4: `??` null-coalesce -------------------------------------------
+
+// `x ?? 0` unwraps `int?` to `int`.
+//- null_coalesce
+fn f() -> int {
+    let x: int? = null
+    let y = x ?? 0
+      //^ int
+    5
+}
+
+// default's type must match the inner type.
+//- null_coalesce_type_mismatch @fail
+fn f() -> int {
+    let x: int? = null
+    let y = x ?? "hi"
+      //^ int
+    5
+}
+
+// --- slice 5: narrowing via null check -------------------------------------
+
+// inside the `!= null` branch, `x` is the inner non-null type.
+//- nullable_narrowing
+fn f(x: int?) -> int {
+    if x != null {
+        x
+      //^ int
+    } else {
+        0
+    }
+}
+
+// `== null` narrows the ELSE branch instead.
+//- nullable_narrowing_eq_else
+fn f(x: int?) -> int {
+    if x == null {
+        0
+    } else {
+        x
+      //^ int
+    }
+}
+
+// the overlay is block-scoped: after the branch closes, `x` is `int?` again.
+//- nullable_narrowing_restored
+fn f(x: int?) -> int {
+    if x != null {
+        let a = x
+          //^ int
+    }
+    // no annotation here: `b` takes `x`'s type verbatim, so this fails if the
+    // overlay leaked `int` past the branch.
+    let b = x
+      //^ int?
+    0
+}

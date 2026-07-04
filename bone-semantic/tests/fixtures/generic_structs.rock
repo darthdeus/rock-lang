@@ -1,0 +1,48 @@
+//! @no_check
+//! Generic structs + App type application. `struct Box<T> { value: T }` stores a
+//! generic param; `Box<int>` is an App instantiation; field access substitutes
+//! the type argument (`b.value` on `Box<int>` is `int`, on `Box<string>` is
+//! `string` -- the second case guards against ignoring the arg).
+
+//- generic_struct_field_int
+struct Box<T> { value: T }
+fn f(b: Box<int>) -> int {
+    let v = b.value
+      //^ int
+    5
+}
+
+//- generic_struct_field_string
+struct Box<T> { value: T }
+fn f(b: Box<string>) -> string {
+    let v = b.value
+      //^ string
+    "hi"
+}
+
+// the type argument flows through the struct's type identity too.
+//- generic_struct_type_renders
+struct Box<T> { value: T }
+fn f(b: Box<int>) -> int {
+   //^ Box<int>
+    5
+}
+
+// constructing a generic struct: the type arg is inferred from the field value
+// (requires the literal to substitute the struct's generics, not unify against `T`).
+//- generic_struct_literal_int
+struct Box<T> { value: T }
+fn f() -> int {
+    let b = Box { value: 5 }
+      //^ Box<int>
+    5
+}
+
+// the inferred arg follows the value type (guards against ignoring it).
+//- generic_struct_literal_string
+struct Box<T> { value: T }
+fn f() -> int {
+    let b = Box { value: "hi" }
+      //^ Box<string>
+    5
+}

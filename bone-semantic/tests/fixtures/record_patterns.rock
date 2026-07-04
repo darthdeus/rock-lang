@@ -1,0 +1,51 @@
+//! Struct record patterns in `match`: `Point { x, y }`, explicit `{ x: a }`,
+//! rest `{ x, .. }`, and nested. bone's lower rejects `PatternKind::Record`.
+//! Each field's sub-pattern is checked against that field's type (via
+//! struct_field_ty); `rest` allows omitting fields. Bodies avoid operators
+//! (no stdlib in the fixture harness). Verified vs rock. Enum-record-variant
+//! patterns (`Color::Red { r }`) are a separate slice.
+
+// shorthand: `{ x, y }` binds locals x and y.
+//- struct_record_shorthand
+struct Point { x: int, y: int }
+fn f(p: Point) -> int {
+    let r = match p {
+        Point { x, y } => x,
+    }
+      //^ int
+    r
+}
+
+// explicit binding: `{ x: a }` binds field x to local a.
+//- struct_record_explicit
+struct Point { x: int, y: int }
+fn f(p: Point) -> int {
+    let r = match p {
+        Point { x: a, y: b } => a,
+    }
+      //^ int
+    r
+}
+
+// rest: `{ x, .. }` ignores remaining fields.
+//- struct_record_rest
+struct Point { x: int, y: int }
+fn f(p: Point) -> int {
+    let r = match p {
+        Point { x, .. } => x,
+    }
+      //^ int
+    r
+}
+
+// nested record: the sub-pattern is itself a record.
+//- struct_record_nested
+struct Point { x: int, y: int }
+struct Wrapper { inner: Point, tag: int }
+fn f(w: Wrapper) -> int {
+    let r = match w {
+        Wrapper { inner: Point { x, y }, tag } => x,
+    }
+      //^ int
+    r
+}

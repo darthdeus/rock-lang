@@ -1,0 +1,87 @@
+//! Method-call resolution when a fn-typed FIELD and a free fn share a name.
+//! rock's rules (verified against the rock backend):
+//!   - method syntax `s.f()`: the receiver's fn-typed field wins; free fns
+//!     (UFCS) are only the fallback when no such field exists.
+//!   - free syntax `f(s)`: free fns ONLY — the field is never considered
+//!     ("Function f not found" when only the field exists).
+//! bone lowers both syntaxes to the same `Callee::Unresolved` (lower.rs
+//! ExprKind::FieldAccess arm vs Ident arm) and only probes the receiver
+//! field when `resolve_callee` finds NO free candidates (inference.rs
+//! resolve_named_call). Three divergences fall out:
+//!   - free fn with non-matching param type rejects the field call
+//!     (bitgun/tile_editor.rock:105, `t.sprite()` vs stone's free `sprite`)
+//!   - a type-compatible free fn silently STEALS the method call from the
+//!     field (type-checks, wrong callee at runtime)
+//!   - `f(s)` free syntax resolves to the field (rock rejects)
+//! Fix: tag method-syntax calls in lowering, probe the receiver field FIRST
+//! for those, and only for those. Field calls must stay unrecorded in
+//! resolved_overload_calls — skull's field-call recovery keys off that
+//! (skull/src/lower.rs `struct_field_is_fn` path).
+
+//- field_call_with_nonmatching_free_fn
+struct Other { x: int }
+fn sprite(o: Other) -> int { o.x }
+struct TileDef { sprite: fn() -> int }
+fn f() -> int {
+    let t = TileDef { sprite: () => 42 }
+    let r = t.sprite()
+      //^ int
+    let o = Other { x: 7 }
+    let q = o.sprite()
+      //^ int
+    let last = q
+    r
+}
+
+//- field_beats_matching_free_fn
+struct S { f: fn() -> string }
+fn f(s: S) -> int { 100 }
+fn g() -> string {
+    let s = S { f: () => "field" }
+    let r = s.f()
+      //^ string
+    r
+}
+
+//- free_syntax_does_not_see_field @fail
+struct S { f: fn() -> int }
+fn g() -> int {
+    let s = S { f: () => 42 }
+    f(s)
+}
+
+// Safe-nav calls `x?.f()` are method syntax on the nullable-peeled
+// receiver and follow the SAME priority as `x.f()`: fn-typed field first,
+// UFCS free fns as the fallback; the result is nullable-wrapped.
+// INTENDED divergence from rock: rock never probes the field through `?.`
+// ("Function f not found" on field-only, free fn wins even with the field
+// present, verified 2026-06-10). rock's behavior is its limitation, not
+// the language rule -- bone is the successor.
+//- safenav_field_call
+struct S { f: fn() -> int }
+fn g() -> int {
+    let s: S? = S { f: () => 42 }
+    let r = s?.f()
+      //^ int?
+    1
+}
+
+//- safenav_field_beats_matching_free_fn
+struct S { f: fn() -> string }
+fn f(s: S) -> int { 100 }
+fn g() -> int {
+    let s: S? = S { f: () => "field" }
+    let r = s?.f()
+      //^ string?
+    1
+}
+
+//- safenav_ufcs_without_field
+struct T { x: int }
+fn h(t: T) -> int { t.x }
+fn g() -> int {
+    let t: T? = T { x: 7 }
+    let r = t?.h()
+      //^ int?
+    1
+}

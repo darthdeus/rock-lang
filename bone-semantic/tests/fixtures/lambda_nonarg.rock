@@ -1,0 +1,46 @@
+//! Lambda params with no annotation AND no expected-type slot (non-arg
+//! position, e.g. `let f = x => ...`) get a fresh inference var rather than a
+//! hard error. The var is constrained monomorphically by the body and by every
+//! application site, and is left free (no error) if nothing constrains it.
+//! Verified against real rock: `x => x * 2` => `fn(int) -> int`, identity applied
+//! at int => `fn(int) -> int`, fully-unconstrained `x => x` is accepted, applying
+//! one binding at two types is a unify error.
+
+// body usage constrains the param: passing it to `take` forces Box
+// (no stdlib in the fixture harness, so avoid operator-driven constraints)
+//- lambda_body_constrains_param
+struct Box { value: int }
+fn take(b: Box) -> int { b.value }
+fn f() -> int {
+    let g = x => take(x)
+      //^ fn(Box) -> int
+    5
+}
+
+// the application site constrains an otherwise-free param
+//- lambda_application_constrains_param
+fn f() -> int {
+    let g = x => x
+    let r = g(3)
+      //^ int
+    5
+}
+
+// a fully-unconstrained param is accepted, not rejected (real rock leaves it a
+// free var); bone renders the unsolved param/ret var
+//- lambda_fully_unconstrained
+fn f() -> int {
+    let g = x => x
+      //^ fn(?R) -> ?R
+    5
+}
+
+// applying the same binding at two incompatible types is a unify error
+// (the param is one monomorphic var, not let-polymorphic)
+//- lambda_param_monomorphic_fail @fail
+fn f() -> int {
+    let g = x => x
+    let a = g(3)
+    let b = g("hi")
+    5
+}

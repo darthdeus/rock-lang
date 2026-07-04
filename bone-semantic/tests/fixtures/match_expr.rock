@@ -1,0 +1,54 @@
+//! @no_check
+//! `match` (enum E3). Scoped first cut: wildcard `_`, ident binding, and enum
+//! variant patterns (unit + tuple payload binding). All arm bodies unify to the
+//! result type; payload sub-patterns bind to the (substituted) variant fields.
+//! Deferred: tuple/record/range patterns, guards, exhaustiveness.
+
+// unit variants + wildcard.
+//- match_unit
+enum Color { Red, Green, Blue }
+fn f(c: Color) -> int {
+    let r = match c {
+        Color::Red => 1,
+        Color::Green => 2,
+        _ => 3,
+    }
+      //^ int
+    r
+}
+
+// tuple-payload variant binds its field in the arm body.
+//- match_payload_binding
+enum Shape { Circle(int), Dot }
+fn f(s: Shape) -> int {
+    let r = match s {
+        Shape::Circle(radius) => radius,
+        Shape::Dot => 0,
+    }
+      //^ int
+    r
+}
+
+// generic enum: the payload binding picks up the instantiated type arg.
+//- match_generic
+enum Opt<T> { Some(T), None }
+fn f(o: Opt<int>) -> int {
+    let r = match o {
+        Opt::Some(x) => x,
+        Opt::None => 0,
+    }
+      //^ int
+    r
+}
+
+// arms whose bodies disagree are rejected.
+//- match_arm_mismatch @fail
+enum Color { Red, Green, Blue }
+fn f(c: Color) -> int {
+    let r = match c {
+        Color::Red => 1,
+        _ => "no",
+    }
+      //^ int
+    r
+}

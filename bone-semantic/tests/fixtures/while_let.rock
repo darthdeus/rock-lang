@@ -1,0 +1,48 @@
+//! while-let: `while let x = opt { body }` loops while `opt` is non-null,
+//! binding x to the unwrapped (non-null) type in the body. With an enum
+//! pattern `while let E::V(n) = e`, binds the variant payload. The whole
+//! `while let` is a statement (unit); the body is checked. Mirrors if-let
+//! minus the else / value-expr form (verified vs rock:
+//! tests/while_let_tests.rock).
+
+//- while_let_nullable_binding
+fn f(o: int?) -> int {
+    while let x = o {
+        let y = x
+          //^ int
+    }
+    5
+}
+
+// the bound name is the NON-NULL type, usable where the unwrapped type is
+// required.
+//- while_let_unwrapped_usable
+fn f(o: int?) -> int {
+    while let x = o {
+        let y: int = x
+          //^ int
+    }
+    5
+}
+
+// enum-pattern form: binds the variant payload in the body.
+//- while_let_enum_pattern
+enum Opt { None, Some(int) }
+fn f(c: Opt) -> int {
+    while let Opt::Some(n) = c {
+        let y = n
+          //^ int
+    }
+    5
+}
+
+// generic enum: the payload binding picks up the instantiated type arg.
+//- while_let_generic_enum
+enum Maybe<T> { Just(T), Nothing }
+fn f(m: Maybe<int>) -> int {
+    while let Maybe::Just(v) = m {
+        let y = v
+          //^ int
+    }
+    5
+}

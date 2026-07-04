@@ -1,0 +1,27 @@
+//! @no_check
+//! Top-level statements (module globals): `global NAME: T = value` at module scope.
+//! Globals are always annotated, so the global's type IS its annotation; function
+//! bodies resolve it as a value of that type. The value is checked against the
+//! annotation.
+
+//- global_int
+global MAX: int = 100
+fn f() -> int {
+    MAX
+  //^ int
+}
+
+//- global_float
+global RATIO: float = 1.5
+fn f() -> float {
+    RATIO
+  //^ float
+}
+
+// the value must match the annotation.
+//- global_value_mismatch @fail
+global BAD: int = "hi"
+fn f() -> int {
+    5
+  //^ int
+}

@@ -1,0 +1,1194 @@
+//! `rock sim <project> <name>` — runner for Rock-native `@sim`
+//! coroutines. See `docs/rock-as-sim-plan.md` for design history.
+//!
+//! Orchestrates: compile project + spawn the game with
+//! `ROCK_RUN_SIM=<name>` set, demux `__SIM__`-prefixed JSON lines from
+//! stderr, pretty-print pass/fail, return non-zero on any expect_fail.
+//!
+//! Side-channel format: stderr lines with the literal prefix
+//! `__SIM__ {json}\n`, where each JSON object has `op: string` and
+//! op-specific fields. See `stone/engine/sim.rock`.
+
+use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
+use colored::Colorize;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tempfile::TempDir;
+
+/// Frame budget. Sims terminate naturally via the runner's `sim_done`
+/// check; this is the upper bound for runaway / hung body.
+const DEFAULT_FRAME_BUDGET: usize = 600;
+/// Wall-clock timeout. Belt-and-suspenders alongside FRAME_COUNT for
+/// sims that wedge the game without hitting frame budget.
+const TIMEOUT_SECS: u64 = 30;
+
+/// Split a `--sim` value on `,` into chain parts. Empty parts dropped,
+/// whitespace trimmed. Single source of truth for the multi-start
+/// chain syntax — used by `do_run_sim_opts` and `rock stone`'s sim
+/// resolver.
+pub fn parse_sim_chain(name: &str) -> Vec<&str> {
+    name.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+}
+
+/// Compile `project` into `output_path` and walk the `@sim` registry
+/// once, returning the registry-ordered wire names alongside each sim's
+/// `@sim_env` pairs. Single source of suite discovery for the list,
+/// single-run, and run-all paths so they can't drift in which sims they
+/// see. Does not validate the project dir or build engine libs — callers
+/// own that (listing needs neither).
+fn compile_sims(
+    backend: crate::Backend,
+    project_path: PathBuf,
+    output_path: PathBuf,
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
+    // Only skull serves sims now (bone has no codegen, rock is gone): build the
+    // bone workspace once, emit the game-shaped main.lua with its `@sim`
+    // registry, and collect the wire/env list from the same build.
+    match backend {
+        crate::Backend::Skull => {
+            let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
+            crate::skull_backend::skull_compile_game_and_collect_sims(
+                &project_path.to_string_lossy(),
+                &main_path,
+            )
+        }
+        other => panic!(
+            "compile_sims reached non-skull backend {:?}; only skull serves sims",
+            other.name()
+        ),
+    }
+}
+
+/// Compile the project and print each `@sim` wire name on stdout, one
+/// per line, sorted by source span. Lets `just anvil-sim` enumerate
+/// the suite without hardcoding names.
+pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
+    rock_host::project::ensure_workspace_root()?;
+
+    let project_path = PathBuf::from(project);
+    if !project_path.is_dir() {
+        return Err(anyhow!("sim --list expects a project directory, got: {project}"));
+    }
+
+    let (wire_names, _) = compile_sims(backend, project_path, PathBuf::from("tmp"))?;
+    for name in wire_names {
+        // Result output, NOT logging: `--list` exists to print the sim
+        // names to stdout — this is the command's answer, consumed by
+        // callers/CI, not a diagnostic.
+        println!("{}", name);
+    }
+    Ok(())
+}
+
+pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, quiet: bool, update_snapshots: bool) -> Result<()> {
+    rock_host::project::ensure_workspace_root()?;
+
+    rock_host::engine_build::build_engine_libs(project)?;
+
+    let project_path = PathBuf::from(project);
+    if !project_path.is_dir() {
+        return Err(anyhow!(
+            "sim expects a project directory, got: {project}"
+        ));
+    }
+
+    let output = "tmp".to_string();
+    let output_path = PathBuf::from(&output);
+
+    // Compile once and collect `@sim_env("K", "V")` env pairs by wire name.
+    // The runner applies them via `Command::env` before luajit spawns --
+    // the in-process runtime `set_env()` runs after `@init`, so it can't
+    // influence env-var-driven game config like `ANVIL_VIDEO`.
+    let (_, env_by_wire) = compile_sims(backend, project_path, output_path)?;
+
+    // Per-run tempdir, exposed to the spawned process as the `OUT` env
+    // var. Multi-start sims (`a,b`) share the same dir, so a fixture
+    // saved by part 1 is readable by part 2. Cleaned up when this
+    // function returns; on test failure the path is logged so the
+    // user can re-run with `keep_temp` for postmortem.
+    let tempdir = TempDir::new().context("creating sim tempdir")?;
+    let out_path = tempdir.path().to_path_buf();
+
+    // Comma-separated names = chained multi-start. Each name is
+    // executed as a fresh luajit child process; the runner aggregates
+    // expects/snapshots/video-assertions across all parts into one
+    // pass/fail decision. Single-name (no commas) is the common case.
+    let parts = parse_sim_chain(sim_name);
+    if parts.is_empty() {
+        return Err(anyhow!("sim got an empty sim name"));
+    }
+
+    let mut combined = SimSummary::default();
+    let display_name = if parts.len() == 1 {
+        parts[0].to_string()
+    } else {
+        sim_name.to_string()
+    };
+
+    for part in &parts {
+        let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
+        let part_summary = run_one_sim(
+            project,
+            part,
+            quiet,
+            update_snapshots,
+            &out_path,
+            &output,
+            &env_pairs,
+        )?;
+        combined.merge(part_summary);
+    }
+
+    // Post-process video assertions (need ffprobe / ffmpeg subprocesses).
+    // Done after all parts run so multi-start sims (like
+    // session_env_resume + part2) can run their video assertions in
+    // either part transparently.
+    process_video_assertions(&mut combined);
+
+    // Deferred cleanup. Runs after assertions so sims using
+    // `cleanup_path` can both verify a file's metadata and tidy up
+    // afterward without racing post-process ffprobe calls.
+    for p in std::mem::take(&mut combined.cleanup_paths) {
+        let _ = std::fs::remove_file(&p);
+    }
+
+    let summary = combined;
+    let sim_name = display_name.as_str();
+
+    if !quiet {
+        summary.print(sim_name);
+    }
+
+    if summary.timed_out {
+        return Err(anyhow!(
+            "sim `{sim_name}` timed out after {TIMEOUT_SECS}s (frame budget {DEFAULT_FRAME_BUDGET})"
+        ));
+    }
+    if let Some(code) = summary.process_failure_code {
+        return Err(anyhow!(
+            "sim `{sim_name}` process exited with non-zero status: {code:?}"
+        ));
+    }
+    // Tempdir is dropped here; explicit drop documents intent.
+    drop(tempdir);
+    if summary.has_failures() {
+        // Caller decides exit code. The standalone `rock sim` CLI maps
+        // this to a non-zero process exit in `dispatcher.rs`; the
+        // `rock stone --sim` watcher path logs and keeps running so the
+        // user can fix and recompile.
+        let fails = summary.expects_fail.len();
+        let errs = summary.errors.len();
+        return Err(anyhow!(
+            "sim `{sim_name}` had {fails} expect failure(s), {errs} error(s)"
+        ));
+    }
+    // A sim that never reached stop_sim() ran incompletely -- a coroutine
+    // abort / swallowed runtime error mid-body. That is a failure even
+    // when no expect explicitly failed; otherwise an aborted sim exits 0
+    // and silently "passes" (every real sim ends in stop_sim()).
+    if !summary.saw_stop {
+        return Err(anyhow!(
+            "sim `{sim_name}` aborted before stop_sim() -- incomplete run (likely a swallowed runtime error)"
+        ));
+    }
+    Ok(())
+}
+
+/// Run every `@sim` in `project` (the no-name form `rock sim <project>`).
+/// Compiles once, then spawns each sim as its own luajit child with a
+/// fresh tempdir, prints each sim's pass/fail line, and a final suite
+/// tally. Returns Err (non-zero exit) if any sim failed. Distinct sims
+/// don't chain, so each gets its own `OUT`; use the comma form for
+/// multi-start chains.
+pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, update_snapshots: bool) -> Result<()> {
+    rock_host::project::ensure_workspace_root()?;
+
+    rock_host::engine_build::build_engine_libs(project)?;
+
+    let project_path = PathBuf::from(project);
+    if !project_path.is_dir() {
+        return Err(anyhow!("sim expects a project directory, got: {project}"));
+    }
+
+    let output = "tmp".to_string();
+    let (wire_names, env_by_wire) =
+        compile_sims(backend, project_path, PathBuf::from(&output))?;
+    if wire_names.is_empty() {
+        return Err(anyhow!("no @sim coroutines found in project `{project}`"));
+    }
+
+    let mut passed = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for name in &wire_names {
+        // Fresh tempdir per sim -- distinct sims don't share OUT the way
+        // a comma-chain's parts do.
+        let tempdir = TempDir::new().context("creating sim tempdir")?;
+        let out_path = tempdir.path().to_path_buf();
+        let env_pairs = env_by_wire.get(name).cloned().unwrap_or_default();
+
+        let mut summary = run_one_sim(
+            project,
+            name,
+            quiet,
+            update_snapshots,
+            &out_path,
+            &output,
+            &env_pairs,
+        )?;
+        process_video_assertions(&mut summary);
+        for p in std::mem::take(&mut summary.cleanup_paths) {
+            let _ = std::fs::remove_file(&p);
+        }
+
+        if !quiet {
+            summary.print(name);
+        }
+
+        let ok = !summary.timed_out
+            && summary.process_failure_code.is_none()
+            && summary.saw_stop  // aborted-before-stop_sim == incomplete == fail
+            && !summary.has_failures();
+        if ok {
+            passed += 1;
+        } else {
+            failed.push(name.clone());
+        }
+        drop(tempdir);
+    }
+
+    // Result output, NOT logging: the suite verdict is this command's
+    // answer, consumed by the user / CI.
+    let suffix = if failed.is_empty() {
+        String::new()
+    } else {
+        format!(" -- FAILED: {}", failed.join(", "))
+    };
+    println!(
+        "[sim] {project} suite: {passed}/{} sims passed{suffix}",
+        wire_names.len()
+    );
+
+    if !failed.is_empty() {
+        return Err(anyhow!(
+            "{} of {} sims failed in `{project}`",
+            failed.len(),
+            wire_names.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Spawn one luajit process for `sim_part` and demux its side channel.
+/// `out_path` is the shared `OUT` env value across all parts in a
+/// multi-start chain.
+fn run_one_sim(
+    project: &str,
+    sim_part: &str,
+    quiet: bool,
+    update_snapshots: bool,
+    out_path: &Path,
+    output: &str,
+    env_pairs: &[(String, String)],
+) -> Result<SimSummary> {
+    let sim_source = find_sim_source(project, sim_part);
+    // Expand `$OUT` in env values to the per-run tempdir absolute path.
+    // Lets sims write `@sim_env("ANVIL_SESSION", "$OUT/resume.json")`
+    // and have it resolve before luajit spawns. Runtime `set_env()`
+    // runs after `@init` so it can't influence env-var-driven config.
+    let out_str = out_path.to_string_lossy().to_string();
+    let preset_env: Vec<(String, String)> = env_pairs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.replace("$OUT", &out_str)))
+        .collect();
+
+    let lua_file = std::path::PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
+    let mut cmd = rock_host::project::build_luajit_command(&lua_file, &[]);
+    cmd.env("ROCK_RUN_SIM", sim_part)
+        .env("FRAME_COUNT", DEFAULT_FRAME_BUDGET.to_string())
+        .env("STONE_HEADLESS", "1")
+        .env("OUT", out_path)
+        // Default deterministic seed for sims. An explicit
+        // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
+        // because `preset_env` is layered after this baseline.
+        .env("ROCK_TEST_SEED", "42")
+        .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .env("FPS_LOG", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+    let stderr_handle = child.stderr.take().expect("piped");
+    let stdout_handle = child.stdout.take().expect("piped");
+
+    // Streaming reader: print `__SIM__` ops as colored progress lines as
+    // they arrive, capture all lines into a shared buffer for the
+    // post-run `from_stderr` parse. Non-`__SIM__` lines (game logs)
+    // pass through to the parent stderr verbatim. The old DSL printed
+    // progress live; without streaming, batched output appears only
+    // after the child exits which is useless feedback for a 30s sim.
+    let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let stderr_thread = {
+        let lines = Arc::clone(&stderr_lines);
+        let quiet = quiet;
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr_handle);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if let Some(rest) = line.strip_prefix("__SIM__ ") {
+                    if !quiet {
+                        print_progress(rest);
+                    }
+                } else {
+                    // Result output, NOT logging: verbatim passthrough of
+                    // the child game's own stderr (non-`__SIM__` lines) —
+                    // the game's output stream, not run_sim's diagnostics.
+                    eprintln!("{line}");
+                }
+                lines.lock().unwrap().push(line);
+            }
+        })
+    };
+
+    let stdout_thread = {
+        let buf = Arc::clone(&stdout_buf);
+        let label = sim_part.to_string();
+        std::thread::spawn(move || {
+            let mut h = stdout_handle;
+            let mut local = Vec::new();
+            // Surface read failures: a silent `let _ = ...` would hand
+            // an empty buffer back to the post-run "game stdout for ..."
+            // dump on failure, hiding any partial output we did get
+            // (silent-errors audit, 2026-05-02).
+            if let Err(e) = h.read_to_end(&mut local) {
+                log::warn!(target: "SIM",
+                    "rock sim `{label}`: error reading game stdout: {e}");
+            }
+            *buf.lock().unwrap() = local;
+        })
+    };
+
+    let timeout = Duration::from_secs(TIMEOUT_SECS);
+    let start_time = std::time::Instant::now();
+    let (status, timed_out) = loop {
+        match child.try_wait()? {
+            Some(s) => break (s, false),
+            None => {
+                if start_time.elapsed() > timeout {
+                    let _ = child.kill();
+                    let s = child.wait()?;
+                    break (s, true);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    };
+
+    // Surface reader-thread panics: a silent JoinError here meant a panic
+    // in the BufReader/Read loop would discard all sim output (the
+    // __SIM__ side channel + raw game stderr) with no diagnostic, leaving
+    // the user with a "0/0 expects passed" PASS line and no clue why
+    // (silent-errors audit, 2026-05-02).
+    if let Err(panic) = stderr_thread.join() {
+        log::warn!(target: "SIM",
+            "rock sim `{sim_part}`: stderr reader thread panicked; sim output may be incomplete: {panic:?}"
+        );
+    }
+    if let Err(panic) = stdout_thread.join() {
+        log::warn!(target: "SIM",
+            "rock sim `{sim_part}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
+        );
+    }
+
+    let stderr_str = stderr_lines.lock().unwrap().join("\n");
+    let stdout_buf_locked = stdout_buf.lock().unwrap();
+    let stdout_str = String::from_utf8_lossy(&stdout_buf_locked).to_string();
+    drop(stdout_buf_locked);
+
+    let mut summary = SimSummary::from_stderr(&stderr_str);
+    summary.timed_out = timed_out;
+    if !status.success() {
+        summary.process_failure_code = Some(status.code().unwrap_or(-1));
+    }
+
+    let snap_dir = sim_source.as_deref().map(snap_dir_for);
+    if let Some(dir) = snap_dir.as_ref() {
+        process_snapshots(&mut summary, dir, update_snapshots);
+    } else if !summary.snapshots.is_empty() || !summary.image_snapshots.is_empty() {
+        summary.errors.push(SiteMessage {
+            message: format!(
+                "could not locate .rock source for sim `{sim_part}` -- snapshot ops cannot resolve baseline dir"
+            ),
+            site: String::new(),
+        });
+    }
+
+    if !quiet && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some()) {
+        if !stdout_str.trim().is_empty() {
+            log::error!(target: "SIM", "--- game stdout for `{sim_part}` ---");
+            // Result output, NOT logging: verbatim dump of the child
+            // game's captured stdout on failure — structured child
+            // output, not a run_sim log record.
+            eprint!("{stdout_str}");
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Compress a `@call_site` path to `<stem>:<line>` for display — the
+/// directory is noise and every sim file ends in `.rock`. Drops the
+/// workspace prefix implicitly by taking only the basename.
+fn compress_site(path: &str) -> String {
+    let (file_part, line_part) = match path.rsplit_once(':') {
+        Some((f, l)) => (f, Some(l)),
+        None => (path, None),
+    };
+    let basename = file_part.rsplit('/').next().unwrap_or(file_part);
+    let stem = basename.strip_suffix(".rock").unwrap_or(basename);
+    match line_part {
+        Some(l) => format!("{stem}:{l}"),
+        None => stem.to_string(),
+    }
+}
+
+/// Render one `__SIM__` op as a colored progress line, mirroring the
+/// `[file:line] op args` shape of the legacy `.sim` runner so muscle
+/// memory carries over. Unknown ops are silently dropped — this is
+/// progress display, not a parser. Heavy fields (snapshot value,
+/// image_snapshot path) are summarized rather than dumped.
+fn print_progress(rest: &str) {
+    let op = extract_str_field(rest, "op").unwrap_or_default();
+    let site_raw = extract_str_field(rest, "site").unwrap_or_default();
+    let site = compress_site(&site_raw);
+    let prefix = if site.is_empty() {
+        String::new()
+    } else {
+        format!("[{}] ", site).bright_black().to_string()
+    };
+    let body = match op.as_str() {
+        "start_game" => {
+            let n = extract_str_field(rest, "name").unwrap_or_default();
+            format!("{} {}", "start".cyan(), n.yellow())
+        }
+        "set_env" => {
+            let k = extract_str_field(rest, "key").unwrap_or_default();
+            let v = extract_str_field(rest, "value").unwrap_or_default();
+            format!("{} {}={}", "env".cyan(), k.yellow(), v)
+        }
+        "key" => {
+            let n = extract_str_field(rest, "name").unwrap_or_default();
+            format!("{} {}", "key".cyan(), n.yellow())
+        }
+        "click" => {
+            let x = extract_raw_field(rest, "x").unwrap_or_default();
+            let y = extract_raw_field(rest, "y").unwrap_or_default();
+            format!("{} {} {}", "click".cyan(), x, y)
+        }
+        "custom" => {
+            let n = extract_str_field(rest, "name").unwrap_or_default();
+            let a = extract_raw_field(rest, "args").unwrap_or_default();
+            format!("{} {} {}", "custom".cyan(), n.bright_cyan(), a)
+        }
+        "expect_ok" => {
+            let m = extract_str_field(rest, "message").unwrap_or_default();
+            format!("{} {}  {}", "expect".cyan(), m, "OK".green().bold())
+        }
+        "expect_fail" => {
+            let m = extract_str_field(rest, "message").unwrap_or_default();
+            let head = format!("{} {}  {}", "expect".cyan(), m, "FAIL".red().bold());
+            match (extract_str_field(rest, "actual"), extract_str_field(rest, "expected")) {
+                (Some(a), Some(e)) => format!(
+                    "{head}\n        {} {}\n        {} {}",
+                    "actual:  ".red().bold(),
+                    a.red(),
+                    "expected:".green().bold(),
+                    e.green(),
+                ),
+                _ => head,
+            }
+        }
+        "snapshot" => {
+            let n = extract_str_field(rest, "name").unwrap_or_default();
+            format!("{} {}", "snapshot".cyan(), n.yellow())
+        }
+        "image_snapshot" => {
+            let n = extract_str_field(rest, "name").unwrap_or_default();
+            format!("{} {}", "image_snapshot".cyan(), n.yellow())
+        }
+        "expect_video" => {
+            let p = extract_str_field(rest, "path").unwrap_or_default();
+            let f = extract_str_field(rest, "field").unwrap_or_default();
+            let cmp = extract_str_field(rest, "cmp").unwrap_or_default();
+            let v = extract_raw_field(rest, "value").unwrap_or_default();
+            format!("{} {} {} {} {}", "expect_video".cyan(), p, f, cmp, v)
+        }
+        "expect_videos_match" => {
+            let a = extract_str_field(rest, "a").unwrap_or_default();
+            let b = extract_str_field(rest, "b").unwrap_or_default();
+            format!("{} {} {}", "expect_videos_match".cyan(), a, b)
+        }
+        "cleanup_path" => {
+            let p = extract_str_field(rest, "path").unwrap_or_default();
+            format!("{} {}", "cleanup_path".cyan(), p)
+        }
+        "log" => {
+            let m = extract_str_field(rest, "message").unwrap_or_default();
+            format!("{} {}", "log".cyan(), m)
+        }
+        "error" => {
+            let m = extract_str_field(rest, "message").unwrap_or_default();
+            format!("{} {}", "error:".red().bold(), m)
+        }
+        "stop" => "stop".cyan().to_string(),
+        _ => return,
+    };
+    // Carve-out (logging-architecture.md decision 2): the live
+    // `[file:line] op args` progress/expect stream is the sim's
+    // result surface (PASS/FAIL/expect lines consumed by you/CI),
+    // not a log record — stays a direct, colored stderr write.
+    eprintln!("{prefix}{body}");
+}
+
+/// Whether `src` declares an `@sim` coroutine named `sim_name`.
+/// Matches the current decl shape `co fn <sim_name>(`.
+fn src_declares_sim(src: &str, sim_name: &str) -> bool {
+    let needle = format!("co fn {sim_name}(");
+    src.contains(&needle)
+}
+
+/// Locate the .rock file containing the `@sim` decl for `sim_name` by
+/// scanning `<project>/tests/sims/*.rock`.
+fn find_sim_source(project: &str, sim_name: &str) -> Option<PathBuf> {
+    let sims_dir = PathBuf::from(project).join("tests").join("sims");
+    let entries = std::fs::read_dir(&sims_dir).ok()?;
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rock") {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if src_declares_sim(&src, sim_name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// `foo/bar/baz.rock` -> `foo/bar/baz.snap`. Carries over the .sim
+/// runner's baseline layout (`<sim_source>.snap/<name>.{json,png}`)
+/// across the migration.
+fn snap_dir_for(source: &Path) -> PathBuf {
+    let stem = source.file_stem().unwrap_or_default();
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let mut name = stem.to_os_string();
+    name.push(".snap");
+    parent.join(name)
+}
+
+/// Walk collected snapshot ops, write or compare against baselines,
+/// record results back into the summary as expect_ok/expect_fail.
+fn process_snapshots(summary: &mut SimSummary, snap_dir: &Path, update: bool) {
+    // Post-run snapshot resolutions are NOT printed by the live stream
+    // (the stream only announces the op, not its diff result), so we
+    // pass an empty site -- that's the signal `SimSummary::print` uses
+    // to know "synthesized after run; please print." The original site
+    // is folded into the message so the user still sees where it came
+    // from. Fixed 2026-05-11 after the print() guard introduced in
+    // 2c78c5cef accidentally suppressed every snapshot/image_snapshot
+    // diff failure.
+    for snap in std::mem::take(&mut summary.snapshots) {
+        let baseline = snap_dir.join(format!("{}.json", snap.name));
+        let site = snap.site.clone();
+        match handle_json_snapshot(&snap, &baseline, update) {
+            Ok(SnapResult::Pass) => summary.expects_ok += 1,
+            Ok(SnapResult::Wrote) => summary.expects_ok += 1,
+            Ok(SnapResult::Fail(msg)) => summary.expects_fail.push(SiteMessage {
+                message: prefix_with_site(&site, &msg),
+                site: String::new(),
+            }),
+            Err(e) => summary.errors.push(SiteMessage {
+                message: prefix_with_site(&site, &format!("snapshot `{}`: {}", snap.name, e)),
+                site: String::new(),
+            }),
+        }
+    }
+    for img in std::mem::take(&mut summary.image_snapshots) {
+        let site = img.site.clone();
+        if !img.save_ok {
+            summary.errors.push(SiteMessage {
+                message: prefix_with_site(
+                    &site,
+                    &format!(
+                        "image_snapshot `{}`: stone_save_screenshot returned false (engine refused readback)",
+                        img.name
+                    ),
+                ),
+                site: String::new(),
+            });
+            continue;
+        }
+        let baseline = snap_dir.join(format!("{}.png", img.name));
+        match handle_image_snapshot(&img, &baseline, update) {
+            Ok(SnapResult::Pass) | Ok(SnapResult::Wrote) => summary.expects_ok += 1,
+            Ok(SnapResult::Fail(msg)) => summary.expects_fail.push(SiteMessage {
+                message: prefix_with_site(&site, &msg),
+                site: String::new(),
+            }),
+            Err(e) => summary.errors.push(SiteMessage {
+                message: prefix_with_site(&site, &format!("image_snapshot `{}`: {}", img.name, e)),
+                site: String::new(),
+            }),
+        }
+        // Best-effort cleanup of the temp file.
+        let _ = std::fs::remove_file(&img.path);
+    }
+}
+
+fn prefix_with_site(site: &str, msg: &str) -> String {
+    if site.is_empty() {
+        msg.to_string()
+    } else {
+        format!("at {site}: {msg}")
+    }
+}
+
+enum SnapResult {
+    Pass,
+    Wrote,
+    Fail(String),
+}
+
+fn process_video_assertions(summary: &mut SimSummary) {
+    for v in std::mem::take(&mut summary.video_assertions) {
+        match eval_video_assertion(&v) {
+            Ok(true) => summary.expects_ok += 1,
+            Ok(false) => summary.expects_fail.push(SiteMessage {
+                message: format!("expect_video {} {} {} {}", v.path, v.field, v.cmp, v.value_json),
+                site: String::new(),
+            }),
+            Err(e) => summary.errors.push(SiteMessage {
+                message: format!("expect_video `{}` failed: {e}", v.path),
+                site: String::new(),
+            }),
+        }
+    }
+    for m in std::mem::take(&mut summary.video_match_assertions) {
+        match crate::image_video::ffmpeg_ssim(&m.a, &m.b) {
+            Ok(score) if score >= m.min_sim => summary.expects_ok += 1,
+            Ok(score) => summary.expects_fail.push(SiteMessage {
+                message: format!(
+                    "expect_videos_match {} {} similarity>={:.4} (got {:.4})",
+                    m.a, m.b, m.min_sim, score
+                ),
+                site: String::new(),
+            }),
+            Err(e) => summary.errors.push(SiteMessage {
+                message: format!("expect_videos_match `{}` vs `{}`: {e}", m.a, m.b),
+                site: String::new(),
+            }),
+        }
+    }
+}
+
+fn eval_video_assertion(v: &VideoAssertion) -> Result<bool> {
+    let meta = crate::image_video::ffprobe_meta(&v.path)?;
+    let actual = meta
+        .get(&v.field)
+        .ok_or_else(|| anyhow!("ffprobe yielded no `{}` for `{}`", v.field, v.path))?;
+    let expected: serde_json::Value = serde_json::from_str(&v.value_json)
+        .map_err(|e| anyhow!("expect_video value `{}` is not valid JSON: {e}", v.value_json))?;
+
+    // String field: codec. Numeric field: duration, width, height,
+    // nb_frames. cmp is one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `~=`.
+    if let (Some(av), Some(ev)) = (actual.as_str(), expected.as_str()) {
+        return Ok(match v.cmp.as_str() {
+            "==" | "~=" => av == ev,
+            "!=" => av != ev,
+            _ => false,
+        });
+    }
+    let an = actual.as_f64().ok_or_else(|| {
+        anyhow!("ffprobe field `{}` for `{}` is not numeric", v.field, v.path)
+    })?;
+    let en = expected
+        .as_f64()
+        .ok_or_else(|| anyhow!("expect_video value for `{}` is not numeric", v.field))?;
+    Ok(match v.cmp.as_str() {
+        "==" => (an - en).abs() < f64::EPSILON,
+        "!=" => (an - en).abs() >= f64::EPSILON,
+        ">" => an > en,
+        ">=" => an >= en,
+        "<" => an < en,
+        "<=" => an <= en,
+        // 1% relative + 1e-3 absolute floor; mirrors `.sim` runner.
+        "~=" => (an - en).abs() < (0.01 * en.abs()).max(1e-3),
+        _ => false,
+    })
+}
+
+fn handle_json_snapshot(snap: &SnapshotOp, baseline: &Path, update: bool) -> Result<SnapResult> {
+    let actual: serde_json::Value = serde_json::from_str(&snap.value_json)
+        .map_err(|e| anyhow!("emitted value is not valid JSON: {e}; raw={}", snap.value_json))?;
+    let actual_pretty = serde_json::to_string_pretty(&actual)? + "\n";
+
+    if update || !baseline.exists() {
+        if let Some(parent) = baseline.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(baseline, &actual_pretty)?;
+        return Ok(SnapResult::Wrote);
+    }
+
+    let baseline_str = std::fs::read_to_string(baseline)?;
+    let expected: serde_json::Value = serde_json::from_str(&baseline_str)
+        .map_err(|e| anyhow!("baseline `{}` is not valid JSON: {e}", baseline.display()))?;
+    if expected == actual {
+        Ok(SnapResult::Pass)
+    } else {
+        // Write `.actual` next to baseline so the user can diff it.
+        let actual_path = baseline.with_extension("json.actual");
+        std::fs::write(&actual_path, &actual_pretty)?;
+        Ok(SnapResult::Fail(format!(
+            "snapshot `{}` mismatch (wrote {} for diff)",
+            snap.name,
+            actual_path.display()
+        )))
+    }
+}
+
+fn handle_image_snapshot(
+    img: &ImageSnapshotOp,
+    baseline: &Path,
+    update: bool,
+) -> Result<SnapResult> {
+    let produced = Path::new(&img.path);
+    if !produced.exists() {
+        return Err(anyhow!(
+            "produced PNG missing at `{}`; engine save_screenshot did not write the file",
+            produced.display()
+        ));
+    }
+
+    if update || !baseline.exists() {
+        if let Some(parent) = baseline.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(produced, baseline)?;
+        return Ok(SnapResult::Wrote);
+    }
+
+    let diff = crate::image_video::image_diff(baseline, produced)
+        .map_err(|e| anyhow!("image_diff failed: {e}"))?;
+    if diff <= img.tol {
+        Ok(SnapResult::Pass)
+    } else {
+        let actual_path = baseline.with_extension("png.actual");
+        std::fs::copy(produced, &actual_path)?;
+        Ok(SnapResult::Fail(format!(
+            "image_snapshot `{}` diff {:.6} > tol {:.6} (wrote {} for diff)",
+            img.name,
+            diff,
+            img.tol,
+            actual_path.display()
+        )))
+    }
+}
+
+/// A failure or error message paired with the workspace-relative site
+/// (`mag/tests/sims/foo.rock:42`) it originated at, captured via
+/// `@call_site` in the sim runtime helpers. Empty `site` for messages
+/// the runner synthesizes itself (e.g. process failure / timeout).
+struct SiteMessage {
+    message: String,
+    site: String,
+}
+
+#[derive(Default)]
+struct SimSummary {
+    expects_ok: usize,
+    expects_fail: Vec<SiteMessage>,
+    errors: Vec<SiteMessage>,
+    saw_stop: bool,
+    snapshots: Vec<SnapshotOp>,
+    image_snapshots: Vec<ImageSnapshotOp>,
+    video_assertions: Vec<VideoAssertion>,
+    video_match_assertions: Vec<VideoMatchAssertion>,
+    cleanup_paths: Vec<String>,
+    timed_out: bool,
+    process_failure_code: Option<i32>,
+}
+
+impl SimSummary {
+    fn merge(&mut self, other: SimSummary) {
+        self.expects_ok += other.expects_ok;
+        self.expects_fail.extend(other.expects_fail);
+        self.errors.extend(other.errors);
+        // saw_stop reflects the *last* part: if the chain's tail
+        // didn't reach stop_sim, surface it. Earlier parts in a
+        // multi-start chain are expected to stop and respawn.
+        self.saw_stop = other.saw_stop;
+        self.snapshots.extend(other.snapshots);
+        self.image_snapshots.extend(other.image_snapshots);
+        self.video_assertions.extend(other.video_assertions);
+        self.video_match_assertions.extend(other.video_match_assertions);
+        self.cleanup_paths.extend(other.cleanup_paths);
+        self.timed_out = self.timed_out || other.timed_out;
+        if other.process_failure_code.is_some() {
+            self.process_failure_code = other.process_failure_code;
+        }
+    }
+}
+
+struct VideoAssertion {
+    path: String,
+    field: String,
+    cmp: String,
+    /// Numeric for duration/width/height/nb_frames; serialized JSON
+    /// number literal. For codec the side channel sends a JSON-quoted
+    /// string and `cmp` is always "==".
+    value_json: String,
+}
+
+struct VideoMatchAssertion {
+    a: String,
+    b: String,
+    min_sim: f64,
+}
+
+struct SnapshotOp {
+    name: String,
+    value_json: String,
+    site: String,
+}
+
+struct ImageSnapshotOp {
+    name: String,
+    path: String,
+    tol: f64,
+    save_ok: bool,
+    site: String,
+}
+
+impl SimSummary {
+    fn from_stderr(stderr: &str) -> Self {
+        let mut s = Self::default();
+        for line in stderr.lines() {
+            let Some(rest) = line.strip_prefix("__SIM__ ") else {
+                continue;
+            };
+            // The protocol is JSON-shaped but we only need a few fields.
+            // A minimal parser pulls "op" + string-typed peers without
+            // pulling in serde -- the schema is intentionally narrow.
+            let op = extract_str_field(rest, "op").unwrap_or_default();
+            let site_raw = extract_str_field(rest, "site").unwrap_or_default();
+            let site = compress_site(&site_raw);
+            match op.as_str() {
+                "expect_ok" => s.expects_ok += 1,
+                "expect_fail" => {
+                    let message = extract_str_field(rest, "message").unwrap_or_default();
+                    s.expects_fail.push(SiteMessage { message, site });
+                }
+                "error" => {
+                    let message = extract_str_field(rest, "message").unwrap_or_default();
+                    s.errors.push(SiteMessage { message, site });
+                }
+                "stop" => s.saw_stop = true,
+                "snapshot" => {
+                    let name = extract_str_field(rest, "name").unwrap_or_default();
+                    let value_json = extract_raw_field(rest, "value").unwrap_or_else(|| "null".into());
+                    s.snapshots.push(SnapshotOp { name, value_json, site: site.clone() });
+                }
+                "image_snapshot" => {
+                    let name = extract_str_field(rest, "name").unwrap_or_default();
+                    let path = extract_str_field(rest, "path").unwrap_or_default();
+                    let tol = extract_raw_field(rest, "tol")
+                        .and_then(|t| t.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let save_ok = extract_raw_field(rest, "ok").as_deref() == Some("true");
+                    s.image_snapshots.push(ImageSnapshotOp {
+                        name,
+                        path,
+                        tol,
+                        save_ok,
+                        site: site.clone(),
+                    });
+                }
+                "expect_video" => {
+                    let path = extract_str_field(rest, "path").unwrap_or_default();
+                    let field = extract_str_field(rest, "field").unwrap_or_default();
+                    let cmp = extract_str_field(rest, "cmp").unwrap_or_else(|| "==".into());
+                    // Codec is a string field (sent quoted); numeric
+                    // fields come through as raw numbers. Either way
+                    // we capture the raw JSON source for later compare.
+                    let value_json = extract_raw_field(rest, "value").unwrap_or_else(|| "null".into());
+                    s.video_assertions.push(VideoAssertion {
+                        path,
+                        field,
+                        cmp,
+                        value_json,
+                    });
+                }
+                "cleanup_path" => {
+                    if let Some(path) = extract_str_field(rest, "path") {
+                        s.cleanup_paths.push(path);
+                    }
+                }
+                "expect_videos_match" => {
+                    let a = extract_str_field(rest, "a").unwrap_or_default();
+                    let b = extract_str_field(rest, "b").unwrap_or_default();
+                    let min_sim = extract_raw_field(rest, "min")
+                        .and_then(|t| t.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    s.video_match_assertions.push(VideoMatchAssertion { a, b, min_sim });
+                }
+                _ => {} // set_env / start_game / etc. are informational
+            }
+        }
+        s
+    }
+
+    fn has_failures(&self) -> bool {
+        !self.expects_fail.is_empty() || !self.errors.is_empty()
+    }
+
+    fn print(&self, sim_name: &str) {
+        // Per-fail lines: only re-print failures that DIDN'T come through
+        // the live stream. Stream-emitted ops (sim_expect, error from
+        // sim.rock) carry a non-empty site and were already printed by
+        // `print_progress` -- duplicating them here is just noise.
+        // Empty-site failures come from post-run synthesis (snapshot
+        // diff, video assertion, runner errors) and only surface here.
+        // Carve-out (logging-architecture.md decision 2): the
+        // `[sim] error:` / `[sim] FAIL:` / final PASS|FAIL summary
+        // lines are the command's result, consumed by you/CI — they
+        // stay direct stderr writes, not log records.
+        for e in &self.errors {
+            if e.site.is_empty() {
+                eprintln!("[sim] error: {}", e.message);
+            }
+        }
+        for f in &self.expects_fail {
+            if f.site.is_empty() {
+                eprintln!("[sim] FAIL: {}", f.message);
+            }
+        }
+        let total = self.expects_ok + self.expects_fail.len();
+        let status = if self.has_failures() { "FAIL" } else { "PASS" };
+        let stop_note = if !self.saw_stop {
+            " (no stop_sim() observed -- sim may have aborted early)"
+        } else {
+            ""
+        };
+        eprintln!(
+            "[sim] {sim_name}: {status} ({}/{} expects passed){stop_note}",
+            self.expects_ok, total
+        );
+    }
+}
+
+/// Pull a string field out of a JSON object literal without a full
+/// JSON parser. Looks for `"<key>":"<value>"` and returns `<value>`
+/// with `\"` and `\\` unescaped. Returns `None` if not found or on
+/// any escape we don't handle -- callers treat that as "field absent."
+///
+/// Deliberately minimal: the side-channel schema is fixed and emitted
+/// by `sim_emit` in `stone/engine/sim.rock`, which only writes plain
+/// `"<key>":"<value>"` shapes. Rich JSON would warrant pulling in a
+/// real parser; today's needs don't.
+fn extract_str_field(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":\"");
+    let start = json.find(&needle)? + needle.len();
+    let rest = &json[start..];
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => return Some(out),
+            '\\' => match chars.next()? {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                _ => return None,
+            },
+            other => out.push(other),
+        }
+    }
+    None
+}
+
+/// Pull the raw bytes after `"<key>":` from a JSON object literal,
+/// stopping at the matching `}`/`]`/`,` boundary. Used for fields
+/// whose value is not a string (objects, arrays, numbers, bools).
+/// Bracket-balanced; respects nesting and string literals.
+fn extract_raw_field(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let start = json.find(&needle)? + needle.len();
+    let bytes = json.as_bytes();
+    let mut i = start;
+    let mut depth_brace = 0i32;
+    let mut depth_brack = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == b'\\' {
+                esc = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'{' => depth_brace += 1,
+            b'}' => {
+                if depth_brace == 0 {
+                    break;
+                }
+                depth_brace -= 1;
+            }
+            b'[' => depth_brack += 1,
+            b']' => {
+                if depth_brack == 0 {
+                    break;
+                }
+                depth_brack -= 1;
+            }
+            b',' if depth_brace == 0 && depth_brack == 0 => break,
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(json[start..i].trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_str_field_basic() {
+        let json = r#"{"op":"expect_fail","message":"1 segment"}"#;
+        assert_eq!(extract_str_field(json, "op"), Some("expect_fail".into()));
+        assert_eq!(
+            extract_str_field(json, "message"),
+            Some("1 segment".into())
+        );
+        assert_eq!(extract_str_field(json, "missing"), None);
+    }
+
+    #[test]
+    fn extract_str_field_handles_escapes() {
+        let json = r#"{"message":"hello \"world\""}"#;
+        assert_eq!(
+            extract_str_field(json, "message"),
+            Some(r#"hello "world""#.into())
+        );
+    }
+
+    #[test]
+    fn extract_raw_field_object_value() {
+        let line = r#"{"op":"snapshot","name":"x","value":{"a":1,"b":[2,3]}}"#;
+        assert_eq!(
+            extract_raw_field(line, "value"),
+            Some(r#"{"a":1,"b":[2,3]}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn extract_raw_field_number_and_bool() {
+        let line = r#"{"tol":0.001,"ok":true,"path":"/tmp/x"}"#;
+        assert_eq!(extract_raw_field(line, "tol"), Some("0.001".into()));
+        assert_eq!(extract_raw_field(line, "ok"), Some("true".into()));
+    }
+
+    #[test]
+    fn extract_raw_field_handles_quotes_inside_strings() {
+        // The "value" field contains a string with an escaped `}`.
+        // Naive depth tracking would stop early at the string's `}`.
+        let line = r#"{"value":{"msg":"abc}def"},"after":1}"#;
+        assert_eq!(
+            extract_raw_field(line, "value"),
+            Some(r#"{"msg":"abc}def"}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn summary_counts_expects() {
+        let stderr = r#"
+__SIM__ {"op":"start_game","name":"anvil","site":"foo.rock:1"}
+__SIM__ {"op":"expect_ok","message":"a","site":"foo.rock:2"}
+__SIM__ {"op":"expect_ok","message":"b","site":"foo.rock:3"}
+__SIM__ {"op":"expect_fail","message":"c","site":"foo.rock:4"}
+__SIM__ {"op":"stop","site":"foo.rock:5"}
+"#;
+        let s = SimSummary::from_stderr(stderr);
+        assert_eq!(s.expects_ok, 2);
+        assert_eq!(s.expects_fail.len(), 1);
+        assert_eq!(s.expects_fail[0].message, "c");
+        assert_eq!(s.expects_fail[0].site, "foo:4");
+        assert!(s.saw_stop);
+        assert!(s.has_failures());
+    }
+
+    #[test]
+    fn summary_flags_missing_stop() {
+        let stderr = r#"__SIM__ {"op":"expect_ok","message":"a","site":"foo.rock:1"}"#;
+        let s = SimSummary::from_stderr(stderr);
+        assert_eq!(s.expects_ok, 1);
+        assert!(!s.saw_stop);
+        assert!(!s.has_failures());
+    }
+
+    #[test]
+    fn summary_compresses_site_to_stem_and_line() {
+        let stderr = r#"__SIM__ {"op":"expect_fail","message":"x","site":"/work/repo/mag/tests/sims/bandage.rock:29"}"#;
+        let s = SimSummary::from_stderr(stderr);
+        assert_eq!(s.expects_fail[0].site, "bandage:29");
+    }
+
+    #[test]
+    fn src_declares_sim_matches_co_fn_decl() {
+        // Real shape: `co fn smoke() -> Coroutine<CoFrame> { ... }`.
+        // Regression: prior needle `co {name}(` missed every sim.
+        let src = "@sim_render\n@sim\nco fn smoke() -> Coroutine<CoFrame> {\n}\n";
+        assert!(src_declares_sim(src, "smoke"));
+        assert!(!src_declares_sim(src, "other"));
+    }
+
+    #[test]
+    fn prefix_with_site_keeps_origin_in_message() {
+        // Post-run snapshot/image_snapshot failures clear `site` so
+        // `print()`'s "already-streamed" guard prints the line, but the
+        // origin still has to reach the user -- fold it into the
+        // message. Regression for the bug that hid every `diff > tol`
+        // line behind the streamed image_snapshot op announcement.
+        assert_eq!(
+            prefix_with_site("smoke:10", "diff 0.006 > tol 0.001"),
+            "at smoke:10: diff 0.006 > tol 0.001"
+        );
+        assert_eq!(prefix_with_site("", "msg"), "msg");
+    }
+
+    #[test]
+    fn src_declares_sim_does_not_match_substring_or_call_site() {
+        // `co fn smoke_alt(` must not match `smoke`. Plain calls to the
+        // sim name (e.g. `smoke()` from another fn) must not match either.
+        let src = "co fn smoke_alt() -> Coroutine<CoFrame> {\n  smoke()\n}\n";
+        assert!(!src_declares_sim(src, "smoke"));
+        assert!(src_declares_sim(src, "smoke_alt"));
+    }
+}

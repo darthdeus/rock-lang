@@ -1,0 +1,26 @@
+[package]
+name = "skull-codegen-lua"
+version = "0.1.0"
+edition = "2024"
+
+# skull-codegen-lua: the dumb Lua printer over skull-mir's typed cell-model CFG.
+# Goto + labels (luajit has real `goto`), liveness-based local naming later. The
+# printer never dispatches on operand types (the IR is already typed -- D8/P3);
+# it depends on `bone` ONLY to resolve a `Call`'s `FuncRef` to its `Function`
+# (mangling + extern/inline-lua emission shape -- bone-mir-design lines 160-164),
+# never to look up an operand's type. Plan: docs/skull-bone-mir-faithful-plan.md.
+
+[dependencies]
+comfy-la-arena = { workspace = true }
+rustc-hash = { workspace = true }
+skull-mir = { path = "../skull-mir" }
+bone-semantic = { path = "../bone-semantic" }
+ustr = { workspace = true }
+
+[dev-dependencies]
+ustr = { workspace = true }
+rock-host = { path = "../rock-host" }
+skull-parser = { path = "../skull-parser" }
+
+[lints]
+workspace = true

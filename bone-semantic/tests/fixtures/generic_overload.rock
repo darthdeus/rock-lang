@@ -1,0 +1,63 @@
+//! Generic-aware overload resolution: candidates differing by shape AND arity.
+//! Candidates are inline(lua) (bodies skipped); the caller's Rock body exercises
+//! selection. Containers declared inline (no stdlib). Custom struct names avoid
+//! bone's builtin Array/Map ctors.
+
+//- picks_dict_by_shape
+struct Lst<T> { len: int }
+struct Dict<K, V> { len: int }
+inline(lua) fn get<T>(v: Lst<T>, i: int) -> T = "return 0"
+inline(lua) fn get<K, V>(m: Dict<K, V>, k: K) -> V = "return 0"
+fn f<K, V>(m: Dict<K, V>, k: K) -> V {
+    let r = get(m, k)
+      //^ V
+    r
+}
+
+//- picks_lst_by_shape
+struct Lst<T> { len: int }
+struct Dict<K, V> { len: int }
+inline(lua) fn get<T>(v: Lst<T>, i: int) -> T = "return 0"
+inline(lua) fn get<K, V>(m: Dict<K, V>, k: K) -> V = "return 0"
+fn f<T>(v: Lst<T>) -> T {
+    let r = get(v, 0)
+      //^ T
+    r
+}
+
+//- arity_disambiguates
+struct Lst<T> { len: int }
+struct Ent<T> { id: int }
+inline(lua) fn get<T>(e: Ent<T>) -> T = "return 0"
+inline(lua) fn get<T>(v: Lst<T>, i: int) -> T = "return 0"
+fn f<T>(e: Ent<T>) -> T {
+    let r = get(e)
+      //^ T
+    r
+}
+
+//- nullable_return
+struct Dict<K, V> { len: int }
+inline(lua) fn get_a<K, V>(m: Dict<K, V>, k: K) -> V? = "return 0"
+inline(lua) fn get_a<T>(v: Dict<T, T>) -> T = "return 0"
+fn f<K, V>(m: Dict<K, V>, k: K) -> V? {
+    let r = get_a(m, k)
+      //^ V?
+    r
+}
+
+//- no_overload_fail @fail
+struct Lst<T> { len: int }
+struct Set<T> { len: int }
+inline(lua) fn get<T>(v: Lst<T>, i: int) -> T = "return 0"
+fn f<T>(s: Set<T>) -> T {
+    get(s, 0)
+}
+
+//- ambiguous_fail @fail
+struct Box<T> { v: int }
+inline(lua) fn pick<T>(x: Box<T>) -> int = "return 0"
+inline(lua) fn pick<U>(x: Box<U>) -> int = "return 1"
+fn f<T>(b: Box<T>) -> int {
+    pick(b)
+}

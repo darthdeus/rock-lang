@@ -1,0 +1,12 @@
+//! `let (a, b) = (1, 2)` destructures a tuple value into multiple bindings.
+//! Mirror the For-loop tuple-pattern lowering (lower.rs StatementKind::For).
+
+//- tuple_let_destructure
+fn f() -> int {
+    let (a, b) = (1, 2)
+    let x = a
+      //^ int
+    let y = b
+      //^ int
+    x
+}

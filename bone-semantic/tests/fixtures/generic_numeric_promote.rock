@@ -1,0 +1,14 @@
+//! Generic numeric promotion: a generic fn `pick<T>(a: T, b: T)` called as
+//! `pick(3, 4.0)` promotes `T` to `float` (the LUB of int & float). bone binds
+//! `T := int` from arg 1, then `unify(int, float)` for arg 2 fails -- it resolves
+//! the bound var to `int` before matching, losing the var. Fix: capture the var
+//! bound to int before resolve and re-bind it to float on an int/float clash.
+//! Verified vs rock.
+
+//- generic_numeric_promote
+fn pick<T>(a: T, b: T) -> T { return a }
+fn f() -> int {
+    let r = pick(3, 4.0)
+      //^ float
+    5
+}

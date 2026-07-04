@@ -1,0 +1,39 @@
+//! Native array literals `![...]` and their operations. The native-array
+//! *type* `![T]` already lowers (parser emits App{Nominal("NativeArray"),[T]});
+//! only the literal expr + the collection ops on it were missing. Mirrors the
+//! Vec/Array path with the NativeArray ctor. Element type joins like Array
+//! (homogeneous); index is int -> elem; iteration yields elem.
+
+//- native_array_literal_type
+fn f() -> int {
+    let xs = ![1, 2, 3]
+      //^ NativeArray<int>
+    5
+}
+
+//- native_array_index_read
+fn f() -> int {
+    let xs = ![10, 20, 30]
+    let y = xs[0]
+      //^ int
+    y
+}
+
+//- native_array_index_write
+fn f() -> int {
+    let xs = ![1, 2, 3]
+    xs[1] = 99
+    let z = xs[1]
+      //^ int
+    z
+}
+
+//- native_array_for
+fn f() -> int {
+    let xs = ![1, 2, 3]
+    for x in xs {
+        let y = x
+          //^ int
+    }
+    5
+}

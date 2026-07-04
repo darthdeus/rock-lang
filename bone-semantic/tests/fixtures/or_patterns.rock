@@ -1,0 +1,78 @@
+//! Or-patterns `A | B | C` at the top of a match arm. Each alternative is
+//! checked against the scrutinee type; the arm body type is the match result.
+//! v1: alternatives may NOT bind variables (rock rejects with an explicit
+//! error). Verified vs rock (tests/or_patterns.rock).
+
+// Unit-variant alternation. The multi-line `match` must type-check; `r` is bool.
+//- or_unit_variants
+enum Faction { Hostile, Friendly, Pet, Neutral }
+fn is_friendly(f: Faction) -> bool {
+    match f {
+        Faction::Hostile | Faction::Friendly => false,
+        Faction::Pet | Faction::Neutral => true,
+    }
+}
+fn check(f: Faction) -> bool {
+    let r = is_friendly(f)
+      //^ bool
+    r
+}
+
+// Literal alternation, with a multi-alt arm and a wildcard fallback.
+//- or_literals
+fn classify(n: int) -> string {
+    let r = match n { 1 | 2 | 3 => "small", 4 | 5 => "mid", _ => "big" }
+      //^ string
+    r
+}
+
+// Range alternation.
+//- or_ranges
+fn band(n: int) -> string {
+    let r = match n { 1..=5 | 10..=20 => "in", _ => "out" }
+      //^ string
+    r
+}
+
+// Payload variants with wildcard payloads (no bindings).
+//- or_payload_wildcard
+enum Color { Red(int), Blue(int), Green(int), Other }
+fn name(c: Color) -> string {
+    let r = match c { Color::Red(_) | Color::Blue(_) | Color::Green(_) => "rgb", Color::Other => "other" }
+      //^ string
+    r
+}
+
+// Nested match, or-patterns at both levels.
+//- or_nested
+enum Faction { Hostile, Friendly, Pet, Neutral }
+fn rel(a: Faction, b: Faction) -> string {
+    match a {
+        Faction::Hostile | Faction::Friendly => "agro",
+        Faction::Pet | Faction::Neutral => match b {
+            Faction::Hostile | Faction::Friendly => "f-vs-agro",
+            Faction::Pet | Faction::Neutral => "f-vs-f",
+        },
+    }
+}
+fn run(a: Faction, b: Faction) -> string {
+    let r = rel(a, b)
+      //^ string
+    r
+}
+
+// Bindings in alternatives are rejected (rock's explicit v1 limitation).
+//- or_binding_rejected @fail
+enum E { A(int), B(int) }
+fn f(e: E) -> int {
+    match e { A(x) | B(x) => x }
+}
+
+// Mixed-type literal alternatives are rejected: a `string` literal cannot
+// coerce to the `int` scrutinee. (rock CURRENTLY accepts this -- a latent bug
+// where literal-pattern arms are not checked against the scrutinee type; bone
+// is correctly stricter. Flip only if rock's literal-pattern check is fixed.)
+//- or_mixed_literal_rejected @fail
+fn f(n: int) -> string {
+    match n { 1 | "two" => "x", _ => "y" }
+}

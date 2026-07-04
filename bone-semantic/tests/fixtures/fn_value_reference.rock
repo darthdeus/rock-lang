@@ -1,0 +1,37 @@
+//! Top-level functions used as first-class VALUES (not called). A bare ident
+//! that names a top-level fn lowers to `Expr::Global` (lower.rs ~361) and bone
+//! looks it up as a global VARIABLE, failing "Undefined global `id`". It
+//! should fall back to function lookup and synthesize the fn's type
+//! `(params) -> ret` (a `TypeExpr::Function`; mind the cross-arena reify
+//! invariant when copying the param/ret types into gamma.out). bone already
+//! CALLS fn-typed params (fn_value_call.rock); this is the missing producer
+//! side -- referencing the fn by name. Verified vs rock.
+
+// bare fn name bound to a local, then called through the local.
+//- fn_name_as_local_value
+fn id(x: int) -> int { return x }
+fn f() -> int {
+    let g = id
+    let y = g(5)
+      //^ int
+    y
+}
+
+// the bound local has the function type.
+//- fn_name_value_has_fn_type
+fn id(x: int) -> int { return x }
+fn f() -> int {
+    let g = id
+      //^ fn(int) -> int
+    g(1)
+}
+
+// fn passed directly as an argument to a higher-order fn.
+//- fn_name_as_argument
+fn id(x: int) -> int { return x }
+fn apply(g: fn(int) -> int, x: int) -> int { return g(x) }
+fn f() -> int {
+    let y = apply(id, 5)
+      //^ int
+    y
+}

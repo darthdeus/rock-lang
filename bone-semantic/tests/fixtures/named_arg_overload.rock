@@ -1,0 +1,73 @@
+//! Named-argument-aware overload resolution.
+//!
+//! Overload SELECTION must bind named args to parameters by name (and fill
+//! omitted defaulted params) the same way the final binding does — i.e. route
+//! scoring through the same arg->param reorder. The bug this pins: selection
+//! built a positional arg-type list and zipped it against params in
+//! declaration order, so a named arg that skips a defaulted param landed in
+//! the wrong slot and every candidate was wrongly rejected ("No overload").
+//!
+//! Only the multi-candidate path is affected (a single overload routes
+//! straight to binding, which already reorders), so every case here declares
+//! two same-named overloads. No stdlib: types are declared inline.
+
+// A named arg skips an earlier DEFAULTED param, so positionally it would land
+// in the wrong slot (`color: c` is arg #3 but param #4). Selection must
+// reorder by name and pick the rich overload. Mirrors stone's `draw_sprite`.
+//- named_arg_skips_defaulted_param
+struct Image { w: int }
+struct Color { r: int }
+fn draw(image: Image) -> int { 0 }
+fn draw(image: Image, x: int, a: int = 0, color: Color = Color { r: 0 }) -> int { 1 }
+fn caller(img: Image, c: Color) -> int {
+    let r = draw(img, 5, color: c)
+      //^ int
+    r
+}
+
+// Two overloads that BOTH have the named param `val` (so a name-only filter
+// can't disambiguate) — the named arg's TYPE selects the winner. The named arg
+// also skips a defaulted `pad`, so the bug misaligns it too. Distinct return
+// types prove which overload was chosen.
+//- named_arg_type_disambiguates
+struct A { x: int }
+struct B { y: int }
+fn make(tag: int, pad: int = 0, val: A = A { x: 0 }) -> A { val }
+fn make(tag: int, pad: int = 0, val: B = B { y: 0 }) -> B { val }
+fn caller(a: A) -> A {
+    let r = make(1, val: a)
+      //^ A
+    r
+}
+
+// Plain positional overload calls must STILL resolve after the change — guards
+// against the named-aware path breaking ordinary selection. Green before and
+// after the fix.
+//- positional_overload_still_resolves
+struct Image { w: int }
+struct Color { r: int }
+fn draw(image: Image) -> int { 0 }
+fn draw(image: Image, c: Color) -> int { 1 }
+fn caller(img: Image, col: Color) -> int {
+    let r = draw(img, col)
+      //^ int
+    r
+}
+
+// A named arg matching no parameter on ANY candidate must be rejected (the bug
+// silently accepted it as positional whenever the arity happened to line up).
+//- unknown_named_param_fail @fail
+struct Image { w: int }
+fn draw(image: Image) -> int { 0 }
+fn draw(image: Image, x: int) -> int { 1 }
+fn caller(img: Image) -> int {
+    draw(img, nope: 5)
+}
+
+// The same parameter supplied both positionally and by name must be rejected.
+//- duplicate_positional_and_named_fail @fail
+fn f(a: int, b: int = 0) -> int { a }
+fn f(a: int, b: int = 0, c: int = 0) -> int { a }
+fn caller() -> int {
+    f(1, 2, b: 3)
+}

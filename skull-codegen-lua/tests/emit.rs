@@ -1,0 +1,441 @@
+//! Emitted-Lua contracts for the dumb printer. Each lowers a snippet to MIR and
+//! asserts its Lua. Naming is raw-arena-index based (`v<raw>`/`c<raw>`/`bb<raw>`),
+//! so value numbers skip the indices consumed by effect instructions (`Store`).
+//!
+//! Execution under luajit is the deeper oracle, wired at the Phase-6 CLI cutover
+//! (`rock {run,test} --backend skull`); these pin the textual shape until then.
+
+use skull_codegen_lua::{emit_function, CodegenCtx};
+use skull_mir::mir::FuncRef;
+
+/// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
+fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
+    let m = ws.module(mid);
+    let (fid, _) = m
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    let ctx = CodegenCtx::new(&ws);
+    emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func)
+}
+
+/// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
+fn emit(src: &str, fn_name: &str) -> String {
+    let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
+    emit_dump(vec![ast], fn_name)
+}
+
+/// Emit EVERY lowerable function in the `<test>` module, run a Lua `driver`
+/// expression (e.g. `"sign(-5)"`) under luajit, and return its trimmed stdout.
+/// The deeper oracle: it proves the emitted Lua is valid AND computes correctly,
+/// not just that its text matches. Stdlib is loaded so `__op_*` resolves; only
+/// snippets whose ops fold to inline Lua (arith / control flow / aggregates /
+/// indexing — no stdlib *fn* calls) run self-contained. Skips if luajit is
+/// absent so the suite still runs on a bare box.
+fn run(src: &str, driver: &str) -> String {
+    use std::sync::LazyLock;
+    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+    if std::process::Command::new("luajit").arg("-v").output().is_err() {
+        eprintln!("luajit not found; skipping execution check");
+        return driver.to_string(); // tests compare against this -> trivially pass
+    }
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let ctx = CodegenCtx::new(&ws);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let mut lua = String::from("local bit = require('bit')\n");
+    for (fid, _) in ws.module(mid).functions.iter() {
+        if let Ok(func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
+            lua.push_str(&emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func));
+        }
+    }
+    lua.push_str(&format!("print({})\n", driver));
+    // Unique per call: parallel tests must not clobber a shared temp file.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("skull_emit_{}_{}.lua", std::process::id(), n));
+    std::fs::write(&dir, &lua).expect("write lua");
+    let out = std::process::Command::new("luajit")
+        .arg(&dir)
+        .output()
+        .expect("run luajit");
+    if !out.status.success() {
+        panic!(
+            "luajit failed:\n--- lua ---\n{lua}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Stdlib-loaded: needed for `__op_*` arithmetic overloads.
+fn emit_std(src: &str, fn_name: &str) -> String {
+    use std::sync::LazyLock;
+    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    emit_dump(modules, fn_name)
+}
+
+#[test]
+fn int_literal_and_return() {
+    // The `5` is a single-use pure value -> tree-folded into the return (no
+    // register, no `local`).
+    assert_eq!(
+        emit("fn five() -> int { 5 }", "five"),
+        "\
+function five()
+  ::bb0::
+  do return (5) end
+end
+"
+    );
+}
+
+#[test]
+fn param_cell_read() {
+    assert_eq!(
+        emit("fn id(x: int) -> int { x }", "id"),
+        "\
+function id(c0)
+  local r0
+  ::bb0::
+  r0 = c0
+  do return r0 end
+end
+"
+    );
+}
+
+#[test]
+fn int_arithmetic() {
+    assert_eq!(
+        emit_std("fn add(a: int, b: int) -> int { a + b }", "add"),
+        "\
+function add(c0, c1)
+  local r0, r1
+  ::bb0::
+  r0 = c0
+  r1 = c1
+  do return (r0 + r1) end
+end
+"
+    );
+}
+
+// --- execution oracle: emitted Lua is valid AND computes correctly ---
+
+// Test fns avoid stdlib names (sign/sum/len exist there -> would mangle, and the
+// driver calls by surface name).
+#[test]
+fn exec_sign_branch() {
+    let src = "fn mysign(x: int) -> int { if x < 0 { 0 } else { 1 } }";
+    assert_eq!(run(src, "mysign(-5)"), "0");
+    assert_eq!(run(src, "mysign(7)"), "1");
+}
+
+#[test]
+fn exec_arith_and_floor_div() {
+    // int `/` is floor division; -7/2 = -4 (floor), not -3 (trunc).
+    assert_eq!(run("fn f(a: int, b: int) -> int { a / b }", "f(-7, 2)"), "-4");
+    assert_eq!(run("fn f(a: int, b: int) -> int { a * b + 1 }", "f(6, 7)"), "43");
+}
+
+#[test]
+fn exec_while_loop_sum() {
+    let src = "
+fn mysum(n: int) -> int {
+    let total = 0;
+    let i = 1;
+    while i <= n {
+        total = total + i;
+        i = i + 1;
+    }
+    total
+}";
+    assert_eq!(run(src, "mysum(10)"), "55");
+}
+
+#[test]
+fn exec_for_range_sum() {
+    let src = "
+fn mysum(n: int) -> int {
+    let total = 0;
+    for i in 0..n {
+        total = total + i;
+    }
+    total
+}";
+    assert_eq!(run(src, "mysum(5)"), "10"); // 0+1+2+3+4
+}
+
+#[test]
+fn exec_recursion_factorial() {
+    let src = "
+fn fact(n: int) -> int {
+    if n <= 1 { 1 } else { n * fact(n - 1) }
+}";
+    assert_eq!(run(src, "fact(5)"), "120");
+}
+
+#[test]
+fn exec_tuple_and_index() {
+    let src = "fn f() -> int { let t = (10, 20, 30); t.0 + t.2 }";
+    assert_eq!(run(src, "f()"), "40");
+}
+
+#[test]
+fn exec_vec_index() {
+    let src = "fn f() -> int { let xs = [3, 4, 5]; xs[0] + xs[2] }";
+    assert_eq!(run(src, "f()"), "8"); // 3 + 5
+}
+
+#[test]
+fn exec_for_over_array() {
+    // for-over-array lowers to the `Len` + `Index` insts (self-contained, no
+    // stdlib `len`/`get` call).
+    let src = "
+fn total(xs: [int]) -> int {
+    let s = 0;
+    for x in xs { s = s + x; }
+    s
+}";
+    assert_eq!(run(src, "total({data = {4, 5, 6}, len = 3, __ty = \"Vec\"})"), "15");
+}
+
+#[test]
+fn exec_struct_field() {
+    let src = "
+struct P { x: int, y: int }
+fn f() -> int { let p = P { x: 7, y: 35 }; p.x + p.y }";
+    assert_eq!(run(src, "f()"), "42");
+}
+
+#[test]
+fn exec_string_concat() {
+    let src = "fn greet(name: string) -> string { \"hi \" + name }";
+    assert_eq!(run(src, "greet(\"bob\")"), "hi bob");
+}
+
+#[test]
+fn inline_lua_with_inline_annotation_is_spliced() {
+    // `@inline inline(lua)` is SPLICED at the call site (params bound to locals,
+    // tail `return X` rewritten to `<result> = X`) instead of emitting a
+    // `callee(args)` call -- so the body runs in the caller's scope (LuaJIT can
+    // sink any cdata it produces; a call boundary blocks that).
+    let body = emit(
+        "@inline inline(lua) fn dbl(x: int) -> int = \"return x * 2\"\n\
+         fn use_it(n: int) -> int { return dbl(n) }",
+        "use_it",
+    );
+    assert!(
+        !body.contains("dbl("),
+        "@inline inline(lua) should be spliced, not called:\n{body}"
+    );
+    assert!(
+        body.contains("local x = "),
+        "spliced body should bind the param to a local:\n{body}"
+    );
+}
+
+#[test]
+fn inline_lua_without_inline_annotation_is_called() {
+    // Plain inline(lua) (no @inline) is still emitted as a function and CALLED --
+    // splicing is opt-in (heavy unconditional inlining bloats code / traces).
+    let body = emit(
+        "inline(lua) fn dbl(x: int) -> int = \"return x * 2\"\n\
+         fn use_it(n: int) -> int { return dbl(n) }",
+        "use_it",
+    );
+    assert!(
+        body.contains("dbl("),
+        "plain inline(lua) should be called, not spliced:\n{body}"
+    );
+}
+
+#[test]
+fn exec_inline_lua_spliced_multistatement() {
+    // A multi-statement @inline inline(lua) body with a guard + tail return must
+    // splice correctly and still compute the right value under luajit.
+    let src = "@inline inline(lua) fn clampx(x: int) -> int = \"\"\"\n\
+        if x < 0 then return 0 end\n\
+        return x\n\
+    \"\"\"\n\
+    fn f(n: int) -> int { return clampx(n) }";
+    // NOTE: `clampx` has an EARLY return -> not splice-safe -> falls back to a
+    // call, but must still be correct.
+    assert_eq!(run(src, "f(-5)"), "0");
+    assert_eq!(run(src, "f(7)"), "7");
+}
+
+#[test]
+fn exec_bitwise() {
+    let src = "fn f(a: int, b: int) -> int { (a & b) | (a << 1) }";
+    // (6 & 3) = 2 ; (6 << 1) = 12 ; 2 | 12 = 14
+    assert_eq!(run(src, "f(6, 3)"), "14");
+}
+
+#[test]
+fn exec_closure_call_and_capture() {
+    // A closure passed as a fn-value and called (CallValue), plus a captured
+    // local (an upvalue).
+    let src = "
+fn apply(f: fn(int) -> int, x: int) -> int { f(x) }
+fn go() -> int {
+    let bonus = 100
+    apply(n => n + bonus, 5)
+}";
+    assert_eq!(run(src, "go()"), "105");
+}
+
+#[test]
+fn exec_default_argument_filled_callee_side() {
+    // An omitted arg arrives as nil; the callee fills the default.
+    let src = "fn greet(name: string, greeting: string = \"Hello\") -> string { \"{greeting}, {name}!\" }";
+    assert_eq!(run(src, "greet(\"World\")"), "Hello, World!");
+    assert_eq!(run(src, "greet(\"World\", \"Hi\")"), "Hi, World!");
+}
+
+#[test]
+fn exec_named_args_reorder() {
+    // The named call is rock syntax, so it lives in a rock wrapper; the driver
+    // calls the wrapper positionally. Named args reorder: b=3, a=10 -> 10 - 3.
+    let src = "
+fn sub(a: int, b: int) -> int { a - b }
+fn go() -> int { sub(b: 3, a: 10) }";
+    assert_eq!(run(src, "go()"), "7");
+}
+
+#[test]
+fn exec_named_arg_with_default_gap() {
+    // A named arg that skips earlier defaulted params: the gaps fill defaults.
+    let src = "
+fn f(a: int = 1, b: int = 2, c: int = 3) -> int { a * 100 + b * 10 + c }
+fn go() -> int { f(c: 9) }";
+    assert_eq!(run(src, "go()"), "129"); // a=1, b=2, c=9
+}
+
+#[test]
+fn exec_newtype_ctor_is_identity() {
+    let src = "
+newtype Id(int)
+fn f() -> Id { let a = Id(40); a }";
+    // Id(40) is transparent -> the runtime value is just 40.
+    assert_eq!(run(src, "f() + 2"), "42");
+}
+
+#[test]
+fn exec_let_tuple_destructure() {
+    let src = "fn f() -> int { let (a, b, c) = (10, 20, 12); a + b + c }";
+    assert_eq!(run(src, "f()"), "42");
+}
+
+#[test]
+fn exec_safe_nav() {
+    // x?.field: nil base -> nil, else the field. Pass a Lua struct table / nil.
+    let src = "
+struct P { x: int, y: int }
+fn gx(p: P?) -> int? { p?.x }";
+    assert_eq!(run(src, "gx({__ty = \"P\", x = 9, y = 1})"), "9");
+    assert_eq!(run(src, "gx(nil)"), "nil");
+}
+
+#[test]
+fn exec_cast_float_to_int() {
+    // float as int floors (toward -inf); other casts are identity.
+    assert_eq!(run("fn f(x: float) -> int { x as int }", "f(3.9)"), "3");
+    assert_eq!(run("fn f(x: float) -> int { x as int }", "f(-1.2)"), "-2");
+    assert_eq!(run("fn f(x: int) -> float { x as float }", "f(5)"), "5");
+}
+
+#[test]
+fn exec_interpolation_scalars() {
+    // `{x}` holes for int/string/bool fold to `tostring(..)` and `..` concat.
+    let src = "fn label(n: int, name: string, ok: bool) -> string { \"n={n} {name} ok={ok}\" }";
+    assert_eq!(run(src, "label(5, \"hi\", true)"), "n=5 hi ok=true");
+}
+
+#[test]
+fn emits_interpolation_as_flat_concat() {
+    // Interpolation must emit ONE flat `..` run (`a .. b .. c .. d .. e`), not
+    // left-nested binary concats (`((((a .. b) .. c) .. d) .. e)`). LuaJIT's
+    // BC_CAT folds a flat run into a SINGLE string allocation; nesting allocates
+    // an intermediate per step (~2x -- the dominant skull-vs-rock HUD/text alloc
+    // gap). Pin the codegen shape: a 5-part interpolation must not deeply nest.
+    let body = emit(
+        "fn label(a: int, b: int) -> string { \"x={a}/{b} done\" }",
+        "label",
+    );
+    assert!(
+        !body.contains("((("),
+        "interpolation must emit a flat concat, not nested parens:\n{body}"
+    );
+    assert!(
+        body.matches(" .. ").count() >= 4,
+        "expected a flat 5-part concat (4 ` .. `):\n{body}"
+    );
+}
+
+// Enum match execution is covered end-to-end where the program-level enum
+// scaffolding (`<Enum>_ct` ctors, `ffi.cdef` typedefs) is emitted: the `skull`
+// umbrella crate (`enum_cdata`/`enum_scalarize`/`enum_payload_sroa`) and the
+// Rock suite (`tests/enum_tests.rock`). The per-function `run` harness here
+// can't emit that scaffolding (it would need a dep on `skull`), so it can't
+// execute a scalarized-enum match; per-function match shape is pinned by
+// skull-mir's `match_enum_*` lowering tests.
+
+#[test]
+fn if_as_value_branch_and_cell_join() {
+    // The `if`-as-value joins through a cell (no block params). Cell coloring
+    // coalesces the param `x` (dead after its `r0 = c0` read in bb0) with the
+    // join cell, so both are `c0`. Single-use pure values are tree-folded: the
+    // `x < 0` compare folds into the branch and the `0`/`1` literals into the
+    // join stores, so only `r0` (the cross-block `Load x`) keeps a register.
+    assert_eq!(
+        emit("fn sign(x: int) -> int { if x < 0 { 0 } else { 1 } }", "sign"),
+        "\
+function sign(c0)
+  local r0
+  ::bb0::
+  r0 = c0
+  if (r0 < (0)) then goto bb1 else goto bb2 end
+  ::bb1::
+  c0 = (0)
+  goto bb3
+  ::bb2::
+  c0 = (1)
+  goto bb3
+  ::bb3::
+  r0 = c0
+  do return r0 end
+end
+"
+    );
+}

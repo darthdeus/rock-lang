@@ -1,0 +1,24 @@
+//! A struct field default may reference a sibling field by `.name`
+//! (`current: int = .max`); the ref has the sibling field's type. bone
+//! must lower `SiblingFieldRef` (not reject it) and resolve it against a
+//! sibling-field scope populated while checking the omitted defaults at a
+//! construction site. Verified vs rock: `HealthBar { max: 100 }.current`
+//! type-checks (the default `.max` is int).
+
+//- sibling_field_default
+struct HealthBar { max: int, current: int = .max }
+fn f() -> int {
+    let h = HealthBar { max: 100 }
+    let c = h.current
+      //^ int
+    c
+}
+
+//- sibling_field_default_string
+struct Labeled { name: string, display: string = .name }
+fn f() -> string {
+    let l = Labeled { name: "hp" }
+    let d = l.display
+      //^ string
+    d
+}

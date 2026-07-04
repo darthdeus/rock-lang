@@ -1,0 +1,29 @@
+//! Top-level (item-emitting) macros: a macro whose body declares items
+//! (`fn`/`struct`/...) is invoked at module level, splicing its `macro_items`
+//! into the module. (No-param case here; ident/type-sigil substitution into
+//! declarations is a separate, larger step.)
+
+//- top_level_macro_emits_fn
+macro emit_const() {
+    fn made_by_macro() -> int { 42 }
+}
+emit_const()
+fn use_it() -> int {
+    let x = made_by_macro()
+      //^ int
+    x
+}
+
+//- top_level_macro_emits_multiple
+macro emit_pair() {
+    fn pair_a() -> int { 1 }
+    fn pair_b() -> int { 2 }
+}
+emit_pair()
+fn use_pair() -> int {
+    let a = pair_a()
+      //^ int
+    let b = pair_b()
+      //^ int
+    a
+}

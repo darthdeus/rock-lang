@@ -1,0 +1,28 @@
+//! Named call args: `f(b: x, a: y)` matches by param name, in any order, mixed
+//! with positional and defaults (verified vs rock). bone drops names at lowering
+//! and matched positionally -> out-of-order named calls mis-typecheck. Names must
+//! be carried to inference and reordered against the callee's params.
+
+//- named_args_out_of_order
+fn g(a: int, b: string) -> int { a }
+fn f() -> int {
+    let r = g(b: "hi", a: 1)
+      //^ int
+    r
+}
+
+// Positional prefix + named tail, with a defaulted param omitted.
+//- named_args_mixed_with_default
+fn g(a: int, b: int, c: string = "x") -> int { a }
+fn f() -> int {
+    let r = g(1, b: 2)
+      //^ int
+    r
+}
+
+// Unknown param name is rejected.
+//- named_args_unknown_rejected @fail
+fn g(a: int) -> int { a }
+fn f() -> int {
+    g(nope: 1)
+}

@@ -1,0 +1,44 @@
+//! NESTED tuple bindings in `for` and `let`. bone already destructures a
+//! flat 2-tuple binding (`for (k,v) in map`, `for (a,b) in [(A,B)]`), but
+//! a nested binding `(i, (a, b))` hits the flat-only collector and errors
+//! "unsupported variable binding pattern in for loop: Tuple(...)". The
+//! non-duplicating fix (per the investigation) is a HIR `BindingPattern`
+//! tree { Leaf(binding) | Tuple(Vec<BindingPattern>) } stored on `For` and
+//! `LetTuple`, built by one recursive `lower_pattern_bindings` and consumed
+//! by one recursive destructure helper -- replacing the two flat zip sites
+//! (inference.rs For :606-638 and LetTuple :668-696). Keeps the single-var
+//! fast path (`for (i, t) in ...` binds the inner tuple as one var).
+//! Verified vs rock.
+
+//- for_nested_tuple
+fn f() -> int {
+    let xs: [(int, (int, string))] = [(1, (2, "a"))]
+    let last = 0
+    for (i, (n, s)) in xs {
+        let m = n
+          //^ int
+        last = m
+    }
+    last
+}
+
+//- for_flat_tuple_still_works
+fn f() -> int {
+    let xs: [(int, string)] = [(1, "a"), (2, "b")]
+    let result = 0
+    for (n, s) in xs {
+        let m = n
+          //^ int
+        result = m
+    }
+    result
+}
+
+//- let_nested_tuple
+fn f() -> int {
+    let pair: (int, (int, string)) = (1, (2, "a"))
+    let (i, (n, s)) = pair
+    let chk = n
+      //^ int
+    chk
+}

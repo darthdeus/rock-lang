@@ -1,0 +1,19 @@
+//! co fn `return e` checks e against R (the Coroutine's 2nd param), not the
+//! whole Coroutine type. `Coroutine<int, string>` synthesizes N=Unit; R=string.
+
+//- coroutine_return_r
+co fn g() -> Coroutine<int, string> {
+    yield 1
+    return "done"
+}
+fn carrier() -> int {
+    let x = 5
+      //^ int
+    x
+}
+
+// return value not matching R is rejected.
+//- coroutine_return_r_mismatch @fail
+co fn g() -> Coroutine<int, string> {
+    return 42
+}

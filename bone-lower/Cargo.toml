@@ -1,0 +1,19 @@
+[package]
+name = "bone-lower"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bone-core = { path = "../bone-core" }
+skull-parser = { path = "../skull-parser" }
+
+rustc-hash = { workspace = true }
+ustr = { workspace = true }
+comfy-la-arena = { workspace = true }
+rust-lapper = { workspace = true }
+smallvec = { workspace = true }
+itertools = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

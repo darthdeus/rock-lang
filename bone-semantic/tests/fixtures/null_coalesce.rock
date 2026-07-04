@@ -1,0 +1,21 @@
+//! `a ?? b` (null-coalesce). bone does `unify(rhs, peel(lhs))` which dies when
+//! rhs is ALSO nullable ("Failed to unify int? and int"). The result is the LUB
+//! of the peeled lhs and the rhs (preserving rhs's nullability): `int?? int?` is
+//! `int?`, `int?? int` is `int`. Fix: `join(peel(lhs), rhs)` instead of unify.
+//! Verified vs rock.
+
+// nullable rhs -> result stays nullable
+//- coalesce_nullable_rhs
+fn f(a: int?, b: int?) -> int {
+    let r = a ?? b
+      //^ int?
+    5
+}
+
+// non-null rhs -> result is non-null
+//- coalesce_nonnull_rhs
+fn f(a: int?, b: int) -> int {
+    let r = a ?? b
+      //^ int
+    5
+}

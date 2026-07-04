@@ -1,0 +1,675 @@
+// Pure-Rock JSON library.
+//
+// JsonValue is the typed surface; json_encode / json_decode are the entry
+// points. No inline(lua) — portable across Rock backends. Part of the
+// Phase-0 effort for the CLR migration (see docs/clr-backend-plan.md).
+
+enum JsonValue {
+    Null,
+    Bool(bool),
+    Int(int),
+    Float(float),
+    Str(string),
+    Array([JsonValue]),
+    Object(Map<string, JsonValue>),
+}
+
+// ---------------------------------------------------------------------------
+// Constructors
+
+fn json_null() -> JsonValue { return JsonValue::Null }
+fn json_bool(b: bool) -> JsonValue { return JsonValue::Bool(b) }
+fn json_int(i: int) -> JsonValue { return JsonValue::Int(i) }
+fn json_float(f: float) -> JsonValue { return JsonValue::Float(f) }
+fn json_str(s: string) -> JsonValue { return JsonValue::Str(s) }
+fn json_array(items: [JsonValue]) -> JsonValue { return JsonValue::Array(items) }
+fn json_object(m: Map<string, JsonValue>) -> JsonValue { return JsonValue::Object(m) }
+
+// ---------------------------------------------------------------------------
+// Accessors. Return null on type mismatch so callers can chain `??` defaults.
+
+fn json_is_null(v: JsonValue) -> bool {
+    match v {
+        Null => return true,
+        _ => return false,
+    }
+}
+
+fn json_as_bool(v: JsonValue) -> bool? {
+    match v {
+        Bool(b) => return b,
+        _ => return null,
+    }
+}
+
+fn json_as_int(v: JsonValue) -> int? {
+    match v {
+        Int(i) => return i,
+        Float(f) => return f as int,
+        _ => return null,
+    }
+}
+
+fn json_as_float(v: JsonValue) -> float? {
+    match v {
+        Int(i) => return i as float,
+        Float(f) => return f,
+        _ => return null,
+    }
+}
+
+fn json_as_str(v: JsonValue) -> string? {
+    match v {
+        Str(s) => return s,
+        _ => return null,
+    }
+}
+
+fn json_as_array(v: JsonValue) -> [JsonValue]? {
+    match v {
+        Array(items) => return items,
+        _ => return null,
+    }
+}
+
+fn json_as_object(v: JsonValue) -> Map<string, JsonValue>? {
+    match v {
+        Object(m) => return m,
+        _ => return null,
+    }
+}
+
+// Look up a field in an object. Returns null if v is not an object or key
+// is absent.
+fn json_field(v: JsonValue, key: string) -> JsonValue? {
+    let m = json_as_object(v)
+    if m == null { return null }
+    let mm = m.unwrap()
+    if !contains(mm, key) { return null }
+    return mm[key]
+}
+
+// ---------------------------------------------------------------------------
+// Encoder
+
+fn json_encode(v: JsonValue) -> string {
+    let parts: [string] = []
+    encode_into(v, parts)
+    return join(parts, "")
+}
+
+fn encode_into(v: JsonValue, parts: [string]) {
+    match v {
+        Null => parts.push("null"),
+        Bool(b) => parts.push(if b { "true" } else { "false" }),
+        Int(i) => parts.push("{i}"),
+        Float(f) => parts.push(format_float(f)),
+        Str(s) => parts.push(encode_string(s)),
+        Array(items) => encode_array(items, parts),
+        Object(m) => encode_object(m, parts),
+    }
+}
+
+fn encode_array(items: [JsonValue], parts: [string]) {
+    parts.push("[")
+    let first = true
+    for item in items {
+        if !first { parts.push(",") }
+        first = false
+        encode_into(item, parts)
+    }
+    parts.push("]")
+}
+
+fn encode_object(m: Map<string, JsonValue>, parts: [string]) {
+    // Sort keys for deterministic output.
+    let keys = keys(m)
+    sort(keys, k => k)
+    parts.push("{{")
+    let first = true
+    for k in keys {
+        if !first { parts.push(",") }
+        first = false
+        parts.push(encode_string(k))
+        parts.push(":")
+        encode_into(m[k], parts)
+    }
+    parts.push("}}")
+}
+
+// Pretty-print: containers expand one child per line, but a container whose
+// children are all scalars stays compact on a single line (so a tile/spawner
+// object renders as `{"type":"wall","x":0,"y":0}`, not four lines). Keeps
+// diffs line-oriented and deterministic (object keys stay sorted).
+fn json_encode_pretty(v: JsonValue) -> string {
+    let parts: [string] = []
+    encode_pretty_into(v, parts, 0)
+    return join(parts, "")
+}
+
+fn encode_pretty_into(v: JsonValue, parts: [string], level: int) {
+    match v {
+        Array(items) => {
+            if json_has_nested_container(v) {
+                encode_pretty_array(items, parts, level)
+            } else {
+                encode_array(items, parts)
+            }
+        },
+        Object(m) => {
+            if json_has_nested_container(v) {
+                encode_pretty_object(m, parts, level)
+            } else {
+                encode_object(m, parts)
+            }
+        },
+        _ => encode_into(v, parts),
+    }
+}
+
+fn json_has_nested_container(v: JsonValue) -> bool {
+    return match v {
+        Array(items) => {
+            for it in items {
+                match it {
+                    Array(_) => return true,
+                    Object(_) => return true,
+                    _ => {}
+                }
+            }
+            false
+        },
+        Object(m) => {
+            for k in keys(m) {
+                match m[k] {
+                    Array(_) => return true,
+                    Object(_) => return true,
+                    _ => {}
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
+fn encode_pretty_array(items: [JsonValue], parts: [string], level: int) {
+    parts.push("[\n")
+    let inner = json_indent(level + 1)
+    let first = true
+    for item in items {
+        if !first { parts.push(",\n") }
+        first = false
+        parts.push(inner)
+        encode_pretty_into(item, parts, level + 1)
+    }
+    parts.push("\n")
+    parts.push(json_indent(level))
+    parts.push("]")
+}
+
+fn encode_pretty_object(m: Map<string, JsonValue>, parts: [string], level: int) {
+    let ks = keys(m)
+    sort(ks, k => k)
+    parts.push("{{\n")
+    let inner = json_indent(level + 1)
+    let first = true
+    for k in ks {
+        if !first { parts.push(",\n") }
+        first = false
+        parts.push(inner)
+        parts.push(encode_string(k))
+        parts.push(": ")
+        encode_pretty_into(m[k], parts, level + 1)
+    }
+    parts.push("\n")
+    parts.push(json_indent(level))
+    parts.push("}}")
+}
+
+fn json_indent(level: int) -> string {
+    let parts: [string] = []
+    let i = 0
+    while i < level {
+        parts.push("  ")
+        i = i + 1
+    }
+    return join(parts, "")
+}
+
+fn encode_string(s: string) -> string {
+    let parts: [string] = []
+    parts.push("\"")
+    let n = length(s)
+    let i = 0
+    while i < n {
+        let b = byte(s, i)
+        if b == 34 {
+            parts.push("\\\"")
+        } else if b == 92 {
+            parts.push("\\\\")
+        } else if b == 8 {
+            parts.push("\\b")
+        } else if b == 9 {
+            parts.push("\\t")
+        } else if b == 10 {
+            parts.push("\\n")
+        } else if b == 12 {
+            parts.push("\\f")
+        } else if b == 13 {
+            parts.push("\\r")
+        } else if b < 32 {
+            parts.push("\\u")
+            parts.push(hex4(b))
+        } else {
+            parts.push(char_at(s, i))
+        }
+        i = i + 1
+    }
+    parts.push("\"")
+    return join(parts, "")
+}
+
+fn hex4(n: int) -> string {
+    let digits = "0123456789abcdef"
+    let d0 = char_at(digits, (n / 4096) % 16)
+    let d1 = char_at(digits, (n / 256) % 16)
+    let d2 = char_at(digits, (n / 16) % 16)
+    let d3 = char_at(digits, n % 16)
+    return "{d0}{d1}{d2}{d3}"
+}
+
+// Format a float without a trailing `.0` for whole numbers, while keeping
+// fractional parts intact. NaN / inf are emitted as null (JSON has no
+// representation for them).
+fn format_float(f: float) -> string {
+    if f != f { return "null" }
+    if f == 1.0 / 0.0 || f == -1.0 / 0.0 { return "null" }
+    let i = f as int
+    if (i as float) == f {
+        return "{i}"
+    }
+    return "{f}"
+}
+
+// ---------------------------------------------------------------------------
+// Decoder
+
+struct JsonParser {
+    src: string,
+    pos: int,
+    len: int,
+    ok: bool,
+}
+
+fn json_decode(s: string) -> JsonValue? {
+    let p = JsonParser { src: s, pos: 0, len: length(s), ok: true }
+    parse_skip_ws(p)
+    let v = parse_value(p)
+    parse_skip_ws(p)
+    if !p.ok { return null }
+    if p.pos != p.len { return null }
+    return v
+}
+
+fn parse_skip_ws(p: JsonParser) {
+    while p.pos < p.len {
+        let b = byte(p.src, p.pos)
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            p.pos = p.pos + 1
+        } else {
+            break
+        }
+    }
+}
+
+fn parse_value(p: JsonParser) -> JsonValue {
+    parse_skip_ws(p)
+    if p.pos >= p.len {
+        p.ok = false
+        return JsonValue::Null
+    }
+    let b = byte(p.src, p.pos)
+    if b == 110 { return parse_keyword(p, "null", JsonValue::Null) }
+    if b == 116 { return parse_keyword(p, "true", JsonValue::Bool(true)) }
+    if b == 102 { return parse_keyword(p, "false", JsonValue::Bool(false)) }
+    if b == 34 { return parse_string_value(p) }
+    if b == 91 { return parse_array_value(p) }
+    if b == 123 { return parse_object_value(p) }
+    // number: starts with - or 0..9
+    if b == 45 || (b >= 48 && b <= 57) {
+        return parse_number(p)
+    }
+    p.ok = false
+    return JsonValue::Null
+}
+
+fn parse_keyword(p: JsonParser, kw: string, value: JsonValue) -> JsonValue {
+    let klen = length(kw)
+    if p.pos + klen > p.len {
+        p.ok = false
+        return JsonValue::Null
+    }
+    let slice = substring(p.src, p.pos, p.pos + klen)
+    if slice != kw {
+        p.ok = false
+        return JsonValue::Null
+    }
+    p.pos = p.pos + klen
+    return value
+}
+
+fn parse_string_value(p: JsonParser) -> JsonValue {
+    let s = parse_string_raw(p)
+    if s == null { return JsonValue::Null }
+    return JsonValue::Str(s.unwrap())
+}
+
+// Consumes a JSON string literal starting at p.pos (which must point at the
+// opening quote). On error sets p.ok = false and returns null.
+fn parse_string_raw(p: JsonParser) -> string? {
+    if byte(p.src, p.pos) != 34 {
+        p.ok = false
+        return null
+    }
+    p.pos = p.pos + 1
+    let parts: [string] = []
+    while p.pos < p.len {
+        let b = byte(p.src, p.pos)
+        if b == 34 {
+            p.pos = p.pos + 1
+            return join(parts, "")
+        }
+        if b == 92 {
+            p.pos = p.pos + 1
+            if p.pos >= p.len {
+                p.ok = false
+                return null
+            }
+            let esc = byte(p.src, p.pos)
+            p.pos = p.pos + 1
+            if esc == 34 { parts.push("\"") }
+            else if esc == 92 { parts.push("\\") }
+            else if esc == 47 { parts.push("/") }
+            else if esc == 110 { parts.push("\n") }
+            else if esc == 114 { parts.push("\r") }
+            else if esc == 116 { parts.push("\t") }
+            else if esc == 98 { parts.push(string_char(8)) }
+            else if esc == 102 { parts.push(string_char(12)) }
+            else if esc == 117 {
+                if p.pos + 4 > p.len {
+                    p.ok = false
+                    return null
+                }
+                let hex = substring(p.src, p.pos, p.pos + 4)
+                p.pos = p.pos + 4
+                let cp = parse_hex4(hex)
+                if cp == null {
+                    p.ok = false
+                    return null
+                }
+                parts.push(codepoint_to_utf8(cp.unwrap()))
+            } else {
+                p.ok = false
+                return null
+            }
+        } else {
+            parts.push(char_at(p.src, p.pos))
+            p.pos = p.pos + 1
+        }
+    }
+    p.ok = false
+    return null
+}
+
+fn parse_hex4(s: string) -> int? {
+    if length(s) != 4 { return null }
+    let result = 0
+    let i = 0
+    while i < 4 {
+        let b = byte(s, i)
+        let d = 0
+        if b >= 48 && b <= 57 {
+            d = b - 48
+        } else if b >= 97 && b <= 102 {
+            d = b - 97 + 10
+        } else if b >= 65 && b <= 70 {
+            d = b - 65 + 10
+        } else {
+            return null
+        }
+        result = result * 16 + d
+        i = i + 1
+    }
+    return result
+}
+
+// Encode a Unicode codepoint as UTF-8. Surrogate-pair joining for codepoints
+// > 0xFFFF is not implemented — JSON \uXXXX escapes are the only path that
+// produces these here, and most real-world JSON encodes BMP characters
+// directly anyway.
+fn codepoint_to_utf8(cp: int) -> string {
+    if cp < 0x80 {
+        return string_char(cp)
+    }
+    if cp < 0x800 {
+        let b1 = 0xC0 + (cp / 64)
+        let b2 = 0x80 + (cp % 64)
+        return "{string_char(b1)}{string_char(b2)}"
+    }
+    let b1 = 0xE0 + (cp / 4096)
+    let b2 = 0x80 + ((cp / 64) % 64)
+    let b3 = 0x80 + (cp % 64)
+    return "{string_char(b1)}{string_char(b2)}{string_char(b3)}"
+}
+
+fn parse_number(p: JsonParser) -> JsonValue {
+    let start = p.pos
+    let is_float = false
+    if byte(p.src, p.pos) == 45 {
+        p.pos = p.pos + 1
+    }
+    while p.pos < p.len {
+        let b = byte(p.src, p.pos)
+        if b >= 48 && b <= 57 {
+            p.pos = p.pos + 1
+        } else {
+            break
+        }
+    }
+    if p.pos < p.len && byte(p.src, p.pos) == 46 {
+        is_float = true
+        p.pos = p.pos + 1
+        while p.pos < p.len {
+            let b = byte(p.src, p.pos)
+            if b >= 48 && b <= 57 {
+                p.pos = p.pos + 1
+            } else {
+                break
+            }
+        }
+    }
+    if p.pos < p.len {
+        let b = byte(p.src, p.pos)
+        if b == 101 || b == 69 {
+            is_float = true
+            p.pos = p.pos + 1
+            if p.pos < p.len {
+                let sign = byte(p.src, p.pos)
+                if sign == 43 || sign == 45 {
+                    p.pos = p.pos + 1
+                }
+            }
+            while p.pos < p.len {
+                let b2 = byte(p.src, p.pos)
+                if b2 >= 48 && b2 <= 57 {
+                    p.pos = p.pos + 1
+                } else {
+                    break
+                }
+            }
+        }
+    }
+    if p.pos == start {
+        p.ok = false
+        return JsonValue::Null
+    }
+    let lit = substring(p.src, start, p.pos)
+    if is_float {
+        let f = parse_float(lit)
+        if f == null {
+            p.ok = false
+            return JsonValue::Null
+        }
+        return JsonValue::Float(f.unwrap())
+    }
+    let i = parse_int(lit)
+    if i == null {
+        p.ok = false
+        return JsonValue::Null
+    }
+    return JsonValue::Int(i.unwrap())
+}
+
+fn parse_array_value(p: JsonParser) -> JsonValue {
+    p.pos = p.pos + 1   // consume [
+    let items: [JsonValue] = []
+    parse_skip_ws(p)
+    if p.pos < p.len && byte(p.src, p.pos) == 93 {
+        p.pos = p.pos + 1
+        return JsonValue::Array(items)
+    }
+    while p.pos < p.len {
+        parse_skip_ws(p)
+        let item = parse_value(p)
+        if !p.ok { return JsonValue::Null }
+        items.push(item)
+        parse_skip_ws(p)
+        if p.pos >= p.len {
+            p.ok = false
+            return JsonValue::Null
+        }
+        let b = byte(p.src, p.pos)
+        if b == 93 {
+            p.pos = p.pos + 1
+            return JsonValue::Array(items)
+        }
+        if b != 44 {
+            p.ok = false
+            return JsonValue::Null
+        }
+        p.pos = p.pos + 1
+    }
+    p.ok = false
+    return JsonValue::Null
+}
+
+fn parse_object_value(p: JsonParser) -> JsonValue {
+    p.pos = p.pos + 1   // consume {
+    let m: Map<string, JsonValue> = map_new()
+    parse_skip_ws(p)
+    if p.pos < p.len && byte(p.src, p.pos) == 125 {
+        p.pos = p.pos + 1
+        return JsonValue::Object(m)
+    }
+    while p.pos < p.len {
+        parse_skip_ws(p)
+        let key = parse_string_raw(p)
+        if key == null { return JsonValue::Null }
+        parse_skip_ws(p)
+        if p.pos >= p.len || byte(p.src, p.pos) != 58 {
+            p.ok = false
+            return JsonValue::Null
+        }
+        p.pos = p.pos + 1
+        parse_skip_ws(p)
+        let val = parse_value(p)
+        if !p.ok { return JsonValue::Null }
+        insert(m, key.unwrap(), val)
+        parse_skip_ws(p)
+        if p.pos >= p.len {
+            p.ok = false
+            return JsonValue::Null
+        }
+        let b = byte(p.src, p.pos)
+        if b == 125 {
+            p.pos = p.pos + 1
+            return JsonValue::Object(m)
+        }
+        if b != 44 {
+            p.ok = false
+            return JsonValue::Null
+        }
+        p.pos = p.pos + 1
+    }
+    p.ok = false
+    return JsonValue::Null
+}
+
+// ---- Field accessors with defaults -----------------------------------------
+// Take the nullable result of json_field(...) (or any JsonValue?) and a
+// fallback; return the extracted value or the default. Saves the verbose
+// `json_as_int(json_field(root, key) ?? json_null()) ?? default` dance at
+// every call site.
+
+fn jv_str(v: JsonValue?, default_val: string) -> string {
+    let vv = v ?? return default_val
+    return json_as_str(vv) ?? default_val
+}
+
+fn jv_int(v: JsonValue?, default_val: int) -> int {
+    let vv = v ?? return default_val
+    let f = json_as_float(vv) ?? return default_val
+    return int(f)
+}
+
+fn jv_float(v: JsonValue?, default_val: float) -> float {
+    let vv = v ?? return default_val
+    return json_as_float(vv) ?? default_val
+}
+
+fn jv_bool(v: JsonValue?, default_val: bool) -> bool {
+    let vv = v ?? return default_val
+    return json_as_bool(vv) ?? default_val
+}
+
+fn jv_float_arr(v: JsonValue?, default_val: [float]) -> [float] {
+    let vv = v ?? return default_val
+    let arr = json_as_array(vv) ?? return default_val
+    let out: [float] = []
+    for e in arr {
+        if let f = json_as_float(e) { out.push(f) }
+    }
+    if out.len() == 0 { return default_val }
+    return out
+}
+
+fn jv_str_arr(v: JsonValue?, default_val: [string]) -> [string] {
+    let vv = v ?? return default_val
+    let arr = json_as_array(vv) ?? return default_val
+    let out: [string] = []
+    for e in arr {
+        if let s = json_as_str(e) { out.push(s) }
+    }
+    if out.len() == 0 { return default_val }
+    return out
+}
+
+fn jv_int_pair(v: JsonValue?, def_w: int, def_h: int) -> (int, int) {
+    if v == null { return (def_w, def_h) }
+    let arr_opt = json_as_array(v.unwrap()) ?? return (def_w, def_h)
+    let arr = arr_opt.unwrap()
+    if arr.len() < 2 { return (def_w, def_h) }
+    let i = 0
+    let out_w = def_w
+    let out_h = def_h
+    for e in arr {
+        if i == 0 {
+            if let f = json_as_float(e) { out_w = int(f) }
+        } else if i == 1 {
+            if let f = json_as_float(e) { out_h = int(f) }
+        }
+        i = i + 1
+    }
+    return (out_w, out_h)
+}

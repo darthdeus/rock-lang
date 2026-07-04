@@ -1,0 +1,29 @@
+//! @no_check
+//! Assignment: `x = v`, `p.field = v`. Plain `=` only for now (compound `+=`
+//! needs operator resolution; index assignment needs `Index`). Result is unit;
+//! the value must unify with the target's type.
+
+//- assign_var
+fn f() -> int {
+    let x = 5
+    x = 10
+    x
+  //^ int
+}
+
+//- assign_field
+struct Point { x: int, y: int }
+fn f(p: Point) -> int {
+    p.x = 5
+    let r = p.x
+      //^ int
+    r
+}
+
+//- assign_type_mismatch @fail
+fn f() -> int {
+    let x = 5
+      //^ int
+    x = true
+    x
+}

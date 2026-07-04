@@ -1,0 +1,114 @@
+//! @no_check
+
+//- let_int
+fn f() -> int {
+    let x = 5
+      //^ int
+    x
+  //^ int
+}
+
+//- let_bool
+fn f() -> bool {
+    let x = true
+      //^ bool
+    x
+  //^ bool
+}
+
+//- let_float
+fn f() -> float {
+    let x = 1.5
+      //^ float
+    x
+  //^ float
+}
+
+//- let_string
+fn f() -> string {
+    let x = "hi"
+      //^ string
+    x
+  //^ string
+}
+
+//- let_two_bindings
+fn f() -> int {
+    let x = 5
+    let y = 6
+      //^ int
+    y
+  //^ int
+}
+
+//- let_use_earlier
+fn f() -> int {
+    let x = 5
+    let y = x
+      //^ int
+    y
+}
+
+//- let_shadow_same_type
+fn f() -> int {
+    let x = 5
+    let x = 10
+      //^ int
+    x
+  //^ int
+}
+
+//- let_shadow_change_type
+fn f() -> string {
+    let x = 5
+    let x = "hi"
+      //^ string
+    x
+  //^ string
+}
+
+//- let_then_return
+fn f() -> int {
+    let x = 5
+      //^ int
+    return x
+      //^ int
+}
+
+//- let_in_nested_block
+fn f() -> int {
+    let x = 5
+    {
+        let y = 6
+          //^ int
+        y
+      //^ int
+    }
+}
+
+//- let_param_then_local
+fn f(p: int) -> int {
+   //^ int
+    let x = p
+      //^ int
+    x
+  //^ int
+}
+
+// declared let type must agree with the value's inferred type
+//- let_annotation_match
+fn f() -> int {
+    let x: int = 5
+      //^ int
+    x
+}
+
+// marker is satisfiable today (annotation is taken verbatim); once the value
+// is unified against the annotation, check_module rejects this before the
+// marker is ever checked.
+//- let_annotation_mismatch @fail
+fn f() -> int {
+    let x: bool = 5
+      //^ bool
+    x
+}

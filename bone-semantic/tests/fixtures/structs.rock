@@ -1,0 +1,146 @@
+//! @no_check
+//! Structs, slice A: definitions + named-type resolution. A `struct` item
+//! registers a named type; its name resolves in type position (params, fields,
+//! returns). Field bodies can forward-reference structs declared later, so
+//! registration is two-pass (collect names, then lower field types).
+//! Literals (slice B) and field access (slice C) come next.
+
+// a struct name resolves as a parameter type, and renders as the name.
+//- struct_param_type
+struct Point { x: int, y: int }
+fn f(p: Point) -> int {
+   //^ Point
+    5
+}
+
+// a struct field whose type is another struct resolves.
+//- struct_field_of_struct
+struct Inner { a: int }
+struct Outer { inner: Inner }
+fn f(o: Outer) -> int {
+   //^ Outer
+    5
+}
+
+// forward reference: Outer's field names Inner, declared later -> two-pass.
+//- struct_forward_ref
+struct Outer { inner: Inner }
+struct Inner { a: int }
+fn f(o: Outer) -> int {
+   //^ Outer
+    5
+}
+
+// a genuinely unknown type name is still rejected.
+//- unknown_type_still_errors @fail
+fn f(p: Nope) -> int {
+   //^ int
+    5
+}
+
+// --- slice B: struct literals ---
+
+// a literal has the struct's type.
+//- struct_literal_let
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: 2 }
+      //^ Point
+    5
+}
+
+// a literal satisfies a declared return of the struct type.
+//- struct_literal_return
+struct Point { x: int, y: int }
+fn f() -> Point {
+    let p = Point { x: 1, y: 2 }
+      //^ Point
+    p
+}
+
+// field order in the literal need not match declaration order.
+//- struct_literal_reordered
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { y: 2, x: 1 }
+      //^ Point
+    5
+}
+
+// a field value with the wrong type is rejected.
+//- struct_literal_wrong_field_type @fail
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: true }
+      //^ Point
+    5
+}
+
+// a missing field is rejected.
+//- struct_literal_missing_field @fail
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1 }
+      //^ Point
+    5
+}
+
+// an unknown field is rejected.
+//- struct_literal_unknown_field @fail
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: 2, z: 3 }
+      //^ Point
+    5
+}
+
+// --- slice C: field access ---
+
+// reading a field yields its declared type.
+//- struct_field_access
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: 2 }
+    let a = p.x
+      //^ int
+    5
+}
+
+// a struct-typed field reads back as that struct.
+//- struct_field_is_struct
+struct Inner { a: int }
+struct Outer { inner: Inner }
+fn f(o: Outer) -> int {
+    let i = o.inner
+      //^ Inner
+    5
+}
+
+// field access chains through nested structs.
+//- struct_field_chain
+struct Inner { a: int }
+struct Outer { inner: Inner }
+fn f(o: Outer) -> int {
+    let a = o.inner.a
+      //^ int
+    5
+}
+
+// accessing a field the struct doesn't have is rejected.
+//- struct_unknown_field_access @fail
+struct Point { x: int, y: int }
+fn f() -> int {
+    let p = Point { x: 1, y: 2 }
+    let a = p.z
+      //^ int
+    5
+}
+
+// accessing a field on a non-struct is rejected.
+//- field_access_on_non_struct @fail
+fn f() -> int {
+    let n = 5
+    let a = n.x
+      //^ int
+    5
+}

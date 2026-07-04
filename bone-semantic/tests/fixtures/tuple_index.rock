@@ -1,0 +1,50 @@
+//! @no_check
+//! Tuple indexing: `t.0`, `t.1`. Needs an `Expr::TupleIndex { tuple, index }`
+//! variant + lowering (`ExprKind::TupleIndex(base, idx)`) + inference (infer the
+//! base, require it to be a `Tuple`, project the index-th element type; error on
+//! out-of-bounds or non-tuple base). Fails today at lowering ("unsupported expr").
+//!
+//! Marker on the `let` binding holding the projection.
+
+//- tuple_index_first
+fn f() -> int {
+    let t = (1, true)
+    let x = t.0
+      //^ int
+    5
+}
+
+//- tuple_index_second
+fn f() -> int {
+    let t = (1, true)
+    let x = t.1
+      //^ bool
+    5
+}
+
+// project through a nested tuple: t.0 is (int, int), t.0.1 is int
+//- tuple_index_nested
+fn f() -> int {
+    let t = ((1, 2), true)
+    let x = t.0.1
+      //^ int
+    5
+}
+
+// out-of-bounds index on a 2-tuple must error
+//- tuple_index_oob @fail
+fn f() -> int {
+    let t = (1, true)
+    let x = t.2
+      //^ int
+    5
+}
+
+// indexing a non-tuple must error
+//- tuple_index_non_tuple @fail
+fn f() -> int {
+    let y = 5
+    let x = y.0
+      //^ int
+    5
+}

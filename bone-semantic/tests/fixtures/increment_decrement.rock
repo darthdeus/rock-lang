@@ -1,0 +1,30 @@
+//! `x++`/`++x`/`x--`/`--x` are mutating unary ops. As expressions they
+//! carry the operand's type (int or float). bone mirrors rock's
+//! `infer_mutating_unary_op`: infer the operand, return its type. The
+//! pre/post and +/- distinction only affects the runtime value (which
+//! bone doesn't compute), not the type. Verified vs rock: `let y = x++`
+//! and float `z++` both type-check.
+
+//- post_increment_int
+fn f() -> int {
+    let x = 5
+    let y = x++
+      //^ int
+    y
+}
+
+//- pre_increment_int
+fn f() -> int {
+    let x = 5
+    let y = ++x
+      //^ int
+    y
+}
+
+//- decrement_float
+fn f() -> float {
+    let z = 5.0
+    let w = z--
+      //^ float
+    w
+}

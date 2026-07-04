@@ -1,0 +1,27 @@
+//! Iterating an `Arena<T>` yields `(Entity<T>, T)` (matches rock's name-based
+//! special-case, like Map<K,V> -> (K,V)). `for (e, item) in arena` destructures
+//! the pair; `for pair in arena` binds the whole tuple.
+
+//- arena_iter_destructure
+struct Entity<T> { idx: int }
+struct Arena<T> { count: int }
+fn f<T>(arena: Arena<T>) -> int {
+    for (e, item) in arena {
+        let x = item
+          //^ T
+        let y = e
+          //^ Entity<T>
+    }
+    0
+}
+
+//- arena_iter_single
+struct Entity<T> { idx: int }
+struct Arena<T> { count: int }
+fn f<T>(arena: Arena<T>) -> int {
+    for pair in arena {
+        let p = pair
+          //^ (Entity<T>, T)
+    }
+    0
+}

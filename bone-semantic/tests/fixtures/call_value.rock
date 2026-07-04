@@ -1,0 +1,13 @@
+//! Calling a value that isn't a bare ident/field: `mk()()` (calling the result
+//! of a call), `(expr)()`, etc. bone's FunctionCall lowering only handles
+//! ident/field/qualified callees ("unsupported call form: FunctionCall"). A
+//! general callee expr should be inferred to a function type and its args
+//! checked (mirror the `Callee::Local` path). Verified vs rock.
+
+//- call_returned_fn
+fn mk() -> fn() -> int { return () => 99 }
+fn f() -> int {
+    let r = mk()()
+      //^ int
+    r
+}

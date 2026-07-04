@@ -1,0 +1,23 @@
+//! Reifying a COMPOUND type cross-arena must preserve its child count.
+//! `reify_range` (inference.rs) feeds App.params, Tuple.elements, and
+//! Function.params; a per-child double-allocation used to leak reify's
+//! intermediate node into the contiguous IdxRange, inflating the child
+//! count (`Map<int, string>` -> `Map<int, string, string>`). An array
+//! literal `[x]` reifies its element type, which is the trigger here.
+//! The nested-tuple manifestation of the same bug lives in tuple_literals.rock.
+
+// App with two type args: reified element type must stay 2-arg.
+//- app_two_arg_reify
+fn f(m: Map<int, string>) -> int {
+    let xs = [m]
+      //^ [Map<int, string>]
+    5
+}
+
+// Function with two params: reified element type must stay 2-param.
+//- fn_two_param_reify
+fn f(g: fn(int, string) -> bool) -> int {
+    let xs = [g]
+      //^ [fn(int, string) -> bool]
+    5
+}

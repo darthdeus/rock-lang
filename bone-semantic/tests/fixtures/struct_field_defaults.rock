@@ -1,0 +1,29 @@
+//! Struct field defaults: `struct Foo { x: int = 5 }` lets a literal omit the
+//! defaulted field (`Foo { }` fills x=5). Verified vs rock. Mirrors default
+//! params: track which fields have defaults; skip them in the missing-field check.
+
+//- field_default_omitted
+struct Slime { kind: int, health: int = 100 }
+fn f() -> int {
+    let s = Slime { kind: 1 }
+    let h = s.health
+      //^ int
+    h
+}
+
+//- field_default_overridden
+struct Boss { phase: int, health: int = 9999 }
+fn f() -> int {
+    let b = Boss { phase: 1, health: 5 }
+    let h = b.health
+      //^ int
+    h
+}
+
+// A non-defaulted field is still required.
+//- non_default_field_required @fail
+struct Slime { kind: int, health: int = 100 }
+fn f() -> int {
+    let s = Slime { health: 5 }
+    0
+}

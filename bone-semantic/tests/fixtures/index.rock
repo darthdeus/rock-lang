@@ -1,0 +1,63 @@
+//! @no_check
+//! Index expressions: `a[i]`. For `[T]` arrays the index is `int` and the
+//! result is `T`; for `Map<K, V>` the index is `K` and the result is `V`.
+//! Needs `Expr::Index` HIR + lowering (`ExprKind::Index`) + inference.
+
+//- index_array_int
+fn f() -> int {
+    let xs = [1, 2, 3]
+    let x = xs[0]
+      //^ int
+    5
+}
+
+//- index_array_bool
+fn f() -> int {
+    let xs = [true, false]
+    let x = xs[1]
+      //^ bool
+    5
+}
+
+// indexing a nested array yields the inner array's element type
+//- index_array_nested
+fn f() -> int {
+    let xs = [[1, 2], [3]]
+    let row = xs[0]
+      //^ [int]
+    5
+}
+
+// map indexing: key type K -> value type V
+//- index_map
+fn f(m: Map<string, int>) -> int {
+    let v = m["k"]
+      //^ int
+    5
+}
+
+// a non-int index into an array must fail
+//- index_array_bad_index @fail
+fn f() -> int {
+    let xs = [1, 2, 3]
+    let x = xs[true]
+      //^ int
+    5
+}
+
+// a wrong key type into a map must fail
+//- index_map_bad_key @fail
+fn f(m: Map<string, int>) -> int {
+    let v = m[5]
+      //^ int
+    5
+}
+
+// indexing a non-indexable type must fail
+//- index_non_indexable @fail
+fn f() -> int {
+    let y = 5
+    let x = y[0]
+      //^ int
+    5
+}

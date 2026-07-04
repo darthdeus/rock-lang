@@ -1,0 +1,27 @@
+//! Position queries inside NON-FUNCTION bodies: `body_at` must map an offset
+//! to its owner for every BodyOwner kind, not just `Function` (bone-inc B7's
+//! item interval index). Before B7 these markers resolve to no type at all.
+
+//- hover_inside_global_init
+global GREETING: string = "hello"
+                        //^ string
+fn f() -> string { GREETING }
+
+//- hover_inside_decorator_body
+struct __DecoTarget { name: string, params: [string], func: any }
+deco init d {
+    let n = target.name
+      //^ string
+}
+fn f() -> int { 3 }
+
+//- hover_inside_struct_default
+struct Cfg { greeting: string = "hi" }
+                              //^ string
+fn f() -> string { Cfg {}.greeting }
+
+//- hover_valueless_global_annotation
+struct Image { w: int }
+global CURRENT: Image
+              //^ Image
+fn f() -> int { CURRENT.w }

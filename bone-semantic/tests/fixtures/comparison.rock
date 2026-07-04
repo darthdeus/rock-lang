@@ -1,0 +1,104 @@
+//! @no_check
+//! Comparison / logical operators carry operand constraints beyond "-> bool":
+//!   <, <=, >, >=  require numeric operands (int/float); int and float widen.
+//!   &&, ||        require bool operands.
+//!   ==, !=        equality-compatible operands; int/float widen, null-compare ok.
+
+// --- ordering requires numeric operands ---
+
+//- lt_int_ok
+fn f() -> bool {
+    let b = 1 < 2
+      //^ bool
+    b
+}
+
+//- gt_float_ok
+fn f() -> bool {
+    let b = 2.5 > 1.5
+      //^ bool
+    b
+}
+
+//- leq_int_ok
+fn f() -> bool {
+    let b = 1 <= 1
+      //^ bool
+    b
+}
+
+// ordering on bools must be rejected
+//- lt_bool_fail @fail
+fn f() -> bool {
+    let b = true < false
+      //^ bool
+    b
+}
+
+// int and float operands widen (matches rock)
+//- lt_int_float_ok
+fn f() -> bool {
+    let b = 1 < 2.5
+      //^ bool
+    b
+}
+
+// ordering on non-numeric operands (string) must be rejected
+//- lt_string_fail @fail
+fn f() -> bool {
+    "a" < "b"
+}
+
+// --- logical requires bool operands ---
+
+//- and_bool_ok
+fn f() -> bool {
+    let b = true && false
+      //^ bool
+    b
+}
+
+//- or_bool_ok
+fn f() -> bool {
+    let b = true || false
+      //^ bool
+    b
+}
+
+//- and_int_fail @fail
+fn f() -> bool {
+    let b = 1 && 2
+      //^ bool
+    b
+}
+
+//- or_int_fail @fail
+fn f() -> bool {
+    let b = 1 || 0
+      //^ bool
+    b
+}
+
+// --- equality stays permissive over matching types, strict across types ---
+
+//- eq_int_ok
+fn f() -> bool {
+    let b = 1 == 2
+      //^ bool
+    b
+}
+
+// equality widens int/float too
+//- eq_int_float_ok
+fn f() -> bool {
+    let b = 1 == 2.5
+      //^ bool
+    b
+}
+
+//- eq_mismatch_fail @fail
+fn f() -> bool {
+    let b = 1 == true
+      //^ bool
+    b
+}

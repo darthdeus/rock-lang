@@ -1,0 +1,30 @@
+//! if-let: `if let x = opt { ... }` unwraps the nullable and binds x to the
+//! non-null type (verified vs rock). With `else`, it's a value expr joining
+//! then/else. Chains `if let a = x && let b = y && cond` bind left-to-right.
+
+//- if_let_unwrap_binding
+fn f(o: int?) -> int {
+    if let x = o {
+        let y = x
+          //^ int
+    }
+    5
+}
+
+//- if_let_else_value
+fn f(o: int?) -> int {
+    let r = if let x = o { x } else { 0 }
+      //^ int
+    r
+}
+
+//- if_let_chain
+fn f(a: int?, b: int?) -> int {
+    if let x = a && let y = b {
+        let s = x
+          //^ int
+        let t = y
+          //^ int
+    }
+    5
+}

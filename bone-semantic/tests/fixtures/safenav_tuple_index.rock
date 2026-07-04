@@ -1,0 +1,24 @@
+//! Nullable tuple/newtype `?.N`: peel one nullable layer, index positionally
+//! (tuple element or newtype wrapped type), then wrap the result back to a
+//! single nullable layer. `(A,B)?.0 -> A?`, `Newtype?.0 -> Wrapped?`. bone must
+//! route a numeric `SafeNav` field through the tuple/newtype positional
+//! resolver (the `Expr::TupleIndex` arm's logic), not `struct_field_ty` (which
+//! only knows named struct fields and errors "non-struct type (A, B)").
+//! Verified vs rock: `x?.0`/`x?.1` on `(int,string)?` and `Score?`.
+
+//- safenav_tuple_index
+fn f(t: (int, string)?) -> int {
+    let a = t?.0
+      //^ int?
+    let b = t?.1
+      //^ string?
+    5
+}
+
+//- safenav_newtype_index
+newtype Score(int)
+fn f(s: Score?) -> int {
+    let v = s?.0
+      //^ int?
+    5
+}

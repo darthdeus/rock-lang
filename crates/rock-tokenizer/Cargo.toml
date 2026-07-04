@@ -1,0 +1,14 @@
+[package]
+name = "rock-tokenizer"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+rock-core = { path = "../rock-core" }
+ustr = { workspace = true }
+ordered-float = { workspace = true }
+atomic_refcell = { workspace = true }
+itertools = { workspace = true }

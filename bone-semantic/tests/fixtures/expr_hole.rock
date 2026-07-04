@@ -1,0 +1,19 @@
+//! `?` in value position lowers to a fresh inference var (HIR `Expr::Hole`),
+//! coerced to the surrounding expected type. Pins that bone accepts expression
+//! holes (was a `comp_error!("unsupported expr Hole")` at lowering); the LSP
+//! hole-info feature reads the coerced type back out.
+
+//- expr_hole_coerced_from_let_annotation
+fn f() -> int {
+    let x: int = ?
+               //^ int
+    x
+}
+
+// the hole's type also flows from a call argument's parameter type
+//- expr_hole_coerced_from_call_arg
+fn takes(n: int) -> int { n }
+fn g() -> int {
+    takes(?)
+        //^ int
+}

@@ -1,0 +1,26 @@
+//! Array-literal spread: `[a, ...t, b]` flattens the operand's elements into the
+//! array and joins their types. Operand may be a tuple, a struct (flattens its
+//! fields), or an array/vec. (Only array-literal spread is used in the suite;
+//! struct-literal spread and call-splat have zero usage -- not implemented.)
+
+//- tuple_spread_in_array
+fn f() -> int {
+    let xs = [1, ...(2, 3), 4]
+      //^ [int]
+    5
+}
+
+//- struct_spread_in_array
+struct V2 { x: int, y: int }
+fn f(p: V2) -> int {
+    let xs = [...p, 0]
+      //^ [int]
+    5
+}
+
+//- tuple_var_spread
+fn f(t: (int, int)) -> int {
+    let xs = [...t, 0]
+      //^ [int]
+    5
+}

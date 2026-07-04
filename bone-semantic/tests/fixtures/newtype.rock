@@ -1,0 +1,71 @@
+//! `newtype UserId(int)` is a distinct nominal wrapper over a base type.
+//! Construction is explicit (`UserId(42)` : UserId); the base type does NOT
+//! coerce to the newtype (verified vs rock: `let x: UserId = 5` is rejected).
+//! Registered like a struct (passes 1-2), constructed via the Call path.
+
+//- newtype_construct
+newtype UserId(int)
+fn f() -> int {
+    let id = UserId(42)
+      //^ UserId
+    5
+}
+
+//- newtype_as_param_type
+newtype Tag(string)
+fn f(t: Tag) -> int {
+    let x = t
+      //^ Tag
+    5
+}
+
+// The wrapped base type does not implicitly become the newtype.
+//- newtype_no_base_coercion @fail
+newtype UserId(int)
+fn f() -> int {
+    let bad: UserId = 5
+    0
+}
+
+// Construction arg must match the wrapped type.
+//- newtype_construct_wrong_arg @fail
+newtype UserId(int)
+fn f() -> int {
+    let id = UserId("nope")
+    0
+}
+
+// Generic newtype: construction infers the type parameter.
+//- generic_newtype_construct
+newtype Box<T>(T)
+fn f() -> int {
+    let b = Box(42)
+      //^ Box<int>
+    5
+}
+
+// Multi-param generic newtype (single-field: wraps one value mentioning both
+// type params).
+//- generic_newtype_multi
+newtype Pair<T, U>((T, U))
+fn f() -> int {
+    let p = Pair((1, "hi"))
+      //^ Pair<int, string>
+    5
+}
+
+// A newtype wraps exactly one type; multi-field defs are rejected by the
+// grammar.
+//- newtype_multi_field_rejected @fail
+newtype Bad(int, string)
+fn f() -> int {
+    0
+}
+
+// A newtype binds exactly one value; multi-binding patterns are rejected.
+//- newtype_multi_binding_rejected @fail
+newtype UserId(int)
+fn f(u: UserId) -> int {
+    let UserId(a, b) = u
+    0
+}

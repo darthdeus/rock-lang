@@ -1,0 +1,68 @@
+//! @no_check
+//! Missing-return: a function with a non-unit declared return type whose body
+//! neither falls through to a tail expression nor `return`s a value must be
+//! rejected. Today the `body_ty != unit` gate in `check_module` skips exactly
+//! this case, so it's a silent hole.
+//!
+//! Principled fix (park note slice 2): a `Never`/bottom type that unifies with
+//! anything. A block whose last statement is `return` is `Never`, so the gate
+//! can be dropped and `unify(body, ret)` catches a plain unit fall-through.
+//! Bare `return` (no value) must also match the declared type via the Return
+//! statement check, not slip through as divergence.
+
+// fall-through with no value: must be rejected.
+//- missing_return_let_only @fail
+fn f() -> int {
+    let x = 5
+      //^ int
+}
+
+// explicit `return <value>` satisfies the declared type.
+//- return_satisfies
+fn f() -> int {
+    let x = 5
+    return x
+      //^ int
+}
+
+// tail expression satisfies the declared type.
+//- tail_satisfies
+fn f() -> int {
+    let x = 5
+    x
+  //^ int
+}
+
+// no declared return type: a unit body is fine.
+//- no_return_type_ok
+fn f() {
+    let x = 5
+      //^ int
+}
+
+// bare `return` (returns unit) in an int function must be rejected.
+//- return_unit_mismatch @fail
+fn f() -> int {
+    let z = 1
+      //^ int
+    return
+}
+
+// a bare `return` in VALUE position is still a unit return -- the position does
+// not change that it returns nothing where an int is declared. Must be rejected
+// (bone is intentionally stricter than rock here: rock accepts this).
+//- bare_return_value_position_rejected @fail
+fn f() -> int {
+    let x: int = return
+      //^ int
+    x
+}
+
+// the `?? return` early-exit idiom lives in UNIT functions, where a bare return
+// matches the unit return type. The fix must NOT touch this -- declared_ret_ty is
+// None for a fn with no declared return, so the return coerce is skipped.
+//- bare_return_in_unit_fn_keeps_working
+fn g(o: int?) {
+    let x = o ?? return
+      //^ int
+}

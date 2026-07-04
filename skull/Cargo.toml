@@ -1,0 +1,31 @@
+[package]
+name = "skull"
+version = "0.1.0"
+edition = "2024"
+
+# skull is the Claude-managed code-generation backend for `bone`'s HIR. It
+# consumes bone as a library (parse -> semantic_pass -> Workspace) and emits
+# Lua, independent of rock's `rock-codegen`. See docs/skull-plan.md.
+
+[features]
+# Swap skull's parallel emit/inline (rayon) for sequential iteration, so a
+# sampling profiler attributes codegen samples to one thread (clean flamegraphs).
+# Mirrors bone's `sequential`. Wired through rock-cli's `sequential` feature.
+sequential = []
+
+[dependencies]
+bone-semantic = { path = "../bone-semantic" }
+skull-mir = { path = "../skull-mir" }
+skull-codegen-lua = { path = "../skull-codegen-lua" }
+skull-transform = { path = "../skull-transform" }
+skull-parser = { path = "../skull-parser" }
+ustr = { workspace = true }
+rustc-hash = { workspace = true }
+rayon = { workspace = true }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+rock-host = { path = "../rock-host" }
+
+[lints]
+workspace = true

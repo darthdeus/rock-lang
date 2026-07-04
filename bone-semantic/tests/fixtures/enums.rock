@@ -1,0 +1,70 @@
+//! @no_check
+//! Enum definitions (E1): an `enum` registers a nominal type whose name resolves
+//! in type position; variant payload types are lowered. Construction
+//! (`Color::Red`, `Shape::Circle(x)`) and `match` are separate slices.
+
+// unit-variant enum used as a parameter type.
+//- enum_as_type
+enum Color { Red, Green, Blue }
+fn f(c: Color) -> int {
+   //^ Color
+    5
+}
+
+// payload (tuple) variants: their field types must lower.
+//- enum_payload_def
+enum Shape { Circle(float), Rect(float, float) }
+fn f(s: Shape) -> int {
+   //^ Shape
+    5
+}
+
+// generic enum: `Option<int>` is an App instantiation and renders as such.
+//- generic_enum_type
+enum Option<T> { Some(T), None }
+fn f(o: Option<int>) -> int {
+   //^ Option<int>
+    5
+}
+
+// --- E2: construction ---
+
+// unit variant (`Color::Red` parses as QualifiedIdent).
+//- enum_unit_construct
+enum Color { Red, Green, Blue }
+fn f() -> Color {
+    Color::Red
+  //^ Color
+}
+
+// payload variant (`Shape::Circle(x)` parses as EnumVariantConstruction).
+//- enum_payload_construct
+enum Shape { Circle(float), Rect(float, float) }
+fn f() -> Shape {
+    Shape::Circle(1.5)
+  //^ Shape
+}
+
+// generic enum construction infers the type arg from the payload.
+//- generic_enum_construct
+enum Option<T> { Some(T), None }
+fn f() -> Option<int> {
+    Option::Some(5)
+  //^ Option<int>
+}
+
+// wrong payload type is rejected.
+//- enum_payload_mismatch @fail
+enum Shape { Circle(float), Rect(float, float) }
+fn f() -> Shape {
+    Shape::Circle(true)
+  //^ Shape
+}
+
+// record-style variant: named payload fields, constructed by name.
+//- enum_record_construct
+enum Shape { Dot, Rect { w: float, h: float } }
+fn f() -> Shape {
+    Shape::Rect { w: 1.0, h: 2.0 }
+  //^ Shape
+}

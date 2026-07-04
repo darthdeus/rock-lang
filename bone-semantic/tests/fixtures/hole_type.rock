@@ -1,0 +1,26 @@
+//! A hole in type position infers from context (here, the value).
+//! Two surface syntaxes: `_` (lexes as `Ident("_")`) and `?`/`?name`
+//! (parses as `TypeExprKind::Hole`). Both must behave like no annotation.
+
+//- hole_in_let
+fn f() -> int {
+    let x: _ = 5
+      //^ int
+    x
+}
+
+// `?` in type position is a placeholder hole -> infer from the value.
+//- q_hole_in_let
+fn f(value: int) -> int {
+    let x: ? = value
+      //^ int
+    x
+}
+
+// A named `?name` hole behaves the same; the name is just a hint.
+//- named_q_hole
+fn f(value: int) -> int {
+    let x: ?elem = value
+      //^ int
+    x
+}

@@ -1,0 +1,240 @@
+//! Preprocessor-dependent `SourceFile` / `SourceFiles` constructors.
+//!
+//! These can't live in `rock-core` (where `SourceFile`/`SourceFiles` are
+//! defined) because they depend on the preprocessor: every load runs the
+//! `#if`/`#script`/`#test`/`#use` directive pass to extract the
+//! `is_script`/`is_test`/`is_test_util`/`used_packages` flags.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use atomic_refcell::AtomicRefCell;
+use rock_core::{FileContents, ModuleId, SourceFile, SourceFiles, Span};
+
+use crate::preprocessor::{preprocess, PreprocessorContext};
+
+/// Preprocessor-dependent SourceFiles constructors (can't be in rock-core since
+/// they depend on the preprocessor).
+pub trait SourceFilesExt {
+    fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles>;
+    fn from_single_path<P: AsRef<Path>>(path: P) -> Result<SourceFiles>;
+    fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles>;
+    fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles>;
+    fn test_from_code_literal(code: &str) -> SourceFiles;
+
+    /// Source text covered by `span` (byte `offset_range`), or None if
+    /// the file isn't loaded or the range is out of bounds. Canonical
+    /// reader for lint auto-fix rendering -- one body for what was three
+    /// copies (coalesce/if-let `slice_source`, ufcs `span_source`).
+    fn span_text(&self, span: &Span) -> Option<String>;
+}
+
+impl SourceFilesExt for SourceFiles {
+    fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles> {
+        source_files_from_dir_impl(source_dir, true)
+    }
+
+    fn span_text(&self, span: &Span) -> Option<String> {
+        let path = span.file.as_str();
+        let file = self
+            .files
+            .iter()
+            .find(|f| f.borrow().file.to_id_path() == path)?;
+        let f = file.borrow();
+        let (start, end) = span.offset_range;
+        f.contents.get(start..end).map(|s| s.to_string())
+    }
+
+    fn from_single_path<P: AsRef<Path>>(path: P) -> Result<SourceFiles> {
+        let file = source_file_load(path, false)?;
+        Ok(SourceFiles::from_single_file(file))
+    }
+
+    fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles> {
+        let file = source_file_load(path, true)?;
+        Ok(SourceFiles::from_single_file(file))
+    }
+
+    fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles> {
+        let files = paths
+            .iter()
+            .map(|path| source_file_load(path, preprocess))
+            .collect::<Result<Vec<_>>>()?;
+
+        let files = files
+            .into_iter()
+            .map(|x| Arc::new(AtomicRefCell::new(x)))
+            .collect();
+
+        Ok(SourceFiles { files })
+    }
+
+    fn test_from_code_literal(code: &str) -> SourceFiles {
+        SourceFiles::from_single_file(source_file_from_code("test.rock".into(), code.to_string()))
+    }
+}
+
+fn source_files_from_dir_impl<P: AsRef<Path>>(source_dir: P, preprocess: bool) -> Result<SourceFiles> {
+    let paths = crate::project::find_rock_files_at_path(source_dir)?;
+
+    // Each file does read_to_string + preprocess. Paths are already canonical
+    // (find_rock_files_at_path canonicalizes the base dir). Parallel by default;
+    // the `sequential` feature loads serially so a sampling profile of the front
+    // end (rock iter-parse / iter-tokenize) carries no rayon pool/teardown frames
+    // -- this is the only par_iter on that path, so gating it keeps the global
+    // rayon pool from ever spinning up.
+    let load = |path: &String| source_file_from_canonical_path(Path::new(path), preprocess);
+
+    #[cfg(not(feature = "sequential"))]
+    let loaded: Result<Vec<_>> = {
+        use rayon::prelude::*;
+        paths.par_iter().map(load).collect()
+    };
+    #[cfg(feature = "sequential")]
+    let loaded: Result<Vec<_>> = paths.iter().map(load).collect();
+
+    let files = loaded?
+        .into_iter()
+        .map(|x| Arc::new(AtomicRefCell::new(x)))
+        .collect();
+
+    Ok(SourceFiles { files })
+}
+
+// Helper function to process content and extract directives.
+// The preprocessor always runs (to extract is_script/is_test/used_packages
+// flags), but `apply` controls whether its output replaces the raw contents.
+// Callers that format or display source pass `apply: false`; callers that
+// compile pass `apply: true`.
+fn preprocess_content(
+    contents: &str,
+    apply: bool,
+) -> Result<(String, bool, bool, bool, Vec<String>)> {
+    let context = PreprocessorContext::new("lua");
+    let preprocessed = preprocess(contents, &context)?;
+
+    let final_contents = if apply {
+        preprocessed.content
+    } else {
+        contents.to_string()
+    };
+
+    Ok((
+        final_contents,
+        preprocessed.is_script,
+        preprocessed.is_test,
+        preprocessed.is_test_util,
+        preprocessed.used_packages,
+    ))
+}
+
+// Helper function to create a SourceFile with all required fields
+fn create_source_file(
+    file: FileContents,
+    contents: String,
+    is_script: bool,
+    is_test: bool,
+    is_test_util: bool,
+    used_packages: Vec<String>,
+) -> SourceFile {
+    let module_id = ModuleId::new(file.to_id_path().into());
+
+    SourceFile {
+        module_id,
+        file,
+        contents,
+        is_script,
+        is_test,
+        is_test_util,
+        used_packages,
+    }
+}
+
+/// Load a source file without applying preprocessor output (used by the
+/// formatter and LSP, which want the original text with #if blocks intact).
+pub fn source_file_new(path: impl AsRef<Path>) -> Result<SourceFile> {
+    source_file_load(path, false)
+}
+
+/// Load a source file and apply preprocessor output (used by the compilation
+/// pipeline, which wants #if blocks resolved).
+pub fn source_file_new_preprocessed(path: impl AsRef<Path>) -> Result<SourceFile> {
+    source_file_load(path, true)
+}
+
+fn source_file_load(path: impl AsRef<Path>, preprocess: bool) -> Result<SourceFile> {
+    let path = fs_err::canonicalize(path.as_ref())
+        .with_context(|| format!("Failed to resolve path '{}'", path.as_ref().display()))?;
+    source_file_from_canonical_path(&path, preprocess)
+}
+
+/// Load a source file from an already-canonical absolute path (skips canonicalize syscall).
+fn source_file_from_canonical_path(
+    path: &Path,
+    preprocess: bool,
+) -> Result<SourceFile> {
+    let raw_contents = fs_err::read_to_string(path)
+        .with_context(|| format!("Failed to read '{}'", path.display()))?;
+
+    let (contents, is_script, is_test, is_test_util, used_packages) =
+        preprocess_content(&raw_contents, preprocess)?;
+
+    let file = FileContents::Filesystem {
+        path: path.to_str().unwrap().to_string(),
+        filename: path.file_name().unwrap().to_string_lossy().to_string(),
+    };
+
+    Ok(create_source_file(
+        file,
+        contents,
+        is_script,
+        is_test,
+        is_test_util,
+        used_packages,
+    ))
+}
+
+pub fn source_file_from_path_and_contents(
+    path: String,
+    filename: String,
+    contents: String,
+) -> SourceFile {
+    // Check for directives without applying preprocessing. Preprocessor
+    // failure (malformed `#if`, etc.) used to fall back to defaults
+    // (is_script=false, is_test=false, used_packages=[]) silently --
+    // tests in such a file would never run with no diagnostic. Surface
+    // the error so the user sees the real cause; keep the safe defaults
+    // so a downstream parse can still produce useful diagnostics
+    // (silent-errors audit, 2026-05-02).
+    let (_, is_script, is_test, is_test_util, used_packages) = match preprocess_content(&contents, false) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("rock: preprocessor error for `{path}`: {e:#}");
+            (contents.clone(), false, false, false, vec![])
+        }
+    };
+
+    let file = FileContents::Filesystem { path, filename };
+
+    create_source_file(file, contents, is_script, is_test, is_test_util, used_packages)
+}
+
+pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
+    // See source_file_from_path_and_contents above for the rationale.
+    let (processed_contents, is_script, is_test, is_test_util, used_packages) =
+        match preprocess_content(&contents, false) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("rock: preprocessor error for `{id_path}`: {e:#}");
+                (contents.clone(), false, false, false, vec![])
+            }
+        };
+
+    let file = FileContents::Code {
+        id_path: id_path.clone(),
+        contents,
+    };
+
+    create_source_file(file, processed_contents, is_script, is_test, is_test_util, used_packages)
+}

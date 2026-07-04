@@ -1,0 +1,177 @@
+//! TARGET SPEC (NOT YET IMPLEMENTED) for field references / key paths --
+//! step 5 of docs/coroutine-ownership-plan.md. RED until the typechecker
+//! learns `FieldOf<T, V>` + the `.field` literal. Sections are the intended
+//! typing rules; run `cargo test -p bone-semantic -- field_ref` to see the
+//! current RED and the real error messages driving the design.
+//!
+//! Design being pinned:
+//!   - `FieldOf<T, V>` is a compiler-known type former (like Entity<T> /
+//!     Coroutine<T>), NOT a user struct. Its inhabitants are field-name
+//!     literals validated against T's declaration.
+//!   - The literal `.field` reuses the existing `SiblingFieldRef` AST node
+//!     (parser.rs:2046) -- no new expression syntax. It is EXPECTED-TYPE
+//!     DRIVEN: given expected `FieldOf<T, V>`, look up `field` on T, unify
+//!     its declared type with V, yield `FieldOf<T, V>`.
+//!   - WRITABLE / INVARIANT: the poller both reads the slot and writes null
+//!     to cancel, so the field's declared type must match V EXACTLY (Swift
+//!     WritableKeyPath, not the covariant read-only KeyPath).
+
+// ---------------------------------------------------------------------------
+// A. concrete V: `.field` checked against FieldOf<T, V> with V fixed
+// ---------------------------------------------------------------------------
+
+//- concrete_v_exact_ok
+struct Mob { health: int, attack_co: int? }
+fn poll(f: FieldOf<Mob, int?>) {}
+fn main() {
+    let f: FieldOf<Mob, int?> = .attack_co
+      //^ FieldOf<Mob, int?>
+    poll(f)
+}
+
+// field that doesn't exist on the struct -> rejected
+//- concrete_v_missing_field_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn poll(f: FieldOf<Mob, int?>) {}
+fn main() {
+    poll(.nope)
+}
+
+// INVARIANCE: a non-null `int` field cannot satisfy `FieldOf<Mob, int?>`
+// (you couldn't write null through it). Exact match required.
+//- concrete_v_widen_write_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn poll(f: FieldOf<Mob, int?>) {}
+fn main() {
+    poll(.health)
+}
+
+// INVARIANCE other direction: a nullable field cannot satisfy
+// `FieldOf<Mob, int>` (a read yields int?, not int).
+//- concrete_v_narrow_read_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn take(f: FieldOf<Mob, int>) {}
+fn main() {
+    take(.attack_co)
+}
+
+// ---------------------------------------------------------------------------
+// B. free V: V is inferred FROM the field -- the field_get/field_set intrinsic
+//    shape. This is the key inference premise for the stdlib intrinsics.
+// ---------------------------------------------------------------------------
+
+//- free_v_inferred_from_field
+struct Mob { health: int, attack_co: int? }
+inline(lua) fn get_field<T, V>(o: T, f: FieldOf<T, V>) -> V = "return o[f]"
+fn main() {
+    let h = get_field(Mob { health: 3, attack_co: null }, .health)
+      //^ int
+    h
+}
+
+//- free_v_inferred_nullable
+struct Mob { health: int, attack_co: int? }
+inline(lua) fn get_field<T, V>(o: T, f: FieldOf<T, V>) -> V = "return o[f]"
+fn main() {
+    let c = get_field(Mob { health: 3, attack_co: null }, .attack_co)
+      //^ int?
+    c
+}
+
+// ---------------------------------------------------------------------------
+// C. inference ordering: T comes from a sibling arg and must be solved BEFORE
+//    the `.field` literal resolves. This is the poll_co_slot shape.
+// ---------------------------------------------------------------------------
+
+//- t_from_sibling_arg_ok
+struct Mob { health: int, attack_co: int? }
+struct Entity<T> { _index: int }
+fn poll_slot<T>(e: Entity<T>, f: FieldOf<T, int?>) {}
+fn main() {
+    let e: Entity<Mob> = Entity { _index: 0 }
+      //^ Entity<Mob>
+    poll_slot(e, .attack_co)
+}
+
+// ---------------------------------------------------------------------------
+// D. a bare `.field` with no expected FieldOf type is an error (same as a
+//    SiblingFieldRef outside a struct default).
+// ---------------------------------------------------------------------------
+
+//- bare_field_no_context_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn main() {
+    let x = .attack_co
+    x
+}
+
+// ---------------------------------------------------------------------------
+// E. generic struct: the field type comes through the struct's own generic
+//    param, so struct_field_ty's substitution must flow into V.
+// ---------------------------------------------------------------------------
+
+//- generic_struct_concrete_v_ok
+struct Box<T> { value: T }
+fn take(f: FieldOf<Box<int>, int>) {}
+fn main() {
+    let f: FieldOf<Box<int>, int> = .value
+      //^ FieldOf<Box<int>, int>
+    take(f)
+}
+
+// free V AND a generic struct at once: T = Box<int> from arg 0, then `.value`
+// resolves value: T_box = int, binding V := int.
+//- generic_struct_free_v_ok
+struct Box<T> { value: T }
+inline(lua) fn get_field<T, V>(o: T, f: FieldOf<T, V>) -> V = "return o[f]"
+fn main() {
+    let v = get_field(Box { value: 7 }, .value)
+      //^ int
+    v
+}
+
+// ---------------------------------------------------------------------------
+// F. field_set writing null through a nullable-typed field -- the actual
+//    coroutine cancel op. V is inferred int? from the field; null coerces to V.
+// ---------------------------------------------------------------------------
+
+//- field_set_write_null_ok
+struct Mob { health: int, attack_co: int? }
+inline(lua) fn field_set<T, V>(o: T, f: FieldOf<T, V>, v: V) = "o[f] = v"
+fn main() {
+    let m = Mob { health: 1, attack_co: null }
+    field_set(m, .attack_co, null)
+    let ok = 1
+      //^ int
+    ok
+}
+
+// ---------------------------------------------------------------------------
+// G. wrong field on the container's T -- T is solved from the Entity<T> arg,
+//    and the named field doesn't exist on that struct.
+// ---------------------------------------------------------------------------
+
+//- generic_container_wrong_field_fail @fail
+struct Mob { health: int, attack_co: int? }
+struct Rock { mass: int }
+struct Entity<T> { _index: int }
+fn poll_slot<T>(e: Entity<T>, f: FieldOf<T, int?>) {}
+fn main() {
+    let e: Entity<Rock> = Entity { _index: 0 }
+    poll_slot(e, .attack_co)
+}
+
+// ---------------------------------------------------------------------------
+// H. value struct: at the TYPE level a field ref resolves like any struct.
+//    The RUNTIME question (string-keyed cdata access) is a separate skull
+//    concern (docs/field-refs-plan.md Open edges); this pins type-level accept.
+// ---------------------------------------------------------------------------
+
+//- value_struct_field_ok
+value Vec2 { x: float, y: float }
+fn take(f: FieldOf<Vec2, float>) {}
+fn main() {
+    let f: FieldOf<Vec2, float> = .x
+      //^ FieldOf<Vec2, float>
+    take(f)
+}

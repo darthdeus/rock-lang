@@ -1,0 +1,57 @@
+//! Safe-nav compound assignment: `o.inner?.vec += v`. This is the ONE compound
+//! form rock's SyntaxDesugarPass does NOT rewrite to `a = __op_X(a, b)` -- it
+//! keeps `Assign { compound_op: Some(op) }` so codegen can thread the nil-check
+//! (generate_safe_nav_assign). bone currently rejects it ("Compound assignment
+//! operators are not supported"). Plain (non-safe-nav) compound assigns never
+//! reach bone in this shape; they arrive already desugared.
+//!
+//! Type rule (rock infer_assign_target + resolve_binary_operator,
+//! rock-semantic/src/bidirectional/{expr_utils.rs:2493, exprs.rs:979}): the
+//! assign-target type is the field type with the receiver's `?` UNWRAPPED (V2,
+//! not V2?); the op is resolved as `op(unwrapped_target, rhs) -> result`; the
+//! result is written back to the unwrapped field type. The whole thing is a
+//! unit statement. The overload bodies here `return a` so the fixture needs no
+//! stdlib numeric ops. Verified vs rock (all three shapes pass).
+
+// one-level safe-nav, homogeneous op.
+//- safenav_compound_basic
+struct V2 { x: int, y: int }
+fn __op_add(a: V2, b: V2) -> V2 { return a }
+struct Inner { v: V2 }
+struct Outer { inner: Inner? }
+fn f() -> int {
+    let o = Outer { inner: Inner { v: V2 { x: 1, y: 1 } } }
+    o.inner?.v += V2 { x: 2, y: 2 }
+    let r = 0
+      //^ int
+    r
+}
+
+// mixed-type op `V2 *= int` (rhs differs from the unwrapped target type).
+//- safenav_compound_mixed_op
+struct V2 { x: int, y: int }
+fn __op_mul(a: V2, s: int) -> V2 { return a }
+struct Inner { v: V2 }
+struct Outer { inner: Inner? }
+fn f() -> int {
+    let o = Outer { inner: Inner { v: V2 { x: 1, y: 1 } } }
+    o.inner?.v *= 3
+    let r = 0
+      //^ int
+    r
+}
+
+// deep safe-nav chain: every `?.` link unwraps; the op applies at the leaf.
+//- safenav_compound_deep_chain
+struct V2 { x: int, y: int }
+fn __op_add(a: V2, b: V2) -> V2 { return a }
+struct L1 { v: V2 }
+struct L2 { l1: L1? }
+struct L3 { l2: L2? }
+fn f() -> int {
+    let root: L3? = L3 { l2: L2 { l1: L1 { v: V2 { x: 1, y: 1 } } } }
+    root?.l2?.l1?.v += V2 { x: 1, y: 1 }
+    let r = 0
+      //^ int
+    r
+}

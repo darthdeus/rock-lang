@@ -1,0 +1,21 @@
+//! Indexing native buffers: `buf[i]`. bone's Index inference only handles Array
+//! and Map ("cannot index into type NativeBufferU8"). `NativeBuffer<T>` indexes
+//! to `T`; the phantom variants (`NativeBufferU8`/`I8`/`U16`/...) index to `int`.
+//! Index must be `int`. (check_types has no stdlib, so the buffer structs are
+//! defined here; the Index arm keys off the nominal name.) Verified vs rock.
+
+//- native_buffer_generic_index
+struct NativeBuffer<T> { ptr: int, len: int }
+fn f(b: NativeBuffer<int>) -> int {
+    let r = b[0]
+      //^ int
+    r
+}
+
+//- native_buffer_phantom_index
+struct NativeBufferU8 { ptr: int, len: int }
+fn f(b: NativeBufferU8) -> int {
+    let r = b[0]
+      //^ int
+    r
+}

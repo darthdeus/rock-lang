@@ -1,0 +1,41 @@
+//! Calling a fn VALUE through a struct FIELD or a GLOBAL. bone already
+//! calls fn-typed params/locals (fn_value_call.rock) and references
+//! top-level fns by name (fn_value_reference.rock); these two call shapes
+//! still mis-resolve:
+//!   - `holder.func()` lowers as a UFCS call `func(holder)` (lower.rs ~640,
+//!     FieldAccess callee -> Callee::Unresolved{name}) -> "Function 'func'
+//!     doesn't exist". Fix: if the receiver has a FIELD `func` of fn type,
+//!     call that field value (don't UFCS).
+//!   - `global_func()` resolves the ident to `Expr::Global` (not
+//!     `Expr::Var`), so the `Callee::Local` value-call path is skipped and
+//!     it falls to name resolution. Fix: a global of fn type is callable.
+//! Verified vs rock (tests/function_field_call.rock, function_shadowing_bug.rock).
+
+//- fn_typed_field_call
+struct Holder { func: fn() -> int, with_args: fn(int, int) -> int }
+fn f() -> int {
+    let h = Holder { func: () => 42, with_args: (a, b) => a }
+    let r = h.func()
+      //^ int
+    let s = h.with_args(3, 4)
+      //^ int
+    s
+}
+
+//- fn_typed_field_nested
+struct Inner { processor: fn(int) -> int }
+struct Outer { inner: Inner }
+fn f() -> int {
+    let o = Outer { inner: Inner { processor: (x) => x } }
+    let r = o.inner.processor(7)
+      //^ int
+    r
+}
+
+//- fn_typed_global_call
+global global_func: fn() -> int = () => 200
+fn f() -> int {
+    let r = global_func()
+      //^ int
+    r
+}
