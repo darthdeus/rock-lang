@@ -21,7 +21,7 @@ pub fn go_to_definition_workspace(
     workspace: &mut LspWorkspace,
     params: &GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
-    crate::scope!("go_to_definition_workspace");
+    rock_types::scope!("go_to_definition_workspace");
     let file_path = get_file_path_from_params(&params.text_document_position_params)?;
     let pos = params.text_document_position_params.position;
     Ok(workspace
@@ -36,7 +36,7 @@ pub fn go_to_type_definition_workspace(
     workspace: &mut LspWorkspace,
     params: &GotoTypeDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
-    crate::scope!("go_to_type_definition_workspace");
+    rock_types::scope!("go_to_type_definition_workspace");
     let file_path = get_file_path_from_params(&params.text_document_position_params)?;
     let pos = params.text_document_position_params.position;
     Ok(workspace
@@ -50,7 +50,7 @@ pub fn find_references_workspace(
     workspace: &mut LspWorkspace,
     params: &ReferenceParams,
 ) -> Result<Option<Vec<Location>>> {
-    crate::scope!("find_references_workspace");
+    rock_types::scope!("find_references_workspace");
     let file_path = get_file_path_from_params(&params.text_document_position)?;
     let pos = params.text_document_position.position;
     let locs = workspace.bone.references(&file_path, pos);
@@ -64,7 +64,7 @@ pub fn do_document_highlight_workspace(
     workspace: &mut LspWorkspace,
     params: &DocumentHighlightParams,
 ) -> Result<Option<Vec<DocumentHighlight>>> {
-    crate::scope!("do_document_highlight_workspace");
+    rock_types::scope!("do_document_highlight_workspace");
     // Plain `file://` strip to match the key bone.update registers on didChange.
     let uri_str = params.text_document_position_params.text_document.uri.as_str();
     let file_path = uri_str.strip_prefix("file://").unwrap_or(uri_str);
@@ -78,7 +78,7 @@ pub fn do_hover_workspace(
     workspace: &mut LspWorkspace,
     params: &HoverParams,
 ) -> Result<Option<Hover>> {
-    crate::scope!("do_hover_workspace");
+    rock_types::scope!("do_hover_workspace");
     let file_path = get_file_path_from_params(&params.text_document_position_params)?;
     let pos = params.text_document_position_params.position;
     Ok(workspace.bone.hover(&file_path, pos))
@@ -89,7 +89,7 @@ pub fn do_signature_help_workspace(
     workspace: &mut LspWorkspace,
     params: &SignatureHelpParams,
 ) -> Result<Option<SignatureHelp>> {
-    crate::scope!("do_signature_help_workspace");
+    rock_types::scope!("do_signature_help_workspace");
     let file_path = get_file_path_from_params(&params.text_document_position_params)?;
     let pos = params.text_document_position_params.position;
     Ok(workspace.bone.signature_help(&file_path, pos))
@@ -100,7 +100,7 @@ pub fn do_document_symbols_workspace(
     workspace: &mut LspWorkspace,
     params: &DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
-    crate::scope!("do_document_symbols_workspace");
+    rock_types::scope!("do_document_symbols_workspace");
     let uri_str = params.text_document.uri.as_str();
     let file_path = uri_str.strip_prefix("file://").unwrap_or(uri_str);
     let symbols = workspace.bone.document_symbols(file_path);
@@ -113,7 +113,7 @@ pub fn do_workspace_symbols_workspace(
     workspace: &mut LspWorkspace,
     params: &WorkspaceSymbolParams,
 ) -> Result<Option<WorkspaceSymbolResponse>> {
-    crate::scope!("do_workspace_symbols_workspace");
+    rock_types::scope!("do_workspace_symbols_workspace");
     let symbols = workspace.bone.workspace_symbols(&params.query);
     Ok(Some(WorkspaceSymbolResponse::Flat(symbols)))
 }
@@ -123,7 +123,7 @@ pub fn do_inlay_hints_workspace(
     workspace: &mut LspWorkspace,
     params: &InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>> {
-    crate::scope!("do_inlay_hints_workspace");
+    rock_types::scope!("do_inlay_hints_workspace");
     let _span = tracing::debug_span!("do_inlay_hints_workspace").entered();
     let uri_str = params.text_document.uri.as_str();
     let file_path = if uri_str.starts_with("file://") {
@@ -139,7 +139,7 @@ pub fn do_completion_workspace(
     workspace: &mut LspWorkspace,
     params: &CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
-    crate::scope!("do_completion_workspace");
+    rock_types::scope!("do_completion_workspace");
     let _span = tracing::debug_span!("do_completion_workspace").entered();
     let file_path = get_file_path_from_params(&params.text_document_position)?;
     let pos = params.text_document_position.position;

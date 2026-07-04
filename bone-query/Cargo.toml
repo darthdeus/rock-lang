@@ -15,6 +15,7 @@ bone-semantic = { path = "../bone-semantic" }
 bone-incremental = { path = "../bone-incremental" }
 skull-parser = { path = "../skull-parser" }
 rock-tokenizer = { path = "../crates/rock-tokenizer" }
+rock-syntax = { path = "../rock-syntax" }
 rock-host = { path = "../rock-host" }
 lsp-types = { path = "../crates/lsp-types-manual", package = "lsp-types-manual" }
 

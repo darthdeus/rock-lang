@@ -13,7 +13,6 @@
 
 pub mod gaps;
 mod macro_refs;
-mod position;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -34,7 +33,7 @@ use lsp_types::{
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{BodyInference, InferenceResult, ModuleId, Span, TyId, Workspace};
 use bone_incremental::session::{Session, UpdateTier};
-use skull_parser::CompilerError;
+use rock_syntax::CompilerError;
 use ustr::Ustr;
 
 use crate::query::{clean_match, fz_boundary, SymCat};
@@ -943,22 +942,35 @@ impl BoneWorkspace {
         // whole project (warm stdlib + dependencies like the engine) resolves a
         // cross-file receiver type at incremental cost -- plain prefix completion
         // (the fall-through below) uses the live workspace directly.
+        // AST cursor classifier (docs/cursor-context-plan.md): parses the
+        // munged buffer once and answers the context queries structurally.
+        // None only when every ladder rung fails to tokenize -- the byte
+        // scanners stay as the documented fallback on that frontier.
+        let cursor_ast = crate::cursor_context::CursorAst::at(src, offset);
+        // Call-arg slot, shared by the member / field-ref / ranking paths.
+        // The receiver anchor is the receiver expr's END offset (the byte
+        // fallback's dot offset serves the same "just past the receiver"
+        // role in method_receiver_ty).
+        let arg_ctx = cursor_ast.as_ref().and_then(|cx| cx.call_arg());
         // Member access (`.`) is the most specific trigger: a `recv.field` even
         // inside a struct-literal field value (`Foo { x: recv.<cursor> }`) is
         // member completion, not field completion -- so it's checked first.
-        if let Some(segments) = receiver_path(src, offset) {
+        let member_segments = cursor_ast.as_ref().and_then(|cx| cx.member_path());
+        if let Some(segments) = member_segments {
             // In a call-arg position, a member completion (`recv.field`) also
             // surfaces TRANSITIVE suffix paths whose deep type matches the
-            // expected param (`recv.movable.grid`). The callee's signature is
-            // resolved from the live workspace (the broken arg can't change it).
-            let expected_types = call_arg_context(src, offset)
-                .map(|(callee, idx, _)| {
-                    expected_param_types(proj.session.workspace(), &callee, idx as usize)
-                })
-                .unwrap_or_default();
+            // expected param (`recv.movable.grid`), and direct members that fit
+            // the slot rank first. The typed session is built INSIDE the member
+            // variant (member TyIds live in that workspace); here we just pass
+            // the enclosing (callee, arg index).
+            let arg_slot = arg_ctx.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
+            // Bool-field soft boost: the chain is the whole `if`/`while`
+            // condition. Structural from the classifier; byte fallback on
+            // the tokenize frontier.
+            let bool_ctx = cursor_ast.as_ref().is_some_and(|cx| cx.bool_condition_chain());
             let mut items = member_completions(
-                &mut proj.session, path, src, offset, &segments, &prefix, &expected_types,
-                proj.reach.as_ref(),
+                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot,
+                proj.reach.as_ref(), bool_ctx,
             );
             if next_is_open_paren {
                 strip_call_template(&mut items);
@@ -975,7 +987,7 @@ impl BoneWorkspace {
         // field ref (live signature says FieldOf, or a `.` is already typed);
         // `field_ref_arg_completions` returns None -> falls through to normal
         // completion (e.g. enum-shorthand `.Variant` in an arg).
-        if let Some((callee, arg_idx, _)) = call_arg_context(src, offset) {
+        if let Some((callee, arg_idx, _)) = arg_ctx.clone() {
             let lead_dot = leading_dot(src, offset);
             // Skip the variant only when the live signature is KNOWN and clearly
             // not a field ref. If the callee is unknown live (the incomplete arg
@@ -1002,7 +1014,8 @@ impl BoneWorkspace {
                 }
             }
         }
-        if let Some((enum_name, variant)) = enum_record_context(src, offset) {
+        let enum_rec = cursor_ast.as_ref().and_then(|cx| cx.enum_record());
+        if let Some((enum_name, variant)) = enum_rec {
             // Falls through (None) when the head isn't a record variant -- a unit/
             // tuple variant as a block head (`if x == Enum::Variant { .. }`) is NOT
             // a record literal, so the block still gets global completion.
@@ -1013,7 +1026,8 @@ impl BoneWorkspace {
                 return items;
             }
         }
-        if let Some((enum_name, _colon_start)) = enum_qualifier(src, offset) {
+        let enum_base = cursor_ast.as_ref().and_then(|cx| cx.qualified_base());
+        if let Some(enum_name) = enum_base {
             let mut items = enum_qualified_completions(
                 &mut proj.session, path, src, offset, &enum_name, &prefix,
             );
@@ -1023,7 +1037,8 @@ impl BoneWorkspace {
             path_ms("enum-qualified path", items.len());
             return items;
         }
-        if let Some((struct_name, brace_open)) = struct_literal_context(src, offset) {
+        let struct_lit = cursor_ast.as_ref().and_then(|cx| cx.struct_literal());
+        if let Some((struct_name, brace_open)) = struct_lit {
             // Falls through (None) when the head isn't actually a struct, so a
             // `match X {` / `if Cond {` block still gets global completion.
             if let Some(items) = struct_literal_field_completions(
@@ -1079,14 +1094,12 @@ impl BoneWorkspace {
             return Vec::new();
         };
         // Type-vs-expression slot governs enum completion (bare `Enum` in a type
-        // slot, qualified `Enum::Variant` values in an expression slot). The
-        // identifier the cursor completes starts `prefix.len()` bytes back (both
-        // are ASCII).
-        let ident_start = offset.saturating_sub(prefix.len());
-        let expr_position = !position::is_type_position(src.as_bytes(), ident_start);
+        // slot, qualified `Enum::Variant` values in an expression slot).
+        let expr_position = !cursor_ast.as_ref().is_some_and(|cx| cx.is_type_position());
         // After a `yield`/`yield*`, coroutine-returning fns rank first (the
         // `yield* frame(1)` delegation pattern).
-        let after_yield = expr_position && is_after_yield(src.as_bytes(), ident_start);
+        let after_yield =
+            expr_position && cursor_ast.as_ref().is_some_and(|cx| cx.after_yield());
         // Param-name + fn-prefix type heuristic (param TYPE slot only): a param
         // named `e`/`entity` suggests the (generic) `Entity` type; the enclosing
         // fn's name prefix picks the payload (`mob_attack_co` -> `Mob` ->
@@ -1095,7 +1108,7 @@ impl BoneWorkspace {
         let mut entity_hint = false;
         let mut entity_payload: Option<Ustr> = None;
         if !expr_position {
-            if let Some((pn, fn_name)) = param_type_context(src.as_bytes(), ident_start) {
+            if let Some((pn, fn_name)) = cursor_ast.as_ref().and_then(|cx| cx.param_type()) {
                 if is_entity_param_name(&pn) {
                     entity_hint = true;
                     entity_payload = fn_prefix_struct(ws, &fn_name);
@@ -1117,11 +1130,28 @@ impl BoneWorkspace {
         // rendered-string list stays alongside as the reachability index's
         // keys and as the fallback rung when no typed session can be built
         // (broken body, no cached inference for the cursor body).
-        let arg_call = call_arg_context(src, offset);
-        let field_slot =
-            if arg_call.is_none() { struct_field_value_context(src, offset) } else { None };
-        let mut expected = arg_call.as_ref().and_then(|(callee, idx, recv_dot)| {
-            let recv_ty = recv_dot.and_then(|d| method_receiver_ty(ws, mid, inf, src, d));
+        let arg_call = arg_ctx;
+        let field_slot = if arg_call.is_none() {
+            cursor_ast.as_ref().and_then(|cx| cx.struct_field_value())
+        } else {
+            None
+        };
+        let mut expected = arg_call.as_ref().and_then(|(callee, idx, _recv)| {
+            // Receiver type for UFCS overload filtering: structural from the
+            // classifier (the receiver is an AST node -- a chain receiver's
+            // type is its callee's unique return type, no paren rescanning);
+            // the byte scanner remains the tokenize-frontier fallback.
+            let recv_ty = cursor_ast.as_ref().and_then(|cx| {
+                cx.call_receiver().and_then(|a| match a {
+                    crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
+                        fn_unique_return_ty(ws, &name)
+                    }
+                    crate::cursor_context::ReceiverAnchor::End(e) => e
+                        .checked_sub(1)
+                        .and_then(|last| bone_semantic::query::type_at(ws, mid, inf, last))
+                        .map(|ta| ta.ty),
+                })
+            });
             ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx as usize, recv_ty)
         });
         if expected.is_none() {
@@ -1140,33 +1170,16 @@ impl BoneWorkspace {
                 ExpectedArg::for_slot(ws, mid, inf, offset, slot)
             });
         }
-        // Rendered expected types for the string consumers: the reachability
-        // index (string-keyed) and the ranking fallback rung. When the typed
-        // session exists its receiver-FILTERED declared renders are the list
-        // (only surviving overloads contribute -- a Color slot must not
-        // re-admit float reach paths from a receiver-rejected overload);
-        // otherwise fall back to the unfiltered union.
-        let expected_types: Vec<String> = match expected.as_ref() {
-            Some(exp) => exp.rendered.clone(),
-            None => arg_call
-                .map(|(callee, idx, _)| expected_param_types(ws, &callee, idx as usize))
-                .or_else(|| {
-                    field_slot.map(|(sname, fname, is_lambda)| {
-                        if is_lambda {
-                            if let Some(ret) = crate::query::struct_field_fn_return_type(ws, &sname, &fname) {
-                                return vec![ret];
-                            }
-                        }
-                        crate::query::struct_fields_by_name(ws, &sname)
-                            .into_iter()
-                            .filter(|(n, _)| *n == fname)
-                            .map(|(_, ty)| ty)
-                            .collect()
-                    })
-                })
-                .unwrap_or_default(),
-        };
-        let has_expected = expected.is_some() || !expected_types.is_empty();
+        // Declared renders of the typed session's surviving slots -- the
+        // string-keyed reachability index's targets, receiver-FILTERED by
+        // construction (only overloads the receiver coerces into contribute, so
+        // a Color slot never re-admits float reach paths from a rejected
+        // overload). Empty when no typed session built -- then there is no
+        // type-directed ranking or reach (kind-based only), never a
+        // rendered-string type compare.
+        let expected_types: Vec<String> =
+            expected.as_ref().map_or_else(Vec::new, |exp| exp.rendered.clone());
+        let has_expected = expected.is_some();
         let t_build = std::time::Instant::now();
         // The signature cache (rebuilt only on non-`BodyOnly` edits) supplies fn
         // `detail` for the survivors below. The one-shot CLI path has no cached
@@ -1229,20 +1242,6 @@ impl BoneWorkspace {
                             0
                         }
                         SymCat::Function if exp.accepts_fn_returning(ws, c.name.as_str()) => 1,
-                        _ => 2,
-                    }
-                } else if !expected_types.is_empty() {
-                    // Fallback rung: rendered-string equality, for states where
-                    // the typed session can't build (broken body / no cached
-                    // inference). Weaker (misses coercions) but never worse
-                    // than the pre-TyId behavior.
-                    match c.kind {
-                        SymCat::Local | SymCat::Param | SymCat::Variant | SymCat::Global
-                            if c.detail.as_deref().is_some_and(|t| expected_types.iter().any(|e| e == t)) =>
-                        {
-                            0
-                        }
-                        SymCat::Function if fn_returns_one_of(ws, c.name.as_str(), &expected_types) => 1,
                         _ => 2,
                     }
                 } else {
@@ -1422,7 +1421,9 @@ impl BoneWorkspace {
         // `CoFrame` struct existing (stone projects); otherwise the generic
         // `Coroutine<$0>` snippet stands in.
         let coframe = struct_exists(ws, "CoFrame");
-        if coroutine_generic_first_arg(src.as_bytes(), ident_start) {
+        let coroutine_slot =
+            cursor_ast.as_ref().is_some_and(|cx| cx.coroutine_first_generic_arg());
+        if coroutine_slot {
             // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0.
             if coframe && clean_match(b"CoFrame", prefix.as_bytes()) {
                 out.retain(|it| it.label != "CoFrame");
@@ -2806,97 +2807,6 @@ fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
     arg
 }
 
-/// `(callee name, 0-based argument index)` when `offset` is inside a call's
-/// argument list -- `f(a, b|)` -> `("f", 1)`. Scans back to the enclosing `(`,
-/// counting top-level commas for the index and reading the identifier before the
-/// paren as the callee. None when not in a call-arg position (a bare `(` group,
-/// an array/block, or a statement boundary intervenes). A pure byte heuristic,
-/// matching the other completion-context scanners; tolerant of broken buffers.
-fn call_arg_context(src: &str, offset: usize) -> Option<(String, u32, Option<usize>)> {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    let (mut paren, mut brack, mut brace) = (0i32, 0i32, 0i32);
-    let mut commas = 0u32;
-    while i > 0 {
-        match b[i - 1] {
-            b')' => paren += 1,
-            b'(' if paren > 0 => paren -= 1,
-            b'(' => break, // enclosing call paren found
-            b']' => brack += 1,
-            b'[' if brack > 0 => brack -= 1,
-            b'[' => return None, // hit an array/index level, not a call
-            b'}' => brace += 1,
-            b'{' if brace > 0 => brace -= 1,
-            b'{' => return None, // hit a block/struct-literal level
-            b';' if paren == 0 && brack == 0 && brace == 0 => return None,
-            b',' if paren == 0 && brack == 0 && brace == 0 => commas += 1,
-            _ => {}
-        }
-        i -= 1;
-    }
-    if i == 0 {
-        return None; // no enclosing `(`
-    }
-    // The callee identifier sits immediately before the `(` (skip whitespace).
-    let mut j = i - 1;
-    while j > 0 && b[j - 1].is_ascii_whitespace() {
-        j -= 1;
-    }
-    let name_end = j;
-    while j > 0 && is_ident_byte(b[j - 1]) {
-        j -= 1;
-    }
-    if j == name_end {
-        return None; // `(expr)` grouping / no callee
-    }
-    let callee = &src[j..name_end];
-    if matches!(callee, "if" | "while" | "for" | "match" | "return") {
-        return None;
-    }
-    // UFCS: `recv.callee(a, b, <cursor>)` desugars to `callee(recv, a, b, ..)`, so
-    // the receiver is param 0 and the arg the cursor is in maps to param
-    // `commas + 1`. A leading `.`/`?.` on the callee marks the method-call form.
-    let mut d = j;
-    while d > 0 && b[d - 1].is_ascii_whitespace() {
-        d -= 1;
-    }
-    let is_method_call = d > 0 && b[d - 1] == b'.';
-    // For a method call, the `.` offset lets the caller resolve the receiver's
-    // type and filter overloads to the matching one (`ui.text(..)` -> the UiRect
-    // `text`, not the DrawList one) instead of unioning every overload's params.
-    let recv_dot = is_method_call.then(|| d - 1);
-    Some((callee.to_string(), commas + u32::from(is_method_call), recv_dot))
-}
-
-/// Rendered types of parameter `arg_index` across the overloads of `callee`
-/// (deduped). Drives type-directed ranking in call-arg completion. When
-/// `receiver_ty` is `Some` (a UFCS method call), only overloads whose param 0
-/// renders to that type are considered -- so `ui.text(..)` yields the `UiRect`
-/// overload's params, not the union with the `DrawList` overload's.
-/// RENDERED expected param types across `callee`'s overloads. Display-form
-/// only: feeds the reachability index (string-keyed) and the member path,
-/// plus the ranking FALLBACK rung when no typed session can be built. The
-/// typed compare is `ExpectedArg` below (docs/assignable-plan.md); migrating
-/// the member/reach consumers onto TyIds is its phase 2.
-fn expected_param_types(ws: &Workspace, callee: &str, arg_index: usize) -> Vec<String> {
-    let name = Ustr::from(callee);
-    let mut out: Vec<String> = Vec::new();
-    for m in ws.modules.iter() {
-        if let Some(fns) = m.functions_by_name.get(&name) {
-            for (fmid, fid) in fns {
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                if let Some(p) = f.param_decls.get(arg_index) {
-                    let r = ws.render(None, p.ty);
-                    if !out.contains(&r) {
-                        out.push(r);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Whether any overload of `callee` declares arg `arg_index` as a
 /// `FieldOf<..>` slot, decided on the param's nominal head. None when no
 /// overload is known live (unknown callee / arity) -- the caller treats that
@@ -2938,10 +2848,11 @@ struct ExpectedArg<'a> {
     gamma: Gamma<'a>,
     span: Span,
     slots: Vec<TyId>,
-    /// DECLARED-form renders of the surviving slots ("Color", "[T]") -- what
-    /// the string-keyed reachability index consumes. Receiver-filtered by
-    /// construction (only surviving overloads contribute), unlike the
-    /// unfiltered `expected_param_types` fallback.
+    /// DECLARED-form renders of the surviving slots ("Color", "[T]") -- the
+    /// string-keyed reachability index's targets, receiver-filtered by
+    /// construction (only overloads the receiver coerces into contribute). The
+    /// reach graph is nominal-name keyed, so consuming these is a graph lookup,
+    /// not a type compare -- bone's `coerce` is the only type-comparison path.
     rendered: Vec<String>,
     memo: HashMap<TyId, bool>,
     ret_memo: HashMap<TyId, bool>,
@@ -3129,69 +3040,6 @@ impl<'a> ExpectedArg<'a> {
             matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == name)
         })
     }
-}
-
-/// The TyId of the receiver expression left of the `.` at `dot_off`, used to
-/// overload-filter UFCS method-call arg completion. Resilient to the broken
-/// trailing arg being typed (the whole statement won't infer):
-/// - a method-CHAIN receiver (`a.b().m(|)`) -> the last method's UNIQUE return
-///   type, resolved structurally (no inference needed). `type_at` on the `)`
-///   would give the callee's fn type, not the call result.
-/// - a variable / field-path receiver -> `type_at` on its last token (a
-///   variable's declared/inferred type survives the broken arg). A
-///   `TyId::Local` here indexes the cursor body's inference -- the same seed
-///   `ExpectedArg`'s scratch Gamma clones, so it stays resolvable.
-fn method_receiver_ty(
-    ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    src: &str,
-    dot_off: usize,
-) -> Option<TyId> {
-    let b = src.as_bytes();
-    let mut i = dot_off.min(b.len());
-    while i > 0 && b[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    if i == 0 {
-        return None;
-    }
-    if b[i - 1] == b')' {
-        // Method-chain receiver: type = the last method's unique return type.
-        let mut depth = 0i32;
-        let mut j = i;
-        while j > 0 {
-            match b[j - 1] {
-                b')' | b']' => depth += 1,
-                b'(' | b'[' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            j -= 1;
-        }
-        if j == 0 {
-            return None;
-        }
-        let mut k = j - 1; // just before the `(`
-        while k > 0 && b[k - 1].is_ascii_whitespace() {
-            k -= 1;
-        }
-        let nend = k;
-        while k > 0 && is_ident_byte(b[k - 1]) {
-            k -= 1;
-        }
-        if k == nend {
-            return None;
-        }
-        return fn_unique_return_ty(ws, &src[k..nend]);
-    }
-    let recv_end = dot_off.checked_sub(1)?;
-    let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end)?;
-    Some(ta.ty)
 }
 
 /// The return TyId shared by ALL overloads of `name`, or None if the
@@ -4356,63 +4204,6 @@ fn fn_is_coroutine(ws: &Workspace, name: &str) -> bool {
     })
 }
 
-/// True when the identifier starting at `ident_start` is the operand of a
-/// `yield` / `yield*` (`yield fr|`, `yield* fr|`). Pure byte heuristic.
-fn is_after_yield(src: &[u8], ident_start: usize) -> bool {
-    let mut i = ident_start.min(src.len());
-    while i > 0 && src[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    // optional `*` of `yield*` (may abut the keyword: `yield*`)
-    if i > 0 && src[i - 1] == b'*' {
-        i -= 1;
-    }
-    let end = i;
-    while i > 0 && (src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_') {
-        i -= 1;
-    }
-    &src[i..end] == b"yield" && (i == 0 || !(src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_'))
-}
-
-/// Start of the member-access chain ending at `offset`: walk back over chain
-/// chars (`[A-Za-z0-9_.?]`). `if thing.foo.bar|` -> the offset of `thing`.
-fn member_chain_start(src: &[u8], offset: usize) -> usize {
-    let mut i = offset.min(src.len());
-    while i > 0 {
-        let c = src[i - 1];
-        if c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'?') {
-            i -= 1;
-        } else {
-            break;
-        }
-    }
-    i
-}
-
-/// True when the member-access chain starting at `chain_start` is the WHOLE
-/// condition of an `if`/`while` -- i.e. directly preceded by the keyword with
-/// only whitespace between (`if thing.foo.bar|`). Any operator/space/paren in
-/// between (`if a && thing.foo`, `if foo().bar`) makes the context unknown.
-/// Used as a SOFT bool-field boost in member completion (`bool` fields rank
-/// first on a score tie, never overriding a better textual match).
-fn is_bool_context(src: &[u8], chain_start: usize) -> bool {
-    let mut i = chain_start;
-    let mut saw_ws = false;
-    while i > 0 && src[i - 1].is_ascii_whitespace() {
-        i -= 1;
-        saw_ws = true;
-    }
-    if !saw_ws {
-        return false;
-    }
-    let end = i;
-    while i > 0 && (src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_') {
-        i -= 1;
-    }
-    let kw = &src[i..end];
-    (kw == b"if" || kw == b"while") && (i == 0 || !(src[i - 1].is_ascii_alphanumeric() || src[i - 1] == b'_'))
-}
-
 /// Member sort_text used ONLY in a bool context (`if`/`while <chain>`), where no
 /// reach-path items coexist. Inserts a bool-priority digit right after the score
 /// so `bool` fields win a SCORE TIE -- a soft nudge, never overriding a
@@ -4446,39 +4237,6 @@ fn member_arg_sort_text(name: &str, pfx: &[u8], type_match: bool, method: u8, di
 fn struct_exists(ws: &Workspace, name: &str) -> bool {
     let u = Ustr::from(name);
     ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u))
-}
-
-/// True when `ident_start` sits in the FIRST generic argument of `Coroutine<..>`
-/// (`Coroutine<|`, `Coroutine<Co|`): an unclosed `<` whose owner identifier is
-/// `Coroutine`, with no top-level comma between it and the cursor. Pure byte
-/// heuristic; drives the `CoFrame`-first boost.
-fn coroutine_generic_first_arg(src: &[u8], ident_start: usize) -> bool {
-    let mut i = ident_start.min(src.len());
-    let mut angle = 0i32;
-    while i > 0 {
-        match src[i - 1] {
-            // a `>` that's the tail of `->`/`=>` is an arrow, not a generic close
-            b'>' if i >= 2 && (src[i - 2] == b'-' || src[i - 2] == b'=') => {}
-            b'>' => angle += 1,
-            b'<' if angle > 0 => angle -= 1,
-            b'<' => {
-                let mut j = i - 1;
-                while j > 0 && src[j - 1].is_ascii_whitespace() {
-                    j -= 1;
-                }
-                let end = j;
-                while j > 0 && is_ident_byte(src[j - 1]) {
-                    j -= 1;
-                }
-                return &src[j..end] == b"Coroutine";
-            }
-            b',' if angle == 0 => return false, // a later arg, not the first
-            b'(' | b')' | b'{' | b'}' | b';' | b'=' | b'\n' => return false,
-            _ => {}
-        }
-        i -= 1;
-    }
-    false
 }
 
 /// True when `offset` sits just after the `)` of a `co fn NAME(..)` signature
@@ -4549,85 +4307,6 @@ fn is_entity_param_name(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "e" | "ent" | "entity")
 }
 
-/// In a param TYPE slot (`fn NAME(.., pname: <cursor>`), return `(param_name,
-/// fn_name)`. Pure byte scan; rejects let-bindings / struct-field decls (the
-/// thing before the param name must open a paren-list). Tolerant of an empty /
-/// being-typed type.
-fn param_type_context(src: &[u8], ident_start: usize) -> Option<(String, String)> {
-    let is_id = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut i = ident_start.min(src.len());
-    while i > 0 && src[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    if i == 0 || src[i - 1] != b':' {
-        return None;
-    }
-    i -= 1; // before ':'
-    if i > 0 && src[i - 1] == b':' {
-        return None; // `::` scope resolution
-    }
-    while i > 0 && src[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    let pn_end = i;
-    while i > 0 && is_id(src[i - 1]) {
-        i -= 1;
-    }
-    if i == pn_end {
-        return None;
-    }
-    let param_name = String::from_utf8_lossy(&src[i..pn_end]).into_owned();
-    // What precedes the param name decides this IS a param: `(` (first param) or
-    // `,` (later param). Anything else (`let`, `{`, ...) is not a param slot.
-    let mut j = i;
-    while j > 0 && src[j - 1].is_ascii_whitespace() {
-        j -= 1;
-    }
-    let open = match src.get(j.wrapping_sub(1)) {
-        Some(b'(') if j > 0 => j - 1,
-        Some(b',') if j > 0 => enclosing_param_open_paren(src, j - 1)?,
-        _ => return None,
-    };
-    // The fn name precedes the param-list `(`.
-    let mut k = open;
-    while k > 0 && src[k - 1].is_ascii_whitespace() {
-        k -= 1;
-    }
-    let fn_end = k;
-    while k > 0 && is_id(src[k - 1]) {
-        k -= 1;
-    }
-    if k == fn_end {
-        return None;
-    }
-    Some((param_name, String::from_utf8_lossy(&src[k..fn_end]).into_owned()))
-}
-
-/// Balance back from a `,` inside a param list to the `(` that opens it.
-fn enclosing_param_open_paren(src: &[u8], from: usize) -> Option<usize> {
-    let (mut dp, mut db, mut dbr, mut da) = (0i32, 0i32, 0i32, 0i32);
-    let mut i = from;
-    while i > 0 {
-        match src[i - 1] {
-            b')' => dp += 1,
-            b'(' if dp > 0 => dp -= 1,
-            b'(' if db == 0 && dbr == 0 && da == 0 => return Some(i - 1),
-            b']' => dbr += 1,
-            b'[' if dbr > 0 => dbr -= 1,
-            b'[' => return None,
-            b'}' => db += 1,
-            b'{' if db > 0 => db -= 1,
-            b'{' => return None,
-            b'>' if i >= 2 && (src[i - 2] == b'-' || src[i - 2] == b'=') => {}
-            b'>' => da += 1,
-            b'<' if da > 0 => da -= 1,
-            _ => {}
-        }
-        i -= 1;
-    }
-    None
-}
-
 /// The struct named by a fn-name's first `_`-segment, capitalized (`mob_attack_co`
 /// -> `Mob`), if such a struct exists -- the payload `T` for a synthesized
 /// `Entity<T>`. None when the segment doesn't name a struct.
@@ -4640,18 +4319,6 @@ fn fn_prefix_struct(ws: &Workspace, fn_name: &str) -> Option<Ustr> {
         let cap: String = chars.next()?.to_ascii_uppercase().to_string() + chars.as_str();
         let u = Ustr::from(&cap);
         ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u)).then_some(u)
-    })
-}
-
-fn fn_returns_one_of(ws: &Workspace, name: &str, expected: &[String]) -> bool {
-    let n = Ustr::from(name);
-    ws.modules.iter().any(|m| {
-        m.functions_by_name.get(&n).is_some_and(|fns| {
-            fns.iter().any(|(fmid, fid)| {
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                f.return_ty.is_some_and(|t| expected.contains(&ws.render(None, t)))
-            })
-        })
     })
 }
 
@@ -4717,57 +4384,6 @@ fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<CompletionItem> {
         }
     }
     out
-}
-
-/// The dotted receiver path immediately left of the cursor, if the cursor is in
-/// member-access position (`receiver.<field-prefix>|`). `line.start.|` yields
-/// `["line", "start"]`; returns None when the cursor isn't after a `.`. Tolerates
-/// `?.` safe-nav links. Used to branch completion into the member path.
-fn receiver_path(src: &str, offset: usize) -> Option<Vec<String>> {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-
-    // skip the partial field identifier under the cursor
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    // must be immediately preceded by a `.` (or `?.` safe-nav)
-    if i == 0 || b[i - 1] != b'.' {
-        return None;
-    }
-    i -= 1; // consume the trigger dot
-    if i > 0 && b[i - 1] == b'?' {
-        i -= 1; // consume the safe-nav `?`
-    }
-
-    let mut segments: Vec<String> = Vec::new();
-    loop {
-        let end = i;
-        while i > 0 && is_ident_byte(b[i - 1]) {
-            i -= 1;
-        }
-        if i == end {
-            break; // no identifier here -> stop
-        }
-        segments.push(src[i..end].to_string());
-
-        // continue the path across a `.` or `?.` link. Scanning backward, the
-        // dot comes first, then the optional safe-nav `?` (`o` <- `?.` <- inner).
-        if i > 0 && b[i - 1] == b'.' {
-            i -= 1;
-            if i > 0 && b[i - 1] == b'?' {
-                i -= 1;
-            }
-            continue;
-        }
-        break;
-    }
-
-    if segments.is_empty() {
-        return None;
-    }
-    segments.reverse();
-    Some(segments)
 }
 
 /// Completion-parseable variants of the source up to `offset`: keep the prefix
@@ -4892,7 +4508,7 @@ fn reparse_with_project_inner(
     bone_semantic::semantic_passes::semantic_pass(&mut single).ok()
 }
 
-fn completion_munges(src: &str, offset: usize) -> [String; 2] {
+pub(crate) fn completion_munges(src: &str, offset: usize) -> [String; 2] {
     let off = offset.min(src.len());
     let (head, tail) = src.split_at(off);
 
@@ -4924,12 +4540,25 @@ fn completion_munges(src: &str, offset: usize) -> [String; 2] {
 /// a `// ...` comment with no trailing newline; the appended closers go on a fresh
 /// line so they aren't swallowed by that comment (which would leave the enclosing
 /// block unclosed and fail the whole parse). An unterminated string is closed too.
-fn balance_delimiters(mut s: String) -> String {
-    let mut closers: Vec<u8> = Vec::new();
+pub(crate) fn balance_delimiters(mut s: String) -> String {
+    // One stack models the whole nesting: code delimiters, strings, and the
+    // interpolation braces that re-enter CODE inside a string (`"a {expr}"`)
+    // -- an unterminated `"foo {` must close as `}"`, not `"`, or the
+    // tokenizer still fatals on the unmatched interpolation.
+    #[derive(PartialEq)]
+    enum Ctx {
+        Paren,
+        Bracket,
+        Brace,
+        /// `{` inside a string: code until the matching `}`.
+        Interp,
+        LineStr,
+        TripleStr,
+    }
+    let mut stack: Vec<Ctx> = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut in_line_comment = false;
-    let mut string_quote: Option<u8> = None;
     while i < bytes.len() {
         let b = bytes[i];
         if in_line_comment {
@@ -4939,112 +4568,64 @@ fn balance_delimiters(mut s: String) -> String {
             i += 1;
             continue;
         }
-        if let Some(q) = string_quote {
-            match b {
-                b'\\' => i += 1, // skip the escaped character
-                _ if b == q => string_quote = None,
-                _ => {}
-            }
-            i += 1;
-            continue;
-        }
-        match b {
-            b'/' if bytes.get(i + 1) == Some(&b'/') => {
-                in_line_comment = true;
+        match stack.last() {
+            Some(Ctx::LineStr) | Some(Ctx::TripleStr) => {
+                let triple = stack.last() == Some(&Ctx::TripleStr);
+                match b {
+                    b'\\' => i += 1, // skip the escaped character
+                    b'"' if triple && bytes.get(i + 1..i + 3) == Some(b"\"\"") => {
+                        stack.pop();
+                        i += 2;
+                    }
+                    b'"' if !triple => {
+                        stack.pop();
+                    }
+                    // `{{` emits a literal `{`; a bare `{` opens interpolation
+                    b'{' if bytes.get(i + 1) == Some(&b'{') => i += 1,
+                    b'{' => stack.push(Ctx::Interp),
+                    _ => {}
+                }
                 i += 1;
             }
-            b'"' => string_quote = Some(b'"'),
-            b'(' => closers.push(b')'),
-            b'[' => closers.push(b']'),
-            b'{' => closers.push(b'}'),
-            b')' | b']' | b'}' => {
-                closers.pop();
+            _ => {
+                match b {
+                    b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                        in_line_comment = true;
+                        i += 1;
+                    }
+                    b'"' if bytes.get(i + 1..i + 3) == Some(b"\"\"") => {
+                        stack.push(Ctx::TripleStr);
+                        i += 2;
+                    }
+                    b'"' => stack.push(Ctx::LineStr),
+                    b'(' => stack.push(Ctx::Paren),
+                    b'[' => stack.push(Ctx::Bracket),
+                    b'{' => stack.push(Ctx::Brace),
+                    b')' | b']' | b'}' => {
+                        // a `}` closes a code Brace or pops Interp back into
+                        // its string; `)`/`]` close their code delimiter
+                        stack.pop();
+                    }
+                    _ => {}
+                }
+                i += 1;
             }
-            _ => {}
         }
-        i += 1;
     }
-    if let Some(q) = string_quote {
-        s.push(q as char); // close an unterminated string before the brace closers
+    if in_line_comment && !stack.is_empty() {
+        s.push('\n'); // source ends inside a `//` comment; keep closers out of it
     }
-    if in_line_comment && !closers.is_empty() {
-        s.push('\n'); // string ends inside a `//` comment; keep closers out of it
-    }
-    while let Some(c) = closers.pop() {
-        s.push(c as char);
+    while let Some(c) = stack.pop() {
+        s.push_str(match c {
+            Ctx::Paren => ")",
+            Ctx::Bracket => "]",
+            Ctx::Brace => "}",
+            Ctx::Interp => "}",
+            Ctx::LineStr => "\"",
+            Ctx::TripleStr => "\"\"\"",
+        });
     }
     s
-}
-
-/// `(enum name, byte offset of the `::`)` if the cursor is in
-/// `EnumName::<variant-prefix>|` position.
-fn enum_qualifier(src: &str, offset: usize) -> Option<(String, usize)> {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1; // skip the variant prefix
-    }
-    if i < 2 || b[i - 1] != b':' || b[i - 2] != b':' {
-        return None;
-    }
-    let colon_start = i - 2;
-    let mut j = colon_start;
-    let end = j;
-    while j > 0 && is_ident_byte(b[j - 1]) {
-        j -= 1;
-    }
-    if j == end {
-        return None;
-    }
-    Some((src[j..end].to_string(), colon_start))
-}
-
-/// `(enum, variant)` if the cursor is inside an enum record-variant literal:
-/// `EnumName::Variant { <field-prefix>| }` (possibly after earlier fields).
-fn enum_record_context(src: &str, offset: usize) -> Option<(String, String)> {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-
-    // skip the field-name prefix under the cursor
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    // scan back to the enclosing `{` (the record literal's), tracking nesting
-    let mut depth = 0i32;
-    while i > 0 {
-        match b[i - 1] {
-            b'}' => depth += 1,
-            b'{' if depth == 0 => break,
-            b'{' => depth -= 1,
-            _ => {}
-        }
-        i -= 1;
-    }
-    if i == 0 {
-        return None;
-    }
-    i -= 1; // consume the `{`
-
-    while i > 0 && b[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    let vend = i;
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    if i == vend || i < 2 || b[i - 1] != b':' || b[i - 2] != b':' {
-        return None; // not `Variant` preceded by `::`
-    }
-    let variant = src[i..vend].to_string();
-    i -= 2;
-    let eend = i;
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    if i == eend {
-        return None;
-    }
-    Some((src[i..eend].to_string(), variant))
 }
 
 /// Field completions for an enum record-variant literal. Reparses (the
@@ -5087,167 +4668,6 @@ fn enum_record_field_completions(
     }
 
     None
-}
-
-/// `Name { <field` struct-literal context: the struct name whose `{ .. }` the
-/// cursor is inside, plus the byte offset of that `{`. None when the cursor
-/// isn't directly inside a `Name {` whose head looks like a type (uppercase,
-/// not preceded by `::` -- that's an `Enum::Variant {` record, handled
-/// separately). The head is verified to be an actual struct by the completion fn.
-/// Walk back from `from` (the start of the field prefix under the cursor) inside
-/// a brace literal, balancing `()[]{}`, to the enclosing `{`. Returns that `{`
-/// offset and, when a top-level single `:` precedes the cursor within the CURRENT
-/// comma-segment, that colon's offset (the field-VALUE marker -- present even
-/// when the value is a complex expression like `field: () => x|`, since the
-/// `()`/`[]` are balanced away). Returns None if a `(`/`[` is hit at depth 0
-/// first (the cursor is inside a call/index arg, not a struct-field literal).
-fn enclosing_brace_field(b: &[u8], from: usize) -> Option<(usize, Option<usize>)> {
-    let mut i = from;
-    let mut depth = 0i32;
-    let mut colon: Option<usize> = None;
-    let mut past_comma = false;
-    while i > 0 {
-        match b[i - 1] {
-            b')' | b']' | b'}' => depth += 1,
-            b'(' | b'[' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-            }
-            b'{' if depth == 0 => return Some((i - 1, colon)),
-            b'{' => depth -= 1,
-            b',' if depth == 0 => past_comma = true,
-            b':' if depth == 0 && !past_comma && colon.is_none() => {
-                let double = (i >= 2 && b[i - 2] == b':') || b.get(i).copied() == Some(b':');
-                if !double {
-                    colon = Some(i - 1);
-                }
-            }
-            _ => {}
-        }
-        i -= 1;
-    }
-    None
-}
-
-fn struct_literal_context(src: &str, offset: usize) -> Option<(String, usize)> {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1; // skip the field prefix under the cursor
-    }
-    // A field VALUE slot (`Name { field: <cursor> }`, or a value EXPRESSION like
-    // `field: () => x|`) is a value position, not a field-name one -- a top-level
-    // `:` precedes the cursor in this segment. Fall through to normal (type-
-    // directed) completion instead of offering field names (which, filtered by a
-    // value prefix, would come up empty and silently kill all completion).
-    let (brace_open, colon) = enclosing_brace_field(b, i)?;
-    if colon.is_some() {
-        return None;
-    }
-    i = brace_open;
-    while i > 0 && b[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    let nend = i;
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    if i == nend {
-        return None; // no name before `{` (plain block, `fn ..() {`, etc.)
-    }
-    if i >= 2 && b[i - 1] == b':' && b[i - 2] == b':' {
-        return None; // `Enum::Variant {` -- handled by enum_record_context
-    }
-    let name = &src[i..nend];
-    // A struct name is capitalized; a lowercase head (scrutinee, fn name,
-    // keyword) is not a struct literal. The completion fn confirms it's a struct.
-    if !name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-        return None;
-    }
-    // Reject `fn f() -> ReturnType {` (a body brace, not a literal): the name is
-    // the return type, preceded by `->`. Also reject a `struct`/`enum`/`fn`
-    // declaration head. `return Foo {`, `= Foo {`, `(Foo {` etc. stay accepted.
-    let mut j = i;
-    while j > 0 && b[j - 1].is_ascii_whitespace() {
-        j -= 1;
-    }
-    if j >= 2 && b[j - 1] == b'>' && b[j - 2] == b'-' {
-        return None;
-    }
-    let we = j;
-    while j > 0 && is_ident_byte(b[j - 1]) {
-        j -= 1;
-    }
-    if matches!(&src[j..we], "struct" | "enum" | "fn") {
-        return None;
-    }
-    Some((name.to_string(), brace_open))
-}
-
-/// In a struct-literal field VALUE slot (`Name { field: <value cursor> }`),
-/// returns (struct name, field name, is_lambda_body). Uses `enclosing_brace_field`
-/// so it fires for any value position -- including a value EXPRESSION like a
-/// lambda body (`field: () => x|`) -- not just an immediate `field:` prefix.
-/// `is_lambda_body` is set when a top-level `=>` sits between the `field:` and the
-/// cursor, so the caller can type-direct on the field's function RETURN type.
-fn struct_field_value_context(src: &str, offset: usize) -> Option<(String, String, bool)> {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1; // skip the value prefix under the cursor
-    }
-    let (brace_open, colon) = enclosing_brace_field(b, i)?;
-    let colon = colon?; // must be a value slot (a `:` precedes the cursor)
-    // field name = the ident before the `:`
-    let mut c = colon;
-    while c > 0 && b[c - 1].is_ascii_whitespace() {
-        c -= 1;
-    }
-    let fend = c;
-    while c > 0 && is_ident_byte(b[c - 1]) {
-        c -= 1;
-    }
-    if c == fend {
-        return None;
-    }
-    let field = &src[c..fend];
-    // struct name immediately before the enclosing `{`
-    let mut j = brace_open;
-    while j > 0 && b[j - 1].is_ascii_whitespace() {
-        j -= 1;
-    }
-    let nend = j;
-    while j > 0 && is_ident_byte(b[j - 1]) {
-        j -= 1;
-    }
-    if j == nend || (j >= 2 && b[j - 1] == b':' && b[j - 2] == b':') {
-        return None; // no name, or an `Enum::Variant { .. }` record
-    }
-    let name = &src[j..nend];
-    if !name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
-        return None;
-    }
-    let is_lambda_body = has_top_level_arrow(b, colon + 1, i);
-    Some((name.to_string(), field.to_string(), is_lambda_body))
-}
-
-/// Whether a top-level (depth-0) `=>` occurs in `b[start..end]` -- the marker of
-/// a lambda whose body the cursor sits in. Balances `()[]{}`.
-fn has_top_level_arrow(b: &[u8], start: usize, end: usize) -> bool {
-    let mut depth = 0i32;
-    let mut k = start;
-    while k < end.min(b.len()) {
-        match b[k] {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth -= 1,
-            b'=' if depth == 0 && b.get(k + 1) == Some(&b'>') => return true,
-            _ => {}
-        }
-        k += 1;
-    }
-    false
 }
 
 /// Field completions for `Name { <field> }`. Offers the struct's fields not
@@ -5517,12 +4937,15 @@ fn member_completions(
     offset: usize,
     segments: &[String],
     prefix: &str,
-    expected_types: &[String],
+    arg_slot: Option<(String, usize)>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
+    bool_ctx: bool,
 ) -> Vec<CompletionItem> {
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
-            member_completion_items(ws, path, src, offset, segments, prefix, expected_types, reach)
+            member_completion_items(
+                ws, path, offset, segments, prefix, arg_slot.clone(), reach, bool_ctx,
+            )
         });
         if let Some(items) = attempt {
             if !items.is_empty() {
@@ -5534,15 +4957,28 @@ fn member_completions(
 }
 
 /// One munge attempt's member items, resolved against the variant workspace.
+/// Whether a member of type `ty_id` (rendered `ty_render`) type-directs into
+/// the expected arg slot. Bone's `coerce` on the TyId when present (so an `int`
+/// field boosts in an `int?`/`float`/`any` slot); rendered-string equality when
+/// the member has no stored TyId (a generic-substituted field) or there's no
+/// session. False with no session at all.
+fn member_ty_match(mut expected: Option<&mut ExpectedArg>, ty_id: Option<TyId>, ty_render: &str) -> bool {
+    let Some(exp) = expected.as_mut() else { return false };
+    match ty_id {
+        Some(t) => exp.accepts(t),
+        None => exp.rendered.iter().any(|e| e == ty_render),
+    }
+}
+
 fn member_completion_items(
     ws: &Workspace,
     path: &str,
-    src: &str,
     offset: usize,
     segments: &[String],
     prefix: &str,
-    expected_types: &[String],
+    arg_slot: Option<(String, usize)>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
+    bool_ctx: bool,
 ) -> Vec<CompletionItem> {
     {
         // The CURRENT file's module (where the receiver/offset live) -- not just
@@ -5561,6 +4997,30 @@ fn member_completion_items(
         if fields.is_empty() && methods.is_empty() {
             return Vec::new();
         }
+        // Typed expected-arg session for the enclosing call, built against THIS
+        // (variant) workspace so its Gamma resolves the member TyIds the
+        // candidates carry (docs/assignable-plan.md phase 2). `coerce` decides
+        // the member type-match, not a rendered-string `==`; the receiver-
+        // filtered `.rendered` still feeds the string-keyed reach index. None
+        // when not in an arg slot or the body has no cached inference -- then
+        // there's no type direction (kind/name order), same as before.
+        let mut expected = arg_slot.as_ref().and_then(|(callee, idx)| {
+            let inf = ws.inference(mid)?;
+            ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx, None)
+        });
+        let arg_ctx = expected.is_some();
+        // Precompute the type-match decision per member (bone's `coerce` on the
+        // member's TyId; rendered-string equality only where a TyId is absent --
+        // e.g. a generic-substituted field). Sequential because `accepts` takes
+        // `&mut` (it memoizes / rolls back trial bindings).
+        let field_match: Vec<bool> = fields
+            .iter()
+            .map(|(_, ty, ty_id)| member_ty_match(expected.as_mut(), *ty_id, ty))
+            .collect();
+        let method_match: Vec<bool> = methods
+            .iter()
+            .map(|m| member_ty_match(expected.as_mut(), m.return_ty, m.returns.as_deref().unwrap_or("")))
+            .collect();
         // Direct members are 1-hop (dist 1): they carry a sort_text too, so they
         // order consistently with -- and ahead of, by distance -- the transitive
         // reach paths added below (fuzzy score is the dominant term either way).
@@ -5569,17 +5029,14 @@ fn member_completion_items(
         // target -- soft-boost them (score-tie tiebreak only). Mutually exclusive
         // with arg-position reach paths, so the bool-format sort_text is safe to
         // mix only with the field/method items here.
-        let bool_ctx = is_bool_context(src.as_bytes(), member_chain_start(src.as_bytes(), offset));
         // Call-arg position (a known expected param type) -- a direct field/method
         // whose type matches that param ranks first. Mutually exclusive with
         // `bool_ctx` (a condition chain isn't inside a call).
-        let arg_ctx = !expected_types.is_empty();
-        let ty_matches = |ty: &str| expected_types.iter().any(|e| e == ty);
         // `_`-prefixed fields are soft-private: hidden from member completion
         // unless the user is explicitly typing an `_` prefix. Fields stay public
         // (no type-check change) -- this is purely a display convention.
         let show_private = prefix.starts_with('_');
-        let field_items = fields.into_iter().filter_map(|(name, ty)| {
+        let field_items = fields.into_iter().zip(field_match).filter_map(|((name, ty, _), tmatch)| {
             if name.starts_with('_') && !show_private {
                 return None;
             }
@@ -5587,7 +5044,7 @@ fn member_completion_items(
                 sort_text: Some(if bool_ctx {
                     member_bool_sort_text(&name, pfx, ty == "bool", 0)
                 } else if arg_ctx {
-                    member_arg_sort_text(&name, pfx, ty_matches(&ty), 0, 1)
+                    member_arg_sort_text(&name, pfx, tmatch, 0, 1)
                 } else {
                     arg_sort_text(0, &name, pfx, 1, 0)
                 }),
@@ -5598,7 +5055,7 @@ fn member_completion_items(
                 ..Default::default()
             })
         });
-        let method_items = methods.into_iter().filter_map(|m| {
+        let method_items = methods.into_iter().zip(method_match).filter_map(|(m, rmatch)| {
             (prefix.is_empty() || clean_match(m.name.as_bytes(), prefix.as_bytes())).then(|| {
                 // Inline `(params) -> ret`. A method with args left after the
                 // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
@@ -5613,7 +5070,6 @@ fn member_completion_items(
                     sort_text: Some(if bool_ctx {
                         member_bool_sort_text(&m.name, pfx, false, 1)
                     } else if arg_ctx {
-                        let rmatch = m.returns.as_deref().is_some_and(&ty_matches);
                         member_arg_sort_text(&m.name, pfx, rmatch, 1, 1)
                     } else {
                         arg_sort_text(0, &m.name, pfx, 1, 1)
@@ -5657,7 +5113,8 @@ fn member_completion_items(
         // already in `field_items`/`method_items` above. The index keys on
         // type-name strings, so the live-built one serves the munged buffer; if
         // it's missing, build a local one from this workspace.
-        if !expected_types.is_empty() {
+        let reach_targets: &[String] = expected.as_ref().map_or(&[], |e| &e.rendered);
+        if !reach_targets.is_empty() {
             if let Some(rs) = recv_struct {
                 let local_idx;
                 let idx = match reach {
@@ -5668,7 +5125,7 @@ fn member_completion_items(
                     }
                 };
                 const REACH_CAP: usize = 64;
-                let res = idx.paths_to(rs.as_str(), expected_types, REACH_CAP);
+                let res = idx.paths_to(rs.as_str(), reach_targets, REACH_CAP);
                 let pfx = prefix.as_bytes();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for p in res.paths {
@@ -6016,11 +5473,20 @@ mod tests {
     }
 
     #[test]
-    fn balance_ignores_braces_in_strings_and_closes_them() {
-        // A `{` inside a string isn't real nesting.
-        assert_eq!(balance_delimiters("let s = \"a { b\"".to_string()), "let s = \"a { b\"");
+    fn balance_closes_strings_and_interpolations() {
+        // `{{` is a literal brace -- no nesting; a complete interp is closed.
+        assert_eq!(balance_delimiters("let s = \"a {{ b\"".to_string()), "let s = \"a {{ b\"");
+        assert_eq!(balance_delimiters("let s = \"a {x} b\"".to_string()), "let s = \"a {x} b\"");
+        // A bare `{` in a string OPENS an interpolation (tokenizer rule): an
+        // unterminated `"foo {` must close as `}"` or tokenize still fatals.
+        assert_eq!(balance_delimiters("let s = \"foo {".to_string()), "let s = \"foo {}\"");
         // An unterminated string is closed before any brace closers.
         assert_eq!(balance_delimiters("fn f() { let s = \"hi".to_string()), "fn f() { let s = \"hi\"}");
+        // Unterminated triple-quoted block.
+        assert_eq!(
+            balance_delimiters("let s = \"\"\"block\ntext".to_string()),
+            "let s = \"\"\"block\ntext\"\"\""
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Macro expansion on skull-parser's arena AST.
 //!
-//! Runs as the FIRST cook stage, before desugar (bone's order), so the
-//! desugars see fully-expanded code.
+//! Reimplements bone's `macro_expansion.rs` (which leaned on rock-syntax +
+//! rock-optimizations) directly on skull's `Ast`. Runs as the FIRST cook stage,
+//! before desugar (bone's order), so the desugars see fully-expanded code.
 //!
 //! Scope: expression-position macros (`macro f(a: expr, ...) { <rock body> }`),
 //! selected by arity (defaults widen the range), params substituted by deep

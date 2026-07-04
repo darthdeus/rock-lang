@@ -22,7 +22,7 @@ use bone_semantic::hir::{
     BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
     MatchArm, Pattern, Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
 };
-use ustr::Ustr;
+use rock_syntax::Ustr;
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::ModuleId;
 use comfy_la_arena::{Idx, IdxRange};
@@ -2690,7 +2690,7 @@ impl Builder<'_> {
     fn resolve_funcref(
         &self,
         e: Idx<Expr>,
-        name: ustr::Ustr,
+        name: rock_syntax::Ustr,
     ) -> Result<FuncRef, CompilerError> {
         if let Some(&(module, func)) = self
             .inf

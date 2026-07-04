@@ -15,7 +15,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use bone_semantic::hir::{self, Function, TyId, TypeExpr};
 use bone_semantic::inference::Workspace;
-use ustr::Ustr;
+use rock_syntax::Ustr;
 
 /// Names with more than one definition across the workspace — the ones that
 /// need mangling to disambiguate. A uniquely-named fn keeps its surface name.

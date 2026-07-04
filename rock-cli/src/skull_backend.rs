@@ -14,9 +14,9 @@
 use crate::Result;
 use crate::bone_backend::{categorize, collect_rock_files, short_path};
 use colored::Colorize;
-use rock_core::CompilerError;
-use rock_core::SourceFiles;
-use rock_core::source_file_from_path_and_contents;
+use rock_syntax::CompilerError;
+use rock_syntax::prelude::SourceFiles;
+use rock_syntax::utils::source_file_from_path_and_contents;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

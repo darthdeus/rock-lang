@@ -1,5 +1,5 @@
 /// Aggregate LoC stats for one compile. Filled by the tokenizer as a
-/// byproduct of parsing (see `rock_tokenizer::count_source_stats`) and
+/// byproduct of parsing (see `rock_syntax::count_source_stats`) and
 /// surfaced alongside compile-time prints as a `loc/sec` figure
 /// comparable to https://wiki.alopex.li/LanguageCompilationSpeed.
 ///

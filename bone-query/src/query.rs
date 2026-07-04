@@ -1780,7 +1780,7 @@ pub fn struct_fields_for_path(
     mid: ModuleId,
     offset: usize,
     segments: &[String],
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, Option<TyId>)> {
     // Inference-first for a single-binding receiver: if its recovered inferred
     // type is a generic struct App, render fields with the inferred type args
     // substituted (`p: Pair<int, string>` -> `first: int`, not `first: A`).
@@ -1816,7 +1816,7 @@ pub fn struct_fields_for_path(
         Some(sdef) => sdef
             .fields
             .iter()
-            .map(|f| (f.name.to_string(), ws.render(None, f.ty)))
+            .map(|f| (f.name.to_string(), ws.render(None, f.ty), Some(f.ty)))
             .collect(),
         None => Vec::new(),
     }
@@ -1833,7 +1833,7 @@ fn inferred_struct_fields(
     mid: ModuleId,
     offset: usize,
     head: &str,
-) -> Option<Vec<(String, String)>> {
+) -> Option<Vec<(String, String, Option<TyId>)>> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
@@ -1860,16 +1860,19 @@ fn inferred_struct_fields(
         sdef.fields
             .iter()
             .map(|f| {
-                let rendered = match deref_ty(ws, None, f.ty) {
+                // Generic field -> the receiver's inferred type arg (a TyId in
+                // `bi`, the same arena a query-time ExpectedArg is seeded from);
+                // else the declared static field type.
+                let (rendered, ty_id) = match deref_ty(ws, None, f.ty) {
                     Some(hir::TypeExpr::Generic(_, gname)) => gnames
                         .iter()
                         .position(|n| n == gname)
                         .and_then(|i| args.get(i))
-                        .map(|arg| ws.render(Some(bi), *arg))
-                        .unwrap_or_else(|| ws.render(None, f.ty)),
-                    _ => ws.render(None, f.ty),
+                        .map(|arg| (ws.render(Some(bi), *arg), Some(*arg)))
+                        .unwrap_or_else(|| (ws.render(None, f.ty), Some(f.ty))),
+                    _ => (ws.render(None, f.ty), Some(f.ty)),
                 };
-                (f.name.to_string(), rendered)
+                (f.name.to_string(), rendered, ty_id)
             })
             .collect(),
     )
@@ -2325,6 +2328,9 @@ pub struct UfcsMethod {
     /// Rendered return type, or None for a `()`-returning method. Drives
     /// type-directed completion (`recv.method()` as a value of the wanted type).
     pub returns: Option<String>,
+    /// The return type as a TyId (module-static), for the typed expected-arg
+    /// compare; None when the method returns `()`/nothing.
+    pub return_ty: Option<TyId>,
 }
 
 /// UFCS methods callable as `recv.method(...)` on a value of struct `name`:
@@ -2346,6 +2352,7 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
                         // the receiver consumes p0; args remain iff there's a p1+
                         takes_args: f.param_decls.len() > 1,
                         returns: f.return_ty.map(|t| ws.render(None, t)),
+                        return_ty: f.return_ty,
                     });
                 }
             }

@@ -255,3 +255,40 @@ fn struct_field_value_offers_expected_enum_variant() {
         "SpellKind::Harm must be offered for `har` in the enum-typed field slot: {labels:?}"
     );
 }
+
+// -- after_yield: coroutine-fn boost fires only on a REAL yield operand -------
+
+#[test]
+fn yield_operand_ranks_coroutine_fn_first() {
+    // Positive control for the comment case below: after a real `yield*`,
+    // the coroutine fn must outrank the plain fn that would otherwise win
+    // (shorter name, same prefix).
+    let labels = labels_at(
+        "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\n\
+         fn frame() {}\n\
+         co fn t() -> Coroutine<int> {\n  yield* fr$0\n}\n",
+    );
+    let co = rank_of(&labels, "frame_co");
+    let plain = rank_of(&labels, "frame");
+    assert!(co.is_some() && plain.is_some(), "both offered: {labels:?}");
+    assert!(co < plain, "coroutine fn must rank first after `yield*`: {labels:?}");
+}
+
+#[test]
+fn yield_inside_a_comment_gets_no_coroutine_boost() {
+    // The byte scanner is comment-blind: `// yield fr|` classified as a
+    // yield operand and promoted coroutine fns. The AST classifier sees no
+    // yield expr at the cursor.
+    let labels = labels_at(
+        "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\n\
+         fn frame() {}\n\
+         fn t() {\n  // yield fr$0\n}\n",
+    );
+    let co = rank_of(&labels, "frame_co");
+    let plain = rank_of(&labels, "frame");
+    assert!(co.is_some() && plain.is_some(), "both offered: {labels:?}");
+    assert!(
+        plain < co,
+        "no coroutine boost inside a comment -- `frame` (shorter, same prefix) must rank first: {labels:?}"
+    );
+}

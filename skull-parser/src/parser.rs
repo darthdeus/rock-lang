@@ -160,7 +160,8 @@ impl Parser {
     }
 
     /// Tokens that can begin a statement -- the resync targets for
-    /// statement-level error recovery.
+    /// statement-level error recovery (mirrors rock's `can_start_statement`
+    /// in `rock-syntax/src/parser/statements.rs`).
     fn can_start_statement(&self, kind: TokenKind) -> bool {
         matches!(
             kind,

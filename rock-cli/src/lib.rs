@@ -7,16 +7,13 @@ pub use walkdir::WalkDir;
 #[cfg(windows)]
 pub use std::os::windows::io::AsRawHandle;
 
-// rock-cli's prelude: symbols the kept code reaches through `crate::*`. Core
-// types come straight from rock_core + rock_tokenizer, host helpers from
-// rock_host, and the rest from std / common deps.
-pub use anyhow::{bail, Result};
-pub use atomic_refcell::AtomicRefCell;
-pub use ustr::Ustr;
-pub use std::path::Path;
-pub use std::sync::Arc;
-pub use rock_core::*;
-pub use rock_tokenizer::*;
+// Curated replacement for the former `pub use rock::prelude::*;` glob. rock-cli
+// no longer depends on the legacy rock pipeline (rock / rock-semantic /
+// rock-optimizations): core types arrive via rock_syntax's prelude (which
+// re-exports rock_types -> rock_core + rock_tokenizer), host helpers via
+// rock_host, and the rest from std / common deps. Symbols the kept code reaches
+// through `crate::*` live here.
+pub use rock_syntax::prelude::*;
 pub use rock_host::process_management::*;
 pub use rock_host::source_files::{
     source_file_from_code, source_file_new_preprocessed, SourceFilesExt,
@@ -364,6 +361,7 @@ pub struct Args {
     pub check: bool,
     pub iters: usize,
     pub warmup: usize,
+    pub skull: bool,
     pub verbose: bool,
     pub quiet: bool,
     pub frames: usize,
@@ -442,6 +440,8 @@ impl Args {
             .arg(Arg::new("warmup").long("warmup").default_value("3")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of untimed warmup runs before the timed iters (used by `backend-stats`). Default 3. Set to 0 to disable."))
+            .arg(Arg::new("skull").long("skull").action(ArgAction::SetTrue)
+                .help("Route `iter-parse` through the experimental skull-parser (arena AST) and report s-expr coverage vs the rock parser"))
             .arg(Arg::new("verbose").long("verbose").action(ArgAction::SetTrue)
                 .help("Enable verbose debug output"))
             .arg(Arg::new("quiet").long("quiet").action(ArgAction::SetTrue)
@@ -511,6 +511,7 @@ impl Args {
             check: m.get_flag("check"),
             iters: *m.get_one::<usize>("iters").unwrap(),
             warmup: *m.get_one::<usize>("warmup").unwrap(),
+            skull: m.get_flag("skull"),
             verbose: m.get_flag("verbose"),
             quiet: m.get_flag("quiet"),
             frames: *m.get_one::<usize>("frames").unwrap(),

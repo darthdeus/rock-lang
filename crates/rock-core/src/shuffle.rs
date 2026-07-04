@@ -16,7 +16,7 @@
 //!
 //! ```ignore
 //! let mut entries: Vec<_> = self.other_symbols.iter().collect();
-//! rock_core::shuffle::shuffle_in_place(&mut entries);
+//! rock_types::shuffle::shuffle_in_place(&mut entries);
 //! for (mid, ms) in entries { ... }
 //! ```
 //!

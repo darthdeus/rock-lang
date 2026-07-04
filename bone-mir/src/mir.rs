@@ -4,7 +4,7 @@
 //! like `Idx<Expr>` is a value in HIR. No separate `Value` type.
 
 use comfy_la_arena::{Arena, Idx};
-use ustr::Ustr;
+use rock_syntax::Ustr;
 
 /// One instruction. Operands are `Idx<Inst>` (the producing instruction).
 #[derive(Clone, Debug)]

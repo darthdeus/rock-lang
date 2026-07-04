@@ -892,7 +892,12 @@ pub fn do_one_frame(
             info!("{} frames executed successfully", frames);
         }
     } else {
-        error!("Stone exited with code: {:?}", process_result.output.status.code());
+        // Propagate the child's failure (e.g. the runner's GL-error exit 3)
+        // so `rock frame` exits nonzero and test-games actually fails.
+        anyhow::bail!(
+            "Stone exited with code: {:?}",
+            process_result.output.status.code()
+        );
     }
 
     Ok(())
@@ -905,7 +910,8 @@ mod tests {
     #[test]
     fn compiler_source_classification() {
         // Compiler crate src files -> rebuild the rock binary.
-        assert!(is_compiler_source("rock-host/src/lib.rs"));
+        assert!(is_compiler_source("rock/src/main.rs"));
+        assert!(is_compiler_source("rock-types/src/lib.rs"));
         assert!(is_compiler_source("rock-cli/src/stone.rs"));
         assert!(is_compiler_source("skull/src/lib.rs"));
         assert!(is_compiler_source("skull-codegen-lua/src/lib.rs"));

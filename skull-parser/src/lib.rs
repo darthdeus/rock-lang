@@ -392,7 +392,7 @@ mod tests {
     fn sibling_field_ref_in_default() {
         // `field: T = .sibling` — leading-dot sibling ref. No corpus file
         // exercises this, so the cook oracle can't catch a parser gap here;
-        // renders `.name`.
+        // renders `.name` to match rock (rock-types/src/expr.rs:619).
         let ast = parse_module(
             "struct HealthBar { max: int, current: int = .max }",
             Ustr::from("t.rock"),
