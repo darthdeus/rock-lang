@@ -7,7 +7,7 @@
 
 use lsp_types::*;
 use rock_lsp::{
-    do_document_symbols_workspace, do_workspace_symbols_workspace, LspBackend, LspWorkspace,
+    do_document_symbols_workspace, do_workspace_symbols_workspace, LspWorkspace,
 };
 use std::str::FromStr;
 
@@ -31,7 +31,6 @@ fn main() {
 fn bone_ws(path: &std::path::Path) -> LspWorkspace {
     std::fs::write(path, SRC).unwrap();
     let mut ws = LspWorkspace::new();
-    ws.backend = LspBackend::Bone;
     ws.bone.update(path.to_str().unwrap(), SRC.to_string());
     ws
 }

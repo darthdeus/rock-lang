@@ -17,21 +17,11 @@ fn build_cli() -> Command {
             .action(ArgAction::SetTrue)
             .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling")
     };
-    // `--backend rock|bone`. `bone` is the default; `rock` opts into the
-    // legacy rock-semantic path while it is being retired. Also honored via
-    // ROCK_BACKEND.
-    let backend_flag = || {
-        Arg::new("backend")
-            .long("backend")
-            .value_parser(["rock", "bone"])
-            .help("Typechecker backend: bone (default) or rock. Can also be set via ROCK_BACKEND=rock.")
-    };
     let pos_subcmd = |name: &'static str, about: &'static str, pos_name: &'static str, pos_help: &'static str| {
         Command::new(name)
             .about(about)
             .arg(Arg::new(pos_name).required(true).help(pos_help))
             .arg(trace_flag())
-            .arg(backend_flag())
     };
     let file_subcmd = |name: &'static str, about: &'static str| {
         pos_subcmd(name, about, "file", "The Rock file to analyze")
@@ -76,8 +66,7 @@ fn build_cli() -> Command {
                 .about("Rename symbol at a specific position")
                 .arg(Arg::new("position").required(true).help("The position in format file:line:column (1-indexed)"))
                 .arg(Arg::new("new_name").required(true).help("The new name for the symbol"))
-                .arg(trace_flag())
-                .arg(backend_flag()),
+                .arg(trace_flag()),
         )
         .subcommand(position_subcmd("signature-help", "Get signature help at a specific position"))
         .subcommand(file_subcmd("document-symbols", "Get document symbols for a Rock file"))
