@@ -122,10 +122,15 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
                 Ok(level) => level.parse().unwrap_or(log::LevelFilter::Warn),
                 Err(_) => log::LevelFilter::Warn,
             };
-            env_logger::builder()
-                .filter_level(log_level)
-                .format_timestamp(None)
-                .init();
+            let mut builder = env_logger::builder();
+            builder.filter_level(log_level).format_timestamp(None);
+            // ROCK_LSP_TIMING=1: surface the per-request handle timer (info on
+            // the `lsp_timing` target) without lifting the default warn floor
+            // for everything else, so `:LspLog` shows timing and nothing else.
+            if std::env::var_os("ROCK_LSP_TIMING").is_some() {
+                builder.filter(Some("lsp_timing"), log::LevelFilter::Info);
+            }
+            builder.init();
         }
     }
 
