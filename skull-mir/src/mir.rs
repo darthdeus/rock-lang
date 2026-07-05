@@ -234,6 +234,19 @@ pub enum Inst {
         positional: Vec<Idx<Inst>>,
         named: Vec<(Ustr, Idx<Inst>)>,
     },
+    /// Re-materialize a boxed enum from a DYNAMIC tag + positional payload slots --
+    /// the inverse of field flattening (`docs/enum-allocation-report.md`). Used at a
+    /// whole-value-read boundary of a flattened enum field, where the variant is not
+    /// statically known (it lives in a runtime `f__tag` slot). Emits
+    /// `{__variant = <tag>, __ty = "<ty>", <positional...>, <named...>}`. Nil slots
+    /// (a variant narrower than the union, or the inactive tuple/record half) are
+    /// harmless: Lua omits them, so the box matches whichever variant is live.
+    MakeEnumDyn {
+        tag: Idx<Inst>,
+        ty: Ustr,
+        positional: Vec<Idx<Inst>>,
+        named: Vec<(Ustr, Idx<Inst>)>,
+    },
 
     // --- projections ---
     /// `base.field` (struct field, or an enum record-payload field).
@@ -360,11 +373,13 @@ pub enum Term {
         cases: Vec<(Lit, Idx<Block>)>,
         default: Idx<Block>,
     },
-    /// `yield <value>`, resuming at `resume`. **Pre-rewrite only** — the
-    /// coroutine transform (in `skull-transform`) removes every `Yield`, turning
-    /// the function into an ordinary state-machine CFG.
+    /// `yield <value>`, resuming at `resume`. `values` is the yield value's leaves
+    /// (empty = bare yield, 1 = a scalar, N = a flat enum's tag+payload leaves via
+    /// the frame-slot channel). **Pre-rewrite only** — the coroutine transform (in
+    /// `skull-transform`) removes every `Yield`, turning the function into an
+    /// ordinary state-machine CFG (writing the leaves to reused frame slots).
     Yield {
-        value: Option<Idx<Inst>>,
+        values: Vec<Idx<Inst>>,
         resume: Idx<Block>,
     },
 }
@@ -409,6 +424,14 @@ pub struct MirFunc {
     /// second parameter. `None` for an ordinary function.
     pub is_coroutine: bool,
     pub resume_arg: Option<Idx<Cell>>,
+    /// A co fn's terminal-cleanup defers, in registration-site order:
+    /// (flag cell, detached guard-block entry). Each entry block is
+    /// UNREACHABLE from `entry` (like closure bodies) and compiles to a
+    /// standalone `<name>__defer<k>(s)` fn: `if flag { flag = false; <body> }`.
+    /// The flag is set where the `defer` statement executes and cleared by the
+    /// normal scope-exit splice, so terminal cleanup (kill/error) runs exactly
+    /// the still-pending defers.
+    pub coro_defers: Vec<(Idx<Cell>, Idx<Block>)>,
 }
 
 impl MirFunc {
@@ -424,6 +447,7 @@ impl MirFunc {
             entry,
             is_coroutine: false,
             resume_arg: None,
+            coro_defers: Vec::new(),
         }
     }
 

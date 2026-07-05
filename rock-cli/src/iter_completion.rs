@@ -170,7 +170,7 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize) -> Result<()> {
             let ph = last_completion_phase_timings();
             let s = &mut by_len[i];
             s.total.push(ms);
-            s.gaps.push(ph.gaps_ms);
+            s.gaps.push(ph.candidates_ms);
             s.rank.push(ph.rank_ms);
             s.reach.push(ph.reach_ms);
             s.ct.push(ph.call_through_ms);
@@ -204,7 +204,7 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize) -> Result<()> {
     eprintln!("  per-prefix-length median by phase (which keystroke + which pipeline):");
     eprintln!(
         "    {:>5}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}   {:>6} {:>5}   {:>5} {:>9} {:>5}",
-        "chars", "total", "gaps", "rank", "reach", "call-thru", "ncand", "nout", "ctfns", "argiters", "surv"
+        "chars", "total", "cands", "rank", "reach", "call-thru", "ncand", "nout", "ctfns", "argiters", "surv"
     );
     let med = |v: &[f64]| -> f64 {
         if v.is_empty() {

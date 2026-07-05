@@ -1101,6 +1101,10 @@ fn rename_expr(ast: &mut Ast, e: Idx<ExprData>, callsite: u32, counter: &mut u32
 
 fn retag_block(ast: &mut Ast, b: Idx<BlockData>, call_span: Span) {
     ast.blocks[b].span = call_span;
+    // The braces of the macro TEMPLATE's blocks don't exist at the call site;
+    // a retagged block is effectively synthetic, so it gets no brace spans
+    // (real spans here would plant brace markers at template offsets).
+    ast.blocks[b].braces = None;
     let stmts = ast.blocks[b].statements.clone();
     for s in stmts {
         ast.stmts[s].span = call_span;

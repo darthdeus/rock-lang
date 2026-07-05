@@ -5,7 +5,10 @@
 //! `shift_module_after_edit` is the one place that corrects them, so `type_at`,
 //! diagnostics, and navigation stay right without re-lowering the kept bodies.
 
-use bone_semantic::{hir::Module, prelude::*};
+use bone_semantic::{
+    hir::{AnnoValue, Callee, Expr, Module, Pattern},
+    prelude::*,
+};
 
 /// A text edit's offset/line delta, applied to stored spans at/after `at`.
 #[derive(Copy, Clone, Debug)]
@@ -73,6 +76,120 @@ pub fn shift_module_after_edit(
             iv.stop = sh.off(iv.stop);
         }
         body.node_index_cell = Default::default();
+
+        // Spans stored INLINE in HIR nodes, not in the side tables above:
+        // callee names, enum-variant heads, struct-literal / record-pattern
+        // field names, binding decls. references/rename read these directly.
+        for (_, b) in body.binding_arena.iter_mut() {
+            sh.span(&mut b.span);
+        }
+        // No catch-all arm: exhaustiveness is the tripwire. A new Expr/Pattern
+        // variant, or a new field on a span-carrying one (fields are named, not
+        // `..`), fails to compile until someone decides whether it holds a span
+        // that needs shifting. The behavioral net is the reference oracle in
+        // bone-query/tests/stale_spans_after_body_edit.rs.
+        for (_, e) in body.expr_arena.iter_mut() {
+            match e {
+                Expr::EnumVariant {
+                    enum_name: _,
+                    enum_name_span,
+                    variant: _,
+                    variant_span,
+                    args: _,
+                } => {
+                    sh.span(enum_name_span);
+                    sh.span(variant_span);
+                }
+                Expr::Call { callee, args: _ } => match callee {
+                    Callee::Unresolved { name: _, name_span } => sh.span(name_span),
+                    Callee::Local(_) | Callee::Value(_) => {}
+                },
+                Expr::Unit
+                | Expr::Null
+                | Expr::Hole(_)
+                | Expr::Int(_)
+                | Expr::Float(_)
+                | Expr::Bool(_)
+                | Expr::String(_)
+                | Expr::Var(_)
+                | Expr::Tuple(_)
+                | Expr::InterpolatedString(_)
+                | Expr::Not(_)
+                | Expr::BitNot(_)
+                | Expr::UnaryMinus(_)
+                | Expr::IncDec { .. }
+                | Expr::Return(_)
+                | Expr::Break
+                | Expr::Continue
+                | Expr::Yield(_)
+                | Expr::YieldDelegate(_)
+                | Expr::Spread(_)
+                | Expr::As { .. }
+                | Expr::Index { .. }
+                | Expr::Lambda { .. }
+                | Expr::SafeNav { .. }
+                | Expr::SafeNavLet { .. }
+                | Expr::SafeNavCall { .. }
+                | Expr::TupleIndex { .. }
+                | Expr::BinOp { .. }
+                | Expr::Block { .. }
+                | Expr::If { .. }
+                | Expr::IfLet { .. }
+                | Expr::Array(_)
+                | Expr::NativeArray(_)
+                | Expr::StructLiteral { .. }
+                | Expr::FieldAccess { .. }
+                | Expr::Global(_)
+                | Expr::SiblingRef(_)
+                | Expr::Range { .. }
+                | Expr::Assign { .. }
+                | Expr::CompoundAssign { .. }
+                | Expr::Match { .. } => {}
+            }
+        }
+        for (_, p) in body.pattern_arena.iter_mut() {
+            match p {
+                Pattern::EnumVariant {
+                    enum_name: _,
+                    enum_name_span,
+                    variant: _,
+                    variant_span,
+                    sub: _,
+                } => {
+                    if let Some(s) = enum_name_span {
+                        sh.span(s);
+                    }
+                    sh.span(variant_span);
+                }
+                Pattern::Record {
+                    enum_name: _,
+                    enum_name_span,
+                    name: _,
+                    name_span,
+                    fields: _,
+                    rest: _,
+                } => {
+                    if let Some(s) = enum_name_span {
+                        sh.span(s);
+                    }
+                    if let Some(s) = name_span {
+                        sh.span(s);
+                    }
+                }
+                Pattern::Wildcard
+                | Pattern::Bind(_)
+                | Pattern::Literal(_)
+                | Pattern::Range { .. }
+                | Pattern::Tuple { .. }
+                | Pattern::Or { .. } => {}
+            }
+        }
+        for (_, f) in body.struct_lit_field_arena.iter_mut() {
+            sh.span(&mut f.name_span);
+        }
+        for (_, f) in body.record_pat_field_arena.iter_mut() {
+            sh.span(&mut f.name_span);
+        }
     }
 
     // Interface type spans (params / returns / fields) of every later signature.
@@ -84,6 +201,15 @@ pub fn shift_module_after_edit(
         sh.span(&mut f.name_span);
         for a in f.annotations.iter_mut() {
             sh.span(&mut a.span);
+            sh.span(&mut a.name.span);
+            for arg in a.args.iter_mut() {
+                if let Some(n) = &mut arg.name {
+                    sh.span(&mut n.span);
+                }
+                if let AnnoValue::Ident(id) = &mut arg.value {
+                    sh.span(&mut id.span);
+                }
+            }
         }
     }
     for (_, st) in module.structs.iter_mut() {

@@ -757,4 +757,81 @@ mod tests {
         };
         assert_eq!(src.as_str(), "return a + b");
     }
+
+    /// Every block with recorded brace spans must have them sitting on literal
+    /// `{` / `}` at its own span's ends; blocks without them are exactly the
+    /// parser's synthetic braceless wrappers (lambda `=> expr`, `@`-trailing
+    /// lambda, match-arm `=> expr`). Consumers (bone-lower's brace lapper
+    /// markers) emit nothing for `braces: None` instead of deriving positions
+    /// from `span` -- which planted phantom 1-wide nodes on the first/last
+    /// chars of braceless bodies (`bone-query/tests/phantom_block_sentinel.rs`).
+    fn check_braces(src: &str, ast: &Ast, expected_braceless: usize) {
+        let mut braceless = 0;
+        for (_, b) in ast.blocks.iter() {
+            match b.braces {
+                Some((open, close)) => {
+                    let (bs, be) = (b.span.offset_range.0, b.span.offset_range.1);
+                    assert_eq!(open.offset_range, (bs, bs + 1), "open brace at span start");
+                    assert_eq!(close.offset_range, (be - 1, be), "close brace at span end");
+                    assert_eq!(&src[bs..bs + 1], "{", "open brace char");
+                    assert_eq!(&src[be - 1..be], "}", "close brace char");
+                }
+                None => braceless += 1,
+            }
+        }
+        assert_eq!(braceless, expected_braceless, "synthetic braceless block count");
+    }
+
+    #[test]
+    fn block_braces_recorded_only_for_real_braces() {
+        let src = "enum E { A, B }\n\
+                   fn g(h: fn() -> int) -> int { h() }\n\
+                   fn f(e: E) -> int {\n\
+                   \x20   let a = () => 1\n\
+                   \x20   let b = () => { 2 }\n\
+                   \x20   let c = g() @ 3\n\
+                   \x20   let d = g() @ { 4 }\n\
+                   \x20   return match e {\n\
+                   \x20       E::A => 5\n\
+                   \x20       E::B => { 6 }\n\
+                   \x20   }\n\
+                   }";
+        let ast = parse_module(src, Ustr::from("test.rock")).unwrap();
+        // Braceless: lambda `=> 1`, `@ 3`, match arm `=> 5`.
+        check_braces(src, &ast, 3);
+    }
+
+    #[test]
+    fn macro_expanded_blocks_lose_brace_spans() {
+        // Span retag stamps the call-site span on expanded template blocks; the
+        // template's braces don't exist at the call site, so they must be
+        // dropped rather than left pointing at template offsets.
+        let src = "macro m() { { 1 } }\nfn f() { m() }";
+        let mut modules = vec![parse_module(src, Ustr::from("test.rock")).unwrap()];
+        cook(&mut modules);
+        let ast = &modules[0];
+        let f = ast
+            .items
+            .iter()
+            .find_map(|i| match &i.kind {
+                ItemKind::Function(f) if f.name.name.as_str() == "f" => Some(f),
+                _ => None,
+            })
+            .expect("fn f survives cook");
+        let body = f.body.rock_block().unwrap();
+        // f's own body keeps its real braces...
+        assert!(ast.b(&body).braces.is_some(), "fn body braces survive cook");
+        // ...but every block spanned to the call site (the retagged expansion,
+        // incl. the template's nested braced block) has none.
+        let call_span = ast.b(&body).statements.first().map(|&s| ast.stmts[s].span).unwrap();
+        let retagged: Vec<_> = ast
+            .blocks
+            .iter()
+            .filter(|(i, b)| *i != body && b.span == call_span)
+            .collect();
+        assert!(!retagged.is_empty(), "expected retagged expansion blocks");
+        for (_, b) in retagged {
+            assert_eq!(b.braces, None, "retagged block must drop brace spans");
+        }
+    }
 }

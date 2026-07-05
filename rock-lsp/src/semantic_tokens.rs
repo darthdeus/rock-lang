@@ -71,6 +71,7 @@ pub fn get_semantic_tokens_legend() -> SemanticTokensLegend {
             SemanticTokenType::NUMBER,
             SemanticTokenType::REGEXP,
             SemanticTokenType::OPERATOR,
+            SemanticTokenType::DECORATOR,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,

@@ -97,6 +97,22 @@ impl<'a> Gamma<'a> {
         }
     }
 
+    pub fn for_query(workspace: &'a Workspace, body: &'a Body, mid: ModuleId, seed: &BodyInference) -> Gamma<'a> {
+        let mut g = Gamma::new(workspace, body, mid);
+        let mut high = g.next_var_id;
+
+        for (_, te) in seed.ty_arena.iter() {
+            if let TypeExpr::Infer(VarId(v), _) = *te {
+                high = high.max(v + 1);
+            }
+        }
+
+        g.next_var_id = high;
+        g.out = seed.clone();
+        g.quiet = true;
+        g
+    }
+
     pub fn module(&self) -> &Module {
         &self.workspace.modules[self.current_module_id.index()]
     }
@@ -4651,4 +4667,14 @@ fn infer_for_elem(
             for_elem_ty(gamma, iter_ty, span)
         }
     }
+}
+
+pub fn instantiate_param(gamma: &mut Gamma, generics: &[TyId], param: TyId, span: Span) -> Result<TyId, CompilerError> {
+    let (subs, _fresh) = gamma.instantiate_generics(generics, span)?;
+    substitute(gamma, param, &subs, span)
+}
+
+pub fn instantiate_params(gamma: &mut Gamma, generics: &[TyId], params: &[TyId], span: Span) -> Result<Vec<TyId>, CompilerError> {
+    let (subs, _fresh) = gamma.instantiate_generics(generics, span)?;
+    params.iter().map(|&p| substitute(gamma, p, &subs, span)).collect()
 }

@@ -1,6 +1,5 @@
 use skull_parser::{
-    Annotation, Ast, Binding, BlockData, DeferKind, ExprData, FunctionDef, IfLetClause,
-    StatementData, StatementKind, TokenKind, TypeExprData,
+    Annotation, Ast, Binding, BlockData, DeferKind, ExprData, ExprKind, FunctionDef, IfLetClause, StatementData, StatementKind, TokenKind, TypeExprData
 };
 use ustr::ustr;
 
@@ -97,23 +96,33 @@ impl<'a> LowerCtx<'a> {
 
         body.expr_spans.insert(idx, span);
 
-        if is_block {
-            // how to get brace spans?
+        if !is_block {
             body.make_lapper(
                 span.offset_range.0,
-                span.offset_range.0 + 1,
+                span.offset_range.1,
+                hir::NodeRef::Expr(idx),
+            );
+        }
+
+        idx
+    }
+
+    pub fn alloc_block_expr(&mut self, body: &mut Body, expr: Expr, b: &BlockData) -> Idx<Expr> {
+        debug_assert!(matches!(expr, Expr::Block { .. }));
+        let idx = body.expr_arena.alloc(expr);
+
+        body.expr_spans.insert(idx, b.span);
+
+        if let Some((open, close)) = b.braces {
+            body.make_lapper(
+                open.offset_range.0,
+                open.offset_range.1,
                 hir::NodeRef::Expr(idx),
             );
 
             body.make_lapper(
-                span.offset_range.1 - 1,
-                span.offset_range.1,
-                hir::NodeRef::Expr(idx),
-            );
-        } else {
-            body.make_lapper(
-                span.offset_range.0,
-                span.offset_range.1,
+                close.offset_range.0,
+                close.offset_range.1,
                 hir::NodeRef::Expr(idx),
             );
         }
@@ -673,14 +682,14 @@ pub fn lower_statement_value(
 
             let vars = ctx.lower_pattern_bindings(body, &f.var, loop_scope)?;
             let body_expr = lower_block(ctx, a, body, loop_scope, &f.body)?;
-            let body = ctx.alloc_expr(body, body_expr, a.b(&f.body).span);
+            let body = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
 
             Statement::For { vars, iter, body }
         }
 
         StatementKind::While(w) => {
             let body_e = lower_block(ctx, a, body, scope, &w.body)?;
-            let body_i = ctx.alloc_expr(body, body_e, a.b(&w.body).span);
+            let body_i = ctx.alloc_block_expr(body, body_e, a.b(&w.body));
 
             Statement::While {
                 cond: lower_expr(ctx, a, body, scope, a.e(&w.condition))?,
@@ -697,7 +706,7 @@ pub fn lower_statement_value(
             let pattern = body.pattern_arena.alloc(pat);
 
             let body_expr = lower_block(ctx, a, body, body_scope, &w.body)?;
-            let body = ctx.alloc_expr(body, body_expr, a.b(&w.body).span);
+            let body = ctx.alloc_block_expr(body, body_expr, a.b(&w.body));
 
             Statement::WhileLet {
                 pattern,
@@ -710,7 +719,7 @@ pub fn lower_statement_value(
             let body = match dk {
                 DeferKind::Block(b) => {
                     let e = lower_block(ctx, a, body, scope, b)?;
-                    ctx.alloc_expr(body, e, a.b(b).span)
+                    ctx.alloc_block_expr(body, e, a.b(b))
                 }
 
                 DeferKind::Expression(e) => lower_expr(ctx, a, body, scope, a.e(e))?,
@@ -725,12 +734,12 @@ pub fn lower_statement_value(
             body: hook_body,
         } => {
             let name = name.as_str();
-            let block_span = a.b(hook_body).span;
+            let block = a.b(hook_body);
 
             if name == "on_killed" || name == "on_resume" || name == "on_hot_reload" {
                 let hook_scope = body.alloc_child_scope(scope);
                 let body_expr = lower_block(ctx, a, body, hook_scope, hook_body)?;
-                let body_idx = ctx.alloc_expr(body, body_expr, block_span);
+                let body_idx = ctx.alloc_block_expr(body, body_expr, block);
 
                 let lambda = ctx.alloc_expr(
                     body,
@@ -738,7 +747,7 @@ pub fn lower_statement_value(
                         params: IdxRange::new_empty(),
                         body: body_idx,
                     },
-                    block_span,
+                    block.span,
                 );
 
                 let args = IdxRange::new_inclusive(lambda..=lambda);
@@ -757,7 +766,7 @@ pub fn lower_statement_value(
                 Statement::Expr(call)
             } else {
                 let e = lower_block(ctx, a, body, scope, hook_body)?;
-                Statement::Expr(ctx.alloc_expr(body, e, block_span))
+                Statement::Expr(ctx.alloc_expr(body, e, block.span))
             }
         }
     };
@@ -960,7 +969,7 @@ pub fn lower_expr_value(
             let mut acc: Option<Idx<Expr>> = match else_branch {
                 Some(blk) => {
                     let blk_expr = lower_block(ctx, a, body, scope, blk)?;
-                    Some(ctx.alloc_expr(body, blk_expr, a.b(blk).span))
+                    Some(ctx.alloc_block_expr(body, blk_expr, a.b(blk)))
                 }
 
                 None => None,
@@ -969,7 +978,7 @@ pub fn lower_expr_value(
             for (cond, block) in branches[1..].iter().rev() {
                 let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
                 let then_expr = lower_block(ctx, a, body, scope, block)?;
-                let then = ctx.alloc_expr(body, then_expr, a.b(block).span);
+                let then = ctx.alloc_block_expr(body, then_expr, a.b(block));
 
                 let idx = ctx.alloc_expr(
                     body,
@@ -987,7 +996,7 @@ pub fn lower_expr_value(
             let (cond, block) = &branches[0];
             let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
             let block_expr = lower_block(ctx, a, body, scope, block)?;
-            let then = ctx.alloc_expr(body, block_expr, a.b(block).span);
+            let then = ctx.alloc_block_expr(body, block_expr, a.b(block));
 
             Expr::If {
                 cond,
@@ -1215,7 +1224,7 @@ pub fn lower_expr_value(
                 let pattern = body.pattern_arena.alloc(pat);
 
                 let body_block = lower_block(ctx, a, body, arm_scope, &arm.body)?;
-                let body_i = ctx.alloc_expr(body, body_block, a.b(&arm.body).span);
+                let body_i = ctx.alloc_block_expr(body, body_block, a.b(&arm.body));
 
                 let guard = match &arm.guard {
                     Some(g) => Some(lower_expr(ctx, a, body, arm_scope, a.e(g))?),
@@ -1295,7 +1304,7 @@ pub fn lower_expr_value(
             let body_expr = lower_block(ctx, a, body, lambda_scope, body_e)?;
             ctx.placeholder_forbidden = saved;
 
-            let body_idx = ctx.alloc_expr(body, body_expr, a.b(body_e).span);
+            let body_idx = ctx.alloc_block_expr(body, body_expr, a.b(body_e));
 
             Expr::Lambda {
                 params: params_range,
@@ -1370,7 +1379,7 @@ pub fn lower_expr_value(
                 .insert(binding.name, b);
 
             let body_expr = lower_block(ctx, a, body, body_scope, block)?;
-            let body = ctx.alloc_expr(body, body_expr, a.b(block).span);
+            let body = ctx.alloc_block_expr(body, body_expr, a.b(block));
 
             Expr::SafeNavLet {
                 receiver,
@@ -1437,6 +1446,15 @@ pub fn lower_expr(
     scope: Idx<Scope>,
     e: &skull_parser::ExprData,
 ) -> Result<Idx<hir::Expr>, CompilerError> {
+    if let ExprKind::Block(b) = &e.kind {
+        let saved = ctx.placeholder_forbidden;
+        ctx.placeholder_forbidden = true;
+        let r = lower_block(ctx, a, body, scope, b);
+        ctx.placeholder_forbidden = saved;
+
+        return Ok(ctx.alloc_block_expr(body, r?, a.b(b)));
+    }
+
     let hir_e = lower_expr_value(ctx, a, body, scope, e)?;
     Ok(ctx.alloc_expr(body, hir_e, e.span))
 }
@@ -1575,10 +1593,10 @@ fn lower_fn_body_into(
 
     let (body_e, lua_body, is_extern, ffi_lib) = match &f.body {
         skull_parser::FunctionBody::Rock(block) => {
-            let span = a.b(block).span;
+            let b = a.b(block);
 
             match lower_block(ctx, a, body, root_scope, block) {
-                Ok(lowered) => (Some(ctx.alloc_expr(body, lowered, span)), None, false, None),
+                Ok(lowered) => (Some(ctx.alloc_block_expr(body, lowered, b)), None, false, None),
 
                 Err(e) => {
                     errors.push(e);
@@ -1781,6 +1799,15 @@ pub fn lower_struct_def(
             .map(|e| lower_expr(ctx, a, &mut body, def_scope, a.e(e)))
             .transpose()?;
 
+        if fields.iter().any(|prev: &hir::StructFieldDef| prev.name == field.name.name) {
+            comp_error!(
+                field.name.span,
+                "Duplicate field `{}` in struct `{}`",
+                field.name.name,
+                s.name.name
+            );
+        }
+
         fields.push(hir::StructFieldDef {
             name: field.name.name,
             ty,
@@ -1828,8 +1855,9 @@ pub fn lower_enum_def(
                     .map(|f| lower_type_expr(ctx, a, &mut body, a.te(f)))
                     .try_vec()?,
             ),
-            EnumVariantKind::Record(fs) => VariantPayload::Record(
-                fs.iter()
+            EnumVariantKind::Record(fs) => {
+                let rec: Vec<hir::StructFieldDef> = fs
+                    .iter()
                     .map(|f| {
                         Ok(hir::StructFieldDef {
                             name: f.name.name,
@@ -1838,9 +1866,30 @@ pub fn lower_enum_def(
                             has_default: false,
                         })
                     })
-                    .try_vec()?,
-            ),
+                    .try_vec()?;
+                for (i, f) in rec.iter().enumerate() {
+                    if rec[..i].iter().any(|prev| prev.name == f.name) {
+                        comp_error!(
+                            f.span,
+                            "Duplicate field `{}` in variant `{}` of enum `{}`",
+                            f.name,
+                            v.name.name,
+                            e.name.name
+                        );
+                    }
+                }
+                VariantPayload::Record(rec)
+            }
         };
+
+        if variants.iter().any(|prev: &EnumVariantDef| prev.name == v.name.name) {
+            comp_error!(
+                v.name.span,
+                "Duplicate variant `{}` in enum `{}`",
+                v.name.name,
+                e.name.name
+            );
+        }
 
         variants.push(EnumVariantDef {
             name: v.name.name,
@@ -2197,13 +2246,13 @@ fn lower_if_let_clauses(
 ) -> Result<Idx<Expr>, CompilerError> {
     let Some((clause, rest)) = clauses.split_first() else {
         let e = lower_block(ctx, a, body, scope, then_block)?;
-        return Ok(ctx.alloc_expr(body, e, a.b(then_block).span));
+        return Ok(ctx.alloc_block_expr(body, e, a.b(then_block)));
     };
 
     let else_branch = match else_block {
         Some(blk) => {
             let e = lower_block(ctx, a, body, scope, blk)?;
-            Some(ctx.alloc_expr(body, e, a.b(blk).span))
+            Some(ctx.alloc_block_expr(body, e, a.b(blk)))
         }
 
         None => None,
@@ -2391,7 +2440,7 @@ pub fn lower_decorator_def(
     }
 
     let lowered_body = lower_block(ctx, a, &mut body, root_scope, &d.body)?;
-    let body_e = ctx.alloc_expr(&mut body, lowered_body, a.b(&d.body).span);
+    let body_e = ctx.alloc_block_expr(&mut body, lowered_body, a.b(&d.body));
 
     let num_required = d
         .params

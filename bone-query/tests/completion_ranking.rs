@@ -224,6 +224,24 @@ fn confident_autofill_suppressed_when_arg_is_ambiguous() {
 }
 
 #[test]
+fn lambda_body_type_directs_on_field_return_type() {
+    // `is_open: fn() -> bool` -- the lambda body `() => sp|` returns the field's
+    // function-type RETURN type (`bool`), so a bool candidate must type-direct
+    // above an int one. Names chosen so the shorter-first tiebreak would put the
+    // int candidate first WITHOUT type direction (the RED state).
+    let labels = labels_at(
+        "struct PanelReg { is_open: fn() -> bool }\n\
+         global SPELL_IS_OPEN: bool = false\n\
+         global SPELL_ID: int = 0\n\
+         global PANELS: [PanelReg] = [\n  PanelReg { is_open: () => sp$0 }\n]\n",
+    );
+    let b = rank_of(&labels, "SPELL_IS_OPEN");
+    let i = rank_of(&labels, "SPELL_ID");
+    assert!(b.is_some() && i.is_some(), "both offered: {labels:?}");
+    assert!(b < i, "bool candidate must type-direct above the int in a `-> bool` lambda body: {labels:?}");
+}
+
+#[test]
 fn struct_field_value_offers_expected_enum_variant() {
     // `kind: SpellKind` -- typing `har` in the value slot should surface the
     // `SpellKind::Harm` variant (type-directed: the field's type is the enum).
@@ -235,5 +253,42 @@ fn struct_field_value_offers_expected_enum_variant() {
     assert!(
         labels.iter().any(|l| l.contains("Harm")),
         "SpellKind::Harm must be offered for `har` in the enum-typed field slot: {labels:?}"
+    );
+}
+
+// -- after_yield: coroutine-fn boost fires only on a REAL yield operand -------
+
+#[test]
+fn yield_operand_ranks_coroutine_fn_first() {
+    // Positive control for the comment case below: after a real `yield*`,
+    // the coroutine fn must outrank the plain fn that would otherwise win
+    // (shorter name, same prefix).
+    let labels = labels_at(
+        "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\n\
+         fn frame() {}\n\
+         co fn t() -> Coroutine<int> {\n  yield* fr$0\n}\n",
+    );
+    let co = rank_of(&labels, "frame_co");
+    let plain = rank_of(&labels, "frame");
+    assert!(co.is_some() && plain.is_some(), "both offered: {labels:?}");
+    assert!(co < plain, "coroutine fn must rank first after `yield*`: {labels:?}");
+}
+
+#[test]
+fn yield_inside_a_comment_gets_no_coroutine_boost() {
+    // The byte scanner is comment-blind: `// yield fr|` classified as a
+    // yield operand and promoted coroutine fns. The AST classifier sees no
+    // yield expr at the cursor.
+    let labels = labels_at(
+        "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\n\
+         fn frame() {}\n\
+         fn t() {\n  // yield fr$0\n}\n",
+    );
+    let co = rank_of(&labels, "frame_co");
+    let plain = rank_of(&labels, "frame");
+    assert!(co.is_some() && plain.is_some(), "both offered: {labels:?}");
+    assert!(
+        plain < co,
+        "no coroutine boost inside a comment -- `frame` (shorter, same prefix) must rank first: {labels:?}"
     );
 }

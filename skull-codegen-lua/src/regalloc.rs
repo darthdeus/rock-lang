@@ -172,6 +172,11 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             positional.iter().for_each(|a| push(*a));
             named.iter().for_each(|(_, a)| push(*a));
         }
+        Inst::MakeEnumDyn { tag, positional, named, .. } => {
+            push(*tag);
+            positional.iter().for_each(|a| push(*a));
+            named.iter().for_each(|(_, a)| push(*a));
+        }
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => push(*base),
         Inst::Index { base, index, .. } => {
             push(*base);
@@ -226,7 +231,7 @@ pub(crate) fn term_uses(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
         Term::Return(vs) => vs.iter().for_each(|v| push(*v)),
         Term::Branch { cond, .. } => push(*cond),
         Term::Switch { discr, .. } => push(*discr),
-        Term::Yield { value: Some(v), .. } => push(*v),
+        Term::Yield { values, .. } => values.iter().for_each(|v| push(*v)),
         _ => {}
     }
 }

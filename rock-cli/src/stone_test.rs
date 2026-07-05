@@ -226,10 +226,18 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
                 let outcome: Result<Option<&'static str>> = match &mut stone {
                     Some(st) => st
                         .recompile(&changed_vec, &main_path, &incremental_path)
-                        .map(|r| match r {
-                            SkullReload::Full { .. } => Some("restart"),
-                            SkullReload::Incremental { .. } => Some("hot"),
-                            SkullReload::NoChange => None,
+                        .and_then(|r| match r {
+                            SkullReload::Full { .. } => Ok(Some("restart")),
+                            SkullReload::Incremental { .. } => Ok(Some("hot")),
+                            // A shape change defers the main.lua write (the live
+                            // stone loop restarts the process); this harness has
+                            // no live process, so materialize the program now
+                            // and report the full-reload event.
+                            SkullReload::ShapeChanged { .. } => {
+                                st.force_full(&main_path, &incremental_path)?;
+                                Ok(Some("restart"))
+                            }
+                            SkullReload::NoChange => Ok(None),
                         }),
                     None => SkullStone::init(&dir, &main_path, &incremental_path).map(|st| {
                         stone = Some(st);

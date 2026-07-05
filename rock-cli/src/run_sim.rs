@@ -15,7 +15,7 @@ use colored::Colorize;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -44,10 +44,11 @@ fn compile_sims(
     backend: crate::Backend,
     project_path: PathBuf,
     output_path: PathBuf,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, crate::skull_backend::SkullStone)> {
     // Only skull serves sims now (bone has no codegen, rock is gone): build the
-    // bone workspace once, emit the game-shaped main.lua with its `@sim`
-    // registry, and collect the wire/env list from the same build.
+    // bone workspace once (a live Session, tests included), emit the game-shaped
+    // main.lua with its `@sim` registry, and collect the wire/env list from the
+    // same build. The returned SkullStone serves mid-sim `reload_edit` ops.
     match backend {
         crate::Backend::Skull => {
             let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
@@ -74,7 +75,7 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
         return Err(anyhow!("sim --list expects a project directory, got: {project}"));
     }
 
-    let (wire_names, _) = compile_sims(backend, project_path, PathBuf::from("tmp"))?;
+    let (wire_names, _, _) = compile_sims(backend, project_path, PathBuf::from("tmp"))?;
     for name in wire_names {
         // Result output, NOT logging: `--list` exists to print the sim
         // names to stdout — this is the command's answer, consumed by
@@ -103,7 +104,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
     // The runner applies them via `Command::env` before luajit spawns --
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `ANVIL_VIDEO`.
-    let (_, env_by_wire) = compile_sims(backend, project_path, output_path)?;
+    let (_, env_by_wire, mut stone) = compile_sims(backend, project_path, output_path)?;
 
     // Per-run tempdir, exposed to the spawned process as the `OUT` env
     // var. Multi-start sims (`a,b`) share the same dir, so a fixture
@@ -139,6 +140,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
             &out_path,
             &output,
             &env_pairs,
+            &mut stone,
         )?;
         combined.merge(part_summary);
     }
@@ -215,7 +217,7 @@ pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, upda
     }
 
     let output = "tmp".to_string();
-    let (wire_names, env_by_wire) =
+    let (wire_names, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
@@ -238,6 +240,7 @@ pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, upda
             &out_path,
             &output,
             &env_pairs,
+            &mut stone,
         )?;
         process_video_assertions(&mut summary);
         for p in std::mem::take(&mut summary.cleanup_paths) {
@@ -282,6 +285,77 @@ pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, upda
     Ok(())
 }
 
+/// A mid-sim `reload_edit` request parsed off the `__SIM__` side channel
+/// (`docs/sim-reload-harness-plan.md`).
+struct ReloadEditReq {
+    file: String,
+    find: String,
+    replace: String,
+    site: String,
+}
+
+/// Apply one `reload_edit`: in-memory find/replace on the file's CURRENT
+/// in-session text, recompiled through the real incremental path
+/// (`SkullStone::apply_edit`), which writes the overlay the running game
+/// hot-reloads. BodyOnly edits only -- any other tier is a sim-author error
+/// (an interface edit would rewrite main.lua under the running child).
+/// `pristine` records each file's pre-edit text at first touch so
+/// `revert_reload_edits` can restore the session after the child exits.
+fn service_reload_edit(
+    stone: &mut crate::skull_backend::SkullStone,
+    output: &str,
+    pristine: &mut HashMap<String, String>,
+    req: &ReloadEditReq,
+) -> Result<()> {
+    let path = Path::new(&req.file);
+    let current = stone
+        .source_text(path)
+        .ok_or_else(|| anyhow!("`{}` is not a source of this build", req.file))?;
+    let hits = current.matches(&req.find).count();
+    if hits != 1 {
+        return Err(anyhow!(
+            "find matched {hits} times in `{}` (need exactly 1): {:?}",
+            req.file,
+            req.find
+        ));
+    }
+    pristine.entry(req.file.clone()).or_insert_with(|| current.clone());
+    let new_text = current.replacen(&req.find, &req.replace, 1);
+    let main_path = Path::new(output).join(rock_host::project::MAIN_LUA_FILENAME);
+    let incremental_path = main_path.with_file_name("incremental.lua");
+    match stone.apply_edit(path, &new_text, &main_path, &incremental_path)? {
+        crate::skull_backend::SkullReload::Incremental { bytes, reinferred, .. } => {
+            log::info!(target: "SIM",
+                "reload_edit `{}`: overlay {bytes}B, {reinferred} bodies", req.file);
+            Ok(())
+        }
+        other => Err(anyhow!(
+            "must stay a body-only edit; `{}` routed to {other:?} \
+             (interface/structural edits are not injectable mid-sim)",
+            req.file
+        )),
+    }
+}
+
+/// Restore every reload_edit-touched file to its pre-sim text and remove the
+/// overlay. Both matter for the NEXT child in a suite run: `emit_overlay`
+/// accumulates, so an unreverted session would leak this sim's edits into a
+/// later reload sim's overlay -- and the in-game watcher fires on the
+/// overlay's first appearance (baseline modtime 0), so a leftover file would
+/// be dofile'd at that sim's startup.
+fn revert_reload_edits(
+    stone: &mut crate::skull_backend::SkullStone,
+    output: &str,
+    pristine: &mut HashMap<String, String>,
+) -> Result<()> {
+    let main_path = Path::new(output).join(rock_host::project::MAIN_LUA_FILENAME);
+    let incremental_path = main_path.with_file_name("incremental.lua");
+    for (file, text) in pristine.drain() {
+        stone.apply_edit(Path::new(&file), &text, &main_path, &incremental_path)?;
+    }
+    crate::skull_backend::wipe_overlay(&incremental_path)
+}
+
 /// Spawn one luajit process for `sim_part` and demux its side channel.
 /// `out_path` is the shared `OUT` env value across all parts in a
 /// multi-start chain.
@@ -293,8 +367,18 @@ fn run_one_sim(
     out_path: &Path,
     output: &str,
     env_pairs: &[(String, String)],
+    stone: &mut crate::skull_backend::SkullStone,
 ) -> Result<SimSummary> {
     let sim_source = find_sim_source(project, sim_part);
+
+    // No stale overlay may exist when the child spawns: with STONE_HOT_RELOAD=1
+    // the in-game watcher fires on the overlay's FIRST appearance (baseline
+    // modtime 0), so a leftover from a previous sim would be dofile'd at startup.
+    crate::skull_backend::wipe_overlay(
+        &Path::new(output)
+            .join(rock_host::project::MAIN_LUA_FILENAME)
+            .with_file_name("incremental.lua"),
+    )?;
     // Expand `$OUT` in env values to the per-run tempdir absolute path.
     // Lets sims write `@sim_env("ANVIL_SESSION", "$OUT/resume.json")`
     // and have it resolve before luajit spawns. Runtime `set_env()`
@@ -332,6 +416,9 @@ fn run_one_sim(
     // after the child exits which is useless feedback for a 30s sim.
     let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
+    // (single-threaded) SkullStone and services them between try_wait polls.
+    let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
 
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
@@ -341,6 +428,17 @@ fn run_one_sim(
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 if let Some(rest) = line.strip_prefix("__SIM__ ") {
+                    if extract_str_field(rest, "op").as_deref() == Some("reload_edit") {
+                        // Send failure = the wait loop already reaped the child;
+                        // the edit can't apply, which the sim's own wait_for
+                        // timeout (or the post-exit drain) surfaces.
+                        let _ = reload_tx.send(ReloadEditReq {
+                            file: extract_str_field(rest, "file").unwrap_or_default(),
+                            find: extract_str_field(rest, "find").unwrap_or_default(),
+                            replace: extract_str_field(rest, "replace").unwrap_or_default(),
+                            site: extract_str_field(rest, "site").unwrap_or_default(),
+                        });
+                    }
                     if !quiet {
                         print_progress(rest);
                     }
@@ -375,6 +473,8 @@ fn run_one_sim(
 
     let timeout = Duration::from_secs(TIMEOUT_SECS);
     let start_time = std::time::Instant::now();
+    let mut pristine: HashMap<String, String> = HashMap::new();
+    let mut reload_errors: Vec<SiteMessage> = Vec::new();
     let (status, timed_out) = loop {
         match child.try_wait()? {
             Some(s) => break (s, false),
@@ -384,10 +484,50 @@ fn run_one_sim(
                     let s = child.wait()?;
                     break (s, true);
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                // Service mid-sim reload_edit requests while waiting; the 50ms
+                // recv timeout doubles as the child poll interval. Disconnected
+                // = the stderr stream closed before the child was reaped --
+                // keep the poll cadence with a plain sleep.
+                match reload_rx.recv_timeout(Duration::from_millis(50)) {
+                    Ok(req) => {
+                        if let Err(e) = service_reload_edit(stone, output, &mut pristine, &req) {
+                            let site = compress_site(&req.site);
+                            // Result output, NOT logging: runner-side failure
+                            // in the sim's live result stream. It never came
+                            // through the child's `__SIM__` channel, and
+                            // `summary.print` suppresses sited entries as
+                            // already-streamed -- this IS that live print.
+                            eprintln!(
+                                "{}{} reload_edit: {e}",
+                                format!("[{}] ", site).bright_black(),
+                                "error:".red().bold(),
+                            );
+                            reload_errors.push(SiteMessage {
+                                message: format!("reload_edit: {e}"),
+                                site,
+                            });
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
             }
         }
     };
+    // A request still queued here arrived after the child exited -- the sim
+    // emitted reload_edit and stopped without waiting for the effect. That's
+    // a sim-author bug; dropping it silently would hide the mis-ordering.
+    while let Ok(req) = reload_rx.try_recv() {
+        reload_errors.push(SiteMessage {
+            message: format!(
+                "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
+                req.file
+            ),
+            site: compress_site(&req.site),
+        });
+    }
 
     // Surface reader-thread panics: a silent JoinError here meant a panic
     // in the BufReader/Read loop would discard all sim output (the
@@ -411,6 +551,16 @@ fn run_one_sim(
     drop(stdout_buf_locked);
 
     let mut summary = SimSummary::from_stderr(&stderr_str);
+    summary.errors.extend(reload_errors);
+    // Restore the session + remove the overlay even when the sim failed --
+    // a revert failure is itself a loud error (it would poison every later
+    // sim in the suite).
+    if let Err(e) = revert_reload_edits(stone, output, &mut pristine) {
+        summary.errors.push(SiteMessage {
+            message: format!("reload_edit revert failed: {e}"),
+            site: String::new(),
+        });
+    }
     summary.timed_out = timed_out;
     if !status.success() {
         summary.process_failure_code = Some(status.code().unwrap_or(-1));
@@ -536,6 +686,10 @@ fn print_progress(rest: &str) {
         "cleanup_path" => {
             let p = extract_str_field(rest, "path").unwrap_or_default();
             format!("{} {}", "cleanup_path".cyan(), p)
+        }
+        "reload_edit" => {
+            let f = extract_str_field(rest, "file").unwrap_or_default();
+            format!("{} {}", "reload_edit".cyan(), f.yellow())
         }
         "log" => {
             let m = extract_str_field(rest, "message").unwrap_or_default();

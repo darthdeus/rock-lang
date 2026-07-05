@@ -396,6 +396,44 @@ impl Session {
         &self.ws
     }
 
+    /// Run `f` against the workspace with `path`'s text temporarily replaced by
+    /// `variant`, then restore the original state. The speculative-analysis
+    /// primitive for IDE paths (completion munges): the variant goes through the
+    /// normal update tiers, so a body-local munge costs one body re-inference --
+    /// not the from-scratch project pass `combined_unexpanded` + `semantic_pass`
+    /// would be.
+    ///
+    /// An UNTRACKED `path` (a file this session refused because its live text
+    /// never lowered clean, or one it has never seen) is speculatively tracked
+    /// for the duration of `f` and removed again -- the session ends as
+    /// untracked as it started.
+    ///
+    /// Not panic-safe: a panicking `f` leaves the variant applied (the IDE
+    /// queries this serves don't panic). A failed variant update is restored
+    /// before the error propagates; a failed RESTORE propagates itself -- the
+    /// original text round-tripped before, so that failure is a real bug and
+    /// must not be swallowed.
+    pub fn with_file_variant<R>(
+        &mut self,
+        path: &str,
+        variant: &str,
+        f: impl FnOnce(&Workspace) -> R,
+    ) -> Result<R, CompilerError> {
+        let Some(original) = self.files.get(path).map(|uf| uf.text.clone()) else {
+            self.update_file(path, variant)?;
+            let out = f(&self.ws);
+            self.remove_file(path)?;
+            return Ok(out);
+        };
+        if let Err(e) = self.update_file(path, variant) {
+            self.update_file(path, &original)?;
+            return Err(e);
+        }
+        let out = f(&self.ws);
+        self.update_file(path, &original)?;
+        Ok(out)
+    }
+
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
         // Reset the re-inference counter so callers can read EXACTLY how many
         // bodies this update re-inferred (check_module_incremental bumps it).

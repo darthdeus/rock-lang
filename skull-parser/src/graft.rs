@@ -125,9 +125,10 @@ fn graft_variant(src: &Ast, dst: &mut Ast, v: &EnumVariant) -> EnumVariant {
 pub fn graft_block(src: &Ast, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
     let data = &src.blocks[b];
     let span = data.span;
+    let braces = data.braces;
     let stmts: Vec<Idx<StatementData>> = data.statements.clone();
     let statements = stmts.into_iter().map(|s| graft_stmt(src, dst, s)).collect();
-    dst.blocks.alloc(BlockData { span, statements })
+    dst.blocks.alloc(BlockData { span, braces, statements })
 }
 
 pub fn graft_expr(src: &Ast, dst: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {

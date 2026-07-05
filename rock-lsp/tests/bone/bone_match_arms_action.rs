@@ -7,13 +7,12 @@
 //! `.rock.lsp` fixture type for code actions.
 
 use lsp_types::*;
-use rock_lsp::{compute_code_actions_workspace, LspBackend, LspWorkspace};
+use rock_lsp::{compute_code_actions_workspace, LspWorkspace};
 use std::str::FromStr;
 
 fn bone_ws(path: &std::path::Path, src: &str) -> LspWorkspace {
     std::fs::write(path, src).unwrap();
     let mut ws = LspWorkspace::new();
-    ws.backend = LspBackend::Bone;
     ws.bone.update(path.to_str().unwrap(), src.to_string());
     ws
 }

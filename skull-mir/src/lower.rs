@@ -176,11 +176,22 @@ fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
 }
 
 /// The scalarizable shape of a signature type (a param/return TyId): `Some` iff
-/// it is a NON-nullable nominal value struct. Nullable value types keep the
-/// single-cdata ABI (one slot or `nil` is cleaner than N slots + a null bit).
+/// it is a NON-nullable nominal value struct OR a flat-eligible (boxed) enum, or a
+/// NULLABLE flat enum -- all thread as leaf scalars. A nullable flat enum threads
+/// with `tag = nil` as the null sentinel (a present variant always has a non-nil
+/// string tag, so no extra null bit is needed). Nullable VALUE structs still keep
+/// the single-cdata ABI (cdata has no spare field for a nil discriminator).
 fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => value_shape(ws, n),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+            value_shape(ws, n).or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape()))
+        }
+        TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                flat_enum_shape(ws, n).map(|s| s.value_shape())
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -288,6 +299,167 @@ pub fn enum_value_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
         return None; // payload-free -> int (increment 1)
     }
     Some(EnumCdataShape { name, slots, variants })
+}
+
+/// The flatten shape of an enum that boxes today and is eligible to be inlined
+/// into a parent struct's Lua table (`docs/enum-allocation-report.md`). Eligible iff
+/// the enum has payload variants (not payload-free -> those are plain ints), is NOT
+/// cdata-eligible (those scalarize via `EnumCdataShape`), and every payload variant
+/// is `Unit` or `Tuple` (record payloads keep boxing for now). Closure / string /
+/// ref payloads are fine -- the slots are dynamically-typed Lua fields. The
+/// discriminant is the variant NAME (a string, mirroring the boxed `__variant`), so
+/// flattened slots are a direct spread of the box's keys; box <-> slot conversion is
+/// a field copy with no name<->ordinal table.
+#[derive(Clone, Debug)]
+pub struct EnumFlatShape {
+    name: Ustr,
+    /// Positional payload slots `f__0 .. f__{tuple_width-1}` (max tuple arity).
+    tuple_width: usize,
+    /// Named payload slots `f__<name>` (union of record-variant field names,
+    /// first-seen order). A tuple position and a record field never collide --
+    /// the former is a number, the latter an identifier.
+    record_fields: Vec<Ustr>,
+}
+
+impl EnumFlatShape {
+    /// The number of scalar leaves this enum threads as across a call: the
+    /// discriminant + every positional slot + every record slot.
+    fn leaf_count(&self) -> usize {
+        1 + self.tuple_width + self.record_fields.len()
+    }
+
+    /// The `ValueShape` the scalar ABI / SROA see: `[__tag, _0.., <rec>..]`, all
+    /// primitive leaves. `pack`/`cdata_leaves` re-detect the enum by name and use
+    /// box semantics (the leaf NAMES here are nominal -- never read structurally).
+    fn value_shape(&self) -> ValueShape {
+        let mut fields = vec![(Ustr::from("__tag"), FieldShape::Prim)];
+        for i in 0..self.tuple_width {
+            fields.push((Ustr::from(format!("_{i}").as_str()), FieldShape::Prim));
+        }
+        for rf in &self.record_fields {
+            fields.push((*rf, FieldShape::Prim));
+        }
+        ValueShape { name: self.name, fields }
+    }
+}
+
+/// `Some(shape)` iff `name` is a mixed/boxed enum eligible for field flattening.
+fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
+    let eid = *ws.enums_by_name.get(&name)?;
+    // Payload-free enums are ints; cdata-eligible enums scalarize via cdata.
+    if payload_free_enum_variants(ws, name).is_some() || enum_value_shape(ws, name).is_some() {
+        return None;
+    }
+    let ed = &ws.modules[eid.module.index()].enums[eid.def];
+    let mut tuple_width = 0;
+    let mut record_fields: Vec<Ustr> = Vec::new();
+    for v in &ed.variants {
+        match &v.payload {
+            VariantPayload::Unit => {}
+            VariantPayload::Tuple(tys) => tuple_width = tuple_width.max(tys.len()),
+            VariantPayload::Record(fields) => {
+                for f in fields {
+                    if !record_fields.contains(&f.name) {
+                        record_fields.push(f.name);
+                    }
+                }
+            }
+        }
+    }
+    Some(EnumFlatShape { name, tuple_width, record_fields })
+}
+
+/// The frame-slot yield channel of a `co fn` whose declared return type is
+/// `Coroutine<Y, ...>` and `Y` is a flat (boxed) enum. `Some` -> the coroutine
+/// yields a flat enum: the transform writes its leaves into reused `s.__y*` frame
+/// slots (0 alloc) and the concrete consumer reads them threaded, while the
+/// generic/boxed `resume()` rebuilds a `{__variant}` box from those slots (the
+/// info here is exactly what that rebuild needs). `None` -> `Y` is a scalar /
+/// non-flat type: `resume()` returns the single value, no frame-slot channel.
+pub struct YieldChannel {
+    pub enum_name: Ustr,
+    pub tuple_width: usize,
+    pub record_fields: Vec<Ustr>,
+}
+
+impl YieldChannel {
+    /// Total scalar leaves: discriminant + positional slots + record slots. These
+    /// are the `s.__y0 .. s.__y{leaf_count-1}` frame slots.
+    pub fn leaf_count(&self) -> usize {
+        1 + self.tuple_width + self.record_fields.len()
+    }
+}
+
+/// The [`YieldChannel`] of a co fn's declared return type `Coroutine<Y, ...>`.
+pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldChannel> {
+    let TyId::Static(m, idx) = return_ty else { return None };
+    let TypeExpr::App { params, .. } = ws.module(m).ty_arena[idx] else { return None };
+    let y_idx = params.into_iter().next()?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = ws.module(m).ty_arena[y_idx] else {
+        return None;
+    };
+    let shape = flat_enum_shape(ws, n)?;
+    Some(YieldChannel {
+        enum_name: shape.name,
+        tuple_width: shape.tuple_width,
+        record_fields: shape.record_fields,
+    })
+}
+
+/// The reused frame slot name for the `i`th yield leaf: `__y{i}` (tag at 0, then
+/// positional, then record leaves -- `value_shape` leaf order).
+pub fn yield_slot(i: usize) -> Ustr {
+    Ustr::from(format!("__y{i}").as_str())
+}
+
+/// The parent-table slot holding a flattened enum field's discriminant (variant
+/// name string), e.g. field `sig` -> `sig__tag`.
+fn flat_tag_slot(field: Ustr) -> Ustr {
+    Ustr::from(format!("{field}__tag").as_str())
+}
+
+/// The parent-table slot holding a flattened enum field's `i`th positional payload,
+/// e.g. field `sig` payload 0 -> `sig__0`.
+fn flat_payload_slot(field: Ustr, i: usize) -> Ustr {
+    Ustr::from(format!("{field}__{i}").as_str())
+}
+
+/// The parent-table slot holding a flattened enum field's named (record) payload,
+/// e.g. field `shape` record field `r` -> `shape__r`.
+fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
+    Ustr::from(format!("{field}__{rec_field}").as_str())
+}
+
+/// A flattened enum value's runtime cells: the discriminant + every union slot
+/// (positional tuple slots and named record slots), nil where unused.
+#[derive(Clone)]
+struct FlatCells {
+    tag: Idx<Inst>,
+    positional: Vec<Idx<Inst>>,
+    named: Vec<(Ustr, Idx<Inst>)>,
+}
+
+/// A `match`/`if let`/`while let` scrutinee: either an ordinary lowered value, or a
+/// FLATTENED enum field still living as `parent.{prefix}__tag`/`__i` slots. The
+/// flat form lets the tag test + payload binds read the parent's slots directly --
+/// no box -- and only materializes (`scrut_value`) on a whole-value path.
+#[derive(Clone)]
+enum Scrut {
+    Val(Idx<Inst>),
+    Flat {
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        shape: EnumFlatShape,
+    },
+    /// A flat enum already threaded as scalar cells (a scalarized param/return or a
+    /// constructed-and-matched temporary) -- tag + payload values held directly, so
+    /// the tag test + payload binds need no box and no slot read.
+    Cells {
+        tag: Idx<Inst>,
+        positional: Vec<Idx<Inst>>,
+        named: Vec<(Ustr, Idx<Inst>)>,
+        shape: EnumFlatShape,
+    },
 }
 
 /// Workspace-wide scalar-ABI context: the set of function names referenced as a
@@ -636,6 +808,7 @@ pub fn lower_function(
         binds: HashMap::new(),
         loop_targets: Vec::new(),
         defers: Vec::new(),
+        in_defer_body: false,
         resume_arg,
         param_shapes,
         ret_shape,
@@ -681,6 +854,7 @@ pub fn lower_global(
         binds: HashMap::new(),
         loop_targets: Vec::new(),
         defers: Vec::new(),
+        in_defer_body: false,
         resume_arg: None,
         param_shapes: Vec::new(),
         ret_shape: None,
@@ -725,6 +899,7 @@ pub fn lower_decorator(
         binds: HashMap::new(),
         loop_targets: Vec::new(),
         defers: Vec::new(),
+        in_defer_body: false,
         resume_arg: None,
         param_shapes: Vec::new(),
         ret_shape: None,
@@ -752,8 +927,13 @@ struct Builder<'a> {
     /// Innermost-last stack of `(continue_target, break_target)` blocks.
     loop_targets: Vec<(Idx<Block>, Idx<Block>)>,
     /// Innermost-last stack of pending `defer` bodies per block scope; spliced
-    /// (LIFO) at block exit and before every `return`.
-    defers: Vec<Vec<Idx<Expr>>>,
+    /// (LIFO) at block exit and before every `return`. In a co fn each entry
+    /// also carries its terminal-cleanup flag cell (see `MirFunc::coro_defers`);
+    /// the splice clears it so kill/error never double-run a completed defer.
+    defers: Vec<Vec<(Idx<Expr>, Option<Idx<Cell>>)>>,
+    /// True while lowering a `defer` body (inline splice or terminal copy) --
+    /// `yield`/`yield*` inside a defer body is a compile error.
+    in_defer_body: bool,
     /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
     /// the next `resume(arg)`). `None` outside a coroutine.
     resume_arg: Option<Idx<Cell>>,
@@ -901,10 +1081,31 @@ impl Builder<'_> {
         for sidx in stmts {
             match self.body.statement_arena[sidx].clone() {
                 Statement::Let { name, value } => {
-                    let v = self.lower_expr(value)?;
-                    let cell = self.f.new_cell(Some(self.body.binding_arena[name].name));
-                    self.emit_cur(Inst::Store { cell, value: v });
-                    self.binds.insert(raw(name), cell);
+                    // A flat-enum local threads as leaf cells (like a scalarized
+                    // param), so a later `match x` reads the cells with no box and a
+                    // whole-value use rebuilds the box on demand. A NULLABLE flat-enum
+                    // local threads too -- `tag = nil` is the null sentinel, handled by
+                    // the nil-safe spread / `== null` tag test / conditional materialize.
+                    if let Some(shape) = self.flat_enum_value_shape_of(value) {
+                        let r = self.lower_expr_repr(value)?;
+                        let leaves = self.repr_to_leaves(&r, &shape);
+                        let bname = self.body.binding_arena[name].name;
+                        let cells: Vec<Idx<Cell>> = leaves
+                            .into_iter()
+                            .enumerate()
+                            .map(|(li, lv)| {
+                                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
+                                self.emit_cur(Inst::Store { cell: c, value: lv });
+                                c
+                            })
+                            .collect();
+                        self.group_binds.insert(raw(name), (cells, shape));
+                    } else {
+                        let v = self.lower_expr(value)?;
+                        let cell = self.f.new_cell(Some(self.body.binding_arena[name].name));
+                        self.emit_cur(Inst::Store { cell, value: v });
+                        self.binds.insert(raw(name), cell);
+                    }
                 }
                 Statement::Expr(e) => {
                     self.lower_stmt_expr(e)?;
@@ -918,9 +1119,21 @@ impl Builder<'_> {
                     return Ok(true);
                 }
                 // Collected, not run inline; spliced at block exit / before return.
+                // In a co fn, dying (kill/error) counts as exiting every open
+                // scope: registration also sets a frame flag + builds a detached
+                // terminal-cleanup copy (see `MirFunc::coro_defers`).
                 Statement::Defer(body) => {
+                    let flag = if self.resume_arg.is_some() {
+                        let flag = self.f.new_cell(Some(Ustr::from("__defer")));
+                        let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
+                        self.emit_cur(Inst::Store { cell: flag, value: on });
+                        self.build_coro_defer_copy(body, flag)?;
+                        Some(flag)
+                    } else {
+                        None
+                    };
                     if let Some(frame) = self.defers.last_mut() {
-                        frame.push(body);
+                        frame.push((body, flag));
                     }
                 }
                 // `let (a, b) = e` — destructure via TupleIndex into a cell per
@@ -970,8 +1183,8 @@ impl Builder<'_> {
     /// LIFO order into the current block — the normal block-exit path.
     fn run_top_frame(&mut self) -> Result<(), CompilerError> {
         if let Some(frame) = self.defers.last() {
-            for body in frame.clone().into_iter().rev() {
-                self.lower_stmt_expr(body)?;
+            for (body, flag) in frame.clone().into_iter().rev() {
+                self.lower_defer_splice(body, flag)?;
             }
         }
         Ok(())
@@ -980,12 +1193,66 @@ impl Builder<'_> {
     /// Splice EVERY pending defer (all enclosing block scopes, innermost first,
     /// each LIFO) — before a `return` that abandons those scopes.
     fn run_all_defers(&mut self) -> Result<(), CompilerError> {
-        let frames: Vec<Vec<Idx<Expr>>> = self.defers.iter().rev().cloned().collect();
+        let frames: Vec<Vec<(Idx<Expr>, Option<Idx<Cell>>)>> = self.defers.iter().rev().cloned().collect();
         for frame in frames {
-            for body in frame.into_iter().rev() {
-                self.lower_stmt_expr(body)?;
+            for (body, flag) in frame.into_iter().rev() {
+                self.lower_defer_splice(body, flag)?;
             }
         }
+        Ok(())
+    }
+
+    /// One inline defer splice: run the body, then clear the co-fn terminal
+    /// flag (if any) so a later kill/error never double-runs a completed defer.
+    fn lower_defer_splice(&mut self, body: Idx<Expr>, flag: Option<Idx<Cell>>) -> Result<(), CompilerError> {
+        let was = std::mem::replace(&mut self.in_defer_body, true);
+        let res = self.lower_stmt_expr(body);
+        self.in_defer_body = was;
+        res?;
+        if let Some(f) = flag {
+            let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
+            self.emit_cur(Inst::Store { cell: f, value: off });
+        }
+        Ok(())
+    }
+
+    /// Build the detached terminal-cleanup copy of a co fn `defer` body:
+    /// `if flag { flag = false; <body> }` ending in a bare return, in blocks
+    /// UNREACHABLE from the fn entry (like closure bodies — the coroutine
+    /// transform and DCE leave them alone). `emit_coroutine` compiles each as a
+    /// standalone `<name>__defer<k>(s)` fn; the ctor stores them BY VALUE on
+    /// the frame so a stale (stamp-killed) coroutine runs ITS OWN layout's
+    /// cleanup. Lowered at the registration site with the same binds; the
+    /// resolution maps are snapshotted so `let`s inside the copy can't leak
+    /// into main-body lowering, and loop targets are cleared so a stray
+    /// `break` can't jump into the main CFG.
+    fn build_coro_defer_copy(&mut self, body: Idx<Expr>, flag: Idx<Cell>) -> Result<(), CompilerError> {
+        let saved_cur = self.cur;
+        let saved_binds = self.binds.clone();
+        let saved_group = self.group_binds.clone();
+        let saved_loops = std::mem::take(&mut self.loop_targets);
+
+        let g_entry = self.f.new_block();
+        let b_body = self.f.new_block();
+        let b_done = self.f.new_block();
+        self.cur = g_entry;
+        let fv = self.emit_cur(Inst::Load(flag));
+        self.f.set_term(g_entry, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
+        self.cur = b_body;
+        let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
+        self.emit_cur(Inst::Store { cell: flag, value: off });
+        let was = std::mem::replace(&mut self.in_defer_body, true);
+        let res = self.lower_stmt_expr(body);
+        self.in_defer_body = was;
+        res?;
+        self.f.set_term(self.cur, Term::Goto(b_done));
+        self.f.set_term(b_done, Term::Return(Vec::new()));
+        self.f.coro_defers.push((flag, g_entry));
+
+        self.cur = saved_cur;
+        self.binds = saved_binds;
+        self.group_binds = saved_group;
+        self.loop_targets = saved_loops;
         Ok(())
     }
 
@@ -1192,17 +1459,34 @@ impl Builder<'_> {
             // continue in the resume block; the expression evaluates to the
             // resume arg (the value of the next `resume(arg)`).
             Expr::Yield(opt) => {
-                let value = match opt {
-                    Some(eb) => Some(self.lower_expr(eb)?),
-                    None => None,
+                if self.in_defer_body {
+                    return Err(gap("`yield` inside a `defer` body is not allowed"));
+                }
+                // A flat-enum yield value threads as leaves through the frame-slot
+                // channel (the transform writes them to reused `s.__y*` slots, 0
+                // alloc); a scalar/non-flat value stays a single packed value.
+                let values: Vec<Idx<Inst>> = match opt {
+                    Some(eb) => match self.flat_enum_value_shape_of(eb) {
+                        Some(shape) => {
+                            let r = self.lower_expr_repr(eb)?;
+                            self.repr_to_leaves(&r, &shape)
+                        }
+                        None => vec![self.lower_expr(eb)?],
+                    },
+                    None => Vec::new(),
                 };
                 let resume = self.f.new_block();
-                self.f.set_term(self.cur, Term::Yield { value, resume });
+                self.f.set_term(self.cur, Term::Yield { values, resume });
                 self.cur = resume;
                 let rac = self.resume_arg.ok_or_else(|| gap("yield outside a coroutine"))?;
                 Ok(self.emit_cur(Inst::Load(rac)))
             }
-            Expr::YieldDelegate(sub) => self.lower_yield_delegate(sub),
+            Expr::YieldDelegate(sub) => {
+                if self.in_defer_body {
+                    return Err(gap("`yield*` inside a `defer` body is not allowed"));
+                }
+                self.lower_yield_delegate(sub)
+            }
 
             // A closure: lower its body into a sub-CFG in the shared arenas.
             // Captured outer vars are the enclosing cells (Lua upvalues); the
@@ -1325,6 +1609,16 @@ impl Builder<'_> {
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         match self.body.expr_arena[target].clone() {
+            // A threaded (group_binds) var -- a scalarized flat-enum local or value
+            // param -- updates its leaf cells, not one boxed cell.
+            Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
+                let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
+                let r = self.lower_expr_repr(value)?;
+                let leaves = self.repr_to_leaves(&r, &shape);
+                for (c, lv) in cells.iter().zip(leaves) {
+                    self.emit_cur(Inst::Store { cell: *c, value: lv });
+                }
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -1335,6 +1629,13 @@ impl Builder<'_> {
             }
             Expr::FieldAccess { base, field } => {
                 let b = self.lower_expr(base)?;
+                // A flattened enum field: write the discriminant + payload slots
+                // directly on the parent table (no nested box).
+                if let Some(shape) = self.flat_field_of(base, field) {
+                    let cells = self.lower_flat_value(&shape, value)?;
+                    self.store_flat_cells(b, field, cells);
+                    return Ok(());
+                }
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
@@ -1797,10 +2098,42 @@ impl Builder<'_> {
                 };
                 if let Some(kind) = kind {
                     if let [arg] = arg_idxs[..] {
+                        // The hook is peeled to the constructor, which can only
+                        // re-render a LAMBDA LITERAL with the frame context -- any
+                        // other fn-typed expression (a named fn, a fn in a
+                        // variable) would silently install no hook. Reject.
+                        if !matches!(self.body.expr_arena[arg], Expr::Lambda { .. }) {
+                            return Err(gap(format!(
+                                "`{name}` argument must be a lambda literal (`() => ...`) -- the hook is relocated to construction time"
+                            )));
+                        }
                         let lambda = self.lower_expr(arg)?;
                         self.emit_cur(Inst::CoroHook { kind, lambda });
                         return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
                     }
+                }
+            }
+        }
+        // A concrete `c.resume()` / `c.resume(arg)` whose yield type is a flat enum:
+        // thread the value through the frame-slot channel instead of the type-erased
+        // generic `resume` return (which always boxes). `c.__advance(c, arg)` steps
+        // the coroutine (writing the leaves to reused `__y*` slots on the object,
+        // which IS the frame), then we read them back as an unboxed group -- no
+        // per-yield allocation.
+        if let Callee::Unresolved { name, .. } = callee {
+            if name.as_str() == "resume"
+                && !arg_idxs.is_empty()
+                && self.is_coroutine_recv(arg_idxs[0])
+            {
+                if let Some(shape) = self.flat_enum_shape_of_expr(e) {
+                    let recv = self.lower_expr(arg_idxs[0])?;
+                    let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
+                    let mut cargs: Vec<Idx<Inst>> = vec![recv];
+                    if let Some(&a) = arg_idxs.get(1) {
+                        cargs.push(self.lower_expr(a)?);
+                    }
+                    self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
+                    return Ok(self.resume_frame_read(recv, &shape));
                 }
             }
         }
@@ -2033,6 +2366,49 @@ impl Builder<'_> {
     fn pack(&mut self, r: ValueRepr) -> Idx<Inst> {
         match r {
             ValueRepr::Scalar(v) => v,
+            // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
+            // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
+            ValueRepr::Group { name, parts } if flat_enum_shape(self.ws, name).is_some() => {
+                let shape = flat_enum_shape(self.ws, name).unwrap();
+                let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
+                let tag = packed[0];
+                let positional = packed[1..1 + shape.tuple_width].to_vec();
+                let named: Vec<(Ustr, Idx<Inst>)> = shape
+                    .record_fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width + i]))
+                    .collect();
+                // A STATIC tag names a present variant: box directly. A payload-free
+                // variant reuses its interned singleton (map-key / identity holds).
+                if let Inst::Const(Lit::Str(variant)) = self.f.insts[tag] {
+                    if self.variant_is_unit(name, variant) {
+                        let g = Ustr::from(format!("__rock_enum_{name}_{variant}").as_str());
+                        return self.emit_cur(Inst::Global(g));
+                    }
+                    return self.emit_cur(Inst::MakeEnumDyn { tag, ty: name, positional, named });
+                }
+                // A DYNAMIC tag may be `nil` (a null nullable enum): materialize to
+                // `nil` in that case, else the box -- else a null threads to a
+                // `{__variant = nil}` table that fails `== null`.
+                let result = self.f.new_cell(None);
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(tag, nil));
+                let nil_bb = self.f.new_block();
+                let box_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: box_bb });
+                self.cur = nil_bb;
+                let z = self.emit_cur(Inst::Const(Lit::Nil));
+                self.emit_cur(Inst::Store { cell: result, value: z });
+                self.f.set_term(self.cur, Term::Goto(join));
+                self.cur = box_bb;
+                let boxed = self.emit_cur(Inst::MakeEnumDyn { tag, ty: name, positional, named });
+                self.emit_cur(Inst::Store { cell: result, value: boxed });
+                self.f.set_term(self.cur, Term::Goto(join));
+                self.cur = join;
+                self.emit_cur(Inst::Load(result))
+            }
             ValueRepr::Group { name, parts } => {
                 // The Group's parts are in declared field order (the positional
                 // `<name>_ct` ABI requires it), so they line up with the declared
@@ -2072,9 +2448,42 @@ impl Builder<'_> {
         }
     }
 
-    /// Flatten a boxed cdata value to its primitive leaves via chained field
-    /// reads (the inverse of `pack`, used when a value arrives boxed).
+    /// Flatten a boxed value to its primitive leaves via chained reads (the inverse
+    /// of `pack`, used when a value arrives boxed). A flat ENUM box reads its box
+    /// keys (`__variant`, positional `[i+1]`, `.recfield`) in shape order; a cdata
+    /// value reads its `<name>_ct` fields.
     fn cdata_leaves(&mut self, v: Idx<Inst>, shape: &ValueShape) -> Vec<Idx<Inst>> {
+        if let Some(es) = flat_enum_shape(self.ws, shape.name) {
+            // NIL-SAFE spread: the box may be `nil` (a null nullable enum), and
+            // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
+            // (tag = nil, the null sentinel); else spread the box's keys.
+            let n = es.leaf_count();
+            let cells: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            let is_nil = self.emit_cur(Inst::Eq(v, nil));
+            let nil_bb = self.f.new_block();
+            let val_bb = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+            self.cur = nil_bb;
+            for c in &cells {
+                let z = self.emit_cur(Inst::Const(Lit::Nil));
+                self.emit_cur(Inst::Store { cell: *c, value: z });
+            }
+            self.f.set_term(self.cur, Term::Goto(join));
+            self.cur = val_bb;
+            let fc = self.spread_box_to_cells(v, &es);
+            let leaves: Vec<Idx<Inst>> = std::iter::once(fc.tag)
+                .chain(fc.positional)
+                .chain(fc.named.into_iter().map(|(_, c)| c))
+                .collect();
+            for (c, lv) in cells.iter().zip(leaves) {
+                self.emit_cur(Inst::Store { cell: *c, value: lv });
+            }
+            self.f.set_term(self.cur, Term::Goto(join));
+            self.cur = join;
+            return cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        }
         let mut out = Vec::new();
         for (fname, fs) in &shape.fields {
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
@@ -2135,6 +2544,12 @@ impl Builder<'_> {
             // `base.field`: project a Group part directly (no cdata); else a
             // boxed field read off the packed base.
             Expr::FieldAccess { base, field } => {
+                // A flattened enum field read as a WHOLE value re-materializes the
+                // box from the parent's slots (the single escape boundary).
+                if let Some(shape) = self.flat_field_of(base, field) {
+                    let parent = self.lower_expr(base)?;
+                    return Ok(ValueRepr::Scalar(self.materialize_flat(parent, field, &shape)));
+                }
                 let br = self.lower_expr_repr(base)?;
                 if let ValueRepr::Group { name, parts } = &br {
                     if let Some(i) = self.field_index(*name, field) {
@@ -2158,6 +2573,14 @@ impl Builder<'_> {
             Expr::EnumVariant { enum_name, variant, args, .. } if enum_value_shape(self.ws, enum_name).is_some() => {
                 let shape = enum_value_shape(self.ws, enum_name).unwrap();
                 self.enum_cdata_repr(&shape, variant, args)
+            }
+            // A flat (boxed) enum construction stays an unboxed Group `[tag, _0..,
+            // <rec>..]` so a call/return/match can thread it as scalars; `pack`
+            // builds the `{__variant}` box only if a boxed context needs it.
+            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
+                let shape = flat_enum_shape(self.ws, enum_name).unwrap();
+                let cells = self.lower_flat_value(&shape, e)?;
+                Ok(self.flat_cells_to_repr(&shape, cells))
             }
             Expr::Call { callee, args } => self.lower_call_repr(e, callee, args),
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
@@ -2296,9 +2719,18 @@ impl Builder<'_> {
         let sub = self.lower_expr(sub_expr)?;
         // Register `sub` as the active inner (kill() chains into it).
         self.emit_cur(Inst::CoroSetInner(sub));
+
+        // A flat-enum delegation threads the inner's yield leaves through the
+        // frame-slot channel (advance + read `sub.__frame.__y*`), re-yielding them
+        // as leaves -- no per-yield box on either coroutine. Otherwise the boxed
+        // path below drives the inner's generic `resume`.
+        if let Some(shape) = self.coroutine_yield_flat_shape(sub_expr) {
+            return self.lower_yield_delegate_flat(sub, rac, &shape);
+        }
+
         let slot = self.f.new_cell(None);
-        let resume0 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("resume") });
-        let primed = self.emit_cur(Inst::CallValue { callee: resume0, args: vec![] });
+        let resume0 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__resume") });
+        let primed = self.emit_cur(Inst::CallValue { callee: resume0, args: vec![sub] });
         self.emit_cur(Inst::Store { cell: slot, value: primed });
 
         let header = self.f.new_block();
@@ -2317,21 +2749,29 @@ impl Builder<'_> {
         self.cur = body;
         let vv = self.emit_cur(Inst::Load(slot));
         let resume_bb = self.f.new_block();
-        self.f.set_term(self.cur, Term::Yield { value: Some(vv), resume: resume_bb });
+        self.f.set_term(self.cur, Term::Yield { values: vec![vv], resume: resume_bb });
         self.cur = resume_bb;
         let arg = self.emit_cur(Inst::Load(rac));
-        let resume1 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("resume") });
-        let v2 = self.emit_cur(Inst::CallValue { callee: resume1, args: vec![arg] });
+        let resume1 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__resume") });
+        let v2 = self.emit_cur(Inst::CallValue { callee: resume1, args: vec![sub, arg] });
         self.emit_cur(Inst::Store { cell: slot, value: v2 });
         self.f.set_term(self.cur, Term::Goto(header));
 
         // exit: clear the active inner, re-raise the inner's error if any, then
         // the `yield*` value is the inner's return.
         self.cur = exit;
+        self.yield_delegate_exit(sub)
+    }
+
+    /// The `yield*` epilogue (shared by the boxed + flat channels): clear the
+    /// active inner, re-raise the inner's error if any, evaluate to its return.
+    /// The inner object IS its frame, so `__error`/`__return` are direct field
+    /// reads (what the `__last_error`/`__result` methods read). Emitted into the
+    /// current block.
+    fn yield_delegate_exit(&mut self, sub: Idx<Inst>) -> Result<Idx<Inst>, CompilerError> {
         let clear = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::CoroSetInner(clear));
-        let last_err = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("last_error") });
-        let inner_err = self.emit_cur(Inst::CallValue { callee: last_err, args: vec![] });
+        let inner_err = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__error") });
         let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
         let has_err = self.emit_cur(Inst::NotEq(inner_err, nil2));
         let raise = self.f.new_block();
@@ -2344,8 +2784,53 @@ impl Builder<'_> {
         self.emit_cur(Inst::CallValue { callee: err_fn, args: vec![inner_err] });
         self.f.set_term(self.cur, Term::Goto(cont));
         self.cur = cont;
-        let result_fn = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("result") });
-        Ok(self.emit_cur(Inst::CallValue { callee: result_fn, args: vec![] }))
+        Ok(self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__return") }))
+    }
+
+    /// `yield* sub` where `sub` yields a flat enum: drive the inner via its
+    /// frame-slot channel (`__advance` + the `__y*` slots on the object, which IS
+    /// its frame) and re-yield the leaves through THIS coroutine's frame slots.
+    /// Zero boxes on either side -- the outer transform copies `sub.__y*` into
+    /// `s.__y*` at the yield point.
+    fn lower_yield_delegate_flat(
+        &mut self,
+        sub: Idx<Inst>,
+        rac: Idx<Cell>,
+        shape: &EnumFlatShape,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let n = shape.leaf_count();
+        let frame = sub;
+        // Prime the inner (advance once).
+        let adv0 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__advance") });
+        self.emit_cur(Inst::CallValue { callee: adv0, args: vec![sub] });
+
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        // header: loop while the inner is still producing (`__state >= 0`).
+        self.cur = header;
+        let state = self.emit_cur(Inst::Field { base: frame, field: Ustr::from("__state") });
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        let done = self.emit_cur(Inst::IntLt(state, zero));
+        self.f.set_term(self.cur, Term::Branch { cond: done, then_bb: exit, else_bb: body });
+
+        // body: re-yield the inner's current leaves, then advance it with our arg.
+        self.cur = body;
+        let values: Vec<Idx<Inst>> = (0..n)
+            .map(|i| self.emit_cur(Inst::Field { base: frame, field: yield_slot(i) }))
+            .collect();
+        let resume_bb = self.f.new_block();
+        self.f.set_term(self.cur, Term::Yield { values, resume: resume_bb });
+        self.cur = resume_bb;
+        let arg = self.emit_cur(Inst::Load(rac));
+        let adv1 = self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__advance") });
+        self.emit_cur(Inst::CallValue { callee: adv1, args: vec![sub, arg] });
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = exit;
+        self.yield_delegate_exit(sub)
     }
 
     /// Resolve an operator-helper stdlib fn (`__op_eq`/`__op_ne`) bone registers
@@ -2663,6 +3148,34 @@ impl Builder<'_> {
                 Ok(self.emit_cur(inst))
             }
             BinOp::Eq | BinOp::NotEq => {
+                // `x == null` / `x != null` on a flat enum: the tag slot is the null
+                // discriminator (nil tag == null). A threaded value has no box to
+                // compare, and materializing one would compare a table to nil
+                // (always false) -- so compare the tag directly.
+                let null_side = if self.is_null_lit(rhs) {
+                    Some(lhs)
+                } else if self.is_null_lit(lhs) {
+                    Some(rhs)
+                } else {
+                    None
+                };
+                if let Some(v) = null_side {
+                    if self.expr_is_flat_enum(v) {
+                        let tag = match self.lower_expr_repr(v)? {
+                            ValueRepr::Group { parts, .. } => {
+                                self.pack(parts.into_iter().next().expect("flat enum group has a tag leaf"))
+                            }
+                            // a boxed flat enum: nil-or-table, compare directly.
+                            ValueRepr::Scalar(s) => s,
+                        };
+                        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                        return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                            Inst::Eq(tag, nil)
+                        } else {
+                            Inst::NotEq(tag, nil)
+                        }));
+                    }
+                }
                 let scalar = self.eq_is_scalar(lhs)
                     || self.eq_is_scalar(rhs)
                     || self.is_null_lit(lhs)
@@ -3444,7 +3957,7 @@ impl Builder<'_> {
         let result = self.f.new_cell(None);
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
-        let scrut_v = self.lower_expr(scrut)?;
+        let scrut_s = self.lower_scrut(scrut)?;
         let join = self.f.new_block();
 
         for aidx in arms {
@@ -3452,7 +3965,7 @@ impl Builder<'_> {
             let next = self.f.new_block();
             // Emit this arm's pattern tests (failures jump to `next`); on success
             // `self.cur` is the block where the bindings are in scope.
-            self.match_pattern(scrut_v, arm.pattern, next, &variants, true, scrut_enum)?;
+            self.match_pattern(&scrut_s, arm.pattern, next, &variants, true, scrut_enum)?;
             if let Some(g) = arm.guard {
                 let gv = self.lower_expr(g)?;
                 let kept = self.f.new_block();
@@ -3487,12 +4000,12 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
-        let scrut_v = self.lower_expr(scrut)?;
+        let scrut_s = self.lower_scrut(scrut)?;
         let join = self.f.new_block();
         for aidx in arms {
             let arm = self.body.match_arm_arena[aidx];
             let next = self.f.new_block();
-            self.match_pattern(scrut_v, arm.pattern, next, &variants, true, scrut_enum)?;
+            self.match_pattern(&scrut_s, arm.pattern, next, &variants, true, scrut_enum)?;
             if let Some(g) = arm.guard {
                 let gv = self.lower_expr(g)?;
                 let kept = self.f.new_block();
@@ -3517,7 +4030,7 @@ impl Builder<'_> {
     /// irrefutable forms (wildcard / bind / tuple-of-binds).
     fn match_pattern(
         &mut self,
-        val: Idx<Inst>,
+        scrut: &Scrut,
         pat: Idx<Pattern>,
         fail: Idx<Block>,
         // The scrutinee enum's variant names (empty if not an enum). `top` is true
@@ -3537,15 +4050,17 @@ impl Builder<'_> {
                 // variant as a catch-all bind; at the root, if the name is a
                 // variant of the scrutinee enum it's a tag test (old skull parity).
                 if top && variants.contains(&name) {
-                    self.test_tag(val, name, scrut_enum, fail);
+                    self.test_tag(scrut, name, scrut_enum, fail);
                     return Ok(());
                 }
+                let val = self.scrut_value(scrut);
                 let cell = self.f.new_cell(Some(name));
                 self.emit_cur(Inst::Store { cell, value: val });
                 self.binds.insert(raw(b), cell);
                 Ok(())
             }
             Pattern::Literal(le) => {
+                let val = self.scrut_value(scrut);
                 let lv = self.lower_expr(le)?;
                 let cond = self.emit_cur(Inst::Eq(val, lv));
                 self.branch_or_fail(cond, fail);
@@ -3558,29 +4073,27 @@ impl Builder<'_> {
                 // unit variant int-compares its ordinal; a payload-carrying
                 // variant resolves to None there and takes the `.__variant` path.
                 let en = enum_name.or(scrut_enum);
-                self.test_tag(val, variant, en, fail);
+                self.test_tag(scrut, variant, en, fail);
                 // A cdata enum's payload lives in its `_<i>` C field (cut 1: `_0`);
-                // a table enum's is the positional `[i+1]` slot (`TupleIndex`).
+                // a table enum's is the positional `[i+1]` slot; a FLATTENED field's
+                // is the parent's `{prefix}__i` slot (see `scrut_payload`).
                 let cdata = en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
                 for (i, sp) in sub.into_iter().enumerate() {
-                    let payload = if cdata {
-                        self.emit_cur(Inst::Field { base: val, field: Ustr::from(format!("_{i}").as_str()) })
-                    } else {
-                        self.emit_cur(Inst::TupleIndex { base: val, index: i })
-                    };
+                    let payload = self.scrut_payload(scrut, i, cdata);
                     // Thread the sub-pattern's enum (from this variant's payload
                     // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
                     // repr -- else an unqualified `J` defaults to the `.__variant`
                     // table path and faults on a cdata inner enum.
                     let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
-                    self.match_pattern(payload, sp, fail, variants, false, sub_enum)?;
+                    self.match_pattern(&Scrut::Val(payload), sp, fail, variants, false, sub_enum)?;
                 }
                 Ok(())
             }
             Pattern::Tuple { elements } => {
+                let val = self.scrut_value(scrut);
                 for (i, sp) in elements.into_iter().enumerate() {
                     let elem = self.emit_cur(Inst::TupleIndex { base: val, index: i });
-                    self.match_pattern(elem, sp, fail, variants, false, None)?;
+                    self.match_pattern(&Scrut::Val(elem), sp, fail, variants, false, None)?;
                 }
                 Ok(())
             }
@@ -3601,18 +4114,17 @@ impl Builder<'_> {
                     if enum_name.is_some() || (top && variants.contains(&variant)) {
                         // `test_tag` picks the repr: a cdata record enum compares
                         // `.__tag`, a table enum `.__variant`.
-                        self.test_tag(val, variant, en, fail);
+                        self.test_tag(scrut, variant, en, fail);
                     }
                 }
-                // A cdata enum's record payload lives in its `_<field>` C slots; a
-                // table enum (or a plain struct destructure, `name` = None) reads the
-                // field key directly.
+                // A FLATTENED field reads its `{prefix}__<field>` slot; a cdata enum's
+                // record payload lives in `_<field>` C slots; a table enum (or a plain
+                // struct destructure, `name` = None) reads the field key directly.
                 let cdata = name.is_some() && en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
-                    let field = if cdata { slot_name(rpf.name.as_str()) } else { rpf.name };
-                    let fv = self.emit_cur(Inst::Field { base: val, field });
-                    self.match_pattern(fv, rpf.pat, fail, variants, false, None)?;
+                    let fv = self.scrut_named(scrut, rpf.name, cdata);
+                    self.match_pattern(&Scrut::Val(fv), rpf.pat, fail, variants, false, None)?;
                 }
                 Ok(())
             }
@@ -3622,6 +4134,7 @@ impl Builder<'_> {
                 inclusive,
             } => {
                 // Assumes an int discriminant (the common range-pattern case).
+                let val = self.scrut_value(scrut);
                 if let Some(s) = start {
                     let sv = self.lower_expr(s)?;
                     let cond = self.emit_cur(Inst::IntLeq(sv, val)); // start <= val
@@ -3657,7 +4170,7 @@ impl Builder<'_> {
                     // An or-pattern preserves `top`, so a top-level `A | B` on a
                     // payload-free enum keeps the int-compare path -> forward
                     // `scrut_enum` (nested alternatives carry `None` anyway).
-                    self.match_pattern(val, alt, next_alt, variants, top, scrut_enum)?;
+                    self.match_pattern(scrut, alt, next_alt, variants, top, scrut_enum)?;
                     // success path of this alternative -> the shared continuation.
                     if self.is_open() {
                         self.f.set_term(self.cur, Term::Goto(matched));
@@ -3716,10 +4229,104 @@ impl Builder<'_> {
         }
     }
 
-    /// Tag test -> continue on match, else `fail`. Three reprs: a payload-free
-    /// enum IS its ordinal int (compare ints); a cdata enum compares `.__tag`
-    /// (int); a table enum compares `.__variant` (string).
-    fn test_tag(&mut self, val: Idx<Inst>, variant: Ustr, enum_name: Option<Ustr>, fail: Idx<Block>) {
+    /// Lower a match/if-let/while-let scrutinee: a flattened enum field stays a
+    /// `Scrut::Flat` (tag/payload read from the parent's slots, no box); anything
+    /// else lowers to an ordinary value.
+    fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
+        if let Expr::FieldAccess { base, field } = self.body.expr_arena[e].clone() {
+            if let Some(shape) = self.flat_field_of(base, field) {
+                let parent = self.lower_expr(base)?;
+                return Ok(Scrut::Flat { parent, prefix: field, shape });
+            }
+        }
+        // A flat enum that threads as a Group (scalarized param/return, or a freshly
+        // constructed enum) matches from its cells -- no box.
+        let r = self.lower_expr_repr(e)?;
+        if let ValueRepr::Group { name, .. } = &r {
+            if let Some(shape) = flat_enum_shape(self.ws, *name) {
+                let ValueRepr::Group { parts, .. } = r else { unreachable!() };
+                let cells = self.repr_group_to_cells(&shape, parts);
+                return Ok(Scrut::Cells {
+                    tag: cells.tag,
+                    positional: cells.positional,
+                    named: cells.named,
+                    shape,
+                });
+            }
+        }
+        Ok(Scrut::Val(self.pack(r)))
+    }
+
+    /// The scrutinee as a whole value -- materializing a flattened field / threaded
+    /// cells into a boxed enum (only on a path that genuinely needs the whole value).
+    fn scrut_value(&mut self, scrut: &Scrut) -> Idx<Inst> {
+        match scrut {
+            Scrut::Val(v) => *v,
+            Scrut::Flat { parent, prefix, shape } => self.materialize_flat(*parent, *prefix, shape),
+            Scrut::Cells { tag, positional, named, shape } => self.emit_cur(Inst::MakeEnumDyn {
+                tag: *tag,
+                ty: shape.name,
+                positional: positional.clone(),
+                named: named.clone(),
+            }),
+        }
+    }
+
+    /// The scrutinee's `i`th positional payload: threaded cells hold it directly; a
+    /// flat field reads the parent's `{prefix}__i` slot; a cdata enum reads its
+    /// `_<i>` C field; a table enum reads the positional `[i+1]` slot.
+    fn scrut_payload(&mut self, scrut: &Scrut, i: usize, cdata: bool) -> Idx<Inst> {
+        match scrut {
+            Scrut::Cells { positional, .. } => positional[i],
+            Scrut::Flat { parent, prefix, .. } => {
+                self.emit_cur(Inst::Field { base: *parent, field: flat_payload_slot(*prefix, i) })
+            }
+            Scrut::Val(v) if cdata => {
+                self.emit_cur(Inst::Field { base: *v, field: Ustr::from(format!("_{i}").as_str()) })
+            }
+            Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: i }),
+        }
+    }
+
+    /// The scrutinee's named (record) payload `field`: threaded cells hold it
+    /// directly; a flat field reads the parent's `{prefix}__<field>` slot; a cdata
+    /// enum reads its `_<field>` C slot; a table enum reads the field key directly.
+    fn scrut_named(&mut self, scrut: &Scrut, field: Ustr, cdata: bool) -> Idx<Inst> {
+        match scrut {
+            Scrut::Cells { named, .. } => {
+                named.iter().find(|(n, _)| *n == field).map(|(_, v)| *v).unwrap_or_else(|| {
+                    self.emit_cur(Inst::Const(Lit::Nil))
+                })
+            }
+            Scrut::Flat { parent, prefix, .. } => {
+                self.emit_cur(Inst::Field { base: *parent, field: flat_named_slot(*prefix, field) })
+            }
+            Scrut::Val(v) => {
+                let f = if cdata { slot_name(field.as_str()) } else { field };
+                self.emit_cur(Inst::Field { base: *v, field: f })
+            }
+        }
+    }
+
+    /// Tag test -> continue on match, else `fail`. Five reprs: a payload-free enum
+    /// IS its ordinal int (compare ints); a cdata enum compares `.__tag` (int); a
+    /// table enum compares `.__variant` (string); a FLATTENED field compares its
+    /// `{prefix}__tag` slot; threaded CELLS compare the held tag (both strings).
+    fn test_tag(&mut self, scrut: &Scrut, variant: Ustr, enum_name: Option<Ustr>, fail: Idx<Block>) {
+        let flat_tag = match scrut {
+            Scrut::Flat { parent, prefix, .. } => {
+                Some(self.emit_cur(Inst::Field { base: *parent, field: flat_tag_slot(*prefix) }))
+            }
+            Scrut::Cells { tag, .. } => Some(*tag),
+            Scrut::Val(_) => None,
+        };
+        if let Some(tag) = flat_tag {
+            let want = self.emit_cur(Inst::Const(Lit::Str(variant)));
+            let cond = self.emit_cur(Inst::Eq(tag, want));
+            self.branch_or_fail(cond, fail);
+            return;
+        }
+        let val = self.scrut_value(scrut);
         if let Some(ord) = enum_name.and_then(|en| payload_free_ordinal(self.ws, en, variant)) {
             let want = self.emit_cur(Inst::Const(Lit::Int(ord)));
             let cond = self.emit_cur(Inst::Eq(val, want));
@@ -3768,12 +4375,15 @@ impl Builder<'_> {
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell(None);
-        let val_v = self.lower_expr(value)?;
+        let scrut = self.lower_scrut(value)?;
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
         // A nullable scrutinee (`if let v = some_opt`) fails the bind on nil ->
         // else branch (the runtime value of a `T?` is the unwrapped value or nil).
+        // A flattened-enum-field scrutinee is never nullable (its type is a bare
+        // enum), so `scrut_value` here is always a plain `Val`.
         if self.expr_is_nullable(value) {
+            let val_v = self.scrut_value(&scrut);
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
             let cont = self.f.new_block();
@@ -3783,7 +4393,7 @@ impl Builder<'_> {
         // Match: failures jump to else_bb; on success `self.cur` holds the bindings.
         let variants = self.scrut_variants(value);
         let scrut_enum = self.scrut_enum_name(value);
-        self.match_pattern(val_v, pattern, else_bb, &variants, true, scrut_enum)?;
+        self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 
@@ -3813,12 +4423,14 @@ impl Builder<'_> {
         self.cur = header;
         let variants = self.scrut_variants(value);
         let scrut_enum = self.scrut_enum_name(value);
-        let val_v = self.lower_expr(value)?;
+        let scrut = self.lower_scrut(value)?;
         // A nullable scrutinee (`while let v = some_opt`) exits the loop on nil
         // (the runtime value of a `T?` is the unwrapped value or nil) — mirrors
         // `if let`. Without this, a plain Bind always "matches" and the loop runs
-        // with `v = nil`, then a use of `v` faults.
+        // with `v = nil`, then a use of `v` faults. (A flat-field scrutinee is
+        // never nullable, so `scrut_value` is a plain `Val` here.)
         if self.expr_is_nullable(value) {
+            let val_v = self.scrut_value(&scrut);
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             let is_nil = self.emit_cur(Inst::Eq(val_v, nil));
             let cont = self.f.new_block();
@@ -3826,7 +4438,7 @@ impl Builder<'_> {
             self.cur = cont;
         }
         // Match: failure exits the loop; on success `self.cur` holds the bindings.
-        self.match_pattern(val_v, pattern, exit, &variants, true, scrut_enum)?;
+        self.match_pattern(&scrut, pattern, exit, &variants, true, scrut_enum)?;
         self.loop_targets.push((header, exit));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
@@ -3922,37 +4534,58 @@ impl Builder<'_> {
         // A field GROUP (`Struct { a + b + c: expr }`) expands to several fields
         // sharing ONE `value` Expr index; evaluate each distinct value-expr once
         // (correct eval count, and grouped fields share the same instance), in
-        // source order.
-        let mut litmap: Vec<(Ustr, Idx<Inst>)> = Vec::new();
+        // source order. A flattened enum field evaluates to (tag, payload slots)
+        // instead of one boxed value (`docs/enum-allocation-report.md`).
+        let mut lit_box: Vec<(Ustr, Idx<Inst>)> = Vec::new();
+        let mut lit_flat: Vec<(Ustr, FlatCells)> = Vec::new();
         let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
+        let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::new();
         for fidx in fields {
             let lf = self.body.struct_lit_field_arena[fidx];
             let key: u32 = lf.value.into_raw().into();
-            let v = match by_value.get(&key) {
-                Some(&v) => v,
-                None => {
-                    let v = self.lower_expr(lf.value)?;
-                    by_value.insert(key, v);
-                    v
-                }
-            };
-            litmap.push((lf.name, v));
+            if let Some(shape) = self.flat_field_of_struct(name, lf.name) {
+                let cells = match flat_by_value.get(&key) {
+                    Some(c) => c.clone(),
+                    None => {
+                        let c = self.lower_flat_value(&shape, lf.value)?;
+                        flat_by_value.insert(key, c.clone());
+                        c
+                    }
+                };
+                lit_flat.push((lf.name, cells));
+            } else {
+                let v = match by_value.get(&key) {
+                    Some(&v) => v,
+                    None => {
+                        let v = self.lower_expr(lf.value)?;
+                        by_value.insert(key, v);
+                        v
+                    }
+                };
+                lit_box.push((lf.name, v));
+            }
         }
         let out = match self.struct_field_names(name) {
             Some(decl) => {
                 let mut fs = Vec::new();
                 for fname in decl {
-                    match litmap.iter().find(|(n, _)| *n == fname) {
-                        Some(&(_, v)) => fs.push((fname, v)),
-                        None => {
-                            let v = self.lower_struct_default(name, fname)?;
-                            fs.push((fname, v));
-                        }
+                    if let Some((_, cells)) = lit_flat.iter().find(|(n, _)| *n == fname) {
+                        fs.extend(self.flat_literal_slots(fname, cells.clone()));
+                    } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
+                        fs.push((fname, v));
+                    } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
+                        // Defaulted flat field: lower the default box, spread its slots.
+                        let dv = self.lower_struct_default(name, fname)?;
+                        let cells = self.spread_box_to_cells(dv, &shape);
+                        fs.extend(self.flat_literal_slots(fname, cells));
+                    } else {
+                        let v = self.lower_struct_default(name, fname)?;
+                        fs.push((fname, v));
                     }
                 }
                 fs
             }
-            None => litmap, // unknown nominal (foreign module): emit as-given
+            None => lit_box, // unknown nominal (foreign module): emit as-given
         };
         // Non-value structs only — a `value` literal is built via the repr layer
         // (`value_literal_repr` -> `pack`, the single value-cdata source), so it
@@ -4149,6 +4782,274 @@ impl Builder<'_> {
         }))
     }
 
+    // --- enum field flattening (docs/enum-allocation-report.md) ---
+
+    /// `Some(shape)` iff `base.field` is a flattenable enum field: `base` is a
+    /// non-`value` struct and the field's declared type is a [`flat_enum_shape`]
+    /// enum. Drives the construct/store/match/materialize rewrites.
+    fn flat_field_of(&self, base: Idx<Expr>, field: Ustr) -> Option<EnumFlatShape> {
+        let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
+            return None;
+        };
+        if self.is_value_struct(sname) {
+            return None;
+        }
+        let sid = *self.ws.struct_by_name.get(&sname)?;
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let fdef = sd.fields.iter().find(|f| f.name == field)?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(ename), .. } = static_ty(self.ws, fdef.ty)? else {
+            return None;
+        };
+        flat_enum_shape(self.ws, ename)
+    }
+
+    /// Same as [`Self::flat_field_of`] but for a known struct name + field (used at a
+    /// struct literal, where the literal's nominal type is the struct being built).
+    fn flat_field_of_struct(&self, sname: Ustr, field: Ustr) -> Option<EnumFlatShape> {
+        if self.is_value_struct(sname) {
+            return None;
+        }
+        let sid = *self.ws.struct_by_name.get(&sname)?;
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let fdef = sd.fields.iter().find(|f| f.name == field)?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(ename), .. } = static_ty(self.ws, fdef.ty)? else {
+            return None;
+        };
+        flat_enum_shape(self.ws, ename)
+    }
+
+    /// Lower an enum-typed value into its flattened cells: the discriminant
+    /// (variant-name string) plus ALL union slots (every positional + every record
+    /// field), nil where the live variant doesn't fill them so stale slots from a
+    /// prior wider/other-shaped variant are cleared. A direct `E::V(..)` ctor fuses
+    /// to a string const + the lowered args (no box); any other enum expression is
+    /// lowered to a box once and spread (`__variant` + `[i+1]` + `.field`).
+    fn lower_flat_value(
+        &mut self,
+        shape: &EnumFlatShape,
+        value: Idx<Expr>,
+    ) -> Result<FlatCells, CompilerError> {
+        if let Expr::EnumVariant { enum_name, variant, args, .. } = self.body.expr_arena[value].clone() {
+            if enum_name == shape.name {
+                let tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
+                let (pos_args, rec_args): (Vec<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>) = match args {
+                    VariantArgs::Unit => (Vec::new(), Vec::new()),
+                    VariantArgs::Tuple(range) => (self.lower_exprs(range)?, Vec::new()),
+                    VariantArgs::Record(fields) => {
+                        let mut rec = Vec::new();
+                        for fidx in fields {
+                            let lf = self.body.struct_lit_field_arena[fidx];
+                            let v = self.lower_expr(lf.value)?;
+                            rec.push((lf.name, v));
+                        }
+                        (Vec::new(), rec)
+                    }
+                };
+                let nil = || Inst::Const(Lit::Nil);
+                let positional = (0..shape.tuple_width)
+                    .map(|i| pos_args.get(i).copied().unwrap_or_else(|| self.emit_cur(nil())))
+                    .collect();
+                let named = shape
+                    .record_fields
+                    .iter()
+                    .map(|rf| {
+                        let v = rec_args
+                            .iter()
+                            .find(|(n, _)| n == rf)
+                            .map(|(_, v)| *v)
+                            .unwrap_or_else(|| self.emit_cur(nil()));
+                        (*rf, v)
+                    })
+                    .collect();
+                return Ok(FlatCells { tag, positional, named });
+            }
+        }
+        // General enum value: thread it as a repr. A flat-enum Group (a scalarized
+        // param/return/local, or a fresh ctor) yields its cells directly -- no box;
+        // a Scalar (a genuinely boxed source: global singleton, `any`, if-join) is
+        // spread back out.
+        let r = self.lower_expr_repr(value)?;
+        match r {
+            ValueRepr::Group { name, parts } if flat_enum_shape(self.ws, name).is_some() => {
+                Ok(self.repr_group_to_cells(shape, parts))
+            }
+            other => {
+                let bv = self.pack(other);
+                Ok(self.spread_box_to_cells(bv, shape))
+            }
+        }
+    }
+
+    /// Whether `variant` of `enum_name` is a Unit (payload-free) variant -- its
+    /// materialized box is the interned singleton `__rock_enum_<E>_<variant>`.
+    fn variant_is_unit(&self, enum_name: Ustr, variant: Ustr) -> bool {
+        self.ws
+            .enums_by_name
+            .get(&enum_name)
+            .map(|eid| &self.ws.modules[eid.module.index()].enums[eid.def])
+            .and_then(|ed| ed.variants.iter().find(|v| v.name == variant))
+            .is_some_and(|v| matches!(v.payload, VariantPayload::Unit))
+    }
+
+    /// Whether `e`'s inferred type is a flat enum (`expr_ty` peels `Nullable`, so
+    /// this is true for both `E` and `E?`).
+    fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
+        matches!(
+            self.expr_ty(e),
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if flat_enum_shape(self.ws, n).is_some()
+        )
+    }
+
+    /// The flat-enum `ValueShape` of `e`'s (non-nullable) inferred type, else `None`
+    /// -- the gate for threading a `let`/reassign target as leaf cells.
+    fn flat_enum_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
+        match self.expr_ty(e)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                flat_enum_shape(self.ws, n).map(|s| s.value_shape())
+            }
+            _ => None,
+        }
+    }
+
+    /// The `EnumFlatShape` of `e`'s (`Nullable`-peeled) inferred type, else `None`.
+    fn flat_enum_shape_of_expr(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
+        match self.expr_ty(e)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => flat_enum_shape(self.ws, n),
+            _ => None,
+        }
+    }
+
+    /// Whether `e`'s inferred type is a `Coroutine<..>` -- the guard that a
+    /// `resume(e)` call is a real coroutine resume (not a user fn named `resume`).
+    fn is_coroutine_recv(&self, e: Idx<Expr>) -> bool {
+        matches!(
+            self.expr_ty(e),
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "Coroutine"
+        )
+    }
+
+    /// Read a resumed flat-enum yield value from the coroutine's frame slots as an
+    /// unboxed `Group` -- the concrete `c.resume()` channel. The object IS the
+    /// frame: `cobj.__y*` holds the leaves the `__step` wrote; when the coroutine
+    /// is terminal (`__state < 0`) the value is null, threaded as an all-nil group
+    /// (`tag = nil` sentinel, matching the nullable flat-enum ABI). The consumer
+    /// must have already advanced the coroutine (`cobj.__advance(cobj, arg)`)
+    /// before this read.
+    fn resume_frame_read(&mut self, cobj: Idx<Inst>, shape: &EnumFlatShape) -> ValueRepr {
+        let n = shape.leaf_count();
+        let frame = cobj;
+        let state = self.emit_cur(Inst::Field { base: frame, field: Ustr::from("__state") });
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        let done = self.emit_cur(Inst::IntLt(state, zero));
+        let cells: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        let done_bb = self.f.new_block();
+        let live_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: done, then_bb: done_bb, else_bb: live_bb });
+        // Terminal: all-nil leaves (tag = nil => `== null`).
+        self.cur = done_bb;
+        for c in &cells {
+            let z = self.emit_cur(Inst::Const(Lit::Nil));
+            self.emit_cur(Inst::Store { cell: *c, value: z });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        // Live: spread the reused frame slots into the leaf cells.
+        self.cur = live_bb;
+        for (i, c) in cells.iter().enumerate() {
+            let v = self.emit_cur(Inst::Field { base: frame, field: yield_slot(i) });
+            self.emit_cur(Inst::Store { cell: *c, value: v });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        let leaves: Vec<Idx<Inst>> = cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let mut idx = 0;
+        self.rebuild_from_leaves(&shape.value_shape(), &leaves, &mut idx)
+    }
+
+    /// Split a flat-enum `ValueRepr::Group` into its cells (the inverse of
+    /// `flat_cells_to_repr`) -- no box. Parts are leaf Scalars in `value_shape`
+    /// order: `[tag, _0.., <rec>..]`.
+    fn repr_group_to_cells(&mut self, shape: &EnumFlatShape, parts: Vec<ValueRepr>) -> FlatCells {
+        let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
+        let tag = packed[0];
+        let positional = packed[1..1 + shape.tuple_width].to_vec();
+        let named = shape
+            .record_fields
+            .iter()
+            .enumerate()
+            .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width + i]))
+            .collect();
+        FlatCells { tag, positional, named }
+    }
+
+    /// A flat enum's runtime cells as a `ValueRepr::Group` in `value_shape` leaf
+    /// order (`[tag, _0.., <rec>..]`) -- the scalar-ABI carrier for a flat enum.
+    fn flat_cells_to_repr(&self, shape: &EnumFlatShape, cells: FlatCells) -> ValueRepr {
+        let mut parts = Vec::with_capacity(shape.leaf_count());
+        parts.push(ValueRepr::Scalar(cells.tag));
+        parts.extend(cells.positional.into_iter().map(ValueRepr::Scalar));
+        parts.extend(cells.named.into_iter().map(|(_, c)| ValueRepr::Scalar(c)));
+        ValueRepr::Group { name: shape.name, parts }
+    }
+
+    /// Read a boxed enum's keys back out into flattened cells (`__variant` -> tag,
+    /// `[i+1]` -> positional, `.field` -> named) -- the box-to-slots spread.
+    fn spread_box_to_cells(&mut self, bv: Idx<Inst>, shape: &EnumFlatShape) -> FlatCells {
+        let tag = self.emit_cur(Inst::Field { base: bv, field: Ustr::from("__variant") });
+        let positional = (0..shape.tuple_width)
+            .map(|i| self.emit_cur(Inst::TupleIndex { base: bv, index: i }))
+            .collect();
+        let named = shape
+            .record_fields
+            .clone()
+            .into_iter()
+            .map(|rf| (rf, self.emit_cur(Inst::Field { base: bv, field: rf })))
+            .collect();
+        FlatCells { tag, positional, named }
+    }
+
+    /// Re-materialize a flattened enum field `parent.{prefix}` to a boxed enum
+    /// (`MakeEnumDyn`) at a whole-value-read boundary.
+    fn materialize_flat(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> Idx<Inst> {
+        let tag = self.emit_cur(Inst::Field { base: parent, field: flat_tag_slot(prefix) });
+        let positional = (0..shape.tuple_width)
+            .map(|i| self.emit_cur(Inst::Field { base: parent, field: flat_payload_slot(prefix, i) }))
+            .collect();
+        let named = shape
+            .record_fields
+            .clone()
+            .into_iter()
+            .map(|rf| (rf, self.emit_cur(Inst::Field { base: parent, field: flat_named_slot(prefix, rf) })))
+            .collect();
+        self.emit_cur(Inst::MakeEnumDyn { tag, ty: shape.name, positional, named })
+    }
+
+    /// Emit the per-slot stores for a flattened enum field assignment
+    /// `parent.{prefix} = <cells>` (tag + every positional + every named slot).
+    fn store_flat_cells(&mut self, parent: Idx<Inst>, prefix: Ustr, cells: FlatCells) {
+        self.emit_cur(Inst::StoreField { base: parent, field: flat_tag_slot(prefix), value: cells.tag });
+        for (i, p) in cells.positional.into_iter().enumerate() {
+            self.emit_cur(Inst::StoreField { base: parent, field: flat_payload_slot(prefix, i), value: p });
+        }
+        for (rf, v) in cells.named {
+            self.emit_cur(Inst::StoreField { base: parent, field: flat_named_slot(prefix, rf), value: v });
+        }
+    }
+
+    /// The `(slot_name, value)` pairs for a flattened enum field in a struct literal
+    /// (tag + every positional + every named slot), keyed by the parent field name.
+    fn flat_literal_slots(&self, field: Ustr, cells: FlatCells) -> Vec<(Ustr, Idx<Inst>)> {
+        let mut out = Vec::with_capacity(1 + cells.positional.len() + cells.named.len());
+        out.push((flat_tag_slot(field), cells.tag));
+        for (i, p) in cells.positional.into_iter().enumerate() {
+            out.push((flat_payload_slot(field, i), p));
+        }
+        for (rf, v) in cells.named {
+            out.push((flat_named_slot(field, rf), v));
+        }
+        out
+    }
+
     /// The collection kind of a base expression, from its inferred type — drives
     /// the index/length shape (decision 9). Defaults to `NativeArray`.
     fn coll_kind(&self, base: Idx<Expr>) -> ContainerKind {
@@ -4266,6 +5167,37 @@ impl Builder<'_> {
         match ty {
             TyId::Static(mid, idx) => Some(self.ws.module(mid).ty_arena[idx]),
             TyId::Local(idx) => Some(self.inf?.ty_arena[idx]),
+        }
+    }
+
+    /// The final `TyId` after chasing `Infer` substitutions (NOT peeling
+    /// `Nullable` -- unlike `resolve_ty`, this keeps the `TyId` so its App params
+    /// can be indexed in the correct arena via `with_idx`).
+    fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
+        match self.ty_node(ty)? {
+            TypeExpr::Infer(var, _) => {
+                let solved = self.inf?.substitutions.get(var)?;
+                self.resolve_tyid(solved)
+            }
+            _ => Some(ty),
+        }
+    }
+
+    /// The `EnumFlatShape` of `Y` when `e`'s type is `Coroutine<Y, ..>` and `Y` is
+    /// a flat enum -- the shape flowing through a `yield*` delegation to a flat-enum
+    /// coroutine (so the delegate threads the inner's leaves instead of a box).
+    fn coroutine_yield_flat_shape(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = self.ty_node(ty)? else {
+            return None;
+        };
+        if n.as_str() != "Coroutine" {
+            return None;
+        }
+        let y_ty = self.resolve_tyid(ty.with_idx(params.into_iter().next()?))?;
+        match self.ty_node(y_ty)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(yn), .. } => flat_enum_shape(self.ws, yn),
+            _ => None,
         }
     }
 }
@@ -4984,23 +5916,47 @@ fn f(c0, c1) {
         // `Some(Circle(r))`: the inner Circle tag test must be GATED behind the
         // outer Some tag (parent tag before any child read) — a cont block after
         // each tag test. This is what the single-level version couldn't do.
-        let dump = mir(
-            "enum Shape { Circle(int), Square(int) }\nenum Opt { Some(Shape), None }\nfn f(o: Opt) -> int { match o { Opt::Some(Shape::Circle(r)) => r, _ => 0 } }",
-            "f",
+        //
+        // The outer Opt rides the flat-enum param ABI: tag leaf `c0` (variant
+        // name string) + payload slot `c1` (the Shape, cdata in the dynamic
+        // slot). The gate: bb3 (inner `.__tag` int compare) and bb4 (`._0`
+        // bind) are reachable only through the outer "Some" branch; the
+        // wildcard arm bb2 is the fallthrough of BOTH tag tests.
+        assert_eq!(
+            mir(
+                "enum Shape { Circle(int), Square(int) }\nenum Opt { Some(Shape), None }\nfn f(o: Opt) -> int { match o { Opt::Some(Shape::Circle(r)) => r, _ => 0 } }",
+                "f",
+            ),
+            "\
+fn f(c0, c1) {
+  bb0:
+    v0 = load c0
+    v1 = load c1
+    v2 = const \"Some\"
+    v3 = eq v0, v2
+    branch v3 -> bb3, bb2
+  bb1:
+    v4 = load c2
+    return v4
+  bb2:
+    v5 = const 0
+    store c2, v5
+    goto bb1
+  bb3:
+    v6 = field v1.__tag
+    v7 = const 0
+    v8 = eq v6, v7
+    branch v8 -> bb4, bb2
+  bb4:
+    v9 = field v1._0
+    store c3, v9
+    v10 = load c3
+    store c2, v10
+    goto bb1
+  bb5:
+    unreachable
+}"
         );
-        // Outer tag test, then (on match) inner tag test, then bind r — each tag
-        // gated by a branch; the wildcard arm is the fallthrough. A Shape-payload
-        // Opt isn't scalarizable, so the outer stays a table enum (`__variant`
-        // string); the inner Shape is cdata, so its tag is an int `__tag` compare.
-        assert!(dump.contains("v1 = field v0.__variant"), "outer table tag read:\n{dump}");
-        assert!(dump.contains("const \"Some\""), "outer tag:\n{dump}");
-        // The inner tag reads a projected payload (TupleIndex of v0), not v0...
-        assert!(
-            dump.contains("tuple_index v0.0"),
-            "inner tag reads the projected payload:\n{dump}"
-        );
-        // ...and that projected Shape is cdata, so the Circle tag is `.__tag`.
-        assert!(dump.contains(".__tag"), "inner cdata int-tag:\n{dump}");
     }
 
     #[test]

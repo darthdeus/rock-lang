@@ -72,6 +72,112 @@ macro_rules! dispatch_request {
     };
 }
 
+/// Opt-in per-request server-side timing (`ROCK_LSP_TIMING=1`). Emitted at
+/// `info` through the shared backend, so it lands on stderr / `:LspLog` with the
+/// standard `[<elapsed>s ...]` timestamp. Measures dequeue -> response-sent (the
+/// server's actual handle time). Compare against the client-observed round-trip
+/// (`:RockPanel`): a small handle time under a large round-trip localizes the
+/// latency to the queue / transport (head-of-line blocking or write
+/// backpressure), NOT to compute.
+fn lsp_timing_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ROCK_LSP_TIMING").is_some())
+}
+
+struct ReqTiming {
+    method: String,
+    id: lsp_server::RequestId,
+    start: std::time::Instant,
+}
+
+impl Drop for ReqTiming {
+    fn drop(&mut self) {
+        let ms = self.start.elapsed().as_secs_f64() as f32 * 1000.0;
+        record_request_time(&self.method, ms);
+        if lsp_timing_enabled() {
+            log::info!(
+                target: "lsp_timing",
+                "req #{} {} handled in {:.1}ms",
+                self.id,
+                self.method,
+                ms
+            );
+        }
+    }
+}
+
+/// Per-method server-side handle-time samples (ms), for the `rock/stats`
+/// introspection request. Recorded unconditionally (a cheap capped ring per
+/// method) so `rock/stats` has data even without `ROCK_LSP_TIMING`.
+static REQUEST_STATS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::collections::VecDeque<f32>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+const REQUEST_STATS_CAP: usize = 200;
+
+fn record_request_time(method: &str, ms: f32) {
+    if let Ok(mut map) = REQUEST_STATS.lock() {
+        let q = map.entry(method.to_string()).or_default();
+        if q.len() == REQUEST_STATS_CAP {
+            q.pop_front();
+        }
+        q.push_back(ms);
+    }
+}
+
+/// Snapshot for the `rock/stats` request: per-method request counts + totals,
+/// rendered generically by the panel's STATS block.
+fn request_stats_json(loaded_modules: usize) -> serde_json::Value {
+    let mut method_counts = serde_json::Map::new();
+    let mut total = 0usize;
+    if let Ok(map) = REQUEST_STATS.lock() {
+        for (method, samples) in map.iter() {
+            method_counts.insert(method.clone(), serde_json::json!(samples.len()));
+            total += samples.len();
+        }
+    }
+    serde_json::json!({
+        "loaded_modules": loaded_modules,
+        "requests_total": total,
+        "distinct_methods": method_counts.len(),
+        "method_counts": method_counts,
+    })
+}
+
+/// Snapshot for the `rock/modules` request, shaped for the modules floater:
+/// `{ total_modules, contexts: [{ kind, root, module_count, modules: [...] }] }`.
+/// bone doesn't track per-module compile timing/staleness, so those fields are
+/// null/false (the floater renders them as `-`).
+fn modules_json(summary: Vec<(String, Vec<String>)>) -> serde_json::Value {
+    let total: usize = summary.iter().map(|(_, ids)| ids.len()).sum();
+    let contexts: Vec<serde_json::Value> = summary
+        .into_iter()
+        .map(|(root, ids)| {
+            let module_count = ids.len();
+            let modules: Vec<serde_json::Value> = ids
+                .into_iter()
+                .map(|id| {
+                    serde_json::json!({
+                        "id": id,
+                        "last_compile_us": serde_json::Value::Null,
+                        "ago_ms": serde_json::Value::Null,
+                        "stale": false,
+                        "is_stdlib": false,
+                        "is_builtin": false,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "kind": "project",
+                "root": root,
+                "module_count": module_count,
+                "modules": modules,
+            })
+        })
+        .collect();
+    serde_json::json!({ "total_modules": total, "contexts": contexts })
+}
+
 
 pub fn run_lsp_server() -> Result<()> {
     info!("Starting Rock LSP server ...");
@@ -181,6 +287,13 @@ pub fn run_lsp_server() -> Result<()> {
                 eprintln!("Panic with unknown payload type: {:?}", panic_payload);
             }
             eprintln!("=== END PANIC INFO ===");
+            // Do NOT fall through to `io_threads.join()`: the reader thread is
+            // blocked on stdin, so join() waits for EOF the client won't send
+            // while it still thinks the server is alive. That leaves a wedged
+            // process holding its compiled session in RAM, silently swallowing
+            // every subsequent request. Exit so the client sees the crash and
+            // restarts cleanly.
+            std::process::exit(1);
         }
     };
 
@@ -299,6 +412,26 @@ fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
                     };
                     connection.sender.send(Message::Response(resp))?;
                     continue;
+                }
+
+                // Server-side handle timer. Dropped at the `continue` of
+                // whichever dispatch arm answers this request, so it captures
+                // dequeue -> response-sent for every request type. Always
+                // records into REQUEST_STATS (feeds rock/stats); only logs the
+                // per-request line when ROCK_LSP_TIMING=1.
+                let _timing = ReqTiming {
+                    method: req.method.clone(),
+                    id: req.id.clone(),
+                    start: std::time::Instant::now(),
+                };
+
+                // Deterministic panic trigger for the wedge-recovery test. Inert
+                // unless ROCK_LSP_ALLOW_TEST_PANIC is set, so a real client can
+                // never crash the server with it.
+                if req.method == "$/rockDebugPanic"
+                    && std::env::var_os("ROCK_LSP_ALLOW_TEST_PANIC").is_some()
+                {
+                    panic!("deliberate test panic ($/rockDebugPanic)");
                 }
 
                 // debug!("got request: {req:?}");
@@ -596,6 +729,20 @@ fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
 
                 dispatch_request!(req, connection, workspace, CodeActionRequest, "lsp_code_actions", compute_code_actions_workspace);
 
+                // Custom introspection requests for the rock.nvim panel. Bone
+                // ports of the old rock-semantic endpoints (rock/consistency was
+                // dropped in the port -- it had no bone equivalent worth the
+                // surface).
+                if req.method == "rock/stats" {
+                    let loaded = workspace.bone.projects_summary().iter().map(|(_, m)| m.len()).sum();
+                    send_response(&connection, req.id, Ok(request_stats_json(loaded)))?;
+                    continue;
+                }
+                if req.method == "rock/modules" {
+                    let snapshot = modules_json(workspace.bone.projects_summary());
+                    send_response(&connection, req.id, Ok(snapshot))?;
+                    continue;
+                }
 
                 // If we reach here, the request was not handled
                 log::warn!("Unhandled request method: {}", req.method);
@@ -835,7 +982,20 @@ fn bone_reload_and_publish(
     let uri_s = uri.as_str();
     let file_path = uri_s.strip_prefix("file://").unwrap_or(uri_s).to_string();
 
+    // Compile-on-open/edit cost (ROCK_LSP_TIMING=1). This is the notification
+    // path (didOpen/didChange) that head-of-line-blocks every queued request
+    // behind it, so it's the number to watch when first-paint feels slow.
+    let _t = std::time::Instant::now();
     let per_file = workspace.bone.update(&file_path, contents);
+    if lsp_timing_enabled() {
+        log::info!(
+            target: "lsp_timing",
+            "compile(update) {} in {:.1}ms ({} files reported)",
+            file_path,
+            _t.elapsed().as_secs_f64() * 1000.0,
+            per_file.len()
+        );
+    }
 
     for (path, diagnostics) in per_file {
         if path == "<autogenerated>" || path == "<unknown>" || path.is_empty() {

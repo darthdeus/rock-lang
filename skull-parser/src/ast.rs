@@ -303,6 +303,12 @@ pub enum Pattern {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockData {
     pub span: Span,
+    /// Real `{` / `}` token spans. `None` for synthetic braceless blocks
+    /// (lambda `=> expr` bodies, `@`-trailing-lambda bodies, match-arm
+    /// `=> expr` bodies, macro-expansion retagged blocks) -- consumers that
+    /// mark brace positions (bone-lower's block lapper entries) must emit
+    /// nothing for these rather than derive positions from `span`.
+    pub braces: Option<(Span, Span)>,
     pub statements: Vec<Idx<StatementData>>,
 }
 
@@ -730,8 +736,13 @@ impl Ast {
         })
     }
 
-    pub fn block(&mut self, span: Span, statements: Vec<Idx<StatementData>>) -> Idx<BlockData> {
-        self.blocks.alloc(BlockData { span, statements })
+    pub fn block(
+        &mut self,
+        span: Span,
+        braces: Option<(Span, Span)>,
+        statements: Vec<Idx<StatementData>>,
+    ) -> Idx<BlockData> {
+        self.blocks.alloc(BlockData { span, braces, statements })
     }
 
     pub fn ty(&mut self, span: Span, kind: TypeExprKind, is_nullable: bool) -> Idx<TypeExprData> {

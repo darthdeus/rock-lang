@@ -276,28 +276,16 @@ fn enum_record_literal_offers_variant_fields() {
 }
 
 #[test]
-fn sentinel_record_variant_condition_head_still_eats_completion() {
-    // SENTINEL (docs/test-sentinels.md). Residual of the block-head ambiguity:
-    // when the condition head is a *record* variant (`if e == Effect::Bandage {`),
-    // the text-based `enum_record_context` can't tell the `if`-block brace from a
-    // real `Effect::Bandage { .. }` record literal -- so it offers the variant's
-    // record fields (filtered to empty by the `spell_clear` prefix) and eats
-    // completion inside the block. The unit/tuple-variant case is FIXED (falls
-    // through); only a record variant as a comparison head remains. This is shared
-    // with the struct path (`if x == SomeStruct {`) and needs block-head keyword
-    // detection to fully resolve -- bigger than this PR.
-    //
-    // Inverted: passes TODAY because the bug exists (completion is empty). When a
-    // future fix teaches the brace classifier to recognize block heads, this goes
-    // red -- flip to `assert!(l.contains(&"spell_clear".to_string()), ...)` and
-    // delete this comment's "still eats" framing.
+fn record_variant_condition_head_no_longer_eats_completion() {
+    // A record variant as a comparison head (`if e == Effect::Bandage {`) is
+    // an if-block brace, not a record literal: scope completion must work
+    // inside the block. The AST classifier resolved the block-head ambiguity
+    // the byte scanner couldn't (was a sentinel, flipped when F3 landed).
     let src = "enum Effect { None, Bandage { duration: float } }\nfn spell_clear() {}\nfn fire(e: Effect) {\n  if e == Effect::Bandage {\n    spell_c\n  }\n}\n";
     let l = labels(src, 4, 11);
     assert!(
-        !l.contains(&"spell_clear".to_string()),
-        "PINNED BUG: record-variant condition head still eats completion. If this \
-         now finds `spell_clear`, the block-head ambiguity was fixed -- flip the \
-         assertion. got: {l:?}"
+        l.contains(&"spell_clear".to_string()),
+        "scope completion must survive a record-variant condition head: {l:?}"
     );
 }
 
@@ -483,15 +471,15 @@ fn reachability_index_rebuilds_on_an_interface_edit() {
 
     let mut bone = BoneWorkspace::new();
     bone.update(path, before.to_string());
-    let has_wv = |bone: &BoneWorkspace| {
+    let has_wv = |bone: &mut BoneWorkspace| {
         bone.completion(path, Position::new(4, 9))
             .into_iter()
             .any(|c| c.insert_text.as_deref() == Some("w.v"))
     };
-    assert!(!has_wv(&bone), "no `w.v` path before W has a V field");
+    assert!(!has_wv(&mut bone), "no `w.v` path before W has a V field");
 
     bone.update(path, after.to_string());
-    assert!(has_wv(&bone), "`w.v` path appears after the interface edit (index rebuilt)");
+    assert!(has_wv(&mut bone), "`w.v` path appears after the interface edit (index rebuilt)");
 }
 
 #[test]
@@ -1608,5 +1596,119 @@ fn uppercase_query_ranks_screaming_const_above_lowercase_fn() {
     assert!(
         const_st < fn_st,
         "JIT_TRACE_LOG_ENABLED ({const_st}) should rank before journal_log ({fn_st}) for an uppercase query"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The context-triggered paths must filter with `clean_match` (fuzzy, boundary-
+// aware) like every other completion filter -- a hand-rolled starts_with here
+// is the divergence class the rock-lsp StartsWithCi invariant existed to
+// prevent: `atco` finds `attack_co` globally, so it must after `recv.` too.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn member_field_filter_is_fuzzy() {
+    // `atco`: a@0 + t run + c/o at the `_` boundary -> `attack_co`.
+    let src = "struct Mob { attack_co: int, health: int }\nfn r(m: Mob) {\n  m.atco\n}\n";
+    let l = labels(src, 2, "  m.atco".len() as u32);
+    assert!(l.contains(&"attack_co: int".to_string()), "fuzzy member field: {l:?}");
+}
+
+#[test]
+fn member_method_filter_is_fuzzy() {
+    // `tiv`: t@0 + i at the `_` boundary + v run -> `to_ivec`.
+    let src = "struct Movable { g: int }\nfn to_ivec(m: Movable) -> int { m.g }\nfn r(mv: Movable) {\n  mv.tiv\n}\n";
+    let l = labels(src, 3, "  mv.tiv".len() as u32);
+    assert!(l.iter().any(|s| s == "to_ivec"), "fuzzy UFCS method: {l:?}");
+}
+
+#[test]
+fn enum_qualified_variant_filter_is_fuzzy() {
+    // `nogr`: n@0 + o run + g at the camel boundary + r run -> `NotGround`.
+    let src = "enum TargetError { NotGround, OutOfRange }\nfn r() {\n  let e = TargetError::nogr\n}\n";
+    let l = labels(src, 2, "  let e = TargetError::nogr".len() as u32);
+    assert!(l.iter().any(|s| s == "NotGround"), "fuzzy variant: {l:?}");
+    assert!(!l.iter().any(|s| s == "OutOfRange"), "non-matching variant filtered: {l:?}");
+}
+
+#[test]
+fn struct_literal_field_filter_is_fuzzy() {
+    // `mosp`: m@0 + o run + s at the `_` boundary + p run -> `move_speed`.
+    let src = "struct Cfg { move_speed: int, other: int }\nfn r() {\n  let c = Cfg { mosp }\n}\n";
+    let l = labels(src, 2, "  let c = Cfg { mosp".len() as u32);
+    assert!(l.contains(&"move_speed: int".to_string()), "fuzzy struct-literal field: {l:?}");
+}
+
+#[test]
+fn enum_record_field_filter_is_fuzzy() {
+    // `alb`: a@0 + l run + b at the `_` boundary -> `alpha_beta`.
+    let src = "enum E { V { alpha_beta: int, other: int } }\nfn r() {\n  let v = E::V { alb }\n}\n";
+    let l = labels(src, 2, "  let v = E::V { alb".len() as u32);
+    assert!(l.contains(&"alpha_beta: int".to_string()), "fuzzy enum-record field: {l:?}");
+}
+
+#[test]
+fn qualifier_inside_a_comment_gets_global_completion() {
+    // The byte scanner is comment-blind: `// SpellState::i|` classified as
+    // enum-qualified and served ONLY the variants. The AST classifier sees no
+    // qualified expr at the cursor, so scope completion runs. (Comment
+    // suppression as such is a separate question; this pins the dispatch.)
+    let src = "enum SpellState { Idle, Loaded(int) }\nfn idle_check() {}\nfn r() {\n  // SpellState::i\n}\n";
+    let l = labels(src, 3, 18);
+    assert!(
+        l.contains(&"idle_check".to_string()),
+        "global fn must be offered inside a comment: {l:?}"
+    );
+}
+
+#[test]
+fn struct_literal_head_inside_a_string_gets_no_field_completion() {
+    // The byte scanner is string-blind: `"Vec2 { |` served Vec2's fields as
+    // if the cursor were in a real literal. The AST classifier sees a string.
+    let src = "struct Vec2 { x: float, y: float }\nfn render() {}\nfn r() {\n  let s = \"Vec2 { \n}\n";
+    let l = labels(src, 3, 18);
+    assert!(
+        !l.contains(&"x: float".to_string()),
+        "no struct-field completion inside a string literal: {l:?}"
+    );
+}
+
+#[test]
+fn decl_field_default_value_slot_type_directs() {
+    // `kind: SpellKind = |` in a struct DECLARATION: the default is a value
+    // expr typed against the field's declared type -- the enum's variants
+    // must surface (parity with the byte scanner, which cannot tell a decl
+    // from a literal and usefully fires here).
+    let src = "enum SpellKind { Fire, Harm }\nstruct SpellDef {\n  kind: SpellKind = har\n}\n";
+    let l = labels(src, 2, 21);
+    assert!(
+        l.iter().any(|l| l.contains("Harm")),
+        "SpellKind::Harm must be offered in the decl default slot: {l:?}"
+    );
+}
+
+#[test]
+fn member_path_inside_a_comment_gets_global_completion() {
+    // The byte scanner is comment-blind: `// cfg.vol|` classified as member
+    // access and served Config's fields inside a comment. The AST classifier
+    // sees no field access there, so scope completion runs.
+    let src = "struct Config { volume: float }\nglobal cfg: Config = Config { volume: 1.0 }\nfn volume_reset() {}\nfn r() {\n  // cfg.vol\n}\n";
+    let l = labels(src, 4, 11);
+    assert!(
+        l.contains(&"volume_reset".to_string()),
+        "global fn must be offered inside a comment (not member fields): {l:?}"
+    );
+}
+
+#[test]
+fn unspaced_less_than_comparison_is_expression_position() {
+    // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot
+    // and offers the bare enum instead of qualified variants. It's a
+    // comparison: an expression slot; the qualified form must be offered.
+    let src = "enum SpellState { Idle, Loaded(int) }\nfn r(hp: int) {\n  let ok = hp<Loa\n}\n";
+    let l = labels(src, 2, 17);
+    assert!(
+        l.contains(&"SpellState::Loaded".to_string()),
+        "expression position: the qualified variant must be offered after an unspaced `<` comparison: {l:?}"
     );
 }

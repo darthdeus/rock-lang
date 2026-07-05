@@ -38,6 +38,10 @@ struct LspTest {
     primary_file: String,
     operation: LspOperation,
     expected: Vec<String>,
+    /// For single-file rename: full post-rename file content, compared exactly
+    /// against the post-edit buffer. `None` when the EXPECTED block is a
+    /// `- snippet` list (substring-matched via `expected` instead).
+    expected_code: Option<String>,
     /// For multi-file rename: expected per-file content after edits are applied.
     expected_files: Vec<(String, String)>,
 }
@@ -97,6 +101,9 @@ enum EditStepOperation {
     Diagnostics,
     Completion { line: usize, character: usize },
     Hover { line: usize, character: usize },
+    /// `CHECK: references(line, char)` -- EXPECTED lines are `LINE:CHAR`
+    /// start positions; the returned set must match exactly (order-free).
+    References { line: usize, character: usize },
 }
 
 /// Check if the given path contains LSP tests
@@ -445,6 +452,8 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
 
             // Parse expected results
             let mut expected = Vec::new();
+            let mut expected_code: Option<String> = None;
+            let mut rename_lines: Vec<String> = Vec::new();
             let mut expected_files: Vec<(String, String)> = Vec::new();
             if let Some(exp_line) = lines.next() {
                 if exp_line.starts_with("EXPECTED:") {
@@ -482,7 +491,11 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                             break;
                         }
                         let line = lines.next().unwrap();
-                        if line.starts_with("- ") {
+                        if test_type == "rename" {
+                            // Raw capture; snippet-vs-full-code is decided
+                            // after the loop from the first non-empty line.
+                            rename_lines.push(line.to_string());
+                        } else if line.starts_with("- ") {
                             expected.push(line.strip_prefix("- ").unwrap().to_string());
                         } else if line.starts_with("file:") || line.starts_with("line:") || line.starts_with("character:") || line.starts_with("min_tokens:") {
                             expected.push(line.to_string());
@@ -512,6 +525,25 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 }
             }
 
+            // Single-file rename EXPECTED comes in two shapes: a `- snippet`
+            // list (substring-matched) or the full post-rename file content
+            // (compared exactly -- a snippet match can't catch missed sites).
+            if test_type == "rename" && expected_files.is_empty() {
+                let snippet_style = rename_lines
+                    .iter()
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| l.starts_with("- "));
+                if snippet_style {
+                    expected.extend(
+                        rename_lines
+                            .iter()
+                            .filter_map(|l| l.strip_prefix("- ").map(str::to_string)),
+                    );
+                } else {
+                    expected_code = Some(rename_lines.join("\n"));
+                }
+            }
+
             tests.push(LspTest {
                 name,
                 test_type,
@@ -520,6 +552,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 primary_file,
                 operation,
                 expected,
+                expected_code,
                 expected_files,
             });
         }
@@ -681,6 +714,22 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
                                         let line = parts[0].trim().parse().unwrap_or(0);
                                         let character = parts[1].trim().parse().unwrap_or(0);
                                         EditStepOperation::Hover { line, character }
+                                    } else {
+                                        continue;
+                                    }
+                                } else {
+                                    continue;
+                                }
+                            }
+                            _ if op_str.starts_with("references") => {
+                                if let Some(params) = op_str.strip_prefix("references(")
+                                    .and_then(|s| s.strip_suffix(')'))
+                                {
+                                    let parts: Vec<&str> = params.split(',').collect();
+                                    if parts.len() == 2 {
+                                        let line = parts[0].trim().parse().unwrap_or(0);
+                                        let character = parts[1].trim().parse().unwrap_or(0);
+                                        EditStepOperation::References { line, character }
                                     } else {
                                         continue;
                                     }
@@ -1546,8 +1595,9 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                         }
                     }
                 } else {
-                // Single-file rename: concat all edits into one result buffer
-                // and substring-match expected snippets (legacy behaviour).
+                // Single-file rename: apply all edits to one result buffer,
+                // then compare -- exactly against `expected_code`, or by
+                // substring for `- snippet` style expectations.
                 let mut result_code = test.code.clone();
 
                 for (_file_uri, edits) in changes {
@@ -1637,11 +1687,24 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                     }
                 }
 
-                for expected_item in &test.expected {
-                    if !result_code.contains(expected_item) {
+                if let Some(expected_code) = &test.expected_code {
+                    let expected_norm = expected_code.trim_end();
+                    let actual_norm = result_code.trim_end();
+                    if expected_norm != actual_norm {
                         all_found = false;
                         if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Expected '{}' not found in output", expected_item);
+                            eprintln!("    Rename mismatch");
+                            eprintln!("    Expected:\n{}", expected_norm);
+                            eprintln!("    Actual:\n{}", actual_norm);
+                        }
+                    }
+                } else {
+                    for expected_item in &test.expected {
+                        if !result_code.contains(expected_item) {
+                            all_found = false;
+                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                                eprintln!("    Expected '{}' not found in output", expected_item);
+                            }
                         }
                     }
                 }
@@ -2112,6 +2175,25 @@ fn run_edit_sequence_test(test: &EditSequenceTest, backend: crate::Backend) -> R
                     let response = read_response_from_chan(&msg_rx, req_id)?;
                     check_hover_response(&response, &check.expected, step_idx, verbose)
                 }
+                EditStepOperation::References { line, character } => {
+                    let req_id = next_id;
+                    next_id += 1;
+                    let request = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "method": "textDocument/references",
+                        "params": {
+                            "textDocument": { "uri": test_uri },
+                            "position": { "line": line, "character": character },
+                            "context": { "includeDeclaration": true }
+                        }
+                    });
+                    stdin.write_all(&encode_jsonrpc(&request))?;
+                    stdin.flush()?;
+
+                    let response = read_response_from_chan(&msg_rx, req_id)?;
+                    check_references_response(&response, &check.expected, step_idx, verbose)
+                }
             };
 
             if check_passed {
@@ -2243,6 +2325,56 @@ fn check_completion_response(
 }
 
 /// Check hover result in an LSP response
+/// Validate a `textDocument/references` response: EXPECTED lines are `L:C`
+/// start positions (0-based); the returned start set must match EXACTLY --
+/// offset bugs show up as a set mismatch, which contains-matching would hide.
+fn check_references_response(
+    response: &serde_json::Value,
+    expected: &[String],
+    step_idx: usize,
+    verbose: bool,
+) -> bool {
+    let mut got: Vec<(u64, u64)> = response
+        .get("result")
+        .and_then(|r| r.as_array())
+        .map(|locs| {
+            locs.iter()
+                .filter_map(|loc| {
+                    let start = loc.get("range")?.get("start")?;
+                    Some((
+                        start.get("line")?.as_u64()?,
+                        start.get("character")?.as_u64()?,
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    got.sort();
+
+    let mut want: Vec<(u64, u64)> = expected
+        .iter()
+        .filter_map(|l| {
+            let (a, b) = l.trim().split_once(':')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        })
+        .collect();
+    want.sort();
+
+    if verbose {
+        eprintln!("    Step {}: references = {:?}", step_idx + 1, got);
+    }
+    let ok = got == want;
+    if !ok && verbose {
+        eprintln!(
+            "    Step {}: FAIL - references mismatch: got {:?}, want {:?}",
+            step_idx + 1,
+            got,
+            want
+        );
+    }
+    ok
+}
+
 fn check_hover_response(
     response: &serde_json::Value,
     expected: &[String],
@@ -2261,6 +2393,20 @@ fn check_hover_response(
 
     if verbose {
         eprintln!("    Step {}: hover = {:?}", step_idx + 1, hover_text);
+    }
+
+    // `EXPECTED: none` -- the hover must be empty (used by sentinels pinning
+    // a missing-hover bug; contains-matching can't express absence).
+    if expected.len() == 1 && expected[0].trim().eq_ignore_ascii_case("none") {
+        let ok = hover_text.is_empty();
+        if !ok && verbose {
+            eprintln!(
+                "    Step {}: FAIL - expected empty hover, got {:?}",
+                step_idx + 1,
+                hover_text
+            );
+        }
+        return ok;
     }
 
     let mut all_ok = true;

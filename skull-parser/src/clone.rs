@@ -25,7 +25,7 @@ pub fn clone_expr(ast: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
 pub fn clone_block(ast: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
     let data = ast.blocks[b].clone();
     let statements = data.statements.iter().map(|&s| clone_stmt(ast, s)).collect();
-    ast.blocks.alloc(BlockData { span: data.span, statements })
+    ast.blocks.alloc(BlockData { span: data.span, braces: data.braces, statements })
 }
 
 pub fn clone_type(ast: &mut Ast, t: Idx<TypeExprData>) -> Idx<TypeExprData> {

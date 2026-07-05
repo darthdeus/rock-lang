@@ -5,7 +5,9 @@
 //! `BoneWorkspace` (the facade in `bone-query` the interactive server calls):
 //! `update` (didChange -> re-typecheck + cross-file diagnostics + hole
 //! diagnostics), then a `semantic_tokens` full refresh and an `inlay_hints`
-//! refresh, plus on-demand `hover`/`completion`/`definition` under the cursor.
+//! refresh, plus on-demand `hover`/`completion`/`definition` under the cursor
+//! and a member (`recv.fie`) completion at the file's first member access --
+//! the speculative-variant path plain completion never exercises.
 //! `iter-incremental` profiles the bone `Session` + skull emit underneath; this
 //! profiles the LSP query layer ON TOP of it -- the costs an editor actually
 //! pays per keystroke.
@@ -92,6 +94,28 @@ fn body_cursor(text: &str) -> Option<usize> {
             return Some(brace + 1 + start);
         }
         i = end;
+    }
+    None
+}
+
+/// Offset one char into the field of the first `recv.fie` member access inside
+/// a fn body -- drives the MEMBER completion path (`receiver_path` triggers on
+/// the preceding `.`), which reparses and is invisible to the plain-completion
+/// timing. One char in so the path also pays its prefix filter.
+fn member_cursor(text: &str) -> Option<usize> {
+    let fn_pos = if text.starts_with("fn ") { 0 } else { text.find("\nfn ")? + 1 };
+    let b = text.as_bytes();
+    let mut i = fn_pos;
+    while i + 2 < b.len() {
+        let recv_ok = i > 0 && (b[i - 1].is_ascii_alphabetic() || b[i - 1] == b'_');
+        if b[i] == b'.' && recv_ok && b[i + 1].is_ascii_alphabetic() {
+            // Skip a dot inside a `//` comment (scan back to the line start).
+            let line_start = text[..i].rfind('\n').map_or(0, |p| p + 1);
+            if !text[line_start..i].contains("//") {
+                return Some(i + 2);
+            }
+        }
+        i += 1;
     }
     None
 }
@@ -197,6 +221,7 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
     let mut s_inlay = Stat::new("inlay_hints");
     let mut s_hover = Stat::new("hover");
     let mut s_compl = Stat::new("completion");
+    let mut s_member = Stat::new("completion (member .)");
     let mut s_def = Stat::new("definition");
     // Additional editor traffic not in the auto-refresh trio: document_highlight
     // fires on every cursor move (O(workspace) via references); doc/workspace
@@ -214,6 +239,7 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
     for i in 0..(warmup + iters) {
         let text = if i % 2 == 0 { &state_a } else { &state_b };
         let cursor = body_cursor(text).map(|off| offset_to_position(text, off));
+        let member_pos = member_cursor(text).map(|off| offset_to_position(text, off));
 
         let owned = text.clone();
         let t = Instant::now();
@@ -271,6 +297,16 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
             sig_ms = Some(ms(t));
         }
 
+        // Member (`recv.fie`) completion goes through the reparse-based path,
+        // which the edit-site completion above never exercises.
+        let (mut member_ms, mut member_count) = (None, 0);
+        if let Some(mpos) = member_pos {
+            let t = Instant::now();
+            let items = bone.completion(&target, mpos);
+            member_ms = Some(ms(t));
+            member_count = items.len();
+        }
+
         if i >= warmup {
             s_update.samples.push(update_ms);
             s_update.last_count = diag_count;
@@ -284,6 +320,10 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
             if let Some(v) = compl_ms {
                 s_compl.samples.push(v);
                 s_compl.last_count = compl_count;
+            }
+            if let Some(v) = member_ms {
+                s_member.samples.push(v);
+                s_member.last_count = member_count;
             }
             if let Some(v) = def_ms {
                 s_def.samples.push(v);
@@ -325,6 +365,7 @@ pub fn iter_lsp(path: &str, iters: usize, warmup: usize) -> Result<()> {
     eprintln!("    (inlay_hints over the WHOLE file -- an upper bound; editors request only the viewport range)");
     s_hover.report();
     s_compl.report();
+    s_member.report();
     s_def.report();
     s_dhl.report();
     s_refs.report();

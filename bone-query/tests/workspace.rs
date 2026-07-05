@@ -485,7 +485,7 @@ fn edit_then_requery_updates_diagnostics() {
 fn completion_offers_global_namespace_by_prefix() {
     // Cursor after `vec` -> the stdlib's vec_* functions surface.
     let src = "fn main() {\n  vec\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let items = bone.completion(PATH, Position::new(1, 5));
     assert!(
         items.iter().any(|c| c.label == "vec_new"),
@@ -785,7 +785,7 @@ fn completion_includes_in_scope_locals_and_params() {
     // body of `f`: param `count`, local `total` (declared line 1). Completing a
     // fresh `t` on line 2 -> the local `total` is offered.
     let src = "fn f(count: int) -> int {\n  let total = 5\n  t\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(2, 3))
         .into_iter()
@@ -809,7 +809,7 @@ fn completion_includes_in_scope_locals_and_params() {
 fn completion_excludes_locals_declared_after_the_cursor() {
     // Completing on line 1 (`l`) must not offer `later`, declared on line 2.
     let src = "fn f() -> int {\n  l\n  let later = 5\n  later\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(1, 3))
         .into_iter()
@@ -823,7 +823,7 @@ fn completion_offers_struct_fields_on_broken_dot() {
     // The trigger `.` is a syntax error (breaks the body); member completion
     // must still resolve `p`'s struct fields. param receiver.
     let src = "struct Point { x: int, y: int }\nfn f(p: Point) {\n  p.\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(2, 4))
         .into_iter()
@@ -837,7 +837,7 @@ fn completion_offers_struct_fields_on_broken_dot() {
 fn completion_member_on_struct_literal_let_and_chain() {
     // receiver `p` is an inferred `let` bound to a struct literal; chained field.
     let src = "struct Vec2 { x: float, y: float }\nstruct Player { pos: Vec2, name: string }\nfn main() {\n  let p = Player { pos: Vec2 { x: 0.0, y: 0.0 }, name: \"h\" }\n  p.pos.\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(4, 8))
         .into_iter()
@@ -849,7 +849,7 @@ fn completion_member_on_struct_literal_let_and_chain() {
 #[test]
 fn completion_member_filters_by_field_prefix() {
     let src = "struct Player { position_x: float, health: float }\nfn foo(player: Player) {\n  player.pos\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(2, 12))
         .into_iter()
@@ -864,7 +864,7 @@ fn completion_member_on_for_loop_var() {
     // `item` is a for-loop variable; its struct is the element type of the
     // iterable `[Item]`. Resolved structurally (no inference).
     let src = "struct Item { name: string, count: int }\nfn main() {\n  let items: [Item] = vec_new()\n  for item in items {\n    item.\n  }\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(4, 9))
         .into_iter()
@@ -877,7 +877,7 @@ fn completion_member_on_for_loop_var() {
 #[test]
 fn completion_enum_qualified_lists_variants() {
     let src = "enum Direction { Up, Down, Left, Right }\nfn main() {\n  let d = Direction::\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(2, 21))
         .into_iter()
@@ -892,7 +892,7 @@ fn completion_enum_qualified_lists_variants() {
 fn completion_member_on_match_pattern_binding() {
     // `p` is bound by `Opt::Some(p)`; its struct is the variant's payload type.
     let src = "struct Point { x: int, y: int }\nenum Opt { None, Some(Point) }\nfn main() {\n  let o = Opt::Some(Point { x: 1, y: 2 })\n  match o {\n    Opt::Some(p) => p.\n    Opt::None => {}\n  }\n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(5, 22))
         .into_iter()
@@ -905,7 +905,7 @@ fn completion_member_on_match_pattern_binding() {
 #[test]
 fn completion_enum_record_variant_fields() {
     let src = "enum Effect { Bandage { duration: float, heal_amount: int }, Other(int) }\nfn main() {\n  let e = Effect::Bandage { \n}\n";
-    let bone = fresh(src);
+    let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(2, 27))
         .into_iter()

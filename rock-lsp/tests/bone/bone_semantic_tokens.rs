@@ -9,7 +9,7 @@
 //! bone's own legend; only the live server hits the mismatch.
 
 use rock_lsp::semantic_tokens::{compute_semantic_tokens_workspace, get_semantic_tokens_legend};
-use rock_lsp::{LspBackend, LspWorkspace};
+use rock_lsp::LspWorkspace;
 use lsp_types::*;
 use std::str::FromStr;
 
@@ -18,7 +18,6 @@ fn tokens(src: &str) -> Vec<SemanticToken> {
     let path = dir.path().join("main.rock");
     std::fs::write(&path, src).unwrap();
     let mut ws = LspWorkspace::new();
-    ws.backend = LspBackend::Bone;
     ws.bone.update(path.to_str().unwrap(), src.to_string());
     let params = SemanticTokensParams {
         text_document: TextDocumentIdentifier {

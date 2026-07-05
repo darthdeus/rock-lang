@@ -895,9 +895,9 @@ impl Parser {
             while self.eat(TokenKind::Semicolon) {}
         }
         self.brace_depth -= 1;
-        self.expect(TokenKind::CloseCurly)?;
+        let close = self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok((self.ast.block(span, statements), items))
+        Ok((self.ast.block(span, Some((start, close)), statements), items))
     }
 
     /// Does the current token start an item declaration valid inside a macro
@@ -1369,9 +1369,9 @@ impl Parser {
             }
         }
         self.brace_depth -= 1;
-        self.expect(TokenKind::CloseCurly)?;
+        let close = self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start); // through the closing `}`
-        Ok(self.ast.block(span, statements))
+        Ok(self.ast.block(span, Some((start, close)), statements))
     }
 
     /// Consume comment tokens on the same source line as the just-parsed
@@ -1512,15 +1512,13 @@ impl Parser {
             }
             TokenKind::Defer => {
                 self.advance();
-                let kind = if self.kind() == TokenKind::OpenParen {
-                    self.advance();
-                    self.delimiter_depth += 1;
-                    let e = self.parse_expr(0)?;
-                    self.delimiter_depth -= 1;
-                    self.expect(TokenKind::CloseParen)?;
-                    DeferKind::Expression(e)
-                } else {
+                // `defer { ... }` is the block form; anything else is a bare
+                // expression statement (`defer clear_attack(e)`) -- a leading
+                // `(` parses as an ordinary parenthesized expression.
+                let kind = if self.kind() == TokenKind::OpenCurly {
                     DeferKind::Block(self.parse_block()?)
+                } else {
+                    DeferKind::Expression(self.parse_expr(0)?)
                 };
                 let span = self.span_from(start);
                 Ok(self.ast.stmt(span, StatementKind::Defer(kind)))
@@ -1973,7 +1971,7 @@ impl Parser {
             let rhs = self.parse_expr(10)?;
             let span = self.ast.exprs[rhs].span;
             let stmt = self.ast.stmt(span, StatementKind::Expression(rhs));
-            self.ast.block(span, vec![stmt])
+            self.ast.block(span, None, vec![stmt])
         };
         let body_span = self.ast.blocks[body].span;
         let lambda = self
@@ -2710,7 +2708,7 @@ impl Parser {
                     }
                 };
                 let body_span = self.span_from(stmt_span);
-                self.ast.block(body_span, vec![stmt])
+                self.ast.block(body_span, None, vec![stmt])
             };
             arms.push(MatchArm { pattern, guard, body });
             self.eat(TokenKind::Comma);
@@ -2897,7 +2895,7 @@ impl Parser {
             let e = self.with_allow_literals(true, |p| p.parse_expr(0))?;
             let body_span = self.ast.exprs[e].span;
             let stmt = self.ast.stmt(body_span, StatementKind::Return { keyword_span: None, value: Some(e) });
-            self.ast.block(body_span, vec![stmt])
+            self.ast.block(body_span, None, vec![stmt])
         };
         let span = self.span_from(start);
         Ok(self.ast.expr(span, ExprKind::Lambda { params, return_ty: None, body }))

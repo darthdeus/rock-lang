@@ -981,41 +981,23 @@ fn collect_skull_sims(
 pub fn skull_compile_game_and_collect_sims(
     dir: &str,
     main_path: &std::path::Path,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
-    use std::path::PathBuf;
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-    let sources = crate::unified_compile::discover_sources(&spec)
-        .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
-    let (mut modules, entry_file) = skull_assemble_project(&sources)
-        .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
-    let ws = crate::bone_backend::check_modules(&mut modules)
-        .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
-    let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
-        .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
+    // Session-based build (same machinery as `rock stone`, tests included so the
+    // `@sim` bodies are in the program). The live SkullStone is returned so the
+    // runner can serve mid-sim `reload_edit` ops through the REAL incremental
+    // path (`docs/sim-reload-harness-plan.md`).
+    let incremental_path = main_path.with_file_name("incremental.lua");
+    let stone = SkullStone::init_with_tests(dir, main_path, &incremental_path)
+        .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
 
-    // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`). The
-    // game/stone path emits separately from run/compile, so it needs the same
-    // host-computed registry appended before the `main` wrapper.
-    let registry = build_rock_globals_registry(&ws, &spec);
-    let lua = format!("{}{}", emit.lua, registry);
-
-    write_full_main(
-        &skull_game_preamble(dir),
-        &lua,
-        main_path,
-        &main_path.with_file_name("incremental.lua"),
-    )
-    .map_err(|e| anyhow::anyhow!("writing {}: {e}", main_path.display()))?;
-
-    let sims = collect_skull_sims(&ws);
+    let sims = collect_skull_sims(stone.session.workspace());
     let mut wire_names = Vec::with_capacity(sims.len());
     let mut env_by_wire = HashMap::with_capacity(sims.len());
     for (wire, env) in sims {
         wire_names.push(wire.clone());
         env_by_wire.insert(wire, env);
     }
-    Ok((wire_names, env_by_wire))
+    Ok((wire_names, env_by_wire, stone))
 }
 
 /// `rock compile <project-dir> --backend skull` — assemble + type-check + emit
@@ -2398,6 +2380,694 @@ mod overlay_runtime_tests {
         }
     }
 
+    /// A FLAT-ENUM-yielding `co fn` body edit, through the overlay, must re-emit the
+    /// frame-slot yield channel (the `__step`'s `s.__y*` slot writes + the ctor's
+    /// `__advance`/`__resume` fields on the merged frame) and a freshly-created coroutine must run the new body,
+    /// threading the yield through the slots -- no `{__variant}` box on the concrete
+    /// consumer path. Guards the frame-slot channel (`docs/coroutine-allocation-plan.md`
+    /// Part A) against a hot-reload regression; the scalar-yield test above does not
+    /// exercise the channel (int yields keep the multi-return path).
+    #[test]
+    fn flat_enum_coroutine_body_edit_overlay_threads_and_runs_new_body() {
+        // The `Act(() -> ())` closure payload makes Ev NON-cdata-eligible, so it is a
+        // genuinely FLAT (boxed) enum that rides the frame-slot channel -- an
+        // all-scalar-payload enum would scalarize as a `_ct` cdata instead (mirrors
+        // `tests/enum_thread_yield.rock`).
+        let prog = |a: i32, b: i32| {
+            format!(
+                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Pair({a}, {b})\n  yield Ev::Done\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn main() {{\n  let c = gen()\n  let e0 = c.resume()\n  let e1 = c.resume()\n  let s0 = if e0 != null {{ score(e0) }} else {{ -1 }}\n  let s1 = if e1 != null {{ score(e1) }} else {{ -1 }}\n  print(\"{{s0}} {{s1}}\")\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog(1, 2), prog(10, 20));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
+            ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1 3", "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)"),
+            ExecOutcome::Errored => panic!("baseline flat-enum coroutine fixture failed to run"),
+        }
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        // The overlay must re-emit the whole frame-slot channel.
+        assert!(overlay.lua.contains("gen__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
+        assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
+        assert!(
+            overlay.lua.contains("function gen__advance(")
+                && overlay.lua.contains("__advance = gen__advance")
+                && overlay.lua.contains("__resume = gen__resume"),
+            "overlay must re-emit the per-co-fn __advance/__resume fns + the ctor storing them as fields:\n{}",
+            overlay.lua
+        );
+
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), &overlay.lua, "main()"]);
+        let fresh_run = run_parts(&[&fresh.lua, stub_for(&fresh.lua), "main()"]);
+        match (composed, fresh_run) {
+            (ExecOutcome::Output(c), ExecOutcome::Output(f)) => {
+                assert_eq!(normalize_stdout(&f).trim(), "10 30", "fresh v1: Tick(10)=10, Pair(10,20)=30");
+                assert_eq!(
+                    normalize_stdout(&c).trim(),
+                    "10 30",
+                    "overlay must run the EDITED flat-enum body via the re-emitted frame-slot channel"
+                );
+            }
+            _ => panic!("composed or fresh flat-enum coroutine run errored"),
+        }
+    }
+
+    /// The load-bearing hot-reload case: a flat-enum coroutine created + first-resumed
+    /// under v0, then resumed again ACROSS a body-edit overlay on the SAME live object
+    /// (the engine's per-frame poll pattern). The live object keeps its v0
+    /// `__advance`/`__resume` closures, but `__advance` calls `gen__step` by GLOBAL
+    /// name, so a mid-flight resume runs the NEW step -- writing the new yield leaves
+    /// into the SAME reused `__y*` slots on the object/frame (the enum shape is
+    /// unchanged), which the (baseline, unchanged) `pump` reads directly. If
+    /// `__advance` had captured the step by value, resume #2 would run the stale v0
+    /// body (Pair(1,2)=3, not Pair(10,20)=30).
+    #[test]
+    fn live_flat_enum_coroutine_survives_overlay_and_threads_new_body() {
+        // `Act(() -> ())` forces Ev to be a FLAT (boxed) enum on the frame-slot
+        // channel (an all-scalar-payload enum would be a `_ct` cdata instead).
+        let prog = |a: i32, b: i32| {
+            format!(
+                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Pair({a}, {b})\n  yield Ev::Done\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog(1, 2), prog(10, 20));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // start() + pump() under v0 (Tick(1)=1), then overlay, then pump() x3 on the
+        // SAME live coroutine under v1: Pair(10,20)=30, Done=100, then done -> -1.
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "start()",
+            "pump()",
+            &overlay.lua,
+            "pump()",
+            "pump()",
+            "pump()",
+        ]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1\n30\n100\n-1",
+                "live coroutine: v0 first yield (Tick=1), then v1 body across the reload (Pair=30, Done=100, done)"
+            ),
+            ExecOutcome::Errored => panic!("live flat-enum coroutine reload fixture failed to run"),
+        }
+    }
+
+    /// Layout drift, cell shift: a live coroutine suspended across a BodyOnly
+    /// overlay that INSERTS a `let` between two frame-resident locals. Frame
+    /// fields are cell-index-named (`c<N>`), so the new step would read the
+    /// second local at a shifted index the old frame never wrote -- the frame
+    /// layout stamp kills the coroutine cleanly instead.
+    /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
+    #[test]
+    fn live_coroutine_cell_layout_shift_overlay_stamp_kills() {
+        // `Act(() -> ())` forces Ev flat (frame-slot channel); `mk()` keeps the
+        // locals as real calls so copy-prop/DCE can't erase the frame cells.
+        let prog = |extra: &str| {
+            format!(
+                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 fn mk(n: int) -> int {{ return n }}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog(""), prog("  let z = mk(999)\n"));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // start() + pump() under v0 (Tick(7)=7, suspended at state 1), overlay,
+        // then pump() again on the SAME live coroutine. The frame layout stamp
+        // rejects the v0 frame in the v1 step (the `let z` shifted `b`'s cell
+        // index): the check errors INSIDE the pcall, the coroutine dies cleanly
+        // (state -2, on_killed, last_error explains) and pump reads null -> -1.
+        // Pre-stamp this CRASHED the consumer (arithmetic on the nil read from
+        // the shifted slot) -- the flipped sentinel guards the clean kill.
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "7\n-1\n-1\n-1",
+                "a cell-shifting overlay must stamp-kill the live coroutine, not corrupt it"
+            ),
+            ExecOutcome::Errored => panic!("cell-shift + live resume crashed -- the layout stamp regressed"),
+        }
+    }
+
+    /// Layout drift, state renumber: yields are numbered by order, so a BodyOnly
+    /// overlay that ADDS a yield point renumbers the state machine and a live
+    /// coroutine's `__state` would dispatch to the wrong resume point (re-run or
+    /// skip code) -- the stamp's per-state variant tags catch it and kill the
+    /// coroutine cleanly. Cells are deliberately untouched (const payloads only)
+    /// so this pins the STATE component of the stamp specifically.
+    /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
+    #[test]
+    fn live_coroutine_yield_renumber_overlay_stamp_kills() {
+        let prog = |extra: &str| {
+            format!(
+                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 co fn gen() -> Coroutine<Ev> {{\n{extra}  yield Ev::Tick(1)\n  print(\"fire\")\n  yield Ev::Tick(2)\n  print(\"cleanup\")\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog(""), prog("  yield Ev::Done\n"));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "adding a yield is a body edit -- must be BodyOnly (the premise), got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // v0: pump() -> Tick(1)=1, suspended at state 1 (before print("fire")).
+        // Overlay renumbers: the new Ev::Done yield becomes state 1, so the live
+        // frame's __state=1 would resume at the WRONG yield point (pre-stamp it
+        // replayed the already-delivered Tick(1), then ran fire/cleanup a pump
+        // late). The per-state variant tags in the layout stamp catch the
+        // renumbering: resume #2 stamp-kills the coroutine -> -1, no replay.
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1\n-1\n-1\n-1",
+                "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point"
+            ),
+            ExecOutcome::Errored => panic!("yield-renumber + live resume errored (expected the clean kill output)"),
+        }
+    }
+
+    /// `yield*` under hot reload: a live outer+inner delegation chain must pick up
+    /// a BodyOnly edit to the INNER co fn's body. The chain is advance-by-field
+    /// (outer holds the inner object) + step-by-global-name (inner's stale advance
+    /// resolves `inner__step` at call time), and both mechanisms must compose
+    /// across the delegation boundary. Guards the Part B kill/advance/delegate
+    /// refactor (docs/coroutine-allocation-plan.md).
+    #[test]
+    fn live_yield_star_delegation_survives_inner_body_overlay() {
+        let prog = |a: i32, b: i32| {
+            format!(
+                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 co fn inner() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Tick({b})\n}}\n\
+                 co fn outer() -> Coroutine<Ev> {{\n  yield* inner()\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = outer() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog(1, 2), prog(10, 20));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "a constant tweak in the inner co fn must be BodyOnly, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // pump #1 under v0: outer primes inner, re-yields inner's Tick(1). Overlay
+        // (layout-stable: constants only). pump #2 resumes the live chain: the
+        // inner's stale advance runs the NEW inner__step -> Tick(20). pump #3:
+        // inner done -> outer's delegate exits, outer completes -> -1.
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1\n20\n-1",
+                "a live yield* chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)"
+            ),
+            ExecOutcome::Errored => panic!("live yield* delegation reload fixture failed to run"),
+        }
+    }
+
+    /// A stamp-kill (or ANY error) of an outer coroutine suspended mid-`yield*`
+    /// must chain into the delegated inner: explicit `kill()` recurses through
+    /// `__inner` (firing the inner's on_killed), and the error path must match --
+    /// otherwise the inner is orphaned and its cleanup hook silently never runs
+    /// (found live: mag mob soft-locked in attack state after a reload).
+    #[test]
+    fn stamp_killed_outer_chains_kill_into_delegated_inner() {
+        let prog = |extra: &str| {
+            format!(
+                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 global INNER_KILLED: int = 0\n\
+                 fn mk(n: int) -> int {{ return n }}\n\
+                 fn note_inner_killed() {{ INNER_KILLED = INNER_KILLED + 1 }}\n\
+                 co fn inner() -> Coroutine<Ev> {{\n  on_killed(() => note_inner_killed())\n  yield Ev::Tick(1)\n  yield Ev::Tick(2)\n}}\n\
+                 co fn outer() -> Coroutine<Ev> {{\n{extra}  yield* inner()\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = outer() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
+                 fn report() {{ print(\"{{INNER_KILLED}}\") }}\n"
+            )
+        };
+        let (v0, v1) = (prog(""), prog("  let z = mk(9)\n"));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "outer's added local must be BodyOnly, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // pump #1: outer primes inner -> Tick(1). Overlay shifts OUTER's layout.
+        // pump #2: outer stamp-killed -> -1, and the inner's on_killed must fire.
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "report()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1\n-1\n1",
+                "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)"
+            ),
+            ExecOutcome::Errored => panic!("stamp-kill inner-chain fixture failed to run"),
+        }
+    }
+
+    /// The mob-soft-lock scenario in miniature: a coroutine holding a game
+    /// invariant cleans up via `defer`, then a layout-shifting overlay
+    /// stamp-kills it mid-flight. The defer must run -- and it must be the
+    /// creation-time (v0) defer against the v0 frame: `__defers` stores the
+    /// per-site fns BY VALUE precisely so stale frames never run current-layout
+    /// cleanup code against old-layout cells.
+    #[test]
+    fn stamp_kill_runs_creation_time_defers() {
+        let prog = |extra: &str| {
+            format!(
+                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 global BUSY: int = 0\n\
+                 fn mk(n: int) -> int {{ return n }}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Tick(b)\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
+                 fn report() {{ print(\"busy:{{BUSY}}\") }}\n"
+            )
+        };
+        let (v0, v1) = (prog(""), prog("  let z = mk(999)\n"));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly));
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // pump #1: Tick(7), BUSY=1, suspended. Overlay (cell shift). pump #2:
+        // stamp-kill -> -1, and the v0 defer must have cleared BUSY.
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "report()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "7\n-1\nbusy:0",
+                "a stamp-killed coroutine must run its creation-time defers (invariant released, no soft-lock)"
+            ),
+            ExecOutcome::Errored => panic!("stamp-kill defer fixture failed to run"),
+        }
+    }
+
+    /// A coroutine hook (`on_killed`/`on_resume`/`on_hot_reload`) argument must
+    /// be a lambda literal: the hook is peeled to the constructor, which can
+    /// only re-render a lambda with the frame context. Any other fn-typed
+    /// expression used to SILENTLY install no hook (docs/unfuck-backlog.md) --
+    /// it must be a compile error instead.
+    #[test]
+    fn non_lambda_coroutine_hook_arg_rejected() {
+        let src = "enum Ev { Tick(int), Act(() -> ()) }\n\
+                   fn cleanup() { print(\"x\") }\n\
+                   co fn gen() -> Coroutine<Ev> {\n  on_killed(cleanup)\n  yield Ev::Tick(1)\n}\n\
+                   fn main() { let c = gen() }\n";
+        let session = bone_session(files(src)).expect("session");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        match skull::mir_emit::emit_full(session.workspace(), mid) {
+            Err(e) => assert!(
+                format!("{e:?}").contains("lambda"),
+                "rejection must say the hook needs a lambda, got: {e:?}"
+            ),
+            Ok((full, _)) => {
+                // Per-fn skips are also an acceptable surface -- but the co fn
+                // must NOT emit with a silently-dropped hook.
+                assert!(
+                    !full.lua.contains("function gen__step("),
+                    "a co fn with a non-lambda hook arg must not emit:\n{}",
+                    full.lua
+                );
+            }
+        }
+    }
+
+    /// `yield` inside a `defer` body is a compile error (a defer body cannot
+    /// suspend -- it may run during terminal cleanup with no resume protocol).
+    #[test]
+    fn yield_inside_defer_body_rejected() {
+        let src = "enum Ev { Tick(int), Act(() -> ()) }\n\
+                   co fn gen() -> Coroutine<Ev> {\n  defer { yield Ev::Tick(1) }\n  yield Ev::Tick(2)\n}\n\
+                   fn main() { let c = gen() }\n";
+        let session = bone_session(files(src)).expect("session");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let err = skull::mir_emit::emit_full(session.workspace(), mid);
+        match err {
+            Err(e) => assert!(
+                format!("{e:?}").contains("defer"),
+                "rejection must mention defer, got: {e:?}"
+            ),
+            Ok((full, _)) => {
+                // Emission collects per-fn skips rather than failing the whole
+                // unit -- accept either surface, but the co fn must NOT emit.
+                assert!(
+                    !full.lua.contains("function gen__step("),
+                    "a co fn with `yield` inside a defer body must not emit:\n{}",
+                    full.lua
+                );
+            }
+        }
+    }
+
+    /// Layout drift via the Interface tier (which does NOT protect live
+    /// coroutines): a full rebuild is a re-`dofile`, not a restart -- mutable
+    /// globals carry the `_G.HOT_RELOAD` preservation guard, so a live coroutine
+    /// held in a global SURVIVES the full reload, and its stale `__advance`
+    /// resolves the step by global name into the NEW program. A realistic
+    /// Interface edit (widen a variant + use the new payload, which also inserts
+    /// a local) would then drive the old frame with a step compiled for a
+    /// different layout -- the stamp kills the survivor cleanly instead.
+    /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
+    #[test]
+    fn live_coroutine_survives_full_reload_and_shape_edit_stamp_kills() {
+        let v0 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
+                  global GEN: Coroutine<Ev>? = null\n\
+                  fn mk(n: int) -> int { return n }\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  fn start() { GEN = gen() }\n\
+                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
+        // Widen Tick + yield the new payload: the enum edit is Interface tier, and
+        // the body gains a local (`z`) -> cell shift for `b`, exactly like the
+        // BodyOnly repro but delivered via a FULL rebuild.
+        let v1 = "enum Ev { Tick(int, int), Pair(int, int), Done, Act(() -> ()) }\n\
+                  global GEN: Coroutine<Ev>? = null\n\
+                  fn mk(n: int) -> int { return n }\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let z = mk(999)\n  let b = mk(35)\n  yield Ev::Tick(a, z)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x, y) => x + y\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  fn start() { GEN = gen() }\n\
+                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, _cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(
+                result.tier,
+                bone_incremental::session::UpdateTier::Interface
+                    | bone_incremental::session::UpdateTier::FullUser
+            ),
+            "an enum shape edit must be a full rebuild (the premise), got {:?}",
+            result.tier
+        );
+        let full1 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+
+        // Premise (non-inverted, stays green): the live coroutine SURVIVES the full
+        // re-dofile -- the mutable-global preservation guard keeps GEN.
+        let survival = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "start()",
+            "pump()",
+            "_G.HOT_RELOAD = true",
+            &full1.lua,
+            "print(_G.GEN ~= nil)",
+        ]);
+        match survival {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "7\ntrue",
+                "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)"
+            ),
+            ExecOutcome::Errored => panic!("full-reload survival fixture failed to run"),
+        }
+
+        // Resuming the survivor: the v1 step's layout stamp (cells shifted by
+        // `let z`, channel widened by the Tick payload) rejects the v0 frame --
+        // the coroutine dies cleanly through the pcall path and pump prints -1.
+        // Pre-stamp this CRASHED the consumer on the shifted frame read, through
+        // the very tier the hot-reload contract once claimed was safe.
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "start()",
+            "pump()",
+            "_G.HOT_RELOAD = true",
+            &full1.lua,
+            "print(_G.GEN ~= nil)",
+            "pump()",
+        ]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "7\ntrue\n-1",
+                "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it"
+            ),
+            ExecOutcome::Errored => panic!("full-reload survivor resume crashed -- the layout stamp regressed"),
+        }
+    }
+
+    /// PREMISE pin for the schema-drift restart policy
+    /// (docs/hot-reload-schema-drift-plan.md): a struct SHAPE edit is an
+    /// Interface-tier full rebuild, but the full reload is a re-`dofile` that
+    /// preserves any mutable global whose declared-type STRING is unchanged --
+    /// and `"Mob?"` names the shape without describing it. A live instance
+    /// therefore SURVIVES the reload with its old field set while every reader
+    /// recompiles to the new one: the recompiled reader nil-reads the added
+    /// field and dies on the first arithmetic touch (or silently propagates
+    /// nil through dynamic sinks). Non-inverted -- this documents the emit
+    /// layer's real behavior; the restart policy prevents the scenario one
+    /// layer up (the stone watcher), which this harness deliberately bypasses.
+    #[test]
+    fn struct_field_add_full_reload_nil_poisons_live_instances() {
+        let v0 = "struct Mob { hp: int }\n\
+                  global M: Mob? = null\n\
+                  fn spawn() { M = Mob { hp: 10 } }\n\
+                  fn describe() {\n  let m = M\n  if m != null { print(\"{m.hp}\") }\n}\n\
+                  fn main() { }\n";
+        let v1 = "struct Mob { hp: int, armor: int }\n\
+                  global M: Mob? = null\n\
+                  fn spawn() { M = Mob { hp: 10, armor: 5 } }\n\
+                  fn describe() {\n  let m = M\n  if m != null { print(\"{m.hp + m.armor}\") }\n}\n\
+                  fn main() { }\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let full0 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0").0;
+
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(
+                result.tier,
+                bone_incremental::session::UpdateTier::Interface
+                    | bone_incremental::session::UpdateTier::FullUser
+            ),
+            "a struct shape edit must be a full rebuild (the premise), got {:?}",
+            result.tier
+        );
+        let full1 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+
+        // Survival premise: the live v0 instance rides through the full
+        // re-dofile untouched -- `"Mob?"` didn't change, so the guard skips
+        // the re-init and the old-shape table persists.
+        let survival = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "spawn()",
+            "describe()",
+            "_G.HOT_RELOAD = true",
+            &full1.lua,
+            "print(_G.M ~= nil and _G.M.armor == nil)",
+        ]);
+        match survival {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "10\ntrue",
+                "a live struct instance must survive the full re-dofile WITHOUT the added field"
+            ),
+            ExecOutcome::Errored => panic!("struct-shape survival fixture failed to run"),
+        }
+
+        // Corruption: the v1 reader assumes `armor: int` on an instance that
+        // never had it -- `m.hp + m.armor` is arithmetic on nil.
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "spawn()",
+            "describe()",
+            "_G.HOT_RELOAD = true",
+            &full1.lua,
+            "describe()",
+        ]);
+        match composed {
+            ExecOutcome::Errored => {} // the pinned corruption
+            ExecOutcome::Output(o) => panic!(
+                "expected the recompiled reader to die on the nil-valued added field, got output:\n{}",
+                normalize_stdout(&o)
+            ),
+        }
+    }
+
+    /// PREMISE pin for the schema-drift restart policy, value-struct class
+    /// (docs/hot-reload-schema-drift-plan.md): LuaJIT `ffi.cdef` typedef
+    /// redefinition is a SILENT NO-OP -- the v1 chunk's cdef "succeeds" but
+    /// `ffi.typeof` keeps the ORIGINAL layout for the life of the process.
+    /// Value-struct construction is POSITIONAL in declared-field order
+    /// (`P_ct(a, b)`), so after a field REORDER the v1 ctor call feeds v1-order
+    /// args into the frozen v0 ctype: every field silently gets the wrong
+    /// value. Not even a fresh post-reload construction is safe -- this is the
+    /// class where no in-process response exists, the core restart argument.
+    #[test]
+    fn value_struct_reorder_full_reload_misassigns_positional_ctor() {
+        let v0 = "value P { x: int, y: int }\n\
+                  global CUR: P = P { x: 0, y: 0 }\n\
+                  fn store_p() { CUR = P { x: 1, y: 2 } }\n\
+                  fn show() { print(\"{CUR.x},{CUR.y}\") }\n\
+                  fn main() { }\n";
+        let v1 = "value P { y: int, x: int }\n\
+                  global CUR: P = P { x: 0, y: 0 }\n\
+                  fn store_p() { CUR = P { x: 1, y: 2 } }\n\
+                  fn show() { print(\"{CUR.x},{CUR.y}\") }\n\
+                  fn main() { }\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let full0 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0").0;
+
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(
+                result.tier,
+                bone_incremental::session::UpdateTier::Interface
+                    | bone_incremental::session::UpdateTier::FullUser
+            ),
+            "a value-struct layout edit must be a full rebuild (the premise), got {:?}",
+            result.tier
+        );
+        let full1 = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+
+        // v0 alone: sanity -- set/show agree on the layout.
+        let fresh = run_parts(&[&full0.lua, stub_for(&full0.lua), "store_p()", "show()"]);
+        match fresh {
+            ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1,2"),
+            ExecOutcome::Errored => panic!("value-struct v0 fixture failed to run"),
+        }
+
+        // Composed: the v1 chunk re-cdefs P (silent no-op), then a FRESH
+        // post-reload `set()` constructs `P { x: 1, y: 2 }` through the v1
+        // positional order (y first) against the frozen v0 ctype (x first):
+        // x=2, y=1. The pinned output is the SWAP -- silently wrong values,
+        // no error anywhere.
+        let composed = run_parts(&[
+            &full0.lua,
+            stub_for(&full0.lua),
+            "store_p()",
+            "show()",
+            "_G.HOT_RELOAD = true",
+            &full1.lua,
+            "store_p()",
+            "show()",
+        ]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1,2\n2,1",
+                "expected the frozen-ctype positional misassignment (the pinned corruption)"
+            ),
+            ExecOutcome::Errored => panic!(
+                "value-struct reorder fixture errored -- if ffi.cdef redefinition \
+                 started FAILING loudly, the premise (and the plan doc) needs updating"
+            ),
+        }
+    }
+
+    /// A flat enum's DEFINITION change (here: a payload widening that adds a frame
+    /// slot) must classify as an Interface edit -> full `main.lua` rebuild (+ overlay
+    /// wipe), NOT a BodyOnly overlay. This is what keeps the frame-slot channel safe
+    /// across a shape change: a live coroutine can only survive a BodyOnly reload, and
+    /// its (v0) resume box-rebuild + the consumer's `__y*` reads assume the v0 slot
+    /// count. Were a shape change a mere overlay, the new step would write a different
+    /// number of slots against stale readers. The Interface tier forces a full rebuild
+    /// (fresh program, no live objects carried over), so that mismatch is impossible.
+    #[test]
+    fn flat_enum_shape_edit_forces_full_rebuild_not_overlay() {
+        let v0 = "enum Ev { Tick(int), Act(() -> ()) }\n\
+                  co fn gen() -> Coroutine<Ev> { yield Ev::Tick(1) }\n\
+                  fn main() { let c = gen() }\n";
+        // Widen Tick to two payloads: Ev's flat shape grows a positional slot.
+        let v1 = "enum Ev { Tick(int, int), Act(() -> ()) }\n\
+                  co fn gen() -> Coroutine<Ev> { yield Ev::Tick(1, 2) }\n\
+                  fn main() { let c = gen() }\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(
+                result.tier,
+                bone_incremental::session::UpdateTier::Interface
+                    | bone_incremental::session::UpdateTier::FullUser
+            ),
+            "an enum shape change must force a full rebuild (not a BodyOnly overlay), got {:?}",
+            result.tier
+        );
+    }
+
     /// `@on_reload` callbacks (e.g. the engine's `fire_live_coroutine_hot_reloads`,
     /// which drives every live coroutine's `on_hot_reload` hook) must fire on EVERY
     /// incremental reload, not just the first. `__rock_fire_hot_reload_callbacks()`
@@ -3031,7 +3701,7 @@ fn skull_game_main(preamble: &str, emit_lua: &str) -> String {
 /// case and is fine; ANY other error is surfaced -- a stale `incremental.lua`
 /// left beside a fresh `main.lua` would reintroduce the overlay/main desync the
 /// two-file split exists to avoid.
-fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
+pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
     match std::fs::remove_file(incremental_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -3064,6 +3734,7 @@ fn write_full_main(
 /// `emit_ms` is codegen + file write (`emit_overlay`/`emit_full`). `bytes` is the
 /// written output size -- for `Incremental` that's the overlay size, the headline
 /// signal for the overlay-size question.
+#[derive(Debug)]
 pub enum SkullReload {
     /// Full rebuild: `main.lua` rewritten, `incremental.lua` wiped (interface/
     /// structural edit, or initial build).
@@ -3073,6 +3744,12 @@ pub enum SkullReload {
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
     /// is the separate disk write of the overlay.
     Incremental { bytes: usize, reinferred: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
+    /// A type's runtime SHAPE changed (docs/hot-reload-schema-drift-plan.md):
+    /// live state cannot be migrated, so the game process must RESTART.
+    /// Nothing was written -- the running process must never dofile the
+    /// new-shape program; the restart path's `force_full` writes it after the
+    /// kill. `types` names the drifted types for the why-log.
+    ShapeChanged { types: Vec<String> },
     /// Nothing changed (content-hash no-op).
     NoChange,
 }
@@ -3094,6 +3771,15 @@ pub struct SkullStone {
     /// read was the waste. A full re-discover only happens when the file SET
     /// changes (add/delete) or a changed path doesn't match a cached source.
     sources: SourceFiles,
+    /// Per-type layout hashes of the last program the game process could have
+    /// loaded. A full recompile whose hashes drifted returns
+    /// `SkullReload::ShapeChanged` (restart request) instead of writing
+    /// (docs/hot-reload-schema-drift-plan.md).
+    shape_hashes: skull::ShapeHashes,
+    /// Whether discovery keeps test-only files (tests/ dirs). The stone game
+    /// build excludes them; the sim-runner build includes them (`@sim` bodies
+    /// live there). Recorded so `recompile`'s full re-discover matches init.
+    include_tests: bool,
 }
 
 /// The Session emit gate. `bone_session` lowering is TOTAL -- it always
@@ -3123,12 +3809,24 @@ fn session_emit_verdict(
 impl SkullStone {
     /// Initial build: warm the Session, `emit_full` -> game-shaped `main.lua`,
     /// wipe `incremental.lua`. Errors render against the project sources.
+    /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
+    /// can't break the running game. See `docs/sims-out-of-game-build-plan.md`.
     pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
+        Self::init_impl(dir, main_path, incremental_path, false)
+    }
+
+    /// Sim-runner build: same as [`SkullStone::init`] but discovery KEEPS
+    /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
+    /// of the emitted program.
+    pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
+        Self::init_impl(dir, main_path, incremental_path, true)
+    }
+
+    fn init_impl(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path, include_tests: bool) -> Result<SkullStone> {
         use std::path::PathBuf;
         let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-        // Game build: exclude test-only files (tests/ dirs) so a broken sim/test
-        // can't break the running game. See `docs/sims-out-of-game-build-plan.md`.
-        let sources = crate::unified_compile::discover_sources(&spec)?.production_only();
+        let discovered = crate::unified_compile::discover_sources(&spec)?;
+        let sources = if include_tests { discovered } else { discovered.production_only() };
         let files: Vec<(String, String)> = sources
             .files
             .iter()
@@ -3153,7 +3851,8 @@ impl SkullStone {
         };
         let preamble = skull_game_preamble(dir);
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
-        Ok(SkullStone { session, cache, preamble, dir: dir.to_string(), sources })
+        let shape_hashes = skull::type_shape_hashes(session.workspace());
+        Ok(SkullStone { session, cache, preamble, dir: dir.to_string(), sources, shape_hashes, include_tests })
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
@@ -3191,21 +3890,61 @@ impl SkullStone {
         }
         if need_full {
             let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(&self.dir));
-            // Game build: keep test-only files (tests/ dirs) out of the live
-            // program. See `docs/sims-out-of-game-build-plan.md`.
-            self.sources = crate::unified_compile::discover_sources(&spec)?.production_only();
+            // Re-discover with the same test-file policy as init (game build
+            // excludes tests/ dirs; sim build keeps them).
+            let discovered = crate::unified_compile::discover_sources(&spec)?;
+            self.sources = if self.include_tests { discovered } else { discovered.production_only() };
             feed = self.sources.files.iter()
                 .map(|f| { let f = f.borrow(); (f.file.to_id_path(), f.contents.clone()) })
                 .collect();
         }
 
+        self.route_and_emit(&feed, main_path, incremental_path, t_cook)
+    }
+
+    /// In-memory edit: replace one source's contents WITHOUT touching disk and
+    /// route/emit exactly like a watcher edit. The sim reload-injection path
+    /// (`docs/sim-reload-harness-plan.md`): the runner edits a source in memory
+    /// and writes only the overlay; the project tree is never mutated. Rejects
+    /// a path the build didn't discover -- an edit to an unknown file would
+    /// otherwise silently do nothing.
+    pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+        let t_cook = Instant::now();
+        let canon = std::fs::canonicalize(path)
+            .map_err(|e| anyhow::anyhow!("apply_edit: cannot canonicalize `{}`: {e}", path.display()))?;
+        let id = canon.to_string_lossy().into_owned();
+        let Some(f) = self.sources.files.iter().find(|f| f.borrow().file.to_id_path() == id) else {
+            anyhow::bail!("apply_edit: `{id}` is not a discovered source of `{}`", self.dir);
+        };
+        f.borrow_mut().contents = new_text.to_string(); // error rendering reads this
+        let feed = vec![(id, new_text.to_string())];
+        self.route_and_emit(&feed, main_path, incremental_path, t_cook)
+    }
+
+    /// The current in-session text of a source (reflects prior `apply_edit`s,
+    /// which never touch disk). None if the path isn't a discovered source.
+    pub fn source_text(&self, path: &std::path::Path) -> Option<String> {
+        let id = std::fs::canonicalize(path).ok()?.to_string_lossy().into_owned();
+        self.sources.files.iter()
+            .find(|f| f.borrow().file.to_id_path() == id)
+            .map(|f| f.borrow().contents.clone())
+    }
+
+    /// Feed source edits into the Session, route by the worst tier, and write
+    /// the output: any interface/structural edit -> full `main.lua` + overlay
+    /// wipe (behind the schema-drift gate); body-only edits -> `incremental.lua`
+    /// overlay. Shared by the disk-driven watcher path ([`SkullStone::recompile`])
+    /// and the in-memory sim reload injection ([`SkullStone::apply_edit`]).
+    /// `t_cook` is the caller's front-end timer (includes its feed construction).
+    fn route_and_emit(&mut self, feed: &[(String, String)], main_path: &std::path::Path, incremental_path: &std::path::Path, t_cook: Instant) -> Result<SkullReload> {
+        use std::path::PathBuf;
         // Cheap Arc-clone of the cache handle so error rendering can read the
         // (shared) sources while the Session loop borrows `self.session` mutably.
         let sources = self.sources.clone();
         let mut reinferred: Vec<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)> = Vec::new();
         let mut full = false;
         let mut any_change = false;
-        for (p, text) in &feed {
+        for (p, text) in feed {
             let upd = self
                 .session
                 .update_file(p, text)
@@ -3231,6 +3970,20 @@ impl SkullStone {
 
         let t_emit = Instant::now();
         if full {
+            // Schema-drift gate (docs/hot-reload-schema-drift-plan.md): live
+            // data outlives every reload tier, so if any type's runtime layout
+            // moved, hot-reloading the recompiled program would drive old-shape
+            // state with new-shape readers. Request a process restart and defer
+            // ALL writes -- the stone loop kills the process, then
+            // `force_full` (canonicalize) writes this session's program for the
+            // respawn. Re-baseline the stored hashes now: the delta is consumed
+            // by this one restart.
+            let new_shapes = skull::type_shape_hashes(self.session.workspace());
+            let drifted = skull::shape_diff(&self.shape_hashes, &new_shapes);
+            if !drifted.is_empty() {
+                self.shape_hashes = new_shapes;
+                return Ok(SkullReload::ShapeChanged { types: drifted });
+            }
             let lua = {
                 let ws = self.session.workspace();
                 let mid = skull::user_module_id(ws)
@@ -3297,7 +4050,122 @@ impl SkullStone {
             format!("{}{}", emit.lua, registry)
         };
         write_full_main(&self.preamble, &lua, main_path, incremental_path)?;
+        // This program is what the (re)spawned process loads -- re-baseline the
+        // shape hashes to it, including drift that arrived via a recompile that
+        // bailed on a type error after mutating the session.
+        self.shape_hashes = skull::type_shape_hashes(self.session.workspace());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shape_drift_tests {
+    //! The schema-drift restart trigger (docs/hot-reload-schema-drift-plan.md):
+    //! a type-SHAPE edit returns `ShapeChanged` (restart request) and DEFERS the
+    //! `main.lua` write -- the running process must never hot-reload a program
+    //! whose live data layout it doesn't have. Body and signature-only edits
+    //! stay on the hot paths. The premise repros for the corruption itself are
+    //! `struct_field_add_full_reload_nil_poisons_live_instances` and
+    //! `value_struct_reorder_full_reload_misassigns_positional_ctor`.
+
+    use super::{SkullReload, SkullStone};
+    use std::path::PathBuf;
+
+    fn boot(v0: &str) -> (tempfile::TempDir, SkullStone, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        let main_lua = dir.path().join("main.lua");
+        let inc_lua = dir.path().join("incremental.lua");
+        let rock = dir.path().join("main.rock");
+        std::fs::write(&rock, v0).unwrap();
+        let stone = SkullStone::init(&dir_str, &main_lua, &inc_lua).expect("init");
+        (dir, stone, main_lua, inc_lua, rock)
+    }
+
+    #[test]
+    fn struct_shape_edit_requests_restart_and_defers_the_write() {
+        let v0 = "struct Mob { hp: int }\n\
+                  global M: Mob? = null\n\
+                  fn spawn() { M = Mob { hp: 10 } }\n\
+                  fn main() { }\n";
+        let v1 = "struct Mob { hp: int, armor: int }\n\
+                  global M: Mob? = null\n\
+                  fn spawn() { M = Mob { hp: 10, armor: 5 } }\n\
+                  fn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        let baseline = std::fs::read_to_string(&main_lua).unwrap();
+
+        std::fs::write(&rock, v1).unwrap();
+        let reload = stone.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("recompile v1");
+        match &reload {
+            SkullReload::ShapeChanged { types } => assert!(
+                types.iter().any(|t| t == "Mob"),
+                "the restart request must name the drifted type, got {types:?}"
+            ),
+            other => panic!("a struct shape edit must request a restart (ShapeChanged), got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&main_lua).unwrap(),
+            baseline,
+            "the new-shape main.lua write must be DEFERRED -- the old process must never dofile it"
+        );
+
+        // The restart path canonicalizes: force_full writes the new program.
+        stone.force_full(&main_lua, &inc_lua).expect("force_full");
+        assert_ne!(
+            std::fs::read_to_string(&main_lua).unwrap(),
+            baseline,
+            "canonicalize after the kill must write the deferred new-shape program"
+        );
+
+        // Re-baselined: recompiling the same source again is a no-op, not a
+        // second restart request.
+        let again = stone.recompile(&[rock], &main_lua, &inc_lua).expect("recompile same");
+        assert!(
+            matches!(again, SkullReload::NoChange),
+            "the shape delta must be consumed by the restart, got {again:?}"
+        );
+    }
+
+    #[test]
+    fn value_struct_layout_edit_requests_restart() {
+        let v0 = "value P { x: int, y: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";
+        let v1 = "value P { y: int, x: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        std::fs::write(&rock, v1).unwrap();
+        let reload = stone.recompile(&[rock], &main_lua, &inc_lua).expect("recompile v1");
+        assert!(
+            matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "P")),
+            "a value-struct field reorder freezes against the process ctype -- must restart, got {reload:?}"
+        );
+    }
+
+    #[test]
+    fn body_and_signature_edits_stay_on_the_hot_paths() {
+        let v0 = "struct Mob { hp: int }\n\
+                  fn heal(m: Mob) -> int { m.hp }\n\
+                  fn main() { }\n";
+        let body = "struct Mob { hp: int }\n\
+                    fn heal(m: Mob) -> int { m.hp + 1 }\n\
+                    fn main() { }\n";
+        let sig = "struct Mob { hp: int }\n\
+                   fn heal(m: Mob, bonus: int) -> int { m.hp + bonus }\n\
+                   fn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+
+        std::fs::write(&rock, body).unwrap();
+        let reload = stone.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("body edit");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "a body edit must stay a hot overlay, got {reload:?}"
+        );
+
+        std::fs::write(&rock, sig).unwrap();
+        let reload = stone.recompile(&[rock], &main_lua, &inc_lua).expect("sig edit");
+        assert!(
+            matches!(reload, SkullReload::Full { .. }),
+            "a signature-only edit carries no data-shape drift -- full reload, NOT a restart, got {reload:?}"
+        );
     }
 }
 

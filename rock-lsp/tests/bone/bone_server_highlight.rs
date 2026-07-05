@@ -6,7 +6,7 @@
 //! LspWorkspace, the same way the server does on a request.
 
 use lsp_types::*;
-use rock_lsp::{do_document_highlight_workspace, LspBackend, LspWorkspace};
+use rock_lsp::{do_document_highlight_workspace, LspWorkspace};
 use std::str::FromStr;
 
 // `count` is declared on line 1 and used on lines 2 and 3 -> three occurrences.
@@ -21,7 +21,6 @@ fn main() {
 fn bone_ws(path: &std::path::Path) -> LspWorkspace {
     std::fs::write(path, SRC).unwrap();
     let mut ws = LspWorkspace::new();
-    ws.backend = LspBackend::Bone;
     ws.bone.update(path.to_str().unwrap(), SRC.to_string());
     ws
 }

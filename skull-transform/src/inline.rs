@@ -450,10 +450,8 @@ fn remap_term_clone(
             }
             *default = bm[default];
         }
-        Term::Yield { value, resume } => {
-            if let Some(v) = value {
-                *v = mi(*v);
-            }
+        Term::Yield { values, resume } => {
+            values.iter_mut().for_each(|v| *v = mi(*v));
             *resume = bm[resume];
         }
         Term::Unreachable => {}

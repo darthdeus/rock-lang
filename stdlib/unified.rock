@@ -130,11 +130,9 @@ struct NativeBuffer<T> {
 @nomangle inline(lua) fn __nb_alloc_float(n: int) -> Ptr<float> = 'return ffi.new("float[?]", n)'
 @nomangle inline(lua) fn __nb_alloc_int(n: int) -> Ptr<int> = 'return ffi.new("int[?]", n)'
 
-@allocates
 fn native_buffer_float(n: int) -> NativeBuffer<float> {
     return NativeBuffer { ptr: __nb_alloc_float(n), len: n }
 }
-@allocates
 fn native_buffer_int(n: int) -> NativeBuffer<int> {
     return NativeBuffer { ptr: __nb_alloc_int(n), len: n }
 }
@@ -199,7 +197,6 @@ struct Metric {
     p99: float,
 }
 
-@allocates
 fn metric_new(name: string, cap: int) -> Metric {
     return Metric {
         name: name,
@@ -389,11 +386,11 @@ struct NativeBufferU32 { ptr: PtrU32, len: int }
 @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
 @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
 
-@allocates fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
-@allocates fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
-@allocates fn native_buffer_u16(n: int) -> NativeBufferU16 { return NativeBufferU16 { ptr: __nb_alloc_u16(n), len: n } }
-@allocates fn native_buffer_i16(n: int) -> NativeBufferI16 { return NativeBufferI16 { ptr: __nb_alloc_i16(n), len: n } }
-@allocates fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: __nb_alloc_u32(n), len: n } }
+fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
+fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
+fn native_buffer_u16(n: int) -> NativeBufferU16 { return NativeBufferU16 { ptr: __nb_alloc_u16(n), len: n } }
+fn native_buffer_i16(n: int) -> NativeBufferI16 { return NativeBufferI16 { ptr: __nb_alloc_i16(n), len: n } }
+fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: __nb_alloc_u32(n), len: n } }
 
 // Single-hop accessors per variant. All surface as int (LuaJIT handles
 // the C<->Lua number conversion at the ffi boundary). One nb_get + nb_set
@@ -949,12 +946,12 @@ macro log_throttled(category: expr, msg: expr, interval_sec: expr, site: expr) {
 extern(lua) fn error(message: string)
 
 // Note: Lua has built-in tostring(), declare as extern
-@allocates extern(lua) fn tostring(value: any) -> string
+extern(lua) fn tostring(value: any) -> string
 
 // Method versions of tostring for basic types
-@allocates fn to_string(value: int) -> string { return tostring(value) }
+fn to_string(value: int) -> string { return tostring(value) }
 
-@allocates fn to_string(value: float) -> string {
+fn to_string(value: float) -> string {
     let str_value = tostring(value)
     // Ensure floats always show decimal point for Lua compatibility
     if find(str_value, ".") == -1 { return str_value + ".0" }
@@ -964,10 +961,10 @@ extern(lua) fn error(message: string)
 // `to_string(string)` is the identity via @expand — does NOT allocate.
 @inline inline(lua) fn to_string(value: string) -> string = "return value"
 
-@allocates fn to_string(value: bool) -> string { return tostring(value) }
+fn to_string(value: bool) -> string { return tostring(value) }
 
 // Generic to_string function that handles any type including nullable/nil values
-@allocates @nomangle inline(lua) fn to_string(value: any) -> string = """
+@nomangle inline(lua) fn to_string(value: any) -> string = """
     if value == nil then
         return "nil"
     end
@@ -1181,7 +1178,7 @@ end
 // regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
 // it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
 // UFCS). See docs/skull-vec-representation-divergence.md.
-@allocates @nomangle inline(lua) fn vec_new<T>() -> [T] = """
+@nomangle inline(lua) fn vec_new<T>() -> [T] = """
     return { data = {}, len = 0, __ty = "Vec" }
 """
 
@@ -1302,15 +1299,15 @@ fn swap_remove<T>(vec: [T], index: int) -> T? {
 // enumerate() returns a lazy closure iterator yielding (index, value) pairs.
 // Each overload has a type-specific body — no runtime dispatch needed.
 
-@allocates inline(lua) fn enumerate<T>(collection: [T]) -> [(int, T)] = """
+inline(lua) fn enumerate<T>(collection: [T]) -> [(int, T)] = """
     return __rock_enumerate(__rock_iter_vec_simple(collection))
 """
 
-@allocates inline(lua) fn enumerate<T>(collection: Arena<T>) -> [(int, (Entity<T>, T))] = """
+inline(lua) fn enumerate<T>(collection: Arena<T>) -> [(int, (Entity<T>, T))] = """
     return __rock_enumerate(__rock_iter_arena(collection))
 """
 
-@allocates inline(lua) fn enumerate<K, V>(collection: Map<K, V>) -> [(int, (K, V))] = """
+inline(lua) fn enumerate<K, V>(collection: Map<K, V>) -> [(int, (K, V))] = """
     return __rock_enumerate(__rock_iter_map(collection))
 """
 
@@ -1318,7 +1315,7 @@ fn swap_remove<T>(vec: [T], index: int) -> T? {
 // via unwrap_enumerate_expr and emits a direct numeric loop reading buf.ptr[i].
 // This overload only runs if enumerate(buf) is called from a non-for-loop
 // context (e.g. stored in a variable) — it materializes the tuples into a Vec.
-@allocates inline(lua) fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] = """
+inline(lua) fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] = """
     local out = vec_new()
     local n = collection.len
     local ptr = collection.ptr
@@ -1501,7 +1498,7 @@ inline(lua) fn float_to_int(value: float) -> int = """
 // `Y?` regardless of R (D2a Unit-elision), with the typed return
 // value on `.result()`.
 inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
-    return c.resume()
+    return c.__resume(c)
 """
 
 // Unified resume: 2-arg overload for `N != Unit`. Same name as the
@@ -1515,7 +1512,7 @@ inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
 // (no `let x = yield V` exists for the body to bind), so prefer the
 // arg-less form there.
 inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
-    return c.resume(arg)
+    return c.__resume(c, arg)
 """
 
 // PR-γ: read the value stashed by `return expr` at a co fn's
@@ -1524,11 +1521,11 @@ inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
 // `R = Unit` coroutines (the default), `R?` is `Unit?` and is always
 // null in practice — same observable as before.
 inline(lua) fn result<Y, R, N>(c: Coroutine<Y, R, N>) -> R? = """
-    return c.result()
+    return c.__return
 """
 
 inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
-    return c.status()
+    if c.__state == -2 then return "errored" elseif c.__state < 0 then return "dead" else return "suspended" end
 """
 
 // D6b: read the error message captured when a step-fn raised during a
@@ -1540,14 +1537,39 @@ inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
 // the stdlib `extern(lua) fn error(message: string)` (the panic-style
 // thrower) -- that's a parking note from the design discussion.
 inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
-    return c.last_error()
+    return c.__error
 """
 
 // Kill a coroutine. Fires the on_killed hook (if registered) and
 // transitions state to terminal. Further resumes return nil. Idempotent:
 // calling kill twice only fires the hook once.
+// Run a dying coroutine's still-pending terminal defers, LIFO, each body
+// pcall'd so one failing defer is logged and the rest still run. `__defers`
+// holds the per-site defer fns BY VALUE (creation-time), so a stale frame
+// (hot-reload stamp-kill) runs cleanup matching ITS layout. @nomangle: called
+// from __rock_coroutine_kill's inline body and from compiler-emitted ctors.
+@nomangle inline(lua) fn __rock_coroutine_run_defers(c: any) = """
+    if not c.__defers then return end
+    for i = #c.__defers, 1, -1 do
+        local ok, err = pcall(c.__defers[i], c)
+        if not ok then __stone_log(0, "CO", "coroutine defer failed during cleanup: " .. tostring(err)) end
+    end
+"""
+
+// Recursive kill core: terminal-mark, chain into the delegated inner
+// (`yield*` stores it at `__inner`), run pending terminal defers, fire the
+// on_killed hook. @nomangle: calls ITSELF by name and is called from kill()'s
+// inline(lua) body.
+@nomangle inline(lua) fn __rock_coroutine_kill(c: any) = """
+    if c.__state < 0 then return end
+    c.__state = -1
+    if c.__inner then __rock_coroutine_kill(c.__inner) end
+    __rock_coroutine_run_defers(c)
+    if c.__on_killed then c.__on_killed() end
+"""
+
 inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
-    c.kill()
+    __rock_coroutine_kill(c)
 """
 
 // Fire the on_hot_reload hook on a live coroutine instance (if declared
@@ -1555,7 +1577,9 @@ inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
 // on every hot reload across all polled coroutines. Safe to call on any
 // handle — dead or hook-less coroutines no-op.
 inline(lua) fn fire_hot_reload<Y, R, N>(c: Coroutine<Y, R, N>) = """
-    c.fire_hot_reload()
+    if c.__state >= 0 and c.__on_hot_reload then
+        c.__on_hot_reload()
+    end
 """
 
 // Register a closure to run at the start of every .resume() call on this
@@ -1947,7 +1971,7 @@ inline(lua) fn ffi_cdef(def: string) = """
 
 
 // Map operations
-@allocates fn map_new<K, V>() -> Map<K, V> {
+fn map_new<K, V>() -> Map<K, V> {
     transmute(table_new())
 }
 
@@ -2126,7 +2150,7 @@ struct Vec<T> {
 
 // Vec operations
 
-@allocates fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {
+fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {
     let result: [U] = []
 
     for item in vec {
@@ -2136,7 +2160,7 @@ struct Vec<T> {
     return result
 }
 
-@allocates fn filter<T>(vec: [T], predicate: fn(T) -> bool) -> [T] {
+fn filter<T>(vec: [T], predicate: fn(T) -> bool) -> [T] {
     let result: [T] = []
 
     for item in vec {
@@ -2358,7 +2382,7 @@ fn arena_entry_new<T>(data: T, index: int, generation: int) -> ArenaEntry<T> {
     }
 }
 
-@allocates fn arena_new<T>() -> Arena<T> {
+fn arena_new<T>() -> Arena<T> {
     return Arena { entries: [], free_indices: [], occupied_count: 0 }
 }
 

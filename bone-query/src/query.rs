@@ -1,4 +1,6 @@
+use bone_semantic::hir::{BindingKind, Function};
 use bone_semantic::{hir::NodeRef, prelude::*};
+use skull_parser::Ast;
 
 pub fn definition_at(
     ws: &Workspace,
@@ -16,11 +18,14 @@ pub fn definition_at(
         return Some(s);
     }
 
-    // Smallest node covering the cursor (same as type_at)
+    // Smallest node covering the cursor, preferring one with an INFORMATIVE
+    // type (see `hover_at`): keeps goto-definition on the identifier if a small
+    // uninformative overlay ever shares its offset.
+    let def_bi = inf.per_fn.get(&owner);
     let iv = body
         .node_index()
         .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)?;
+        .min_by_key(|x| (def_bi.map_or(0, |bi| node_ty_uninformative(ws, bi, x.val)), x.stop - x.start))?;
 
     match iv.val {
         // Cursor on a decl itself
@@ -250,6 +255,30 @@ fn builtin_type_landmark(name: Ustr, ws: &Workspace) -> Option<Span> {
 /// Not yet handled (need bone to record the relevant identifier spans, shared
 /// with the goto-definition name-span work): a struct/enum *declaration* name,
 /// a struct-literal *field* name (vs the head), and pattern field names.
+/// Hover tie-break rank: 0 if the node has an informative type, 1 if it has none
+/// or resolves to `never`/`<error>`. Used to prefer a concrete-typed node over an
+/// equal-span wrapper node (e.g. a lambda body vs its `never`-typed wrapper).
+fn node_ty_uninformative(ws: &Workspace, bi: &BodyInference, node: NodeRef) -> u8 {
+    let ty = match node {
+        NodeRef::Expr(e) => bi.expr_types.get(e).copied(),
+        NodeRef::Binding(b) => bi.binding_types.get(b).copied(),
+        _ => return 0,
+    };
+    match ty {
+        Some(t) => {
+            let te = match t {
+                TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+                TyId::Local(idx) => bi.ty_arena[idx],
+            };
+            u8::from(matches!(
+                te,
+                hir::TypeExpr::Builtin(hir::BuiltinTy::Never | hir::BuiltinTy::Error)
+            ))
+        }
+        None => 1,
+    }
+}
+
 pub fn hover_at(
     ws: &Workspace,
     mid: ModuleId,
@@ -266,10 +295,17 @@ pub fn hover_at(
             if let Some(hit) = hover_record_pat(ws, body, offset) {
                 return Some(hit);
             }
+            // Prefer the node with an INFORMATIVE type, then the smallest --
+            // belt-and-suspenders against small uninformative overlays (e.g. a
+            // brace marker or `never`-typed wrapper sharing an offset with a
+            // typed node) shadowing the node the user is actually on. A genuine
+            // `never` expr with no informative sibling still wins. Offset
+            // stability across every identifier char is pinned by
+            // bone-query/tests/{completion_sweep,phantom_block_sentinel}.rs.
             if let Some(iv) = body
                 .node_index()
                 .find(offset, offset + 1)
-                .min_by_key(|x| x.stop - x.start)
+                .min_by_key(|x| (node_ty_uninformative(ws, bi, x.val), x.stop - x.start))
             {
                 match iv.val {
                     NodeRef::Expr(e) => {
@@ -304,7 +340,7 @@ pub fn hover_at(
                                 if let Some((cmid, fid)) = bi.resolved_overload_calls.get(&e) {
                                     let f = &ws.modules.get(cmid.index())?.functions[*fid];
                                     let sig =
-                                        crate::backend::gaps::render_fn_signature(ws, f.name, f);
+                                        render_fn_signature(ws, f.name, f);
                                     return Some((fenced(&sig), span));
                                 }
                             }
@@ -347,7 +383,7 @@ pub fn hover_at(
         }
         let (s, e) = f.name_span.offset_range;
         if s <= offset && offset < e {
-            let sig = crate::backend::gaps::render_fn_signature(ws, f.name, f);
+            let sig = render_fn_signature(ws, f.name, f);
             return Some((fenced(&sig), f.name_span));
         }
     }
@@ -430,7 +466,7 @@ pub fn fn_signature_hover(
         // extern/abstract fn with no body).
         let body_open = src.get(s..e).and_then(|seg| seg.find('{')).map_or(e, |i| s + i);
         if offset < body_open {
-            let sig = crate::backend::gaps::render_fn_signature(ws, f.name, f);
+            let sig = render_fn_signature(ws, f.name, f);
             return Some((fenced(&sig), f.name_span));
         }
     }
@@ -634,18 +670,67 @@ fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
     None
 }
 
+/// A reference site for find-references/rename. `shorthand` is set when the
+/// site is a struct-literal or record-pattern shorthand token (`S { x }`) that
+/// stands for both a field name and a same-named binding -- rename must expand
+/// the shorthand instead of replacing the token.
+#[derive(Clone, Copy, Debug)]
+pub struct RefSite {
+    pub span: Span,
+    pub shorthand: Option<Shorthand>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Shorthand {
+    /// The renamed symbol is the binding; the field keeps its name:
+    /// `{ x }` -> `{ x: <new> }`.
+    KeepField(Ustr),
+    /// The renamed symbol is the field; the binding keeps its name:
+    /// `{ x }` -> `{ <new>: x }`.
+    KeepBinding(Ustr),
+}
+
+impl RefSite {
+    fn plain(span: Span) -> Self {
+        RefSite {
+            span,
+            shorthand: None,
+        }
+    }
+}
+
 pub fn references(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
-) -> Vec<Span> {
+) -> Vec<RefSite> {
+    let plain = |spans: Vec<Span>| spans.into_iter().map(RefSite::plain).collect();
+
     if let Some(local) = local_references(ws, mid, offset) {
         return local;
     }
 
+    if let Some((gmid, gidx)) = generic_param_at(ws, mid, offset) {
+        return plain(generic_param_references(ws, gmid, gidx));
+    }
+
+    if let Some((ename, variant)) = enum_variant_at(ws, mid, offset) {
+        return plain(enum_variant_references(ws, ename, variant));
+    }
+
+    if let Some(name) = enum_at(ws, mid, offset) {
+        return plain(enum_references(ws, name));
+    }
+
     if let Some(name) = struct_at(ws, mid, inf, offset) {
-        return struct_references(ws, name);
+        // `struct_at` matches any Nominal annotation ctor, including enums
+        // (`c: Color`) -- route those to the enum walk so the declaration and
+        // `Color::` qualifiers rename too.
+        if enum_def_by_name(ws, name).is_some() {
+            return plain(enum_references(ws, name));
+        }
+        return plain(struct_references(ws, name));
     }
 
     if let Some((sname, field)) = struct_field_at(ws, mid, inf, offset) {
@@ -655,7 +740,7 @@ pub fn references(
     if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
         let name = ws.modules.get(fmid.index()).map(|m| m.functions[fid].name);
         if let Some(name) = name {
-            return function_references_by_name(ws, name);
+            return plain(function_references_by_name(ws, name));
         }
     }
 
@@ -798,15 +883,15 @@ fn struct_field_at(
 /// declaration, every `recv.field` access whose receiver is a `sname` (inferred,
 /// so a same-named field on a different struct is excluded), every `sname { field:
 /// .. }` literal field name, and every `sname { field }` record-pattern field.
-fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<Span> {
+fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
     let flen = field.as_str().len();
-    let mut out: Vec<Span> = Vec::new();
-    let mut push = |sp: Span| {
+    let mut out: Vec<RefSite> = Vec::new();
+    let mut push = |site: RefSite| {
         if !out
             .iter()
-            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+            .any(|s| s.span.offset_range == site.span.offset_range && s.span.file == site.span.file)
         {
-            out.push(sp);
+            out.push(site);
         }
     };
 
@@ -814,7 +899,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<Span> {
         // Declaration.
         if let Some(idx) = m.struct_by_name.get(&sname) {
             if let Some(f) = m.structs[*idx].fields.iter().find(|f| f.name == field) {
-                push(f.span);
+                push(RefSite::plain(f.span));
             }
         }
 
@@ -824,12 +909,22 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<Span> {
 
             for (e, expr) in body.expr_arena.iter() {
                 match expr {
-                    // `sname { field: .. }` literal field.
+                    // `sname { field: .. }` literal field. Shorthand (`{ x }`,
+                    // where the value token IS the name token) expands on
+                    // rename, keeping the binding: `{ <new>: x }`.
                     hir::Expr::StructLiteral { name, fields } if *name == sname => {
                         for fidx in fields.clone() {
                             let f = &body.struct_lit_field_arena[fidx];
                             if f.name == field {
-                                push(f.name_span);
+                                let is_shorthand = body
+                                    .expr_spans
+                                    .get(f.value)
+                                    .is_some_and(|vs| vs.offset_range == f.name_span.offset_range);
+                                push(RefSite {
+                                    span: f.name_span,
+                                    shorthand: is_shorthand
+                                        .then_some(Shorthand::KeepBinding(f.name)),
+                                });
                             }
                         }
                     }
@@ -843,10 +938,10 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<Span> {
                         if resolves {
                             if let Some(sp) = body.expr_spans.get(e) {
                                 let end = sp.offset_range.1;
-                                push(Span {
+                                push(RefSite::plain(Span {
                                     offset_range: (end - flen, end),
                                     ..*sp
-                                });
+                                }));
                             }
                         }
                     }
@@ -855,6 +950,8 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<Span> {
             }
 
             // `sname { field }` record-pattern field (struct patterns only).
+            // Shorthand (the sub-pattern's binding token IS the name token)
+            // expands on rename, keeping the binding.
             for pat in body.pattern_arena.values() {
                 if let hir::Pattern::Record {
                     enum_name: None,
@@ -867,7 +964,20 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<Span> {
                         for fidx in fields.clone() {
                             let f = &body.record_pat_field_arena[fidx];
                             if f.name == field {
-                                push(f.name_span);
+                                let is_shorthand = match body.pattern_arena[f.pat] {
+                                    hir::Pattern::Bind(b) => body
+                                        .binding_spans
+                                        .get(b)
+                                        .is_some_and(|bs| {
+                                            bs.offset_range == f.name_span.offset_range
+                                        }),
+                                    _ => false,
+                                };
+                                push(RefSite {
+                                    span: f.name_span,
+                                    shorthand: is_shorthand
+                                        .then_some(Shorthand::KeepBinding(f.name)),
+                                });
                             }
                         }
                     }
@@ -896,36 +1006,12 @@ fn struct_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
         }
     };
 
-    let on_nominal = |te: &hir::TypeExpr| {
-        matches!(te, hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } if *n == name)
-    };
-
     for m in ws.modules.iter() {
         if let Some(idx) = m.struct_by_name.get(&name) {
             push(&m.structs[*idx].name_span);
         }
         for body in m.bodies.values() {
-            // Type-annotation occurrences via `node_index`: `ty_spans` skips
-            // bare `Ident`-kind types (lower.rs), so a `p: Point` param/return
-            // wouldn't be found by iterating `ty_arena` -- but every annotation
-            // is a `StaticTy`/`LocalTy` node here with its source span.
-            for iv in body.node_index().iter() {
-                let te = match iv.val {
-                    NodeRef::StaticTy { mid: tmid, idx } => {
-                        ws.modules.get(tmid.index()).map(|tm| &tm.ty_arena[idx])
-                    }
-                    NodeRef::LocalTy(idx) => Some(&body.lowered_tys[idx]),
-                    _ => None,
-                };
-                if te.is_some_and(on_nominal) {
-                    push(&Span {
-                        file: m.file,
-                        line_range: (0, 0),
-                        col_range: (0, 0),
-                        offset_range: (iv.start, iv.stop),
-                    });
-                }
-            }
+            for_each_nominal_annotation(ws, m.file, body, name, &mut push);
             // `Point { .. }` literal heads.
             for (e, expr) in body.expr_arena.iter() {
                 if matches!(expr, hir::Expr::StructLiteral { name: n, .. } if *n == name) {
@@ -940,7 +1026,382 @@ fn struct_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
     out
 }
 
-fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<Span>> {
+/// Call `f` with the span of every type-annotation node in `body` whose
+/// nominal ctor is `name`. Walks `node_index` rather than `ty_arena`:
+/// `ty_spans` skips bare `Ident`-kind types (lower.rs), so a `p: Point`
+/// param/return wouldn't be found by arena iteration -- but every annotation
+/// is a `StaticTy`/`LocalTy` node here with its source span.
+fn for_each_nominal_annotation(
+    ws: &Workspace,
+    file: Ustr,
+    body: &hir::Body,
+    name: Ustr,
+    f: &mut impl FnMut(&Span),
+) {
+    let on_nominal = |te: &hir::TypeExpr| {
+        matches!(te, hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } if *n == name)
+    };
+    for iv in body.node_index().iter() {
+        let te = match iv.val {
+            NodeRef::StaticTy { mid: tmid, idx } => {
+                ws.modules.get(tmid.index()).map(|tm| &tm.ty_arena[idx])
+            }
+            NodeRef::LocalTy(idx) => Some(&body.lowered_tys[idx]),
+            _ => None,
+        };
+        if te.is_some_and(on_nominal) {
+            f(&Span {
+                file,
+                line_range: (0, 0),
+                col_range: (0, 0),
+                offset_range: (iv.start, iv.stop),
+            });
+        }
+    }
+}
+
+/// `true` if `offset` falls inside `span` (an exact name-token span).
+fn span_contains(span: &Span, offset: usize) -> bool {
+    let (s, e) = span.offset_range;
+    s <= offset && offset < e
+}
+
+/// The `(enum name, variant name)` the cursor is on: a variant *declaration*
+/// name, a qualified use (`Color::Red`, incl. tuple/record payload heads), or
+/// a match-pattern variant name. An unqualified pattern variant resolves to
+/// the first enum declaring that variant (structural, like hover). `None`
+/// otherwise.
+fn enum_variant_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<(Ustr, Ustr)> {
+    let module = ws.modules.get(mid.index())?;
+
+    for en in module.enums.values() {
+        for v in &en.variants {
+            if span_contains(&v.name_span, offset) {
+                return Some((en.name, v.name));
+            }
+        }
+    }
+
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+
+    for (_, expr) in body.expr_arena.iter() {
+        if let hir::Expr::EnumVariant {
+            enum_name,
+            variant,
+            variant_span,
+            ..
+        } = expr
+        {
+            if span_contains(variant_span, offset) {
+                return Some((*enum_name, *variant));
+            }
+        }
+    }
+
+    for pat in body.pattern_arena.values() {
+        match pat {
+            hir::Pattern::EnumVariant {
+                enum_name,
+                variant,
+                variant_span,
+                ..
+            } if span_contains(variant_span, offset) => {
+                let ename = enum_def_for_variant(ws, *enum_name, *variant)?.name;
+                return Some((ename, *variant));
+            }
+            hir::Pattern::Record {
+                enum_name: Some(en),
+                name: Some(v),
+                name_span: Some(nspan),
+                ..
+            } if span_contains(nspan, offset) => {
+                return Some((*en, *v));
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+/// Every reference to variant `ename::variant` across all modules: the
+/// declaration name, every qualified expression use, and every match-pattern
+/// site. Same-named variants on other enums are excluded (qualified sites
+/// carry the enum name; unqualified patterns resolve structurally).
+fn enum_variant_references(ws: &Workspace, ename: Ustr, variant: Ustr) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    let mut push = |sp: Span| {
+        if !out
+            .iter()
+            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+        {
+            out.push(sp);
+        }
+    };
+
+    for m in ws.modules.iter() {
+        if let Some(idx) = m.enums_by_name.get(&ename) {
+            if let Some(v) = m.enums[*idx].variants.iter().find(|v| v.name == variant) {
+                push(v.name_span);
+            }
+        }
+
+        for body in m.bodies.values() {
+            for (_, expr) in body.expr_arena.iter() {
+                if let hir::Expr::EnumVariant {
+                    enum_name,
+                    variant: v,
+                    variant_span,
+                    ..
+                } = expr
+                {
+                    if *enum_name == ename && *v == variant {
+                        push(*variant_span);
+                    }
+                }
+            }
+
+            for pat in body.pattern_arena.values() {
+                match pat {
+                    hir::Pattern::EnumVariant {
+                        enum_name,
+                        variant: v,
+                        variant_span,
+                        ..
+                    } if *v == variant => {
+                        let resolved = enum_def_for_variant(ws, *enum_name, *v).map(|e| e.name);
+                        if resolved == Some(ename) {
+                            push(*variant_span);
+                        }
+                    }
+                    hir::Pattern::Record {
+                        enum_name: Some(en),
+                        name: Some(v),
+                        name_span: Some(nspan),
+                        ..
+                    } if *en == ename && *v == variant => {
+                        push(*nspan);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// The enum name the cursor is on: an enum *declaration* name or the `Enum::`
+/// qualifier of a variant use/pattern. Type-annotation ctors (`c: Color`) are
+/// matched by `struct_at` and routed here by `references`.
+fn enum_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
+    let module = ws.modules.get(mid.index())?;
+
+    for en in module.enums.values() {
+        if in_leading_name(offset, &en.name_span, en.name.as_str().len()) {
+            return Some(en.name);
+        }
+    }
+
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+
+    for (_, expr) in body.expr_arena.iter() {
+        if let hir::Expr::EnumVariant {
+            enum_name,
+            enum_name_span,
+            ..
+        } = expr
+        {
+            if span_contains(enum_name_span, offset) {
+                return Some(*enum_name);
+            }
+        }
+    }
+
+    for pat in body.pattern_arena.values() {
+        let (enum_name, enum_name_span) = match pat {
+            hir::Pattern::EnumVariant {
+                enum_name: Some(en),
+                enum_name_span: Some(sp),
+                ..
+            } => (*en, sp),
+            hir::Pattern::Record {
+                enum_name: Some(en),
+                enum_name_span: Some(sp),
+                ..
+            } => (*en, sp),
+            _ => continue,
+        };
+        if span_contains(enum_name_span, offset) {
+            return Some(enum_name);
+        }
+    }
+
+    None
+}
+
+/// Every reference to enum `name` across all modules: the declaration name,
+/// every `Nominal` type-annotation ctor, and every `name::Variant` qualifier
+/// in expressions and patterns. Each site is clipped to the name token.
+fn enum_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
+    let len = name.as_str().len();
+    let mut out: Vec<Span> = Vec::new();
+    let mut push = |sp: &Span| {
+        let clipped = leading_name_span(sp, len);
+        if !out
+            .iter()
+            .any(|s| s.offset_range == clipped.offset_range && s.file == clipped.file)
+        {
+            out.push(clipped);
+        }
+    };
+
+    for m in ws.modules.iter() {
+        if let Some(idx) = m.enums_by_name.get(&name) {
+            push(&m.enums[*idx].name_span);
+        }
+        for body in m.bodies.values() {
+            for_each_nominal_annotation(ws, m.file, body, name, &mut push);
+
+            for (_, expr) in body.expr_arena.iter() {
+                if let hir::Expr::EnumVariant {
+                    enum_name,
+                    enum_name_span,
+                    ..
+                } = expr
+                {
+                    if *enum_name == name {
+                        push(enum_name_span);
+                    }
+                }
+            }
+
+            for pat in body.pattern_arena.values() {
+                let sp = match pat {
+                    hir::Pattern::EnumVariant {
+                        enum_name: Some(en),
+                        enum_name_span: Some(sp),
+                        ..
+                    } if *en == name => sp,
+                    hir::Pattern::Record {
+                        enum_name: Some(en),
+                        enum_name_span: Some(sp),
+                        ..
+                    } if *en == name => sp,
+                    _ => continue,
+                };
+                push(sp);
+            }
+        }
+    }
+
+    out
+}
+
+/// The fn generic type param the cursor is on, identified by its shared
+/// `ty_arena` slot: every use of `T` in the fn resolves to the single
+/// `TypeExpr::Generic` allocated at declaration (`declare_generics`), so slot
+/// identity gives exact per-fn scoping -- a same-named `T` on another fn is a
+/// different slot. Covers the `<T>` declaration name (via `ty_spans`) and any
+/// annotation use (via `node_index`). Struct/enum generics are NOT matched:
+/// their payload/field types lower without a body, so use sites aren't
+/// enumerable and a decl-only rename would produce broken code.
+fn generic_param_at(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+) -> Option<(ModuleId, Idx<hir::TypeExpr>)> {
+    let module = ws.modules.get(mid.index())?;
+
+    for f in module.functions.values() {
+        for g in &f.generics {
+            if let TyId::Static(gm, gi) = g {
+                let decl = ws.modules.get(gm.index()).and_then(|m| m.ty_spans.get(*gi));
+                if decl.is_some_and(|sp| span_contains(sp, offset)) {
+                    return Some((*gm, *gi));
+                }
+            }
+        }
+    }
+
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let iv = body
+        .node_index()
+        .find(offset, offset + 1)
+        .min_by_key(|x| x.stop - x.start)?;
+    let NodeRef::StaticTy { mid: tmid, idx } = iv.val else {
+        return None;
+    };
+    let m = ws.modules.get(tmid.index())?;
+    match m.ty_arena[idx] {
+        hir::TypeExpr::Generic(..) => Some((tmid, idx)),
+        // `T?` lowers to one node whose slot is a fresh `Nullable` wrapping
+        // the shared generic; the name still leads the span.
+        hir::TypeExpr::Nullable(ii)
+            if matches!(m.ty_arena[ii], hir::TypeExpr::Generic(..)) =>
+        {
+            Some((tmid, ii))
+        }
+        _ => None,
+    }
+}
+
+/// Every reference to the fn generic at `(gmid, gidx)`: the `<T>` declaration
+/// name plus every annotation occurrence (params, return, nested type args,
+/// `T?` wrappers), matched by shared-slot identity. Sites are clipped to the
+/// leading name token.
+fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeExpr>) -> Vec<Span> {
+    let Some(m) = ws.modules.get(gmid.index()) else {
+        return Vec::new();
+    };
+    let hir::TypeExpr::Generic(_, gname) = m.ty_arena[gidx] else {
+        return Vec::new();
+    };
+    let len = gname.as_str().len();
+
+    let mut out: Vec<Span> = Vec::new();
+    let mut push = |sp: Span| {
+        let clipped = leading_name_span(&sp, len);
+        if !out
+            .iter()
+            .any(|s| s.offset_range == clipped.offset_range && s.file == clipped.file)
+        {
+            out.push(clipped);
+        }
+    };
+
+    if let Some(decl) = m.ty_spans.get(gidx) {
+        push(*decl);
+    }
+
+    for body in m.bodies.values() {
+        for iv in body.node_index().iter() {
+            let NodeRef::StaticTy { mid: tmid, idx } = iv.val else {
+                continue;
+            };
+            if tmid != gmid {
+                continue;
+            }
+            let hits = idx == gidx
+                || matches!(m.ty_arena[idx], hir::TypeExpr::Nullable(ii) if ii == gidx);
+            if hits {
+                push(Span {
+                    file: m.file,
+                    line_range: (0, 0),
+                    col_range: (0, 0),
+                    offset_range: (iv.start, iv.stop),
+                });
+            }
+        }
+    }
+
+    out
+}
+
+fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<RefSite>> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
@@ -963,7 +1424,25 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
             _ => None,
         })?;
 
-    let name_len = body.binding_arena[b].name.as_str().len();
+    let name = body.binding_arena[b].name;
+    let name_len = name.as_str().len();
+
+    // A shorthand token (`S { x }` literal, `S { x } =>` pattern) doubles as
+    // the field name: a binding rename must expand it, keeping the field.
+    // Shorthand iff a same-named field's name token IS this site's token;
+    // explicit `x: x` has the field name on a different token.
+    let shorthand_at = |sp: &Span| -> Option<Shorthand> {
+        let lit = body
+            .struct_lit_field_arena
+            .values()
+            .any(|f| f.name == name && f.name_span.offset_range == sp.offset_range);
+        let pat = body
+            .record_pat_field_arena
+            .values()
+            .any(|f| f.name == name && f.name_span.offset_range == sp.offset_range);
+        (lit || pat).then_some(Shorthand::KeepField(name))
+    };
+
     let mut out = Vec::new();
 
     if let Some(s) = body.binding_spans.get(b) {
@@ -971,9 +1450,13 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
         // rename replaces the identifier, not the annotation. (The name always
         // leads the binding span; a plain `let x` is already name-only.)
         let start = s.offset_range.0;
-        out.push(Span {
+        let span = Span {
             offset_range: (start, start + name_len),
             ..*s
+        };
+        out.push(RefSite {
+            span,
+            shorthand: shorthand_at(&span),
         });
     }
 
@@ -981,7 +1464,10 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
         match expr {
             hir::Expr::Var(x) if *x == b => {
                 if let Some(s) = body.expr_spans.get(e) {
-                    out.push(*s);
+                    out.push(RefSite {
+                        span: *s,
+                        shorthand: shorthand_at(s),
+                    });
                 }
             }
 
@@ -991,10 +1477,10 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
             } if *x == b => {
                 if let Some(s) = body.expr_spans.get(e) {
                     let start = s.offset_range.0;
-                    out.push(Span {
+                    out.push(RefSite::plain(Span {
                         offset_range: (start, start + name_len),
                         ..*s
-                    });
+                    }));
                 }
             }
 
@@ -1216,7 +1702,7 @@ pub fn locals_in_scope(
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
-) -> Vec<(Ustr, hir::BindingKind, String)> {
+) -> Vec<(Ustr, hir::BindingKind, String, Option<TyId>)> {
     let mut out = Vec::new();
     let Some(module) = ws.modules.get(mid.index()) else {
         return out;
@@ -1264,10 +1750,15 @@ pub fn locals_in_scope(
             continue;
         }
 
-        let ty = bi
-            .and_then(|bi| bi.binding_types.get(b_idx).map(|t| ws.render(Some(bi), *t)))
-            .unwrap_or_default();
-        out.push((binding.name, binding.kind, ty));
+        // The TyId rides along with the render: a `TyId::Local` here indexes
+        // the cursor body's BodyInference arena -- the same seed an
+        // `ExpectedArg` scratch Gamma clones, so it stays resolvable there.
+        let ty_id = bi.and_then(|bi| bi.binding_types.get(b_idx).copied());
+        let ty = match (bi, ty_id) {
+            (Some(bi), Some(t)) => ws.render(Some(bi), t),
+            _ => String::new(),
+        };
+        out.push((binding.name, binding.kind, ty, ty_id));
     }
 
     out
@@ -1289,7 +1780,7 @@ pub fn struct_fields_for_path(
     mid: ModuleId,
     offset: usize,
     segments: &[String],
-) -> Vec<(String, String)> {
+) -> Vec<(String, String, Option<TyId>)> {
     // Inference-first for a single-binding receiver: if its recovered inferred
     // type is a generic struct App, render fields with the inferred type args
     // substituted (`p: Pair<int, string>` -> `first: int`, not `first: A`).
@@ -1325,7 +1816,7 @@ pub fn struct_fields_for_path(
         Some(sdef) => sdef
             .fields
             .iter()
-            .map(|f| (f.name.to_string(), ws.render(None, f.ty)))
+            .map(|f| (f.name.to_string(), ws.render(None, f.ty), Some(f.ty)))
             .collect(),
         None => Vec::new(),
     }
@@ -1342,7 +1833,7 @@ fn inferred_struct_fields(
     mid: ModuleId,
     offset: usize,
     head: &str,
-) -> Option<Vec<(String, String)>> {
+) -> Option<Vec<(String, String, Option<TyId>)>> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
@@ -1369,16 +1860,19 @@ fn inferred_struct_fields(
         sdef.fields
             .iter()
             .map(|f| {
-                let rendered = match deref_ty(ws, None, f.ty) {
+                // Generic field -> the receiver's inferred type arg (a TyId in
+                // `bi`, the same arena a query-time ExpectedArg is seeded from);
+                // else the declared static field type.
+                let (rendered, ty_id) = match deref_ty(ws, None, f.ty) {
                     Some(hir::TypeExpr::Generic(_, gname)) => gnames
                         .iter()
                         .position(|n| n == gname)
                         .and_then(|i| args.get(i))
-                        .map(|arg| ws.render(Some(bi), *arg))
-                        .unwrap_or_else(|| ws.render(None, f.ty)),
-                    _ => ws.render(None, f.ty),
+                        .map(|arg| (ws.render(Some(bi), *arg), Some(*arg)))
+                        .unwrap_or_else(|| (ws.render(None, f.ty), Some(f.ty))),
+                    _ => (ws.render(None, f.ty), Some(f.ty)),
                 };
-                (f.name.to_string(), rendered)
+                (f.name.to_string(), rendered, ty_id)
             })
             .collect(),
     )
@@ -1834,6 +2328,9 @@ pub struct UfcsMethod {
     /// Rendered return type, or None for a `()`-returning method. Drives
     /// type-directed completion (`recv.method()` as a value of the wanted type).
     pub returns: Option<String>,
+    /// The return type as a TyId (module-static), for the typed expected-arg
+    /// compare; None when the method returns `()`/nothing.
+    pub return_ty: Option<TyId>,
 }
 
 /// UFCS methods callable as `recv.method(...)` on a value of struct `name`:
@@ -1851,10 +2348,11 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
                 if struct_name_of_ty(ws, None, p0.ty) == Some(name) {
                     out.push(UfcsMethod {
                         name: f.name.to_string(),
-                        signature: crate::backend::gaps::render_fn_signature(ws, f.name, f),
+                        signature: render_fn_signature(ws, f.name, f),
                         // the receiver consumes p0; args remain iff there's a p1+
                         takes_args: f.param_decls.len() > 1,
                         returns: f.return_ty.map(|t| ws.render(None, t)),
+                        return_ty: f.return_ty,
                     });
                 }
             }
@@ -1873,6 +2371,35 @@ pub fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, String)
             .map(|f| (f.name.to_string(), ws.render(None, f.ty)))
             .collect(),
         None => Vec::new(),
+    }
+}
+
+/// The rendered RETURN type of struct `name`'s field `field`, when that field's
+/// type is a function type (`fn(..) -> R` -> `R`); else None. Used to type-direct
+/// completion inside a lambda body assigned to a function-typed field.
+pub fn struct_field_fn_return_type(ws: &Workspace, name: &str, field: &str) -> Option<String> {
+    struct_field_fn_return_ty(ws, name, field).map(|t| ws.render(None, t))
+}
+
+/// The declared TyId of struct `name`'s field `field` (Static -- struct defs
+/// are lowered module items). Typed twin of `struct_fields_by_name`'s render.
+pub fn struct_field_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
+    let sdef = struct_def_by_name(ws, Ustr::from(name))?;
+    sdef.fields.iter().find(|f| f.name.as_str() == field).map(|f| f.ty)
+}
+
+/// TyId twin of `struct_field_fn_return_type`: the RETURN TyId of a
+/// function-typed field.
+pub fn struct_field_fn_return_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
+    let sdef = struct_def_by_name(ws, Ustr::from(name))?;
+    let f = sdef.fields.iter().find(|f| f.name.as_str() == field)?;
+    let te = match f.ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        TyId::Local(_) => return None,
+    };
+    match te {
+        hir::TypeExpr::Function { ret, .. } => Some(f.ty.with_idx(ret)),
+        _ => None,
     }
 }
 
@@ -2256,4 +2783,630 @@ fn format_variant_arm(enum_name: Ustr, v: &hir::EnumVariantDef) -> String {
         hir::VariantPayload::Record(_) => format!("{}::{} {{ .. }}", enum_name, v.name),
     };
     format!("{pat} => {{}}")
+}
+
+// ---------------------------------------------------------------------------
+// Feature queries graduated from `backend::gaps` -- completion, symbols,
+// signature help, typed holes -- plus the `clean_match`/`fz_boundary`
+// matching primitives they and the facade ranking share. Bone-native
+// inputs/outputs only; the lsp_types conversion stays in `backend`.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SymCat {
+    Function,
+    Struct,
+    Enum,
+    Variant,
+    Newtype,
+    Global,
+    Local,
+    Param,
+    Field,
+    Keyword,
+}
+
+pub struct CompletionEntry {
+    /// Interned candidate name (`Copy`, no heap clone during ranking). The
+    /// caller materializes the `String` label only for the post-cap survivors.
+    pub name: ustr::Ustr,
+    pub kind: SymCat,
+    pub detail: Option<String>,
+    /// The candidate's type when one is knowable: locals/params carry their
+    /// inferred/declared TyId (Locals index the cursor body's inference --
+    /// only resolvable against a Gamma seeded from that body), globals their
+    /// declared Static TyId. Feeds the typed expected-arg compare
+    /// (`ExpectedArg::accepts`); `detail` stays display-only.
+    pub ty: Option<TyId>,
+    /// Whether a `SymCat::Function` candidate declares any parameters. Drives
+    /// the completion snippet: a fn with params inserts `name($0)` (cursor
+    /// inside), a param-less fn inserts `name()` (cursor after). Meaningless
+    /// for non-function kinds (left `false`).
+    pub takes_params: bool,
+    /// For a `SymCat::Variant` candidate (qualified `Enum::Variant`), its
+    /// construction shape -- drives the payload template (`($0)` / `{ $0 }`).
+    /// `None` for every other kind.
+    pub variant_shape: Option<VariantShape>,
+}
+
+pub struct SymbolEntry {
+    pub name: String,
+    pub kind: SymCat,
+    pub span: Span,
+}
+
+pub struct SignatureEntry {
+    pub label: String,
+    pub params: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// completion
+// ---------------------------------------------------------------------------
+
+/// Completion candidates at `offset`.
+///
+/// IMPLEMENTED for the **global namespace** by mining the per-module name
+/// indexes (`functions_by_name` / `struct_by_name` / `enums_by_name` /
+/// `newtype_by_name` / `global_by_name`) across every module in the workspace
+/// (user code + warm stdlib + builtin). Functions get a rendered signature as
+/// `detail`. The facade filters these by the identifier prefix at the cursor.
+///
+/// In-scope **locals and params** (from [`locals_in_scope`]) are
+/// offered first and shadow same-named globals. NOT yet covered: member/`.`
+/// completion (needs the receiver's type + its fields/methods).
+///
+/// `expr_position` (the cursor is in a value slot, not a type slot) governs enum
+/// completion: in an expression slot a user enum is offered as its qualified
+/// `Enum::Variant` values (the bare name isn't a usable value); in a type slot
+/// the bare `Enum` name is offered instead. Mirrors rock-lsp.
+pub fn completion(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+    prefix: &str,
+    expr_position: bool,
+) -> Vec<CompletionEntry> {
+    let mut seen: std::collections::HashSet<ustr::Ustr> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+
+    // Filter by the identifier query HERE, before rendering any per-candidate
+    // detail (function signatures cost a render each). A post-filter in the
+    // caller would render every signature in the workspace and then throw most
+    // away. Match is a CLEAN fuzzy match (`clean_match`): the query is a
+    // subsequence whose first char is at a word boundary and the rest land at
+    // boundaries / in a run -- so `tilecen` finds `tile_center` across the `_`
+    // and `log` finds `stone_log`, but a mid-word scatter (`nog` across
+    // `__sto(n)e_l(o)(g)`) is dropped rather than shown ranked low. The fuzzy
+    // score in the caller (`arg_sort_text`) then ranks tight runs first.
+    // `prefix` is already lowercased.
+    let pfx = prefix.as_bytes();
+    let matches = |name: &str| -> bool { clean_match(name.as_bytes(), pfx) };
+
+    // Locals/params in scope shadow the global namespace -- emit them first and
+    // let the shared `seen` set suppress a same-named global.
+    for (name, kind, ty, ty_id) in locals_in_scope(ws, mid, inf, offset) {
+        if !matches(name.as_str()) {
+            continue;
+        }
+        if seen.insert(name) {
+            out.push(CompletionEntry {
+                name,
+                kind: match kind {
+                    BindingKind::Param => SymCat::Param,
+                    BindingKind::Let => SymCat::Local,
+                },
+                detail: (!ty.is_empty()).then_some(ty),
+                ty: ty_id,
+                takes_params: false,
+                variant_shape: None,
+            });
+        }
+    }
+
+    for m in ws.modules.iter() {
+        for (name, fns) in m.functions_by_name.iter() {
+            if !matches(name.as_str()) {
+                continue;
+            }
+            if !seen.insert(*name) {
+                continue;
+            }
+            let first = fns.first().map(|(fmid, fid)| &ws.modules[fmid.index()].functions[*fid]);
+            out.push(CompletionEntry {
+                name: *name,
+                kind: SymCat::Function,
+                // Signature `detail` is deferred to the caller and materialized
+                // (from `BoneProject::fn_sigs`) only for the post-cap survivors,
+                // not rendered or cloned for every workspace function here.
+                detail: None,
+                ty: None,
+                takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
+                variant_shape: None,
+            });
+        }
+        for name in m.struct_by_name.keys() {
+            if matches(name.as_str()) && seen.insert(*name) {
+                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, ty: None, takes_params: false, variant_shape: None });
+            }
+        }
+        // A user enum in an expression slot is offered as its qualified
+        // `Enum::Variant` values (matched by a fuzzy subsequence so typing the
+        // variant name -- not the enum -- still surfaces it), and the bare enum
+        // is suppressed. In a type slot (or for a stdlib/builtin enum, whose `<..>`
+        // file id starts with `<`), the bare `Enum` name is offered as before.
+        let user_module = !m.file.as_str().starts_with('<');
+        for (name, idx) in m.enums_by_name.iter() {
+            if expr_position && user_module {
+                for v in m.enums[*idx].variants.iter() {
+                    let qualified = format!("{name}::{}", v.name);
+                    let qn = ustr::Ustr::from(qualified.as_str());
+                    // Clean-match the VARIANT NAME (what the user types, `nog` ->
+                    // NotGround -- camelCase-aware) or the qualified form (a
+                    // `tarnog` Enum+variant query), dropping mid-word scatter.
+                    let vname = v.name.as_str();
+                    let hit = pfx.is_empty()
+                        || clean_match(vname.as_bytes(), pfx)
+                        || clean_match(qualified.as_bytes(), pfx);
+                    if hit && seen.insert(qn) {
+                        out.push(CompletionEntry {
+                            name: qn,
+                            kind: SymCat::Variant,
+                            detail: Some(name.to_string()),
+                            ty: None,
+                            takes_params: false,
+                            variant_shape: Some(VariantShape::of(&v.payload)),
+                        });
+                    }
+                }
+            } else if matches(name.as_str()) && seen.insert(*name) {
+                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, ty: None, takes_params: false, variant_shape: None });
+            }
+        }
+        for name in m.newtypes_by_name.keys() {
+            if matches(name.as_str()) && seen.insert(*name) {
+                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, ty: None, takes_params: false, variant_shape: None });
+            }
+        }
+        for (name, gidx) in m.global_by_name.iter() {
+            if matches(name.as_str()) && seen.insert(*name) {
+                // Carry the rendered type in `detail` -- both for the inline
+                // `: type` hint and so arg-position ranking can recognise a
+                // global of the expected type (bucket 0).
+                let ty = ws.render(None, m.globals[*gidx].ty);
+                out.push(CompletionEntry {
+                    name: *name,
+                    kind: SymCat::Global,
+                    detail: (!ty.is_empty()).then_some(ty),
+                    ty: Some(m.globals[*gidx].ty),
+                    takes_params: false,
+                    variant_shape: None,
+                });
+            }
+        }
+    }
+
+    // Builtin type names, in a TYPE slot only. `Coroutine`/`Map` are compiler
+    // builtins with no entry in the workspace name-index, and the scalar
+    // primitives aren't nominal types at all -- neither flows through the loops
+    // above. (Stdlib structs like `Vec`/`Entity`/`Arena`/`NativeBuffer*`/`Ptr*`/
+    // `Unit` already come through `struct_by_name`.)
+    if !expr_position {
+        for name in BUILTIN_TYPE_NAMES {
+            let n = ustr::Ustr::from(*name);
+            if matches(name) && seen.insert(n) {
+                out.push(CompletionEntry {
+                    name: n,
+                    kind: SymCat::Struct,
+                    detail: None,
+                    ty: None,
+                    takes_params: false,
+                    variant_shape: None,
+                });
+            }
+        }
+    }
+
+    // `yield` / `yield*` keywords, only inside a `co fn` body in an expression
+    // slot. Outside a coroutine they're not valid, so don't offer them.
+    if expr_position && enclosing_is_coroutine(ws, mid, offset) {
+        for kw in ["yield", "yield*"] {
+            let n = ustr::Ustr::from(kw);
+            if matches(kw) && seen.insert(n) {
+                out.push(CompletionEntry {
+                    name: n,
+                    kind: SymCat::Keyword,
+                    detail: None,
+                    ty: None,
+                    takes_params: false,
+                    variant_shape: None,
+                });
+            }
+        }
+    }
+
+    out
+}
+
+/// Type-name builtins surfaced in a type slot (see the call site). The generic
+/// builtins (`Coroutine`, `Map`) and the scalar primitives have no workspace
+/// name-index entry.
+const BUILTIN_TYPE_NAMES: &[&str] =
+    &["Coroutine", "Map", "int", "float", "string", "bool", "any"];
+
+/// Whether the body enclosing `offset` is a `co fn`. Drives `yield`/`yield*`
+/// keyword completion (and -- in the facade -- coroutine-fn ranking after a
+/// `yield`).
+fn enclosing_is_coroutine(ws: &Workspace, mid: ModuleId, offset: usize) -> bool {
+    let Some(module) = ws.modules.get(mid.index()) else {
+        return false;
+    };
+    matches!(
+        module.body_at(offset),
+        Some(hir::BodyOwner::Function(fid)) if module.functions[fid].is_coroutine
+    )
+}
+
+/// Render `fn name(p: T, ...) -> R` from a HIR function (static types, no body
+/// inference context needed).
+pub(crate) fn render_fn_signature(ws: &Workspace, name: ustr::Ustr, f: &bone_semantic::hir::Function) -> String {
+    let params: Vec<String> = f
+        .param_decls
+        .iter()
+        .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
+        .collect();
+    let ret = f
+        .return_ty
+        .map(|t| format!(" -> {}", ws.render(None, t)))
+        .unwrap_or_default();
+    format!("fn {}({}){}", name, params.join(", "), ret)
+}
+
+/// Per-function ctags signature pieces, keyed by declaration-span start:
+/// `(params, returns)` where `params` is `"(a: int, b: int)"` and `returns` is
+/// the rendered return type (None for a unit/no-return fn). Split form -- not
+/// `render_fn_signature`'s combined string -- because ctags carries `signature:`
+/// and `returns:` as separate extended fields. Keyed by span start (unique per
+/// declaration, so overloads don't collide). Only the on-save ctags path calls
+/// this; `document_symbols` stays signature-free so the hot `workspace_symbols`
+/// query doesn't render types it won't show.
+pub(crate) fn fn_ctags_signatures(
+    ws: &Workspace,
+    mid: ModuleId,
+) -> std::collections::HashMap<usize, (String, Option<String>)> {
+    let mut out = std::collections::HashMap::new();
+    let Some(m) = ws.modules.get(mid.index()) else {
+        return out;
+    };
+    for (_, f) in m.functions.iter() {
+        let params: Vec<String> = f
+            .param_decls
+            .iter()
+            .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
+            .collect();
+        let returns = f.return_ty.map(|t| ws.render(None, t));
+        out.insert(f.span.offset_range.0, (format!("({})", params.join(", ")), returns));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// document symbols
+// ---------------------------------------------------------------------------
+
+/// Top-level items declared in `mid` (functions, types, globals) with spans.
+///
+/// Walks the module's item arenas directly -- no inference needed, every item
+/// carries its name + declaration `Span`. The facade maps each `SymbolEntry`
+/// to a `DocumentSymbol`.
+pub fn document_symbols(ws: &Workspace, mid: ModuleId) -> Vec<SymbolEntry> {
+    let Some(m) = ws.modules.get(mid.index()) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let mut push = |name: ustr::Ustr, kind: SymCat, span: Span| {
+        out.push(SymbolEntry { name: name.to_string(), kind, span });
+    };
+
+    for (_, f) in m.functions.iter() {
+        push(f.name, SymCat::Function, f.span);
+    }
+    for (_, s) in m.structs.iter() {
+        push(s.name, SymCat::Struct, s.span);
+    }
+    for (_, e) in m.enums.iter() {
+        push(e.name, SymCat::Enum, e.span);
+    }
+    for (_, n) in m.newtypes.iter() {
+        push(n.name, SymCat::Newtype, n.span);
+    }
+    for (_, g) in m.globals.iter() {
+        push(g.name, SymCat::Global, g.span);
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// signature help
+// ---------------------------------------------------------------------------
+
+/// Signature(s) of the call (or struct-literal constructor) enclosing `offset`,
+/// plus that expr's source span so the facade can compute the active argument
+/// index from cursor position.
+///
+/// Three resolution tiers, in order of precision:
+/// 1. A function call bone resolved to a single overload (`resolved_overload_calls`,
+///    same data as goto-definition) -> that one signature.
+/// 2. A function call bone could NOT resolve (e.g. a generic call with a lambda
+///    arg bone can't disambiguate -> "ambiguous overload") -> every function with
+///    the callee's name, the standard LSP overload list. Inference isn't needed.
+/// 3. A struct literal `Name { .. }` -> a `Name { f: T, .. }` constructor signature.
+///
+/// The active-parameter index is intentionally NOT computed here -- it's a
+/// cursor/source concern, so the facade fills it from the returned span.
+pub fn signature_help(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: Option<&InferenceResult>,
+    offset: usize,
+) -> Option<(Vec<SignatureEntry>, Span)> {
+    let module = ws.modules.get(mid.index())?;
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+
+    // Smallest enclosing call/struct-literal expr covering the cursor wins
+    // (handles nested calls like `multiply(add(2, 3), 4)`), found through the
+    // body's interval index -- not an O(body) arena scan.
+    let e = body
+        .node_index()
+        .find(offset, offset + 1)
+        .filter_map(|iv| match iv.val {
+            NodeRef::Expr(e) => matches!(
+                body.expr_arena[e],
+                hir::Expr::Call { .. } | hir::Expr::StructLiteral { .. }
+            )
+            .then_some((iv.stop - iv.start, e)),
+            _ => None,
+        })
+        .min_by_key(|(len, _)| *len)
+        .map(|(_, e)| e)?;
+    let call_span = *body.expr_spans.get(e)?;
+
+    match &body.expr_arena[e] {
+        hir::Expr::Call { callee, .. } => {
+            // Tier 1: the overload bone nailed down.
+            if let Some((cmid, fid)) = inf
+                .and_then(|inf| inf.per_fn.get(&owner))
+                .and_then(|bi| bi.resolved_overload_calls.get(&e))
+            {
+                let f = &ws.modules.get(cmid.index())?.functions[*fid];
+                return Some((vec![fn_sig_entry(ws, f.name, f)], call_span));
+            }
+            // Tier 2: by-name overload list (resolution was ambiguous/absent).
+            let hir::Callee::Unresolved { name, .. } = callee else {
+                return None;
+            };
+            let sigs = functions_named(ws, *name);
+            (!sigs.is_empty()).then_some((sigs, call_span))
+        }
+        hir::Expr::StructLiteral { name, .. } => {
+            Some((vec![struct_ctor_sig(ws, *name)?], call_span))
+        }
+        _ => None,
+    }
+}
+
+/// Render one function as a `SignatureEntry` (label + per-param labels).
+fn fn_sig_entry(ws: &Workspace, name: Ustr, f: &Function) -> SignatureEntry {
+    let params = f
+        .param_decls
+        .iter()
+        .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
+        .collect();
+    SignatureEntry { label: render_fn_signature(ws, name, f), params }
+}
+
+/// Every function in the workspace named `name` (user code + stdlib), as the
+/// overload list a signature-help popup shows when resolution is ambiguous.
+fn functions_named(ws: &Workspace, name: Ustr) -> Vec<SignatureEntry> {
+    let mut out = Vec::new();
+    for m in ws.modules.iter() {
+        if let Some(fns) = m.functions_by_name.get(&name) {
+            for (fmid, fid) in fns {
+                let f = &ws.modules[fmid.index()].functions[*fid];
+                out.push(fn_sig_entry(ws, name, f));
+            }
+        }
+    }
+    out
+}
+
+/// `Name { f: T, .. }` constructor signature for struct literal `name`, or None.
+fn struct_ctor_sig(ws: &Workspace, name: Ustr) -> Option<SignatureEntry> {
+    for m in ws.modules.iter() {
+        if let Some(sid) = m.struct_by_name.get(&name) {
+            let sdef = &m.structs[*sid];
+            let params: Vec<String> = sdef
+                .fields
+                .iter()
+                .map(|f| format!("{}: {}", f.name, ws.render(None, f.ty)))
+                .collect();
+            let label = format!("{} {{ {} }}", name, params.join(", "));
+            return Some(SignatureEntry { label, params });
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// hole info
+// ---------------------------------------------------------------------------
+
+/// Which kind of `?` hole the cursor sits on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HoleKind {
+    /// `?` in type position, e.g. `let x: ? = expr`.
+    Type,
+    /// `?` in value position, e.g. `let x = ?`.
+    Expr,
+}
+
+/// The typed-hole report: kind, the inferred/expected type (when known), and the
+/// bindings in scope at the hole. The type is the hole's solved type -- for a
+/// type hole the inference var the `?` lowered to, for an expression hole the
+/// fresh var coerced to its surrounding expected type (`int` in `let x: int = ?`,
+/// an unsolved `?H` when nothing constrains it). `None` only if inference left
+/// the node typeless.
+pub struct HoleInfo {
+    pub kind: HoleKind,
+    pub ty: Option<String>,
+    pub in_scope: Vec<(String, String)>,
+    /// Source span of the `?` itself, so the hover handler can range its result.
+    pub span: Span,
+}
+
+/// Hole-info at `offset`, or None when the cursor isn't on a `?` hole. The hole
+/// is detected on the raw (pre-lowering) AST (where both kinds survive with a
+/// span); the type comes from the lowered node at the cursor -- a type
+/// annotation for type holes, an `Expr` for expression holes -- rendered through
+/// the body's substitution chain.
+pub fn hole_info(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    ast: &Ast,
+    offset: usize,
+) -> Option<HoleInfo> {
+    let (kind, span) = hole_kind_at(ast, offset)?;
+    let ty = type_at_offset(ws, mid, inf, offset);
+    let in_scope = locals_in_scope(ws, mid, inf, offset)
+        .into_iter()
+        .map(|(name, _kind, ty, _ty_id)| (name.to_string(), ty))
+        .collect();
+    Some(HoleInfo { kind, ty, in_scope, span })
+}
+
+/// Every `?` hole in `ast`, each with its kind, solved/expected type (when
+/// inference could resolve it), and source span. Powers the unfilled-hole
+/// diagnostics: expression holes warn ("fill me in"), resolved type holes hint
+/// ("inferred as T"). Same detection as `hole_kind_at`, swept over the whole
+/// module instead of one cursor offset.
+pub fn all_holes(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    ast: &Ast,
+) -> Vec<(Span, HoleKind, Option<String>)> {
+    let mut out = Vec::new();
+    for (_, t) in ast.types.iter() {
+        if matches!(t.kind, skull_parser::TypeExprKind::Hole(..)) {
+            let ty = type_at_offset(ws, mid, inf, t.span.offset_range.0);
+            out.push((t.span, HoleKind::Type, ty));
+        }
+    }
+    for (_, e) in ast.exprs.iter() {
+        if matches!(e.kind, skull_parser::ExprKind::Hole(..)) {
+            let ty = type_at_offset(ws, mid, inf, e.span.offset_range.0);
+            out.push((e.span, HoleKind::Expr, ty));
+        }
+    }
+    out
+}
+
+/// The kind of `?` hole whose span covers `offset` plus that span, if any. Type
+/// position wins (a `?` is only ever one or the other at a given span).
+fn hole_kind_at(ast: &Ast, offset: usize) -> Option<(HoleKind, Span)> {
+    let covers = |range: (usize, usize)| range.0 <= offset && offset < range.1;
+    for (_, t) in ast.types.iter() {
+        if matches!(t.kind, skull_parser::TypeExprKind::Hole(..)) && covers(t.span.offset_range) {
+            return Some((HoleKind::Type, t.span));
+        }
+    }
+    for (_, e) in ast.exprs.iter() {
+        if matches!(e.kind, skull_parser::ExprKind::Hole(..)) && covers(e.span.offset_range) {
+            return Some((HoleKind::Expr, e.span));
+        }
+    }
+    None
+}
+
+/// Render the lowered node at `offset`, resolved through the body's substitution
+/// chain. A type hole's `?` is a type annotation (`LocalTy`/`StaticTy` -> the
+/// inference var); an expression hole's `?` is an `Expr` (its `expr_types`
+/// entry, the fresh var coerced from context).
+fn type_at_offset(ws: &Workspace, mid: ModuleId, inf: &InferenceResult, offset: usize) -> Option<String> {
+    let module = ws.modules.get(mid.index())?;
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let bi = inf.per_fn.get(&owner)?;
+    let iv = body
+        .node_index()
+        .find(offset, offset + 1)
+        .min_by_key(|x| x.stop - x.start)?;
+    let ty = match iv.val {
+        NodeRef::LocalTy(idx) => TyId::Local(idx),
+        NodeRef::StaticTy { mid, idx } => TyId::Static(mid, idx),
+        NodeRef::Expr(e) => *bi.expr_types.get(e)?,
+        _ => return None,
+    };
+    Some(ws.render(Some(bi), ty))
+}
+
+/// Word-boundary test mirroring `fuzzy_score`: position 0, or preceded by a
+/// delimiter. (Note: delimiter-only -- NO camelCase, unlike `clean_match`.)
+pub(crate) fn fz_boundary(cand: &[u8], j: usize) -> bool {
+    j == 0 || matches!(cand[j - 1], b'_' | b'.' | b'(' | b')' | b':' | b' ')
+}
+
+/// Does `query` (already lowercased) match `cand` (ORIGINAL case) CLEANLY -- the
+/// FIRST char at a word boundary, and every later char either at a word boundary
+/// or immediately after the previous match (a run)? Word boundaries are
+/// delimiters (`_ . ( ) : space`) AND camelCase transitions (a lower/digit
+/// followed by an upper -- `NotGround`'s `G`), so PascalCase variant/type names
+/// match by their inner words. This is how people fuzzy-type (`tc` / `tilecen`
+/// -> `tile_center`, `log` -> `stone_log`, `nog` -> `NotGround`), and it drops
+/// coincidental mid-word scatter (`nog` across `__sto(n)e_l(o)(g)` or
+/// `Bloody(B)anda(g)e`). Filters completion candidates; ranking still uses the
+/// finer `fuzzy_score`. Boolean DP over (query x cand); char compare is
+/// case-insensitive. Empty = clean.
+pub(crate) fn clean_match(cand: &[u8], query: &[u8]) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let n = cand.len();
+    if n < query.len() {
+        return false;
+    }
+    let is_delim = |b: u8| matches!(b, b'_' | b'.' | b'(' | b')' | b':' | b' ');
+    let boundary = |j: usize| {
+        j == 0
+            || is_delim(cand[j - 1])
+            || (cand[j].is_ascii_uppercase() && !cand[j - 1].is_ascii_uppercase())
+    };
+    // `prev[j]` = query[..=i] cleanly matched with query[i] ending at cand[j].
+    let mut prev = vec![false; n];
+    let mut cur = vec![false; n];
+    for (i, &qc) in query.iter().enumerate() {
+        let mut any = false;
+        let mut prev_before = false; // some prev[k] true for k < j
+        for j in 0..n {
+            cur[j] = cand[j].to_ascii_lowercase() == qc
+                && if i == 0 {
+                    boundary(j)
+                } else {
+                    // consecutive (run) OR a new run starting at a boundary
+                    (j > 0 && prev[j - 1]) || (boundary(j) && prev_before)
+                };
+            any |= cur[j];
+            prev_before |= prev[j];
+        }
+        if !any {
+            return false;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev.iter().any(|&b| b)
 }
