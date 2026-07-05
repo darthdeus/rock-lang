@@ -307,7 +307,11 @@ impl BoneWorkspace {
                     BoneProject { session, texts, hole_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
                 );
             }
-            Err(_) => {
+            Err(e) => {
+                log::warn!(
+                    "batch load failed for `{}` ({e:?}); falling back to per-file indexing",
+                    root.display()
+                );
                 for (p, src) in files {
                     let _ = self.update(&p, src);
                 }
@@ -1984,9 +1988,16 @@ impl BoneWorkspace {
         // dropped the module, so hints still show during partial edits (#21).
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
-            proj.session.combined_unexpanded().ok().and_then(|combined| {
+            let ws = proj.session.combined_unexpanded().ok().and_then(|combined| {
                 reparse_with_project(&combined, path, &balance_delimiters(src.to_string()))
-            })
+            });
+            if ws.is_none() {
+                log::warn!(
+                    "inlay: broken-buffer recovery failed for `{path}`; \
+                     hints degraded to the live workspace"
+                );
+            }
+            ws
         } else {
             None
         };
