@@ -282,6 +282,24 @@ impl BoneWorkspace {
         self.batch_load_for_file(path);
     }
 
+    /// Per-project loaded-file summary for the `rock/modules` introspection
+    /// request: `(root, sorted module ids)` for every indexed project. The LSP
+    /// serves one root per server, but a session can hold several (scratch files
+    /// keyed by parent dir), so this returns all of them as separate contexts.
+    pub fn projects_summary(&self) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = self
+            .projects
+            .iter()
+            .map(|(root, proj)| {
+                let mut ids: Vec<String> = proj.texts.keys().cloned().collect();
+                ids.sort();
+                (root.display().to_string(), ids)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Batch-create the session from `file_path`'s whole compilation unit -- the
     /// project's own files PLUS its `stick.toml` path-dependencies (e.g. a game's
     /// engine) -- so cross-file and cross-package references resolve. The file set
