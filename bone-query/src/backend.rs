@@ -1438,6 +1438,30 @@ impl BoneWorkspace {
                 });
             }
         }
+        // Named-arg completions: at a DIRECT call arg slot, offer the callee's
+        // still-unsupplied params as `name:` items. Additive to the value-
+        // expression candidates and ranked in the top (type_rank 0) bucket, so
+        // `greet(gr|)` surfaces `greeting:` above the identifier fallback while
+        // `grid` etc. stay. Skips params already passed positionally or by name.
+        if let Some(nargs) = cursor_ast.as_ref().and_then(|cx| cx.named_arg_slot()) {
+            for (i, (pname, pty)) in callee_param_names(ws, &nargs.callee).into_iter().enumerate() {
+                if i < nargs.positional || nargs.named.iter().any(|n| n.as_str() == pname.as_str()) {
+                    continue;
+                }
+                if !prefix.is_empty() && !clean_match(pname.as_str().as_bytes(), prefix.as_bytes()) {
+                    continue;
+                }
+                let score = fuzzy_score(pname.as_str().as_bytes(), prefix.as_bytes());
+                out.push(CompletionItem {
+                    label: format!("{pname}:"),
+                    kind: Some(CompletionItemKind::FIELD),
+                    detail: Some(pty),
+                    insert_text: Some(format!("{pname}: ")),
+                    sort_text: Some(sort_text_with_score(0, 0, pname.as_str(), score, 0, 0, score_leads)),
+                    ..Default::default()
+                });
+            }
+        }
         // Coroutine ergonomics: `CoFrame` is the dominant Stone yield type
         // (~75% of `Coroutine<..>` annotations), so surface it. All gated on a
         // `CoFrame` struct existing (stone projects); otherwise the generic
@@ -2862,6 +2886,27 @@ fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Op
         }
     }
     any.then_some(found)
+}
+
+/// Declared params of every fn named `callee`, unioned across overloads in
+/// first-seen order (param name + rendered declared type). Drives named-arg
+/// completion at a call site.
+fn callee_param_names(ws: &Workspace, callee: &str) -> Vec<(Ustr, String)> {
+    let name = Ustr::from(callee);
+    let mut out: Vec<(Ustr, String)> = Vec::new();
+    for m in ws.modules.iter() {
+        let Some(fns) = m.functions_by_name.get(&name) else { continue };
+        for (fmid, fid) in fns {
+            let f = &ws.modules[fmid.index()].functions[*fid];
+            for p in &f.param_decls {
+                if out.iter().any(|(n, _)| *n == p.name) {
+                    continue;
+                }
+                out.push((p.name, ws.render(None, p.ty)));
+            }
+        }
+    }
+    out
 }
 
 /// Typed expected-type oracle for one completion request's arg slot

@@ -78,6 +78,15 @@ pub(crate) enum ReceiverAnchor {
     ChainCall(String),
 }
 
+/// Named-arg completion context: the direct callee, the count of leading
+/// positional args already supplied, and the explicit `name:` args already
+/// supplied (both excluding the slot being typed).
+pub(crate) struct NamedArgSlot {
+    pub callee: String,
+    pub positional: usize,
+    pub named: Vec<String>,
+}
+
 enum RecordHead {
     /// (name, name-ident end offset)
     Struct(String, usize),
@@ -477,6 +486,29 @@ impl CursorAst {
     /// the cursor sits in), so commas inside strings / nested calls / arrays
     /// never miscount, unlike the byte scanner.
     pub(crate) fn call_arg(&self) -> Option<(String, u32, Option<usize>)> {
+        let (call, _cursor_arg, pos) = self.enclosing_arg_call()?;
+        let ExprKind::FunctionCall { func, .. } = &self.expr(call).kind else {
+            return None;
+        };
+        match &self.expr(*func).kind {
+            ExprKind::Ident(id) => Some((id.name.to_string(), pos as u32, None)),
+            ExprKind::QualifiedIdent { member, .. } => {
+                Some((member.name.to_string(), pos as u32, None))
+            }
+            ExprKind::FieldAccess(recv, method) | ExprKind::SafeNavigation(recv, method) => {
+                let recv_end = self.expr(*recv).span.offset_range.1;
+                Some((method.name.to_string(), pos as u32 + 1, Some(recv_end)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The normal/`@` call the cursor sits in an arg slot of, plus the cursor's
+    /// OWN arg node (`None` when between args) and the positional slot index.
+    /// Shared by `call_arg` and `named_arg_slot`. `None` when the cursor isn't
+    /// in a paren-arg position (operator/no-parens call, callee region, or a
+    /// param-list declaration slot).
+    fn enclosing_arg_call(&self) -> Option<(Idx<ExprData>, Option<Idx<ExprData>>, usize)> {
         let chain = self.expr_chain();
         for (ci, &node) in chain.iter().enumerate() {
             // A lambda between the cursor and any enclosing call, with the
@@ -497,7 +529,7 @@ impl CursorAst {
             if !matches!(syntax, CallSyntax::Normal | CallSyntax::At) {
                 continue;
             }
-            let pos = if ci == 0 {
+            if ci == 0 {
                 // The call node ITSELF is the innermost expr at the cursor: a
                 // fresh arg is being typed between existing args (`f(a, k: v,|
                 // b: w)`). Every sentinel munge breaks there (juxtaposition /
@@ -513,9 +545,11 @@ impl CursorAst {
                 if self.probe <= paren {
                     continue;
                 }
-                args.iter()
+                let pos = args
+                    .iter()
                     .filter(|a| self.expr(a.value).span.offset_range.1 <= self.probe)
-                    .count()
+                    .count();
+                return Some((node, None, pos));
             } else {
                 let inner = chain[ci - 1];
                 if *func == inner {
@@ -524,22 +558,47 @@ impl CursorAst {
                 let Some(pos) = args.iter().position(|a| a.value == inner) else {
                     continue;
                 };
-                pos
-            };
-            return match &self.expr(*func).kind {
-                ExprKind::Ident(id) => Some((id.name.to_string(), pos as u32, None)),
-                ExprKind::QualifiedIdent { member, .. } => {
-                    Some((member.name.to_string(), pos as u32, None))
-                }
-                ExprKind::FieldAccess(recv, method)
-                | ExprKind::SafeNavigation(recv, method) => {
-                    let recv_end = self.expr(*recv).span.offset_range.1;
-                    Some((method.name.to_string(), pos as u32 + 1, Some(recv_end)))
-                }
-                _ => None,
-            };
+                return Some((node, Some(inner), pos));
+            }
         }
         None
+    }
+
+    /// Named-arg completion context (`greet(gr|)` -> callee `greet`, plus the
+    /// args already supplied). `positional` counts the leading unnamed args
+    /// (they bind params 0..positional by declaration order); `named` lists the
+    /// explicit `name:` args -- both EXCLUDING the slot being typed. `None` for
+    /// UFCS/method callees (the receiver occupies param 0, deferred) and outside
+    /// a direct call's arg list. The caller resolves the callee's param list and
+    /// offers the still-unsupplied ones.
+    pub(crate) fn named_arg_slot(&self) -> Option<NamedArgSlot> {
+        let (call, cursor_arg, _pos) = self.enclosing_arg_call()?;
+        let ExprKind::FunctionCall { func, args, .. } = &self.expr(call).kind else {
+            return None;
+        };
+        let callee = match &self.expr(*func).kind {
+            ExprKind::Ident(id) => id.name.to_string(),
+            ExprKind::QualifiedIdent { member, .. } => member.name.to_string(),
+            _ => return None,
+        };
+        let mut positional = 0usize;
+        let mut named: Vec<String> = Vec::new();
+        for a in args.iter() {
+            if cursor_arg == Some(a.value) {
+                continue; // the slot being typed, not a supplied arg
+            }
+            // Between-args (no cursor node): only args ENDING before the probe
+            // are supplied for this slot; a trailing arg after it isn't. With a
+            // cursor node every OTHER arg is already present, so count them all.
+            if cursor_arg.is_none() && self.expr(a.value).span.offset_range.1 > self.probe {
+                continue;
+            }
+            match &a.name {
+                Some(n) => named.push(n.name.to_string()),
+                None => positional += 1,
+            }
+        }
+        Some(NamedArgSlot { callee, positional, named })
     }
 
     /// TYPE-vs-expression slot: true when the innermost node containing the
