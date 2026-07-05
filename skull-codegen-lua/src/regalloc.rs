@@ -713,7 +713,7 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
 #[cfg(test)]
 mod cell_color_tests {
     use super::*;
-    use ustr::Ustr;
+    use rock_syntax::Ustr;
     use skull_mir::mir::Lit;
 
     /// Two cells whose live ranges do NOT overlap (`a` is read and dead before

@@ -34,7 +34,7 @@ use lsp_types::{
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{BodyInference, InferenceResult, ModuleId, Span, TyId, Workspace};
 use bone_incremental::session::{Session, UpdateTier};
-use skull_parser::CompilerError;
+use rock_syntax::CompilerError;
 use ustr::Ustr;
 
 use crate::query::{clean_match, fz_boundary, SymCat};

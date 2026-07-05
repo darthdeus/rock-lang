@@ -20,7 +20,7 @@ pub struct SourceFile {
 }
 
 /// Build a `SourceFile` from an on-disk path + already-read contents. The
-/// canonical constructor; skull-parser + the rock-cli prelude re-export it.
+/// canonical constructor; rock-syntax / rock-semantic / skull-parser re-export it.
 pub fn source_file_from_path_and_contents(
     path: String,
     filename: String,

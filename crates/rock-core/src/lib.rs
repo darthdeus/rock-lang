@@ -1,8 +1,8 @@
 //! Foundation crate for the rock compiler: source positions (`Span`,
 //! `LineCol`), diagnostics (`CompilerError`), the type representation
 //! (`TypeRef`), symbols, scopes, node-id newtypes, and compile stats.
-//! Deliberately holds nothing AST-shaped — the parser (`skull-parser`)
-//! and `rock-tokenizer` both build on top of this.
+//! Deliberately holds nothing AST-shaped — `rock-types` (the AST) and
+//! `rock-tokenizer` both build on top of this.
 
 pub mod code_repr;
 pub mod compile_stats;

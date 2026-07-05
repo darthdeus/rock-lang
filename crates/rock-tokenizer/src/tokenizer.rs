@@ -1536,7 +1536,7 @@ mod test {
         );
     }
 
-    /// Every entry in `rock_tokenizer::token::KEYWORDS` must be recognized
+    /// Every entry in `rock_types::token::KEYWORDS` must be recognized
     /// by the tokenizer as a non-Ident token. Catches drift when
     /// `KEYWORDS` adds a name the tokenizer doesn't recognize. The
     /// reverse direction (new keyword in the tokenizer match missing
@@ -1551,7 +1551,7 @@ mod test {
             assert_eq!(tokens.len(), 1, "keyword {kw:?} produced {tokens:?}");
             match &tokens[0] {
                 TokenKind::Ident(_) => panic!(
-                    "{kw:?} listed in rock_tokenizer::token::KEYWORDS but tokenizer treats it as an identifier"
+                    "{kw:?} listed in rock_types::token::KEYWORDS but tokenizer treats it as an identifier"
                 ),
                 _ => {}
             }

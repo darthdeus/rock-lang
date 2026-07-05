@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use bone_semantic::hir::Function;
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
-use ustr::Ustr;
+use rock_syntax::Ustr;
 use skull_mir::mir::*;
 
 pub use mangle::{compute_overloaded_names, mangle_fn};

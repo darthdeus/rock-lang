@@ -23,9 +23,9 @@ sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequen
 [dependencies]
 rock-host = { path = "../rock-host" }
 rock-log = { path = "../rock-log" }
-rock-core = { path = "../crates/rock-core" }
-rock-tokenizer = { path = "../crates/rock-tokenizer" }
+rock-types = { path = "../rock-types" }
 skull-fmt = { path = "../crates/skull-fmt" }
+rock-syntax = { path = "../rock-syntax" }
 skull-parser = { path = "../skull-parser" }
 bone-semantic = { path = "../bone-semantic" }
 bone-incremental = { path = "../bone-incremental" }

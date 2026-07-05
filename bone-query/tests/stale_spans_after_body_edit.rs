@@ -234,50 +234,48 @@ fn references_track_line_removal_from_other_fn_edit() {
 }
 
 // ---------------------------------------------------------------------------
-// Guard: incremental-vs-from-scratch reference oracle.
+// Guard: incremental-vs-from-scratch navigation oracle.
 //
 // The pinned tests above assert hand-computed offsets for specific cursors, so
 // they only cover span carriers someone thought to name. This asserts the
-// general invariant: after an incremental edit, `references` at EVERY offset
-// must match a from-scratch check of the same final text. Any unshifted span
-// the navigation layer reads makes the two diverge -- it catches the whole
-// class without enumerating which field. (bone-incremental's equivalence
-// oracle compares only `type_at`, which reads the shifted `node_index`, so it
-// was blind to inline node spans; this closes that gap for a future span add.)
+// general invariant: after an incremental edit, references / hover / definition
+// at EVERY offset must match a from-scratch check of the same final text. Any
+// unshifted span these read makes the two diverge -- it catches the whole class
+// without enumerating which field. (bone-incremental's equivalence oracle
+// compares only `type_at`, which reads the shifted `node_index`, so it was
+// blind to inline node spans; this closes that gap for a future span add.)
+//
+// A consistent bug present in BOTH sides (e.g. the typed-for-binding empty-hover
+// sentinel) keeps the two equal, so the oracle doesn't false-positive on it --
+// it fires only when incremental and from-scratch actually disagree.
 // ---------------------------------------------------------------------------
 
-/// For every cursor position in `text`, the sorted reference ranges
-/// `references` returns there. Empty results are dropped so a divergence report
-/// shows only the positions that actually resolve to something.
-fn ref_profile(bone: &BoneWorkspace, text: &str) -> Vec<((u32, u32), Vec<(u32, u32, u32, u32)>)> {
+/// For every cursor position in `text`, the sorted `query` results there.
+/// Empty results are dropped so a divergence report shows only the positions
+/// that actually resolve to something.
+fn nav_profile(
+    bone: &BoneWorkspace,
+    text: &str,
+    query: impl Fn(&BoneWorkspace, Position) -> Vec<String>,
+) -> Vec<((u32, u32), Vec<String>)> {
     let mut out = Vec::new();
     for (line, line_text) in text.lines().enumerate() {
         for ch in 0..=line_text.chars().count() {
             let pos = Position::new(line as u32, ch as u32);
-            let mut refs: Vec<(u32, u32, u32, u32)> = bone
-                .references(PATH, pos)
-                .into_iter()
-                .map(|l| {
-                    (
-                        l.range.start.line,
-                        l.range.start.character,
-                        l.range.end.line,
-                        l.range.end.character,
-                    )
-                })
-                .collect();
-            refs.sort();
-            if !refs.is_empty() {
-                out.push(((line as u32, ch as u32), refs));
+            let mut r = query(bone, pos);
+            r.sort();
+            if !r.is_empty() {
+                out.push(((line as u32, ch as u32), r));
             }
         }
     }
     out
 }
 
-/// Apply `before` then `after` incrementally, compare `references` at every
-/// offset against a fresh workspace built from `after` alone.
-fn assert_incremental_refs_match_scratch(before: &str, after: &str) {
+/// Apply `before` then `after` incrementally, then compare references, hover,
+/// and definition at every offset against a fresh workspace built from `after`
+/// alone. All three read inline node spans, so each is an independent net.
+fn assert_incremental_nav_matches_scratch(before: &str, after: &str) {
     let mut inc = BoneWorkspace::new();
     inc.update(PATH, before.to_string());
     inc.update(PATH, after.to_string());
@@ -285,10 +283,39 @@ fn assert_incremental_refs_match_scratch(before: &str, after: &str) {
     let mut scratch = BoneWorkspace::new();
     scratch.update(PATH, after.to_string());
 
+    let refs = |b: &BoneWorkspace, p| {
+        b.references(PATH, p)
+            .into_iter()
+            .map(|l| format!("{:?}", l.range))
+            .collect::<Vec<_>>()
+    };
+    let hover = |b: &BoneWorkspace, p| {
+        b.hover(PATH, p)
+            .into_iter()
+            .map(|h| format!("{h:?}"))
+            .collect::<Vec<_>>()
+    };
+    let def = |b: &BoneWorkspace, p| {
+        b.definition(PATH, p)
+            .into_iter()
+            .map(|l| format!("{l:?}"))
+            .collect::<Vec<_>>()
+    };
+
     assert_eq!(
-        ref_profile(&inc, after),
-        ref_profile(&scratch, after),
+        nav_profile(&inc, after, &refs),
+        nav_profile(&scratch, after, &refs),
         "incremental references must equal from-scratch after the edit"
+    );
+    assert_eq!(
+        nav_profile(&inc, after, &hover),
+        nav_profile(&scratch, after, &hover),
+        "incremental hover must equal from-scratch after the edit"
+    );
+    assert_eq!(
+        nav_profile(&inc, after, &def),
+        nav_profile(&scratch, after, &def),
+        "incremental definition must equal from-scratch after the edit"
     );
 }
 
@@ -347,7 +374,7 @@ fn identity<T>(x: T) -> T {
 ";
 
 #[test]
-fn incremental_references_match_from_scratch_across_offsets() {
+fn incremental_nav_matches_from_scratch_across_offsets() {
     // Each pair edits a body that precedes the symbols of interest, so those
     // symbols shift and their inline spans must be patched. Between them the
     // corpus exercises locals, call sites, enum variants, struct-literal and
@@ -359,6 +386,6 @@ fn incremental_references_match_from_scratch_across_offsets() {
         (ORACLE_STRUCT_BEFORE, ORACLE_STRUCT_AFTER),
         (ORACLE_GENERIC_BEFORE, ORACLE_GENERIC_AFTER),
     ] {
-        assert_incremental_refs_match_scratch(before, after);
+        assert_incremental_nav_matches_scratch(before, after);
     }
 }

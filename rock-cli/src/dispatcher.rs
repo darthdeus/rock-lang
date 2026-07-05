@@ -402,7 +402,10 @@ impl CommandContext {
         // front-end is backend-independent, so dispatch before the backend switch.
         if self.args.command == CliCommand::IterParse {
             let path = self.get_path_or_current()?;
-            return crate::iter_parse::iter_parse_skull(&path, self.args.iters);
+            if self.args.skull {
+                return crate::iter_parse::iter_parse_skull(&path, self.args.iters);
+            }
+            return crate::iter_parse::iter_parse(&path, self.args.iters);
         }
         if self.args.command == CliCommand::IterTokenize {
             let path = self.get_path_or_current()?;

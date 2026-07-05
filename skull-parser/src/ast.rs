@@ -1,9 +1,9 @@
 //! Arena-allocated surface AST for skull-parser.
 //!
-//! Every child edge is an arena `Idx` instead of a `Box`/`Vec<T>`, and
-//! there is no `AstNodeId` — an `Idx<ExprData>` *is* the node's identity
-//! within a module (plan decision 5). One `Ast` per parsed module
-//! (decision 6).
+//! Mirrors the shape of rock's `Box`-based AST (`rock-types`) but every
+//! child edge is an arena `Idx` instead of a `Box`/`Vec<T>`, and there is
+//! no `AstNodeId` — an `Idx<ExprData>` *is* the node's identity within a
+//! module (plan decision 5). One `Ast` per parsed module (decision 6).
 
 use crate::OrderedFloat;
 pub use comfy_la_arena::{Arena, Idx};

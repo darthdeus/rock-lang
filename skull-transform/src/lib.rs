@@ -952,8 +952,8 @@ pub(crate) fn remap_term(term: &mut Term, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
     }
 }
 
-fn vfield(v: Idx<Inst>) -> ustr::Ustr {
-    ustr::Ustr::from(format!("v{}", raw(v)).as_str())
+fn vfield(v: Idx<Inst>) -> rock_syntax::Ustr {
+    rock_syntax::Ustr::from(format!("v{}", raw(v)).as_str())
 }
 
 /// Spill every CROSS-BLOCK value (defined in one block, used in another) to the
@@ -1051,7 +1051,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     let mut step = func.clone();
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
     let params = func.params.clone();
-    let s_cell = step.new_cell(Some(ustr::Ustr::from("s")));
+    let s_cell = step.new_cell(Some(rock_syntax::Ustr::from("s")));
 
     // Frame = all cells except the two step params (s, __resume_arg).
     let frame_cells: HashSet<Idx<Cell>> = step
@@ -1107,7 +1107,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
                 step.blocks[bid].insts.push(sv);
                 let store = step.insts.alloc(Inst::StoreField {
                     base: sv,
-                    field: ustr::Ustr::from("__inner"),
+                    field: rock_syntax::Ustr::from("__inner"),
                     value: x,
                 });
                 step.blocks[bid].insts.push(store);
@@ -1151,7 +1151,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
             }
             let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k)));
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from(STATE), value: kc });
+            emit(&mut step, bid, Inst::StoreField { base: sv, field: rock_syntax::Ustr::from(STATE), value: kc });
             step.blocks[bid].term = if frame_slot_channel { Term::Return(Vec::new()) } else { Term::Return(values) };
         }
     }
@@ -1170,11 +1170,11 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
         if let Some(v0) = ret_val {
             if let Some(v) = v0 {
                 let sv = emit(&mut step, bid, Inst::Load(s_cell));
-                emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from("__return"), value: v });
+                emit(&mut step, bid, Inst::StoreField { base: sv, field: rock_syntax::Ustr::from("__return"), value: v });
             }
             let dc = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
             let sv2 = emit(&mut step, bid, Inst::Load(s_cell));
-            emit(&mut step, bid, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: dc });
+            emit(&mut step, bid, Inst::StoreField { base: sv2, field: rock_syntax::Ustr::from(STATE), value: dc });
             step.blocks[bid].term = Term::Return(Vec::new());
         }
     }
@@ -1230,7 +1230,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
         for k in 0..num_states {
             let bid = check_blocks[k];
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let st = emit(&mut step, bid, Inst::Field { base: sv, field: rock_syntax::Ustr::from(STATE) });
             let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k as i64 + 1)));
             let eq = emit(&mut step, bid, Inst::Eq(st, kc));
             let else_bb = if k + 1 < num_states { check_blocks[k + 1] } else { orig_entry };
@@ -1248,15 +1248,15 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
         let dispatch = step.entry;
         let chk = step.new_block();
         let sv = emit(&mut step, chk, Inst::Load(s_cell));
-        let lay = emit(&mut step, chk, Inst::Field { base: sv, field: ustr::Ustr::from("__layout") });
+        let lay = emit(&mut step, chk, Inst::Field { base: sv, field: rock_syntax::Ustr::from("__layout") });
         let kc = emit(&mut step, chk, Inst::Const(Lit::Int(layout_hash)));
         let ne = emit(&mut step, chk, Inst::NotEq(lay, kc));
         let raise = step.new_block();
-        let err_fn = emit(&mut step, raise, Inst::Global(ustr::Ustr::from("error")));
+        let err_fn = emit(&mut step, raise, Inst::Global(rock_syntax::Ustr::from("error")));
         let msg = emit(
             &mut step,
             raise,
-            Inst::Const(Lit::Str(ustr::Ustr::from(
+            Inst::Const(Lit::Str(rock_syntax::Ustr::from(
                 format!("coroutine killed: frame layout changed by hot reload ({})", func.name).as_str(),
             ))),
         );
@@ -1268,7 +1268,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     }
 
     // 5. The step is an ordinary fn `(s, __resume_arg)`.
-    step.name = ustr::Ustr::from(format!("{}__step", func.name).as_str());
+    step.name = rock_syntax::Ustr::from(format!("{}__step", func.name).as_str());
     step.params = vec![s_cell, resume_arg];
     step.is_coroutine = false;
     step.resume_arg = None;

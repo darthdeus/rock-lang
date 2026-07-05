@@ -24,7 +24,7 @@
 //! cast, stringify/format, inline-lua) — see the plan's phase checklist.
 
 use comfy_la_arena::{Arena, Idx};
-use ustr::Ustr;
+use rock_syntax::Ustr;
 
 /// A resolved call target: which function in which module. Mangling (rock's
 /// overload scheme) is deferred to codegen, which also reads `is_extern` /

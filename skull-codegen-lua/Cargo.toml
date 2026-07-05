@@ -15,6 +15,7 @@ comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
 skull-mir = { path = "../skull-mir" }
 bone-semantic = { path = "../bone-semantic" }
+rock-syntax = { path = "../rock-syntax" }
 ustr = { workspace = true }
 
 [dev-dependencies]
