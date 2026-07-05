@@ -211,6 +211,13 @@ pub fn run_lsp_server() -> Result<()> {
                 eprintln!("Panic with unknown payload type: {:?}", panic_payload);
             }
             eprintln!("=== END PANIC INFO ===");
+            // Do NOT fall through to `io_threads.join()`: the reader thread is
+            // blocked on stdin, so join() waits for EOF the client won't send
+            // while it still thinks the server is alive. That leaves a wedged
+            // process holding its compiled session in RAM, silently swallowing
+            // every subsequent request. Exit so the client sees the crash and
+            // restarts cleanly.
+            std::process::exit(1);
         }
     };
 
@@ -339,6 +346,15 @@ fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
                     id: req.id.clone(),
                     start: std::time::Instant::now(),
                 });
+
+                // Deterministic panic trigger for the wedge-recovery test. Inert
+                // unless ROCK_LSP_ALLOW_TEST_PANIC is set, so a real client can
+                // never crash the server with it.
+                if req.method == "$/rockDebugPanic"
+                    && std::env::var_os("ROCK_LSP_ALLOW_TEST_PANIC").is_some()
+                {
+                    panic!("deliberate test panic ($/rockDebugPanic)");
+                }
 
                 // debug!("got request: {req:?}");
 
