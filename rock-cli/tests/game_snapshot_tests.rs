@@ -189,31 +189,3 @@ fn test_match3_seeded_random_board_alt_seed() {
     let state = run_frame_dump("games/match3", 1, 99, None);
     insta::assert_json_snapshot!(match3_runtime(&state));
 }
-
-/// An errored coroutine must surface its error in the log. `last_error` has no
-/// callers and the poller treats an errored coroutine identically to natural
-/// completion, so without a poll-level report the raise is swallowed entirely
-/// (docs/coroutine-allocation-plan.md "Errored coroutines must be LOGGED").
-/// The sim (mag/tests/sims/errored_co_logs.rock) drives a raising coroutine
-/// through `poll`; this test asserts the error text reaches the game's stderr,
-/// which `rock sim` forwards verbatim.
-#[test]
-fn test_errored_coroutine_is_logged() {
-    let rock_bin = env!("CARGO_BIN_EXE_rock");
-    let output = Command::new(rock_bin)
-        .args(["sim", "mag", "errored_co_logs"])
-        .current_dir(workspace_root())
-        .output()
-        .expect("failed to spawn rock sim");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "rock sim mag errored_co_logs failed: {:?}\nstderr:\n{stderr}\nstdout:\n{stdout}",
-        output.status
-    );
-    assert!(
-        stderr.contains("boom-co-error-probe"),
-        "an errored coroutine's message must reach the log (stderr); got:\n{stderr}"
-    );
-}

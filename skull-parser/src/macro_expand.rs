@@ -1,7 +1,8 @@
 //! Macro expansion on skull-parser's arena AST.
 //!
-//! Runs as the FIRST cook stage, before desugar (bone's order), so the
-//! desugars see fully-expanded code.
+//! Reimplements bone's `macro_expansion.rs` (which leaned on rock-syntax +
+//! rock-optimizations) directly on skull's `Ast`. Runs as the FIRST cook stage,
+//! before desugar (bone's order), so the desugars see fully-expanded code.
 //!
 //! Scope: expression-position macros (`macro f(a: expr, ...) { <rock body> }`),
 //! selected by arity (defaults widen the range), params substituted by deep
@@ -1100,10 +1101,6 @@ fn rename_expr(ast: &mut Ast, e: Idx<ExprData>, callsite: u32, counter: &mut u32
 
 fn retag_block(ast: &mut Ast, b: Idx<BlockData>, call_span: Span) {
     ast.blocks[b].span = call_span;
-    // The braces of the macro TEMPLATE's blocks don't exist at the call site;
-    // a retagged block is effectively synthetic, so it gets no brace spans
-    // (real spans here would plant brace markers at template offsets).
-    ast.blocks[b].braces = None;
     let stmts = ast.blocks[b].statements.clone();
     for s in stmts {
         ast.stmts[s].span = call_span;

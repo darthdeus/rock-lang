@@ -19,6 +19,8 @@ workspace = true
 
 [dependencies]
 rock-host = { path = "../rock-host" }
+rock-types = { path = "../rock-types" }
+rock-syntax = { path = "../rock-syntax" }
 bone-query = { path = "../bone-query" }
 
 anyhow = { workspace = true }

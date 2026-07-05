@@ -156,11 +156,6 @@ fn fmt_inst(
             parts.extend(named.iter().map(|(n, id)| format!("{n}=v{}", num[id])));
             format!("enum {ty}::{tag}({})", parts.join(", "))
         }
-        Inst::MakeEnumDyn { tag, ty, positional, named } => {
-            let mut parts: Vec<String> = positional.iter().map(|id| format!("v{}", num[id])).collect();
-            parts.extend(named.iter().map(|(n, id)| format!("{n}=v{}", num[id])));
-            format!("enum_dyn {ty}::[v{}]({})", num[tag], parts.join(", "))
-        }
 
         Inst::Field { base, field } => format!("field v{}.{field}", v(*base)),
         Inst::TupleIndex { base, index } => format!("tuple_index v{}.{index}", v(*base)),
@@ -241,13 +236,13 @@ fn fmt_term(t: &Term, num: &HashMap<Idx<Inst>, u32>) -> String {
                 .join(", ");
             format!("switch v{} [{cs}] else bb{}", num[discr], raw(*default))
         }
-        Term::Yield { values, resume } => {
-            if values.is_empty() {
-                format!("yield -> bb{}", raw(*resume))
-            } else {
-                let vs = values.iter().map(|v| format!("v{}", num[v])).collect::<Vec<_>>().join(", ");
-                format!("yield {vs} -> bb{}", raw(*resume))
-            }
-        }
+        Term::Yield {
+            value: Some(v),
+            resume,
+        } => format!("yield v{} -> bb{}", num[v], raw(*resume)),
+        Term::Yield {
+            value: None,
+            resume,
+        } => format!("yield -> bb{}", raw(*resume)),
     }
 }

@@ -224,24 +224,6 @@ fn confident_autofill_suppressed_when_arg_is_ambiguous() {
 }
 
 #[test]
-fn lambda_body_type_directs_on_field_return_type() {
-    // `is_open: fn() -> bool` -- the lambda body `() => sp|` returns the field's
-    // function-type RETURN type (`bool`), so a bool candidate must type-direct
-    // above an int one. Names chosen so the shorter-first tiebreak would put the
-    // int candidate first WITHOUT type direction (the RED state).
-    let labels = labels_at(
-        "struct PanelReg { is_open: fn() -> bool }\n\
-         global SPELL_IS_OPEN: bool = false\n\
-         global SPELL_ID: int = 0\n\
-         global PANELS: [PanelReg] = [\n  PanelReg { is_open: () => sp$0 }\n]\n",
-    );
-    let b = rank_of(&labels, "SPELL_IS_OPEN");
-    let i = rank_of(&labels, "SPELL_ID");
-    assert!(b.is_some() && i.is_some(), "both offered: {labels:?}");
-    assert!(b < i, "bool candidate must type-direct above the int in a `-> bool` lambda body: {labels:?}");
-}
-
-#[test]
 fn struct_field_value_offers_expected_enum_variant() {
     // `kind: SpellKind` -- typing `har` in the value slot should surface the
     // `SpellKind::Harm` variant (type-directed: the field's type is the enum).

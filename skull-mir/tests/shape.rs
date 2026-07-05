@@ -170,11 +170,11 @@ fn dump_covers_arith_unary_switch_and_yield() {
     );
 
     f.set_term(s0, Term::Yield {
-        values: vec![bits],
+        value: Some(bits),
         resume,
     });
     f.set_term(s1, Term::Yield {
-        values: vec![],
+        value: None,
         resume,
     });
     f.set_term(resume, Term::Return(vec![]));

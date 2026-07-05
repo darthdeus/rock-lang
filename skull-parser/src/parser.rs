@@ -160,7 +160,8 @@ impl Parser {
     }
 
     /// Tokens that can begin a statement -- the resync targets for
-    /// statement-level error recovery.
+    /// statement-level error recovery (mirrors rock's `can_start_statement`
+    /// in `rock-syntax/src/parser/statements.rs`).
     fn can_start_statement(&self, kind: TokenKind) -> bool {
         matches!(
             kind,
@@ -894,9 +895,9 @@ impl Parser {
             while self.eat(TokenKind::Semicolon) {}
         }
         self.brace_depth -= 1;
-        let close = self.expect(TokenKind::CloseCurly)?;
+        self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok((self.ast.block(span, Some((start, close)), statements), items))
+        Ok((self.ast.block(span, statements), items))
     }
 
     /// Does the current token start an item declaration valid inside a macro
@@ -1368,9 +1369,9 @@ impl Parser {
             }
         }
         self.brace_depth -= 1;
-        let close = self.expect(TokenKind::CloseCurly)?;
+        self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start); // through the closing `}`
-        Ok(self.ast.block(span, Some((start, close)), statements))
+        Ok(self.ast.block(span, statements))
     }
 
     /// Consume comment tokens on the same source line as the just-parsed
@@ -1511,13 +1512,15 @@ impl Parser {
             }
             TokenKind::Defer => {
                 self.advance();
-                // `defer { ... }` is the block form; anything else is a bare
-                // expression statement (`defer clear_attack(e)`) -- a leading
-                // `(` parses as an ordinary parenthesized expression.
-                let kind = if self.kind() == TokenKind::OpenCurly {
-                    DeferKind::Block(self.parse_block()?)
+                let kind = if self.kind() == TokenKind::OpenParen {
+                    self.advance();
+                    self.delimiter_depth += 1;
+                    let e = self.parse_expr(0)?;
+                    self.delimiter_depth -= 1;
+                    self.expect(TokenKind::CloseParen)?;
+                    DeferKind::Expression(e)
                 } else {
-                    DeferKind::Expression(self.parse_expr(0)?)
+                    DeferKind::Block(self.parse_block()?)
                 };
                 let span = self.span_from(start);
                 Ok(self.ast.stmt(span, StatementKind::Defer(kind)))
@@ -1970,7 +1973,7 @@ impl Parser {
             let rhs = self.parse_expr(10)?;
             let span = self.ast.exprs[rhs].span;
             let stmt = self.ast.stmt(span, StatementKind::Expression(rhs));
-            self.ast.block(span, None, vec![stmt])
+            self.ast.block(span, vec![stmt])
         };
         let body_span = self.ast.blocks[body].span;
         let lambda = self
@@ -2078,7 +2081,13 @@ impl Parser {
         if kind == TokenKind::TripleDot {
             self.advance();
             let operand = self.parse_expr(0)?;
-            let span = self.span_from(start);
+            // End at the operand, NOT the current position: parsing `...y` before
+            // a closing `]`/`)` runs the infix loop's `skip_comments_in_expr`,
+            // which consumes a trailing `// comment` (the closer counts as `is_op`).
+            // A `span_from(start)` would then swallow that comment into the spread
+            // span, and the formatter would emit it twice (verbatim slice + the
+            // re-applied trailing comment).
+            let span = self.merge_spans(start, self.ast.exprs[operand].span);
             return Ok(self.ast.expr(span, ExprKind::Spread(operand)));
         }
 
@@ -2701,7 +2710,7 @@ impl Parser {
                     }
                 };
                 let body_span = self.span_from(stmt_span);
-                self.ast.block(body_span, None, vec![stmt])
+                self.ast.block(body_span, vec![stmt])
             };
             arms.push(MatchArm { pattern, guard, body });
             self.eat(TokenKind::Comma);
@@ -2888,7 +2897,7 @@ impl Parser {
             let e = self.with_allow_literals(true, |p| p.parse_expr(0))?;
             let body_span = self.ast.exprs[e].span;
             let stmt = self.ast.stmt(body_span, StatementKind::Return { keyword_span: None, value: Some(e) });
-            self.ast.block(body_span, None, vec![stmt])
+            self.ast.block(body_span, vec![stmt])
         };
         let span = self.span_from(start);
         Ok(self.ast.expr(span, ExprKind::Lambda { params, return_ty: None, body }))
@@ -3005,6 +3014,22 @@ impl Parser {
         // when the token after the comment continues the expression.
         while matches!(self.kind(), TokenKind::Comment(_)) {
             let next = self.peek_kind();
+            // A fresh-line expression-starter after the comment (`@` decorator /
+            // `@global_write`, a unary `-`, ...) begins a NEW statement/item, not
+            // a continuation of this expression -- the postfix/infix loop breaks
+            // on it via `op_starts_expr && newline_breaks`, so stop here too and
+            // leave the standalone comment for the item/statement loop to capture
+            // instead of silently consuming it (widening the expression span).
+            let next_on_fresh_line = self
+                .tokens
+                .get(self.pos)
+                .map(|t| t.trailing_newlines)
+                .unwrap_or(0)
+                > 0
+                && (self.delimiter_depth == 0 || self.brace_depth > 0);
+            if op_starts_expr(next) && next_on_fresh_line {
+                break;
+            }
             let continues = next.is_op()
                 || matches!(
                     next,

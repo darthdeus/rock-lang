@@ -483,15 +483,15 @@ fn reachability_index_rebuilds_on_an_interface_edit() {
 
     let mut bone = BoneWorkspace::new();
     bone.update(path, before.to_string());
-    let has_wv = |bone: &mut BoneWorkspace| {
+    let has_wv = |bone: &BoneWorkspace| {
         bone.completion(path, Position::new(4, 9))
             .into_iter()
             .any(|c| c.insert_text.as_deref() == Some("w.v"))
     };
-    assert!(!has_wv(&mut bone), "no `w.v` path before W has a V field");
+    assert!(!has_wv(&bone), "no `w.v` path before W has a V field");
 
     bone.update(path, after.to_string());
-    assert!(has_wv(&mut bone), "`w.v` path appears after the interface edit (index rebuilt)");
+    assert!(has_wv(&bone), "`w.v` path appears after the interface edit (index rebuilt)");
 }
 
 #[test]
@@ -1609,52 +1609,4 @@ fn uppercase_query_ranks_screaming_const_above_lowercase_fn() {
         const_st < fn_st,
         "JIT_TRACE_LOG_ENABLED ({const_st}) should rank before journal_log ({fn_st}) for an uppercase query"
     );
-}
-
-// ---------------------------------------------------------------------------
-// The context-triggered paths must filter with `clean_match` (fuzzy, boundary-
-// aware) like every other completion filter -- a hand-rolled starts_with here
-// is the divergence class the rock-lsp StartsWithCi invariant existed to
-// prevent: `atco` finds `attack_co` globally, so it must after `recv.` too.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn member_field_filter_is_fuzzy() {
-    // `atco`: a@0 + t run + c/o at the `_` boundary -> `attack_co`.
-    let src = "struct Mob { attack_co: int, health: int }\nfn r(m: Mob) {\n  m.atco\n}\n";
-    let l = labels(src, 2, "  m.atco".len() as u32);
-    assert!(l.contains(&"attack_co: int".to_string()), "fuzzy member field: {l:?}");
-}
-
-#[test]
-fn member_method_filter_is_fuzzy() {
-    // `tiv`: t@0 + i at the `_` boundary + v run -> `to_ivec`.
-    let src = "struct Movable { g: int }\nfn to_ivec(m: Movable) -> int { m.g }\nfn r(mv: Movable) {\n  mv.tiv\n}\n";
-    let l = labels(src, 3, "  mv.tiv".len() as u32);
-    assert!(l.iter().any(|s| s == "to_ivec"), "fuzzy UFCS method: {l:?}");
-}
-
-#[test]
-fn enum_qualified_variant_filter_is_fuzzy() {
-    // `nogr`: n@0 + o run + g at the camel boundary + r run -> `NotGround`.
-    let src = "enum TargetError { NotGround, OutOfRange }\nfn r() {\n  let e = TargetError::nogr\n}\n";
-    let l = labels(src, 2, "  let e = TargetError::nogr".len() as u32);
-    assert!(l.iter().any(|s| s == "NotGround"), "fuzzy variant: {l:?}");
-    assert!(!l.iter().any(|s| s == "OutOfRange"), "non-matching variant filtered: {l:?}");
-}
-
-#[test]
-fn struct_literal_field_filter_is_fuzzy() {
-    // `mosp`: m@0 + o run + s at the `_` boundary + p run -> `move_speed`.
-    let src = "struct Cfg { move_speed: int, other: int }\nfn r() {\n  let c = Cfg { mosp }\n}\n";
-    let l = labels(src, 2, "  let c = Cfg { mosp".len() as u32);
-    assert!(l.contains(&"move_speed: int".to_string()), "fuzzy struct-literal field: {l:?}");
-}
-
-#[test]
-fn enum_record_field_filter_is_fuzzy() {
-    // `alb`: a@0 + l run + b at the `_` boundary -> `alpha_beta`.
-    let src = "enum E { V { alpha_beta: int, other: int } }\nfn r() {\n  let v = E::V { alb }\n}\n";
-    let l = labels(src, 2, "  let v = E::V { alb".len() as u32);
-    assert!(l.contains(&"alpha_beta: int".to_string()), "fuzzy enum-record field: {l:?}");
 }

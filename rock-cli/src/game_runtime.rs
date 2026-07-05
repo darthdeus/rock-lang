@@ -16,27 +16,15 @@ use std::path::{Path, PathBuf};
 /// output paths; `compile` writes `tmp/main.lua` (+ optional `tmp/incremental.lua`
 /// overlay) that the running engine hot-reloads. Everything around it (watch
 /// loop, process, engine/compiler builds, sims) is the backend-agnostic runtime.
-/// What a successful (re)compile asks of the runtime beyond hot-reloading.
-#[derive(Default)]
-pub struct CompileOutcome {
-    /// Type names whose runtime SHAPE changed. Non-empty => live state cannot
-    /// be migrated, so the runtime must RESTART the game process: kill, then
-    /// `canonicalize_for_restart` (which writes the deferred `main.lua`), then
-    /// respawn. The compile deliberately did NOT write `main.lua` -- the old
-    /// process must never hot-reload the new-shape program
-    /// (docs/hot-reload-schema-drift-plan.md).
-    pub restart_types: Vec<String>,
-}
-
 pub trait GameCompiler {
     /// (Re)compile the project. `changed` = game source paths the watcher saw
     /// since the last call (empty on the initial build). `force_full` forces a
     /// from-scratch rebuild (set after a compiler-binary rebuild wiped caches).
-    /// Writes the engine-loadable Lua, EXCEPT when the outcome requests a
-    /// restart (see `CompileOutcome`). The backend logs its own reload detail
-    /// (skull: full vs overlay vs no-change) internally. Err => the caller
-    /// writes `tmp/error.txt` and keeps serving the last good output.
-    fn compile(&mut self, changed: &HashSet<PathBuf>, force_full: bool) -> Result<CompileOutcome>;
+    /// Writes the engine-loadable Lua. The backend logs its own reload detail
+    /// (skull: full vs overlay vs no-change) internally — the runtime does not
+    /// branch on it. Err => the caller writes `tmp/error.txt` and keeps serving
+    /// the last good output.
+    fn compile(&mut self, changed: &HashSet<PathBuf>, force_full: bool) -> Result<()>;
 
     /// Fold any overlay back into `main.lua` so a *process restart* (luajit
     /// loads `main.lua` only) gets the complete current program. No-op for
@@ -53,10 +41,6 @@ pub struct SkullGameCompiler {
     dir: String,
     output_path: PathBuf,
     incremental_path: PathBuf,
-    /// A shape-changed compile deferred its `main.lua` write; the restart
-    /// path's `canonicalize_for_restart` must write it even with no overlay
-    /// on disk.
-    pending_shape_write: bool,
 }
 
 impl SkullGameCompiler {
@@ -66,13 +50,12 @@ impl SkullGameCompiler {
             dir: path.to_string(),
             output_path,
             incremental_path,
-            pending_shape_write: false,
         }
     }
 }
 
 impl GameCompiler for SkullGameCompiler {
-    fn compile(&mut self, changed: &HashSet<PathBuf>, force_full: bool) -> Result<CompileOutcome> {
+    fn compile(&mut self, changed: &HashSet<PathBuf>, force_full: bool) -> Result<()> {
         use crate::skull_backend::{SkullReload, SkullStone};
 
         // First build, or a forced full rebuild (compiler changed): (re)build
@@ -87,8 +70,7 @@ impl GameCompiler for SkullGameCompiler {
                     &self.output_path,
                     &self.incremental_path,
                 )?);
-                self.pending_shape_write = false;
-                Ok(CompileOutcome::default())
+                Ok(())
             }
             Some(st) => {
                 // Feed the Session only the files the watcher saw change (it
@@ -102,13 +84,9 @@ impl GameCompiler for SkullGameCompiler {
                     SkullReload::Incremental { bytes, reinferred, cook_ms, emit_ms, write_ms } => log::info!(target: "STONE",
                         "skull: body edit -> incremental.lua in {:.1}ms ({:.1} cook + {:.1} emit + {:.1} write, {} fn{}, {} B overlay)",
                         cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, reinferred, if reinferred == 1 { "" } else { "s" }, bytes),
-                    SkullReload::ShapeChanged { types } => {
-                        self.pending_shape_write = true;
-                        return Ok(CompileOutcome { restart_types: types });
-                    }
                     SkullReload::NoChange => {}
                 }
-                Ok(CompileOutcome::default())
+                Ok(())
             }
         }
     }
@@ -117,13 +95,12 @@ impl GameCompiler for SkullGameCompiler {
         // A restart re-spawns luajit, which loads main.lua only -- it does NOT
         // dual-load the accumulated incremental.lua. Fold the overlay back in
         // first so the restarted process gets the complete current program.
-        // Runs when an overlay is on disk (body edits since the last full
-        // build) or a shape-changed compile deferred its main.lua write.
-        if self.incremental_path.exists() || self.pending_shape_write {
+        // Only when an overlay is actually on disk (body edits since the last
+        // full build).
+        if self.incremental_path.exists() {
             if let Some(st) = &mut self.stone {
-                log::info!(target: "STONE", "skull: canonicalizing main.lua before restart");
+                log::info!(target: "STONE", "skull: folding incremental.lua into main.lua before restart");
                 st.force_full(&self.output_path, &self.incremental_path)?;
-                self.pending_shape_write = false;
             }
         }
         Ok(())

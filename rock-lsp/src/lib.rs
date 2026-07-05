@@ -1,14 +1,5 @@
 #![allow(clippy::mutable_key_type)]
 
-/// Open a tracing info-span scoped to the rest of the enclosing block, output
-/// to tracing-flame / tracing-perfetto. rock-lsp is its only user.
-#[macro_export]
-macro_rules! scope {
-    ($name:expr) => {
-        let _scope = ::tracing::info_span!($name).entered();
-    };
-}
-
 use std::str::FromStr;
 
 use anyhow::Result;

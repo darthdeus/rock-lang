@@ -465,7 +465,7 @@ impl TokenKind {
 /// `read_keyword_or_ident` (this crate's `tokenizer`); this list is the
 /// downstream-visible mirror used by tooling (LSP completion in
 /// particular). If you add a keyword to the tokenizer, append it
-/// here too — a keyword round-trip test fails
+/// here too — `tokenizer_keyword_round_trip` in rock-syntax fails
 /// when an entry here is NOT recognized as a keyword token, catching
 /// drift in one direction. The reverse (new tokenizer keyword
 /// missing from this list) is a doc-comment invariant.

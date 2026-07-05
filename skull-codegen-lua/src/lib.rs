@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use bone_semantic::hir::Function;
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
-use ustr::Ustr;
+use rock_syntax::Ustr;
 use skull_mir::mir::*;
 
 pub use mangle::{compute_overloaded_names, mangle_fn};
@@ -883,7 +883,6 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeArray(_) | Inst::MakeVec(_)
             | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. }
-            | Inst::MakeEnumDyn { .. }
     )
 }
 
@@ -1576,21 +1575,6 @@ impl Emitter<'_> {
             } => {
                 out.push_str("{__variant = ");
                 write_lua_string(out, tag.as_str());
-                out.push_str(", __ty = ");
-                write_lua_string(out, ty.as_str());
-                for id in positional {
-                    out.push_str(", ");
-                    self.write_opnd(out, *id);
-                }
-                for (n, id) in named {
-                    let _ = write!(out, ", {n} = ");
-                    self.write_opnd(out, *id);
-                }
-                out.push('}');
-            }
-            Inst::MakeEnumDyn { tag, ty, positional, named } => {
-                out.push_str("{__variant = ");
-                self.write_opnd(out, *tag);
                 out.push_str(", __ty = ");
                 write_lua_string(out, ty.as_str());
                 for id in positional {

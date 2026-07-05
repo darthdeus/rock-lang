@@ -7,7 +7,7 @@ use bone_semantic::{
     or_fail,
 };
 use comfy_la_arena::{ArenaMap, Idx};
-use skull_parser::CompilerError;
+use rock_syntax::CompilerError;
 
 use crate::mir::{Block, Cell, Inst, MirFunc, Term};
 

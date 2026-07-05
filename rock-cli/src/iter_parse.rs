@@ -7,7 +7,7 @@
 //! * `iter-tokenize <project> --iters N` -- the loop body is just
 //!   `Tokenizer::tokenize` per file; the parser is never constructed.
 //! * `iter-parse <project> --iters N` -- tokenizes every file ONCE up front and
-//!   caches the token streams, so the timed loop is *only* the skull parser.
+//!   caches the token streams, so the timed loop is *only* `Parser::parse_*`.
 //!
 //! Run either under a sampler with a large N (1000-5000) so the process runs
 //! long enough for statistically meaningful data:
@@ -24,10 +24,16 @@
 //! ignore `--backend`.
 
 use crate::Result;
-use rock_core::{CompilerError, CompileStats, ModuleId, SourceFiles};
-use rock_tokenizer::{count_source_stats, Token, Tokenizer};
-use ustr::Ustr;
+use rock_syntax::prelude::{Arc, AtomicRefCell, SourceFile, SourceFiles, Ustr};
+use rock_syntax::tokenizer::{count_source_stats, Token};
+use rock_syntax::CompilerError;
+use rock_syntax::{AstBuilder, CompileStats, ModuleId, Parser, Tokenizer};
 use std::time::{Duration, Instant};
+
+/// A file's already-tokenized stream plus the source arc the parser needs for
+/// `module_id` and span file ids. Built once by `iter_parse` so the timed loop
+/// does no tokenization.
+type Prepared = Vec<(Vec<Token>, Arc<AtomicRefCell<SourceFile>>)>;
 
 fn discover(path: &str) -> Result<SourceFiles> {
     let spec = crate::common::path_to_source_spec(path);
@@ -44,7 +50,7 @@ fn discover_or_walk(path: &str) -> Result<SourceFiles> {
     if let Ok(s) = discover(path) {
         return Ok(s);
     }
-    use rock_core::source_file_from_path_and_contents;
+    use rock_syntax::utils::source_file_from_path_and_contents;
     let p = std::path::Path::new(path);
     let mut paths: Vec<std::path::PathBuf> = if p.is_file() {
         vec![p.to_path_buf()]
@@ -97,6 +103,48 @@ pub fn iter_tokenize(path: &str, iters: usize) -> Result<()> {
     Ok(())
 }
 
+/// `rock iter-parse` -- tokenize once, then re-parse the cached tokens N times.
+pub fn iter_parse(path: &str, iters: usize) -> Result<()> {
+    let sources = discover(path)?;
+    let iters = iters.max(1);
+
+    // Tokenize ONCE and cache the token streams + source arcs. LoC stats are
+    // gathered here (the tokens are right in hand), so the timed loop below
+    // touches only the parser.
+    let mut stats = CompileStats::new();
+    let mut prepared: Prepared = Vec::with_capacity(sources.files.len());
+    for file in &sources.files {
+        let f = file.borrow();
+        let mut tokenizer = Tokenizer::from_source_file(&f.contents, file);
+        let tokens = match tokenizer.tokenize() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("{}", e.render(&sources));
+                std::process::exit(1);
+            }
+        };
+        stats.merge(&count_source_stats(&f.contents, &tokens));
+        drop(f);
+        prepared.push((tokens, file.clone()));
+    }
+
+    // Warm-up parse outside the timed loop (catch parse errors, prime caches).
+    if let Err(e) = parse_all(&prepared) {
+        eprintln!("{}", e.render(&sources));
+        std::process::exit(1);
+    }
+
+    let t = Instant::now();
+    for _ in 0..iters {
+        if let Err(e) = parse_all(&prepared) {
+            eprintln!("{}", e.render(&sources));
+            std::process::exit(1);
+        }
+    }
+    report("iter-parse", path, iters, &stats, t.elapsed());
+    Ok(())
+}
+
 /// One tokenize pass over every source file. When `stats` is `Some`, merges each
 /// file's `CompileStats` (LoC classification piggybacks on the tokens -- no
 /// extra walk).
@@ -115,9 +163,26 @@ fn tokenize_all(
     Ok(())
 }
 
-/// `rock iter-parse <project> --iters N` -- tokenize every file once, then time
-/// the skull-parser parse loop over the cached token streams (tokenization is
-/// outside the timed region). Backend-independent: the front end is shared.
+/// One parse pass over every pre-tokenized file. `Parser::new` consumes its
+/// `Vec<Token>`, so the cached stream is cloned per iteration -- one
+/// allocation + memcpy per file (TokenKind fields are `Copy`), negligible next
+/// to the parse and easy to spot as `<Vec as Clone>` if it shows in a profile.
+fn parse_all(prepared: &Prepared) -> std::result::Result<(), CompilerError> {
+    for (tokens, arc) in prepared {
+        let mut builder = AstBuilder::new_for_module(arc.borrow().module_id);
+        let mut parser = Parser::new(tokens.clone(), &mut builder)?;
+        parser.parse_module_from_source_file(arc)?;
+    }
+    Ok(())
+}
+
+/// `rock iter-parse <project> --skull` -- route the parse loop through the
+/// experimental arena-based skull-parser. First runs an untimed *coverage*
+/// pass that parses every file with BOTH parsers and compares per-function
+/// body s-exprs (the anti-"fake speed" correctness guard from
+/// `docs/skull-parser-plan.md`); then times skull's parse loop. Coverage is
+/// expected to be partial during the walking-skeleton milestone — the report
+/// is the honest measure of how much of the grammar skull covers so far.
 pub fn iter_parse_skull(path: &str, iters: usize) -> Result<()> {
     let iters = iters.max(1);
     let (prepared, stats) = prepare_skull(path)?;
@@ -133,7 +198,7 @@ pub fn iter_parse_skull(path: &str, iters: usize) -> Result<()> {
         }
     }
     let _ = parsed;
-    report("iter-parse", path, iters, &stats, t.elapsed());
+    report("iter-parse --skull", path, iters, &stats, t.elapsed());
     Ok(())
 }
 

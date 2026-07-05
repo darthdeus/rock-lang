@@ -11,9 +11,9 @@
 //! only *consumes* bone's public pipeline (`parse_rock` + `passes::semantic_pass`).
 
 use crate::Result;
-use rock_core::CompilerError;
-use rock_core::SourceFiles;
-use rock_core::source_file_from_path_and_contents;
+use rock_syntax::CompilerError;
+use rock_syntax::prelude::SourceFiles;
+use rock_syntax::utils::source_file_from_path_and_contents;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -560,8 +560,8 @@ fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
 /// matching the file set the Lua backend's tokenizer counts (so `lines`/`loc per
 /// sec` line up across backends). Only `files`/`total_lines`/`bytes` are filled
 /// -- the code/comment/blank split needs tokens and isn't shown in the headline.
-fn bone_loc_stats(sources: &SourceFiles) -> rock_core::CompileStats {
-    let mut stats = rock_core::CompileStats::default();
+fn bone_loc_stats(sources: &SourceFiles) -> rock_types::CompileStats {
+    let mut stats = rock_types::CompileStats::default();
     for file in &sources.files {
         let f = file.borrow();
         stats.files += 1;

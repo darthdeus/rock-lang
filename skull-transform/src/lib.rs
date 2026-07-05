@@ -163,7 +163,7 @@ fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
         Term::Return(vs) => vs.iter().for_each(|v| push(*v)),
         Term::Branch { cond, .. } => push(*cond),
         Term::Switch { discr, .. } => push(*discr),
-        Term::Yield { values, .. } => values.iter().for_each(|v| push(*v)),
+        Term::Yield { value: Some(v), .. } => push(*v),
         _ => {}
     }
 }
@@ -778,20 +778,6 @@ struct CoroLowered {
     /// `(kind, lambda inst)`. The lambda still lives in `step`'s arenas (rendered
     /// by the ctor via `emit_lambda`), just removed from every block's inst list.
     hooks: Vec<(CoroHookKind, Idx<Inst>)>,
-    /// Frame layout stamp: the ctor writes it (`__layout`), the step's entry
-    /// checks it. See `layout_stamp_canon` for what it hashes.
-    layout_hash: i64,
-}
-
-/// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
-/// exactly representable in a Lua number.
-fn fnv1a32(s: &str) -> u32 {
-    let mut h: u32 = 0x811c_9dc5;
-    for b in s.bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x0100_0193);
-    }
-    h
 }
 
 /// Append `inst` to block `bid` of `f`, returning its id.
@@ -869,11 +855,6 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
         }
-        Inst::MakeEnumDyn { tag, positional, named, .. } => {
-            p(tag);
-            positional.iter().for_each(&mut p);
-            named.iter().for_each(|(_, a)| p(a));
-        }
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => p(base),
         Inst::Index { base, index, .. } => { p(base); p(index); }
         Inst::Len { base, .. } => p(base),
@@ -913,11 +894,6 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));
         }
-        Inst::MakeEnumDyn { tag, positional, named, .. } => {
-            f(tag);
-            positional.iter_mut().for_each(&mut f);
-            named.iter_mut().for_each(|(_, a)| f(a));
-        }
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => f(base),
         Inst::Index { base, index, .. } => { f(base); f(index); }
         Inst::Len { base, .. } => f(base),
@@ -938,7 +914,7 @@ fn term_value(term: &Term) -> Option<Idx<Inst>> {
         Term::Return(vs) => vs.first().copied(),
         Term::Branch { cond, .. } => Some(*cond),
         Term::Switch { discr, .. } => Some(*discr),
-        Term::Yield { values, .. } => values.first().copied(),
+        Term::Yield { value, .. } => *value,
         _ => None,
     }
 }
@@ -946,14 +922,14 @@ fn term_value(term: &Term) -> Option<Idx<Inst>> {
 pub(crate) fn remap_term(term: &mut Term, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
     match term {
         Term::Return(vs) => vs.iter_mut().for_each(|v| *v = m(*v)),
-        Term::Branch { cond: v, .. } | Term::Switch { discr: v, .. } => *v = m(*v),
-        Term::Yield { values, .. } => values.iter_mut().for_each(|v| *v = m(*v)),
+        Term::Branch { cond: v, .. } | Term::Switch { discr: v, .. }
+        | Term::Yield { value: Some(v), .. } => *v = m(*v),
         _ => {}
     }
 }
 
-fn vfield(v: Idx<Inst>) -> ustr::Ustr {
-    ustr::Ustr::from(format!("v{}", raw(v)).as_str())
+fn vfield(v: Idx<Inst>) -> rock_syntax::Ustr {
+    rock_syntax::Ustr::from(format!("v{}", raw(v)).as_str())
 }
 
 /// Spill every CROSS-BLOCK value (defined in one block, used in another) to the
@@ -962,9 +938,8 @@ fn vfield(v: Idx<Inst>) -> ustr::Ustr {
 /// survives the suspend/resume. (P2 — "only cells cross a yield" — is an
 /// over-statement: lowering routes some data through values; this is the
 /// canonical stackless spill, documented as a finding.) `protect` are param-like
-/// values never spilled. Returns the sorted spill field names (`v<N>`) — an
-/// input to the frame layout stamp.
-fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) -> Vec<String> {
+/// values never spilled.
+fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[Idx<Block>]) {
     // def block of every value.
     let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
     for &bid in block_ids {
@@ -989,7 +964,7 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         }
     }
     if frame_values.is_empty() {
-        return Vec::new();
+        return;
     }
 
     for &bid in block_ids {
@@ -1040,18 +1015,14 @@ fn spill_cross_block_values(step: &mut MirFunc, s_cell: Idx<Cell>, block_ids: &[
         remap_term(&mut term, &m);
         step.blocks[bid].term = term;
     }
-    let mut names: Vec<String> = frame_values.iter().map(|&v| vfield(v).as_str().to_string()).collect();
-    names.sort();
-    names
 }
 
 /// Transform a lowered `co fn` into its `__step` state machine + frame info.
-fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldChannel>) -> CoroLowered {
-    let frame_slot_channel = channel.is_some();
+fn transform_coroutine(func: &MirFunc) -> CoroLowered {
     let mut step = func.clone();
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
     let params = func.params.clone();
-    let s_cell = step.new_cell(Some(ustr::Ustr::from("s")));
+    let s_cell = step.new_cell(Some(rock_syntax::Ustr::from("s")));
 
     // Frame = all cells except the two step params (s, __resume_arg).
     let frame_cells: HashSet<Idx<Cell>> = step
@@ -1107,7 +1078,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
                 step.blocks[bid].insts.push(sv);
                 let store = step.insts.alloc(Inst::StoreField {
                     base: sv,
-                    field: ustr::Ustr::from("__inner"),
+                    field: rock_syntax::Ustr::from("__inner"),
                     value: x,
                 });
                 step.blocks[bid].insts.push(store);
@@ -1118,41 +1089,17 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     }
 
     // 2. Yields: `s.__state = k; return value`. Record (resume block) per state.
-    // Per state, also record the yielded variant tag when statically known (a
-    // `Const` tag leaf) -- a layout-stamp input that catches cross-variant yield
-    // reordering, which cell/spill/state-count hashing alone cannot see.
     let mut resume_of_state: Vec<Idx<Block>> = Vec::new();
-    let mut state_tags: Vec<String> = Vec::new();
     let mut yield_blocks: HashSet<Idx<Block>> = HashSet::default();
     for &bid in &orig_blocks {
-        if let Term::Yield { values, resume } = &step.blocks[bid].term {
-            let values = values.clone();
-            let resume = *resume;
+        if let Term::Yield { value, resume } = step.blocks[bid].term {
             let k = resume_of_state.len() as i64 + 1;
             resume_of_state.push(resume);
-            let tag = values
-                .first()
-                .and_then(|&v| match &step.insts[v] {
-                    Inst::Const(Lit::Str(s)) => Some(s.as_str().to_string()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "dyn".to_string());
-            state_tags.push(tag);
             yield_blocks.insert(bid);
-            // Frame-slot channel (flat-enum yield): write the leaves to reused
-            // `s.__y*` slots and return nothing (0 alloc per yield). The consumer
-            // reads the slots at the concrete resume site. Otherwise the value(s)
-            // multi-return directly (scalar / bare yield -- no box to remove).
-            if frame_slot_channel {
-                for (i, &v) in values.iter().enumerate() {
-                    let sv = emit(&mut step, bid, Inst::Load(s_cell));
-                    emit(&mut step, bid, Inst::StoreField { base: sv, field: skull_mir::lower::yield_slot(i), value: v });
-                }
-            }
             let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k)));
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from(STATE), value: kc });
-            step.blocks[bid].term = if frame_slot_channel { Term::Return(Vec::new()) } else { Term::Return(values) };
+            emit(&mut step, bid, Inst::StoreField { base: sv, field: rock_syntax::Ustr::from(STATE), value: kc });
+            step.blocks[bid].term = Term::Return(value.into_iter().collect());
         }
     }
     let num_states = resume_of_state.len();
@@ -1170,52 +1117,18 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
         if let Some(v0) = ret_val {
             if let Some(v) = v0 {
                 let sv = emit(&mut step, bid, Inst::Load(s_cell));
-                emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from("__return"), value: v });
+                emit(&mut step, bid, Inst::StoreField { base: sv, field: rock_syntax::Ustr::from("__return"), value: v });
             }
             let dc = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
             let sv2 = emit(&mut step, bid, Inst::Load(s_cell));
-            emit(&mut step, bid, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: dc });
+            emit(&mut step, bid, Inst::StoreField { base: sv2, field: rock_syntax::Ustr::from(STATE), value: dc });
             step.blocks[bid].term = Term::Return(Vec::new());
         }
     }
 
     // 3b. Spill cross-block values (loop-carried collections/bounds, multi-yield
     // args) so they survive a suspend/resume — see `spill_cross_block_values`.
-    let spill_fields = spill_cross_block_values(&mut step, s_cell, &orig_blocks);
-
-    // 3c. Frame layout stamp. Hash everything that fixes the frame's field
-    // meanings + the state numbering: (cell idx, source name) pairs, the spill
-    // field set, per-state variant tags, and the yield-channel shape. Body
-    // LOGIC/values/spans are deliberately excluded so a layout-stable edit keeps
-    // live coroutines running (the live-update feature). The ctor writes the
-    // stamp; the step's entry (below) rejects a frame with a different one --
-    // through `error()`, so the pcall in `__advance` turns it into a clean
-    // errored kill (docs/coroutine-allocation-plan.md "Layout drift").
-    let mut canon = String::new();
-    {
-        use std::fmt::Write as _;
-        for (id, cell) in step.cells.iter() {
-            if frame_cells.contains(&id) {
-                let _ = write!(canon, "c{}:{};", raw(id), cell.name.map(|n| n.as_str().to_string()).unwrap_or_default());
-            }
-        }
-        for f in &spill_fields {
-            let _ = write!(canon, "{f};");
-        }
-        for (i, t) in state_tags.iter().enumerate() {
-            let _ = write!(canon, "s{i}:{t};");
-        }
-        match channel {
-            Some(ch) => {
-                let _ = write!(canon, "ch:{}:{}", ch.enum_name, ch.tuple_width);
-                for rf in &ch.record_fields {
-                    let _ = write!(canon, ":{rf}");
-                }
-            }
-            None => canon.push_str("ch:-"),
-        }
-    }
-    let layout_hash = fnv1a32(&canon) as i64;
+    spill_cross_block_values(&mut step, s_cell, &orig_blocks);
 
     // 4. Dispatch entry: read s.__state, branch to each resume block; fall
     // through to the original entry (state 0). A chain of one block per state.
@@ -1230,7 +1143,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
         for k in 0..num_states {
             let bid = check_blocks[k];
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let st = emit(&mut step, bid, Inst::Field { base: sv, field: rock_syntax::Ustr::from(STATE) });
             let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k as i64 + 1)));
             let eq = emit(&mut step, bid, Inst::Eq(st, kc));
             let else_bb = if k + 1 < num_states { check_blocks[k + 1] } else { orig_entry };
@@ -1239,84 +1152,33 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
         step.entry = check_blocks[0];
     }
 
-    // 4b. Layout-stamp check ABOVE the dispatch: a frame written by a
-    // different layout (a live coroutine surviving a layout-shifting reload)
-    // must not be driven -- raise instead; `__advance`'s pcall turns it into a
-    // clean errored kill (on_killed fires, last_error explains, the poller
-    // logs). A fresh coroutine always matches (ctor + step emitted together).
-    {
-        let dispatch = step.entry;
-        let chk = step.new_block();
-        let sv = emit(&mut step, chk, Inst::Load(s_cell));
-        let lay = emit(&mut step, chk, Inst::Field { base: sv, field: ustr::Ustr::from("__layout") });
-        let kc = emit(&mut step, chk, Inst::Const(Lit::Int(layout_hash)));
-        let ne = emit(&mut step, chk, Inst::NotEq(lay, kc));
-        let raise = step.new_block();
-        let err_fn = emit(&mut step, raise, Inst::Global(ustr::Ustr::from("error")));
-        let msg = emit(
-            &mut step,
-            raise,
-            Inst::Const(Lit::Str(ustr::Ustr::from(
-                format!("coroutine killed: frame layout changed by hot reload ({})", func.name).as_str(),
-            ))),
-        );
-        emit(&mut step, raise, Inst::CallValue { callee: err_fn, args: vec![msg] });
-        // Unreachable (error() raised); a terminator is still required.
-        step.blocks[raise].term = Term::Goto(dispatch);
-        step.blocks[chk].term = Term::Branch { cond: ne, then_bb: raise, else_bb: dispatch };
-        step.entry = chk;
-    }
-
     // 5. The step is an ordinary fn `(s, __resume_arg)`.
-    step.name = ustr::Ustr::from(format!("{}__step", func.name).as_str());
+    step.name = rock_syntax::Ustr::from(format!("{}__step", func.name).as_str());
     step.params = vec![s_cell, resume_arg];
     step.is_coroutine = false;
     step.resume_arg = None;
 
-    CoroLowered { step, s_cell, frame_cells, params, num_states, hooks, layout_hash }
+    CoroLowered { step, s_cell, frame_cells, params, num_states, hooks }
 }
 
 /// Emit a `co fn` as its stackless `__step` (via the dumb printer, with a frame
 /// context) + the stdlib Coroutine constructor.
 pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func: &MirFunc) -> String {
     let name = mangled(ws, ctx, self_ref);
-    // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
-    // per yield); the channel's shape drives both the slot writes (transform) and
-    // the generic/boxed `resume()` rebuild (constructor).
-    let channel = ws.module(self_ref.module).functions[self_ref.func]
-        .return_ty
-        .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
-    let lowered = transform_coroutine(func, channel.as_ref());
+    let lowered = transform_coroutine(func);
     let frame = FrameCtx { s_cell: lowered.s_cell, fields: lowered.frame_cells.iter().copied().collect() };
     let step_name = format!("{name}__step");
     let step_lua = emit_named_framed(ws, ctx, &step_name, &lowered.step, Some(&frame));
-    // Terminal-cleanup defers: each detached copy (`if flag { flag = false;
-    // <body> }`) emits as a standalone `<name>__defer<k>(s)` over the SAME
-    // frame naming (shared cell arena + FrameCtx). The ctor stores them by
-    // value (`__defers` table) so a stale coroutine runs its own layout's
-    // cleanup; `__rock_coroutine_run_defers` iterates LIFO with per-body pcall.
-    let mut defer_luas = String::new();
-    for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {
-        let mut dfn = lowered.step.clone();
-        dfn.entry = *entry;
-        dfn.params = vec![lowered.s_cell];
-        let dname = format!("{name}__defer{k}");
-        defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&frame)));
-    }
-    let ctor = emit_constructor(ws, ctx, &name, &step_name, &lowered, &frame, channel.as_ref());
+    let ctor = emit_constructor(ws, ctx, &name, &step_name, &lowered, &frame);
     let _ = lowered.num_states;
-    format!("{step_lua}{defer_luas}{ctor}")
+    format!("{step_lua}{ctor}")
 }
 
 /// The constructor: build the state table (seed param fields + relocated
-/// on_killed/on_resume hooks) and return IT as the handle -- the object IS the
-/// frame, with `__`-prefixed method fields (`__resume`/`__result`/
-/// `__last_error`/`__status`/`__kill`/`__fire_hot_reload`, plus `__advance` on
-/// the frame-slot channel) driving the shared `<name>__step`. Method fields
-/// can't collide with user state: frame cells render as `c<N>`/`v<N>`. The
-/// state table is named `c<raw(s_cell)>` (NOT `s`) so a hook lambda
-/// referencing a frame cell renders `c<s>.c<field>` — the same name the
-/// step's `FrameCtx` produces.
+/// on_killed/on_resume hooks), return the handle (resume/result/last_error/
+/// status/kill) driving the shared `<name>__step`. The state table is named
+/// `c<raw(s_cell)>` (NOT `s`) so a hook lambda referencing a frame cell renders
+/// `c<s>.c<field>` — the same name the step's `FrameCtx` produces.
 fn emit_constructor(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -1324,26 +1186,13 @@ fn emit_constructor(
     step_name: &str,
     lowered: &CoroLowered,
     frame: &FrameCtx,
-    channel: Option<&skull_mir::lower::YieldChannel>,
 ) -> String {
     use std::fmt::Write as _;
     let svar = format!("c{}", raw(lowered.s_cell));
     let param_fields: Vec<String> = lowered.params.iter().map(|p| format!("c{}", raw(*p))).collect();
-    let mut init = vec![
-        "__ty = \"Coroutine\"".to_string(),
-        format!("{STATE} = 0"),
-        format!("__layout = {}", lowered.layout_hash),
-    ];
+    let mut init = vec![format!("{STATE} = 0")];
     for pf in &param_fields {
         init.push(format!("{pf} = {pf}"));
-    }
-    // Terminal-cleanup defer fns, stored BY VALUE (site order; runners iterate
-    // in reverse for LIFO) -- a stale frame must run ITS OWN layout's cleanup,
-    // never the current code's (the step is name-resolved, cleanup is not).
-    let n_defers = lowered.step.coro_defers.len();
-    if n_defers > 0 {
-        let list: Vec<String> = (0..n_defers).map(|k| format!("{name}__defer{k}")).collect();
-        init.push(format!("__defers = {{ {} }}", list.join(", ")));
     }
 
     // Hook prologue: `c<s>.__on_killed = function() .. end`. The lambda lives in
@@ -1357,74 +1206,35 @@ fn emit_constructor(
         }
     }
 
-    // The pure readers (result/status/last_error/kill/fire_hot_reload) are NOT
-    // fields: they live in the stdlib as shared fns reading the frame directly
-    // (`c.__return`, `c.__state`, `__rock_coroutine_kill`). Only the step-bound
-    // methods remain per-construction. Each takes the object explicitly
-    // (`c.__X(c, ...)`) and reads ONLY its `s` param -- the bodies are already
-    // shared-fn-shaped, so hoisting them out of the ctor (Part B closure
-    // elimination) is a ctor-only change, no consumer churn.
-
-    // Frame-slot channel: the step writes yield leaves to reused `s.__y*` slots
-    // and returns nothing. The OBJECT IS THE FRAME (one table per creation):
-    // `__advance(s, arg)` steps (returns done-bool) and a concrete consumer reads
-    // the `__y*` leaves threaded off the object itself (0 alloc). The
-    // generic/boxed `__resume` rebuilds one `{__variant}` box from the slots --
-    // same external `Y?` for erased consumers (correct, allocates, rare).
-    if let Some(ch) = channel {
-        let mut box_fields = format!(
-            "{{__variant = s.{tag}, __ty = {ty}",
-            tag = skull_mir::lower::yield_slot(0),
-            ty = skull_codegen_lua::lua_string(ch.enum_name.as_str()),
-        );
-        for i in 0..ch.tuple_width {
-            let _ = write!(box_fields, ", s.{}", skull_mir::lower::yield_slot(1 + i));
-        }
-        for (j, rf) in ch.record_fields.iter().enumerate() {
-            let _ = write!(box_fields, ", {rf} = s.{}", skull_mir::lower::yield_slot(1 + ch.tuple_width + j));
-        }
-        box_fields.push('}');
-        // `__advance`/`__resume` are PER-CO-FN top-level fns (emitted once, next
-        // to the step), stored in the table literal as plain fn-value fields --
-        // zero closures per creation. Hot-reload staleness is identical to the
-        // closure form: a live object's stale v0 fn values resolve the step (and
-        // `{name}__advance`) by GLOBAL name at call time, so a BodyOnly overlay's
-        // new step is picked up mid-flight (guarded by
-        // `live_flat_enum_coroutine_survives_overlay_and_threads_new_body`).
-        return format!(
-            "function {name}__advance(s, arg)\n\
-             \x20 if s.{STATE} < 0 then return true end\n\
-             \x20 if s.__on_resume then s.__on_resume() end\n\
-             \x20 local ok, err = pcall({step_name}, s, arg)\n\
-             \x20 if not ok then s.{STATE} = -2; s.__error = err; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed() end; return true end\n\
-             \x20 return s.{STATE} < 0\n\
-             end\n\
-             function {name}__resume(s, arg)\n\
-             \x20 if {name}__advance(s, arg) then return nil end\n\
-             \x20 return {box_fields}\n\
-             end\n\
-             function {name}({paramlist})\n\
-             \x20 local {svar} = {{ {fields}, __advance = {name}__advance, __resume = {name}__resume }}\n\
-             {prologue}\
-             \x20 return {svar}\n\
-             end\n",
-            paramlist = param_fields.join(", "),
-            fields = init.join(", "),
-        );
-    }
-
     format!(
-        "function {name}__resume(s, arg)\n\
-         \x20 if s.{STATE} < 0 then return nil end\n\
-         \x20 if s.__on_resume then s.__on_resume() end\n\
-         \x20 local ok, val = pcall({step_name}, s, arg)\n\
-         \x20 if not ok then s.{STATE} = -2; s.__error = val; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed() end; return nil end\n\
-         \x20 return val\n\
-         end\n\
-         function {name}({paramlist})\n\
-         \x20 local {svar} = {{ {fields}, __resume = {name}__resume }}\n\
+        "function {name}({paramlist})\n\
+         \x20 local {svar} = {{ {fields} }}\n\
          {prologue}\
-         \x20 return {svar}\n\
+         \x20 return {{\n\
+         \x20   __ty = \"Coroutine\",\n\
+         \x20   resume = function(arg)\n\
+         \x20     if {svar}.{STATE} < 0 then return nil end\n\
+         \x20     if {svar}.__on_resume then {svar}.__on_resume() end\n\
+         \x20     local ok, val = pcall({step_name}, {svar}, arg)\n\
+         \x20     if not ok then {svar}.{STATE} = -2; {svar}.__error = val; if {svar}.__on_killed then {svar}.__on_killed() end; return nil end\n\
+         \x20     return val\n\
+         \x20   end,\n\
+         \x20   result = function() return {svar}.__return end,\n\
+         \x20   last_error = function() return {svar}.__error end,\n\
+         \x20   status = function()\n\
+         \x20     if {svar}.{STATE} == -2 then return \"errored\" elseif {svar}.{STATE} < 0 then return \"dead\" else return \"suspended\" end\n\
+         \x20   end,\n\
+         \x20   kill = function()\n\
+         \x20     if {svar}.{STATE} < 0 then return end\n\
+         \x20     {svar}.{STATE} = -1\n\
+         \x20     if {svar}.__inner then {svar}.__inner.kill() end\n\
+         \x20     if {svar}.__on_killed then {svar}.__on_killed() end\n\
+         \x20   end,\n\
+         \x20   fire_hot_reload = function()\n\
+         \x20     if {svar}.{STATE} < 0 then return end\n\
+         \x20     if {svar}.__on_hot_reload then {svar}.__on_hot_reload() end\n\
+         \x20   end,\n\
+         \x20 }}\n\
          end\n",
         paramlist = param_fields.join(", "),
         fields = init.join(", "),

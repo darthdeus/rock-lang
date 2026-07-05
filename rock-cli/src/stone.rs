@@ -408,19 +408,12 @@ pub fn do_stone_watch(
         let mut compilation_succeeded = false;
         if has_game_changes || compiler_rebuilt {
             match compiler.compile(&changed_paths, compiler_rebuilt) {
-                Ok(outcome) => {
+                Ok(_) => {
                     // Consumed successfully; start the next edit clean. On error
                     // we keep them so the next tick retries the same changes.
                     changed_paths.clear();
                     compilation_succeeded = true;
                     clear_error_file();
-                    if !outcome.restart_types.is_empty() {
-                        info!(
-                            "type shape changed ({}) -- live state cannot be migrated, restarting game process",
-                            outcome.restart_types.join(", ")
-                        );
-                        should_restart = true;
-                    }
                 }
                 Err(e) => {
                     let error_message = format!("Error compiling game: {}", e);
@@ -433,11 +426,6 @@ pub fn do_stone_watch(
 
         // If game hasn't been started yet and compilation just succeeded, start it now
         if game_process.is_none() && compilation_succeeded {
-            // A crashed/never-started process loads `main.lua` only -- fold any
-            // overlay / deferred shape write in first, same as a restart.
-            if let Err(e) = compiler.canonicalize_for_restart() {
-                error!("fold before start failed: {} (start may load a stale main.lua)", e);
-            }
             info!("First successful compilation! Starting game...");
             game_process = Some(start_game_process(app_args)?);
             info!("Game started successfully");
@@ -446,19 +434,16 @@ pub fn do_stone_watch(
         // artifacts (or the user manually triggered) and the game is up.
         else if should_restart {
             if let Some(ref mut process) = game_process {
-                // Kill FIRST: a shape-changed compile deferred its main.lua
-                // write precisely so the old process never hot-reloads the
-                // new-shape program -- the canonicalize below is what writes
-                // it. (For plain restarts the fold is idempotent; a dead
-                // process cannot race the write either way.) A restart
-                // re-spawns luajit, which loads `main.lua` only -- it does NOT
-                // dual-load any accumulated overlay, so the fold must run
-                // before the new process starts.
-                info!("Restarting game process...");
-                kill_game_process(process)?;
+                // A restart re-spawns luajit, which loads `main.lua` only -- it
+                // does NOT dual-load any accumulated overlay. Let the backend
+                // fold its overlay back into `main.lua` first (no-op for rock,
+                // and for skull when no overlay is on disk) so the restarted
+                // process gets the complete current program, not a stale baseline.
                 if let Err(e) = compiler.canonicalize_for_restart() {
                     error!("fold before restart failed: {} (restart may load a stale main.lua)", e);
                 }
+                info!("Restarting game process...");
+                kill_game_process(process)?;
                 game_process = Some(start_game_process(app_args)?);
                 info!("Game process restarted");
             }
@@ -905,7 +890,8 @@ mod tests {
     #[test]
     fn compiler_source_classification() {
         // Compiler crate src files -> rebuild the rock binary.
-        assert!(is_compiler_source("rock-host/src/lib.rs"));
+        assert!(is_compiler_source("rock/src/main.rs"));
+        assert!(is_compiler_source("rock-types/src/lib.rs"));
         assert!(is_compiler_source("rock-cli/src/stone.rs"));
         assert!(is_compiler_source("skull/src/lib.rs"));
         assert!(is_compiler_source("skull-codegen-lua/src/lib.rs"));

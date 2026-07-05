@@ -45,84 +45,6 @@ pub fn compile_source(src: &str) -> Result<String, CompilerError> {
     Ok(mir_emit::emit_workspace_mir(&ws, mid)?.lua)
 }
 
-/// Per-nominal-type layout hash, keyed by type name (unique workspace-wide).
-pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
-
-/// Hash every nominal type's RUNTIME LAYOUT for the hot-reload schema-drift
-/// restart trigger (docs/hot-reload-schema-drift-plan.md): live data outlives
-/// a reload, so a layout change means the process must restart. The hash
-/// covers exactly what determines how live values are laid out -- ordered
-/// (field name, field type) pairs for structs (+ the value/cdata flag),
-/// ordered (variant name, payload shape) for enums, the wrapped type for
-/// newtypes. Bodies, spans, defaults, and comments do not participate, so a
-/// hot body edit or a doc tweak never restarts. Transitive drift needs no
-/// transitive hash: a nested type's OWN entry changes. Known over-trigger
-/// (accepted, uniform-predictable): reordering a boxed enum's variants
-/// restarts even though its live tags are name strings.
-pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
-    use bone_semantic::hir::VariantPayload;
-    use std::hash::{Hash, Hasher};
-
-    let mut out = ShapeHashes::default();
-    for module in ws.modules.iter() {
-        for (_, s) in module.structs.iter() {
-            let mut h = rustc_hash::FxHasher::default();
-            "struct".hash(&mut h);
-            s.is_value.hash(&mut h);
-            for f in s.fields.iter() {
-                f.name.as_str().hash(&mut h);
-                ws.render(None, f.ty).hash(&mut h);
-            }
-            out.insert(s.name, h.finish());
-        }
-        for (_, e) in module.enums.iter() {
-            let mut h = rustc_hash::FxHasher::default();
-            "enum".hash(&mut h);
-            for v in e.variants.iter() {
-                v.name.as_str().hash(&mut h);
-                match &v.payload {
-                    VariantPayload::Unit => "unit".hash(&mut h),
-                    VariantPayload::Tuple(tys) => {
-                        "tuple".hash(&mut h);
-                        for t in tys.iter() {
-                            ws.render(None, *t).hash(&mut h);
-                        }
-                    }
-                    VariantPayload::Record(fields) => {
-                        "record".hash(&mut h);
-                        for f in fields.iter() {
-                            f.name.as_str().hash(&mut h);
-                            ws.render(None, f.ty).hash(&mut h);
-                        }
-                    }
-                }
-            }
-            out.insert(e.name, h.finish());
-        }
-        for (_, nt) in module.newtypes.iter() {
-            let mut h = rustc_hash::FxHasher::default();
-            "newtype".hash(&mut h);
-            ws.render(None, nt.wrapped).hash(&mut h);
-            out.insert(nt.name, h.finish());
-        }
-    }
-    out
-}
-
-/// The type names whose shape hash differs between two compiles: changed,
-/// added, or removed entries all count -- live data under a REMOVED type is
-/// just as stale as under a changed one.
-pub fn shape_diff(old: &ShapeHashes, new: &ShapeHashes) -> Vec<String> {
-    let mut changed: Vec<String> = new
-        .iter()
-        .filter(|(name, hash)| old.get(*name) != Some(hash))
-        .map(|(name, _)| name.to_string())
-        .collect();
-    changed.extend(old.keys().filter(|n| !new.contains_key(*n)).map(|n| n.to_string()));
-    changed.sort();
-    changed
-}
-
 /// The single user module id (everything in the workspace but the builtin one).
 pub fn user_module_id(ws: &Workspace) -> Result<ModuleId, CompilerError> {
     ws.modules
@@ -825,52 +747,6 @@ mod tests {
         compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
     }
 
-    /// The schema-drift restart trigger's oracle (docs/hot-reload-schema-drift-plan.md):
-    /// the hash moves iff the runtime LAYOUT moves. Body edits are invisible;
-    /// each shape-edit class moves exactly its own type's entry; a removed type
-    /// counts as drifted (live data under it is stale).
-    #[test]
-    fn type_shape_hashes_track_layout_not_bodies() {
-        let hashes = |src: &str| {
-            let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>"))
-                .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
-            let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
-                .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
-            super::type_shape_hashes(&ws)
-        };
-        let base = "struct Mob { hp: int }\n\
-                    enum Ev { Tick(int), Done }\n\
-                    value P { x: int, y: int }\n\
-                    newtype Gold(int)\n\
-                    fn probe(m: Mob) -> int { m.hp }\n";
-        let h0 = hashes(base);
-        let none: Vec<String> = Vec::new();
-
-        let body = base.replace("{ m.hp }", "{ m.hp + 1 }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&body)), none, "a body edit must not drift any shape");
-
-        let field_add = base.replace("struct Mob { hp: int }", "struct Mob { hp: int, armor: int }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&field_add)), vec!["Mob"]);
-
-        let field_retype = base.replace("struct Mob { hp: int }", "struct Mob { hp: float }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&field_retype)), vec!["Mob"]);
-
-        let vs_reorder = base.replace("value P { x: int, y: int }", "value P { y: int, x: int }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&vs_reorder)), vec!["P"]);
-
-        let payload_widen = base.replace("Ev { Tick(int), Done }", "Ev { Tick(int, int), Done }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&payload_widen)), vec!["Ev"]);
-
-        let variant_reorder = base.replace("Ev { Tick(int), Done }", "Ev { Done, Tick(int) }");
-        assert_eq!(super::shape_diff(&h0, &hashes(&variant_reorder)), vec!["Ev"]);
-
-        let rewrap = base.replace("newtype Gold(int)", "newtype Gold(float)");
-        assert_eq!(super::shape_diff(&h0, &hashes(&rewrap)), vec!["Gold"]);
-
-        let removed = base.replace("newtype Gold(int)\n", "");
-        assert_eq!(super::shape_diff(&h0, &hashes(&removed)), vec!["Gold"], "a removed type counts as drifted");
-    }
-
     #[test]
     fn int_literal_function() {
         let lua = emit("fn five() -> int { 5 }");
@@ -1136,8 +1012,7 @@ mod tests {
     #[test]
     fn exec_coroutine_yield() {
         // A `co fn` emits a stackless state machine; calling it returns a
-        // Frame driven by the per-co-fn `__resume` stored as a literal field
-        // (the ctor returns the frame; `__`-method fields take it explicitly).
+        // Coroutine object driven by repeated `.resume()` calls.
         let src = "co fn counter() -> Coroutine<int> {\n\
                        yield 1\n\
                        yield 2\n\
@@ -1145,7 +1020,7 @@ mod tests {
                    }";
         let Some(out) = run(
             src,
-            "local c = counter(); print(c.__resume(c)); print(c.__resume(c)); print(c.__resume(c))",
+            "local c = counter(); print(c.resume()); print(c.resume()); print(c.resume())",
         ) else {
             return;
         };
@@ -1181,8 +1056,8 @@ mod tests {
             "step must be top-level, not a per-instance closure, got:\n{lua}"
         );
         assert!(
-            lua.contains(r#"{ __ty = "Coroutine", __state = 0, __layout = "#),
-            "expected the tagged+stamped frame table, got:\n{lua}"
+            lua.contains("{ __state = 0 }"),
+            "expected a state table, got:\n{lua}"
         );
         assert!(
             lua.contains("pcall(counter__step,"),
@@ -1191,7 +1066,7 @@ mod tests {
         // State machine: writes to the state field + a terminal -1, over an
         // ordinary goto-CFG — NOT the emit-time goto-into-block re-entry labels.
         assert!(lua.contains(".__state ="), "expected state-saving write, got:\n{lua}");
-        assert!(lua.contains("__state = (-1)"), "expected terminal transition, got:\n{lua}");
+        assert!(lua.contains("= -1"), "expected terminal transition, got:\n{lua}");
         assert!(lua.contains("goto bb"), "expected ordinary goto CFG, got:\n{lua}");
         assert!(
             !lua.contains("__co_resume_"),
@@ -1213,7 +1088,7 @@ mod tests {
                    }";
         let Some(out) = run(
             src,
-            "local c = outer(); for i=1,4 do print(c.__resume(c)) end",
+            "local c = outer(); for i=1,4 do print(c.resume()) end",
         ) else {
             return;
         };

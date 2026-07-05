@@ -24,9 +24,7 @@ pub fn compile_game_for_run(
     let output_path = PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
     let mut compiler = crate::game_runtime::game_compiler_for(backend, path, &output_path);
     match compiler.compile(&HashSet::new(), true) {
-        // One-shot from-scratch compile: always the init path, so the outcome
-        // can never request a shape restart (there is no live process).
-        Ok(_) => {
+        Ok(()) => {
             clear_error_file();
             Ok(output_path)
         }

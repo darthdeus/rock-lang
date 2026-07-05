@@ -35,12 +35,6 @@ pub enum Doc {
     /// multi-line).
     #[allow(dead_code)]
     IfBreak(Box<Doc>, Box<Doc>),
-    /// First-fit alternatives: render the first option *all* of whose lines fit
-    /// the width at the current column; fall back to the last option otherwise.
-    /// Unlike `Group` (which is a binary flat/break choice over one layout), this
-    /// picks between distinct layouts -- used for the fluid assignment layout
-    /// (`lhs = rhs` | `lhs =\n  rhs` | `lhs = rhs(\n  args\n)`).
-    Choice(Vec<Doc>),
 }
 
 impl Doc {
@@ -68,10 +62,6 @@ impl Doc {
         Doc::IfBreak(Box::new(broken), Box::new(flat))
     }
 
-    pub fn choice(options: impl IntoIterator<Item = Doc>) -> Doc {
-        Doc::Choice(options.into_iter().collect())
-    }
-
     /// Join `docs` with `sep` between each pair.
     pub fn join(sep: Doc, docs: impl IntoIterator<Item = Doc>) -> Doc {
         let mut out = Vec::new();
@@ -95,9 +85,6 @@ impl Doc {
             // The flat branch is what matters when probing whether a group can
             // stay flat; the broken branch never appears in flat mode.
             Doc::IfBreak(_, flat) => flat.has_hard_line(),
-            // A choice is only entered in break mode and resolves to one option;
-            // for flat-probing it stands in for its first (flattest) option.
-            Doc::Choice(opts) => opts.first().is_some_and(Doc::has_hard_line),
         }
     }
 }
@@ -161,66 +148,9 @@ fn fits(mut width: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
                 let chosen = if mode == Mode::Break { broken } else { flat };
                 stack.push((indent, mode, chosen));
             }
-            // A choice nested inside a flat-probe stands in for its first option.
-            Doc::Choice(opts) => {
-                if let Some(first) = opts.first() {
-                    stack.push((indent, mode, first));
-                }
-            }
         }
     }
     false
-}
-
-/// Whether every line of `doc`, rendered standalone from `start_col` at indent
-/// level `indent`, fits within `width`. Groups are measured flat; hard lines
-/// reset the column to the indent. Used to pick a `Choice` option.
-fn all_lines_fit(
-    doc: &Doc,
-    indent: usize,
-    start_col: usize,
-    width: usize,
-    indent_unit: usize,
-) -> bool {
-    let mut col = start_col;
-    let mut stack: Vec<(usize, &Doc)> = vec![(indent, doc)];
-    while let Some((ind, d)) = stack.pop() {
-        match d {
-            Doc::Nil => {}
-            Doc::Text(s) => {
-                for (i, seg) in s.split('\n').enumerate() {
-                    if i > 0 {
-                        col = ind * indent_unit;
-                    }
-                    col += seg.chars().count();
-                    if col > width {
-                        return false;
-                    }
-                }
-            }
-            Doc::Line(LineKind::Hard) => col = ind * indent_unit,
-            Doc::Line(LineKind::Normal) => col += 1,
-            Doc::Line(LineKind::Soft) => {}
-            Doc::Concat(ds) => {
-                for sub in ds.iter().rev() {
-                    stack.push((ind, sub));
-                }
-            }
-            Doc::Indent(sub) => stack.push((ind + 1, sub)),
-            // Measure groups and choices in their flattest form.
-            Doc::Group(sub) => stack.push((ind, sub)),
-            Doc::IfBreak(_, flat) => stack.push((ind, flat)),
-            Doc::Choice(opts) => {
-                if let Some(first) = opts.first() {
-                    stack.push((ind, first));
-                }
-            }
-        }
-        if col > width {
-            return false;
-        }
-    }
-    true
 }
 
 /// Render `doc` to a string. `width` is the target max line length;
@@ -293,17 +223,6 @@ pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
                 let chosen = if mode == Mode::Break { broken } else { flat };
                 stack.push((indent, mode, chosen.as_ref()));
             }
-            Doc::Choice(opts) => {
-                // Pick the first option whose every line fits; else the last.
-                let chosen = opts
-                    .iter()
-                    .take(opts.len().saturating_sub(1))
-                    .find(|opt| all_lines_fit(opt, indent, col, width, indent_unit))
-                    .or_else(|| opts.last());
-                if let Some(c) = chosen {
-                    stack.push((indent, Mode::Break, c));
-                }
-            }
         }
     }
 
@@ -371,56 +290,6 @@ mod tests {
             Doc::text("}"),
         ]);
         assert_eq!(r(&d, 80), "fn f() {\n    return 1\n}");
-    }
-
-    // The fluid assignment layout: flat | break-after-op | hug.
-    fn assign_choice(lhs: &str, rhs: Doc) -> Doc {
-        let flat = Doc::concat([Doc::text(lhs), Doc::text(" = "), rhs.clone()]);
-        let after = Doc::concat([
-            Doc::text(lhs),
-            Doc::text(" ="),
-            Doc::indent(Doc::concat([hardline(), rhs.clone()])),
-        ]);
-        let hug = Doc::concat([Doc::text(lhs), Doc::text(" = "), rhs]);
-        Doc::choice([flat, after, hug])
-    }
-
-    // A multi-arg call group: `f(a, b, c)` flat, breaking one-per-line.
-    fn call(name: &str, args: &[&str]) -> Doc {
-        Doc::group(Doc::concat([
-            Doc::text(name),
-            Doc::text("("),
-            Doc::indent(Doc::concat([
-                softline(),
-                Doc::join(
-                    Doc::concat([Doc::text(","), line()]),
-                    args.iter().map(|a| Doc::text(*a)),
-                ),
-            ])),
-            softline(),
-            Doc::text(")"),
-        ]))
-    }
-
-    #[test]
-    fn choice_picks_all_flat_when_it_fits() {
-        let d = assign_choice("x", call("f", &["a", "b"]));
-        assert_eq!(r(&d, 80), "x = f(a, b)");
-    }
-
-    #[test]
-    fn choice_breaks_after_op_when_rhs_fits_on_its_own_line() {
-        // `xxxx = f(aaaa, bbbb)` is 20 wide; at width 18 the one-liner fails but
-        // the RHS (`f(aaaa, bbbb)`, 13 wide) fits at indent 4 (17) -> break after `=`.
-        let d = assign_choice("xxxx", call("f", &["aaaa", "bbbb"]));
-        assert_eq!(r(&d, 18), "xxxx =\n    f(aaaa, bbbb)");
-    }
-
-    #[test]
-    fn choice_hugs_when_rhs_too_wide_even_alone() {
-        // The RHS doesn't fit even on its own indented line -> hug and break args.
-        let d = assign_choice("xxxx", call("f", &["aaaaaaaa", "bbbbbbbb"]));
-        assert_eq!(r(&d, 16), "xxxx = f(\n    aaaaaaaa,\n    bbbbbbbb\n)");
     }
 
     #[test]

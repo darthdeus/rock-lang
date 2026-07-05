@@ -15,6 +15,7 @@ edition = "2024"
 comfy-la-arena = { workspace = true }
 bone-semantic = { path = "../bone-semantic" }
 skull-parser = { path = "../skull-parser" }
+rock-syntax = { path = "../rock-syntax" }
 ustr = { workspace = true }
 
 [dev-dependencies]

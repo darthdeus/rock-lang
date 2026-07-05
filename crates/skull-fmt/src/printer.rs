@@ -301,7 +301,7 @@ impl<'a> Printer<'a> {
             ItemKind::Struct(s) => self.struct_def(s),
             ItemKind::Enum(e) => self.enum_def(e),
             ItemKind::Newtype(n) => self.newtype_def(n),
-            ItemKind::Comment(text) => self.comment_line(text),
+            ItemKind::Comment(text) => self.comment_node(item.span, text),
             // Constructs whose source spelling the raw AST does not fully
             // recover -- slice verbatim for now.
             ItemKind::Decorator(_)
@@ -334,6 +334,23 @@ impl<'a> Printer<'a> {
             return self.raw(f.span);
         }
 
+        // A block comment in the signature (`fn f(a, /* c */ b) -> /* c */ T`)
+        // has no structural home -- slice the signature verbatim (keeping the
+        // body structural). The body's `{` re-emitted by `block`.
+        let block = f.body.rock_block().unwrap();
+        let sig_start = f.keyword_span.unwrap_or(f.span);
+        let body_open = self.ast.b(&block).span.offset_range.0;
+        if sig_start.line_range.0 == self.ast.b(&block).span.line_range.0
+            && self.trivia.has_block_comment_in(sig_start.offset_range.0, body_open)
+        {
+            let sig = self.slice_range(sig_start.offset_range.0, body_open);
+            return Doc::concat([
+                Doc::text(sig.trim_end().to_string()),
+                Doc::text(" "),
+                self.block(block),
+            ]);
+        }
+
         let keyword = if f.is_macro { "macro" } else { "fn" };
         let coroutine = if f.is_coroutine { "co " } else { "" };
         let mut sig = vec![
@@ -360,7 +377,6 @@ impl<'a> Printer<'a> {
             self.cfg.indent_size,
         );
         let sig_str = sig_brace.strip_suffix(" {").unwrap_or(&sig_brace);
-        let block = f.body.rock_block().unwrap();
         Doc::concat([
             Doc::text(sig_str.to_string()),
             Doc::text(" "),
@@ -449,6 +465,12 @@ impl<'a> Printer<'a> {
     }
 
     fn variant(&self, v: &EnumVariant) -> Doc {
+        // A block comment among tuple/record fields (`Rect(float, /* w */ float)`)
+        // sits between field spans, not inside one -- slice the variant verbatim.
+        self.maybe_verbatim_line(v.span, || self.variant_structural(v))
+    }
+
+    fn variant_structural(&self, v: &EnumVariant) -> Doc {
         let name = Doc::text(kw(v.name.name));
         match &v.kind {
             EnumVariantKind::Unit => name,
@@ -488,6 +510,51 @@ impl<'a> Printer<'a> {
 
     fn comment_line(&self, text: &str) -> Doc {
         Doc::text(format!("//{text}"))
+    }
+
+    /// If `span` is a single source line that carries a block comment the
+    /// structural render would drop, slice it verbatim -- block comments are a
+    /// preserve-verbatim trigger with no structural home in headers/types/arms.
+    /// Multi-line spans keep structural rendering (verbatim would un-format a
+    /// nested body).
+    fn maybe_verbatim_line(&self, span: Span, fallback: impl FnOnce() -> Doc) -> Doc {
+        if span.line_range.0 == span.line_range.1
+            && self
+                .trivia
+                .has_block_comment_in(span.offset_range.0, span.offset_range.1)
+        {
+            Doc::text(self.slice(span).trim_end().to_string())
+        } else {
+            fallback()
+        }
+    }
+
+    /// Prepend an inline block comment the parser dropped from just before a
+    /// node (`/* second */ 2`, `/* y field */ y: 2`). Only a SAME-LINE leading
+    /// comment (gap is spaces/tabs, no newline) is inlined; an own-line block
+    /// comment is left for gap recovery so it stays on its own line.
+    fn prepend_leading_block(&self, doc: Doc, node_start: usize) -> Doc {
+        if let Some((cstart, cend)) = self.trivia.block_comment_ending_before(node_start) {
+            let gap = self.slice_range(cend, node_start);
+            if !gap.is_empty() && gap.bytes().all(|b| b == b' ' || b == b'\t') {
+                let comment = self.slice_range(cstart, cend);
+                return Doc::concat([Doc::text(format!("{comment} ")), doc]);
+            }
+        }
+        doc
+    }
+
+    /// A `Comment` AST node (statement / item). The parser stores the inner text
+    /// only, losing whether it was `//` or `/* */`; slice the node's span to
+    /// preserve a block comment verbatim (`/* between */`, not `// between`).
+    /// `//` comments keep the reconstructed form (no source-whitespace churn).
+    fn comment_node(&self, span: Span, text: &str) -> Doc {
+        let src = self.slice(span);
+        if src.trim_start().starts_with("/*") {
+            Doc::text(src.trim_end().to_string())
+        } else {
+            self.comment_line(text)
+        }
     }
 
     // ---- signatures -------------------------------------------------------
@@ -640,50 +707,90 @@ impl<'a> Printer<'a> {
     }
 
     fn stmt_seq(&self, stmts: &[Idx<StatementData>]) -> Doc {
-        // Render each statement, then preserve any hand-aligned run verbatim
-        // (aligned `let` columns etc.) before assembling.
         let spans: Vec<Span> = stmts.iter().map(|s| self.ast.s(s).span).collect();
-        let eligible: Vec<bool> = stmts
+        let is_comment = |i: usize| matches!(self.ast.s(&stmts[i]).kind, StatementKind::Comment(_));
+
+        // Group consecutive statements the author put on ONE source line
+        // (`a; b; c`) so they stay on that line -- a Comment statement stands
+        // alone. Only when the block spans multiple lines: a whole body minified
+        // onto one line (`fn f(){a;b;c}`) is still expanded one-per-line.
+        let multi_line_block = stmts
+            .first()
+            .zip(stmts.last())
+            .is_some_and(|(f, l)| self.ast.s(f).span.line_range.0 != self.ast.s(l).span.line_range.1);
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for i in 0..stmts.len() {
+            let merge = multi_line_block
+                && groups.last().is_some_and(|g| {
+                    let p = *g.last().unwrap();
+                    !is_comment(p)
+                        && !is_comment(i)
+                        && spans[p].line_range.0 == spans[i].line_range.0
+                });
+            if merge {
+                groups.last_mut().unwrap().push(i);
+            } else {
+                groups.push(vec![i]);
+            }
+        }
+        // Per-group span (first statement start .. last statement end).
+        let gspans: Vec<Span> = groups
             .iter()
-            .zip(&spans)
-            .map(|(s, sp)| {
-                sp.line_range.0 == sp.line_range.1
-                    && !matches!(self.ast.s(s).kind, StatementKind::Comment(_))
+            .map(|g| {
+                let (f, l) = (spans[g[0]], spans[*g.last().unwrap()]);
+                Span {
+                    line_range: (f.line_range.0, l.line_range.1),
+                    offset_range: (f.offset_range.0, l.offset_range.1),
+                    ..f
+                }
             })
             .collect();
-        let mut docs: Vec<Doc> = stmts.iter().map(|&s| self.stmt(s)).collect();
-        // Aligned statements are sliced verbatim INCLUDING any trailing comment
-        // (so the author's `//`-column alignment survives the trailing-comment
-        // aligner); those skip the `with_trailing_comment` wrap below.
-        let no_skip = vec![false; spans.len()];
-        let mut aligned = vec![false; spans.len()];
-        for k in self.aligned_indices(&spans, &eligible, &no_skip) {
-            docs[k] = self.verbatim_full_line(spans[k]);
-            aligned[k] = true;
+        // A multi-statement line is sliced verbatim (preserving the `;`
+        // separators and any column alignment); a lone statement renders
+        // structurally.
+        let mut docs: Vec<Doc> = groups
+            .iter()
+            .zip(&gspans)
+            .map(|(g, gs)| {
+                if g.len() > 1 {
+                    self.verbatim_full_line(*gs)
+                } else {
+                    self.stmt(stmts[g[0]])
+                }
+            })
+            .collect();
+        // Preserve hand-aligned runs of lone statements verbatim (incl. trailing
+        // comment). Multi-statement groups are already verbatim.
+        let eligible: Vec<bool> = groups
+            .iter()
+            .zip(&gspans)
+            .map(|(g, gs)| g.len() == 1 && gs.line_range.0 == gs.line_range.1 && !is_comment(g[0]))
+            .collect();
+        let no_skip = vec![false; groups.len()];
+        let mut verbatim = groups.iter().map(|g| g.len() > 1).collect::<Vec<_>>();
+        for k in self.aligned_indices(&gspans, &eligible, &no_skip) {
+            docs[k] = self.verbatim_full_line(gspans[k]);
+            verbatim[k] = true;
         }
 
         let mut parts = Vec::new();
-        for (i, &s) in stmts.iter().enumerate() {
-            if i > 0 {
+        for (gi, g) in groups.iter().enumerate() {
+            if gi > 0 {
                 parts.push(hardline());
-                let prev_end = self.ast.s(&stmts[i - 1]).span.line_range.1;
-                let cur_start = self.ast.s(&s).span.line_range.0;
-                // Preserve the author's blank lines verbatim -- don't synthesize a
-                // blank above a standalone comment the author put flush against the
-                // preceding statement.
-                let blanks = self.trivia.blank_count_between(prev_end, cur_start);
+                let blanks = self
+                    .trivia
+                    .blank_count_between(gspans[gi - 1].line_range.1, gspans[gi].line_range.0);
                 for _ in 0..blanks {
                     parts.push(hardline());
                 }
             }
-            let d = docs[i].clone();
-            // A `Comment` statement IS a standalone comment; don't also attach
-            // it as a trailing comment (trivia keys it by the same line). An
-            // aligned statement already carries its comment verbatim.
-            if aligned[i] || matches!(self.ast.s(&s).kind, StatementKind::Comment(_)) {
+            let d = docs[gi].clone();
+            // A verbatim group already carries its own comment; a `Comment`
+            // statement IS one. Otherwise attach the statement's trailing comment.
+            if verbatim[gi] || is_comment(g[0]) {
                 parts.push(d);
             } else {
-                parts.push(self.with_trailing_comment(d, self.ast.s(&s).span, 'P'));
+                parts.push(self.with_trailing_comment(d, spans[g[0]], 'P'));
             }
         }
         Doc::concat(parts)
@@ -697,8 +804,8 @@ impl<'a> Printer<'a> {
     /// not normalize -- the comma is cosmetic in the source-driven layout world).
     /// When `body_span` is `Some((open, close))` -- the lines of the enclosing
     /// `{` and `}` -- standalone `//` comments the parser dropped inside the body
-    /// are recovered by position; `None` disables recovery (struct literals /
-    /// match arms deliberately drop interior comments, matching the corpus).
+    /// are recovered by position; `None` disables recovery (struct literals
+    /// deliberately drop interior comments, matching the corpus).
     fn comma_block(
         &self,
         entries: Vec<(Doc, usize, Span)>,
@@ -708,12 +815,28 @@ impl<'a> Printer<'a> {
     ) -> Doc {
         let mut body = vec![hardline()];
         let mut prev_end: Option<usize> = None;
+        let mut last_off: Option<usize> = None;
         for (doc, start, espan) in entries.into_iter() {
             let end = espan.line_range.1;
+            last_off = Some(espan.offset_range.1);
             let gap_lo = prev_end.or(body_span.map(|(open, _)| open));
-            // Standalone comments authored before this entry.
-            let comments = match (body_span, gap_lo) {
-                (Some(_), Some(lo)) => self.trivia.standalone_comments_between(lo, start),
+            // Standalone comments authored before this entry, in source-line
+            // order: `//` own-line comments AND own-line `/* */` block comments
+            // (rendered verbatim so the block form survives).
+            let comments: Vec<(usize, Doc)> = match (body_span, gap_lo) {
+                (Some(_), Some(lo)) => {
+                    let mut v: Vec<(usize, Doc)> = self
+                        .trivia
+                        .standalone_comments_between(lo, start)
+                        .into_iter()
+                        .map(|(l, t)| (l, self.comment_line(t)))
+                        .collect();
+                    for (s, e, l) in self.trivia.own_line_block_comments_between(lo, start) {
+                        v.push((l, Doc::text(self.slice_range(s, e).to_string())));
+                    }
+                    v.sort_by_key(|(l, _)| *l);
+                    v
+                }
                 _ => Vec::new(),
             };
             if prev_end.is_some() {
@@ -729,8 +852,8 @@ impl<'a> Printer<'a> {
                     body.push(hardline());
                 }
             }
-            for (_, text) in &comments {
-                body.push(self.comment_line(text));
+            for (_, d) in &comments {
+                body.push(d.clone());
                 body.push(hardline());
             }
             if let (Some((cline, _)), Some(_)) = (comments.last(), prev_end) {
@@ -738,7 +861,7 @@ impl<'a> Printer<'a> {
                     body.push(hardline());
                 }
             }
-            body.push(doc);
+            body.push(self.prepend_leading_block(doc, espan.offset_range.0));
             // Each entry's separator comma is source-derived: for constructs
             // where it's syntactically required (struct/array/enum) the source
             // always has it, so this matches forcing it; for match arms (where
@@ -754,11 +877,34 @@ impl<'a> Printer<'a> {
             }
             prev_end = Some(end);
         }
-        // Trailing standalone comments between the last entry and the `}`.
+        // A trailing INLINE block comment on the last entry (`3 /* end */`),
+        // between the entry and the close -- appended on the entry's line (the
+        // gap check bounds it: a comment in a later construct has non-whitespace
+        // -- the close delimiter -- before it and is rejected).
+        if let Some(off) = last_off {
+            if let Some((s, e)) = self.trivia.inline_block_starting_after(off) {
+                let gap = self.slice_range(off, s);
+                if gap.bytes().all(|b| b == b' ' || b == b'\t' || b == b',') {
+                    body.push(Doc::text(format!(" {}", self.slice_range(s, e))));
+                }
+            }
+        }
+        // Trailing standalone comments between the last entry and the `}` --
+        // `//` own-line and own-line `/* */`, in source-line order.
         if let (Some((_, close)), Some(prev)) = (body_span, prev_end) {
-            for (_, text) in self.trivia.standalone_comments_between(prev, close) {
+            let mut tail: Vec<(usize, Doc)> = self
+                .trivia
+                .standalone_comments_between(prev, close)
+                .into_iter()
+                .map(|(l, t)| (l, self.comment_line(t)))
+                .collect();
+            for (s, e, l) in self.trivia.own_line_block_comments_between(prev, close) {
+                tail.push((l, Doc::text(self.slice_range(s, e).to_string())));
+            }
+            tail.sort_by_key(|(l, _)| *l);
+            for (_, d) in tail {
                 body.push(hardline());
-                body.push(self.comment_line(text));
+                body.push(d);
             }
         }
         Doc::concat([
@@ -994,6 +1140,26 @@ impl<'a> Printer<'a> {
     // ---- statements -------------------------------------------------------
 
     fn stmt(&self, s: Idx<StatementData>) -> Doc {
+        // A single-line statement carrying a block comment -- mid-expression
+        // (`let x = 1 + /* c */ 2`) or trailing (`let x = 5 /* note */`, which
+        // sits just past the statement span, so extend to cover it) -- has no
+        // structural home, so slice it verbatim. Multi-line statements (for/if
+        // with bodies) keep structural rendering; their headers are handled by
+        // `header_verbatim`.
+        let mut span = self.ast.s(&s).span;
+        if let Some((cs, ce)) = self.trivia.inline_block_starting_after(span.offset_range.1) {
+            let gap = self.slice_range(span.offset_range.1, cs);
+            if gap.bytes().all(|b| b == b' ' || b == b'\t') {
+                span = Span {
+                    offset_range: (span.offset_range.0, ce),
+                    ..span
+                };
+            }
+        }
+        self.maybe_verbatim_line(span, || self.stmt_structural(s))
+    }
+
+    fn stmt_structural(&self, s: Idx<StatementData>) -> Doc {
         match &self.ast.s(&s).kind {
             StatementKind::Expression(e) => self.expr(*e),
             StatementKind::Let(l) => self.let_stmt(l),
@@ -1003,21 +1169,26 @@ impl<'a> Printer<'a> {
             },
             StatementKind::Break { .. } => Doc::text("break"),
             StatementKind::Continue { .. } => Doc::text("continue"),
-            StatementKind::For(f) => self.for_stmt(f),
+            StatementKind::For(f) => {
+                self.header_verbatim(self.ast.s(&s).span, f.body, || self.for_stmt(f))
+            }
             StatementKind::While(w) => {
                 // `loop { .. }` parses as `while true { .. }` (same AST). Render
                 // an always-true condition back as `loop`, normalizing the
                 // literal `while true` spelling to it too (corpus rule).
-                if matches!(self.ast.e(&w.condition).kind, ExprKind::Bool(true)) {
-                    Doc::concat([Doc::text("loop "), self.flow_block(w.body)])
-                } else {
-                    Doc::concat([
-                        Doc::text("while "),
-                        self.expr(w.condition),
-                        Doc::text(" "),
-                        self.flow_block(w.body),
-                    ])
-                }
+                let is_loop = matches!(self.ast.e(&w.condition).kind, ExprKind::Bool(true));
+                self.header_verbatim(self.ast.s(&s).span, w.body, || {
+                    if is_loop {
+                        Doc::concat([Doc::text("loop "), self.flow_block(w.body)])
+                    } else {
+                        Doc::concat([
+                            Doc::text("while "),
+                            self.expr(w.condition),
+                            Doc::text(" "),
+                            self.flow_block(w.body),
+                        ])
+                    }
+                })
             }
             StatementKind::WhileLet(w) => Doc::concat([
                 Doc::text("while let "),
@@ -1027,7 +1198,7 @@ impl<'a> Printer<'a> {
                 Doc::text(" "),
                 self.flow_block(w.body),
             ]),
-            StatementKind::Comment(text) => self.comment_line(text),
+            StatementKind::Comment(text) => self.comment_node(self.ast.s(&s).span, text),
             StatementKind::Defer(_) | StatementKind::LifecycleHook { .. } => {
                 self.raw(self.ast.s(&s).span)
             }
@@ -1041,13 +1212,37 @@ impl<'a> Printer<'a> {
             parts.push(self.type_expr(ty));
         }
         if let Some(v) = l.value {
-            if self.rhs_breaks_after_assign(v) {
-                return self.assign_break(Doc::concat(parts), "=", v);
-            }
             parts.push(Doc::text(" = "));
             parts.push(self.expr(v));
         }
         Doc::concat(parts)
+    }
+
+    /// A block comment in a control-flow HEADER (`for /* c */ v in /* c */ xs {`,
+    /// `if /* c */ cond {`) has no structural home. Slice the header (statement
+    /// start .. body `{`) verbatim, then render the body structurally. Only when
+    /// the header is a single source line; else fall back.
+    fn header_verbatim(
+        &self,
+        stmt_span: Span,
+        body: Idx<BlockData>,
+        fallback: impl FnOnce() -> Doc,
+    ) -> Doc {
+        let body_span = self.ast.b(&body).span;
+        let body_open = body_span.offset_range.0;
+        if body_span.line_range.0 == stmt_span.line_range.0
+            && self
+                .trivia
+                .has_block_comment_in(stmt_span.offset_range.0, body_open)
+        {
+            let header = self.slice_range(stmt_span.offset_range.0, body_open);
+            return Doc::concat([
+                Doc::text(header.trim_end().to_string()),
+                Doc::text(" "),
+                self.flow_block(body),
+            ]);
+        }
+        fallback()
     }
 
     fn for_stmt(&self, f: &For) -> Doc {
@@ -1195,7 +1390,7 @@ impl<'a> Printer<'a> {
             ExprKind::If {
                 branches,
                 else_branch,
-            } => self.if_expr(branches, *else_branch),
+            } => self.if_expr(branches, *else_branch, data.span),
 
             ExprKind::ReturnExpr(v) => match v {
                 Some(v) => Doc::concat([Doc::text("return "), self.expr(*v)]),
@@ -1217,9 +1412,6 @@ impl<'a> Printer<'a> {
                     Some(o) => binop_str(o),
                     None => "=".to_string(),
                 };
-                if self.rhs_breaks_after_assign(*value) {
-                    return self.assign_break(self.expr(*target), &sym, *value);
-                }
                 Doc::concat([self.expr(*target), Doc::text(format!(" {sym} ")), self.expr(*value)])
             }
 
@@ -1334,16 +1526,30 @@ impl<'a> Printer<'a> {
         for k in self.aligned_indices(&arm_spans, &eligible, &no_skip) {
             docs[k] = self.verbatim_line(arm_spans[k]);
         }
+        // A block comment anywhere in a single-line arm (`1 /* c */ => e`,
+        // `_ => /* c */ e`) has no structural home -- slice the arm verbatim.
+        for k in 0..arm_spans.len() {
+            if eligible[k]
+                && self
+                    .trivia
+                    .has_block_comment_in(arm_spans[k].offset_range.0, arm_spans[k].offset_range.1)
+            {
+                docs[k] = self.verbatim_line(arm_spans[k]);
+            }
+        }
+        // Entry span is the FULL arm (pattern .. body), so comma_block's
+        // leading-block prepend checks the arm start, not the body -- an interior
+        // block comment already lives in the verbatim doc and must not double.
         let entries = docs
             .into_iter()
-            .zip(&bodies)
-            .map(|(d, b)| (d, b.line_range.0, *b))
+            .zip(&arm_spans)
+            .map(|(d, s)| (d, s.line_range.0, *s))
             .collect();
         Doc::concat([
             Doc::text("match "),
             self.expr(scrutinee),
             Doc::text(" "),
-            self.comma_block(entries, None, "{", "}"),
+            self.comma_block(entries, Some((span.line_range.0, span.line_range.1)), "{", "}"),
         ])
     }
 
@@ -1397,13 +1603,13 @@ impl<'a> Printer<'a> {
             return self.raw(span);
         };
         let body = *body;
-        let head = if others.is_empty() {
-            self.expr(func)
+        let f = self.ast.e(&func).span;
+        let (head, head_span) = if others.is_empty() {
+            (self.expr(func), f)
         } else {
             // The head call's own span (callee .. last non-lambda arg), NOT the
             // whole `f(args) @ {...}` span -- otherwise the multi-line `@`-block
             // makes the preserve check expand the head call's args.
-            let f = self.ast.e(&func).span;
             let last = self.ast.e(&others.last().unwrap().value).span;
             let head_span = Span {
                 file: f.file,
@@ -1411,23 +1617,47 @@ impl<'a> Printer<'a> {
                 col_range: (f.col_range.0, last.col_range.1),
                 offset_range: (f.offset_range.0, last.offset_range.1),
             };
-            self.call(func, others, head_span)
+            (self.call(func, others, head_span), head_span)
         };
         let stmts = &self.ast.b(&body).statements;
-        let rhs = if !self.block_has_braces(body) {
+        let rhs_expr = if !self.block_has_braces(body) {
             self.arrow_body_expr(body)
-                .map(|e| self.expr(e))
-                .unwrap_or_else(|| self.block(body))
         } else if stmts.len() == 1 {
             // `f() @ { stmt }` unwraps a single expression statement to the bare
             // form `f() @ stmt` (the braces add nothing).
             match &self.ast.s(&stmts[0]).kind {
-                StatementKind::Expression(e) => self.expr(*e),
-                _ => self.block(body),
+                StatementKind::Expression(e) => Some(*e),
+                _ => None,
             }
         } else {
-            self.block(body)
+            None
         };
+        let rhs = rhs_expr
+            .map(|e| self.expr(e))
+            .unwrap_or_else(|| self.block(body));
+        // A `//` comment on the `@` line (`head @ // note\n rhs`) has no
+        // structural home once the parser desugars `@` away -- recover it as the
+        // `@`-line trailing comment and keep the rhs on the next line. Gated on
+        // the rhs actually starting on a LATER line: a genuine `@`-line comment
+        // eats the rest of that line, forcing rhs down. Without that guard a
+        // single-line `head @ rhs // note` mis-claims the statement's own
+        // trailing comment here AND lets the statement handler emit it -> dup.
+        let rhs_line = rhs_expr
+            .map(|e| self.ast.e(&e).span.line_range.0)
+            .unwrap_or_else(|| self.ast.b(&body).span.line_range.0);
+        let at_comment = self
+            .trivia
+            .trailing_comment(head_span.line_range.1)
+            .filter(|(_, _, off)| *off >= head_span.offset_range.1);
+        if let Some((text, _, _)) = at_comment.filter(|_| rhs_line > head_span.line_range.1) {
+            return Doc::concat([
+                head,
+                Doc::text(" @ "),
+                self.comment_line(text),
+                hardline(),
+                rhs,
+            ]);
+        }
         Doc::concat([head, Doc::text(" @ "), rhs])
     }
 
@@ -1469,7 +1699,8 @@ impl<'a> Printer<'a> {
             || !self
                 .trivia
                 .standalone_comments_between(span.line_range.0, span.line_range.1)
-                .is_empty();
+                .is_empty()
+            || self.trivia.has_block_comment_in(span.offset_range.0, span.offset_range.1);
         // Preserve the author's layout: a call written across multiple source
         // lines expands one arg per line; one on a single line stays inline --
         // even past the width limit, so a hand-compacted call (e.g. inside a
@@ -1717,45 +1948,6 @@ impl<'a> Printer<'a> {
         ]))
     }
 
-    /// A `lhs = rhs` whose RHS is a plain (non-hugging) function call breaks
-    /// AFTER the operator -- the RHS drops to its own indented line and lays out
-    /// flat there -- rather than breaking the call's argument list. Huggable RHS
-    /// (struct/array literals, infix operators, `@`-calls, a call hugging a sole
-    /// collection arg) stay on the operator's line and break their own
-    /// delimiters. (Prettier's break-after-operator assignment layout, scoped to
-    /// the call form the corpus exercises.)
-    fn rhs_breaks_after_assign(&self, value: Idx<ExprData>) -> bool {
-        let ExprKind::FunctionCall { args, syntax, .. } = &self.ast.e(&value).kind else {
-            return false;
-        };
-        let infix = matches!(syntax, CallSyntax::Binary(_)) && args.len() == 2;
-        let at = matches!(syntax, CallSyntax::At);
-        let hugs = args.len() == 1
-            && args[0].name.is_none()
-            && !args[0].is_splat
-            && self.is_huggable_arg(args[0].value);
-        !infix && !at && !hugs && !args.is_empty()
-    }
-
-    /// The fluid assignment layout, a first-fit choice of three (`op` is the
-    /// bare operator `=`, `+=`, ...):
-    ///   1. `lhs <op> rhs`            -- all on one line, if it fits;
-    ///   2. `lhs <op>\n    rhs`       -- break after the op, RHS flat on its own
-    ///                                   indented line, if the RHS fits there;
-    ///   3. `lhs <op> rhs(\n  args\n)` -- otherwise hug: keep the RHS on the op's
-    ///                                   line and let it break its own delimiters.
-    fn assign_break(&self, lhs: Doc, op: &str, value: Idx<ExprData>) -> Doc {
-        let rhs = self.expr(value);
-        let flat = Doc::concat([lhs.clone(), Doc::text(format!(" {op} ")), rhs.clone()]);
-        let after_op = Doc::concat([
-            lhs.clone(),
-            Doc::text(format!(" {op}")),
-            Doc::indent(Doc::concat([hardline(), rhs.clone()])),
-        ]);
-        let hug = Doc::concat([lhs, Doc::text(format!(" {op} ")), rhs]);
-        Doc::choice([flat, after_op, hug])
-    }
-
     fn tuple(&self, items: &[Idx<ExprData>], span: Span) -> Doc {
         // Preserve the author's layout (tuples never take a trailing comma): a
         // single-line tuple stays inline; a multi-line one expands one per line.
@@ -1803,7 +1995,8 @@ impl<'a> Printer<'a> {
             || !self
                 .trivia
                 .standalone_comments_between(span.line_range.0, span.line_range.1)
-                .is_empty();
+                .is_empty()
+            || self.trivia.has_block_comment_in(span.offset_range.0, span.offset_range.1);
         if !has_comments {
             let rows = items
                 .iter()
@@ -1878,7 +2071,8 @@ impl<'a> Printer<'a> {
             || !self
                 .trivia
                 .standalone_comments_between(span.line_range.0, span.line_range.1)
-                .is_empty();
+                .is_empty()
+            || self.trivia.has_block_comment_in(span.offset_range.0, span.offset_range.1);
         // Preserve the author's layout: a struct literal written across multiple
         // source lines expands one-field-per-line; one written on a single line
         // stays inline -- even past the width limit (a hand-compacted data-table
@@ -1911,7 +2105,18 @@ impl<'a> Printer<'a> {
             }
             let entries = fields
                 .iter()
-                .map(|(names, value)| (field_doc(names, value), field_line(names), self.ast.e(value).span))
+                .map(|(names, value)| {
+                    let v = self.ast.e(value).span;
+                    // Full field span (name start -> value end) so a leading
+                    // inline block comment (`/* y field */ y: 2`) is in the
+                    // entry's leading gap; the end is unchanged, so trailing
+                    // comma/comment detection is unaffected.
+                    let full = Span {
+                        offset_range: (names[0].span.offset_range.0, v.offset_range.1),
+                        ..v
+                    };
+                    (field_doc(names, value), field_line(names), full)
+                })
                 .collect();
             return Doc::concat([
                 Doc::text(format!("{name} ")),
@@ -1930,6 +2135,7 @@ impl<'a> Printer<'a> {
         &self,
         branches: &[(Idx<ExprData>, Idx<BlockData>)],
         else_branch: Option<Idx<BlockData>>,
+        if_span: Span,
     ) -> Doc {
         // The whole if-expression is ONE group: if it doesn't fit on a line,
         // every branch breaks together (matching the corpus). Each nested `if`
@@ -1940,6 +2146,22 @@ impl<'a> Printer<'a> {
         let mut parts = Vec::new();
         for (i, (cond, body)) in branches.iter().enumerate() {
             if i == 0 {
+                // A block comment in the first header (`if /* c */ cond /* c */ {`)
+                // has no structural home -- slice the header verbatim, then render
+                // the body structurally.
+                let body_span = self.ast.b(body).span;
+                if if_span.line_range.0 == body_span.line_range.0
+                    && self
+                        .trivia
+                        .has_block_comment_in(if_span.offset_range.0, body_span.offset_range.0)
+                {
+                    let header =
+                        self.slice_range(if_span.offset_range.0, body_span.offset_range.0);
+                    parts.push(Doc::text(header.trim_end().to_string()));
+                    parts.push(Doc::text(" "));
+                    parts.push(self.branch_body(*body));
+                    continue;
+                }
                 parts.push(Doc::text("if "));
             } else {
                 let prev_end = self.ast.b(&branches[i - 1].1).span.line_range.1;
@@ -2014,6 +2236,15 @@ impl<'a> Printer<'a> {
 
     fn type_expr(&self, t: Idx<TypeExprData>) -> Doc {
         let data = self.ast.te(&t);
+        // A block comment inside a type (`(int, /* c */ int)`, `Foo<int /* c */>`)
+        // has no structural home -- slice the type verbatim.
+        if data.span.line_range.0 == data.span.line_range.1
+            && self
+                .trivia
+                .has_block_comment_in(data.span.offset_range.0, data.span.offset_range.1)
+        {
+            return Doc::text(self.slice(data.span).trim_end().to_string());
+        }
         let inner = match &data.kind {
             TypeExprKind::Any => Doc::text("any"),
             TypeExprKind::Unit => Doc::text("()"),

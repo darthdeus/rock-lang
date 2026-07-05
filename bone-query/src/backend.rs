@@ -31,13 +31,12 @@ use lsp_types::{
     Uri, WorkspaceEdit,
 };
 
-use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{BodyInference, InferenceResult, ModuleId, Span, TyId, Workspace};
 use bone_incremental::session::{Session, UpdateTier};
-use skull_parser::CompilerError;
+use rock_syntax::CompilerError;
 use ustr::Ustr;
 
-use crate::query::{clean_match, fz_boundary, SymCat};
+use gaps::SymCat;
 
 /// Re-parse a tracked user file from its stored text. The Session no longer
 /// retains the AST (it is transient -- the per-body HIR is the incremental
@@ -102,7 +101,7 @@ struct BoneProject {
     /// `None` until the first build (in `update`).
     reach: Option<crate::reachability::ReachabilityIndex>,
     /// Rendered function signatures (completion `detail`), keyed by name with
-    /// first-overload-wins to match `crate::query::completion`'s dedup order. Like
+    /// first-overload-wins to match `gaps::completion`'s dedup order. Like
     /// `reach`, a pure function of the type graph (signatures): a `BodyOnly`
     /// edit cannot change any signature, so this survives body keystrokes and
     /// is rebuilt only on a non-`BodyOnly` edit. Without it, completion
@@ -565,7 +564,7 @@ impl BoneWorkspace {
         // formatting in a Markdown editor.
         if let Some(uf) = proj.session.files.get(path) {
             if let Some(hi) = reparse_user_file(uf, path)
-                .and_then(|ast| crate::query::hole_info(ws, mid, inf, &ast, offset))
+                .and_then(|ast| gaps::hole_info(ws, mid, inf, &ast, offset))
             {
                 return Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
@@ -676,7 +675,7 @@ impl BoneWorkspace {
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
         self.all_reference_spans(proj, path, offset)
             .into_iter()
-            .filter_map(|s| self.location_from_span_indexed(proj, &s.span, &mut idx_cache))
+            .filter_map(|s| self.location_from_span_indexed(proj, &s, &mut idx_cache))
             .collect()
     }
 
@@ -712,7 +711,7 @@ impl BoneWorkspace {
         let inf = ws.inference(mid)?;
         let uf = proj.session.files.get(path)?;
         let ast = reparse_user_file(uf, path)?;
-        let hi = crate::query::hole_info(ws, mid, inf, &ast, offset)?;
+        let hi = gaps::hole_info(ws, mid, inf, &ast, offset)?;
         Some(format_hole_report(&hi))
     }
 
@@ -866,26 +865,15 @@ impl BoneWorkspace {
         })
     }
 
-    /// Every reference site for the symbol at `offset`. Macro parameters resolve
+    /// Every reference span for the symbol at `offset`. Macro parameters resolve
     /// against the raw (pre-expansion) AST -- they're erased from bone's HIR --
     /// then everything else through the bone workspace.
-    fn all_reference_spans(
-        &self,
-        proj: &BoneProject,
-        path: &str,
-        offset: usize,
-    ) -> Vec<crate::query::RefSite> {
+    fn all_reference_spans(&self, proj: &BoneProject, path: &str, offset: usize) -> Vec<Span> {
         if let Some(uf) = proj.session.files.get(path) {
             if let Some(ast) = reparse_user_file(uf, path) {
                 let macro_refs = macro_refs::macro_param_references(&ast, offset);
                 if !macro_refs.is_empty() {
-                    return macro_refs
-                        .into_iter()
-                        .map(|span| crate::query::RefSite {
-                            span,
-                            shorthand: None,
-                        })
-                        .collect();
+                    return macro_refs;
                 }
             }
         }
@@ -899,36 +887,20 @@ impl BoneWorkspace {
         gaps::references(ws, mid, inf, offset)
     }
 
-    // -- Feature: completion (stubbed: crate::query::completion) ---------------------
+    // -- Feature: completion (stubbed: gaps::completion) ---------------------
 
-    pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
-        // `&mut self`: the context-triggered paths (member/enum/struct/field-ref)
-        // analyze the completion munge as a speculative Session variant
-        // (`with_file_variant`), which mutates and restores the live session.
+    pub fn completion(&self, path: &str, pos: Position) -> Vec<CompletionItem> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
-        let Some(proj) = self.projects.get_mut(&Self::root_for(path)) else {
+        let Some(proj) = self.project(path) else {
             return Vec::new();
         };
         let Some(src) = proj.texts.get(path) else {
             return Vec::new();
         };
-        let src = src.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
         let prefix_raw = ident_prefix(src, offset).to_string();
         let prefix = prefix_raw.to_lowercase();
-        // Every early-return path below reports its total under BONE_LSP_PROFILE;
-        // the fall-through path has its own phase breakdown further down.
-        let prof = lsp_profile_enabled();
-        let t_total = std::time::Instant::now();
-        let path_ms = |label: &str, n: usize| {
-            if prof {
-                eprintln!(
-                    "[bone completion] {label} {:.2}ms ({n} items, prefix {prefix_raw:?})",
-                    t_total.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-        };
         // A `(` directly after the cursor means the call parens already exist
         // (e.g. `cw` over the callee in `world_to_screen(x)`): a `name($0)`
         // snippet would double them (`world_to_design()(x)`). `strip_call_template`
@@ -936,100 +908,108 @@ impl BoneWorkspace {
         let next_is_open_paren = src.get(offset..).is_some_and(|s| s.starts_with('('));
 
         // Member / enum-qualified completion is detected from source text and
-        // analyzed on a munged copy of the file -- it must run BEFORE the
-        // live-module guard, since the trigger `.`/`::` can drop the whole module
-        // from the live session (e.g. an incomplete `for i in x.` leaves no user
-        // module). The munge is applied as a speculative Session variant, so the
-        // whole project (warm stdlib + dependencies like the engine) resolves a
-        // cross-file receiver type at incremental cost -- plain prefix completion
-        // (the fall-through below) uses the live workspace directly.
+        // reparses independently -- it must run BEFORE the live-module guard,
+        // since the trigger `.`/`::` can drop the whole module from the live
+        // session (e.g. an incomplete `for i in x.` leaves no user module).
+        // These reparse a munged copy of the file. They must do so WITH the rest
+        // of the project (warm stdlib + every module, incl. dependencies like the
+        // engine), or a cross-file receiver type (e.g. an `IVec2` param) can't be
+        // resolved and completion comes up empty. `combined` is computed lazily,
+        // only when one of these context detectors matches -- plain prefix
+        // completion (the fall-through below) uses the live workspace instead.
         // Member access (`.`) is the most specific trigger: a `recv.field` even
         // inside a struct-literal field value (`Foo { x: recv.<cursor> }`) is
         // member completion, not field completion -- so it's checked first.
         if let Some(segments) = receiver_path(src, offset) {
+            let Ok(combined) = proj.session.combined_unexpanded() else {
+                return Vec::new();
+            };
             // In a call-arg position, a member completion (`recv.field`) also
             // surfaces TRANSITIVE suffix paths whose deep type matches the
             // expected param (`recv.movable.grid`). The callee's signature is
             // resolved from the live workspace (the broken arg can't change it).
             let expected_types = call_arg_context(src, offset)
                 .map(|(callee, idx, _)| {
-                    expected_param_types(proj.session.workspace(), &callee, idx as usize)
+                    expected_param_types(proj.session.workspace(), &callee, idx as usize, None)
                 })
                 .unwrap_or_default();
             let mut items = member_completions(
-                &mut proj.session, path, src, offset, &segments, &prefix, &expected_types,
-                proj.reach.as_ref(),
+                &combined, path, src, offset, &segments, &prefix, &expected_types, proj.reach.as_ref(),
             );
             if next_is_open_paren {
                 strip_call_template(&mut items);
             }
-            path_ms("member path", items.len());
             return items;
         }
         // Field-reference key path: a call-arg slot whose expected param is
         // `FieldOf<Struct, V>` completes to Struct's fields of type V (the
         // typechecker's invariance) -- offered whether or not the leading `.`
-        // is typed yet, with a generic `T` resolved from a sibling arg. Analyze
-        // a munged variant so the callee + args resolve through an incomplete
-        // `.`. Gated so the variant only fires when the slot is plausibly a
+        // is typed yet, with a generic `T` resolved from a sibling arg. Reparse
+        // a munged buffer so the callee + args resolve through an incomplete
+        // `.`. Gated so the reparse only fires when the slot is plausibly a
         // field ref (live signature says FieldOf, or a `.` is already typed);
         // `field_ref_arg_completions` returns None -> falls through to normal
         // completion (e.g. enum-shorthand `.Variant` in an arg).
         if let Some((callee, arg_idx, _)) = call_arg_context(src, offset) {
             let lead_dot = leading_dot(src, offset);
-            // Skip the variant only when the live signature is KNOWN and clearly
+            // Skip the reparse only when the live signature is KNOWN and clearly
             // not a field ref. If the callee is unknown live (the incomplete arg
-            // broke the current file) or the slot is FieldOf, analyze the munge
-            // to resolve it -- so normal `foo(arg` stays variant-free but a
-            // field-ref slot is caught even through a parse error. The gate reads
-            // the param's nominal HEAD (`TypeCtor`), not a rendered substring.
-            let definitely_not_field_ref = matches!(
-                callee_slot_is_field_of(proj.session.workspace(), &callee, arg_idx as usize),
-                Some(false)
-            );
+            // broke the current file) or the slot is FieldOf, reparse to resolve
+            // it -- so normal `foo(arg` stays reparse-free but a field-ref slot
+            // is caught even through a parse error.
+            let live_params =
+                expected_param_types(proj.session.workspace(), &callee, arg_idx as usize, None);
+            let definitely_not_field_ref =
+                !live_params.is_empty() && !live_params.iter().any(|t| t.contains("FieldOf<"));
             let plausible = lead_dot || !definitely_not_field_ref;
             if plausible {
-                for munged in completion_munges(src, offset) {
-                    let attempt = analyze_variant(&mut proj.session, path, &munged, |ws| {
-                        field_ref_arg_completions(
-                            ws, path, src, offset, &callee, arg_idx as usize, &prefix, lead_dot,
-                        )
-                    });
-                    if let Some(Some(items)) = attempt {
-                        path_ms("field-ref path", items.len());
-                        return items;
+                if let Ok(combined) = proj.session.combined_unexpanded() {
+                    for munged in completion_munges(src, offset) {
+                        let Some(ws) = reparse_with_project(&combined, path, &munged) else {
+                            continue;
+                        };
+                        if let Some(items) = field_ref_arg_completions(
+                            &ws, path, src, offset, &callee, arg_idx as usize, &prefix, lead_dot,
+                        ) {
+                            return items;
+                        }
                     }
                 }
             }
         }
         if let Some((enum_name, variant)) = enum_record_context(src, offset) {
+            let Ok(combined) = proj.session.combined_unexpanded() else {
+                return Vec::new();
+            };
             // Falls through (None) when the head isn't a record variant -- a unit/
             // tuple variant as a block head (`if x == Enum::Variant { .. }`) is NOT
             // a record literal, so the block still gets global completion.
-            if let Some(items) = enum_record_field_completions(
-                &mut proj.session, path, src, offset, &enum_name, &variant, &prefix,
-            ) {
-                path_ms("enum-record path", items.len());
+            if let Some(items) =
+                enum_record_field_completions(&combined, path, src, offset, &enum_name, &variant, &prefix)
+            {
                 return items;
             }
         }
-        if let Some((enum_name, _colon_start)) = enum_qualifier(src, offset) {
-            let mut items = enum_qualified_completions(
-                &mut proj.session, path, src, offset, &enum_name, &prefix,
-            );
+        if let Some((enum_name, colon_start)) = enum_qualifier(src, offset) {
+            let Ok(combined) = proj.session.combined_unexpanded() else {
+                return Vec::new();
+            };
+            let mut items =
+                enum_qualified_completions(&combined, path, src, offset, colon_start, &enum_name, &prefix);
             if next_is_open_paren {
                 strip_call_template(&mut items);
             }
-            path_ms("enum-qualified path", items.len());
             return items;
         }
         if let Some((struct_name, brace_open)) = struct_literal_context(src, offset) {
+            let Ok(combined) = proj.session.combined_unexpanded() else {
+                return Vec::new();
+            };
             // Falls through (None) when the head isn't actually a struct, so a
             // `match X {` / `if Cond {` block still gets global completion.
             if let Some(items) = struct_literal_field_completions(
-                &mut proj.session, path, src, offset, &struct_name, brace_open, &prefix,
+                &combined, path, src, offset, &struct_name, brace_open, &prefix,
             ) {
-                path_ms("struct-literal path", items.len());
                 return items;
             }
         }
@@ -1039,9 +1019,7 @@ impl BoneWorkspace {
         // trigger and served from the live workspace (decorators are declared in
         // the engine, so they're present even if the edited module dropped out).
         if decorator_context(src, offset) {
-            let items = decorator_completions(proj.session.workspace(), &prefix);
-            path_ms("decorator path", items.len());
-            return items;
+            return decorator_completions(proj.session.workspace(), &prefix);
         }
 
         // Scope + global namespace needs a workspace with the user module.
@@ -1050,24 +1028,9 @@ impl BoneWorkspace {
         // completion still works mid-edit (backlog #21).
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
-            let t = std::time::Instant::now();
-            let ws = proj.session.combined_unexpanded().ok().and_then(|combined| {
+            proj.session.combined_unexpanded().ok().and_then(|combined| {
                 reparse_with_project(&combined, path, &balance_delimiters(src.to_string()))
-            });
-            if prof {
-                eprintln!(
-                    "[bone completion] broken-buffer fallback reparse {:.2}ms (recovered: {})",
-                    t.elapsed().as_secs_f64() * 1000.0,
-                    ws.is_some()
-                );
-            }
-            if ws.is_none() {
-                log::warn!(
-                    "completion: broken-buffer recovery failed for `{path}`; \
-                     scope completion degraded to the live workspace"
-                );
-            }
-            ws
+            })
         } else {
             None
         };
@@ -1102,71 +1065,34 @@ impl BoneWorkspace {
                 }
             }
         }
-        // The prefix filter happens inside `crate::query::completion`, before per-candidate
+        // The prefix filter happens inside `gaps::completion`, before per-candidate
         // detail rendering -- so typing narrows the work, not just the result.
-        let t_cands = std::time::Instant::now();
-        let cands = crate::query::completion(ws, mid, inf, offset, &prefix, expr_position);
-        let cands_ms = t_cands.elapsed().as_secs_f64() * 1000.0;
+        let t_gaps = std::time::Instant::now();
+        let cands = gaps::completion(ws, mid, inf, offset, &prefix, expr_position);
+        let gaps_ms = t_gaps.elapsed().as_secs_f64() * 1000.0;
         let n_cands = cands.len();
         // Type-directed ranking: inside `f(|)` with a known expected param type,
         // a variable of that type ranks first, a function returning it second,
         // then everything else. Encoded as `sort_text` (only when in arg position
-        // -- otherwise the default order is kept). The TYPED oracle
-        // (`ExpectedArg`: bone's `coerce` on TyIds, so generics / nullable
-        // widening / numeric top-level coercion all rank correctly) leads; the
-        // rendered-string list stays alongside as the reachability index's
-        // keys and as the fallback rung when no typed session can be built
-        // (broken body, no cached inference for the cursor body).
-        let arg_call = call_arg_context(src, offset);
-        let field_slot =
-            if arg_call.is_none() { struct_field_value_context(src, offset) } else { None };
-        let mut expected = arg_call.as_ref().and_then(|(callee, idx, recv_dot)| {
-            let recv_ty = recv_dot.and_then(|d| method_receiver_ty(ws, mid, inf, src, d));
-            ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx as usize, recv_ty)
-        });
-        if expected.is_none() {
-            // Struct-literal field VALUE slot (`Name { field: <cursor> }`):
-            // the expected type is that field's declared type, so an enum-
-            // typed field surfaces its variants type-directed. Inside a lambda
-            // body assigned to a function-typed field (`is_open: () => x|`),
-            // the body returns the field's RETURN type, so type-direct on that.
-            expected = field_slot.as_ref().and_then(|(sname, fname, is_lambda)| {
-                let slot = if *is_lambda {
-                    crate::query::struct_field_fn_return_ty(ws, sname, fname)
-                        .or_else(|| crate::query::struct_field_ty(ws, sname, fname))
-                } else {
-                    crate::query::struct_field_ty(ws, sname, fname)
-                }?;
-                ExpectedArg::for_slot(ws, mid, inf, offset, slot)
-            });
-        }
-        // Rendered expected types for the string consumers: the reachability
-        // index (string-keyed) and the ranking fallback rung. When the typed
-        // session exists its receiver-FILTERED declared renders are the list
-        // (only surviving overloads contribute -- a Color slot must not
-        // re-admit float reach paths from a receiver-rejected overload);
-        // otherwise fall back to the unfiltered union.
-        let expected_types: Vec<String> = match expected.as_ref() {
-            Some(exp) => exp.rendered.clone(),
-            None => arg_call
-                .map(|(callee, idx, _)| expected_param_types(ws, &callee, idx as usize))
-                .or_else(|| {
-                    field_slot.map(|(sname, fname, is_lambda)| {
-                        if is_lambda {
-                            if let Some(ret) = crate::query::struct_field_fn_return_type(ws, &sname, &fname) {
-                                return vec![ret];
-                            }
-                        }
-                        crate::query::struct_fields_by_name(ws, &sname)
-                            .into_iter()
-                            .filter(|(n, _)| *n == fname)
-                            .map(|(_, ty)| ty)
-                            .collect()
-                    })
+        // -- otherwise the default order is kept).
+        let expected_types: Vec<String> = call_arg_context(src, offset)
+            .map(|(callee, idx, recv_dot)| {
+                let recv_ty = recv_dot.and_then(|d| method_receiver_type(ws, mid, inf, src, d));
+                expected_param_types(ws, &callee, idx as usize, recv_ty.as_deref())
+            })
+            .or_else(|| {
+                // Struct-literal field VALUE slot (`Name { field: <cursor> }`):
+                // the expected type is that field's declared type, so an enum-
+                // typed field surfaces its variants type-directed.
+                struct_field_value_context(src, offset).map(|(sname, fname)| {
+                    crate::query::struct_fields_by_name(ws, &sname)
+                        .into_iter()
+                        .filter(|(n, _)| *n == fname)
+                        .map(|(_, ty)| ty)
+                        .collect()
                 })
-                .unwrap_or_default(),
-        };
-        let has_expected = expected.is_some() || !expected_types.is_empty();
+            })
+            .unwrap_or_default();
         let t_build = std::time::Instant::now();
         // The signature cache (rebuilt only on non-`BodyOnly` edits) supplies fn
         // `detail` for the survivors below. The one-shot CLI path has no cached
@@ -1202,41 +1128,20 @@ impl BoneWorkspace {
             type_rank: u8,
             key2: u16,
             method: u8,
-            entry: crate::query::CompletionEntry,
+            entry: gaps::CompletionEntry,
         }
         let q = prefix.as_bytes();
         let q_raw = prefix_raw.as_bytes();
         let mut ranked: Vec<RankedCand> = cands
             .into_iter()
             .map(|c| {
-                let type_rank = if let Some(exp) = expected.as_mut() {
+                let type_rank = if !expected_types.is_empty() {
                     match c.kind {
-                        // A local/param/global whose type COERCES into the
-                        // expected slot (bone's real relation: generics
-                        // instantiate, `int` fits `int?`/`float`/`any`), OR an
-                        // enum variant whose enum is the slot's nominal head
+                        // A local/param/global of the expected type, OR an enum
+                        // variant whose enum IS the expected type
                         // (`reject_target(nog)` wanting a TargetError ->
-                        // `TargetError::NotGround`; the variant carries its
-                        // enum name in `detail`).
-                        SymCat::Local | SymCat::Param | SymCat::Global
-                            if c.ty.is_some_and(|t| exp.accepts(t)) =>
-                        {
-                            0
-                        }
-                        SymCat::Variant
-                            if c.detail.as_deref().is_some_and(|e| exp.expects_nominal(e)) =>
-                        {
-                            0
-                        }
-                        SymCat::Function if exp.accepts_fn_returning(ws, c.name.as_str()) => 1,
-                        _ => 2,
-                    }
-                } else if !expected_types.is_empty() {
-                    // Fallback rung: rendered-string equality, for states where
-                    // the typed session can't build (broken body / no cached
-                    // inference). Weaker (misses coercions) but never worse
-                    // than the pre-TyId behavior.
-                    match c.kind {
+                        // `TargetError::NotGround`). Each carries the matching
+                        // type name in `detail` (the variant carries its enum).
                         SymCat::Local | SymCat::Param | SymCat::Variant | SymCat::Global
                             if c.detail.as_deref().is_some_and(|t| expected_types.iter().any(|e| e == t)) =>
                         {
@@ -1272,7 +1177,7 @@ impl BoneWorkspace {
                 // variant NAME (the user types it; `Enum::` uppercasing would
                 // skew it). In arg position the expected-TYPE bucket must stay
                 // dominant over case, so leave case neutral (0) there.
-                let case_rank = if !has_expected {
+                let case_rank = if expected_types.is_empty() {
                     let case_target =
                         if c.kind == SymCat::Variant { name.rsplit("::").next().unwrap_or(name) } else { name };
                     case_mismatch_rank(case_target.as_bytes(), q_raw)
@@ -1299,7 +1204,7 @@ impl BoneWorkspace {
         // Non-arg (no expected type) ranks score-first; arg position keeps the
         // expected-type bucket dominant. Mirrors the two `sort_text_with_score`
         // layouts so the O(n) top-N select agrees with the final string sort.
-        let score_leads = !has_expected;
+        let score_leads = expected_types.is_empty();
         let rank_cmp = |a: &RankedCand, b: &RankedCand| {
             let primary = if score_leads {
                 // MATCH QUALITY leads, then the smart-case tiebreak, then KIND: a
@@ -1499,7 +1404,7 @@ impl BoneWorkspace {
             // globals).
             let mut roots: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
                 .into_iter()
-                .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty))
+                .map(|(n, _k, ty)| (n.to_string(), ty))
                 .collect();
             for m in ws.modules.iter() {
                 for (gname, gidx) in m.global_by_name.iter() {
@@ -1598,7 +1503,7 @@ impl BoneWorkspace {
         let call_through_ms = t_ct.elapsed().as_secs_f64() * 1000.0;
         LAST_COMPLETION_PHASES.with(|c| {
             c.set(CompletionPhaseTimings {
-                candidates_ms: cands_ms,
+                gaps_ms,
                 rank_ms,
                 reach_ms,
                 call_through_ms,
@@ -1611,7 +1516,7 @@ impl BoneWorkspace {
         });
         if lsp_profile_enabled() {
             eprintln!(
-                "[bone completion] candidates {cands_ms:.2}ms ({n_cands} cands)  rank {rank_ms:.2}  reach {reach_ms:.2}  call-through {call_through_ms:.2}  ({} items, prefix {:?})",
+                "[bone completion] gaps {gaps_ms:.2}ms ({n_cands} cands)  rank {rank_ms:.2}  reach {reach_ms:.2}  call-through {call_through_ms:.2}  ({} items, prefix {:?})",
                 out.len(),
                 prefix
             );
@@ -1644,7 +1549,6 @@ impl BoneWorkspace {
         let here = self
             .all_reference_spans(proj, path, offset)
             .into_iter()
-            .map(|s| s.span)
             .find(|s| {
                 s.file.as_str() == path
                     && s.offset_range.0 <= offset
@@ -1666,26 +1570,13 @@ impl BoneWorkspace {
 
         let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
-        for site in sites {
-            let Some(loc) = self.location_from_span_indexed(proj, &site.span, &mut idx_cache)
-            else {
+        for span in sites {
+            let Some(loc) = self.location_from_span_indexed(proj, &span, &mut idx_cache) else {
                 continue;
-            };
-            // A shorthand token (`S { x }`) names both the field and a
-            // binding; renaming one side expands the shorthand, keeping the
-            // other side's (old) name.
-            let new_text = match site.shorthand {
-                None => new_name.to_string(),
-                Some(crate::query::Shorthand::KeepField(field)) => {
-                    format!("{field}: {new_name}")
-                }
-                Some(crate::query::Shorthand::KeepBinding(binding)) => {
-                    format!("{new_name}: {binding}")
-                }
             };
             changes.entry(loc.uri).or_default().push(TextEdit {
                 range: loc.range,
-                new_text,
+                new_text: new_name.to_string(),
             });
         }
         Some(WorkspaceEdit {
@@ -1694,7 +1585,7 @@ impl BoneWorkspace {
         })
     }
 
-    // -- Feature: document symbols (stubbed: crate::query::document_symbols) ---------
+    // -- Feature: document symbols (stubbed: gaps::document_symbols) ---------
 
     pub fn document_symbols(&self, path: &str) -> Vec<DocumentSymbol> {
         let path_c = self.canon(path);
@@ -1712,7 +1603,7 @@ impl BoneWorkspace {
         // One LineIndex for the file: a per-symbol `range_from_offsets` would do
         // an O(offset) scan from the file start for each symbol's two ends.
         let line_index = LineIndex::new(src);
-        crate::query::document_symbols(ws, mid)
+        gaps::document_symbols(ws, mid)
             .into_iter()
             .map(|s| {
                 let range = line_index.range(src, s.span.offset_range.0, s.span.offset_range.1);
@@ -1737,7 +1628,7 @@ impl BoneWorkspace {
     /// `query` (case-insensitive substring; empty query = everything). Rock has
     /// no modules -- "workspace" is every tracked `.rock` file (stdlib/builtin
     /// modules aren't in `texts`, so they're naturally excluded). Reuses the
-    /// per-module `crate::query::document_symbols` walk, one pass per file. Spans every
+    /// per-module `gaps::document_symbols` walk, one pass per file. Spans every
     /// project the session has loaded (the one-shot CLI loads exactly one; the
     /// interactive server accumulates each opened root).
     pub fn workspace_symbols(&self, query: &str) -> Vec<SymbolInformation> {
@@ -1756,7 +1647,7 @@ impl BoneWorkspace {
                 // skips most files, so don't index a file with no hit. Without it
                 // every matched symbol re-scanned from the file start (O(offset)).
                 let mut line_index: Option<LineIndex> = None;
-                for s in crate::query::document_symbols(ws, mid) {
+                for s in gaps::document_symbols(ws, mid) {
                     if !needle.is_empty() && !s.name.to_lowercase().contains(&needle) {
                         continue;
                     }
@@ -1812,14 +1703,14 @@ impl BoneWorkspace {
             // Function `signature:`/`returns:` fields, looked up per function by
             // declaration-span start. Built once per file, not on the hot
             // `document_symbols` path.
-            let sigs = crate::query::fn_ctags_signatures(ws, mid);
+            let sigs = gaps::fn_ctags_signatures(ws, mid);
             // Global declared types, keyed the same way, for the `type:` field.
             let global_tys: std::collections::HashMap<usize, String> = m
                 .globals
                 .iter()
                 .map(|(_, g)| (g.span.offset_range.0, ws.render(None, g.ty)))
                 .collect();
-            for s in crate::query::document_symbols(ws, mid) {
+            for s in gaps::document_symbols(ws, mid) {
                 let Some(kind) = ctags_kind(s.kind) else {
                     continue;
                 };
@@ -1927,7 +1818,7 @@ impl BoneWorkspace {
         crate::ctags::write_tags_file(&root.join(".rock.tags"), entries)
     }
 
-    // -- Feature: signature help (stubbed: crate::query::signature_help) -------------
+    // -- Feature: signature help (stubbed: gaps::signature_help) -------------
 
     pub fn signature_help(&self, path: &str, pos: Position) -> Option<SignatureHelp> {
         let path_c = self.canon(path);
@@ -1940,7 +1831,7 @@ impl BoneWorkspace {
         // Inference is optional: tiers 2/3 (by-name overload list, struct ctor)
         // serve a signature even when the file doesn't fully type-check.
         let inf = ws.inference(mid);
-        let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset)?;
+        let (sigs, call_span) = gaps::signature_help(ws, mid, inf, offset)?;
         // Active argument = top-level commas between the call's `(` and the cursor.
         let active = active_param(src, call_span.offset_range.0, offset);
         Some(SignatureHelp {
@@ -2136,15 +2027,7 @@ impl BoneWorkspace {
         let tok_ms = t.elapsed().as_secs_f64() * 1000.0;
         let ws = proj.session.workspace();
         let t = std::time::Instant::now();
-        let mut names = semantic_name_map(ws);
-        // Macros are expanded away before bone lowering, so the workspace HIR
-        // has no record of them; the Session's parse-time capture supplies the
-        // names (def sites and call sites are both bare ident tokens).
-        for uf in proj.session.files.values() {
-            for md in &uf.macros {
-                names.entry(md.name).or_insert(TT_MACRO);
-            }
-        }
+        let names = semantic_name_map(ws);
         let names_ms = t.elapsed().as_secs_f64() * 1000.0;
         let t = std::time::Instant::now();
         let hir = user_module_for_path(ws, path)
@@ -2162,7 +2045,6 @@ impl BoneWorkspace {
         let mut data = Vec::new();
         let (mut prev_line, mut prev_start) = (0u32, 0u32);
         let mut prev_kind: Option<&rock_tokenizer::TokenKind> = None;
-        let mut prev_end = 0usize;
         for (i, tok) in toks.iter().enumerate() {
             // A `.`/`?.` immediately before an identifier marks it a field/method
             // access (-> property). Tracked over the FULL stream (punctuation is
@@ -2171,14 +2053,7 @@ impl BoneWorkspace {
                 prev_kind,
                 Some(rock_tokenizer::TokenKind::Dot) | Some(rock_tokenizer::TokenKind::QuestionDot)
             );
-            // A GLUED `@ident` is an annotation (`@guarded`, `@global_write`)
-            // when the HIR doesn't claim the ident; the `@` trailing-lambda
-            // operator's operand is an expression the HIR does claim, and is
-            // conventionally spaced anyway.
-            let is_annotation = matches!(prev_kind, Some(rock_tokenizer::TokenKind::At))
-                && prev_end == tok.span.offset_range.0;
             prev_kind = Some(&tok.kind);
-            prev_end = tok.span.offset_range.1;
 
             // Next non-comment token — lets `classify_token` recognize the
             // contextual `co` keyword (`co` before `fn`).
@@ -2200,15 +2075,9 @@ impl BoneWorkspace {
             if tok.span.line_range.0 != tok.span.line_range.1 {
                 continue;
             }
-            let Some((token_type, token_modifiers_bitset)) = classify_token(
-                &tok.kind,
-                next_kind,
-                &hir.by_offset,
-                &names,
-                tok.span.offset_range.0,
-                is_member,
-                is_annotation,
-            ) else {
+            let Some((token_type, token_modifiers_bitset)) =
+                classify_token(&tok.kind, next_kind, &hir, &names, tok.span.offset_range.0, is_member)
+            else {
                 continue;
             };
             let line = tok.span.line_range.0 as u32;
@@ -2217,55 +2086,21 @@ impl BoneWorkspace {
             if length == 0 {
                 continue;
             }
-            // An interpolated string splits into literal segments (STRING,
-            // incl. the braces) and hole expressions colored as what they are
-            // (the hole's root classification from the offset map; the token
-            // is single-line here, so char-based `col_range` math is safe).
-            let mut pieces: Vec<(u32, u32, u32, u32)> = Vec::new();
-            if token_type == TT_STRING {
-                let (ts, te) = tok.span.offset_range;
-                let mut cur = start;
-                for h in hir
-                    .interp_holes
-                    .iter()
-                    .filter(|h| h.offset_range.0 >= ts && h.offset_range.1 <= te)
-                {
-                    let (hs, he) = (h.col_range.0 as u32, h.col_range.1 as u32);
-                    if hs > cur {
-                        pieces.push((cur, hs - cur, TT_STRING, 0));
-                    }
-                    let (tt, mods) = hir
-                        .by_offset
-                        .get(&h.offset_range.0)
-                        .copied()
-                        .unwrap_or((TT_VARIABLE, 0));
-                    pieces.push((hs, he - hs, tt, mods));
-                    cur = he;
-                }
-                if !pieces.is_empty() && start + length > cur {
-                    pieces.push((cur, start + length - cur, TT_STRING, 0));
-                }
-            }
-            if pieces.is_empty() {
-                pieces.push((start, length, token_type, token_modifiers_bitset));
-            }
-            for (col, len, tt, mods) in pieces {
-                let delta_line = line.saturating_sub(prev_line);
-                let delta_start = if delta_line == 0 {
-                    col.saturating_sub(prev_start)
-                } else {
-                    col
-                };
-                data.push(SemanticToken {
-                    delta_line,
-                    delta_start,
-                    length: len,
-                    token_type: tt,
-                    token_modifiers_bitset: mods,
-                });
-                prev_line = line;
-                prev_start = col;
-            }
+            let delta_line = line.saturating_sub(prev_line);
+            let delta_start = if delta_line == 0 {
+                start.saturating_sub(prev_start)
+            } else {
+                start
+            };
+            data.push(SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type,
+                token_modifiers_bitset,
+            });
+            prev_line = line;
+            prev_start = start;
         }
         SemanticTokens {
             result_id: None,
@@ -2290,10 +2125,6 @@ pub fn semantic_tokens_legend() -> Vec<SemanticTokenType> {
         SemanticTokenType::COMMENT,  // 8
         SemanticTokenType::PROPERTY, // 9
         SemanticTokenType::PARAMETER, // 10
-        SemanticTokenType::ENUM_MEMBER, // 11
-        SemanticTokenType::TYPE_PARAMETER, // 12
-        SemanticTokenType::DECORATOR, // 13
-        SemanticTokenType::MACRO, // 14
     ]
 }
 
@@ -2308,20 +2139,11 @@ pub fn semantic_tokens_modifiers_legend() -> Vec<SemanticTokenModifier> {
         // A use of a `T?` binding that flow narrowed to `T` (e.g. inside
         // `if x != null { .. }`). Mutually exclusive with `nullable`.
         SemanticTokenModifier::new("refined"), // bit 1
-        // A `const` declaration or use. Combines with nullable/refined.
-        // Editors style `variable` + `readonly`/`static` to make globals pop
-        // against locals (the nvim plugin bolds both
-        // `@lsp.typemod.variable.readonly.rock` and `.static.rock`).
-        SemanticTokenModifier::READONLY, // bit 2
-        // A mutable `global` declaration or use (readonly would be a lie).
-        SemanticTokenModifier::STATIC, // bit 3
     ]
 }
 
 const MOD_NULLABLE: u32 = 1 << 0;
 const MOD_REFINED: u32 = 1 << 1;
-const MOD_READONLY: u32 = 1 << 2;
-const MOD_STATIC: u32 = 1 << 3;
 
 const TT_KEYWORD: u32 = 0;
 const TT_VARIABLE: u32 = 1;
@@ -2334,10 +2156,6 @@ const TT_STRING: u32 = 7;
 const TT_COMMENT: u32 = 8;
 const TT_PROPERTY: u32 = 9;
 const TT_PARAMETER: u32 = 10;
-const TT_ENUM_MEMBER: u32 = 11;
-const TT_TYPE_PARAMETER: u32 = 12;
-const TT_DECORATOR: u32 = 13;
-const TT_MACRO: u32 = 14;
 
 /// Classify a token into a legend index, or `None` to skip it (operators,
 /// punctuation, delimiters -- not highlighted).
@@ -2348,7 +2166,6 @@ fn classify_token(
     names: &HashMap<Ustr, u32>,
     offset: usize,
     is_member: bool,
-    is_annotation: bool,
 ) -> Option<(u32, u32)> {
     use rock_tokenizer::TokenKind as T;
     Some(match kind {
@@ -2382,9 +2199,6 @@ fn classify_token(
                     _ => (TT_PROPERTY, 0),
                 })
             })
-            // A glued `@ident` the HIR didn't claim: statement/item-level
-            // annotations (`@guarded`, `@global_write`) that never reach hir.
-            .or_else(|| is_annotation.then_some((TT_DECORATOR, 0)))
             .or_else(|| names.get(n).map(|&t| (t, 0)))
             .unwrap_or((TT_VARIABLE, 0)),
         _ => return None,
@@ -2402,16 +2216,15 @@ fn semantic_classifications(
     ws: &Workspace,
     mid: ModuleId,
     range: Option<(usize, usize)>,
-) -> SemanticClassifications {
+) -> HashMap<usize, (u32, u32)> {
     use bone_semantic::hir::{BindingKind, BodyOwner, Expr};
     let binding_tt = |k: BindingKind| match k {
         BindingKind::Param => TT_PARAMETER,
         BindingKind::Let => TT_VARIABLE,
     };
     let mut map: HashMap<usize, (u32, u32)> = HashMap::new();
-    let mut holes: Vec<Span> = Vec::new();
     let Some(module) = ws.modules.get(mid.index()) else {
-        return SemanticClassifications::default();
+        return map;
     };
     let inf = ws.inference(mid);
     // Struct field declaration names -> property.
@@ -2419,58 +2232,6 @@ fn semantic_classifications(
         for f in &s.fields {
             map.insert(f.span.offset_range.0, (TT_PROPERTY, 0));
         }
-    }
-    // Enum variant declaration names -> enum member.
-    for en in module.enums.values() {
-        for v in &en.variants {
-            map.insert(v.name_span.offset_range.0, (TT_ENUM_MEMBER, 0));
-        }
-    }
-    // Function annotation names (`@test`, `@late_draw`) -> decorator. The
-    // hir keeps each annotation's name Ident with its span.
-    for f in module.functions.values() {
-        for anno in &f.annotations {
-            map.insert(anno.name.span.offset_range.0, (TT_DECORATOR, 0));
-        }
-    }
-    // Generic param declarations (`fn id<T>`, `struct Box<T>`): the decl's
-    // `TypeExpr::Generic` node keeps its `<T>` name span in ty_spans
-    // (span_recordable excludes generics, so uses never clobber it).
-    let generic_decls = module
-        .functions
-        .values()
-        .flat_map(|f| &f.generics)
-        .chain(module.structs.values().flat_map(|s| &s.generics))
-        .chain(module.enums.values().flat_map(|e| &e.generics));
-    for g in generic_decls {
-        if let bone_semantic::prelude::TyId::Static(gmid, idx) = g {
-            if *gmid == mid {
-                if let Some(sp) = module.ty_spans.get(*idx) {
-                    map.insert(sp.offset_range.0, (TT_TYPE_PARAMETER, 0));
-                }
-            }
-        }
-    }
-    // Workspace-wide global decls, name -> (declared type, is_const):
-    // classifies `Expr::Global` uses (incl. cross-module refs). `const` gets
-    // `readonly`, a mutable `global` gets `static`.
-    let global_mod = |is_const: bool| if is_const { MOD_READONLY } else { MOD_STATIC };
-    let mut global_tys: HashMap<Ustr, (bone_semantic::prelude::TyId, bool)> = HashMap::new();
-    for m in ws.modules.iter() {
-        for (_, g) in m.globals.iter() {
-            global_tys.entry(g.name).or_insert((g.ty, g.is_const));
-        }
-    }
-    // This module's global declaration names. A `T?` global carries `nullable`
-    // at its declaration, like a binding decl.
-    for (_, g) in module.globals.iter() {
-        let mods = global_mod(g.is_const)
-            | if ty_is_nullable(ws, None, g.ty) {
-                MOD_NULLABLE
-            } else {
-                0
-            };
-        map.insert(g.name_span.offset_range.0, (TT_VARIABLE, mods));
     }
     for (owner, body) in module.bodies.iter() {
         // Range request (viewport): walk only function bodies whose footprint
@@ -2518,33 +2279,6 @@ fn semantic_classifications(
                         map.insert(sp.offset_range.0, (tt, mods));
                     }
                 }
-                // Variant names in expression position (`Color::Red`, bare
-                // `Red`) -> enum member; the enum qualifier colors via the
-                // workspace name map.
-                Expr::EnumVariant { variant_span, .. } => {
-                    map.insert(variant_span.offset_range.0, (TT_ENUM_MEMBER, 0));
-                }
-                // A global use -> readonly variable, with the same
-                // nullable/refined flow logic as `Var` (bone refines globals
-                // purity-aware). Names that aren't declared globals (e.g. a fn
-                // used as a value) fall through to the workspace name map.
-                Expr::Global(name) => {
-                    if let (Some(sp), Some(&(decl_ty, is_const))) =
-                        (body.expr_spans.get(e), global_tys.get(name))
-                    {
-                        let mods = global_mod(is_const)
-                            | if ty_is_nullable(ws, bi, decl_ty) {
-                                match bi.and_then(|bi| bi.expr_types.get(e)) {
-                                    Some(&use_ty) if ty_is_nullable(ws, bi, use_ty) => MOD_NULLABLE,
-                                    Some(_) => MOD_REFINED,
-                                    None => MOD_NULLABLE,
-                                }
-                            } else {
-                                0
-                            };
-                        map.insert(sp.offset_range.0, (TT_VARIABLE, mods));
-                    }
-                }
                 // Struct-literal field names -> property.
                 Expr::StructLiteral { fields, .. } => {
                     for fi in fields.clone() {
@@ -2552,67 +2286,11 @@ fn semantic_classifications(
                         map.insert(f.name_span.offset_range.0, (TT_PROPERTY, 0));
                     }
                 }
-                // Interpolation holes: each `{expr}`'s expr span (real in-file
-                // offsets from the parser) lets the emitter split the string
-                // token and color the hole as the expression it is.
-                Expr::InterpolatedString(parts) => {
-                    for pi in parts.clone() {
-                        if let bone_semantic::hir::InterpPart::Value { expr, .. } =
-                            &body.interp_part_arena[pi]
-                        {
-                            if let Some(sp) = body.expr_spans.get(*expr) {
-                                holes.push(*sp);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Generic USES in type positions (`x: T`, `-> T`, `Vec<T>`'s param):
-        // every use lowers a lapper interval (with the use's span) pointing at
-        // the shared `TypeExpr::Generic` decl node -- the only per-use record,
-        // since the resolved TyId is the decl's.
-        for iv in &body.node_intervals {
-            if let bone_semantic::hir::NodeRef::StaticTy { mid: tmid, idx } = iv.val {
-                if matches!(
-                    ws.module(tmid).ty_arena[idx],
-                    bone_semantic::hir::TypeExpr::Generic(..)
-                ) {
-                    map.insert(iv.start, (TT_TYPE_PARAMETER, 0));
-                }
-            }
-        }
-        // Variant names in match patterns (`Color::Red =>`, record variants
-        // `Circle { .. } =>`). The flat arena walk reaches nested sub-patterns.
-        for (_, pat) in body.pattern_arena.iter() {
-            match pat {
-                bone_semantic::hir::Pattern::EnumVariant { variant_span, .. } => {
-                    map.insert(variant_span.offset_range.0, (TT_ENUM_MEMBER, 0));
-                }
-                bone_semantic::hir::Pattern::Record {
-                    enum_name: Some(_),
-                    name_span: Some(sp),
-                    ..
-                } => {
-                    map.insert(sp.offset_range.0, (TT_ENUM_MEMBER, 0));
-                }
                 _ => {}
             }
         }
     }
-    holes.sort_by_key(|h| h.offset_range.0);
-    SemanticClassifications { by_offset: map, interp_holes: holes }
-}
-
-/// Output of [`semantic_classifications`]: per-offset identifier
-/// classifications plus the interpolation-hole expr spans the emitter uses to
-/// split string tokens.
-#[derive(Default)]
-struct SemanticClassifications {
-    by_offset: HashMap<usize, (u32, u32)>,
-    /// `{expr}` hole EXPR spans (no braces), sorted by start offset.
-    interp_holes: Vec<Span>,
+    map
 }
 
 /// Whether `ty` resolves to a `T?` nullable, following inference-var
@@ -2661,9 +2339,6 @@ fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
         }
         for n in m.functions_by_name.keys() {
             names.entry(*n).or_insert(TT_FUNCTION);
-        }
-        for d in m.decorators.values() {
-            names.entry(d.name).or_insert(TT_DECORATOR);
         }
     }
     names
@@ -2873,18 +2548,24 @@ fn call_arg_context(src: &str, offset: usize) -> Option<(String, u32, Option<usi
 /// `receiver_ty` is `Some` (a UFCS method call), only overloads whose param 0
 /// renders to that type are considered -- so `ui.text(..)` yields the `UiRect`
 /// overload's params, not the union with the `DrawList` overload's.
-/// RENDERED expected param types across `callee`'s overloads. Display-form
-/// only: feeds the reachability index (string-keyed) and the member path,
-/// plus the ranking FALLBACK rung when no typed session can be built. The
-/// typed compare is `ExpectedArg` below (docs/assignable-plan.md); migrating
-/// the member/reach consumers onto TyIds is its phase 2.
-fn expected_param_types(ws: &Workspace, callee: &str, arg_index: usize) -> Vec<String> {
+fn expected_param_types(
+    ws: &Workspace,
+    callee: &str,
+    arg_index: usize,
+    receiver_ty: Option<&str>,
+) -> Vec<String> {
     let name = Ustr::from(callee);
     let mut out: Vec<String> = Vec::new();
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
             for (fmid, fid) in fns {
                 let f = &ws.modules[fmid.index()].functions[*fid];
+                if let Some(rty) = receiver_ty {
+                    let matches = f.param_decls.first().is_some_and(|p| ws.render(None, p.ty) == rty);
+                    if !matches {
+                        continue;
+                    }
+                }
                 if let Some(p) = f.param_decls.get(arg_index) {
                     let r = ws.render(None, p.ty);
                     if !out.contains(&r) {
@@ -2897,257 +2578,21 @@ fn expected_param_types(ws: &Workspace, callee: &str, arg_index: usize) -> Vec<S
     out
 }
 
-/// Whether any overload of `callee` declares arg `arg_index` as a
-/// `FieldOf<..>` slot, decided on the param's nominal head. None when no
-/// overload is known live (unknown callee / arity) -- the caller treats that
-/// as "can't rule it out".
-fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Option<bool> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let name = Ustr::from(callee);
-    let mut any = false;
-    let mut found = false;
-    for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&name) else { continue };
-        for (fmid, fid) in fns {
-            let f = &ws.modules[fmid.index()].functions[*fid];
-            let Some(p) = f.param_decls.get(arg_index) else { continue };
-            any = true;
-            let te = match p.ty {
-                TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
-                TyId::Local(_) => continue,
-            };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == "FieldOf")
-            {
-                found = true;
-            }
-        }
-    }
-    any.then_some(found)
-}
-
-/// Typed expected-type oracle for one completion request's arg slot
-/// (docs/assignable-plan.md). The callee's surviving overloads' params are
-/// instantiated ONCE per overload (fresh vars) in a scratch
-/// `Gamma::for_query` seeded from the cursor body's inference; candidate
-/// compatibility is bone's REAL `coerce` under trial, rolled back per
-/// candidate so one candidate's bindings never leak into the next. A UFCS
-/// receiver coerces into each overload's first param and its bindings are
-/// KEPT -- the receiver's instantiation is what the arg slot must agree with
-/// (`nums.add_all(|)`: receiver `[int]` binds T, so the slot expects `[int]`).
-struct ExpectedArg<'a> {
-    gamma: Gamma<'a>,
-    span: Span,
-    slots: Vec<TyId>,
-    /// DECLARED-form renders of the surviving slots ("Color", "[T]") -- what
-    /// the string-keyed reachability index consumes. Receiver-filtered by
-    /// construction (only surviving overloads contribute), unlike the
-    /// unfiltered `expected_param_types` fallback.
-    rendered: Vec<String>,
-    memo: HashMap<TyId, bool>,
-    ret_memo: HashMap<TyId, bool>,
-}
-
-impl<'a> ExpectedArg<'a> {
-    /// Throwaway Gamma over the cursor body's cached inference. None when the
-    /// body is broken enough to have no cached inference -- the caller falls
-    /// back to the rendered-string rung.
-    fn scratch(
-        ws: &'a Workspace,
-        mid: ModuleId,
-        inf: &InferenceResult,
-        offset: usize,
-    ) -> Option<(Gamma<'a>, Span)> {
-        let module = ws.modules.get(mid.index())?;
-        let owner = module.body_at(offset)?;
-        let body = module.bodies.get(&owner)?;
-        let seed = inf.per_fn.get(&owner)?;
-        let span = Span {
-            file: module.file,
-            line_range: (0, 0),
-            col_range: (0, 0),
-            offset_range: (0, 0),
-        };
-        Some((Gamma::for_query(ws, body, mid, seed), span))
-    }
-
-    /// Session for `callee(.. <arg_idx> ..)`; `recv` is the UFCS receiver's
-    /// type when the call is `recv.callee(..)`.
-    fn for_call(
-        ws: &'a Workspace,
-        mid: ModuleId,
-        inf: &InferenceResult,
-        offset: usize,
-        callee: &str,
-        arg_idx: usize,
-        recv: Option<TyId>,
-    ) -> Option<ExpectedArg<'a>> {
-        let (mut gamma, span) = Self::scratch(ws, mid, inf, offset)?;
-        let name = Ustr::from(callee);
-        let mut slots = Vec::new();
-        let mut rendered: Vec<String> = Vec::new();
-        for m in ws.modules.iter() {
-            let Some(fns) = m.functions_by_name.get(&name) else { continue };
-            for (fmid, fid) in fns {
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                if f.param_decls.len() <= arg_idx {
-                    continue;
-                }
-                let params: Vec<TyId> = f.param_decls.iter().map(|p| p.ty).collect();
-                let Ok(inst) =
-                    gamma.trial(|g| inference::instantiate_params(g, &f.generics, &params, span))
-                else {
-                    continue;
-                };
-                if let Some(rt) = recv {
-                    let cp = gamma.out.checkpoint();
-                    let ok = gamma.trial(|g| inference::coerce(g, rt, inst[0], span).is_ok());
-                    if !ok {
-                        gamma.out.rollback_to(cp);
-                        continue;
-                    }
-                    // Bindings deliberately kept -- see the struct doc.
-                }
-                slots.push(inst[arg_idx]);
-                let r = ws.render(None, params[arg_idx]);
-                if !rendered.contains(&r) {
-                    rendered.push(r);
-                }
-            }
-        }
-        (!slots.is_empty()).then(|| ExpectedArg {
-            gamma,
-            span,
-            slots,
-            rendered,
-            memo: HashMap::new(),
-            ret_memo: HashMap::new(),
-        })
-    }
-
-    /// Session for a single concrete expected slot (struct-literal field
-    /// value / lambda-body return type).
-    fn for_slot(
-        ws: &'a Workspace,
-        mid: ModuleId,
-        inf: &InferenceResult,
-        offset: usize,
-        slot: TyId,
-    ) -> Option<ExpectedArg<'a>> {
-        let (gamma, span) = Self::scratch(ws, mid, inf, offset)?;
-        let rendered = match slot {
-            TyId::Static(..) => vec![ws.render(None, slot)],
-            TyId::Local(_) => Vec::new(),
-        };
-        Some(ExpectedArg {
-            gamma,
-            span,
-            slots: vec![slot],
-            rendered,
-            memo: HashMap::new(),
-            ret_memo: HashMap::new(),
-        })
-    }
-
-    /// Would passing a value of type `ty` to this slot type-check? Bone's
-    /// `coerce` under trial; bindings rolled back so candidates stay
-    /// independent. Memoized per candidate TyId (candidates repeat few
-    /// distinct types across a ~2500-entry ranking pass).
-    fn accepts(&mut self, ty: TyId) -> bool {
-        if let Some(&b) = self.memo.get(&ty) {
-            return b;
-        }
-        let span = self.span;
-        let mut ok = false;
-        for i in 0..self.slots.len() {
-            let slot = self.slots[i];
-            let cp = self.gamma.out.checkpoint();
-            let hit = self.gamma.trial(|g| inference::coerce(g, ty, slot, span).is_ok());
-            self.gamma.out.rollback_to(cp);
-            if hit {
-                ok = true;
-                break;
-            }
-        }
-        self.memo.insert(ty, ok);
-        ok
-    }
-
-    /// Would a CALL of fn `name` produce this slot's type? The candidate fn's
-    /// own generics instantiate fresh (`clone(xs)` CAN return `[int]`), then
-    /// its return coerces into a slot; everything rolls back.
-    fn accepts_fn_returning(&mut self, ws: &Workspace, name: &str) -> bool {
-        let n = Ustr::from(name);
-        let span = self.span;
-        let slots = self.slots.clone();
-        for m in ws.modules.iter() {
-            let Some(fns) = m.functions_by_name.get(&n) else { continue };
-            for (fmid, fid) in fns {
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                let Some(ret) = f.return_ty else { continue };
-                if let Some(&b) = self.ret_memo.get(&ret) {
-                    if b {
-                        return true;
-                    }
-                    continue;
-                }
-                let cp = self.gamma.out.checkpoint();
-                let inst = self
-                    .gamma
-                    .trial(|g| inference::instantiate_params(g, &f.generics, &[ret], span));
-                let hit = match inst {
-                    Ok(inst) => slots.iter().any(|&slot| {
-                        let cp2 = self.gamma.out.checkpoint();
-                        let ok = self
-                            .gamma
-                            .trial(|g| inference::coerce(g, inst[0], slot, span).is_ok());
-                        self.gamma.out.rollback_to(cp2);
-                        ok
-                    }),
-                    Err(_) => false,
-                };
-                self.gamma.out.rollback_to(cp);
-                self.ret_memo.insert(ret, hit);
-                if hit {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// The slot expects nominal type `name` -- the enum-variant fast path
-    /// (`Enum::V` candidates carry their enum's NAME, not a TyId). Unwraps
-    /// one level of nullable so an `E?` param still boosts `E::..` variants.
-    fn expects_nominal(&self, name: &str) -> bool {
-        use bone_semantic::hir::{TypeCtor, TypeExpr};
-        self.slots.iter().any(|&slot| {
-            let te = *self.gamma.get(slot);
-            let te = match te {
-                TypeExpr::Nullable(inner) => *self.gamma.get(slot.with_idx(inner)),
-                other => other,
-            };
-            matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == name)
-        })
-    }
-}
-
-/// The TyId of the receiver expression left of the `.` at `dot_off`, used to
-/// overload-filter UFCS method-call arg completion. Resilient to the broken
-/// trailing arg being typed (the whole statement won't infer):
+/// The rendered type of the receiver expression left of the `.` at `dot_off`,
+/// used to overload-filter UFCS method-call arg completion. Resilient to the
+/// broken trailing arg being typed (the whole statement won't infer):
 /// - a method-CHAIN receiver (`a.b().m(|)`) -> the last method's UNIQUE return
 ///   type, resolved structurally (no inference needed). `type_at` on the `)`
 ///   would give the callee's fn type, not the call result.
 /// - a variable / field-path receiver -> `type_at` on its last token (a
-///   variable's declared/inferred type survives the broken arg). A
-///   `TyId::Local` here indexes the cursor body's inference -- the same seed
-///   `ExpectedArg`'s scratch Gamma clones, so it stays resolvable.
-fn method_receiver_ty(
+///   variable's declared/inferred type survives the broken arg).
+fn method_receiver_type(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     src: &str,
     dot_off: usize,
-) -> Option<TyId> {
+) -> Option<String> {
     let b = src.as_bytes();
     let mut i = dot_off.min(b.len());
     while i > 0 && b[i - 1].is_ascii_whitespace() {
@@ -3187,34 +2632,32 @@ fn method_receiver_ty(
         if k == nend {
             return None;
         }
-        return fn_unique_return_ty(ws, &src[k..nend]);
+        return fn_unique_return_type(ws, &src[k..nend]);
     }
     let recv_end = dot_off.checked_sub(1)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end)?;
-    Some(ta.ty)
+    Some(ws.render(None, ta.ty))
 }
 
-/// The return TyId shared by ALL overloads of `name`, or None if the
-/// overloads disagree / any lacks a return type. Agreement is decided on the
-/// RENDERED form (structural sameness across overloads' Static arenas), but
-/// the TyId is what flows on -- the typed compare never re-parses the string.
-fn fn_unique_return_ty(ws: &Workspace, name: &str) -> Option<TyId> {
+/// The rendered return type shared by ALL overloads of `name`, or None if the
+/// overloads disagree / any lacks a return type. Used to type a method-chain
+/// receiver structurally (no inference).
+fn fn_unique_return_type(ws: &Workspace, name: &str) -> Option<String> {
     let n = Ustr::from(name);
-    let mut ret: Option<(TyId, String)> = None;
+    let mut ret: Option<String> = None;
     for m in ws.modules.iter() {
         let Some(fns) = m.functions_by_name.get(&n) else { continue };
         for (fmid, fid) in fns {
             let f = &ws.modules[fmid.index()].functions[*fid];
-            let t = f.return_ty?;
-            let r = ws.render(None, t);
+            let r = ws.render(None, f.return_ty?);
             match &ret {
-                None => ret = Some((t, r)),
-                Some((_, prev)) if *prev == r => {}
+                None => ret = Some(r),
+                Some(prev) if *prev == r => {}
                 Some(_) => return None, // overloads disagree -> can't decide
             }
         }
     }
-    ret.map(|(t, _)| t)
+    ret
 }
 
 /// True when a leading `.` sits just before the partial identifier under the
@@ -3490,7 +2933,7 @@ fn field_ref_arg_completions(
 /// enum / struct-literal early-returns leave the previous value untouched).
 #[derive(Clone, Copy)]
 pub struct CompletionPhaseTimings {
-    pub candidates_ms: f64,
+    pub gaps_ms: f64,
     pub rank_ms: f64,
     pub reach_ms: f64,
     pub call_through_ms: f64,
@@ -3516,7 +2959,7 @@ struct CtCounts {
 thread_local! {
     static LAST_COMPLETION_PHASES: std::cell::Cell<CompletionPhaseTimings> = const {
         std::cell::Cell::new(CompletionPhaseTimings {
-            candidates_ms: 0.0,
+            gaps_ms: 0.0,
             rank_ms: 0.0,
             reach_ms: 0.0,
             call_through_ms: 0.0,
@@ -3545,6 +2988,11 @@ const FZ_BOUNDARY: i32 = 10; // matched char at a word start
 const FZ_CONSEC: i32 = 8; // matched char right after the previous match (run)
 const FZ_FIRST: i32 = 10; // extra for matching at absolute position 0
 
+/// Word-boundary test mirroring `fuzzy_score`: position 0, or preceded by a
+/// delimiter. (Note: delimiter-only -- NO camelCase, unlike `clean_match`.)
+fn fz_boundary(cand: &[u8], j: usize) -> bool {
+    j == 0 || matches!(cand[j - 1], b'_' | b'.' | b'(' | b')' | b':' | b' ')
+}
 
 fn fuzzy_score(cand: &[u8], query: &[u8]) -> i32 {
     const MISS: i32 = FZ_MISS;
@@ -3778,6 +3226,55 @@ fn arg_path_penalty(arg: &str) -> i32 {
     hops * HOP + calls * CALL
 }
 
+/// Does `query` (already lowercased) match `cand` (ORIGINAL case) CLEANLY -- the
+/// FIRST char at a word boundary, and every later char either at a word boundary
+/// or immediately after the previous match (a run)? Word boundaries are
+/// delimiters (`_ . ( ) : space`) AND camelCase transitions (a lower/digit
+/// followed by an upper -- `NotGround`'s `G`), so PascalCase variant/type names
+/// match by their inner words. This is how people fuzzy-type (`tc` / `tilecen`
+/// -> `tile_center`, `log` -> `stone_log`, `nog` -> `NotGround`), and it drops
+/// coincidental mid-word scatter (`nog` across `__sto(n)e_l(o)(g)` or
+/// `Bloody(B)anda(g)e`). Filters completion candidates; ranking still uses the
+/// finer `fuzzy_score`. Boolean DP over (query x cand); char compare is
+/// case-insensitive. Empty = clean.
+fn clean_match(cand: &[u8], query: &[u8]) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let n = cand.len();
+    if n < query.len() {
+        return false;
+    }
+    let is_delim = |b: u8| matches!(b, b'_' | b'.' | b'(' | b')' | b':' | b' ');
+    let boundary = |j: usize| {
+        j == 0
+            || is_delim(cand[j - 1])
+            || (cand[j].is_ascii_uppercase() && !cand[j - 1].is_ascii_uppercase())
+    };
+    // `prev[j]` = query[..=i] cleanly matched with query[i] ending at cand[j].
+    let mut prev = vec![false; n];
+    let mut cur = vec![false; n];
+    for (i, &qc) in query.iter().enumerate() {
+        let mut any = false;
+        let mut prev_before = false; // some prev[k] true for k < j
+        for j in 0..n {
+            cur[j] = cand[j].to_ascii_lowercase() == qc
+                && if i == 0 {
+                    boundary(j)
+                } else {
+                    // consecutive (run) OR a new run starting at a boundary
+                    (j > 0 && prev[j - 1]) || (boundary(j) && prev_before)
+                };
+            any |= cur[j];
+            prev_before |= prev[j];
+        }
+        if !any {
+            return false;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev.iter().any(|&b| b)
+}
 
 /// Build the arg-position `sort_text`. Ordering is most-significant first:
 /// `type_rank` (0 value-of-expected-type / 1 fn-returning-it / 2 other), then
@@ -4068,7 +3565,7 @@ fn call_through_param_completions(
     // reach expansion are precomputed in `index` (the slow part, now cached).
     let locals: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
         .into_iter()
-        .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty))
+        .map(|(n, _k, ty)| (n.to_string(), ty))
         .collect();
 
     // Call-through is a synthesized, bottom-ranked (bucket 4) convenience; the
@@ -4305,7 +3802,7 @@ fn ci_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 }
 
 /// Render every function's signature once -- the dominant completion cost --
-/// keyed by name with first-overload-wins to match `crate::query::completion`'s
+/// keyed by name with first-overload-wins to match `gaps::completion`'s
 /// `seen`-dedup order (modules walked in `ws.modules` order). Stored in
 /// `BoneProject::fn_sigs` and rebuilt only on non-`BodyOnly` edits, so body
 /// keystrokes reuse it instead of re-rendering the whole workspace.
@@ -4316,7 +3813,7 @@ fn build_fn_sigs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
             if let Some((fmid, fid)) = fns.first() {
                 sigs.entry(*name).or_insert_with(|| {
                     let f = &ws.modules[fmid.index()].functions[*fid];
-                    crate::query::render_fn_signature(ws, *name, f)
+                    gaps::render_fn_signature(ws, *name, f)
                 });
             }
         }
@@ -4811,67 +4308,6 @@ fn reparse_with_project(
     path: &str,
     munged: &str,
 ) -> Option<Workspace> {
-    let t = std::time::Instant::now();
-    let out = reparse_with_project_inner(combined, path, munged);
-    if lsp_profile_enabled() {
-        eprintln!(
-            "[bone completion] reparse_with_project {:.2}ms ({} modules, recovered: {})",
-            t.elapsed().as_secs_f64() * 1000.0,
-            combined.len(),
-            out.is_some()
-        );
-    }
-    out
-}
-
-/// Analyze one completion munge: apply it as a speculative Session variant
-/// (incremental cost -- a body-local munge re-infers one body) and run `f`
-/// against the variant workspace. If the session REFUSES the variant (strict
-/// rejection: a name colliding with the stdlib, macro-expansion failure, hard
-/// tokenize error), fall back to a single-file scratch pass over the munged
-/// text alone -- same-file types still resolve, the last rung of the old
-/// reparse ladder. `None` only when both rungs fail.
-fn analyze_variant<R>(
-    session: &mut Session,
-    path: &str,
-    munged: &str,
-    f: impl Fn(&Workspace) -> R,
-) -> Option<R> {
-    match session.with_file_variant(path, munged, &f) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            log::warn!(
-                "completion: session refused the variant ({}); single-file fallback",
-                e.message
-            );
-            if lsp_profile_enabled() {
-                eprintln!(
-                    "[bone completion] variant refused ({}) -> single-file fallback",
-                    e.message
-                );
-            }
-            let fallback = skull_parser::parse_module(munged, Ustr::from(path))
-                .ok()
-                .and_then(|m| bone_semantic::semantic_passes::semantic_pass(&mut vec![m]).ok());
-            match fallback {
-                Some(ws) => Some(f(&ws)),
-                None => {
-                    log::warn!(
-                        "completion: single-file fallback also failed for `{path}`; \
-                         this munge yields no completions"
-                    );
-                    None
-                }
-            }
-        }
-    }
-}
-
-fn reparse_with_project_inner(
-    combined: &[skull_parser::Ast],
-    path: &str,
-    munged: &str,
-) -> Option<Workspace> {
     // Project-wide pass: every module except the current file, plus the munge.
     // Resolves cross-file / dependency types (an `IVec2` engine param, etc.).
     let mut modules: Vec<skull_parser::Ast> =
@@ -5054,7 +4490,7 @@ fn enum_record_context(src: &str, offset: usize) -> Option<(String, String)> {
 /// caller falls through to global completion. `Some(vec![])` only when the variant
 /// IS a record but the prefix filtered every field out.
 fn enum_record_field_completions(
-    session: &mut Session,
+    combined: &[skull_parser::Ast],
     path: &str,
     src: &str,
     offset: usize,
@@ -5063,18 +4499,18 @@ fn enum_record_field_completions(
     prefix: &str,
 ) -> Option<Vec<CompletionItem>> {
     for munged in completion_munges(src, offset) {
-        let Some(fields) = analyze_variant(session, path, &munged, |ws| {
-            crate::query::variant_record_fields(ws, enum_name, variant)
-        }) else {
+        let Some(ws) = reparse_with_project(combined, path, &munged) else {
             continue;
         };
+
+        let fields = crate::query::variant_record_fields(&ws, enum_name, variant);
         if fields.is_empty() {
             continue;
         }
         return Some(
             fields
                 .into_iter()
-                .filter(|(name, _)| prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes()))
+                .filter(|(name, _)| prefix.is_empty() || name.to_lowercase().starts_with(prefix))
                 .map(|(name, ty)| CompletionItem {
                     label: format!("{name}: {ty}"),
                     kind: Some(CompletionItemKind::FIELD),
@@ -5186,22 +4622,26 @@ fn struct_literal_context(src: &str, offset: usize) -> Option<(String, usize)> {
     Some((name.to_string(), brace_open))
 }
 
-/// In a struct-literal field VALUE slot (`Name { field: <value cursor> }`),
-/// returns (struct name, field name, is_lambda_body). Uses `enclosing_brace_field`
-/// so it fires for any value position -- including a value EXPRESSION like a
-/// lambda body (`field: () => x|`) -- not just an immediate `field:` prefix.
-/// `is_lambda_body` is set when a top-level `=>` sits between the `field:` and the
-/// cursor, so the caller can type-direct on the field's function RETURN type.
-fn struct_field_value_context(src: &str, offset: usize) -> Option<(String, String, bool)> {
+/// In a struct-literal field VALUE slot (`Name { field: <cursor> }`), returns
+/// (struct name, field name). Keyed on the `field:` (single colon) immediately
+/// left of the value prefix; walks out to the enclosing `{` and the struct name
+/// the same way [`struct_literal_context`] does. Drives type-directed completion
+/// of the value from the field's declared type.
+fn struct_field_value_context(src: &str, offset: usize) -> Option<(String, String)> {
     let b = src.as_bytes();
     let mut i = offset.min(b.len());
     while i > 0 && is_ident_byte(b[i - 1]) {
         i -= 1; // skip the value prefix under the cursor
     }
-    let (brace_open, colon) = enclosing_brace_field(b, i)?;
-    let colon = colon?; // must be a value slot (a `:` precedes the cursor)
-    // field name = the ident before the `:`
-    let mut c = colon;
+    // require a single `:` (a `field:` separator, not `Enum::`) just before it
+    let mut c = i;
+    while c > 0 && b[c - 1].is_ascii_whitespace() {
+        c -= 1;
+    }
+    if !(c > 0 && b[c - 1] == b':' && !(c >= 2 && b[c - 2] == b':')) {
+        return None;
+    }
+    c -= 1; // consume the `:`
     while c > 0 && b[c - 1].is_ascii_whitespace() {
         c -= 1;
     }
@@ -5213,8 +4653,22 @@ fn struct_field_value_context(src: &str, offset: usize) -> Option<(String, Strin
         return None;
     }
     let field = &src[c..fend];
-    // struct name immediately before the enclosing `{`
-    let mut j = brace_open;
+    // walk out to the enclosing `{` (balancing nested braces)
+    let mut depth = 0i32;
+    while c > 0 {
+        match b[c - 1] {
+            b'}' => depth += 1,
+            b'{' if depth == 0 => break,
+            b'{' => depth -= 1,
+            _ => {}
+        }
+        c -= 1;
+    }
+    if c == 0 {
+        return None;
+    }
+    // the struct name immediately before the `{`
+    let mut j = c - 1;
     while j > 0 && b[j - 1].is_ascii_whitespace() {
         j -= 1;
     }
@@ -5229,32 +4683,14 @@ fn struct_field_value_context(src: &str, offset: usize) -> Option<(String, Strin
     if !name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
         return None;
     }
-    let is_lambda_body = has_top_level_arrow(b, colon + 1, i);
-    Some((name.to_string(), field.to_string(), is_lambda_body))
-}
-
-/// Whether a top-level (depth-0) `=>` occurs in `b[start..end]` -- the marker of
-/// a lambda whose body the cursor sits in. Balances `()[]{}`.
-fn has_top_level_arrow(b: &[u8], start: usize, end: usize) -> bool {
-    let mut depth = 0i32;
-    let mut k = start;
-    while k < end.min(b.len()) {
-        match b[k] {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth -= 1,
-            b'=' if depth == 0 && b.get(k + 1) == Some(&b'>') => return true,
-            _ => {}
-        }
-        k += 1;
-    }
-    false
+    Some((name.to_string(), field.to_string()))
 }
 
 /// Field completions for `Name { <field> }`. Offers the struct's fields not
 /// already written in the literal, filtered by the prefix. Returns None (so the
 /// caller falls through to the global namespace) when `name` isn't a struct.
 fn struct_literal_field_completions(
-    session: &mut Session,
+    combined: &[skull_parser::Ast],
     path: &str,
     src: &str,
     offset: usize,
@@ -5262,13 +4698,12 @@ fn struct_literal_field_completions(
     brace_open: usize,
     prefix: &str,
 ) -> Option<Vec<CompletionItem>> {
-    // Analyze a balanced/synthetic munge as a Session variant so the struct def
+    // Reparse (with the project) a balanced/synthetic munge so the struct def
     // survives the broken literal -- and so a struct defined in another file /
     // dependency resolves.
     let fields = completion_munges(src, offset).into_iter().find_map(|munged| {
-        let f = analyze_variant(session, path, &munged, |ws| {
-            crate::query::struct_fields_by_name(ws, name)
-        })?;
+        let ws = reparse_with_project(combined, path, &munged)?;
+        let f = crate::query::struct_fields_by_name(&ws, name);
         (!f.is_empty()).then_some(f)
     })?;
 
@@ -5285,7 +4720,7 @@ fn struct_literal_field_completions(
         fields
             .into_iter()
             .filter(|(n, _)| !present.contains(n))
-            .filter(|(n, _)| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
+            .filter(|(n, _)| prefix.is_empty() || n.to_lowercase().starts_with(prefix))
             .map(|(n, ty)| CompletionItem {
                 label: format!("{n}: {ty}"),
                 kind: Some(CompletionItemKind::FIELD),
@@ -5442,33 +4877,25 @@ fn enclosing_block_is_match(b: &[u8], from: usize) -> bool {
 /// record variant `Variant { $0 }`, with the cursor parked inside. Unit variants
 /// (and any variant in a match-arm pattern position) insert the bare name.
 fn enum_qualified_completions(
-    session: &mut Session,
+    combined: &[skull_parser::Ast],
     path: &str,
     src: &str,
     offset: usize,
+    colon_start: usize,
     enum_name: &str,
     prefix: &str,
 ) -> Vec<CompletionItem> {
-    // The query only needs the enum DEF resolvable, so the standard sentinel
-    // munges (body-local -- a cheap variant tier) serve it; a truncate-at-`::`
-    // munge would delete every item after the cursor and turn the variant into
-    // an interface-tier edit.
-    let mut all = Vec::new();
-    for munged in completion_munges(src, offset) {
-        let attempt = analyze_variant(session, path, &munged, |ws| {
-            crate::query::enum_variants_with_shape(ws, enum_name)
-        });
-        if let Some(v) = attempt {
-            if !v.is_empty() {
-                all = v;
-                break;
-            }
-        }
-    }
+    let munged = balance_delimiters(src[..colon_start.min(src.len())].to_string());
+
+    let Some(ws) = reparse_with_project(combined, path, &munged) else {
+        return Vec::new();
+    };
 
     let pattern = in_pattern_position(src, offset);
+
+    let all = crate::query::enum_variants_with_shape(&ws, enum_name);
     let matches_prefix =
-        |v: &str| prefix.is_empty() || clean_match(v.as_bytes(), prefix.as_bytes());
+        |v: &str| prefix.is_empty() || v.to_lowercase().starts_with(prefix);
     // When the in-progress prefix matches NO variant (a typo like `TextAlign::top`),
     // returning empty hands the popup to the client's buffer-word fallback -- the
     // worst outcome, since an enum is a closed set. Show every variant instead, and
@@ -5508,10 +4935,8 @@ fn enum_qualified_completions(
 /// the trigger `.`, so this munges in a synthetic identifier (rust-analyzer's
 /// technique) to get a parseable file, then resolves the receiver's struct
 /// **structurally** (no inference required). Field labels are `name: type`.
-/// Each munge is analyzed as a speculative Session variant (one incremental
-/// update + restore), not a from-scratch project pass.
 fn member_completions(
-    session: &mut Session,
+    combined: &[skull_parser::Ast],
     path: &str,
     src: &str,
     offset: usize,
@@ -5521,45 +4946,24 @@ fn member_completions(
     reach: Option<&crate::reachability::ReachabilityIndex>,
 ) -> Vec<CompletionItem> {
     for munged in completion_munges(src, offset) {
-        let attempt = analyze_variant(session, path, &munged, |ws| {
-            member_completion_items(ws, path, src, offset, segments, prefix, expected_types, reach)
-        });
-        if let Some(items) = attempt {
-            if !items.is_empty() {
-                return items;
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// One munge attempt's member items, resolved against the variant workspace.
-fn member_completion_items(
-    ws: &Workspace,
-    path: &str,
-    src: &str,
-    offset: usize,
-    segments: &[String],
-    prefix: &str,
-    expected_types: &[String],
-    reach: Option<&crate::reachability::ReachabilityIndex>,
-) -> Vec<CompletionItem> {
-    {
+        let Some(ws) = reparse_with_project(combined, path, &munged) else {
+            continue;
+        };
         // The CURRENT file's module (where the receiver/offset live) -- not just
         // "first non-builtin", which is wrong now that the whole project loads.
-        let Some(mid) = user_module_for_path(ws, path) else {
-            return Vec::new();
+        let Some(mid) = user_module_for_path(&ws, path) else {
+            continue;
         };
 
-        let fields = crate::query::struct_fields_for_path(ws, mid, offset, segments);
+        let fields = crate::query::struct_fields_for_path(&ws, mid, offset, segments);
         // UFCS methods: functions whose first param is the receiver's struct,
         // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
-        let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
+        let recv_struct = crate::query::struct_name_for_path(&ws, mid, offset, segments);
         let methods = recv_struct
-            .map(|name| crate::query::ufcs_methods(ws, name))
+            .map(|name| crate::query::ufcs_methods(&ws, name))
             .unwrap_or_default();
         if fields.is_empty() && methods.is_empty() {
-            return Vec::new();
+            continue;
         }
         // Direct members are 1-hop (dist 1): they carry a sort_text too, so they
         // order consistently with -- and ahead of, by distance -- the transitive
@@ -5583,7 +4987,7 @@ fn member_completion_items(
             if name.starts_with('_') && !show_private {
                 return None;
             }
-            (prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {
+            (prefix.is_empty() || name.to_lowercase().starts_with(prefix)).then(|| CompletionItem {
                 sort_text: Some(if bool_ctx {
                     member_bool_sort_text(&name, pfx, ty == "bool", 0)
                 } else if arg_ctx {
@@ -5599,7 +5003,7 @@ fn member_completion_items(
             })
         });
         let method_items = methods.into_iter().filter_map(|m| {
-            (prefix.is_empty() || clean_match(m.name.as_bytes(), prefix.as_bytes())).then(|| {
+            (prefix.is_empty() || m.name.to_lowercase().starts_with(prefix)).then(|| {
                 // Inline `(params) -> ret`. A method with args left after the
                 // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
                 // inside); one with no remaining args inserts `name()` as plain
@@ -5663,7 +5067,7 @@ fn member_completion_items(
                 let idx = match reach {
                     Some(r) => r,
                     None => {
-                        local_idx = crate::reachability::ReachabilityIndex::build(ws);
+                        local_idx = crate::reachability::ReachabilityIndex::build(&ws);
                         &local_idx
                     }
                 };
@@ -5707,8 +5111,10 @@ fn member_completion_items(
                 }
             }
         }
-        items
+        return items;
     }
+
+    Vec::new()
 }
 
 /// bone's `CompilerError.location` is 0-based in both line and col -- the same
@@ -5743,17 +5149,17 @@ pub fn compiler_error_to_diagnostic(e: &CompilerError) -> Diagnostic {
 /// Render a typed-hole report (kind line + `In scope:` block) as plain text.
 /// Shared by the `rock-lsp hole-info` CLI handler and the interactive hover
 /// handler so both surface identical content for a `?` under the cursor.
-fn format_hole_report(hi: &crate::query::HoleInfo) -> String {
+fn format_hole_report(hi: &gaps::HoleInfo) -> String {
     let mut out = String::new();
     match hi.kind {
-        crate::query::HoleKind::Type => {
+        gaps::HoleKind::Type => {
             out.push_str("Type hole");
             if let Some(ty) = &hi.ty {
                 out.push_str(": ");
                 out.push_str(ty);
             }
         }
-        crate::query::HoleKind::Expr => {
+        gaps::HoleKind::Expr => {
             out.push_str("Expression hole");
             if let Some(ty) = &hi.ty {
                 out.push_str(" expecting: ");
@@ -5803,7 +5209,7 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
     let uf = proj.session.files.get(path)?;
     let ast = reparse_user_file(uf, path)?;
     let line_index = LineIndex::new(src);
-    let diags = crate::query::all_holes(ws, mid, inf, &ast)
+    let diags = gaps::all_holes(ws, mid, inf, &ast)
         .into_iter()
         .map(|(span, kind, ty)| {
             // Only name the type when it's a useful concrete type, not an
@@ -5820,14 +5226,14 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
                         .any(|w| w[0] == b'?' && w[1].is_ascii_digit())
             });
             let (severity, message) = match kind {
-                crate::query::HoleKind::Expr => (
+                gaps::HoleKind::Expr => (
                     DiagnosticSeverity::WARNING,
                     match &useful {
                         Some(t) => format!("unfilled expression hole ? expecting {t}"),
                         None => "unfilled expression hole ?".to_string(),
                     },
                 ),
-                crate::query::HoleKind::Type => (
+                gaps::HoleKind::Type => (
                     DiagnosticSeverity::HINT,
                     match &useful {
                         Some(t) => format!("type hole ? inferred as {t}"),

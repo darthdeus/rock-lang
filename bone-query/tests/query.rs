@@ -109,10 +109,11 @@ fn definition_of_global() {
 
 // ---------------------------------------------------------------------------
 // references: every use site of the symbol under the cursor, INCLUDING the
-// declaration (so find-references and rename share it). Covers locals/params,
-// functions, structs + fields, enums + variants, and fn generic params --
-// all name-precise (the span is the identifier, not the whole item), so
-// rename is safe. Globals aren't covered yet.
+// declaration (so find-references and rename share it). Scoped to local
+// bindings + params for now -- those are name-precise (binding decl span and
+// `Var` use spans are the identifier, not the whole let/item), so rename is
+// safe. Functions/globals/structs need a recorded name span before they're
+// rename-safe; not covered here yet.
 // ---------------------------------------------------------------------------
 
 /// Resolve `cursor_off`; assert the returned reference set covers exactly the
@@ -125,16 +126,16 @@ fn assert_refs(src: &str, cursor_off: usize, expected: &[usize]) {
         spans.len(),
         expected.len(),
         "reference count: got {:?}, expected offsets {:?}",
-        spans.iter().map(|s| s.span.offset_range).collect::<Vec<_>>(),
+        spans.iter().map(|s| s.offset_range).collect::<Vec<_>>(),
         expected
     );
     for &off in expected {
         assert!(
             spans
                 .iter()
-                .any(|s| s.span.offset_range.0 <= off && off < s.span.offset_range.1),
+                .any(|s| s.offset_range.0 <= off && off < s.offset_range.1),
             "no reference span covers offset {off}; got {:?}",
-            spans.iter().map(|s| s.span.offset_range).collect::<Vec<_>>()
+            spans.iter().map(|s| s.offset_range).collect::<Vec<_>>()
         );
     }
 }
@@ -163,7 +164,7 @@ fn refs_at(src: &str, cursor_off: usize) -> Vec<(usize, usize)> {
     let inf = ws.inference(mid).expect("user module inferred");
     references(&ws, mid, inf, cursor_off)
         .iter()
-        .map(|s| s.span.offset_range)
+        .map(|s| s.offset_range)
         .collect()
 }
 
