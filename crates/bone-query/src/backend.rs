@@ -1193,14 +1193,28 @@ impl BoneWorkspace {
             });
         }
         if expected.is_none() && arg_call.is_none() && field_slot.is_none() {
-            // Assignment RHS (`lhs = <cursor>`): the LHS type is the expected
-            // slot, so an enum-typed target surfaces its variants type-directed
-            // (`mob.ai_state = Com|` -> `MobAiState::Combat`).
+            // Slot-anchored contexts beyond call args / struct fields: an
+            // offset whose `type_at` IS the expected type. Comparison /
+            // null-coalesce RHS first (a `==` nested in an assignment RHS is
+            // the more specific slot), then assignment RHS (`mob.ai_state =
+            // Com|` -> `MobAiState::Combat`), then a typed-`let` init.
             expected = cursor_ast
                 .as_ref()
-                .and_then(|cx| cx.assign_lhs())
-                .and_then(|lhs_end| bone_semantic::query::type_at(ws, mid, inf, lhs_end))
+                .and_then(|cx| {
+                    cx.comparison_lhs().or_else(|| cx.assign_lhs()).or_else(|| cx.typed_let_binding())
+                })
+                .and_then(|anchor| bone_semantic::query::type_at(ws, mid, inf, anchor))
                 .and_then(|ta| ExpectedArg::for_slot(ws, mid, inf, offset, ta.ty));
+            // `return <cursor>`: the enclosing fn's declared return type is
+            // the slot, resolved from the HIR owner at the cursor.
+            if expected.is_none() && cursor_ast.as_ref().is_some_and(|cx| cx.in_return_value()) {
+                expected = ws.modules.get(mid.index()).and_then(|m| {
+                    let bone_semantic::hir::BodyOwner::Function(fid) = m.body_at(offset)? else {
+                        return None;
+                    };
+                    ExpectedArg::for_slot(ws, mid, inf, offset, m.functions[fid].return_ty?)
+                });
+            }
         }
         // Declared renders of the typed session's surviving slots -- the
         // string-keyed reachability index's targets, receiver-FILTERED by
@@ -1659,8 +1673,17 @@ impl BoneWorkspace {
                     &ct_owned
                 }
             };
-            let (ct_items, c) =
-                call_through_param_completions(ws, mid, inf, offset, &prefix, ct, reach, score_leads);
+            let (ct_items, c) = call_through_param_completions(
+                ws,
+                mid,
+                inf,
+                offset,
+                &prefix,
+                ct,
+                reach,
+                score_leads,
+                expected.as_mut(),
+            );
             ct_counts = c;
             out.extend(ct_items);
         }
@@ -4045,6 +4068,7 @@ fn call_through_param_completions(
     index: &CallThroughIndex,
     reach: &crate::reachability::ReachabilityIndex,
     score_leads: bool,
+    mut expected: Option<&mut ExpectedArg>,
 ) -> (Vec<CompletionItem>, CtCounts) {
     let mut counts = CtCounts::default();
     let q = prefix.as_bytes();
@@ -4252,6 +4276,21 @@ fn call_through_param_completions(
     for (score, fi, a, payload, type_rank) in cands {
         let cf = &index.fns[fi];
         let fname = cf.name;
+        // A local-seeded promotion (0/1) holds only when the synth PRODUCES the
+        // expected slot type -- a fn accepting your local but returning the
+        // wrong type must not outrank type-directed candidates
+        // (docs/completion-ranking-design.md, principle 3). No expected type ->
+        // promotion stands on the local seed alone.
+        let type_rank = match expected.as_deref_mut() {
+            Some(exp) if type_rank < 4 => {
+                if exp.accepts_fn_returning(ws, fname.as_str()) {
+                    type_rank
+                } else {
+                    4
+                }
+            }
+            _ => type_rank,
+        };
         let call = format!("{fname}({a})");
         if !seen.insert(call.clone()) {
             continue;

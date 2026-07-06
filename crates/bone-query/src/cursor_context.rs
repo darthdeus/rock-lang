@@ -9,7 +9,8 @@
 //! in the munged and live buffers -- receiver spans from here feed `type_at`
 //! on the LIVE workspace directly.
 
-use skull_parser::ast::{CallSyntax, ExprData, ExprKind, IfLetClause, Pattern, StatementKind};
+use rock_tokenizer::TokenKind;
+use skull_parser::ast::{Binding, CallSyntax, ExprData, ExprKind, IfLetClause, Pattern, StatementKind};
 use skull_parser::Idx;
 use ustr::Ustr;
 
@@ -494,6 +495,72 @@ impl CursorAst {
             }
         }
         None
+    }
+
+    /// Cursor in the RHS of a comparison or null-coalesce BinOp (`lhs ==
+    /// <cursor>`, `lhs ?? <cursor>`): the last byte offset of the LHS, so
+    /// `type_at` resolves the compared-against type as the slot's expected
+    /// type (`expects_nominal` strips the `?` for `??`). Arena order is
+    /// bottom-up, so the first hit is the innermost enclosing BinOp.
+    pub(crate) fn comparison_lhs(&self) -> Option<usize> {
+        for (_, e) in self.ast.exprs.iter() {
+            let ExprKind::BinOp { left, op, right } = &e.kind else {
+                continue;
+            };
+            if !matches!(op, TokenKind::Equals | TokenKind::NotEquals | TokenKind::DoubleQuestionMark)
+            {
+                continue;
+            }
+            let (vs, ve) = self.expr(*right).span.offset_range;
+            if vs <= self.probe && self.probe <= ve {
+                return self.expr(*left).span.offset_range.1.checked_sub(1);
+            }
+        }
+        None
+    }
+
+    /// Cursor in the INIT of an explicitly-typed `let name: T = <cursor>`:
+    /// the last byte offset of the binding ident, so `type_at` resolves the
+    /// declared type (the annotation types the binding even while the init
+    /// is broken).
+    pub(crate) fn typed_let_binding(&self) -> Option<usize> {
+        for (_, s) in self.ast.stmts.iter() {
+            let StatementKind::Let(l) = &s.kind else {
+                continue;
+            };
+            if l.ty.is_none() {
+                continue;
+            }
+            let Some(v) = l.value else {
+                continue;
+            };
+            let (vs, ve) = self.expr(v).span.offset_range;
+            if vs <= self.probe && self.probe <= ve {
+                let Binding::Ident(id) = &l.binding else {
+                    return None;
+                };
+                return id.span.offset_range.1.checked_sub(1);
+            }
+        }
+        None
+    }
+
+    /// Cursor in the VALUE of a `return` (statement or expression form): the
+    /// slot expects the enclosing fn's declared return type -- the caller
+    /// resolves it from the HIR owner at the cursor. False when a lambda
+    /// body encloses the cursor (its return retargets to the lambda).
+    pub(crate) fn in_return_value(&self) -> bool {
+        let in_span = |(vs, ve): (usize, usize)| vs <= self.probe && self.probe <= ve;
+        let hit = self.ast.stmts.iter().any(|(_, s)| {
+            matches!(&s.kind, StatementKind::Return { value: Some(v), .. }
+                if in_span(self.expr(*v).span.offset_range))
+        }) || self.ast.exprs.iter().any(|(_, e)| {
+            matches!(&e.kind, ExprKind::ReturnExpr(Some(v))
+                if in_span(self.expr(*v).span.offset_range))
+        });
+        hit && !self.ast.exprs.iter().any(|(_, e)| {
+            matches!(&e.kind, ExprKind::Lambda { .. }) && self.lambda_body_contains(e)
+        })
     }
 
     /// Enclosing call with the cursor in an ARGUMENT slot: `(callee,

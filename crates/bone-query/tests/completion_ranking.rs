@@ -576,6 +576,123 @@ fn assignment_rhs_prioritizes_expected_enum_variant() {
 }
 
 #[test]
+fn return_value_prioritizes_expected_enum_variant() {
+    // `return combat` in a fn declared `-> MobAiState` -- the return slot's
+    // type is the fn's declared return type, so `MobAiState::Combat` must
+    // outrank the case-exact-prefix wrong-type fn `combat_target_grid`.
+    let labels = labels_at(
+        "enum MobAiState { Wander, Combat }\n\
+         fn combat_target_grid(x: int) -> int { return 0 }\n\
+         fn pick() -> MobAiState {\n  return combat$0\n}\n",
+    );
+    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let func = rank_of(&labels, "combat_target_grid");
+    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
+    assert!(
+        func.is_none() || variant < func,
+        "expected enum variant must outrank wrong-type fn in return position: {labels:?}"
+    );
+}
+
+#[test]
+fn typed_let_init_prioritizes_expected_enum_variant() {
+    // `let s: MobAiState = combat` -- the annotation types the slot, so the
+    // variant must outrank the case-exact-prefix wrong-type fn.
+    let labels = labels_at(
+        "enum MobAiState { Wander, Combat }\n\
+         fn combat_target_grid(x: int) -> int { return 0 }\n\
+         fn r() {\n  let s: MobAiState = combat$0\n}\n",
+    );
+    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let func = rank_of(&labels, "combat_target_grid");
+    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
+    assert!(
+        func.is_none() || variant < func,
+        "expected enum variant must outrank wrong-type fn in a typed-let init: {labels:?}"
+    );
+}
+
+#[test]
+fn comparison_rhs_prioritizes_expected_enum_variant() {
+    // `mob.ai_state == combat` -- the compared-against LHS types the slot, so
+    // the variant must outrank the case-exact-prefix wrong-type fn.
+    let labels = labels_at(
+        "enum MobAiState { Wander, Combat }\n\
+         struct Mob { ai_state: MobAiState }\n\
+         fn combat_target_grid(mob: Mob) -> int { return 0 }\n\
+         fn use_it(mob: Mob) {\n  if mob.ai_state == combat$0 {\n  }\n}\n",
+    );
+    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let func = rank_of(&labels, "combat_target_grid");
+    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
+    assert!(
+        func.is_none() || variant < func,
+        "expected enum variant must outrank wrong-type fn in a comparison RHS: {labels:?}"
+    );
+}
+
+#[test]
+fn null_coalesce_rhs_prioritizes_expected_enum_variant() {
+    // `state ?? combat` with `state: MobAiState?` -- the coalesce RHS expects
+    // the LHS type (nullable stripped by the nominal-head check), so the
+    // variant must outrank the case-exact-prefix wrong-type fn.
+    let labels = labels_at(
+        "enum MobAiState { Wander, Combat }\n\
+         fn combat_target_grid(x: int) -> int { return 0 }\n\
+         fn r(state: MobAiState?) {\n  let s = state ?? combat$0\n}\n",
+    );
+    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let func = rank_of(&labels, "combat_target_grid");
+    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
+    assert!(
+        func.is_none() || variant < func,
+        "expected enum variant must outrank wrong-type fn in a `??` RHS: {labels:?}"
+    );
+}
+
+#[test]
+fn wrong_type_call_through_synth_defers_to_expected_type_variant() {
+    // In a `MobAiState` slot, a local-seeded call-through synth whose fn does
+    // NOT produce the slot type (`compare(mob) -> int`) must not outrank the
+    // type-directed `MobAiState::Combat`. RED pre-fix: the local-seeded
+    // promotion (type_rank 0/1) never consulted the expected type.
+    let labels = labels_at(
+        "enum MobAiState { Wander, Combat }\n\
+         struct Mob { ai_state: MobAiState }\n\
+         fn compare(mob: Mob) -> int { return 0 }\n\
+         fn use_it(mob: Mob) {\n  mob.ai_state = com$0\n}\n",
+    );
+    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let synth = rank_of(&labels, "compare(mob)");
+    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
+    assert!(
+        synth.is_none() || variant < synth,
+        "wrong-type call-through synth must not outrank the expected-type variant: {labels:?}"
+    );
+}
+
+#[test]
+fn right_type_call_through_synth_keeps_promotion_in_expected_slot() {
+    // The counterpart: a local-seeded synth whose fn DOES produce the slot type
+    // (`make_state(mob) -> MobAiState`) keeps its promotion -- it must outrank
+    // a wrong-type same-prefix fn.
+    let labels = labels_at(
+        "enum MobAiState { Wander, Combat }\n\
+         struct Mob { ai_state: MobAiState }\n\
+         fn make_state(mob: Mob) -> MobAiState { return MobAiState::Wander }\n\
+         fn makeshift_grid(x: int) -> int { return 0 }\n\
+         fn use_it(mob: Mob) {\n  mob.ai_state = makes$0\n}\n",
+    );
+    let synth = rank_of(&labels, "make_state(mob)");
+    let wrong = rank_of(&labels, "makeshift_grid");
+    assert!(synth.is_some(), "make_state(mob) offered: {labels:?}");
+    assert!(
+        wrong.is_none() || synth < wrong,
+        "right-type call-through synth must outrank a wrong-type fn: {labels:?}"
+    );
+}
+
+#[test]
 fn member_field_coercing_to_nullable_slot_ranks_first() {
     // `wants(s.|)` with `wants(x: int?)`: the field `zog: int` COERCES into
     // `int?` (nullable widening) so it must rank above `aaa: string` -- but the
