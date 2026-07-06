@@ -757,6 +757,45 @@ fn local_rooted_reach_path_beats_right_type_global() {
 }
 
 #[test]
+fn member_completion_type_directs_from_assignment_lhs() {
+    // `mob.ai_state = other.$0` -- the slot-anchored expected type (assign
+    // LHS) must reach the MEMBER path: `other`'s MobAiState-typed field ranks
+    // above its int field. Names chosen so the pre-fix order (no expected
+    // type -> alphabetical at empty prefix) puts the WRONG field first.
+    let labels = member_labels_by_sort(
+        "enum MobAiState { Wander, Combat }\n\
+         struct Mob { ai_state: MobAiState }\n\
+         struct Other { zz_state: MobAiState, aa_count: int }\n\
+         fn r(mob: Mob, other: Other) {\n  mob.ai_state = other.$0\n}\n",
+    );
+    let right = labels.iter().position(|l| l.starts_with("zz_state"));
+    let wrong = labels.iter().position(|l| l.starts_with("aa_count"));
+    assert!(right.is_some() && wrong.is_some(), "both fields offered: {labels:?}");
+    assert!(
+        right < wrong,
+        "slot-typed field must type-direct in member completion: {labels:?}"
+    );
+}
+
+#[test]
+fn member_completion_type_directs_from_return_slot() {
+    // `return other.$0` in a `-> MobAiState` fn: same drift class, return
+    // anchor.
+    let labels = member_labels_by_sort(
+        "enum MobAiState { Wander, Combat }\n\
+         struct Other { zz_state: MobAiState, aa_count: int }\n\
+         fn pick(other: Other) -> MobAiState {\n  return other.$0\n}\n",
+    );
+    let right = labels.iter().position(|l| l.starts_with("zz_state"));
+    let wrong = labels.iter().position(|l| l.starts_with("aa_count"));
+    assert!(right.is_some() && wrong.is_some(), "both fields offered: {labels:?}");
+    assert!(
+        right < wrong,
+        "return-slot type must type-direct in member completion: {labels:?}"
+    );
+}
+
+#[test]
 fn member_arg_slot_field_beats_boundary_richer_method() {
     // `feed(s.targrid$0)` with both members producing int (type-match tie),
     // both in the boundary band: the FIELD `target_grid` must beat the method

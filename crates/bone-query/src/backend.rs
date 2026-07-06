@@ -987,12 +987,17 @@ impl BoneWorkspace {
             // variant (member TyIds live in that workspace); here we just pass
             // the enclosing (callee, arg index).
             let arg_slot = arg_ctx.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
+            // Slot-anchored expected type (assignment/comparison RHS,
+            // typed-`let`, `return`) -- the member list type-directs from the
+            // same anchor the general path uses (`mob.ai_state = other.|`
+            // boosts `other`'s MobAiState-typed members).
+            let anchor = cursor_ast.as_ref().and_then(slot_anchor);
             // Bool-field soft boost: the chain is the whole `if`/`while`
             // condition. Structural from the classifier; byte fallback on
             // the tokenize frontier.
             let bool_ctx = cursor_ast.as_ref().is_some_and(|cx| cx.bool_condition_chain());
             let mut items = member_completions(
-                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot,
+                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot, anchor,
                 proj.reach.as_ref(), bool_ctx,
             );
             if next_is_open_paren {
@@ -1194,28 +1199,13 @@ impl BoneWorkspace {
             });
         }
         if expected.is_none() && arg_call.is_none() && field_slot.is_none() {
-            // Slot-anchored contexts beyond call args / struct fields: an
-            // offset whose `type_at` IS the expected type. Comparison /
-            // null-coalesce RHS first (a `==` nested in an assignment RHS is
-            // the more specific slot), then assignment RHS (`mob.ai_state =
-            // Com|` -> `MobAiState::Combat`), then a typed-`let` init.
+            // Slot-anchored contexts beyond call args / struct fields
+            // (assignment/comparison RHS, typed-`let` init, `return`) -- the
+            // same `slot_anchor` the member path consumes.
             expected = cursor_ast
                 .as_ref()
-                .and_then(|cx| {
-                    cx.comparison_lhs().or_else(|| cx.assign_lhs()).or_else(|| cx.typed_let_binding())
-                })
-                .and_then(|anchor| bone_semantic::query::type_at(ws, mid, inf, anchor))
-                .and_then(|ta| ExpectedArg::for_slot(ws, mid, inf, offset, ta.ty));
-            // `return <cursor>`: the enclosing fn's declared return type is
-            // the slot, resolved from the HIR owner at the cursor.
-            if expected.is_none() && cursor_ast.as_ref().is_some_and(|cx| cx.in_return_value()) {
-                expected = ws.modules.get(mid.index()).and_then(|m| {
-                    let bone_semantic::hir::BodyOwner::Function(fid) = m.body_at(offset)? else {
-                        return None;
-                    };
-                    ExpectedArg::for_slot(ws, mid, inf, offset, m.functions[fid].return_ty?)
-                });
-            }
+                .and_then(slot_anchor)
+                .and_then(|a| expected_for_anchor(ws, mid, inf, offset, a));
         }
         // Declared renders of the typed session's surviving slots -- the
         // string-keyed reachability index's targets, receiver-FILTERED by
@@ -5163,13 +5153,14 @@ fn member_completions(
     segments: &[String],
     prefix: &str,
     arg_slot: Option<(String, usize)>,
+    anchor: Option<SlotAnchor>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
 ) -> Vec<CompletionItem> {
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
             member_completion_items(
-                ws, path, offset, segments, prefix, arg_slot.clone(), reach, bool_ctx,
+                ws, path, offset, segments, prefix, arg_slot.clone(), anchor, reach, bool_ctx,
             )
         });
         if let Some(items) = attempt {
@@ -5179,6 +5170,54 @@ fn member_completions(
         }
     }
     Vec::new()
+}
+
+/// Where the expected type of the current slot comes from, beyond the
+/// call-arg / struct-field cases: a byte anchor whose `type_at` IS the slot
+/// type (assign LHS end, comparison LHS end, typed-`let` binding ident), or
+/// the enclosing fn's declared return type. Computed ONCE from the cursor
+/// classifier and consumed by BOTH the general and the member path, so the
+/// two cannot drift. Anchors END before the cursor, so they resolve
+/// identically against the live workspace and any completion-munge variant
+/// (the munges only rewrite at/after the cursor).
+#[derive(Clone, Copy)]
+enum SlotAnchor {
+    TypeAt(usize),
+    EnclosingFnReturn,
+}
+
+/// Classify the slot-anchored expected-type context at the cursor.
+/// Comparison first (a `==` nested in an assignment RHS is the more specific
+/// slot), then assignment RHS, typed-`let` init, and `return` last.
+fn slot_anchor(cx: &crate::cursor_context::CursorAst) -> Option<SlotAnchor> {
+    cx.comparison_lhs()
+        .or_else(|| cx.assign_lhs())
+        .or_else(|| cx.typed_let_binding())
+        .map(SlotAnchor::TypeAt)
+        .or_else(|| cx.in_return_value().then_some(SlotAnchor::EnclosingFnReturn))
+}
+
+/// Resolve a `SlotAnchor` to a typed expected-slot session against `ws` --
+/// the live workspace on the general path, the munge variant on the member
+/// path (member TyIds only resolve against the variant's Gamma).
+fn expected_for_anchor<'a>(
+    ws: &'a Workspace,
+    mid: ModuleId,
+    inf: &'a InferenceResult,
+    offset: usize,
+    anchor: SlotAnchor,
+) -> Option<ExpectedArg<'a>> {
+    let slot = match anchor {
+        SlotAnchor::TypeAt(a) => bone_semantic::query::type_at(ws, mid, inf, a)?.ty,
+        SlotAnchor::EnclosingFnReturn => {
+            let m = ws.modules.get(mid.index())?;
+            let bone_semantic::hir::BodyOwner::Function(fid) = m.body_at(offset)? else {
+                return None;
+            };
+            m.functions[fid].return_ty?
+        }
+    };
+    ExpectedArg::for_slot(ws, mid, inf, offset, slot)
 }
 
 /// One munge attempt's member items, resolved against the variant workspace.
@@ -5202,6 +5241,7 @@ fn member_completion_items(
     segments: &[String],
     prefix: &str,
     arg_slot: Option<(String, usize)>,
+    anchor: Option<SlotAnchor>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
 ) -> Vec<CompletionItem> {
@@ -5233,6 +5273,15 @@ fn member_completion_items(
             let inf = ws.inference(mid)?;
             ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx, None)
         });
+        if expected.is_none() {
+            // Slot-anchored contexts (assignment/comparison RHS, typed-`let`,
+            // `return`): the anchor ends before the cursor, so it resolves
+            // against THIS variant workspace directly.
+            expected = anchor.and_then(|a| {
+                let inf = ws.inference(mid)?;
+                expected_for_anchor(ws, mid, inf, offset, a)
+            });
+        }
         let arg_ctx = expected.is_some();
         // Precompute the type-match decision per member (bone's `coerce` on the
         // member's TyId; rendered-string equality only where a TyId is absent --
