@@ -17,5 +17,6 @@ mod backend;
 mod cursor_context;
 mod rank_key;
 pub use backend::*;
+pub use rank_key::explain_sort_text;
 
 mod ctags;

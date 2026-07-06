@@ -143,7 +143,7 @@ fn emit_definitions(
 }
 
 /// `rock-lsp completion <file:line:col> --backend bone`.
-pub fn completion(file_path: &str, line: u32, column: u32) -> Result<()> {
+pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
     let mut bone = BoneWorkspace::new();
@@ -151,6 +151,19 @@ pub fn completion(file_path: &str, line: u32, column: u32) -> Result<()> {
 
     let pos = Position::new(line - 1, column - 1);
     let items = bone.completion(&file_path, pos);
+
+    if explain {
+        // Ranking breakdown for humans: server order with each item's RankKey
+        // rungs decoded (rank_key.rs) -- a mis-rank reads as named fields, not
+        // digit columns. Items without a decodable key print the raw string.
+        for (i, it) in items.iter().enumerate() {
+            let st = it.sort_text.as_deref().unwrap_or("");
+            let ex = bone_query::explain_sort_text(st)
+                .unwrap_or_else(|| format!("raw sort_text: {st}"));
+            println!("{:3}. {:<40} {}", i + 1, it.label, ex);
+        }
+        return Ok(());
+    }
 
     let output = json!({
         "file": file_path,

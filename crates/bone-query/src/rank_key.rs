@@ -74,6 +74,30 @@ impl RankKey {
     }
 }
 
+/// Decode an encoded sort_text into labeled fields -- the `--explain`
+/// surface (`rock lsp completion <pos> --explain`): a live mis-rank reads as
+/// named rungs instead of hand-decoded digit columns. None when the string
+/// is not a RankKey encoding (foreign/legacy sort_texts).
+pub fn explain_sort_text(st: &str) -> Option<String> {
+    let b = st.as_bytes();
+    if b.len() < 15 || !b[..15].iter().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let fine: u32 = st[8..12].parse().ok()?;
+    Some(format!(
+        "exact={} type_rank={} band={} case={} kind={} dist={} method={} score={} len={}",
+        &st[0..1],
+        &st[1..2],
+        &st[2..3],
+        &st[3..4],
+        &st[4..5],
+        &st[5..7],
+        &st[7..8],
+        9999 - fine,
+        &st[12..15],
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +146,26 @@ mod tests {
         assert_eq!(RankKey::len_key(0, 40), 0);
         assert_eq!(RankKey::len_key(1, 40), 40);
         assert_eq!(RankKey::len_key(50, 5000), 999);
+    }
+
+    #[test]
+    fn explain_round_trips_encode() {
+        let k = RankKey {
+            exact: 1,
+            type_rank: 2,
+            band: 3,
+            case: 0,
+            kind: 1,
+            dist: 4,
+            method: 1,
+            fine: RankKey::fine(1021),
+            len: 22,
+        };
+        let ex = explain_sort_text(&k.encode("target_grid")).expect("decodes");
+        assert_eq!(
+            ex,
+            "exact=1 type_rank=2 band=3 case=0 kind=1 dist=04 method=1 score=1021 len=022"
+        );
+        assert!(explain_sort_text("not-a-key").is_none());
     }
 }
