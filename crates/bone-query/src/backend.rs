@@ -1160,9 +1160,10 @@ impl BoneWorkspace {
                 &local_sigs
             }
         };
-        // Rank EVERY candidate (full accuracy), then materialize a CompletionItem
-        // only for the post-cap survivors. The rank is a `RankKey` (rank_key.rs)
-        // whose `Ord` IS the `sort_text` encoding, so the O(n) select and the
+        // Rank EVERY candidate (full accuracy) as a fact-shaped `Cand`, then
+        // materialize a CompletionItem only for the post-cap survivors
+        // (`materialize_cand`). The rank is a `RankKey` (rank_key.rs) whose
+        // `Ord` IS the `sort_text` encoding, so the O(n) select and the
         // final string sort cannot disagree. Ranking allocates NOTHING per
         // candidate: `fuzzy_score` lowercases the name inline and the tiebreak
         // compares names case-insensitively inline (`ci_cmp`). Only the
@@ -1173,19 +1174,9 @@ impl BoneWorkspace {
         // 1 = fn returning it, 2 = else; all 0 when no type is inferable) and
         // `kind` the locality ladder -- primary bucket without a type, the
         // post-band tiebreak with one.
-        struct RankedCand {
-            exact: u8,
-            band: u8,
-            case_rank: u8,
-            type_rank: u8,
-            kind: u8,
-            key2: u16,
-            method: u8,
-            entry: crate::query::CompletionEntry,
-        }
         let q = prefix.as_bytes();
         let q_raw = prefix_raw.as_bytes();
-        let mut ranked: Vec<RankedCand> = cands
+        let mut general: Vec<Cand> = cands
             .into_iter()
             .map(|c| {
                 // Locality/kind ladder, always computed: variables first
@@ -1255,117 +1246,58 @@ impl BoneWorkspace {
                 } else {
                     fuzzy_score(name.as_bytes(), q)
                 };
-                let key2 = (9999 - score.clamp(0, 9999)) as u16;
                 // Coarse match band + exact-name flag: classified against the
                 // variant tail too (the user types `Combat`, not
                 // `MobAiState::Combat`), mirroring the score's vname handling.
                 let (exact, band) = match_band_exact(name, q, q_raw);
-                RankedCand { exact, band, case_rank, type_rank, kind, key2, method, entry: c }
+                let key = RankKey {
+                    exact,
+                    type_rank,
+                    band,
+                    case: case_rank,
+                    kind,
+                    dist: 0,
+                    method,
+                    fine: RankKey::fine(score),
+                    len: RankKey::len_key(score, name.len()),
+                };
+                Cand::new(key, CandName::Sym(c.name), false, CandShape::Entry(c))
             })
             .collect();
         // We only need the BEST `MAX_COMPLETION_ITEMS`, not a full ordering --
-        // the `rank_and_cap` below re-sorts the kept set by sort_text. So select
-        // the top-N in O(n) (`select_nth_unstable_by`) rather than sort all in
-        // O(n log n); at empty prefix that is ~2500 candidates. The RankKey Ord
-        // IS the sort_text encoding, so the select agrees with the string sort
-        // by construction.
+        // the final sort below re-orders the kept set anyway. So select the
+        // top-N in O(n) (`select_nth_unstable_by`) rather than sort all in
+        // O(n log n); at empty prefix that is ~2500 candidates. `cand_cmp` IS
+        // the sort_text encoding order, so the select agrees with the final
+        // sort by construction.
         let score_leads = !has_expected;
-        let key_of = |r: &RankedCand| RankKey {
-            exact: r.exact,
-            type_rank: r.type_rank,
-            band: r.band,
-            case: r.case_rank,
-            kind: r.kind,
-            dist: 0,
-            method: r.method,
-            fine: r.key2,
-            len: RankKey::len_key(9999 - r.key2 as i32, r.entry.name.as_str().len()),
-        };
-        let rank_cmp = |a: &RankedCand, b: &RankedCand| {
-            key_of(a)
-                .cmp(&key_of(b))
-                .then_with(|| ci_cmp(a.entry.name.as_str().as_bytes(), b.entry.name.as_str().as_bytes()))
-        };
-        if ranked.len() > MAX_COMPLETION_ITEMS {
-            ranked.select_nth_unstable_by(MAX_COMPLETION_ITEMS, rank_cmp);
-            ranked.truncate(MAX_COMPLETION_ITEMS);
+        if general.len() > MAX_COMPLETION_ITEMS {
+            general.select_nth_unstable_by(MAX_COMPLETION_ITEMS, cand_cmp);
+            general.truncate(MAX_COMPLETION_ITEMS);
         }
-        let mut out: Vec<CompletionItem> = ranked
-            .into_iter()
-            .map(|r| {
-                let sort_text = Some(key_of(&r).encode(r.entry.name.as_str()));
-                let RankedCand { entry: c, .. } = r;
-                // Function `detail` is the cached signature, materialized HERE for
-                // survivors only; non-fn kinds carry their (cheap) detail already.
-                let detail = match c.kind {
-                    SymCat::Function => fn_sigs.get(&c.name).cloned(),
-                    _ => c.detail,
-                };
-                // The full detail goes in the panel; a concise form renders inline
-                // next to the label in the popup (a fn's `(params) -> ret`, a
-                // binding's `: type`).
-                let label_details = fn_or_type_label_details(c.kind, detail.as_deref());
-                // A function with params accepts as a snippet `name($0)` ->
-                // inserts `name()` with the cursor parked between the parens (the
-                // client shows a snippet marker, e.g. nvim-cmp's `~`). A param-less
-                // function inserts `name()` as plain text so the cursor lands AFTER
-                // the `)` -- there's nothing to fill.
-                // A qualified `Enum::Variant` value in an expression slot carries
-                // the same payload template as the `Enum::` path: tuple -> `($0)`,
-                // record -> `{ $0 }`, unit -> bare.
-                let (insert_text, insert_text_format) = match c.kind {
-                    // `on_killed`/`on_resume`/`on_hot_reload` are contextual
-                    // lifecycle-hook keywords with a statement BLOCK form
-                    // (`on_killed { .. }`) -- complete to the block, not a call.
-                    SymCat::Function if is_lifecycle_hook(c.name.as_str()) => {
-                        (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
-                    }
-                    SymCat::Function if c.takes_params => {
-                        (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
-                    }
-                    SymCat::Function => (Some(format!("{}()", c.name)), None),
-                    SymCat::Variant => match c.variant_shape {
-                        Some(crate::query::VariantShape::Tuple) => {
-                            (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
-                        }
-                        Some(crate::query::VariantShape::Record) => {
-                            (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
-                        }
-                        _ => (None, None),
-                    },
-                    _ => (None, None),
-                };
-                CompletionItem {
-                    label: c.name.to_string(),
-                    kind: Some(completion_kind(c.kind)),
-                    label_details,
-                    detail,
-                    insert_text,
-                    insert_text_format,
-                    sort_text,
-                    ..Default::default()
-                }
-            })
-            .collect();
+        let mut sink = Sink::new();
+        sink.cands = general;
         // Synthesized generic `Entity<..>` from the param-name + fn-prefix
-        // heuristic. Pushed directly (not a workspace symbol) with the minimal
-        // sort_text so it ranks first among the type candidates. With an inferred
-        // payload it's the concrete `Entity<Mob>` (plain insert); without one it's
-        // the `Entity<$0>` snippet so the cursor lands in the generic slot.
+        // heuristic. Emitted directly (not a workspace symbol) with the minimal
+        // rank key so it ranks first among the type candidates. With an inferred
+        // payload it's the concrete `Entity<Mob>`; without one the `Entity<$0>`
+        // snippet parks the cursor in the generic slot (materialize_cand).
         if entity_hint {
-            let (label, insert, fmt) = match entity_payload {
-                Some(p) => (format!("Entity<{p}>"), format!("Entity<{p}>"), None),
-                None => ("Entity<>".to_string(), "Entity<$0>".to_string(), Some(InsertTextFormat::SNIPPET)),
+            let label = match entity_payload {
+                Some(p) => format!("Entity<{p}>"),
+                None => "Entity<>".to_string(),
             };
             if clean_match(label.as_bytes(), prefix.as_bytes()) {
-                out.push(CompletionItem {
-                    label: label.clone(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    insert_text: Some(insert),
-                    insert_text_format: fmt,
-                    sort_text: Some(RankKey { len: RankKey::len_key(9999, label.len()), ..Default::default() }.encode(&label)),
+                let key = RankKey {
+                    len: RankKey::len_key(9999, label.len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Owned(label),
+                    false,
+                    CandShape::EntitySynth { payload: entity_payload },
+                ));
             }
         }
         // Named-arg completions: at a DIRECT call arg slot, offer the callee's
@@ -1383,14 +1315,19 @@ impl BoneWorkspace {
                 }
                 let score = fuzzy_score(pname.as_str().as_bytes(), prefix.as_bytes());
                 let (ex, bd) = match_band_exact(pname.as_str(), prefix.as_bytes(), prefix_raw.as_bytes());
-                out.push(CompletionItem {
-                    label: format!("{pname}:"),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(pty),
-                    insert_text: Some(format!("{pname}: ")),
-                    sort_text: Some(RankKey { exact: ex, band: bd, fine: RankKey::fine(score), len: RankKey::len_key(score, pname.as_str().len()), ..Default::default() }.encode(pname.as_str())),
+                let key = RankKey {
+                    exact: ex,
+                    band: bd,
+                    fine: RankKey::fine(score),
+                    len: RankKey::len_key(score, pname.as_str().len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Sym(pname),
+                    false,
+                    CandShape::NamedArg { pname, pty },
+                ));
             }
         }
         // Coroutine ergonomics: `CoFrame` is the dominant Stone yield type
@@ -1400,54 +1337,63 @@ impl BoneWorkspace {
         let coframe = struct_exists(ws, "CoFrame");
         let coroutine_slot = cx.coroutine_generic;
         if coroutine_slot {
-            // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0.
+            // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0,
+            // superseding the plain struct symbol.
             if coframe && clean_match(b"CoFrame", prefix.as_bytes()) {
-                out.retain(|it| it.label != "CoFrame");
-                out.push(CompletionItem {
-                    label: "CoFrame".to_string(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    sort_text: Some(RankKey { len: RankKey::len_key(9999, "CoFrame".len()), ..Default::default() }.encode("CoFrame")),
+                sink.retain_not_named("CoFrame");
+                let key = RankKey {
+                    len: RankKey::len_key(9999, "CoFrame".len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Owned("CoFrame".to_string()),
+                    false,
+                    CandShape::CoFrame,
+                ));
             }
         } else if !expr_position && !prefix.is_empty() && clean_match(b"Coroutine", prefix.as_bytes()) {
             // (b) completing the `Coroutine` type name -> snippet forms replace
             // the bare type: `Coroutine<CoFrame>` first, `Coroutine<$0>` second.
-            out.retain(|it| it.label != "Coroutine");
+            sink.retain_not_named("Coroutine");
             if coframe {
-                out.push(CompletionItem {
-                    label: "Coroutine<CoFrame>".to_string(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    insert_text: Some("Coroutine<CoFrame>".to_string()),
-                    sort_text: Some(RankKey { len: RankKey::len_key(9999, "Coroutine<CoFrame>".len()), ..Default::default() }.encode("Coroutine<CoFrame>")),
+                let key = RankKey {
+                    len: RankKey::len_key(9999, "Coroutine<CoFrame>".len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Owned("Coroutine<CoFrame>".to_string()),
+                    false,
+                    CandShape::Coroutine { with_coframe: true },
+                ));
             }
-            out.push(CompletionItem {
-                label: "Coroutine<>".to_string(),
-                kind: Some(CompletionItemKind::STRUCT),
-                insert_text: Some("Coroutine<$0>".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                sort_text: Some(RankKey { fine: RankKey::fine(9998), len: RankKey::len_key(9998, "Coroutine<>".len()), ..Default::default() }.encode("Coroutine<>")),
+            let key = RankKey {
+                fine: RankKey::fine(9998),
+                len: RankKey::len_key(9998, "Coroutine<>".len()),
                 ..Default::default()
-            });
+            };
+            sink.push(Cand::new(
+                key,
+                CandName::Owned("Coroutine<>".to_string()),
+                false,
+                CandShape::Coroutine { with_coframe: false },
+            ));
         }
         // (c) `co fn NAME()|` with no return type -> offer the `-> Coroutine<..>`
         // return type to the right of `)`.
         if prefix.is_empty() && co_fn_return_slot(src.as_bytes(), offset) {
-            let (label, insert, fmt) = if coframe {
-                ("-> Coroutine<CoFrame>", "-> Coroutine<CoFrame>", None)
-            } else {
-                ("-> Coroutine<>", "-> Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
-            };
-            out.push(CompletionItem {
-                label: label.to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                insert_text: Some(insert.to_string()),
-                insert_text_format: fmt,
-                sort_text: Some(RankKey { len: RankKey::len_key(9999, label.len()), ..Default::default() }.encode(label)),
+            let label = if coframe { "-> Coroutine<CoFrame>" } else { "-> Coroutine<>" };
+            let key = RankKey {
+                len: RankKey::len_key(9999, label.len()),
                 ..Default::default()
-            });
+            };
+            sink.push(Cand::new(
+                key,
+                CandName::Owned(label.to_string()),
+                false,
+                CandShape::CoReturn { coframe },
+            ));
         }
         let rank_ms = t_build.elapsed().as_secs_f64() * 1000.0;
         // Reachability-path candidates: in arg position with a known expected
@@ -1469,7 +1415,6 @@ impl BoneWorkspace {
                 }
             };
             let pfx = prefix.as_bytes();
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             // Roots: in-scope locals/params PLUS every global (Rock has one global
             // namespace across files, so `player.movable.grid` works where
             // `player` is a global from another file -- `locals_in_scope` omits
@@ -1503,35 +1448,24 @@ impl BoneWorkspace {
                     if !pfx.is_empty() && !clean_match(key.as_bytes(), pfx) {
                         continue;
                     }
-                    if !seen.insert(key.clone()) {
+                    if !sink.admit(&key) {
                         continue;
                     }
-                    let (label, kind, insert_text, insert_text_format) = if p.is_method {
-                        let call = format!("{key}()");
-                        let (insert, fmt) = if p.takes_args {
-                            (format!("{key}($0)"), Some(InsertTextFormat::SNIPPET))
-                        } else {
-                            (format!("{key}()"), None)
-                        };
-                        (format!("{call} -> {}", p.final_ty), CompletionItemKind::METHOD, insert, fmt)
-                    } else {
-                        (format!("{key}: {}", p.final_ty), CompletionItemKind::FIELD, key.clone(), None)
-                    };
                     // A reachability path IS a value of the expected type
                     // (type_rank 0); the shared key folds in match quality
                     // (prefix on the root beats a scattered subsequence), the
                     // root locality, the hop distance, and field-before-method.
-                    let sort_text =
-                        arg_sort_text(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method));
-                    out.push(CompletionItem {
-                        label,
-                        kind: Some(kind),
-                        detail: Some(p.final_ty),
-                        insert_text: Some(insert_text),
-                        insert_text_format,
-                        sort_text: Some(sort_text),
-                        ..Default::default()
-                    });
+                    let rk = arg_rank_key(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method));
+                    sink.push(Cand::new(
+                        rk,
+                        CandName::Owned(key),
+                        true,
+                        CandShape::Reach {
+                            final_ty: p.final_ty,
+                            is_method: p.is_method,
+                            takes_args: p.takes_args,
+                        },
+                    ));
                 }
             }
         }
@@ -1544,12 +1478,12 @@ impl BoneWorkspace {
         // Skip call-through entirely when the general (+ reach) candidates already
         // fill the cap: MOST call-through items are bucket 4 (sort_text "1..."),
         // sorting AFTER every general (bucket 0-3) / reach item, so the final
-        // `rank_and_cap` truncates them -- computing them is waste. Removes the
+        // cap truncates them -- computing them is waste. Removes the
         // worst keystrokes (high-general-count short prefixes, `sp` -> 229). Known
         // gap: a LOCAL-SEEDED promoted call-through (bucket 0/1) could survive the
         // cap but is skipped here at a >=MAX short prefix; acceptable under the
         // `isIncomplete` contract (the user narrows and it reappears).
-        if expr_position && out.len() < MAX_COMPLETION_ITEMS {
+        if expr_position && sink.len() < MAX_COMPLETION_ITEMS {
             // reach (for local-arg expansion) + the precomputed call-through
             // index, both cached on the project and rebuilt only on non-BodyOnly
             // edits. The one-shot CLI path has neither cached -> build throwaways.
@@ -1569,7 +1503,7 @@ impl BoneWorkspace {
                     &ct_owned
                 }
             };
-            let (ct_items, c) = call_through_param_completions(
+            ct_counts = call_through_param_completions(
                 ws,
                 mid,
                 inf,
@@ -1579,9 +1513,8 @@ impl BoneWorkspace {
                 reach,
                 score_leads,
                 expected.as_mut(),
+                &mut sink,
             );
-            ct_counts = c;
-            out.extend(ct_items);
         }
         let call_through_ms = t_ct.elapsed().as_secs_f64() * 1000.0;
         LAST_COMPLETION_PHASES.with(|c| {
@@ -1591,7 +1524,7 @@ impl BoneWorkspace {
                 reach_ms,
                 call_through_ms,
                 n_general: n_cands,
-                n_out: out.len(),
+                n_out: sink.len(),
                 ct_fns: ct_counts.fns,
                 ct_arg_iters: ct_counts.arg_iters,
                 ct_survivors: ct_counts.survivors,
@@ -1600,22 +1533,30 @@ impl BoneWorkspace {
         if lsp_profile_enabled() {
             eprintln!(
                 "[bone completion] candidates {cands_ms:.2}ms ({n_cands} cands)  rank {rank_ms:.2}  reach {reach_ms:.2}  call-through {call_through_ms:.2}  ({} items, prefix {:?})",
-                out.len(),
+                sink.len(),
                 prefix
             );
         }
-        // The list is served `isIncomplete: true`, so cap it: the client
-        // re-queries per keystroke and the server re-scores, so returning the
-        // whole workspace (2539 items at empty prefix) is pure wasted
-        // serialization -- the dominant end-to-end completion cost.
-        rank_and_cap(&mut out, MAX_COMPLETION_ITEMS, "completion");
+        // ONE select over the facts. The list is served `isIncomplete: true`,
+        // so cap it: the client re-queries per keystroke and the server
+        // re-scores, so returning the whole workspace (2539 items at empty
+        // prefix) is pure wasted serialization -- the dominant end-to-end
+        // completion cost.
+        if sink.cands.len() > MAX_COMPLETION_ITEMS && lsp_profile_enabled() {
+            eprintln!(
+                "[bone completion] completion truncated {} -> {MAX_COMPLETION_ITEMS}",
+                sink.cands.len()
+            );
+        }
+        sink.cands.sort_by(cand_cmp);
+        sink.cands.truncate(MAX_COMPLETION_ITEMS);
         // Keep the visible top varied: a flood of reach paths must not bury other
         // kinds (docs/completion-ranking-design.md, Divergence 3).
-        diversify(&mut out);
-        if next_is_open_paren {
-            strip_call_template(&mut out);
-        }
-        out
+        diversify_cands(&mut sink.cands);
+        sink.cands
+            .into_iter()
+            .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren))
+            .collect()
     }
 
     // -- Feature: rename + prepare-rename (stubbed: gaps::references) --------
@@ -3650,12 +3591,18 @@ fn arg_path_penalty(arg: &str) -> i32 {
 /// value-of-expected-type / 1 fn-returning-it / 2 other), `dist` (shorter
 /// paths first) and `method` (field/var before method/fn).
 fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> String {
+    arg_rank_key(type_rank, kind, cand, query, dist, method).encode(cand)
+}
+
+/// The `RankKey` behind `arg_sort_text` -- the reach source emits it as a
+/// `Cand` fact and defers the encode to materialization.
+fn arg_rank_key(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> RankKey {
     // `fuzzy_score` lowercases the candidate inline; `query` is pre-lowercased.
     let score = fuzzy_score(cand.as_bytes(), query);
     // Arg path is case-neutral, so the pre-lowercased query stands in for the raw
     // one (cs/ci prefix collapse to one band -- band is tertiary here anyway).
     let (exact, band) = match_band_exact(cand, query, query);
-    let key = RankKey {
+    RankKey {
         exact,
         type_rank,
         band,
@@ -3665,8 +3612,7 @@ fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, m
         fine: RankKey::fine(score),
         len: RankKey::len_key(score, cand.len()),
         ..Default::default()
-    };
-    key.encode(cand)
+    }
 }
 
 /// `(exact, band)` match-quality classification for the ranking ladder
@@ -3816,6 +3762,35 @@ struct CtFn {
     multiparam: bool,
 }
 
+/// One candidate arg value for a call-through synth, with the structural
+/// facts recorded at construction (not re-derived from the rendered text):
+/// `method` = the path traverses a method call on ANY hop (the per-fn
+/// method-chain cap and the confident-autofill exclusion key off it),
+/// `path` = a dotted access path rather than a direct value/variant (the
+/// diversity class).
+#[derive(Clone)]
+struct CtArg {
+    text: String,
+    payload: ArgPayload,
+    method: bool,
+    path: bool,
+}
+
+impl CtArg {
+    fn direct(text: String, payload: ArgPayload) -> Self {
+        CtArg { text, payload, method: false, path: false }
+    }
+
+    fn reach(root: &str, p: &crate::reachability::ReachPath) -> Self {
+        let text = if p.is_method {
+            format!("{root}.{}()", p.suffix)
+        } else {
+            format!("{root}.{}", p.suffix)
+        };
+        CtArg { text, payload: ArgPayload::None, method: p.via_call, path: true }
+    }
+}
+
 /// Precomputed call-through index: the function table + the GLOBAL-derived arg
 /// values per param type (direct globals of the type, the type's enum variants,
 /// and reach paths from globals -- `g.movable.grid`). All a pure function of the
@@ -3831,7 +3806,7 @@ struct CallThroughIndex {
     /// for plausible candidates, not all ~1700). Built with the index (a pure
     /// fn of the type graph).
     fns_by_first_char: HashMap<u8, Vec<u32>>,
-    global_type_args: HashMap<String, Vec<(String, ArgPayload)>>,
+    global_type_args: HashMap<String, Vec<CtArg>>,
 }
 
 /// Build the call-through index from a checked workspace + reach index. This is
@@ -3869,12 +3844,12 @@ fn build_call_through(
     // (`arg_paths_from`), bucketed by target type. No per-(type,global) DFS.
     let needed: std::collections::HashSet<&str> =
         fns.iter().map(|c| c.first_param_ty.as_str()).collect();
-    let mut global_type_args: HashMap<String, Vec<(String, ArgPayload)>> = HashMap::new();
+    let mut global_type_args: HashMap<String, Vec<CtArg>> = HashMap::new();
     for t in &needed {
-        let mut vals: Vec<(String, ArgPayload)> = groots
+        let mut vals: Vec<CtArg> = groots
             .iter()
             .filter(|(_, rt)| rt == t)
-            .map(|(n, _)| (n.clone(), ArgPayload::None))
+            .map(|(n, _)| CtArg::direct(n.clone(), ArgPayload::None))
             .collect();
         for (vname, shape) in crate::query::enum_variants_with_shape(ws, t) {
             let payload = match shape {
@@ -3882,7 +3857,7 @@ fn build_call_through(
                 crate::query::VariantShape::Tuple => ArgPayload::Tuple,
                 crate::query::VariantShape::Record => ArgPayload::Record,
             };
-            vals.push((format!("{t}::{vname}"), payload));
+            vals.push(CtArg::direct(format!("{t}::{vname}"), payload));
         }
         global_type_args.insert(t.to_string(), vals);
     }
@@ -3894,12 +3869,7 @@ fn build_call_through(
             let Some(vals) = global_type_args.get_mut(p.final_ty.as_str()) else {
                 continue; // not a first-param type any fn needs
             };
-            let v = if p.is_method {
-                format!("{rn}.{}()", p.suffix)
-            } else {
-                format!("{rn}.{}", p.suffix)
-            };
-            vals.push((v, ArgPayload::None));
+            vals.push(CtArg::reach(rn, p));
         }
     }
     // Bucket fn indices by lowercase first byte for the per-keystroke first-char
@@ -3923,14 +3893,15 @@ fn call_through_param_completions(
     reach: &crate::reachability::ReachabilityIndex,
     score_leads: bool,
     mut expected: Option<&mut ExpectedArg>,
-) -> (Vec<CompletionItem>, CtCounts) {
+    sink: &mut Sink,
+) -> CtCounts {
     let mut counts = CtCounts::default();
     let q = prefix.as_bytes();
     if q.len() < 2 {
         // 1 char only completes the fn-name's first letter -- no room for an
         // arg yet. At 2+ chars the fn name can absorb the lead and the arg can
         // start to match, so call-through is meaningful.
-        return (Vec::new(), counts);
+        return counts;
     }
     // In-scope LOCAL roots only -- the position-dependent part. Globals + their
     // reach expansion are precomputed in `index` (the slow part, now cached).
@@ -3969,19 +3940,17 @@ fn call_through_param_completions(
     // local arg of its param type (`gmob` -> `give(mob)`). Owned keys: a reach
     // path's `final_ty` is a temporary. Immutable after -- the per-`(type, k)`
     // match memo borrows from it.
-    let mut local_args: HashMap<String, Vec<(String, ArgPayload)>> = HashMap::new();
+    let mut local_args: HashMap<String, Vec<CtArg>> = HashMap::new();
     for (ln, lt) in &locals {
-        local_args.entry(lt.clone()).or_default().push((ln.clone(), ArgPayload::None));
+        local_args
+            .entry(lt.clone())
+            .or_default()
+            .push(CtArg::direct(ln.clone(), ArgPayload::None));
         for p in reach.arg_paths_from(lt) {
             if p.is_method && p.takes_args {
                 continue;
             }
-            let val = if p.is_method {
-                format!("{ln}.{}()", p.suffix)
-            } else {
-                format!("{ln}.{}", p.suffix)
-            };
-            local_args.entry(p.final_ty.clone()).or_default().push((val, ArgPayload::None));
+            local_args.entry(p.final_ty.clone()).or_default().push(CtArg::reach(ln, p));
         }
     }
 
@@ -3994,7 +3963,7 @@ fn call_through_param_completions(
         let local_arg_matches = || {
             local_args
                 .get(cf.first_param_ty.as_str())
-                .is_some_and(|args| args.iter().any(|(a, _)| arg_matches_residual(q, k, a)))
+                .is_some_and(|args| args.iter().any(|a| arg_matches_residual(q, k, &a.text)))
         };
         if k == q.len() {
             committed.push(fi as usize);
@@ -4020,10 +3989,10 @@ fn call_through_param_completions(
     // EXACT vs the old per-pair `fuzzy_score(name(arg), q)` (the `(` junction
     // breaks any cross-half run, and the +1000 prefix bonus never applies to a
     // passing call-through fn), just without re-scoring the shared arg set per fn.
-    let empty: Vec<(String, ArgPayload)> = Vec::new();
-    // Per group: (arg, payload, suffix_scores, path_penalty). suffix + penalty
+    let empty: Vec<CtArg> = Vec::new();
+    // Per group: (arg, suffix_scores, path_penalty, local). suffix + penalty
     // both depend only on the arg (not the fn), so computed once and shared.
-    let mut match_memo: HashMap<(&str, usize), Vec<(&str, ArgPayload, Vec<i32>, i32, bool)>> =
+    let mut match_memo: HashMap<(&str, usize), Vec<(&CtArg, Vec<i32>, i32, bool)>> =
         HashMap::new();
     let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
 
@@ -4037,7 +4006,7 @@ fn call_through_param_completions(
     // to 0 -- a fn accepting a local of the right type is what the user reached
     // for, so it ranks among the direct locals, not below every candidate
     // (docs/completion-ranking-design.md, Divergence 3).
-    let mut cands: Vec<(i32, usize, &str, ArgPayload, u8)> = Vec::new();
+    let mut cands: Vec<(i32, usize, &CtArg, u8)> = Vec::new();
     for (fi, k) in passing {
         let cf = &index.fns[fi];
         let t = cf.first_param_ty.as_str();
@@ -4048,17 +4017,17 @@ fn call_through_param_completions(
             // (or reachable from one), vs a global. Local-seeded partial matches
             // promote (type_rank 1) so a fn accepting your local surfaces above
             // unrelated fns; globals stay bucketed last.
-            let mut v: Vec<(&str, ArgPayload, Vec<i32>, i32, bool)> = Vec::new();
-            for (a, payload, local) in gargs
+            let mut v: Vec<(&CtArg, Vec<i32>, i32, bool)> = Vec::new();
+            for (a, local) in gargs
                 .iter()
-                .map(|(a, p)| (a, p, false))
-                .chain(largs.iter().map(|(a, p)| (a, p, true)))
+                .map(|a| (a, false))
+                .chain(largs.iter().map(|a| (a, true)))
             {
                 counts.arg_iters += 1;
-                if arg_matches_residual(q, k, a) {
+                if arg_matches_residual(q, k, &a.text) {
                     let mut suffix = Vec::new();
-                    fuzzy_suffix_scores(a.as_bytes(), q, &mut suffix);
-                    v.push((a.as_str(), *payload, suffix, arg_path_penalty(a), local));
+                    fuzzy_suffix_scores(a.text.as_bytes(), q, &mut suffix);
+                    v.push((a, suffix, arg_path_penalty(&a.text), local));
                 }
             }
             v
@@ -4067,30 +4036,30 @@ fn call_through_param_completions(
         // Prefix scores for THIS fn's name (one forward DP, reused buffer), then
         // combine with each arg's shared suffix vector.
         fuzzy_prefix_scores(cf.name.as_bytes(), q, &mut prefix_scores);
-        let mut scored: Vec<(i32, &str, ArgPayload, bool)> = Vec::with_capacity(group.len());
-        for (a, payload, suffix, penalty, local) in group.iter() {
+        let mut scored: Vec<(i32, &CtArg, bool)> = Vec::with_capacity(group.len());
+        for (a, suffix, penalty, local) in group.iter() {
             // Bias toward simpler args: a direct value / clean field path beats a
             // deep method chain (which the boundary-rich score over-rewards). The
             // penalty is arg-only, precomputed once per group.
             let score = combine_scores(&prefix_scores, suffix) - penalty;
-            scored.push((score, a, *payload, *local));
+            scored.push((score, a, *local));
         }
-        // Cap only METHOD-chain args (an arg string containing a `(` -- the
-        // unbounded `x.foo().bar()` reach-noise); keep ALL direct values / field
+        // Cap only METHOD-chain args (`CtArg::method` -- the unbounded
+        // `x.foo().bar()` reach-noise); keep ALL direct values / field
         // paths so sibling fields are browsable. The global `CALL_THROUGH_CAP` backstops the
         // total. (Method args still sort against everything in the final cap.)
         let (mut methods, simple): (Vec<_>, Vec<_>) =
-            scored.into_iter().partition(|(_, a, _, _)| a.contains('('));
+            scored.into_iter().partition(|(_, a, _)| a.method);
         if methods.len() > PER_FN_METHOD_CAP {
             // Best by score DESC, then arg lexical CASE-INSENSITIVE (so an
             // UPPER_CASE global doesn't beat a lowercase field path on a tie).
             methods.select_nth_unstable_by(PER_FN_METHOD_CAP, |x, y| {
-                y.0.cmp(&x.0).then_with(|| ci_cmp(x.1.as_bytes(), y.1.as_bytes()))
+                y.0.cmp(&x.0).then_with(|| ci_cmp(x.1.text.as_bytes(), y.1.text.as_bytes()))
             });
             methods.truncate(PER_FN_METHOD_CAP);
         }
-        for (score, a, payload, local) in simple.into_iter().chain(methods) {
-            cands.push((score, fi, a, payload, if local { 1 } else { 4 }));
+        for (score, a, local) in simple.into_iter().chain(methods) {
+            cands.push((score, fi, a, if local { 1 } else { 4 }));
         }
     }
     // CONFIDENT unique-arg autofill: for a committed (full-name-match) fn, the
@@ -4103,30 +4072,29 @@ fn call_through_param_completions(
     for fi in committed {
         let cf = &index.fns[fi];
         let t = cf.first_param_ty.as_str();
-        let confident: Vec<&(String, ArgPayload)> = local_args
+        let confident: Vec<&CtArg> = local_args
             .get(t)
-            .map(|v| v.iter().filter(|(a, _)| !a.contains('(')).collect())
+            .map(|v| v.iter().filter(|a| !a.method).collect())
             .unwrap_or_default();
-        if let [(a, payload)] = confident.as_slice() {
+        if let [a] = confident.as_slice() {
             // A full-name match with a unique, unambiguous LOCAL arg is the
             // highest-confidence call-through: a fn accepting a local of the right
             // type. type_rank 0 promotes it out of the bottom bucket to rank among
             // the direct locals (method bit still demotes it just below a plain
             // local), above coincidental partial (`passing`) matches.
             let score = fuzzy_score(cf.name.as_bytes(), q) + 5000;
-            cands.push((score, fi, a.as_str(), *payload, 0));
+            cands.push((score, fi, a, 0));
         }
     }
     // Global top `CALL_THROUGH_CAP` by score (then ci-arg tiebreak); materialize only those.
     if cands.len() > CALL_THROUGH_CAP {
         cands.select_nth_unstable_by(CALL_THROUGH_CAP, |x, y| {
-            y.0.cmp(&x.0).then_with(|| ci_cmp(x.2.as_bytes(), y.2.as_bytes()))
+            y.0.cmp(&x.0).then_with(|| ci_cmp(x.2.text.as_bytes(), y.2.text.as_bytes()))
         });
         cands.truncate(CALL_THROUGH_CAP);
     }
-    let mut out: Vec<CompletionItem> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (score, fi, a, payload, type_rank) in cands {
+    let ct_start = sink.cands.len();
+    for (score, fi, a, type_rank) in cands {
         let cf = &index.fns[fi];
         let fname = cf.name;
         // A local-seeded promotion (0/1) holds only when the synth PRODUCES the
@@ -4144,70 +4112,58 @@ fn call_through_param_completions(
             }
             _ => type_rank,
         };
-        let call = format!("{fname}({a})");
-        if !seen.insert(call.clone()) {
+        let call = format!("{fname}({})", a.text);
+        if !sink.admit(&call) {
             continue;
         }
-        // Insert: a tuple/record variant arg carries a payload hole; the trailing
-        // param (when multiparam) takes `$0`, so the payload uses `$1` to keep the
-        // tab order arg-then-next-param.
-        let (insert_text, is_snippet) = match (payload, cf.multiparam) {
-            (ArgPayload::None, false) => (format!("{fname}({a})"), false),
-            (ArgPayload::None, true) => (format!("{fname}({a}, $0)"), true),
-            (ArgPayload::Tuple, false) => (format!("{fname}({a}($0))"), true),
-            (ArgPayload::Tuple, true) => (format!("{fname}({a}($1), $0)"), true),
-            (ArgPayload::Record, false) => (format!("{fname}({a} {{ $0 }})"), true),
-            (ArgPayload::Record, true) => (format!("{fname}({a} {{ $1 }}, $0)"), true),
+        // Rank 4 = a synthesized whole-call, below every direct candidate;
+        // a LOCAL-SEEDED promotion (0/1) lifts it into the direct region.
+        // With an expected type the promotion IS type relevance
+        // (`type_rank`); with none it is only the coarse bucket, so the
+        // promoted rank rides the KIND rung instead (a confident autofill
+        // ranks with locals, a partial with globals) and `type_rank`
+        // carries just direct-vs-synth. Reuse the score computed above.
+        let (ex, bd) = match_band_exact(&call, q, q);
+        let key = if score_leads {
+            RankKey {
+                exact: ex,
+                type_rank: if type_rank >= 4 { 4 } else { 0 },
+                band: bd,
+                kind: type_rank.min(3),
+                ..Default::default()
+            }
+        } else {
+            // Typed slot: kind 2 (a call synth is fn-shaped), so a real
+            // local of the slot type still beats a same-rank synth.
+            RankKey { exact: ex, type_rank, band: bd, kind: 2, ..Default::default() }
         };
-        let insert_text_format = is_snippet.then_some(InsertTextFormat::SNIPPET);
-        // Label shows the payload shape so a tuple/record variant reads as a call
-        // to fill, not a bare value.
-        let label = match payload {
-            ArgPayload::None => call.clone(),
-            ArgPayload::Tuple => format!("{fname}({a}(...))"),
-            ArgPayload::Record => format!("{fname}({a} {{ ... }})"),
+        let key = RankKey {
+            method: 1,
+            fine: RankKey::fine(score),
+            len: RankKey::len_key(score, call.len()),
+            ..key
         };
-        out.push(CompletionItem {
-            label,
-            kind: Some(CompletionItemKind::FUNCTION),
-            insert_text: Some(insert_text),
-            insert_text_format,
-            // Rank 4 = a synthesized whole-call, below every direct candidate;
-            // a LOCAL-SEEDED promotion (0/1) lifts it into the direct region.
-            // With an expected type the promotion IS type relevance
-            // (`type_rank`); with none it is only the coarse bucket, so the
-            // promoted rank rides the KIND rung instead (a confident autofill
-            // ranks with locals, a partial with globals) and `type_rank`
-            // carries just direct-vs-synth. Reuse the score computed above.
-            sort_text: {
-                let (ex, bd) = match_band_exact(&call, q, q);
-                let key = if score_leads {
-                    RankKey {
-                        exact: ex,
-                        type_rank: if type_rank >= 4 { 4 } else { 0 },
-                        band: bd,
-                        kind: type_rank.min(3),
-                        ..Default::default()
-                    }
-                } else {
-                    // Typed slot: kind 2 (a call synth is fn-shaped), so a real
-                    // local of the slot type still beats a same-rank synth.
-                    RankKey { exact: ex, type_rank, band: bd, kind: 2, ..Default::default() }
-                };
-                let key = RankKey {
-                    method: 1,
-                    fine: RankKey::fine(score),
-                    len: RankKey::len_key(score, call.len()),
-                    ..key
-                };
-                Some(key.encode(&call))
+        // Path-shaped for diversity when the arg is a dotted access path or
+        // renders a payload hole (`f(V(...))` / `f(V { ... })`) -- the synth
+        // shapes the visible-window cap exists for.
+        let path_like = a.path || a.payload != ArgPayload::None;
+        sink.push(Cand::new(
+            key,
+            CandName::Owned(call),
+            path_like,
+            CandShape::CallThrough {
+                fname,
+                arg: a.text.clone(),
+                payload: a.payload,
+                multiparam: cf.multiparam,
             },
-            ..Default::default()
-        });
+        ));
     }
-    // Final sort by sort_text; the global select above already bounded the count.
-    rank_and_cap(&mut out, CALL_THROUGH_CAP, "call-through");
-    (out, counts)
+    // Keep the emitted tail in rank order (the final stable sort preserves
+    // insertion order on full ties); the global select above already bounded
+    // the count.
+    sink.cands[ct_start..].sort_by(cand_cmp);
+    counts
 }
 
 // === Completion tuning (docs/completion-v2-design.md) =======================
@@ -4238,6 +4194,357 @@ const PER_FN_METHOD_CAP: usize = 2;
 /// (kept, browsable) so a same-type path flood can't bury other kinds.
 const DIVERSITY_WINDOW: usize = 12;
 const REACH_PATH_TOP_CAP: usize = 3;
+
+// === Completion candidate pipeline (docs/completion-v2-design.md, M3) ========
+//
+// Stage B/D of completion-v2: every general-path source emits fact-shaped
+// `Cand`s into a `Sink`; ONE select (RankKey order) + the diversity pass run
+// on the facts; `CompletionItem`s (labels, inserts, details) materialize in
+// `materialize_cand` for the post-cap survivors only. Sources never build
+// display strings for ranking, and no post-pass reverse-engineers structure
+// from labels.
+
+/// The name a candidate ranks and sorts under -- the string `RankKey::encode`
+/// appends and the ci-alphabetical tiebreak compares. NOT always the display
+/// label: a named-arg `greeting:` ranks under `greeting`, a reach item
+/// labeled `player.grid: IVec2` under `player.grid`.
+enum CandName {
+    Sym(ustr::Ustr),
+    Owned(String),
+}
+
+impl CandName {
+    fn as_str(&self) -> &str {
+        match self {
+            CandName::Sym(u) => u.as_str(),
+            CandName::Owned(s) => s.as_str(),
+        }
+    }
+}
+
+/// Materialization facts: everything `materialize_cand` needs to render a
+/// survivor's label / insert / detail / kind.
+enum CandShape {
+    /// A scope/global-namespace symbol from `crate::query::completion`.
+    Entry(crate::query::CompletionEntry),
+    /// Param-name + fn-prefix `Entity<..>` type synth: a known payload
+    /// renders concrete `Entity<Mob>`, an unknown one the `Entity<$0>`
+    /// snippet.
+    EntitySynth { payload: Option<ustr::Ustr> },
+    /// A callee param offered as `name:` at a direct call-arg slot.
+    NamedArg { pname: ustr::Ustr, pty: String },
+    /// `CoFrame` in the first generic slot of `Coroutine<..>`.
+    CoFrame,
+    /// `Coroutine<CoFrame>` / `Coroutine<$0>` replacing the bare type name.
+    Coroutine { with_coframe: bool },
+    /// `-> Coroutine<..>` return type offered after `co fn name()`.
+    CoReturn { coframe: bool },
+    /// A reachability path; the cand name is the access form `root.suffix`.
+    Reach { final_ty: String, is_method: bool, takes_args: bool },
+    /// A synthesized whole call; the cand name is `fname(arg)`.
+    CallThrough { fname: ustr::Ustr, arg: String, payload: ArgPayload, multiparam: bool },
+    /// A `deco` declaration (decorator position).
+    Decorator { detail: Option<String> },
+}
+
+/// A fact-shaped completion candidate: rank key + rank/tiebreak name +
+/// diversity class + materialization facts. `key` is stored CLAMPED
+/// (`RankKey::clamped`) so `cand_cmp` and the client's sort_text string
+/// order agree at any field value.
+struct Cand {
+    key: RankKey,
+    name: CandName,
+    /// The diversity unit `diversify` caps in the visible window: a dotted
+    /// access path (reach) or a call synth rendering a dotted arg / payload
+    /// hole -- the flood-prone shapes.
+    path_like: bool,
+    shape: CandShape,
+}
+
+impl Cand {
+    fn new(key: RankKey, name: CandName, path_like: bool, shape: CandShape) -> Self {
+        Cand { key: key.clamped(), name, path_like, shape }
+    }
+}
+
+/// Stage-B sink: sources emit `Cand`s here in source order. Owns the
+/// cross-source dedup namespace (reach access forms and call-through call
+/// strings share it) and the synth-shadowing retain (a synth item
+/// superseding the same-named workspace symbol).
+struct Sink {
+    cands: Vec<Cand>,
+    seen: std::collections::HashSet<String>,
+}
+
+impl Sink {
+    fn new() -> Self {
+        Sink { cands: Vec::new(), seen: std::collections::HashSet::new() }
+    }
+
+    fn push(&mut self, cand: Cand) {
+        self.cands.push(cand);
+    }
+
+    /// Admit `name` once across every deduping source: true the first time,
+    /// false for a duplicate (the caller skips the emit).
+    fn admit(&mut self, name: &str) -> bool {
+        if self.seen.contains(name) {
+            return false;
+        }
+        self.seen.insert(name.to_string());
+        true
+    }
+
+    /// Drop an already-emitted candidate a synth supersedes (e.g. the plain
+    /// `CoFrame` struct symbol when the coroutine-slot synth takes over).
+    fn retain_not_named(&mut self, name: &str) {
+        self.cands.retain(|c| c.name.as_str() != name);
+    }
+
+    fn len(&self) -> usize {
+        self.cands.len()
+    }
+}
+
+/// The ONE candidate ordering: clamped `RankKey`, then the ci name tiebreak
+/// -- by construction the order the client's `sort_text` string sort
+/// produces (`RankKey::encode` appends the lowercased name).
+fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
+    a.key
+        .cmp(&b.key)
+        .then_with(|| ci_cmp(a.name.as_str().as_bytes(), b.name.as_str().as_bytes()))
+}
+
+/// Diversity re-rank over the already-sorted candidates: keep the ranked
+/// order but stop a flood of path-shaped items (`Cand::path_like`) from
+/// filling the visible top and burying other kinds (a fn / enum variant /
+/// direct value the user actually wants). Within the first
+/// `DIVERSITY_WINDOW` slots, at most `REACH_PATH_TOP_CAP` path-likes are
+/// kept; the overflow is DEFERRED to just after the window (never dropped --
+/// browsable by scrolling / narrowing). Tunable; see
+/// `docs/completion-ranking-design.md` (Divergence 3, diversity).
+fn diversify_cands(cands: &mut Vec<Cand>) {
+    if cands.len() <= REACH_PATH_TOP_CAP {
+        return;
+    }
+    let mut window: Vec<Cand> = Vec::with_capacity(cands.len());
+    let mut deferred: Vec<Cand> = Vec::new();
+    let mut rest: Vec<Cand> = Vec::new();
+    let mut paths = 0;
+    for c in cands.drain(..) {
+        if window.len() >= DIVERSITY_WINDOW {
+            rest.push(c);
+        } else if c.path_like {
+            if paths >= REACH_PATH_TOP_CAP {
+                deferred.push(c);
+            } else {
+                paths += 1;
+                window.push(c);
+            }
+        } else {
+            window.push(c);
+        }
+    }
+    window.append(&mut deferred);
+    window.append(&mut rest);
+    *cands = window;
+}
+
+/// Stage D: render ONE surviving candidate to its `CompletionItem`. Every
+/// display string (label, insert, detail, sort_text) is built here and only
+/// here. `strip_call` = the cursor sits directly before an existing `(`
+/// (e.g. `cw` over the callee of `world_to_screen(x)`): call-template
+/// shapes insert the bare name so the existing parens are reused instead of
+/// doubled.
+fn materialize_cand(
+    cand: Cand,
+    fn_sigs: &HashMap<ustr::Ustr, String>,
+    strip_call: bool,
+) -> CompletionItem {
+    let sort_text = Some(cand.key.encode(cand.name.as_str()));
+    match cand.shape {
+        CandShape::Entry(c) => {
+            // Function `detail` is the cached signature, materialized HERE
+            // for survivors only; non-fn kinds carry their (cheap) detail
+            // already.
+            let detail = match c.kind {
+                SymCat::Function => fn_sigs.get(&c.name).cloned(),
+                _ => c.detail,
+            };
+            // The full detail goes in the panel; a concise form renders
+            // inline next to the label in the popup (a fn's `(params) ->
+            // ret`, a binding's `: type`).
+            let label_details = fn_or_type_label_details(c.kind, detail.as_deref());
+            // A function with params accepts as a snippet `name($0)` ->
+            // inserts `name()` with the cursor parked between the parens
+            // (the client shows a snippet marker, e.g. nvim-cmp's `~`). A
+            // param-less function inserts `name()` as plain text so the
+            // cursor lands AFTER the `)` -- there's nothing to fill.
+            // A qualified `Enum::Variant` value in an expression slot
+            // carries the same payload template as the `Enum::` path:
+            // tuple -> `($0)`, record -> `{ $0 }`, unit -> bare.
+            let (insert_text, insert_text_format) = match c.kind {
+                // `on_killed`/`on_resume`/`on_hot_reload` are contextual
+                // lifecycle-hook keywords with a statement BLOCK form
+                // (`on_killed { .. }`) -- complete to the block, not a call.
+                SymCat::Function if is_lifecycle_hook(c.name.as_str()) => {
+                    (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
+                }
+                SymCat::Function if strip_call => (Some(c.name.to_string()), None),
+                SymCat::Function if c.takes_params => {
+                    (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
+                }
+                SymCat::Function => (Some(format!("{}()", c.name)), None),
+                SymCat::Variant => match c.variant_shape {
+                    Some(crate::query::VariantShape::Tuple) if strip_call => {
+                        (Some(c.name.to_string()), None)
+                    }
+                    Some(crate::query::VariantShape::Tuple) => {
+                        (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
+                    }
+                    Some(crate::query::VariantShape::Record) => {
+                        (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
+                    }
+                    _ => (None, None),
+                },
+                _ => (None, None),
+            };
+            CompletionItem {
+                label: c.name.to_string(),
+                kind: Some(completion_kind(c.kind)),
+                label_details,
+                detail,
+                insert_text,
+                insert_text_format,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::EntitySynth { payload } => {
+            let (label, insert, fmt) = match payload {
+                Some(p) => (format!("Entity<{p}>"), format!("Entity<{p}>"), None),
+                None => (
+                    "Entity<>".to_string(),
+                    "Entity<$0>".to_string(),
+                    Some(InsertTextFormat::SNIPPET),
+                ),
+            };
+            CompletionItem {
+                label,
+                kind: Some(CompletionItemKind::STRUCT),
+                insert_text: Some(insert),
+                insert_text_format: fmt,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::NamedArg { pname, pty } => CompletionItem {
+            label: format!("{pname}:"),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(pty),
+            insert_text: Some(format!("{pname}: ")),
+            sort_text,
+            ..Default::default()
+        },
+        CandShape::CoFrame => CompletionItem {
+            label: "CoFrame".to_string(),
+            kind: Some(CompletionItemKind::STRUCT),
+            sort_text,
+            ..Default::default()
+        },
+        CandShape::Coroutine { with_coframe } => {
+            let (label, insert, fmt) = if with_coframe {
+                ("Coroutine<CoFrame>", "Coroutine<CoFrame>", None)
+            } else {
+                ("Coroutine<>", "Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
+            };
+            CompletionItem {
+                label: label.to_string(),
+                kind: Some(CompletionItemKind::STRUCT),
+                insert_text: Some(insert.to_string()),
+                insert_text_format: fmt,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::CoReturn { coframe } => {
+            let (label, insert, fmt) = if coframe {
+                ("-> Coroutine<CoFrame>", "-> Coroutine<CoFrame>", None)
+            } else {
+                ("-> Coroutine<>", "-> Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
+            };
+            CompletionItem {
+                label: label.to_string(),
+                kind: Some(CompletionItemKind::SNIPPET),
+                insert_text: Some(insert.to_string()),
+                insert_text_format: fmt,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::Reach { final_ty, is_method, takes_args } => {
+            let key = cand.name.as_str();
+            let (label, kind, insert_text, insert_text_format) = if is_method {
+                let (insert, fmt) = if strip_call {
+                    (key.to_string(), None)
+                } else if takes_args {
+                    (format!("{key}($0)"), Some(InsertTextFormat::SNIPPET))
+                } else {
+                    (format!("{key}()"), None)
+                };
+                (format!("{key}() -> {final_ty}"), CompletionItemKind::METHOD, insert, fmt)
+            } else {
+                (format!("{key}: {final_ty}"), CompletionItemKind::FIELD, key.to_string(), None)
+            };
+            CompletionItem {
+                label,
+                kind: Some(kind),
+                detail: Some(final_ty),
+                insert_text: Some(insert_text),
+                insert_text_format,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::CallThrough { fname, arg: a, payload, multiparam } => {
+            // Insert: a tuple/record variant arg carries a payload hole; the
+            // trailing param (when multiparam) takes `$0`, so the payload
+            // uses `$1` to keep the tab order arg-then-next-param.
+            let (insert_text, is_snippet) = match (payload, multiparam) {
+                (ArgPayload::None, false) => (format!("{fname}({a})"), false),
+                (ArgPayload::None, true) => (format!("{fname}({a}, $0)"), true),
+                (ArgPayload::Tuple, false) => (format!("{fname}({a}($0))"), true),
+                (ArgPayload::Tuple, true) => (format!("{fname}({a}($1), $0)"), true),
+                (ArgPayload::Record, false) => (format!("{fname}({a} {{ $0 }})"), true),
+                (ArgPayload::Record, true) => (format!("{fname}({a} {{ $1 }}, $0)"), true),
+            };
+            let insert_text_format = is_snippet.then_some(InsertTextFormat::SNIPPET);
+            // Label shows the payload shape so a tuple/record variant reads
+            // as a call to fill, not a bare value.
+            let label = match payload {
+                ArgPayload::None => format!("{fname}({a})"),
+                ArgPayload::Tuple => format!("{fname}({a}(...))"),
+                ArgPayload::Record => format!("{fname}({a} {{ ... }})"),
+            };
+            CompletionItem {
+                label,
+                kind: Some(CompletionItemKind::FUNCTION),
+                insert_text: Some(insert_text),
+                insert_text_format,
+                sort_text,
+                ..Default::default()
+            }
+        }
+        CandShape::Decorator { detail } => CompletionItem {
+            label: cand.name.as_str().to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail,
+            insert_text: Some(cand.name.as_str().to_string()),
+            sort_text,
+            ..Default::default()
+        },
+    }
+}
 
 /// Case-insensitive ASCII byte-slice ordering -- the alloc-free equivalent of
 /// `a.to_lowercase().cmp(&b.to_lowercase())` for the (ASCII) identifier
@@ -4273,59 +4580,6 @@ fn build_fn_sigs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
         }
     }
     sigs
-}
-
-/// The single rank+cap used by every completion path: sort best-first by the
-/// precomputed `sort_text`, then drop the tail past `cap`.
-///
-/// Sound to drop the tail because completion is always served `isIncomplete:
-/// true` (see `do_completion_workspace`) -- the client re-requests per keystroke
-/// and the server re-scores against the typed prefix, so an item cut from this
-/// keystroke's `cap` reappears the moment the prefix ranks it back in. `what`
-/// labels the truncation in the `BONE_LSP_PROFILE` log.
-fn rank_and_cap(items: &mut Vec<CompletionItem>, cap: usize, what: &str) {
-    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-    if items.len() > cap {
-        if lsp_profile_enabled() {
-            eprintln!("[bone completion] {what} truncated {} -> {cap}", items.len());
-        }
-        items.truncate(cap);
-    }
-}
-
-/// Diversity re-rank over the already-sorted list: keep the ranked order but
-/// stop a flood of REACH-PATH items (dotted labels -- `s.a`, `player.movable.grid`,
-/// the field/method call-through noise) from filling the visible top and burying
-/// other kinds (a fn / enum variant / direct value the user actually wants).
-/// Within the first `DIVERSITY_WINDOW` slots, at most `REACH_PATH_TOP_CAP` dotted
-/// paths are kept; the overflow is DEFERRED to just after the window (never
-/// dropped -- browsable by scrolling / narrowing). Tunable; see
-/// `docs/completion-ranking-design.md` (Divergence 3, diversity).
-fn diversify(items: &mut Vec<CompletionItem>) {
-    if items.len() <= REACH_PATH_TOP_CAP {
-        return;
-    }
-    let mut window: Vec<CompletionItem> = Vec::with_capacity(items.len());
-    let mut deferred: Vec<CompletionItem> = Vec::new();
-    let mut rest: Vec<CompletionItem> = Vec::new();
-    let mut paths = 0;
-    for it in items.drain(..) {
-        if window.len() >= DIVERSITY_WINDOW {
-            rest.push(it);
-        } else if it.label.contains('.') {
-            if paths >= REACH_PATH_TOP_CAP {
-                deferred.push(it);
-            } else {
-                paths += 1;
-                window.push(it);
-            }
-        } else {
-            window.push(it);
-        }
-    }
-    window.append(&mut deferred);
-    window.append(&mut rest);
-    *items = window;
 }
 
 /// True if any overload of `name` declares a return type rendering to one of
@@ -4514,6 +4768,10 @@ fn decorator_context(src: &str, offset: usize) -> bool {
 fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
+    // Decorators materialize through the shared shape but keep declaration
+    // order (no select/cap -- the namespace is small and the client sorts by
+    // sort_text).
+    let no_sigs = HashMap::new();
     for m in ws.modules.iter() {
         for (_, dec) in m.decorators.iter() {
             let name = dec.name.as_str();
@@ -4525,23 +4783,22 @@ fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<CompletionItem> {
                 .iter()
                 .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
                 .collect();
-            out.push(CompletionItem {
-                label: name.to_string(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: (!params.is_empty()).then(|| format!("deco ({})", params.join(", "))),
-                insert_text: Some(name.to_string()),
-                sort_text: {
-                    let (ex, bd) = match_band_exact(name, prefix.as_bytes(), prefix.as_bytes());
-                    let key = RankKey {
-                        exact: ex,
-                        band: bd,
-                        len: RankKey::len_key(9999, name.len()),
-                        ..Default::default()
-                    };
-                    Some(key.encode(name))
-                },
+            let (ex, bd) = match_band_exact(name, prefix.as_bytes(), prefix.as_bytes());
+            let key = RankKey {
+                exact: ex,
+                band: bd,
+                len: RankKey::len_key(9999, name.len()),
                 ..Default::default()
-            });
+            };
+            let cand = Cand::new(
+                key,
+                CandName::Sym(dec.name),
+                false,
+                CandShape::Decorator {
+                    detail: (!params.is_empty()).then(|| format!("deco ({})", params.join(", "))),
+                },
+            );
+            out.push(materialize_cand(cand, &no_sigs, false));
         }
     }
     out

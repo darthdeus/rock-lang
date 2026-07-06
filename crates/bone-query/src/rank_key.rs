@@ -54,6 +54,25 @@ impl RankKey {
         }
     }
 
+    /// The key with every field clamped to its `encode` digit width. Tuple
+    /// `Ord` on a clamped key agrees with the encoded-string order at ANY
+    /// field value (an unclamped `dist: 150` orders below `dist: 100` in
+    /// `Ord` but both encode `99`); `Cand` stores clamped keys so the
+    /// in-process select and the client's sort_text sort cannot disagree.
+    pub fn clamped(self) -> RankKey {
+        RankKey {
+            exact: self.exact.min(9),
+            type_rank: self.type_rank.min(9),
+            band: self.band.min(9),
+            case: self.case.min(9),
+            kind: self.kind.min(9),
+            dist: self.dist.min(99),
+            method: self.method.min(9),
+            fine: self.fine.min(9999),
+            len: self.len.min(999),
+        }
+    }
+
     /// The LSP `sort_text`: the fields in `Ord` order, fixed-width, with the
     /// lowercased candidate appended as the final ci-alphabetical tiebreak.
     /// Lexicographic order of these strings == `(RankKey, ci name)` order.
@@ -139,6 +158,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn clamped_ord_agrees_with_encode_beyond_widths() {
+        // Unclamped Ord would order these; both encode dist as `99`.
+        let a = RankKey { dist: 150, ..RankKey::default() };
+        let b = RankKey { dist: 100, ..RankKey::default() };
+        assert_eq!(a.clamped().cmp(&b.clamped()), a.encode("x").cmp(&b.encode("x")));
+        // In-range values pass through untouched.
+        let k = RankKey {
+            exact: 1,
+            type_rank: 4,
+            band: 3,
+            case: 9,
+            kind: 3,
+            dist: 99,
+            method: 1,
+            fine: 9999,
+            len: 999,
+        };
+        assert_eq!(k.clamped(), k);
     }
 
     #[test]
