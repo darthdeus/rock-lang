@@ -1444,8 +1444,17 @@ impl BoneWorkspace {
         // `greet(gr|)` surfaces `greeting:` above the identifier fallback while
         // `grid` etc. stay. Skips params already passed positionally or by name.
         if let Some(nargs) = cursor_ast.as_ref().and_then(|cx| cx.named_arg_slot()) {
+            // Params already supplied by a `..spread` operand's fields.
+            let spread_covered: std::collections::HashSet<Ustr> = nargs
+                .spread_probes
+                .iter()
+                .flat_map(|&p| crate::query::struct_field_names_at(ws, mid, inf, p))
+                .collect();
             for (i, (pname, pty)) in callee_param_names(ws, &nargs.callee).into_iter().enumerate() {
-                if i < nargs.positional || nargs.named.iter().any(|n| n.as_str() == pname.as_str()) {
+                if i < nargs.positional
+                    || nargs.named.iter().any(|n| n.as_str() == pname.as_str())
+                    || spread_covered.contains(&pname)
+                {
                     continue;
                 }
                 if !prefix.is_empty() && !clean_match(pname.as_str().as_bytes(), prefix.as_bytes()) {

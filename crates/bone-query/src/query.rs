@@ -2363,6 +2363,30 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
 
 /// Fields `(name, rendered_type)` of struct `name`, or empty if it isn't a
 /// struct. Drives struct-literal field completion (`Name { <field> }`).
+/// Field names of the nominal struct typed at `offset` (a call-site spread
+/// operand `..op`), or empty when it isn't a known struct. Used to skip
+/// spread-covered params in named-arg completion.
+pub fn struct_field_names_at(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+) -> Vec<Ustr> {
+    let Some(ta) = bone_semantic::query::type_at(ws, mid, inf, offset) else {
+        return Vec::new();
+    };
+    let Some(bi) = ta.body else {
+        return Vec::new();
+    };
+    let Some((name, _)) = struct_app_args(ws, bi, ta.ty) else {
+        return Vec::new();
+    };
+    match struct_def_by_name(ws, name) {
+        Some(sdef) => sdef.fields.iter().map(|f| f.name).collect(),
+        None => Vec::new(),
+    }
+}
+
 pub fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, String)> {
     match struct_def_by_name(ws, Ustr::from(name)) {
         Some(sdef) => sdef
@@ -2543,9 +2567,15 @@ pub fn struct_fields_fill(
         }
     }
     let (_, e) = best?;
-    let hir::Expr::StructLiteral { name, fields, .. } = &body.expr_arena[e] else {
+    let hir::Expr::StructLiteral { name, fields, bases } = &body.expr_arena[e] else {
         return None;
     };
+
+    // A functional-update base (`{ ..base }`) supplies every unwritten field,
+    // so nothing is missing.
+    if !bases.is_empty() {
+        return None;
+    }
 
     let sdef = struct_def_by_name(ws, *name)?;
 
