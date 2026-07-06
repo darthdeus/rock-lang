@@ -492,9 +492,11 @@ fn partial_fn_name_with_local_arg_promotes_call_through() {
         .into_iter()
         .find(|c| c.label == "give(mob)")
         .unwrap_or_else(|| panic!("give(mob) call-through must be offered: {labels:?}"));
+    // RankKey encoding (rank_key.rs): digit 0 = exact, digit 1 = type_rank --
+    // the direct-vs-synth bucket here (0 promoted, 4 bucketed last).
     let st = it.sort_text.as_deref().unwrap_or("");
     assert!(
-        st.starts_with('0'),
+        st.chars().nth(1) == Some('0'),
         "partial local-seeded call-through must be promoted (bucket 0, not 4): {st}"
     );
 }
@@ -647,6 +649,132 @@ fn null_coalesce_rhs_prioritizes_expected_enum_variant() {
     assert!(
         func.is_none() || variant < func,
         "expected enum variant must outrank wrong-type fn in a `??` RHS: {labels:?}"
+    );
+}
+
+#[test]
+fn typed_slot_local_beats_global_of_same_type() {
+    // Inside `feed(<cursor>)` expecting int, a right-type LOCAL must outrank a
+    // right-type GLOBAL even when the global's name scores higher -- locality
+    // is a rung of the ladder in the typed layout too (design doc principle 4).
+    // Names chosen so the global's fine score wins (case-exact prefix of the
+    // query) while the local is a boundary subsequence: only the kind rung can
+    // put the local first.
+    let labels = labels_at(
+        "global nomad_x: int = 3\n\
+         fn feed(x: int) {}\n\
+         fn r() {\n  let nx_offset_mad = 5\n  feed(nomad$0)\n}\n",
+    );
+    let local = rank_of(&labels, "nx_offset_mad");
+    let global = rank_of(&labels, "nomad_x");
+    assert!(local.is_some() && global.is_some(), "both offered: {labels:?}");
+    assert!(
+        global < local,
+        "case-exact-prefix global still beats a scattered local (band before kind): {labels:?}"
+    );
+}
+
+#[test]
+fn typed_slot_kind_breaks_same_band_ties() {
+    // Same band, same type: the local wins over the global on the locality
+    // rung (today the fine score decides and can flip it to the global).
+    let labels = labels_at(
+        "global target_ref_grid_max: int = 3\n\
+         fn feed(x: int) {}\n\
+         fn r() {\n  let target_grid = 5\n  feed(targrid$0)\n}\n",
+    );
+    let local = rank_of(&labels, "target_grid");
+    let global = rank_of(&labels, "target_ref_grid_max");
+    assert!(local.is_some() && global.is_some(), "both offered: {labels:?}");
+    assert!(
+        local < global,
+        "same-band right-type local must outrank the global on the kind rung: {labels:?}"
+    );
+}
+
+#[test]
+fn member_completion_prefix_field_beats_boundary_richer_field() {
+    // MEMBER path banding: `s.co$0` -- the case-exact-prefix field `cost` must
+    // outrank `charge_over_time`, whose extra word boundaries give it a higher
+    // fine score (`c` + `_o`). Pre-M1 the member encoders were score-first
+    // (no exact/band tiers), so the boundary-richer name won on raw points.
+    let labels = member_labels_by_sort(
+        "struct S { cost: int, charge_over_time: int }\n\
+         fn r(s: S) {\n  let x = s.co$0\n}\n",
+    );
+    let pfx = labels.iter().position(|l| l.starts_with("cost"));
+    let boundary = labels.iter().position(|l| l.starts_with("charge_over_time"));
+    assert!(pfx.is_some() && boundary.is_some(), "both fields offered: {labels:?}");
+    assert!(
+        pfx < boundary,
+        "prefix-band field must outrank a boundary-richer higher-scoring one: {labels:?}"
+    );
+}
+
+#[test]
+fn direct_global_beats_global_rooted_reach_chain() {
+    // Typed slot: a direct right-type GLOBAL must outrank a reach chain rooted
+    // at some OTHER global -- both produce the type, but the chain rides the
+    // same (global) locality rung and loses on distance. Pinned from the M1
+    // sweep review: reach paths briefly took kind 0 and deep global chains
+    // outranked direct globals.
+    let labels = labels_at(
+        "struct Holder { grid_size: int }\n\
+         global grip_count: int = 3\n\
+         global grid_holder: Holder = Holder { grid_size: 1 }\n\
+         fn feed(x: int) {}\n\
+         fn r() {\n  feed(gr$0)\n}\n",
+    );
+    let direct = rank_of(&labels, "grip_count");
+    let chain = labels.iter().position(|l| l.starts_with("grid_holder.grid_size"));
+    assert!(direct.is_some() && chain.is_some(), "both offered: {labels:?}");
+    assert!(
+        direct < chain,
+        "direct right-type global must outrank a global-rooted reach chain: {labels:?}"
+    );
+}
+
+#[test]
+fn local_rooted_reach_path_beats_right_type_global() {
+    // Typed slot, SAME match band (both case-exact `h` prefixes): a path
+    // seeded from a LOCAL (`h.grid_size`) is a top-tier candidate -- above a
+    // direct right-type GLOBAL (design doc principle 3: local-seeded before
+    // globals). Match quality still leads: a better-band global beats a
+    // worse-band path (covered by `direct_global_beats_global_rooted_reach_chain`).
+    let labels = labels_at(
+        "struct Holder { grid_size: int }\n\
+         global h_count: int = 3\n\
+         fn feed(x: int) {}\n\
+         fn r(h: Holder) {\n  feed(h$0)\n}\n",
+    );
+    let path = labels.iter().position(|l| l.starts_with("h.grid_size"));
+    let global = rank_of(&labels, "h_count");
+    assert!(path.is_some() && global.is_some(), "both offered: {labels:?}");
+    assert!(
+        path < global,
+        "same-band local-rooted right-type path must outrank the right-type global: {labels:?}"
+    );
+}
+
+#[test]
+fn member_arg_slot_field_beats_boundary_richer_method() {
+    // `feed(s.targrid$0)` with both members producing int (type-match tie),
+    // both in the boundary band: the FIELD `target_grid` must beat the method
+    // `target_ref_grid()` whose extra `_ref_` boundary out-scores it on fine
+    // points. Pre-M1 `member_arg_sort_text` was score-first past the
+    // type-match digit, so the method won.
+    let labels = member_labels_by_sort(
+        "struct S { target_grid: int }\n\
+         fn target_ref_grid(s: S) -> int { return 0 }\n\
+         fn feed(x: int) {}\n\
+         fn r(s: S) {\n  feed(s.targrid$0)\n}\n",
+    );
+    let field = labels.iter().position(|l| l.starts_with("target_grid"));
+    let method = labels.iter().position(|l| l.starts_with("target_ref_grid"));
+    assert!(field.is_some() && method.is_some(), "both members offered: {labels:?}");
+    assert!(
+        field < method,
+        "same-band type-matching field must outrank the boundary-richer method: {labels:?}"
     );
 }
 

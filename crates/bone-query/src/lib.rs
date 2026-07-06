@@ -15,6 +15,7 @@ pub mod reachability;
 
 mod backend;
 mod cursor_context;
+mod rank_key;
 pub use backend::*;
 
 mod ctags;

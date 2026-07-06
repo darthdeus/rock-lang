@@ -37,6 +37,7 @@ use skull_parser::CompilerError;
 use ustr::Ustr;
 
 use crate::query::{clean_match, fz_boundary, SymCat};
+use crate::rank_key::RankKey;
 
 /// Re-parse a tracked user file from its stored text. The Session no longer
 /// retains the AST (it is transient -- the per-body HIR is the incremental
@@ -1239,28 +1240,24 @@ impl BoneWorkspace {
             }
         };
         // Rank EVERY candidate (full accuracy), then materialize a CompletionItem
-        // only for the post-cap survivors. The rank key is exactly what
-        // `sort_text` encodes -- `{type_rank}{9999-score:04}{dist:02}{method}{lc}`
-        // -- and `dist` is 0 for all direct candidates, so ordering by the tuple
-        // `(type_rank, 9999-score, method, name-ci)` is identical to a sort_text
-        // string sort. Ranking allocates NOTHING per candidate: `fuzzy_score`
-        // lowercases the name inline and the tiebreak compares names
-        // case-insensitively inline (`ci_cmp`). Only the sort_text string, the fn
-        // signature `detail`, `insert_text`/`label_details`, and the
-        // `CompletionItem` itself are built for the ~200 we keep, not the ~2500 we
-        // cap away. `type_rank` is the leading bucket:
-        //   - ARG position: 0 = var/param/global/variant of the expected type,
-        //     1 = fn returning it, 2 = everything else.
-        //   - non-arg: rank by KIND -- 0 = in-scope local/param, 1 = global,
-        //     2 = function / struct / bare enum / newtype, 3 = enum-member
-        //     variant, so variables beat functions/types beat enum members,
-        //     fuzzy-ranking within each bucket. Call-through items sit at bucket
-        //     4, below all direct candidates.
+        // only for the post-cap survivors. The rank is a `RankKey` (rank_key.rs)
+        // whose `Ord` IS the `sort_text` encoding, so the O(n) select and the
+        // final string sort cannot disagree. Ranking allocates NOTHING per
+        // candidate: `fuzzy_score` lowercases the name inline and the tiebreak
+        // compares names case-insensitively inline (`ci_cmp`). Only the
+        // sort_text string, the fn signature `detail`,
+        // `insert_text`/`label_details`, and the `CompletionItem` itself are
+        // built for the ~200 we keep, not the ~2500 we cap away. `type_rank` is
+        // the typed ladder (0 = var/param/global/variant of the expected type,
+        // 1 = fn returning it, 2 = else; all 0 when no type is inferable) and
+        // `kind` the locality ladder -- primary bucket without a type, the
+        // post-band tiebreak with one.
         struct RankedCand {
             exact: u8,
             band: u8,
             case_rank: u8,
             type_rank: u8,
+            kind: u8,
             key2: u16,
             method: u8,
             entry: crate::query::CompletionEntry,
@@ -1270,6 +1267,25 @@ impl BoneWorkspace {
         let mut ranked: Vec<RankedCand> = cands
             .into_iter()
             .map(|c| {
+                // Locality/kind ladder, always computed: variables first
+                // (locals/params, then globals), then functions / structs /
+                // bare enums / newtypes, then enum-member VARIANTS last. In a
+                // typed slot it is the post-band tiebreak (a right-type local
+                // beats a right-type global); with no expected type it is the
+                // primary kind bucket. Structs sit in bucket 2 (NOT below
+                // functions): on an EMPTY prefix the cap keeps the best
+                // MAX_COMPLETION_ITEMS, and burying types under every stdlib
+                // fn would truncate them away entirely; within bucket 2 the
+                // `method` tiebreak already orders non-fns ahead of functions.
+                let kind = match c.kind {
+                    SymCat::Local | SymCat::Param => 0,
+                    // After `yield`/`yield*`, a coroutine fn is the expected
+                    // operand -- promote it above plain fns/types.
+                    SymCat::Function if after_yield && fn_is_coroutine(ws, c.name.as_str()) => 0,
+                    SymCat::Global => 1,
+                    SymCat::Variant => 3,
+                    _ => 2,
+                };
                 let type_rank = if let Some(exp) = expected.as_mut() {
                     match c.kind {
                         // A local/param/global whose type COERCES into the
@@ -1293,25 +1309,8 @@ impl BoneWorkspace {
                         _ => 2,
                     }
                 } else {
-                    // No expected type: rank by KIND. Variables first
-                    // (locals/params, then globals), then functions / structs /
-                    // bare enums / newtypes, then enum-member VARIANTS last. Enum
-                    // members are only top-priority in a typed arg position (the
-                    // branch above) that expects their enum. Structs sit in
-                    // bucket 2 (NOT below functions): on an EMPTY prefix the cap
-                    // keeps the best MAX_COMPLETION_ITEMS, and burying types under
-                    // every stdlib fn would truncate them away entirely; within
-                    // bucket 2 the `method` tiebreak already orders non-fns
-                    // (structs/types) ahead of functions.
-                    match c.kind {
-                        SymCat::Local | SymCat::Param => 0,
-                        // After `yield`/`yield*`, a coroutine fn is the expected
-                        // operand -- promote it above plain fns/types.
-                        SymCat::Function if after_yield && fn_is_coroutine(ws, c.name.as_str()) => 0,
-                        SymCat::Global => 1,
-                        SymCat::Variant => 3,
-                        _ => 2,
-                    }
+                    // No expected type: the kind ladder is the whole bucket.
+                    0
                 };
                 let method = u8::from(c.kind == SymCat::Function);
                 let name = c.name.as_str();
@@ -1340,44 +1339,30 @@ impl BoneWorkspace {
                 // variant tail too (the user types `Combat`, not
                 // `MobAiState::Combat`), mirroring the score's vname handling.
                 let (exact, band) = match_band_exact(name, q, q_raw);
-                RankedCand { exact, band, case_rank, type_rank, key2, method, entry: c }
+                RankedCand { exact, band, case_rank, type_rank, kind, key2, method, entry: c }
             })
             .collect();
         // We only need the BEST `MAX_COMPLETION_ITEMS`, not a full ordering --
         // the `rank_and_cap` below re-sorts the kept set by sort_text. So select
         // the top-N in O(n) (`select_nth_unstable_by`) rather than sort all in
-        // O(n log n); at empty prefix that is ~2500 candidates.
-        // Non-arg (no expected type) ranks score-first; arg position keeps the
-        // expected-type bucket dominant. Mirrors the two `sort_text_with_score`
-        // layouts so the O(n) top-N select agrees with the final string sort.
+        // O(n log n); at empty prefix that is ~2500 candidates. The RankKey Ord
+        // IS the sort_text encoding, so the select agrees with the string sort
+        // by construction.
         let score_leads = !has_expected;
+        let key_of = |r: &RankedCand| RankKey {
+            exact: r.exact,
+            type_rank: r.type_rank,
+            band: r.band,
+            case: r.case_rank,
+            kind: r.kind,
+            dist: 0,
+            method: r.method,
+            fine: r.key2,
+            len: RankKey::len_key(9999 - r.key2 as i32, r.entry.name.as_str().len()),
+        };
         let rank_cmp = |a: &RankedCand, b: &RankedCand| {
-            let primary = if score_leads {
-                // EXACT name, then COARSE band, then smart-case, then KIND -- the
-                // fine score is only a within-band tiebreak below. Mirrors the
-                // score_leads sort_text layout.
-                (a.exact, a.band, a.case_rank, a.type_rank, a.method)
-                    .cmp(&(b.exact, b.band, b.case_rank, b.type_rank, b.method))
-            } else {
-                // Exact name, then expected-type bucket, then band (case neutral
-                // in arg position).
-                (a.exact, a.type_rank, a.band, a.case_rank, a.method)
-                    .cmp(&(b.exact, b.type_rank, b.band, b.case_rank, b.method))
-            };
-            primary
-                // Fine fuzzy score as the within-band numeric tiebreak (before
-                // length, so a genuinely better match beats a merely shorter one).
-                .then_with(|| a.key2.cmp(&b.key2))
-                // Shorter-first tiebreak, matching the `{len:03}` in sort_text --
-                // only when there's a real match (key2 < 9999 == score > 0); at
-                // empty prefix (key2 == 9999) keep the alphabetical order.
-                .then_with(|| {
-                    if a.key2 < 9999 {
-                        a.entry.name.as_str().len().cmp(&b.entry.name.as_str().len())
-                    } else {
-                        std::cmp::Ordering::Equal
-                    }
-                })
+            key_of(a)
+                .cmp(&key_of(b))
                 .then_with(|| ci_cmp(a.entry.name.as_str().as_bytes(), b.entry.name.as_str().as_bytes()))
         };
         if ranked.len() > MAX_COMPLETION_ITEMS {
@@ -1387,20 +1372,8 @@ impl BoneWorkspace {
         let mut out: Vec<CompletionItem> = ranked
             .into_iter()
             .map(|r| {
-                let RankedCand { exact, band, case_rank, type_rank, key2, method, entry: c } = r;
-                // Reconstruct the exact sort_text the old per-candidate path
-                // produced: `9999 - key2` recovers the clamped score.
-                let sort_text = Some(sort_text_with_score(
-                    case_rank,
-                    type_rank,
-                    c.name.as_str(),
-                    9999 - key2 as i32,
-                    0,
-                    method,
-                    score_leads,
-                    exact,
-                    band,
-                ));
+                let sort_text = Some(key_of(&r).encode(r.entry.name.as_str()));
+                let RankedCand { entry: c, .. } = r;
                 // Function `detail` is the cached signature, materialized HERE for
                 // survivors only; non-fn kinds carry their (cheap) detail already.
                 let detail = match c.kind {
@@ -1469,7 +1442,7 @@ impl BoneWorkspace {
                     kind: Some(CompletionItemKind::STRUCT),
                     insert_text: Some(insert),
                     insert_text_format: fmt,
-                    sort_text: Some(sort_text_with_score(0, 0, &label, 9999, 0, 0, score_leads, 0, 0)),
+                    sort_text: Some(RankKey { len: RankKey::len_key(9999, label.len()), ..Default::default() }.encode(&label)),
                     ..Default::default()
                 });
             }
@@ -1494,7 +1467,7 @@ impl BoneWorkspace {
                     kind: Some(CompletionItemKind::FIELD),
                     detail: Some(pty),
                     insert_text: Some(format!("{pname}: ")),
-                    sort_text: Some(sort_text_with_score(0, 0, pname.as_str(), score, 0, 0, score_leads, ex, bd)),
+                    sort_text: Some(RankKey { exact: ex, band: bd, fine: RankKey::fine(score), len: RankKey::len_key(score, pname.as_str().len()), ..Default::default() }.encode(pname.as_str())),
                     ..Default::default()
                 });
             }
@@ -1513,7 +1486,7 @@ impl BoneWorkspace {
                 out.push(CompletionItem {
                     label: "CoFrame".to_string(),
                     kind: Some(CompletionItemKind::STRUCT),
-                    sort_text: Some(sort_text_with_score(0, 0, "CoFrame", 9999, 0, 0, score_leads, 0, 0)),
+                    sort_text: Some(RankKey { len: RankKey::len_key(9999, "CoFrame".len()), ..Default::default() }.encode("CoFrame")),
                     ..Default::default()
                 });
             }
@@ -1526,7 +1499,7 @@ impl BoneWorkspace {
                     label: "Coroutine<CoFrame>".to_string(),
                     kind: Some(CompletionItemKind::STRUCT),
                     insert_text: Some("Coroutine<CoFrame>".to_string()),
-                    sort_text: Some(sort_text_with_score(0, 0, "Coroutine<CoFrame>", 9999, 0, 0, score_leads, 0, 0)),
+                    sort_text: Some(RankKey { len: RankKey::len_key(9999, "Coroutine<CoFrame>".len()), ..Default::default() }.encode("Coroutine<CoFrame>")),
                     ..Default::default()
                 });
             }
@@ -1535,7 +1508,7 @@ impl BoneWorkspace {
                 kind: Some(CompletionItemKind::STRUCT),
                 insert_text: Some("Coroutine<$0>".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
-                sort_text: Some(sort_text_with_score(0, 0, "Coroutine<>", 9998, 0, 0, score_leads, 0, 0)),
+                sort_text: Some(RankKey { fine: RankKey::fine(9998), len: RankKey::len_key(9998, "Coroutine<>".len()), ..Default::default() }.encode("Coroutine<>")),
                 ..Default::default()
             });
         }
@@ -1552,7 +1525,7 @@ impl BoneWorkspace {
                 kind: Some(CompletionItemKind::SNIPPET),
                 insert_text: Some(insert.to_string()),
                 insert_text_format: fmt,
-                sort_text: Some(sort_text_with_score(0, 0, label, 9999, 0, 0, score_leads, 0, 0)),
+                sort_text: Some(RankKey { len: RankKey::len_key(9999, label.len()), ..Default::default() }.encode(label)),
                 ..Default::default()
             });
         }
@@ -1581,19 +1554,24 @@ impl BoneWorkspace {
             // namespace across files, so `player.movable.grid` works where
             // `player` is a global from another file -- `locals_in_scope` omits
             // globals).
-            let mut roots: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
+            // Root locality rides the kind rung: a path seeded from a LOCAL
+            // ranks with locals (a method on a local yielding the type is a
+            // top-tier candidate), a global-rooted path with globals -- so a
+            // deep chain off some global can't outrank a direct right-type
+            // global (docs/completion-ranking-design.md, principle 3).
+            let mut roots: Vec<(String, String, u8)> = crate::query::locals_in_scope(ws, mid, inf, offset)
                 .into_iter()
-                .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty))
+                .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty, 0))
                 .collect();
             for m in ws.modules.iter() {
                 for (gname, gidx) in m.global_by_name.iter() {
-                    roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty)));
+                    roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty), 1));
                 }
             }
             // UX cap on paths surfaced per root, ranked by distance -- principled
             // "k shortest ways", not a depth limit. `truncated` is logged below.
             const REACH_CAP: usize = 64;
-            for (vname, vty) in roots {
+            for (vname, vty, root_kind) in roots {
                 let res = reach.paths_to(&vty, &expected_types, REACH_CAP);
                 if res.truncated && lsp_profile_enabled() {
                     eprintln!("[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}");
@@ -1625,8 +1603,9 @@ impl BoneWorkspace {
                     // A reachability path IS a value of the expected type
                     // (type_rank 0); the shared key folds in match quality
                     // (prefix on the root beats a scattered subsequence), the
-                    // hop distance, and field-before-method.
-                    let sort_text = arg_sort_text(0, &key, pfx, p.dist, u8::from(p.is_method));
+                    // root locality, the hop distance, and field-before-method.
+                    let sort_text =
+                        arg_sort_text(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method));
                     out.push(CompletionItem {
                         label,
                         kind: Some(kind),
@@ -3424,7 +3403,7 @@ fn field_ref_arg_completions(
                 format!(".{}", fld.name)
             };
             out.push(CompletionItem {
-                sort_text: Some(arg_sort_text(0, fld.name.as_str(), pfx, 1, 0)),
+                sort_text: Some(arg_sort_text(0, 0, fld.name.as_str(), pfx, 1, 0)),
                 // The label carries the leading `.` -- a field ref IS `.co` (no
                 // receiver), unlike member completion where the `recv.` is
                 // already typed. `filter_text` stays the bare name so typing
@@ -3749,30 +3728,30 @@ fn arg_path_penalty(arg: &str) -> i32 {
 }
 
 
-/// Build the arg-position `sort_text`. Ordering is most-significant first:
-/// `type_rank` (0 value-of-expected-type / 1 fn-returning-it / 2 other), then
-/// the fuzzy match score DESCENDING (long boundary-aligned runs win -- `9999 -
-/// score` so higher score sorts earlier), then `dist` (shorter paths first),
-/// then `kind` (0 field/var < 1 method/fn), then the lowercased insert string
-/// (case-insensitive tiebreak -- an UPPER_CASE global no longer wins a tie over
-/// a lowercase local). All fields are fixed-width so lexicographic compare
-/// matches the tuple.
-fn arg_sort_text(type_rank: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> String {
+/// Build the arg-position / reach-path / member-default `sort_text`: a
+/// case- and kind-neutral `RankKey` with the caller's `type_rank` (0
+/// value-of-expected-type / 1 fn-returning-it / 2 other), `dist` (shorter
+/// paths first) and `method` (field/var before method/fn).
+fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> String {
     // `fuzzy_score` lowercases the candidate inline; `query` is pre-lowercased.
     let score = fuzzy_score(cand.as_bytes(), query);
     // Arg path is case-neutral, so the pre-lowercased query stands in for the raw
     // one (cs/ci prefix collapse to one band -- band is tertiary here anyway).
     let (exact, band) = match_band_exact(cand, query, query);
-    sort_text_with_score(0, type_rank, cand, score, dist, method, false, exact, band)
+    let key = RankKey {
+        exact,
+        type_rank,
+        band,
+        kind,
+        dist,
+        method,
+        fine: RankKey::fine(score),
+        len: RankKey::len_key(score, cand.len()),
+        ..Default::default()
+    };
+    key.encode(cand)
 }
 
-
-/// Like [`arg_sort_text`] but with the fuzzy score supplied by the caller --
-/// used when the string the user is TYPING differs from the displayed `cand`.
-/// An enum variant displays/insert as `Enum::Variant` but the user types the
-/// VARIANT NAME, so the score is taken against `Variant` (else `nog` scores low
-/// against `targeterror::notground` -- `n` is mid-string, no position-0 bonus --
-/// and loses to a long path that starts with `n`).
 /// `(exact, band)` match-quality classification for the ranking ladder
 /// (`docs/completion-ranking-design.md`). `exact` = 0 iff `cand` equals the
 /// query case-exact (a whole-name hit outranks everything). `band` is the COARSE
@@ -3807,48 +3786,6 @@ fn match_band_exact(cand: &str, q_lc: &[u8], q_raw: &[u8]) -> (u8, u8) {
         return (e.min(e2), b.min(b2));
     }
     (e, b)
-}
-
-fn sort_text_with_score(
-    case_rank: u8,
-    type_rank: u8,
-    cand: &str,
-    score: i32,
-    dist: u16,
-    method: u8,
-    score_leads: bool,
-    exact: u8,
-    band: u8,
-) -> String {
-    let lc = cand.to_lowercase();
-    let score = score.clamp(0, 9999);
-    // `{len:03}` before the name is a shorter-first tiebreak: equal-band
-    // candidates (e.g. two prefix matches `attacking` / `attack_timer` of
-    // `attack`) rank by length, so the tighter match wins -- without it the
-    // alphabetical name fallback puts `attack_timer` first (`_` < `i`). Gated on
-    // `score > 0`: at an EMPTY prefix every candidate scores 0 and there's no
-    // match to be "tighter" about, so length must NOT reorder (else short stdlib
-    // names bury longer user symbols past the result cap).
-    let len_key = if score > 0 { lc.len().min(999) } else { 0 };
-    let key2 = 9999 - score;
-    let d = dist.min(99);
-    if score_leads {
-        // Non-arg (plain identifier prefix): EXACT name, then the COARSE match
-        // BAND, then the smart-case tiebreak, then KIND -- the fine score
-        // (`key2`) is only a within-band tiebreak, so a boundary-richer longer
-        // name can't outrank a same-band local on raw points (targrid -> the
-        // local `target_grid` over the fn `target_ref_grid`). Case still decides
-        // same-band near-ties (`jlog` -> `journal_log` over `JIT_TRACE_LOG`, both
-        // clean-band). Call-through items (type_rank >= 4) stay bucketed last.
-        let ct_bucket = u8::from(type_rank >= 4);
-        let kind = type_rank.min(3);
-        format!("{ct_bucket}{exact}{band}{case_rank}{kind}{d:02}{method}{key2:04}{len_key:03}{lc}")
-    } else {
-        // Arg / member / type-directed: an EXACT name still wins, then the
-        // expected-TYPE bucket dominates (case neutral there), then band, then
-        // the fine score as a within-band tiebreak.
-        format!("{exact}{type_rank}{band}{case_rank}{d:02}{method}{key2:04}{len_key:03}{lc}")
-    }
 }
 
 /// Strip a trailing `name($0)` / `name()` CALL template to the bare name when
@@ -4319,14 +4256,35 @@ fn call_through_param_completions(
             kind: Some(CompletionItemKind::FUNCTION),
             insert_text: Some(insert_text),
             insert_text_format,
-            // type_rank 4: a synthesized whole-call, below every direct candidate
-            // (vars/fns/structs/variants all rank <= 3); ranked among themselves by
-            // match quality. A LOCAL-SEEDED confident autofill carries type_rank 0
-            // instead, promoting it into the direct-candidate region. Reuse the
-            // score computed above.
+            // Rank 4 = a synthesized whole-call, below every direct candidate;
+            // a LOCAL-SEEDED promotion (0/1) lifts it into the direct region.
+            // With an expected type the promotion IS type relevance
+            // (`type_rank`); with none it is only the coarse bucket, so the
+            // promoted rank rides the KIND rung instead (a confident autofill
+            // ranks with locals, a partial with globals) and `type_rank`
+            // carries just direct-vs-synth. Reuse the score computed above.
             sort_text: {
                 let (ex, bd) = match_band_exact(&call, q, q);
-                Some(sort_text_with_score(0, type_rank, &call, score, 0, 1, score_leads, ex, bd))
+                let key = if score_leads {
+                    RankKey {
+                        exact: ex,
+                        type_rank: if type_rank >= 4 { 4 } else { 0 },
+                        band: bd,
+                        kind: type_rank.min(3),
+                        ..Default::default()
+                    }
+                } else {
+                    // Typed slot: kind 2 (a call synth is fn-shaped), so a real
+                    // local of the slot type still beats a same-rank synth.
+                    RankKey { exact: ex, type_rank, band: bd, kind: 2, ..Default::default() }
+                };
+                let key = RankKey {
+                    method: 1,
+                    fine: RankKey::fine(score),
+                    len: RankKey::len_key(score, call.len()),
+                    ..key
+                };
+                Some(key.encode(&call))
             },
             ..Default::default()
         });
@@ -4449,32 +4407,46 @@ fn fn_is_coroutine(ws: &Workspace, name: &str) -> bool {
 }
 
 /// Member sort_text used ONLY in a bool context (`if`/`while <chain>`), where no
-/// reach-path items coexist. Inserts a bool-priority digit right after the score
-/// so `bool` fields win a SCORE TIE -- a soft nudge, never overriding a
-/// better-scoring match. Mirrors `sort_text_with_score`'s layout otherwise.
+/// reach-path items coexist. A `bool` member rides the type-relevance rung
+/// (rank 0), everything else 1 -- the bool-context analogue of an expected
+/// type. Banded like every other path: a prefix-tier match outranks a
+/// boundary-richer higher-scoring one.
 fn member_bool_sort_text(name: &str, pfx: &[u8], is_bool: bool, method: u8) -> String {
-    let lc = name.to_lowercase();
-    let score = fuzzy_score(name.as_bytes(), pfx).clamp(0, 9999);
-    let bp = u8::from(!is_bool); // 0 = bool (ranks first), 1 = everything else
-    // Leading `0` = case-neutral, aligning with `sort_text_with_score`'s
-    // `{case_rank}` column (member context does not case-rank).
-    format!("00{:04}{bp}01{method}{:03}{lc}", 9999 - score, lc.len().min(999))
+    let score = fuzzy_score(name.as_bytes(), pfx);
+    let (exact, band) = match_band_exact(name, pfx, pfx);
+    let key = RankKey {
+        exact,
+        type_rank: u8::from(!is_bool),
+        band,
+        dist: 1,
+        method,
+        fine: RankKey::fine(score),
+        len: RankKey::len_key(score, name.len()),
+        ..Default::default()
+    };
+    key.encode(name)
 }
 
 /// Member sort_text used ONLY in a call-arg position (`callee(.., recv.<prefix>)`
-/// with a known expected param type). Inserts a type-match priority digit BEFORE
-/// the score so a field/method/reach-path whose type MATCHES the expected param
-/// DOMINATES (mirrors the global path, where a value of the expected type
-/// outranks a better-prefix candidate of the wrong type). The prefix filter still
-/// removes wrong-prefix candidates first, so this only reorders genuine matches.
+/// with a known expected param type). A member whose type MATCHES the expected
+/// param takes type-relevance rank 0 and DOMINATES (mirrors the global path,
+/// where a value of the expected type outranks a better-prefix candidate of the
+/// wrong type). The prefix filter still removes wrong-prefix candidates first,
+/// so this only reorders genuine matches.
 fn member_arg_sort_text(name: &str, pfx: &[u8], type_match: bool, method: u8, dist: u16) -> String {
-    let lc = name.to_lowercase();
-    let score = fuzzy_score(name.as_bytes(), pfx).clamp(0, 9999);
-    let tp = u8::from(!type_match); // 0 = matches expected type (first), 1 = else
-    let len_key = if score > 0 { lc.len().min(999) } else { 0 };
-    // Leading `0` = case-neutral, aligning with `sort_text_with_score`'s
-    // `{case_rank}` column (member context does not case-rank).
-    format!("00{tp}{:04}{:02}{method}{len_key:03}{lc}", 9999 - score, dist.min(99))
+    let score = fuzzy_score(name.as_bytes(), pfx);
+    let (exact, band) = match_band_exact(name, pfx, pfx);
+    let key = RankKey {
+        exact,
+        type_rank: u8::from(!type_match),
+        band,
+        dist,
+        method,
+        fine: RankKey::fine(score),
+        len: RankKey::len_key(score, name.len()),
+        ..Default::default()
+    };
+    key.encode(name)
 }
 
 /// Whether a struct named `name` is defined anywhere in the workspace.
@@ -4624,7 +4596,13 @@ fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<CompletionItem> {
                 insert_text: Some(name.to_string()),
                 sort_text: {
                     let (ex, bd) = match_band_exact(name, prefix.as_bytes(), prefix.as_bytes());
-                    Some(sort_text_with_score(0, 0, name, 9999, 0, 0, true, ex, bd))
+                    let key = RankKey {
+                        exact: ex,
+                        band: bd,
+                        len: RankKey::len_key(9999, name.len()),
+                        ..Default::default()
+                    };
+                    Some(key.encode(name))
                 },
                 ..Default::default()
             });
@@ -5293,7 +5271,7 @@ fn member_completion_items(
                 } else if arg_ctx {
                     member_arg_sort_text(&name, pfx, tmatch, 0, 1)
                 } else {
-                    arg_sort_text(0, &name, pfx, 1, 0)
+                    arg_sort_text(0, 0, &name, pfx, 1, 0)
                 }),
                 label: format!("{name}: {ty}"),
                 kind: Some(CompletionItemKind::FIELD),
@@ -5319,7 +5297,7 @@ fn member_completion_items(
                     } else if arg_ctx {
                         member_arg_sort_text(&m.name, pfx, rmatch, 1, 1)
                     } else {
-                        arg_sort_text(0, &m.name, pfx, 1, 1)
+                        arg_sort_text(0, 0, &m.name, pfx, 1, 1)
                     }),
                     label: m.name.clone(),
                     label_details: fn_or_type_label_details(SymCat::Function, Some(&m.signature)),
@@ -5339,7 +5317,7 @@ fn member_completion_items(
         if recv_struct.is_some_and(|s| s.as_str() == "Entity") {
             for it in items.iter_mut() {
                 if it.label == "get" {
-                    it.sort_text = Some(sort_text_with_score(0, 0, "get", 9999, 0, 0, false, 0, 0));
+                    it.sort_text = Some(RankKey { len: RankKey::len_key(9999, "get".len()), ..Default::default() }.encode("get"));
                 }
             }
             if clean_match(b"get().unwrap()", prefix.as_bytes()) {
@@ -5348,7 +5326,7 @@ fn member_completion_items(
                     kind: Some(CompletionItemKind::METHOD),
                     detail: Some("unwrap the Entity's value (T)".to_string()),
                     insert_text: Some("get().unwrap()".to_string()),
-                    sort_text: Some(sort_text_with_score(0, 0, "get().unwrap()", 9998, 0, 0, false, 0, 0)),
+                    sort_text: Some(RankKey { fine: RankKey::fine(9998), len: RankKey::len_key(9998, "get().unwrap()".len()), ..Default::default() }.encode("get().unwrap()")),
                     ..Default::default()
                 });
             }
