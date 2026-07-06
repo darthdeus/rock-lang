@@ -1488,9 +1488,6 @@ impl BoneWorkspace {
                     roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty), 1));
                 }
             }
-            // UX cap on paths surfaced per root, ranked by distance -- principled
-            // "k shortest ways", not a depth limit. `truncated` is logged below.
-            const REACH_CAP: usize = 64;
             for (vname, vty, root_kind) in roots {
                 let res = reach.paths_to(&vty, &expected_types, REACH_CAP);
                 if res.truncated && lsp_profile_enabled() {
@@ -3943,7 +3940,7 @@ fn call_through_param_completions(
         .collect();
 
     // Call-through is a synthesized, bottom-ranked (bucket 4) convenience; the
-    // GLOBAL `CAP` keeps it from burying the direct candidates. Per fn, the
+    // GLOBAL `CALL_THROUGH_CAP` keeps it from burying the direct candidates. Per fn, the
     // per-fn cap applies ONLY to METHOD-chain args (`x.foo().bar()`), which are
     // unbounded reach-noise; direct values + field paths are NOT capped, so a
     // committed query (`tilecenp` -> `tile_center`) can explore all the sibling
@@ -3951,8 +3948,7 @@ fn call_through_param_completions(
     // Call-through is the ONLY arg-suggestion path while the fn name is still an
     // abbreviation -- arg completion needs a resolved callee to know the param
     // type, which `tilecen(` doesn't give -- so it must be browsable, not capped.
-    const CAP: usize = 10;
-    const PER_FN_METHOD_CAP: usize = 2;
+
 
     // Pass 1: walk only the first-char bucket (lever (a)) and keep the fns that
     // clear the noise guard, recording `k` (how many leading query chars the
@@ -4032,7 +4028,7 @@ fn call_through_param_completions(
     let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
 
     // Collect lightweight candidates (score, fn index, arg, payload) across all
-    // fns; materialize ONLY the global top `CAP`. Per fn we keep ALL simple args
+    // fns; materialize ONLY the global top `CALL_THROUGH_CAP`. Per fn we keep ALL simple args
     // (browsable fields) so the candidate pool can be large at a short prefix, but
     // we don't `format!` items we'll drop -- rank cheap, materialize survivors
     // (same pattern as general completion).
@@ -4081,7 +4077,7 @@ fn call_through_param_completions(
         }
         // Cap only METHOD-chain args (an arg string containing a `(` -- the
         // unbounded `x.foo().bar()` reach-noise); keep ALL direct values / field
-        // paths so sibling fields are browsable. The global `CAP` backstops the
+        // paths so sibling fields are browsable. The global `CALL_THROUGH_CAP` backstops the
         // total. (Method args still sort against everything in the final cap.)
         let (mut methods, simple): (Vec<_>, Vec<_>) =
             scored.into_iter().partition(|(_, a, _, _)| a.contains('('));
@@ -4121,12 +4117,12 @@ fn call_through_param_completions(
             cands.push((score, fi, a.as_str(), *payload, 0));
         }
     }
-    // Global top `CAP` by score (then ci-arg tiebreak); materialize only those.
-    if cands.len() > CAP {
-        cands.select_nth_unstable_by(CAP, |x, y| {
+    // Global top `CALL_THROUGH_CAP` by score (then ci-arg tiebreak); materialize only those.
+    if cands.len() > CALL_THROUGH_CAP {
+        cands.select_nth_unstable_by(CALL_THROUGH_CAP, |x, y| {
             y.0.cmp(&x.0).then_with(|| ci_cmp(x.2.as_bytes(), y.2.as_bytes()))
         });
-        cands.truncate(CAP);
+        cands.truncate(CALL_THROUGH_CAP);
     }
     let mut out: Vec<CompletionItem> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4210,9 +4206,14 @@ fn call_through_param_completions(
         });
     }
     // Final sort by sort_text; the global select above already bounded the count.
-    rank_and_cap(&mut out, CAP, "call-through");
+    rank_and_cap(&mut out, CALL_THROUGH_CAP, "call-through");
     (out, counts)
 }
+
+// === Completion tuning (docs/completion-v2-design.md) =======================
+// Every cap/threshold the ranking pipeline exposes, in one block. The fuzzy
+// score weights (FZ_*) live next to the DP above; the RankKey field order is
+// the ladder itself (rank_key.rs).
 
 /// Max items returned by general (non-member) completion. Generous headroom over
 /// a screenful -- the client narrows within a keystroke and re-requests (every
@@ -4220,6 +4221,23 @@ fn call_through_param_completions(
 /// serializing the whole workspace (2539 items / ~518 KB on mag at empty prefix)
 /// when the client will throw nearly all of it away and ask again.
 const MAX_COMPLETION_ITEMS: usize = 200;
+
+/// Max reach paths expanded per ROOT toward the expected type -- a principled
+/// "k shortest ways" (ranked by distance), not a depth limit. Shared by the
+/// general arg-position expansion and the member transitive-path expansion.
+const REACH_CAP: usize = 64;
+
+/// Call-through: max synthesized `f(arg)` items kept overall, and max
+/// METHOD-CHAIN args kept per fn (direct values / field paths are uncapped so
+/// sibling fields stay browsable; the global cap backstops the total).
+const CALL_THROUGH_CAP: usize = 10;
+const PER_FN_METHOD_CAP: usize = 2;
+
+/// Diversity: within the first `DIVERSITY_WINDOW` visible slots, at most
+/// `REACH_PATH_TOP_CAP` dotted reach paths -- the overflow defers just below
+/// (kept, browsable) so a same-type path flood can't bury other kinds.
+const DIVERSITY_WINDOW: usize = 12;
+const REACH_PATH_TOP_CAP: usize = 3;
 
 /// Case-insensitive ASCII byte-slice ordering -- the alloc-free equivalent of
 /// `a.to_lowercase().cmp(&b.to_lowercase())` for the (ASCII) identifier
@@ -4284,8 +4302,6 @@ fn rank_and_cap(items: &mut Vec<CompletionItem>, cap: usize, what: &str) {
 /// dropped -- browsable by scrolling / narrowing). Tunable; see
 /// `docs/completion-ranking-design.md` (Divergence 3, diversity).
 fn diversify(items: &mut Vec<CompletionItem>) {
-    const DIVERSITY_WINDOW: usize = 12;
-    const REACH_PATH_TOP_CAP: usize = 3;
     if items.len() <= REACH_PATH_TOP_CAP {
         return;
     }
@@ -5453,7 +5469,6 @@ fn member_completion_items(
                         &local_idx
                     }
                 };
-                const REACH_CAP: usize = 64;
                 let res = idx.paths_to(rs.as_str(), reach_targets, REACH_CAP);
                 let pfx = prefix.as_bytes();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
