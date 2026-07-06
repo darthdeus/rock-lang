@@ -2409,6 +2409,21 @@ fn classify_token(
         // Contextual `co` keyword — only highlighted when it precedes `fn`
         // (`co fn ...`); a bare `co` identifier falls through to the Ident arm.
         T::Ident(n) if n.as_str() == "co" && matches!(next_kind, Some(T::Fn)) => (TT_KEYWORD, 0),
+        // A macro invocation (`get_speed()`): the call-site ident is a bare token
+        // whose name resolves to a MACRO in the name map. Macro expansion retags
+        // the expanded template body onto the whole invocation span, so the HIR
+        // offset map can carry the template's first ref (e.g. a global ->
+        // VARIABLE+STATIC) at the call-site offset and would otherwise win. Claim
+        // the call site as MACRO here, gated on call position (`(` next) and
+        // non-member, so a local that merely shadows a macro name (used as a
+        // value, no following paren) keeps its HIR classification.
+        T::Ident(n)
+            if !is_member
+                && matches!(next_kind, Some(T::OpenParen))
+                && names.get(n) == Some(&TT_MACRO) =>
+        {
+            (TT_MACRO, 0)
+        }
         T::Fn | T::Operator | T::Table | T::Let | T::Return | T::Defer | T::Yield
         | T::Struct | T::Newtype | T::If | T::Else | T::For | T::Loop | T::In | T::While
         | T::Break | T::Continue | T::Null | T::Enum | T::Match | T::Extern | T::Global

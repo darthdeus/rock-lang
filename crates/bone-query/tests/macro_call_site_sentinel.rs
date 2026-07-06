@@ -1,23 +1,20 @@
-// PINNED BUG: a macro call site whose EXPANSION begins with a variable /
-// global / enum-variant reference from the macro TEMPLATE colors as that
-// reference (modifiers included), not as MACRO.
+// GUARD: a macro call site whose EXPANSION begins with a variable / global /
+// enum-variant reference from the macro TEMPLATE must still color as MACRO,
+// not as that reference.
 //
 // Mechanics: semantic tokens classify raw-source ident tokens HIR-first (by
 // span-start offset), falling back to the workspace name map where macro
 // names live. Macro expansion replaces the call expr with the template body
 // and `retag_block` stamps the WHOLE invocation's span onto every expanded
 // template node -- so a template-side `Global(SPEED)` ends up with a span
-// whose START is the call-site ident's first byte. Its map entry
-// (variable+static) then beats the name map's MACRO at exactly that offset.
-// Argument substitutions keep their caller spans, so `m(x)`-shaped macros
-// whose bodies only use args/literals are unaffected (covered green in
-// semantic_tokens.rs::macro_def_name_and_call_site_color_macro).
+// whose START is the call-site ident's first byte, and its HIR entry
+// (variable+static) used to beat the name map's MACRO at exactly that offset.
 //
-// The assertions are INVERTED: they pass today because the bug exists. If
-// they fail with MACRO / empty modifiers, a fix landed (e.g. the Session
-// capturing macro CALL spans at parse time as an authoritative overlay, the
-// way it already captures defs) -- flip them and fold this into the macro
-// cases in semantic_tokens.rs.
+// Fixed in classify_token (bone-query/src/backend.rs): an ident in call
+// position (`(` next, non-member) whose name resolves to MACRO claims the
+// call site as MACRO before the HIR offset lookup runs. Gated on call
+// position so a local that merely shadows a macro name (used as a value, no
+// following paren) keeps its HIR classification.
 
 use bone_query::{semantic_tokens_legend, semantic_tokens_modifiers_legend, BoneWorkspace};
 use lsp_types::{SemanticTokenModifier, SemanticTokenType};
@@ -59,15 +56,13 @@ fn macro_call_site_shadowed_by_retagged_template_global() {
 
     assert_eq!(
         ty,
-        SemanticTokenType::VARIABLE,
-        "PINNED BUG: the call site colors as the retagged template global \
-         (VARIABLE), not MACRO. If this is MACRO now, the fix landed -- flip \
-         both assertions and fold into semantic_tokens.rs"
+        SemanticTokenType::MACRO,
+        "the call site must color as MACRO, not the retagged template global"
     );
     assert_eq!(
         mods,
-        vec![SemanticTokenModifier::STATIC],
-        "PINNED BUG: the template global's `static` modifier leaks onto the \
-         call site (renders as a bold mutable global). Flip when fixed."
+        Vec::<SemanticTokenModifier>::new(),
+        "the macro call site carries no modifiers (the template global's \
+         `static` must not leak onto it)"
     );
 }
