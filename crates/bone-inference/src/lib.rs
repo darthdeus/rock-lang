@@ -2216,13 +2216,22 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             },
         ) => {
             if ctor_a != ctor_b {
-                unify_fail!(
-                    gamma,
-                    span,
-                    "Failed to unify {} and {}, different generic constructors",
-                    gamma.workspace.render(Some(&gamma.out), a),
-                    gamma.workspace.render(Some(&gamma.out), b)
-                )
+                let a_str = gamma.workspace.render(Some(&gamma.out), a);
+                let b_str = gamma.workspace.render(Some(&gamma.out), b);
+
+                // Both sides are plain nominals (structs/enums with no type
+                // args) far more often than generics; "different generic
+                // constructors" is nonsense for those. Only mention generics
+                // when a side actually has type parameters.
+                if params_a.is_empty() && params_b.is_empty() {
+                    unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+                } else {
+                    unify_fail!(
+                        gamma,
+                        span,
+                        "type mismatch: expected `{b_str}`, found `{a_str}` (different type constructors)"
+                    )
+                }
             }
 
             if params_a.len() != params_b.len() {
@@ -3992,6 +4001,59 @@ fn resolve_newtype(gamma: &Gamma, name: Ustr) -> Option<NewtypeId> {
 }
 
 fn resolve_named_call(
+    gamma: &mut Gamma,
+    c: BodyCtx,
+    name: Ustr,
+    recv_override: Option<TyId>,
+    args: IdxRange<Expr>,
+    call_expr: Idx<Expr>,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    let res = resolve_named_call_inner(gamma, c, name, recv_override, args, call_expr, span);
+
+    let Err(e) = res else { return res };
+    if gamma.quiet {
+        return Err(e);
+    }
+
+    // `recv.name(...)` that failed to resolve: if `recv` has a field `name`
+    // that isn't callable, the `()` is almost certainly a slip (a field read
+    // written as a call). Gate on the failure being about the receiver or the
+    // call itself, so a later-arg mismatch under a legit UFCS call keeps its
+    // real error.
+    let (recv_ty, recv_span) = match recv_override {
+        Some(r) => (resolve(gamma, r, span), None),
+        None if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
+            match infer_expr(c, gamma, args.start()) {
+                Ok(t) => (resolve(gamma, t, span), Some(c.body.expr_spans[args.start()])),
+                Err(_) => return Err(e),
+            }
+        }
+        None => return Err(e),
+    };
+
+    let err_span = e.labels.first().map(|l| l.span);
+    let about_receiver = err_span == Some(span) || (recv_span.is_some() && err_span == recv_span);
+    if about_receiver {
+        if let Ok(fty) = struct_field_ty(gamma, recv_ty, name, span) {
+            let fty = resolve(gamma, fty, span);
+            if !matches!(gamma.get(fty), TypeExpr::Function { .. }) {
+                let recv_str = gamma.workspace.render(Some(&gamma.out), recv_ty);
+                let fty_str = gamma.workspace.render(Some(&gamma.out), fty);
+                return Err(CompilerError::new_with_label(
+                    span,
+                    format!(
+                        "`{name}` is a field of `{recv_str}` (type `{fty_str}`), not a method -- remove the `()` to read the field"
+                    ),
+                ));
+            }
+        }
+    }
+
+    Err(e)
+}
+
+fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
     name: Ustr,
