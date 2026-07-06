@@ -56,7 +56,7 @@ fn skull_emit_full(
 /// `semantic` mirror `BonePhaseTimes` (skull shares bone's front half: same
 /// `parse_rock` + `semantic_pass`), so they're directly comparable; `emit` is
 /// the codegen skull adds on top (`skull::emit_workspace`). Consumed by
-/// `backend-stats` for the 3-way rock/bone/skull comparison.
+/// `backend-stats` for the bone-vs-skull comparison.
 #[derive(Default, Clone)]
 pub struct SkullPhaseTimes {
     pub parse: Duration,
@@ -981,41 +981,23 @@ fn collect_skull_sims(
 pub fn skull_compile_game_and_collect_sims(
     dir: &str,
     main_path: &std::path::Path,
-) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>)> {
-    use std::path::PathBuf;
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-    let sources = crate::unified_compile::discover_sources(&spec)
-        .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
-    let (mut modules, entry_file) = skull_assemble_project(&sources)
-        .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
-    let ws = crate::bone_backend::check_modules(&mut modules)
-        .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
-    let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
-        .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
+) -> Result<(Vec<String>, HashMap<String, Vec<(String, String)>>, SkullStone)> {
+    // Session-based build (same machinery as `rock stone`, tests included so the
+    // `@sim` bodies are in the program). The live SkullStone is returned so the
+    // runner can serve mid-sim `reload_edit` ops through the REAL incremental
+    // path (`docs/sim-reload-harness-plan.md`).
+    let incremental_path = main_path.with_file_name("incremental.lua");
+    let stone = SkullStone::init_with_tests(dir, main_path, &incremental_path)
+        .map_err(|e| anyhow::anyhow!("cannot compile project {dir}: {e}"))?;
 
-    // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`). The
-    // game/stone path emits separately from run/compile, so it needs the same
-    // host-computed registry appended before the `main` wrapper.
-    let registry = build_rock_globals_registry(&ws, &spec);
-    let lua = format!("{}{}", emit.lua, registry);
-
-    write_full_main(
-        &skull_game_preamble(dir),
-        &lua,
-        main_path,
-        &main_path.with_file_name("incremental.lua"),
-    )
-    .map_err(|e| anyhow::anyhow!("writing {}: {e}", main_path.display()))?;
-
-    let sims = collect_skull_sims(&ws);
+    let sims = collect_skull_sims(stone.session.workspace());
     let mut wire_names = Vec::with_capacity(sims.len());
     let mut env_by_wire = HashMap::with_capacity(sims.len());
     for (wire, env) in sims {
         wire_names.push(wire.clone());
         env_by_wire.insert(wire, env);
     }
-    Ok((wire_names, env_by_wire))
+    Ok((wire_names, env_by_wire, stone))
 }
 
 /// `rock compile <project-dir> --backend skull` — assemble + type-check + emit
@@ -3719,7 +3701,7 @@ fn skull_game_main(preamble: &str, emit_lua: &str) -> String {
 /// case and is fine; ANY other error is surfaced -- a stale `incremental.lua`
 /// left beside a fresh `main.lua` would reintroduce the overlay/main desync the
 /// two-file split exists to avoid.
-fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
+pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
     match std::fs::remove_file(incremental_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -3794,6 +3776,10 @@ pub struct SkullStone {
     /// `SkullReload::ShapeChanged` (restart request) instead of writing
     /// (docs/hot-reload-schema-drift-plan.md).
     shape_hashes: skull::ShapeHashes,
+    /// Whether discovery keeps test-only files (tests/ dirs). The stone game
+    /// build excludes them; the sim-runner build includes them (`@sim` bodies
+    /// live there). Recorded so `recompile`'s full re-discover matches init.
+    include_tests: bool,
 }
 
 /// The Session emit gate. `bone_session` lowering is TOTAL -- it always
@@ -3823,12 +3809,24 @@ fn session_emit_verdict(
 impl SkullStone {
     /// Initial build: warm the Session, `emit_full` -> game-shaped `main.lua`,
     /// wipe `incremental.lua`. Errors render against the project sources.
+    /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
+    /// can't break the running game. See `docs/sims-out-of-game-build-plan.md`.
     pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
+        Self::init_impl(dir, main_path, incremental_path, false)
+    }
+
+    /// Sim-runner build: same as [`SkullStone::init`] but discovery KEEPS
+    /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
+    /// of the emitted program.
+    pub fn init_with_tests(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
+        Self::init_impl(dir, main_path, incremental_path, true)
+    }
+
+    fn init_impl(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path, include_tests: bool) -> Result<SkullStone> {
         use std::path::PathBuf;
         let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-        // Game build: exclude test-only files (tests/ dirs) so a broken sim/test
-        // can't break the running game. See `docs/sims-out-of-game-build-plan.md`.
-        let sources = crate::unified_compile::discover_sources(&spec)?.production_only();
+        let discovered = crate::unified_compile::discover_sources(&spec)?;
+        let sources = if include_tests { discovered } else { discovered.production_only() };
         let files: Vec<(String, String)> = sources
             .files
             .iter()
@@ -3854,7 +3852,7 @@ impl SkullStone {
         let preamble = skull_game_preamble(dir);
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(session.workspace());
-        Ok(SkullStone { session, cache, preamble, dir: dir.to_string(), sources, shape_hashes })
+        Ok(SkullStone { session, cache, preamble, dir: dir.to_string(), sources, shape_hashes, include_tests })
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
@@ -3892,21 +3890,61 @@ impl SkullStone {
         }
         if need_full {
             let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(&self.dir));
-            // Game build: keep test-only files (tests/ dirs) out of the live
-            // program. See `docs/sims-out-of-game-build-plan.md`.
-            self.sources = crate::unified_compile::discover_sources(&spec)?.production_only();
+            // Re-discover with the same test-file policy as init (game build
+            // excludes tests/ dirs; sim build keeps them).
+            let discovered = crate::unified_compile::discover_sources(&spec)?;
+            self.sources = if self.include_tests { discovered } else { discovered.production_only() };
             feed = self.sources.files.iter()
                 .map(|f| { let f = f.borrow(); (f.file.to_id_path(), f.contents.clone()) })
                 .collect();
         }
 
+        self.route_and_emit(&feed, main_path, incremental_path, t_cook)
+    }
+
+    /// In-memory edit: replace one source's contents WITHOUT touching disk and
+    /// route/emit exactly like a watcher edit. The sim reload-injection path
+    /// (`docs/sim-reload-harness-plan.md`): the runner edits a source in memory
+    /// and writes only the overlay; the project tree is never mutated. Rejects
+    /// a path the build didn't discover -- an edit to an unknown file would
+    /// otherwise silently do nothing.
+    pub fn apply_edit(&mut self, path: &std::path::Path, new_text: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullReload> {
+        let t_cook = Instant::now();
+        let canon = std::fs::canonicalize(path)
+            .map_err(|e| anyhow::anyhow!("apply_edit: cannot canonicalize `{}`: {e}", path.display()))?;
+        let id = canon.to_string_lossy().into_owned();
+        let Some(f) = self.sources.files.iter().find(|f| f.borrow().file.to_id_path() == id) else {
+            anyhow::bail!("apply_edit: `{id}` is not a discovered source of `{}`", self.dir);
+        };
+        f.borrow_mut().contents = new_text.to_string(); // error rendering reads this
+        let feed = vec![(id, new_text.to_string())];
+        self.route_and_emit(&feed, main_path, incremental_path, t_cook)
+    }
+
+    /// The current in-session text of a source (reflects prior `apply_edit`s,
+    /// which never touch disk). None if the path isn't a discovered source.
+    pub fn source_text(&self, path: &std::path::Path) -> Option<String> {
+        let id = std::fs::canonicalize(path).ok()?.to_string_lossy().into_owned();
+        self.sources.files.iter()
+            .find(|f| f.borrow().file.to_id_path() == id)
+            .map(|f| f.borrow().contents.clone())
+    }
+
+    /// Feed source edits into the Session, route by the worst tier, and write
+    /// the output: any interface/structural edit -> full `main.lua` + overlay
+    /// wipe (behind the schema-drift gate); body-only edits -> `incremental.lua`
+    /// overlay. Shared by the disk-driven watcher path ([`SkullStone::recompile`])
+    /// and the in-memory sim reload injection ([`SkullStone::apply_edit`]).
+    /// `t_cook` is the caller's front-end timer (includes its feed construction).
+    fn route_and_emit(&mut self, feed: &[(String, String)], main_path: &std::path::Path, incremental_path: &std::path::Path, t_cook: Instant) -> Result<SkullReload> {
+        use std::path::PathBuf;
         // Cheap Arc-clone of the cache handle so error rendering can read the
         // (shared) sources while the Session loop borrows `self.session` mutably.
         let sources = self.sources.clone();
         let mut reinferred: Vec<(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)> = Vec::new();
         let mut full = false;
         let mut any_change = false;
-        for (p, text) in &feed {
+        for (p, text) in feed {
             let upd = self
                 .session
                 .update_file(p, text)

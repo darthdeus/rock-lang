@@ -14,6 +14,7 @@ pub mod query;
 pub mod reachability;
 
 mod backend;
+mod cursor_context;
 pub use backend::*;
 
 mod ctags;

@@ -45,40 +45,8 @@ pub struct DocumentVersionTracker {
     pub versions: HashMap<String, i32>,
 }
 
-/// Which typechecker backend serves LSP requests.
-///
-/// `Bone` routes every feature through the bone facade (`bone_query`) and is
-/// the default. `Rock` is the legacy rock-semantic path, opt-in only while it
-/// is being retired (see `docs/rock-deletion-plan.md`). Selected once at
-/// server start via `ROCK_LSP_BACKEND` / `ROCK_BACKEND` (`=rock` opts out).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub enum LspBackend {
-    #[default]
-    Bone,
-    Rock,
-}
-
-impl LspBackend {
-    pub fn from_env() -> Self {
-        let pick = std::env::var("ROCK_LSP_BACKEND")
-            .ok()
-            .or_else(|| std::env::var("ROCK_BACKEND").ok());
-        match pick.as_deref() {
-            Some("rock") => LspBackend::Rock,
-            _ => LspBackend::Bone,
-        }
-    }
-
-    pub fn is_bone(self) -> bool {
-        self == LspBackend::Bone
-    }
-}
-
 /// Workspace managing the bone session plus per-document LSP caches.
 pub struct LspWorkspace {
-    /// Selected typechecker backend (see [`LspBackend`]).
-    pub backend: LspBackend,
-
     /// bone-backed state: the per-root sessions that serve every query.
     pub bone: bone_query::BoneWorkspace,
 
@@ -102,7 +70,6 @@ pub struct LspWorkspace {
 impl LspWorkspace {
     pub fn new() -> Self {
         Self {
-            backend: LspBackend::from_env(),
             bone: bone_query::BoneWorkspace::new(),
             semantic_token_cache: HashMap::new(),
             inlay_hint_cache: HashMap::new(),

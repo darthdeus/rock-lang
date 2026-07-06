@@ -414,6 +414,13 @@ impl CommandContext {
             let path = self.get_path_or_current()?;
             return crate::skull_backend::skull_iter_codegen(&path, self.args.iters);
         }
+        // backend-stats runs BOTH backends itself (bone semantic vs skull
+        // semantic+emit), so it ignores --backend and dispatches before the
+        // backend switch like the iter-* profilers.
+        if self.args.command == CliCommand::BackendStats {
+            let input = self.get_path_or_current()?;
+            return crate::backend_stats::do_backend_stats(&input, self.args.iters, self.args.warmup);
+        }
         // skull-inline-stats replays the inliner over the workspace and writes a
         // diagnostic report; skull-specific, dispatched early like iter-codegen.
         if self.args.command == CliCommand::SkullInlineStats {

@@ -892,7 +892,12 @@ pub fn do_one_frame(
             info!("{} frames executed successfully", frames);
         }
     } else {
-        error!("Stone exited with code: {:?}", process_result.output.status.code());
+        // Propagate the child's failure (e.g. the runner's GL-error exit 3)
+        // so `rock frame` exits nonzero and test-games actually fails.
+        anyhow::bail!(
+            "Stone exited with code: {:?}",
+            process_result.output.status.code()
+        );
     }
 
     Ok(())

@@ -3,8 +3,9 @@
 //! + mag, formatting must:
 //!   1. be idempotent -- `format(format(x)) == format(x)` (a fixed point), and
 //!   2. reparse cleanly -- the output is valid Rock, and
-//!   3. invent no comments -- the output's comment multiset is a subset of the
-//!      source's (catches the duplicate-trailing-comment class).
+//!   3. neither invent nor drop comments -- the output's comment multiset
+//!      EQUALS the source's (catches the duplicate-trailing-comment class AND
+//!      the standalone-comment-loss class).
 //!
 //! These ran ad-hoc while a round of real-file corruption bugs was fixed
 //! (byte-vs-char slicing, operator bodies, blank/param oscillation, an extra `>`
@@ -48,6 +49,18 @@ fn comment_multiset(src: &str) -> std::collections::HashMap<String, usize> {
             *m.entry(line[idx..].trim_end().to_string()).or_default() += 1;
         }
     }
+    // Block comments (`/* ... */`), whole-slice keyed so `/* x */` and `// x`
+    // never alias. A `/*` inside a `//` line comment or a string round-trips
+    // verbatim, so it cancels in the equality check.
+    let mut rest = src;
+    while let Some(a) = rest.find("/*") {
+        if let Some(b) = rest[a..].find("*/") {
+            *m.entry(rest[a..a + b + 2].to_string()).or_default() += 1;
+            rest = &rest[a + b + 2..];
+        } else {
+            break;
+        }
+    }
     m
 }
 
@@ -86,9 +99,17 @@ fn real_sources_are_idempotent_reparse_and_keep_comments() {
         }
 
         let src_c = comment_multiset(&src);
-        for (text, n) in comment_multiset(&once) {
-            if n > src_c.get(&text).copied().unwrap_or(0) {
+        let out_c = comment_multiset(&once);
+        for (text, n) in &out_c {
+            if *n > src_c.get(text).copied().unwrap_or(0) {
                 fails.push(format!("comment invented/duplicated in {short}: {text:?}"));
+            }
+        }
+        // ...and drops none: every source comment survives (formatting must
+        // preserve comments, not just avoid inventing them).
+        for (text, n) in &src_c {
+            if *n > out_c.get(text).copied().unwrap_or(0) {
+                fails.push(format!("comment dropped in {short}: {text:?}"));
             }
         }
     }

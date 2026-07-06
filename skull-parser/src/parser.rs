@@ -2078,7 +2078,13 @@ impl Parser {
         if kind == TokenKind::TripleDot {
             self.advance();
             let operand = self.parse_expr(0)?;
-            let span = self.span_from(start);
+            // End at the operand, NOT the current position: parsing `...y` before
+            // a closing `]`/`)` runs the infix loop's `skip_comments_in_expr`,
+            // which consumes a trailing `// comment` (the closer counts as `is_op`).
+            // A `span_from(start)` would then swallow that comment into the spread
+            // span, and the formatter would emit it twice (verbatim slice + the
+            // re-applied trailing comment).
+            let span = self.merge_spans(start, self.ast.exprs[operand].span);
             return Ok(self.ast.expr(span, ExprKind::Spread(operand)));
         }
 
@@ -3005,6 +3011,22 @@ impl Parser {
         // when the token after the comment continues the expression.
         while matches!(self.kind(), TokenKind::Comment(_)) {
             let next = self.peek_kind();
+            // A fresh-line expression-starter after the comment (`@` decorator /
+            // `@global_write`, a unary `-`, ...) begins a NEW statement/item, not
+            // a continuation of this expression -- the postfix/infix loop breaks
+            // on it via `op_starts_expr && newline_breaks`, so stop here too and
+            // leave the standalone comment for the item/statement loop to capture
+            // instead of silently consuming it (widening the expression span).
+            let next_on_fresh_line = self
+                .tokens
+                .get(self.pos)
+                .map(|t| t.trailing_newlines)
+                .unwrap_or(0)
+                > 0
+                && (self.delimiter_depth == 0 || self.brace_depth > 0);
+            if op_starts_expr(next) && next_on_fresh_line {
+                break;
+            }
             let continues = next.is_op()
                 || matches!(
                     next,

@@ -9,7 +9,7 @@
 //! through the adapter the same way the server dispatches a request.
 
 use lsp_types::*;
-use rock_lsp::{do_completion_workspace, LspBackend, LspWorkspace};
+use rock_lsp::{do_completion_workspace, LspWorkspace};
 use std::str::FromStr;
 
 const SRC: &str = "\
@@ -28,7 +28,6 @@ fn bone_completion_is_marked_incomplete() {
     let path = dir.path().join("main.rock");
     std::fs::write(&path, SRC).unwrap();
     let mut ws = LspWorkspace::new();
-    ws.backend = LspBackend::Bone;
     ws.bone.update(path.to_str().unwrap(), SRC.to_string());
 
     let params = CompletionParams {

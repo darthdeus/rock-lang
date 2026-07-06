@@ -28,6 +28,7 @@ pub use std::time::Duration;
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 
+pub mod backend_stats;
 pub mod bone_backend;
 pub mod skull_backend;
 pub mod common;
@@ -184,6 +185,12 @@ pub enum CliCommand {
     /// timing. `ITER_CASCADE_TYPE` targets the type. See
     /// `bone_backend::bone_iter_cascade`.
     IterCascade,
+    /// `rock backend-stats <X>` — bone-vs-skull performance comparison on one
+    /// input (file / test file / project): bone's semantic (typecheck floor) vs
+    /// skull's semantic + emit (codegen delta), whole workspace, mean of
+    /// `--iters` timed runs after `--warmup`. Runs BOTH backends itself, so it
+    /// ignores `--backend`. See `backend_stats::do_backend_stats`.
+    BackendStats,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -208,6 +215,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterReinfer,
             Self::IterCompletion,
             Self::IterCascade,
+            Self::BackendStats,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -247,6 +255,7 @@ impl CliCommand {
             Self::IterReinfer => "iter-reinfer",
             Self::IterCompletion => "iter-completion",
             Self::IterCascade => "iter-cascade",
+            Self::BackendStats => "backend-stats",
         }
     }
 }
