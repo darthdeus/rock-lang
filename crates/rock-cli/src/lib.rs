@@ -38,6 +38,7 @@ mod error_test;
 mod file_watcher;
 pub mod game_runtime;
 mod formatting;
+mod completion_sweep;
 mod iter_completion;
 mod iter_lsp;
 mod iter_parse;
@@ -176,6 +177,12 @@ pub enum CliCommand {
     /// synthetic prefix, `ITER_COMPL_FILE` the target file. Built to run under
     /// `perf record`. See `iter_completion::iter_completion`.
     IterCompletion,
+    /// `rock completion-sweep <project> [--stride N]` -- deterministic
+    /// completion-output dump over a derived corpus of cursor positions
+    /// (identifier ends + after-dot member slots), printed to stdout for
+    /// byte-identity diffing across a refactor. The M0 gate of
+    /// `docs/completion-v2-design.md`. See `completion_sweep::completion_sweep`.
+    CompletionSweep,
     /// `rock iter-cascade <project> [--iters N --warmup W]` -- tight loop benching
     /// the Interface-tier RE-LOWER cascade: a field edit on a high-fan-in TYPE
     /// re-lowers every module whose interface references it (vs `iter-reinfer`,
@@ -214,6 +221,7 @@ impl clap::ValueEnum for CliCommand {
             Self::LspSurvey,
             Self::IterReinfer,
             Self::IterCompletion,
+            Self::CompletionSweep,
             Self::IterCascade,
             Self::BackendStats,
         ]
@@ -254,6 +262,7 @@ impl CliCommand {
             Self::LspSurvey => "lsp-survey",
             Self::IterReinfer => "iter-reinfer",
             Self::IterCompletion => "iter-completion",
+            Self::CompletionSweep => "completion-sweep",
             Self::IterCascade => "iter-cascade",
             Self::BackendStats => "backend-stats",
         }
@@ -392,6 +401,15 @@ pub struct Args {
     pub dump_state: bool,
     pub update_snapshots: bool,
 
+    /// For `rock completion-sweep`: keep every Nth derived probe position
+    /// (1 = exhaustive). Controls corpus size vs coverage.
+    pub stride: usize,
+
+    /// For `rock iter-completion`: fail (exit nonzero) when the worst
+    /// per-keystroke median exceeds this many ms -- the completion perf gate
+    /// (docs/completion-v2-design.md M0). None = report only.
+    pub budget_ms: Option<f64>,
+
     /// For `rock sim`: list every `@sim` wire name in the project,
     /// one per line, then exit. Skips the runner. Used by
     /// `just anvil-sim` to avoid hardcoding the sim array.
@@ -493,6 +511,12 @@ impl Args {
                 .help("Dump all global state as JSON after the last frame (for AI/human diagnostics)"))
             .arg(Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
+            .arg(Arg::new("stride").long("stride").default_value("10")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
+            .arg(Arg::new("budget-ms").long("budget-ms")
+                .value_parser(clap::value_parser!(f64))
+                .help("For `rock iter-completion`: fail when the worst per-keystroke median exceeds this many ms (the completion perf gate)."))
             .arg(Arg::new("list").long("list").action(ArgAction::SetTrue)
                 .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."))
             .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
@@ -538,6 +562,8 @@ impl Args {
             no_timeout: m.get_flag("no-timeout"),
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
+            stride: *m.get_one::<usize>("stride").unwrap(),
+            budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
             app_args: many_str("app_args"),
             watch: m.get_flag("watch"),

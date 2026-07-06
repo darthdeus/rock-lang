@@ -451,7 +451,19 @@ impl CommandContext {
         // completion path (call_through_param_completions); dispatched early.
         if self.args.command == CliCommand::IterCompletion {
             let path = self.get_path_or_current()?;
-            return crate::iter_completion::iter_completion(&path, self.args.iters, self.args.warmup);
+            return crate::iter_completion::iter_completion(
+                &path,
+                self.args.iters,
+                self.args.warmup,
+                self.args.budget_ms,
+            );
+        }
+        // completion-sweep is the byte-identity output dump for completion
+        // refactors (docs/completion-v2-design.md M0); dispatched early like
+        // the other completion harnesses.
+        if self.args.command == CliCommand::CompletionSweep {
+            let path = self.get_path_or_current()?;
+            return crate::completion_sweep::completion_sweep(&path, self.args.stride);
         }
         // lsp-survey is the stats-driven slow-edit hunter (BoneWorkspace);
         // dispatched early like the other iter-* / LSP profilers.
