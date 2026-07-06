@@ -1428,11 +1428,13 @@ impl Builder<'_> {
             }
             // A value-struct literal is built via the repr layer (so a callsite
             // can splat it without a cdata); a plain struct is a Lua table.
-            Expr::StructLiteral { name, fields } if self.is_value_struct(name) => {
-                let r = self.value_literal_repr(name, fields)?;
+            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
+                let r = self.value_literal_repr(name, fields, bases)?;
                 Ok(self.pack(r))
             }
-            Expr::StructLiteral { name, fields } => self.lower_struct_literal(name, fields),
+            Expr::StructLiteral { name, fields, bases } => {
+                self.lower_struct_literal(name, fields, bases)
+            }
             Expr::EnumVariant {
                 enum_name,
                 variant,
@@ -2564,8 +2566,8 @@ impl Builder<'_> {
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
-            Expr::StructLiteral { name, fields } if self.is_value_struct(name) => {
-                self.value_literal_repr(name, fields)
+            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
+                self.value_literal_repr(name, fields, bases)
             }
             // A cdata-eligible enum construction stays an unboxed Group `[tag, _0]`
             // (so a callsite/field can splat it without a cdata round-trip); `pack`
@@ -2594,7 +2596,20 @@ impl Builder<'_> {
         &mut self,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<ValueRepr, CompilerError> {
+        // Functional-update base: evaluate once (before fields). A Group base
+        // projects its parts directly (no cdata); a boxed base reads fields off
+        // the packed cdata (the normal value-field read). Inference guarantees
+        // at most one base of this struct's type.
+        let base_repr: Option<ValueRepr> = match bases.into_iter().next() {
+            Some(b) => Some(self.lower_expr_repr(b)?),
+            None => None,
+        };
+        let base_boxed: Option<Idx<Inst>> = match &base_repr {
+            Some(ValueRepr::Group { .. }) | None => None,
+            Some(other) => Some(self.pack(other.clone())),
+        };
         let mut litmap: Vec<(Ustr, ValueRepr)> = Vec::new();
         let mut by_value: HashMap<u32, ValueRepr> = HashMap::new();
         for fidx in fields {
@@ -2616,10 +2631,23 @@ impl Builder<'_> {
                 for fname in decl {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
-                        None => {
-                            let v = self.lower_struct_default(name, fname)?;
-                            fs.push(ValueRepr::Scalar(v));
-                        }
+                        None => match (&base_repr, base_boxed) {
+                            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+                                let i = self
+                                    .field_index(*bn, fname)
+                                    .expect("functional-update base covers every field");
+                                fs.push(parts[i].clone());
+                            }
+                            (Some(_), Some(bi)) => {
+                                fs.push(ValueRepr::Scalar(
+                                    self.emit_cur(Inst::Field { base: bi, field: fname }),
+                                ));
+                            }
+                            _ => {
+                                let v = self.lower_struct_default(name, fname)?;
+                                fs.push(ValueRepr::Scalar(v));
+                            }
+                        },
                     }
                 }
                 fs
@@ -4530,7 +4558,15 @@ impl Builder<'_> {
         &mut self,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        // Functional-update base (`Struct { ..base, .. }`): evaluate once, before
+        // fields (source order), and read unwritten fields off it. Inference
+        // guarantees at most one base and that it has this struct's type.
+        let base_inst: Option<Idx<Inst>> = match bases.into_iter().next() {
+            Some(b) => Some(self.lower_expr(b)?),
+            None => None,
+        };
         // A field GROUP (`Struct { a + b + c: expr }`) expands to several fields
         // sharing ONE `value` Expr index; evaluate each distinct value-expr once
         // (correct eval count, and grouped fields share the same instance), in
@@ -4574,12 +4610,19 @@ impl Builder<'_> {
                     } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
                         fs.push((fname, v));
                     } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
-                        // Defaulted flat field: lower the default box, spread its slots.
-                        let dv = self.lower_struct_default(name, fname)?;
+                        // Unwritten flat field: from the base if present, else the
+                        // struct default; spread the box into slots either way.
+                        let dv = match base_inst {
+                            Some(bi) => self.emit_cur(Inst::Field { base: bi, field: fname }),
+                            None => self.lower_struct_default(name, fname)?,
+                        };
                         let cells = self.spread_box_to_cells(dv, &shape);
                         fs.extend(self.flat_literal_slots(fname, cells));
                     } else {
-                        let v = self.lower_struct_default(name, fname)?;
+                        let v = match base_inst {
+                            Some(bi) => self.emit_cur(Inst::Field { base: bi, field: fname }),
+                            None => self.lower_struct_default(name, fname)?,
+                        };
                         fs.push((fname, v));
                     }
                 }

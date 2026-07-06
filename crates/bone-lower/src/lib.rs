@@ -810,6 +810,18 @@ pub fn lower_expr_value(
         }
     }
 
+    // struct-spread plan: call-site spread `..arg` lowering is M2 (functional
+    // update `Ty { ..base }` is handled in the StructLiteral arm below). Reject
+    // call-site spread cleanly rather than silently drop an operand.
+    if let ExprKind::FunctionCall { args, .. } = &e.kind {
+        if let Some(sp) = args.iter().find(|x| x.is_spread) {
+            comp_error!(
+                a.e(&sp.value).span,
+                "call-site struct spread `..arg` is not yet implemented (struct-spread plan M2)"
+            );
+        }
+    }
+
     let result = match &e.kind {
         ExprKind::Null => Expr::Null,
         ExprKind::Unit => Expr::Unit,
@@ -1095,7 +1107,10 @@ pub fn lower_expr_value(
             }
         }
 
-        ExprKind::StructLiteral { name, fields } => {
+        ExprKind::StructLiteral { name, bases, fields } => {
+            // Functional-update bases evaluate before fields.
+            let base_range = lower_exprs(ctx, a, body, scope, bases.iter())?;
+
             let mut entries = Vec::new();
 
             for (names, value) in fields.iter() {
@@ -1115,6 +1130,7 @@ pub fn lower_expr_value(
             Expr::StructLiteral {
                 name: name.name,
                 fields,
+                bases: base_range,
             }
         }
 

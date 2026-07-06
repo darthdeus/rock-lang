@@ -51,7 +51,7 @@ pub fn definition_at(
 
             // A field name in a struct literal -> the struct's field decl;
             // otherwise the head -> the struct.
-            hir::Expr::StructLiteral { name, fields } => {
+            hir::Expr::StructLiteral { name, fields, .. } => {
                 for fidx in fields.clone() {
                     let f = &body.struct_lit_field_arena[fidx];
                     let (s, e) = f.name_span.offset_range;
@@ -311,7 +311,7 @@ pub fn hover_at(
                     NodeRef::Expr(e) => {
                         let span = *body.expr_spans.get(e)?;
                         match &body.expr_arena[e] {
-                            hir::Expr::StructLiteral { name, fields } => {
+                            hir::Expr::StructLiteral { name, fields, .. } => {
                                 // A field name under the cursor -> `field: T
                                 // (field of Struct)`; otherwise the head -> the
                                 // full struct definition.
@@ -853,7 +853,7 @@ fn struct_field_at(
     };
     match &body.expr_arena[e] {
         // A field name inside a struct literal.
-        hir::Expr::StructLiteral { name, fields } => {
+        hir::Expr::StructLiteral { name, fields, .. } => {
             for fidx in fields.clone() {
                 let f = &body.struct_lit_field_arena[fidx];
                 let (fs, fe) = f.name_span.offset_range;
@@ -912,7 +912,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                     // `sname { field: .. }` literal field. Shorthand (`{ x }`,
                     // where the value token IS the name token) expands on
                     // rename, keeping the binding: `{ <new>: x }`.
-                    hir::Expr::StructLiteral { name, fields } if *name == sname => {
+                    hir::Expr::StructLiteral { name, fields, .. } if *name == sname => {
                         for fidx in fields.clone() {
                             let f = &body.struct_lit_field_arena[fidx];
                             if f.name == field {
@@ -2543,7 +2543,7 @@ pub fn struct_fields_fill(
         }
     }
     let (_, e) = best?;
-    let hir::Expr::StructLiteral { name, fields } = &body.expr_arena[e] else {
+    let hir::Expr::StructLiteral { name, fields, .. } = &body.expr_arena[e] else {
         return None;
     };
 

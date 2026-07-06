@@ -617,7 +617,7 @@ fn verify_pure_expr(
         }
         // A `value` struct literal is byte-value (pure); a heap struct literal
         // has observable identity.
-        Expr::StructLiteral { name, fields } => {
+        Expr::StructLiteral { name, fields, bases } => {
             let is_value = ws
                 .struct_by_name
                 .get(&name)
@@ -628,6 +628,9 @@ fn verify_pure_expr(
                     "`@pure` function constructs a heap struct literal (identity observable); only `value` structs are allowed"
                         .to_string(),
                 ));
+            }
+            for b in bases {
+                go!(b);
             }
             for fld in fields {
                 go!(c.body.struct_lit_field_arena[fld].value);
@@ -1582,9 +1585,10 @@ pub fn infer_expr_used(
             }
         }
 
-        Expr::StructLiteral { name, fields } => {
+        Expr::StructLiteral { name, fields, bases } => {
             let name = *name;
             let fields = *fields;
+            let bases = *bases;
 
             let sid = resolve_struct(gamma, name).ok_or_else(|| {
                 CompilerError::new_with_label(expr_span, format!("unknown struct `{}`", name))
@@ -1603,14 +1607,32 @@ pub fn infer_expr_used(
 
             let what = format!("struct `{}`", name);
 
-            check_named_fields(c, gamma, &def.fields, &provided, &subs, expr_span, &what)?;
-
             let ctor = match name.as_str() {
                 "Vec" => TypeCtor::Array,
                 _ => TypeCtor::Nominal(name),
             };
+            let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
 
-            gamma.app_with_ctor(ctor, &arg_tys, expr_span)
+            // Functional update `Ty { ..base, .. }`: each base must have the same
+            // nominal type as the literal (rule 6). A single base covers every
+            // unwritten field. Multiple bases of the same type would all supply
+            // every field (rule 5 collision), so only one is allowed.
+            let has_base = !bases.is_empty();
+            if bases.into_iter().count() > 1 {
+                comp_error!(
+                    expr_span,
+                    "a functional-update literal takes at most one `..base`"
+                );
+            }
+            for b in bases {
+                check_expr(c, gamma, b, result_ty, c.body.expr_spans[b])?;
+            }
+
+            check_named_fields(
+                c, gamma, &def.fields, &provided, &subs, expr_span, &what, has_base,
+            )?;
+
+            result_ty
         }
 
         Expr::FieldAccess { base, field } => {
@@ -1760,7 +1782,7 @@ pub fn infer_expr_used(
                         })
                         .collect();
 
-                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what)?;
+                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what, false)?;
                 }
 
                 _ => comp_error!(
@@ -2758,6 +2780,9 @@ fn check_named_fields(
     subs: &FxHashMap<VarId, TyId>,
     span: Span,
     what: &str,
+    // A functional-update base (`{ ..base }`) copies every unwritten field, so
+    // missing-field errors are suppressed when a base is present.
+    base_covers_all: bool,
 ) -> Result<(), CompilerError> {
     let mut seen: Vec<Ustr> = Vec::new();
 
@@ -2778,9 +2803,11 @@ fn check_named_fields(
         check_expr(c, gamma, *fvalue, fty, vspan)?
     }
 
-    for f in fields {
-        if !seen.contains(&f.name) && !f.has_default {
-            comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
+    if !base_covers_all {
+        for f in fields {
+            if !seen.contains(&f.name) && !f.has_default {
+                comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
+            }
         }
     }
 

@@ -637,6 +637,10 @@ pub enum Expr {
     StructLiteral {
         name: Ustr,
         fields: IdxRange<StructLitField>,
+        /// Functional-update bases (`Ty { ..base, .. }`), evaluated before
+        /// fields. Empty for a plain literal. Each base has the same nominal
+        /// type as the literal; unwritten fields are copied from it.
+        bases: IdxRange<Expr>,
     },
 
     FieldAccess {

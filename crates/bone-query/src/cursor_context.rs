@@ -398,7 +398,7 @@ impl CursorAst {
     fn record_ctx(&self) -> Option<RecordCtx> {
         for &node in self.expr_chain().iter() {
             let (head, fields) = match &self.expr(node).kind {
-                ExprKind::StructLiteral { name, fields } => {
+                ExprKind::StructLiteral { name, fields, .. } => {
                     (RecordHead::Struct(name.name.to_string(), name.span.offset_range.1), fields)
                 }
                 ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => (
