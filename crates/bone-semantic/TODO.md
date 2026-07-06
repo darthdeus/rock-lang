@@ -5,7 +5,7 @@
 
 - remove `is_null` from refinements & refinement tests
 
-- userland iterators via traits (DEFERRED until traits land; design done + measured)
+- userland iterators via traits (base-iterator arc ACTIVE on `traits` branch -- implementation guide: docs/iterator-implementation-plan.md; only generic combinators stay deferred until trait bounds land)
   - `for x in coll` desugars to `let it = iter(coll); loop { let (ok, x) = next(it); if !ok break; body }`
   - two free fns `iter`/`next` (UFCS), `next -> (bool, E)` lowered to Lua MULTI-RETURN (zero-alloc); skip iters MUST be fetch-outside (else interpreter blacklist at sparse holes)
   - generic `map`/`filter` need an `Iterator<E>` trait bound (monomorphized, static); direct for-loops work magic-name w/o traits, so it can stage: range-for -> direct collection-for -> generic combinators
