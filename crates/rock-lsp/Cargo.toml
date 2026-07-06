@@ -1,0 +1,51 @@
+[package]
+name = "rock-lsp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = []
+perfetto = ["dep:tracing-perfetto", "dep:tracing-flame", "dep:tracing-subscriber"]
+# Mirror rock-cli: build rock-lsp's bone hover/diagnostics path with bone's
+# sequential shim (single-threaded, no rayon frames) for clean profiling. See
+# docs/bone-profiling.md.
+sequential = ["bone-query/sequential"]
+
+[lints]
+workspace = true
+
+[dependencies]
+rock-host = { path = "../rock-host" }
+bone-query = { path = "../bone-query" }
+
+anyhow = { workspace = true }
+fs-err = { workspace = true }
+clap = { workspace = true }
+comfy-git-version = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+ustr = { workspace = true }
+log = { workspace = true }
+
+env_logger = { workspace = true }
+lsp-server = { path = "../lsp-server-manual", package = "lsp-server-manual" }
+lsp-types = { path = "../lsp-types-manual", package = "lsp-types-manual" }
+tracing = { workspace = true }
+tracing-flame = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+tracing-perfetto = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3.0"
+
+# Grouped integration-test binaries. Each tests/<group>/main.rs is one
+# linked binary that `mod`-includes its sibling test files.
+[[test]]
+name = "bone"
+path = "tests/bone/main.rs"

@@ -9,7 +9,7 @@ workspace = true
 [dependencies]
 rock-core = { path = "../rock-core" }
 rock-tokenizer = { path = "../rock-tokenizer" }
-skull-parser = { path = "../../skull-parser" }
+skull-parser = { path = "../skull-parser" }
 comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 ordered-float = { workspace = true }
