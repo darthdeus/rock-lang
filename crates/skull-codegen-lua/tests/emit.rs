@@ -604,3 +604,42 @@ fn for_user_iter_inline_is_zero_alloc() {
         "@inline iter/next over a `for` must leave no table constructor:\n{lua}"
     );
 }
+
+// A cursor whose field is a Vec (not just scalars) also scalarizes: the Vec ref
+// is hoisted to one cell + the index to a loop-carried scalar; the per-element
+// read is `data[i+1]`, no cursor table. This is the shape slice 5's stdlib
+// `VecIter` swap activates for real `[T]` (proven here via a wrapper type so the
+// slice-3 desugar routing fires without the author's bone arm-removal).
+const ZERO_ALLOC_VEC_BACKED_SRC: &str = "
+struct MyVec { items: [int] }
+struct MyVecIter { items: [int], i: int }
+
+@inline
+fn iter(v: MyVec) -> MyVecIter { return MyVecIter { items: v.items, i: 0 } }
+
+@inline
+fn next(it: MyVecIter) -> (bool, int) {
+    if it.i >= it.items.len { return (false, 0) }
+    let v = it.items[it.i]
+    it.i = it.i + 1
+    return (true, v)
+}
+
+fn sum_myvec(v: MyVec) -> int {
+    let total = 0
+    for x in v { total += x }
+    return total
+}";
+
+#[test]
+fn for_vec_backed_iter_inline_is_zero_alloc() {
+    let lua = emit_inlined(ZERO_ALLOC_VEC_BACKED_SRC, "sum_myvec");
+    assert!(
+        !lua.contains("__rock_create_struct"),
+        "vec-backed cursor must scalarize away:\n{lua}"
+    );
+    assert!(
+        !lua.contains('{'),
+        "vec-backed @inline iterator loop must leave no table constructor:\n{lua}"
+    );
+}
