@@ -428,6 +428,153 @@ fn member_labels_by_sort(src: &str) -> Vec<String> {
     items.into_iter().map(|c| c.label).collect()
 }
 
+// == Ranking ladder (docs/completion-ranking-design.md) =======================
+
+#[test]
+fn expr_position_local_beats_boundary_richer_fn() {
+    // `targrid` matches a local `target_grid: IVec2` and a fn
+    // `target_ref_grid(t) -> IVec2?`. The fn's extra `_ref_` gives it one more
+    // word-boundary hit -> a higher RAW fuzzy score (79 vs 77), but both are
+    // word-boundary subsequence matches -- same coarse band -- so the local
+    // (kind 0) must win over the function (kind 2). RED pre-banding: raw score
+    // led and the fn won.
+    let labels = labels_at(
+        "struct IVec2 { x: int, y: int }\n\
+         fn target_ref_grid(t: int) -> IVec2? { return IVec2 { x: 0, y: 0 } }\n\
+         fn use_it() {\n  let target_grid = IVec2 { x: 1, y: 2 }\n  let tdist = targrid$0\n}\n",
+    );
+    let local = rank_of(&labels, "target_grid");
+    let func = rank_of(&labels, "target_ref_grid");
+    assert!(local.is_some() && func.is_some(), "both offered: {labels:?}");
+    assert!(local < func, "local var must beat boundary-richer fn for `targrid`: {labels:?}");
+}
+
+#[test]
+fn local_seeded_call_through_ranks_above_unrelated_global() {
+    // Typing `att` with a local `mob: Mob` in scope and a fn `attack(m: Mob)`:
+    // the call-through `attack(mob)` (a fn accepting the local, seeded from a var
+    // of the right type) must rank ABOVE an unrelated prefix-matching global
+    // `attention_span`. Pre-fix, ALL call-through was bucketed last (below every
+    // direct), so the unrelated global won.
+    let labels = labels_at(
+        "struct Mob { hp: int }\n\
+         global attention_span: int = 0\n\
+         fn attack(m: Mob) {}\n\
+         fn r(mob: Mob) {\n  att$0\n}\n",
+    );
+    let ct = rank_of(&labels, "attack(mob)");
+    let global = rank_of(&labels, "attention_span");
+    assert!(ct.is_some(), "attack(mob) call-through offered: {labels:?}");
+    assert!(global.is_some(), "attention_span offered: {labels:?}");
+    assert!(ct < global, "local-seeded call-through must outrank unrelated global: {labels:?}");
+}
+
+#[test]
+fn partial_fn_name_with_local_arg_promotes_call_through() {
+    // `givemob`: the fn name `give` absorbs `give`, the remainder `mob` matches
+    // the in-scope local `mob: Mob` (the param type), so `give(mob)` is a
+    // partial-match call-through seeded from a LOCAL of the right type. It must
+    // be promoted out of the last bucket (sort_text bucket 0, not 4).
+    let labels = labels_at(
+        "struct Mob { hp: int }\n\
+         fn give(m: Mob) {}\n\
+         fn r(mob: Mob) {\n  givemob$0\n}\n",
+    );
+    let (s, pos) = marked(
+        "struct Mob { hp: int }\n\
+         fn give(m: Mob) {}\n\
+         fn r(mob: Mob) {\n  givemob$0\n}\n",
+    );
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, s);
+    let it = bone
+        .completion(PATH, pos)
+        .into_iter()
+        .find(|c| c.label == "give(mob)")
+        .unwrap_or_else(|| panic!("give(mob) call-through must be offered: {labels:?}"));
+    let st = it.sort_text.as_deref().unwrap_or("");
+    assert!(
+        st.starts_with('0'),
+        "partial local-seeded call-through must be promoted (bucket 0, not 4): {st}"
+    );
+}
+
+#[test]
+fn relaxed_guard_offers_local_seeded_call_through_on_short_fn_prefix() {
+    // `gmob`: the fn `give` absorbs only `g` (< half the 4-char query), but the
+    // residual `mob` matches the in-scope local `mob: Mob` (the param type). The
+    // noise guard normally suppresses a fn absorbing < half the query; for a
+    // LOCAL-seeded arg it's relaxed, so `give(mob)` is offered.
+    let labels = labels_at(
+        "struct Mob { hp: int }\n\
+         fn give(m: Mob) {}\n\
+         fn r(mob: Mob) {\n  gmob$0\n}\n",
+    );
+    assert!(
+        labels.iter().any(|l| l == "give(mob)"),
+        "relaxed guard must offer give(mob) for `gmob`: {labels:?}"
+    );
+}
+
+#[test]
+fn diversity_caps_reach_path_flood_in_the_visible_top() {
+    // A local `s: S` with 15 int fields floods the `feed(<int>)` arg slot with 15
+    // dotted reach paths (`s.a`..`s.o`). Without a diversity cap they fill the
+    // visible top and bury every other kind; the cap keeps at most 3 dotted paths
+    // in the top window, deferring the rest just below (kept, never dropped).
+    let labels = labels_at(
+        "fn feed(x: int) {}\n\
+         struct S { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int }\n\
+         fn r(s: S) {\n  feed($0)\n}\n",
+    );
+    let paths_in_window = labels.iter().take(12).filter(|l| l.contains('.')).count();
+    let paths_total = labels.iter().filter(|l| l.contains('.')).count();
+    assert!(
+        paths_in_window <= 3,
+        "at most 3 reach paths in the visible top-12: {:?}",
+        &labels[..labels.len().min(14)]
+    );
+    assert!(paths_total >= 15, "overflow paths deferred, not dropped: {paths_total} paths total");
+}
+
+#[test]
+fn exact_name_match_outranks_type_directed_candidate() {
+    // Inside `feed(<cursor>)` expecting `int`, a local `n: int` is type-directed,
+    // but a local named exactly `feed`-arg... here: typing `xs` where a local
+    // `xs: string` (WRONG type) exactly matches the name must still outrank the
+    // int-typed `xsize`. Exact name is the strongest signal, above the expected
+    // type bucket.
+    let labels = labels_at(
+        "fn feed(x: int) {}\n\
+         fn r() {\n  let xsize = 5\n  let xs = \"hi\"\n  feed(xs$0)\n}\n",
+    );
+    let exact = rank_of(&labels, "xs");
+    let typed = rank_of(&labels, "xsize");
+    assert!(exact.is_some() && typed.is_some(), "both offered: {labels:?}");
+    assert!(exact < typed, "exact name `xs` must outrank type-directed `xsize`: {labels:?}");
+}
+
+#[test]
+fn assignment_rhs_prioritizes_expected_enum_variant() {
+    // `mob.ai_state = combat` -- the LHS type is `MobAiState`, so the variant
+    // `MobAiState::Combat` must outrank a same-prefix wrong-type fn
+    // `combat_target_grid(mob) -> int`. RED pre-fix: assignment RHS is not an
+    // expected-type context, so the case-exact-prefix fn won on raw score.
+    let labels = labels_at(
+        "enum MobAiState { Wander, Combat }\n\
+         struct Mob { ai_state: MobAiState }\n\
+         fn combat_target_grid(mob: Mob) -> int { return 0 }\n\
+         fn use_it(mob: Mob) {\n  mob.ai_state = combat$0\n}\n",
+    );
+    let variant = labels.iter().position(|l| l.contains("MobAiState") && l.contains("Combat"));
+    let func = rank_of(&labels, "combat_target_grid");
+    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
+    assert!(
+        func.is_none() || variant < func,
+        "expected enum variant must outrank wrong-type fn in assignment RHS: {labels:?}"
+    );
+}
+
 #[test]
 fn member_field_coercing_to_nullable_slot_ranks_first() {
     // `wants(s.|)` with `wants(x: int?)`: the field `zog: int` COERCES into

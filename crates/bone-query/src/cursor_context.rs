@@ -478,6 +478,24 @@ impl CursorAst {
         }
     }
 
+    /// Cursor in the RHS of an assignment `lhs = <cursor>` (or a compound
+    /// `lhs += <cursor>`): the last byte offset of the LHS place expression, so
+    /// `type_at` resolves the slot's expected type (an enum-typed field
+    /// surfaces its variants type-directed, `mob.ai_state = Com|`). The LHS ends
+    /// before the cursor, so its offset is live-buffer-valid.
+    pub(crate) fn assign_lhs(&self) -> Option<usize> {
+        for (_, e) in self.ast.exprs.iter() {
+            let ExprKind::Assign { target, value, .. } = &e.kind else {
+                continue;
+            };
+            let (vs, ve) = self.expr(*value).span.offset_range;
+            if vs <= self.probe && self.probe <= ve {
+                return self.expr(*target).span.offset_range.1.checked_sub(1);
+            }
+        }
+        None
+    }
+
     /// Enclosing call with the cursor in an ARGUMENT slot: `(callee,
     /// arg_index, receiver_end)`. The UFCS receiver counts as param 0 (so a
     /// paren-arg position shifts by one) and `receiver_end` is the receiver

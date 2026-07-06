@@ -658,9 +658,11 @@ fn arg_position_ranks_expected_enum_variant_first() {
                fn reject_target(e: TargetError) {}\n\
                fn r() {\n  reject_target(nog)\n}\n";
     let it = item(src, 3, 19, "TargetError::NotGround");
+    // Arg layout is `{exact}{type_rank}..`; `nog` is not an exact name, so the
+    // expected-type bucket is the second digit.
     assert!(
-        it.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
-        "expected-type variant should rank in bucket 0: {:?}",
+        it.sort_text.as_deref().is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
+        "expected-type variant should rank in type bucket 0: {:?}",
         it.sort_text
     );
 }
@@ -692,9 +694,11 @@ fn arg_position_ranks_expected_type_global_first() {
                fn apply_cfg(c: Cfg) {}\n\
                fn r() {\n  apply_cfg(gam)\n}\n";
     let it = item(src, 4, 15, "GAME_CFG");
+    // Arg layout is `{exact}{type_rank}..`; `gam` is not an exact name, so the
+    // expected-type bucket is the second digit.
     assert!(
-        it.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
-        "expected-type global should rank in bucket 0: {:?}",
+        it.sort_text.as_deref().is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
+        "expected-type global should rank in type bucket 0: {:?}",
         it.sort_text
     );
 }

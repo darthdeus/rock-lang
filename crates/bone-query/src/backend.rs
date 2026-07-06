@@ -1192,6 +1192,16 @@ impl BoneWorkspace {
                 ExpectedArg::for_slot(ws, mid, inf, offset, slot)
             });
         }
+        if expected.is_none() && arg_call.is_none() && field_slot.is_none() {
+            // Assignment RHS (`lhs = <cursor>`): the LHS type is the expected
+            // slot, so an enum-typed target surfaces its variants type-directed
+            // (`mob.ai_state = Com|` -> `MobAiState::Combat`).
+            expected = cursor_ast
+                .as_ref()
+                .and_then(|cx| cx.assign_lhs())
+                .and_then(|lhs_end| bone_semantic::query::type_at(ws, mid, inf, lhs_end))
+                .and_then(|ta| ExpectedArg::for_slot(ws, mid, inf, offset, ta.ty));
+        }
         // Declared renders of the typed session's surviving slots -- the
         // string-keyed reachability index's targets, receiver-FILTERED by
         // construction (only overloads the receiver coerces into contribute, so
@@ -1233,6 +1243,8 @@ impl BoneWorkspace {
         //     fuzzy-ranking within each bucket. Call-through items sit at bucket
         //     4, below all direct candidates.
         struct RankedCand {
+            exact: u8,
+            band: u8,
             case_rank: u8,
             type_rank: u8,
             key2: u16,
@@ -1310,7 +1322,11 @@ impl BoneWorkspace {
                     fuzzy_score(name.as_bytes(), q)
                 };
                 let key2 = (9999 - score.clamp(0, 9999)) as u16;
-                RankedCand { case_rank, type_rank, key2, method, entry: c }
+                // Coarse match band + exact-name flag: classified against the
+                // variant tail too (the user types `Combat`, not
+                // `MobAiState::Combat`), mirroring the score's vname handling.
+                let (exact, band) = match_band_exact(name, q, q_raw);
+                RankedCand { exact, band, case_rank, type_rank, key2, method, entry: c }
             })
             .collect();
         // We only need the BEST `MAX_COMPLETION_ITEMS`, not a full ordering --
@@ -1323,17 +1339,21 @@ impl BoneWorkspace {
         let score_leads = !has_expected;
         let rank_cmp = |a: &RankedCand, b: &RankedCand| {
             let primary = if score_leads {
-                // MATCH QUALITY leads, then the smart-case tiebreak, then KIND: a
-                // strong match on a SCREAMING_CONST is no longer buried below a
-                // weaker case-clean one; case only decides near-ties.
-                (a.key2, a.case_rank, a.type_rank, a.method)
-                    .cmp(&(b.key2, b.case_rank, b.type_rank, b.method))
+                // EXACT name, then COARSE band, then smart-case, then KIND -- the
+                // fine score is only a within-band tiebreak below. Mirrors the
+                // score_leads sort_text layout.
+                (a.exact, a.band, a.case_rank, a.type_rank, a.method)
+                    .cmp(&(b.exact, b.band, b.case_rank, b.type_rank, b.method))
             } else {
-                // Expected-type bucket leads (case neutral in arg position).
-                (a.case_rank, a.type_rank, a.key2, a.method)
-                    .cmp(&(b.case_rank, b.type_rank, b.key2, b.method))
+                // Exact name, then expected-type bucket, then band (case neutral
+                // in arg position).
+                (a.exact, a.type_rank, a.band, a.case_rank, a.method)
+                    .cmp(&(b.exact, b.type_rank, b.band, b.case_rank, b.method))
             };
             primary
+                // Fine fuzzy score as the within-band numeric tiebreak (before
+                // length, so a genuinely better match beats a merely shorter one).
+                .then_with(|| a.key2.cmp(&b.key2))
                 // Shorter-first tiebreak, matching the `{len:03}` in sort_text --
                 // only when there's a real match (key2 < 9999 == score > 0); at
                 // empty prefix (key2 == 9999) keep the alphabetical order.
@@ -1353,7 +1373,7 @@ impl BoneWorkspace {
         let mut out: Vec<CompletionItem> = ranked
             .into_iter()
             .map(|r| {
-                let RankedCand { case_rank, type_rank, key2, method, entry: c } = r;
+                let RankedCand { exact, band, case_rank, type_rank, key2, method, entry: c } = r;
                 // Reconstruct the exact sort_text the old per-candidate path
                 // produced: `9999 - key2` recovers the clamped score.
                 let sort_text = Some(sort_text_with_score(
@@ -1364,6 +1384,8 @@ impl BoneWorkspace {
                     0,
                     method,
                     score_leads,
+                    exact,
+                    band,
                 ));
                 // Function `detail` is the cached signature, materialized HERE for
                 // survivors only; non-fn kinds carry their (cheap) detail already.
@@ -1433,7 +1455,7 @@ impl BoneWorkspace {
                     kind: Some(CompletionItemKind::STRUCT),
                     insert_text: Some(insert),
                     insert_text_format: fmt,
-                    sort_text: Some(sort_text_with_score(0, 0, &label, 9999, 0, 0, score_leads)),
+                    sort_text: Some(sort_text_with_score(0, 0, &label, 9999, 0, 0, score_leads, 0, 0)),
                     ..Default::default()
                 });
             }
@@ -1452,12 +1474,13 @@ impl BoneWorkspace {
                     continue;
                 }
                 let score = fuzzy_score(pname.as_str().as_bytes(), prefix.as_bytes());
+                let (ex, bd) = match_band_exact(pname.as_str(), prefix.as_bytes(), prefix_raw.as_bytes());
                 out.push(CompletionItem {
                     label: format!("{pname}:"),
                     kind: Some(CompletionItemKind::FIELD),
                     detail: Some(pty),
                     insert_text: Some(format!("{pname}: ")),
-                    sort_text: Some(sort_text_with_score(0, 0, pname.as_str(), score, 0, 0, score_leads)),
+                    sort_text: Some(sort_text_with_score(0, 0, pname.as_str(), score, 0, 0, score_leads, ex, bd)),
                     ..Default::default()
                 });
             }
@@ -1476,7 +1499,7 @@ impl BoneWorkspace {
                 out.push(CompletionItem {
                     label: "CoFrame".to_string(),
                     kind: Some(CompletionItemKind::STRUCT),
-                    sort_text: Some(sort_text_with_score(0, 0, "CoFrame", 9999, 0, 0, score_leads)),
+                    sort_text: Some(sort_text_with_score(0, 0, "CoFrame", 9999, 0, 0, score_leads, 0, 0)),
                     ..Default::default()
                 });
             }
@@ -1489,7 +1512,7 @@ impl BoneWorkspace {
                     label: "Coroutine<CoFrame>".to_string(),
                     kind: Some(CompletionItemKind::STRUCT),
                     insert_text: Some("Coroutine<CoFrame>".to_string()),
-                    sort_text: Some(sort_text_with_score(0, 0, "Coroutine<CoFrame>", 9999, 0, 0, score_leads)),
+                    sort_text: Some(sort_text_with_score(0, 0, "Coroutine<CoFrame>", 9999, 0, 0, score_leads, 0, 0)),
                     ..Default::default()
                 });
             }
@@ -1498,7 +1521,7 @@ impl BoneWorkspace {
                 kind: Some(CompletionItemKind::STRUCT),
                 insert_text: Some("Coroutine<$0>".to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
-                sort_text: Some(sort_text_with_score(0, 0, "Coroutine<>", 9998, 0, 0, score_leads)),
+                sort_text: Some(sort_text_with_score(0, 0, "Coroutine<>", 9998, 0, 0, score_leads, 0, 0)),
                 ..Default::default()
             });
         }
@@ -1515,7 +1538,7 @@ impl BoneWorkspace {
                 kind: Some(CompletionItemKind::SNIPPET),
                 insert_text: Some(insert.to_string()),
                 insert_text_format: fmt,
-                sort_text: Some(sort_text_with_score(0, 0, label, 9999, 0, 0, score_leads)),
+                sort_text: Some(sort_text_with_score(0, 0, label, 9999, 0, 0, score_leads, 0, 0)),
                 ..Default::default()
             });
         }
@@ -1609,14 +1632,13 @@ impl BoneWorkspace {
         let t_ct = std::time::Instant::now();
         let mut ct_counts = CtCounts::default();
         // Skip call-through entirely when the general (+ reach) candidates already
-        // fill the cap: call-through items are bucket 4 (sort_text "4..."), so
-        // they sort AFTER every general (bucket 0-3) / reach (bucket 0) item, and
-        // the final `rank_and_cap` keeps only the best `MAX_COMPLETION_ITEMS`.
-        // If `out` already holds that many bucket-<4 items, every call-through
-        // item would be truncated -- so computing them is pure waste. This is
-        // EXACT (the output is byte-identical) and removes the worst keystrokes,
-        // which are exactly the high-general-count short prefixes (e.g. `sp` ->
-        // 229 general candidates -> all call-through truncated anyway).
+        // fill the cap: MOST call-through items are bucket 4 (sort_text "1..."),
+        // sorting AFTER every general (bucket 0-3) / reach item, so the final
+        // `rank_and_cap` truncates them -- computing them is waste. Removes the
+        // worst keystrokes (high-general-count short prefixes, `sp` -> 229). Known
+        // gap: a LOCAL-SEEDED promoted call-through (bucket 0/1) could survive the
+        // cap but is skipped here at a >=MAX short prefix; acceptable under the
+        // `isIncomplete` contract (the user narrows and it reappears).
         if expr_position && out.len() < MAX_COMPLETION_ITEMS {
             // reach (for local-arg expansion) + the precomputed call-through
             // index, both cached on the project and rebuilt only on non-BodyOnly
@@ -1668,6 +1690,9 @@ impl BoneWorkspace {
         // whole workspace (2539 items at empty prefix) is pure wasted
         // serialization -- the dominant end-to-end completion cost.
         rank_and_cap(&mut out, MAX_COMPLETION_ITEMS, "completion");
+        // Keep the visible top varied: a flood of reach paths must not bury other
+        // kinds (docs/completion-ranking-design.md, Divergence 3).
+        diversify(&mut out);
         if next_is_open_paren {
             strip_call_template(&mut out);
         }
@@ -3712,7 +3737,10 @@ fn arg_path_penalty(arg: &str) -> i32 {
 fn arg_sort_text(type_rank: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> String {
     // `fuzzy_score` lowercases the candidate inline; `query` is pre-lowercased.
     let score = fuzzy_score(cand.as_bytes(), query);
-    sort_text_with_score(0, type_rank, cand, score, dist, method, false)
+    // Arg path is case-neutral, so the pre-lowercased query stands in for the raw
+    // one (cs/ci prefix collapse to one band -- band is tertiary here anyway).
+    let (exact, band) = match_band_exact(cand, query, query);
+    sort_text_with_score(0, type_rank, cand, score, dist, method, false, exact, band)
 }
 
 
@@ -3722,6 +3750,42 @@ fn arg_sort_text(type_rank: u8, cand: &str, query: &[u8], dist: u16, method: u8)
 /// VARIANT NAME, so the score is taken against `Variant` (else `nog` scores low
 /// against `targeterror::notground` -- `n` is mid-string, no position-0 bonus --
 /// and loses to a long path that starts with `n`).
+/// `(exact, band)` match-quality classification for the ranking ladder
+/// (`docs/completion-ranking-design.md`). `exact` = 0 iff `cand` equals the
+/// query case-exact (a whole-name hit outranks everything). `band` is the COARSE
+/// match tier -- 0 case-exact prefix, 1 ci prefix, 2 clean word-boundary
+/// subsequence, 3 scattered -- so the fine `fuzzy_score` no longer leads the
+/// sort (a boundary-richer longer name can't outrank a same-tier local on raw
+/// points). A variant `Enum::Variant` is classified against BOTH the qualified
+/// name and the bare tail (the user types either), taking the better of each.
+/// Empty query -> `(1, 0)`: no match signal, kind/alpha decide as before.
+fn match_band_exact(cand: &str, q_lc: &[u8], q_raw: &[u8]) -> (u8, u8) {
+    if q_raw.is_empty() {
+        return (1, 0);
+    }
+    let classify = |c: &str| -> (u8, u8) {
+        let cb = c.as_bytes();
+        let n = q_raw.len();
+        let exact = u8::from(cb != q_raw);
+        let band = if cb.len() >= n && cb[..n] == *q_raw {
+            0
+        } else if cb.len() >= n && cb[..n].eq_ignore_ascii_case(q_raw) {
+            1
+        } else if crate::query::clean_match(cb, q_lc) {
+            2
+        } else {
+            3
+        };
+        (exact, band)
+    };
+    let (e, b) = classify(cand);
+    if let Some(idx) = cand.rfind("::") {
+        let (e2, b2) = classify(&cand[idx + 2..]);
+        return (e.min(e2), b.min(b2));
+    }
+    (e, b)
+}
+
 fn sort_text_with_score(
     case_rank: u8,
     type_rank: u8,
@@ -3730,10 +3794,12 @@ fn sort_text_with_score(
     dist: u16,
     method: u8,
     score_leads: bool,
+    exact: u8,
+    band: u8,
 ) -> String {
     let lc = cand.to_lowercase();
     let score = score.clamp(0, 9999);
-    // `{len:03}` before the name is a shorter-first tiebreak: equal-score
+    // `{len:03}` before the name is a shorter-first tiebreak: equal-band
     // candidates (e.g. two prefix matches `attacking` / `attack_timer` of
     // `attack`) rank by length, so the tighter match wins -- without it the
     // alphabetical name fallback puts `attack_timer` first (`_` < `i`). Gated on
@@ -3744,19 +3810,21 @@ fn sort_text_with_score(
     let key2 = 9999 - score;
     let d = dist.min(99);
     if score_leads {
-        // Non-arg (plain identifier prefix): MATCH QUALITY leads, then the
-        // smart-case tiebreak, then KIND. A strong match on a SCREAMING_CONST /
-        // PascalName is no longer buried below every weaker case-clean match --
-        // case only decides near-ties (`jlog` -> `journal_log` over
-        // `JIT_TRACE_LOG_ENABLED`, both score-equal). Call-through items
-        // (type_rank >= 4) stay bucketed last regardless of their score.
+        // Non-arg (plain identifier prefix): EXACT name, then the COARSE match
+        // BAND, then the smart-case tiebreak, then KIND -- the fine score
+        // (`key2`) is only a within-band tiebreak, so a boundary-richer longer
+        // name can't outrank a same-band local on raw points (targrid -> the
+        // local `target_grid` over the fn `target_ref_grid`). Case still decides
+        // same-band near-ties (`jlog` -> `journal_log` over `JIT_TRACE_LOG`, both
+        // clean-band). Call-through items (type_rank >= 4) stay bucketed last.
         let ct_bucket = u8::from(type_rank >= 4);
         let kind = type_rank.min(3);
-        format!("{ct_bucket}{key2:04}{case_rank}{kind}{d:02}{method}{len_key:03}{lc}")
+        format!("{ct_bucket}{exact}{band}{case_rank}{kind}{d:02}{method}{key2:04}{len_key:03}{lc}")
     } else {
-        // Arg / member / type-directed: the expected-TYPE bucket dominates (case
-        // neutral there); score then dist then kind. Unchanged layout.
-        format!("{case_rank}{type_rank}{key2:04}{d:02}{method}{len_key:03}{lc}")
+        // Arg / member / type-directed: an EXACT name still wins, then the
+        // expected-TYPE bucket dominates (case neutral there), then band, then
+        // the fine score as a within-band tiebreak.
+        format!("{exact}{type_rank}{band}{case_rank}{d:02}{method}{key2:04}{len_key:03}{lc}")
     }
 }
 
@@ -4017,47 +4085,52 @@ fn call_through_param_completions(
     // Fns whose name FULLY covers the query (`k == q.len()`): normally suppressed
     // as fn-name browsing, but eligible for confident unique-arg autofill below.
     let mut committed: Vec<usize> = Vec::new();
-    let mut needed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    // Local-derived args, keyed by the type each PRODUCES (a local's own type, or
+    // a reach path's final type), built BEFORE pass 1 so the noise guard can
+    // admit a fn whose name absorbs < half the query when the residual matches a
+    // local arg of its param type (`gmob` -> `give(mob)`). Owned keys: a reach
+    // path's `final_ty` is a temporary. Immutable after -- the per-`(type, k)`
+    // match memo borrows from it.
+    let mut local_args: HashMap<String, Vec<(String, ArgPayload)>> = HashMap::new();
+    for (ln, lt) in &locals {
+        local_args.entry(lt.clone()).or_default().push((ln.clone(), ArgPayload::None));
+        for p in reach.arg_paths_from(lt) {
+            if p.is_method && p.takes_args {
+                continue;
+            }
+            let val = if p.is_method {
+                format!("{ln}.{}()", p.suffix)
+            } else {
+                format!("{ln}.{}", p.suffix)
+            };
+            local_args.entry(p.final_ty.clone()).or_default().push((val, ArgPayload::None));
+        }
+    }
+
     for &fi in bucket {
         let cf = &index.fns[fi as usize];
         let k = prefix_subseq_len(q, &cf.name_lc);
         if !clean_match(cf.name_lc.as_bytes(), &q[..k.min(q.len())]) {
             continue;
         }
+        let local_arg_matches = || {
+            local_args
+                .get(cf.first_param_ty.as_str())
+                .is_some_and(|args| args.iter().any(|(a, _)| arg_matches_residual(q, k, a)))
+        };
         if k == q.len() {
             committed.push(fi as usize);
-            needed.insert(cf.first_param_ty.as_str());
         } else if k >= q.len().div_ceil(2) {
             counts.fns += 1;
             passing.push((fi as usize, k));
-            needed.insert(cf.first_param_ty.as_str());
+        } else if local_arg_matches() {
+            // Relaxed noise guard: the fn name absorbs < half the query, but the
+            // residual matches a LOCAL arg of its param type -- a promoted
+            // local-seeded call-through (`gmob` -> `give(mob)`), not fn-name noise.
+            counts.fns += 1;
+            passing.push((fi as usize, k));
         }
-    }
-
-    // Local-derived args per NEEDED type (local-direct + reach-from-locals),
-    // built once and immutable after -- the per-`(type, k)` match memo below
-    // borrows from it.
-    let mut local_args: HashMap<&str, Vec<(String, ArgPayload)>> = HashMap::new();
-    for &t in &needed {
-        let mut v: Vec<(String, ArgPayload)> = locals
-            .iter()
-            .filter(|(_, lt)| lt == t)
-            .map(|(n, _)| (n.clone(), ArgPayload::None))
-            .collect();
-        for (ln, lt) in &locals {
-            for p in reach.arg_paths_from(lt) {
-                if (p.is_method && p.takes_args) || p.final_ty != t {
-                    continue;
-                }
-                let val = if p.is_method {
-                    format!("{ln}.{}()", p.suffix)
-                } else {
-                    format!("{ln}.{}", p.suffix)
-                };
-                v.push((val, ArgPayload::None));
-            }
-        }
-        local_args.insert(t, v);
     }
 
     // (b)+(A) Per `(param_type, k)` group, share BOTH the matching-arg set AND
@@ -4073,7 +4146,8 @@ fn call_through_param_completions(
     let empty: Vec<(String, ArgPayload)> = Vec::new();
     // Per group: (arg, payload, suffix_scores, path_penalty). suffix + penalty
     // both depend only on the arg (not the fn), so computed once and shared.
-    let mut match_memo: HashMap<(&str, usize), Vec<(&str, ArgPayload, Vec<i32>, i32)>> = HashMap::new();
+    let mut match_memo: HashMap<(&str, usize), Vec<(&str, ArgPayload, Vec<i32>, i32, bool)>> =
+        HashMap::new();
     let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
 
     // Collect lightweight candidates (score, fn index, arg, payload) across all
@@ -4081,20 +4155,33 @@ fn call_through_param_completions(
     // (browsable fields) so the candidate pool can be large at a short prefix, but
     // we don't `format!` items we'll drop -- rank cheap, materialize survivors
     // (same pattern as general completion).
-    let mut cands: Vec<(i32, usize, &str, ArgPayload)> = Vec::new();
+    // The trailing `u8` is the emit-time `type_rank`: 4 (bucketed last) for a
+    // global/partial-match synth, but a LOCAL-SEEDED confident autofill promotes
+    // to 0 -- a fn accepting a local of the right type is what the user reached
+    // for, so it ranks among the direct locals, not below every candidate
+    // (docs/completion-ranking-design.md, Divergence 3).
+    let mut cands: Vec<(i32, usize, &str, ArgPayload, u8)> = Vec::new();
     for (fi, k) in passing {
         let cf = &index.fns[fi];
         let t = cf.first_param_ty.as_str();
         let group = match_memo.entry((t, k)).or_insert_with(|| {
             let gargs = index.global_type_args.get(t).unwrap_or(&empty);
             let largs = local_args.get(t).unwrap_or(&empty);
-            let mut v: Vec<(&str, ArgPayload, Vec<i32>, i32)> = Vec::new();
-            for (a, payload) in gargs.iter().chain(largs.iter()) {
+            // Trailing `bool` = LOCAL-seeded: an arg drawn from an in-scope local
+            // (or reachable from one), vs a global. Local-seeded partial matches
+            // promote (type_rank 1) so a fn accepting your local surfaces above
+            // unrelated fns; globals stay bucketed last.
+            let mut v: Vec<(&str, ArgPayload, Vec<i32>, i32, bool)> = Vec::new();
+            for (a, payload, local) in gargs
+                .iter()
+                .map(|(a, p)| (a, p, false))
+                .chain(largs.iter().map(|(a, p)| (a, p, true)))
+            {
                 counts.arg_iters += 1;
                 if arg_matches_residual(q, k, a) {
                     let mut suffix = Vec::new();
                     fuzzy_suffix_scores(a.as_bytes(), q, &mut suffix);
-                    v.push((a.as_str(), *payload, suffix, arg_path_penalty(a)));
+                    v.push((a.as_str(), *payload, suffix, arg_path_penalty(a), local));
                 }
             }
             v
@@ -4103,20 +4190,20 @@ fn call_through_param_completions(
         // Prefix scores for THIS fn's name (one forward DP, reused buffer), then
         // combine with each arg's shared suffix vector.
         fuzzy_prefix_scores(cf.name.as_bytes(), q, &mut prefix_scores);
-        let mut scored: Vec<(i32, &str, ArgPayload)> = Vec::with_capacity(group.len());
-        for (a, payload, suffix, penalty) in group.iter() {
+        let mut scored: Vec<(i32, &str, ArgPayload, bool)> = Vec::with_capacity(group.len());
+        for (a, payload, suffix, penalty, local) in group.iter() {
             // Bias toward simpler args: a direct value / clean field path beats a
             // deep method chain (which the boundary-rich score over-rewards). The
             // penalty is arg-only, precomputed once per group.
             let score = combine_scores(&prefix_scores, suffix) - penalty;
-            scored.push((score, a, *payload));
+            scored.push((score, a, *payload, *local));
         }
         // Cap only METHOD-chain args (an arg string containing a `(` -- the
         // unbounded `x.foo().bar()` reach-noise); keep ALL direct values / field
         // paths so sibling fields are browsable. The global `CAP` backstops the
         // total. (Method args still sort against everything in the final cap.)
         let (mut methods, simple): (Vec<_>, Vec<_>) =
-            scored.into_iter().partition(|(_, a, _)| a.contains('('));
+            scored.into_iter().partition(|(_, a, _, _)| a.contains('('));
         if methods.len() > PER_FN_METHOD_CAP {
             // Best by score DESC, then arg lexical CASE-INSENSITIVE (so an
             // UPPER_CASE global doesn't beat a lowercase field path on a tie).
@@ -4125,8 +4212,8 @@ fn call_through_param_completions(
             });
             methods.truncate(PER_FN_METHOD_CAP);
         }
-        for (score, a, payload) in simple.into_iter().chain(methods) {
-            cands.push((score, fi, a, payload));
+        for (score, a, payload, local) in simple.into_iter().chain(methods) {
+            cands.push((score, fi, a, payload, if local { 1 } else { 4 }));
         }
     }
     // CONFIDENT unique-arg autofill: for a committed (full-name-match) fn, the
@@ -4144,11 +4231,13 @@ fn call_through_param_completions(
             .map(|v| v.iter().filter(|(a, _)| !a.contains('(')).collect())
             .unwrap_or_default();
         if let [(a, payload)] = confident.as_slice() {
-            // A full-name match with a unique, unambiguous arg is the highest-
-            // confidence call-through -- rank it above the coincidental partial
-            // (`passing`) matches (whose combined name+arg scores are far lower).
+            // A full-name match with a unique, unambiguous LOCAL arg is the
+            // highest-confidence call-through: a fn accepting a local of the right
+            // type. type_rank 0 promotes it out of the bottom bucket to rank among
+            // the direct locals (method bit still demotes it just below a plain
+            // local), above coincidental partial (`passing`) matches.
             let score = fuzzy_score(cf.name.as_bytes(), q) + 5000;
-            cands.push((score, fi, a.as_str(), *payload));
+            cands.push((score, fi, a.as_str(), *payload, 0));
         }
     }
     // Global top `CAP` by score (then ci-arg tiebreak); materialize only those.
@@ -4160,7 +4249,7 @@ fn call_through_param_completions(
     }
     let mut out: Vec<CompletionItem> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (score, fi, a, payload) in cands {
+    for (score, fi, a, payload, type_rank) in cands {
         let cf = &index.fns[fi];
         let fname = cf.name;
         let call = format!("{fname}({a})");
@@ -4193,8 +4282,13 @@ fn call_through_param_completions(
             insert_text_format,
             // type_rank 4: a synthesized whole-call, below every direct candidate
             // (vars/fns/structs/variants all rank <= 3); ranked among themselves by
-            // match quality. Reuse the score computed above.
-            sort_text: Some(sort_text_with_score(0, 4, &call, score, 0, 1, score_leads)),
+            // match quality. A LOCAL-SEEDED confident autofill carries type_rank 0
+            // instead, promoting it into the direct-candidate region. Reuse the
+            // score computed above.
+            sort_text: {
+                let (ex, bd) = match_band_exact(&call, q, q);
+                Some(sort_text_with_score(0, type_rank, &call, score, 0, 1, score_leads, ex, bd))
+            },
             ..Default::default()
         });
     }
@@ -4262,6 +4356,43 @@ fn rank_and_cap(items: &mut Vec<CompletionItem>, cap: usize, what: &str) {
         }
         items.truncate(cap);
     }
+}
+
+/// Diversity re-rank over the already-sorted list: keep the ranked order but
+/// stop a flood of REACH-PATH items (dotted labels -- `s.a`, `player.movable.grid`,
+/// the field/method call-through noise) from filling the visible top and burying
+/// other kinds (a fn / enum variant / direct value the user actually wants).
+/// Within the first `DIVERSITY_WINDOW` slots, at most `REACH_PATH_TOP_CAP` dotted
+/// paths are kept; the overflow is DEFERRED to just after the window (never
+/// dropped -- browsable by scrolling / narrowing). Tunable; see
+/// `docs/completion-ranking-design.md` (Divergence 3, diversity).
+fn diversify(items: &mut Vec<CompletionItem>) {
+    const DIVERSITY_WINDOW: usize = 12;
+    const REACH_PATH_TOP_CAP: usize = 3;
+    if items.len() <= REACH_PATH_TOP_CAP {
+        return;
+    }
+    let mut window: Vec<CompletionItem> = Vec::with_capacity(items.len());
+    let mut deferred: Vec<CompletionItem> = Vec::new();
+    let mut rest: Vec<CompletionItem> = Vec::new();
+    let mut paths = 0;
+    for it in items.drain(..) {
+        if window.len() >= DIVERSITY_WINDOW {
+            rest.push(it);
+        } else if it.label.contains('.') {
+            if paths >= REACH_PATH_TOP_CAP {
+                deferred.push(it);
+            } else {
+                paths += 1;
+                window.push(it);
+            }
+        } else {
+            window.push(it);
+        }
+    }
+    window.append(&mut deferred);
+    window.append(&mut rest);
+    *items = window;
 }
 
 /// True if any overload of `name` declares a return type rendering to one of
@@ -4452,7 +4583,10 @@ fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<CompletionItem> {
                 kind: Some(CompletionItemKind::FUNCTION),
                 detail: (!params.is_empty()).then(|| format!("deco ({})", params.join(", "))),
                 insert_text: Some(name.to_string()),
-                sort_text: Some(sort_text_with_score(0, 0, name, 9999, 0, 0, true)),
+                sort_text: {
+                    let (ex, bd) = match_band_exact(name, prefix.as_bytes(), prefix.as_bytes());
+                    Some(sort_text_with_score(0, 0, name, 9999, 0, 0, true, ex, bd))
+                },
                 ..Default::default()
             });
         }
@@ -5166,7 +5300,7 @@ fn member_completion_items(
         if recv_struct.is_some_and(|s| s.as_str() == "Entity") {
             for it in items.iter_mut() {
                 if it.label == "get" {
-                    it.sort_text = Some(sort_text_with_score(0, 0, "get", 9999, 0, 0, false));
+                    it.sort_text = Some(sort_text_with_score(0, 0, "get", 9999, 0, 0, false, 0, 0));
                 }
             }
             if clean_match(b"get().unwrap()", prefix.as_bytes()) {
@@ -5175,7 +5309,7 @@ fn member_completion_items(
                     kind: Some(CompletionItemKind::METHOD),
                     detail: Some("unwrap the Entity's value (T)".to_string()),
                     insert_text: Some("get().unwrap()".to_string()),
-                    sort_text: Some(sort_text_with_score(0, 0, "get().unwrap()", 9998, 0, 0, false)),
+                    sort_text: Some(sort_text_with_score(0, 0, "get().unwrap()", 9998, 0, 0, false, 0, 0)),
                     ..Default::default()
                 });
             }
