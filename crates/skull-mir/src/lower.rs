@@ -2139,7 +2139,11 @@ impl Builder<'_> {
                 }
             }
         }
-        let any_named = arg_idxs.iter().any(|a| self.body.arg_names.contains_key(a));
+        // A spread arg fills param slots by field name, so it takes the
+        // slot-reordering path just like a named arg.
+        let any_named = arg_idxs
+            .iter()
+            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at
             // runtime -- the wrapped value IS the inner -- so it lowers to the
@@ -2331,6 +2335,32 @@ impl Builder<'_> {
         let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
+            // Struct spread `..op`: evaluate the operand once, then place each
+            // field's repr into the param slot of the same name.
+            if self.body.spread_args.contains(&a) {
+                let base_repr = self.lower_expr_repr(a)?;
+                let base_boxed = match &base_repr {
+                    ValueRepr::Group { .. } => None,
+                    other => Some(self.pack(other.clone())),
+                };
+                for fname in self.spread_operand_fields(a)? {
+                    let Some(pidx) = param_names.iter().position(|p| *p == fname) else {
+                        continue;
+                    };
+                    let r = match (&base_repr, base_boxed) {
+                        (ValueRepr::Group { name, parts }, _) => {
+                            let i = self.field_index(*name, fname).expect("spread field exists");
+                            parts[i].clone()
+                        }
+                        (_, Some(bi)) => {
+                            ValueRepr::Scalar(self.emit_cur(Inst::Field { base: bi, field: fname }))
+                        }
+                        (_, None) => unreachable!("non-Group base is packed"),
+                    };
+                    slots[pidx] = Some(r);
+                }
+                continue;
+            }
             let r = self.lower_expr_repr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
@@ -2679,6 +2709,20 @@ impl Builder<'_> {
         let mut slots: Vec<Option<Idx<Inst>>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
+            // Struct spread `..op`: evaluate the operand once, then read each
+            // field into the param slot of the same name (bone verified every
+            // field matches a param; a named arg after the spread overrides via
+            // last-write-wins over these slots).
+            if self.body.spread_args.contains(&a) {
+                let base = self.lower_expr(a)?;
+                for fname in self.spread_operand_fields(a)? {
+                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
+                        let fv = self.emit_cur(Inst::Field { base, field: fname });
+                        slots[pidx] = Some(fv);
+                    }
+                }
+                continue;
+            }
             let v = self.lower_expr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
@@ -5184,6 +5228,18 @@ impl Builder<'_> {
                 .map(|s| self.is_nullable_ty(s))
                 .unwrap_or(false),
             _ => false,
+        }
+    }
+
+    /// The declared field names of a call-site spread operand `..op`, in struct
+    /// order. bone-inference has already verified the operand is a nominal
+    /// struct whose fields all match callee params.
+    fn spread_operand_fields(&self, op: Idx<Expr>) -> Result<Vec<Ustr>, CompilerError> {
+        match self.expr_ty(op) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self
+                .struct_field_names(name)
+                .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields"))),
+            _ => Err(gap("spread operand is not a nominal struct")),
         }
     }
 

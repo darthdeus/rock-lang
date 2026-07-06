@@ -3304,6 +3304,7 @@ fn score_candidate(
 
     let slots = match reorder_call_args(
         c,
+        gamma,
         args,
         &pnames[offset..],
         f.num_required.saturating_sub(offset),
@@ -3330,13 +3331,16 @@ fn score_candidate(
         };
 
         match slot {
-            Some(arg) => {
-                let aty = match arg_ty.get(arg) {
-                    Some(&t) => t,
-                    None => {
-                        gamma.out.rollback_to(snap);
-                        return None;
-                    }
+            Some(fill) => {
+                let aty = match fill {
+                    SlotFill::Direct(arg) => match arg_ty.get(arg) {
+                        Some(&t) => t,
+                        None => {
+                            gamma.out.rollback_to(snap);
+                            return None;
+                        }
+                    },
+                    SlotFill::SpreadField(_, fty) => *fty,
                 };
 
                 match fit_cost(gamma, aty, pty, span) {
@@ -3916,17 +3920,92 @@ fn coroutine_yrn(
     }
 }
 
+/// How a callee parameter slot is filled after `..spread` expansion.
+#[derive(Clone, Copy)]
+enum SlotFill {
+    /// A written positional or named argument.
+    Direct(Idx<Expr>),
+    /// A field pulled from a spread operand: (operand expr, field type). The
+    /// param slot index encodes which field; skull-mir re-derives the name.
+    SpreadField(Idx<Expr>, TyId),
+}
+
+/// The (name, type) of every field of a call-site spread operand. The operand
+/// must be a nominal struct with statically known fields (rule: not tuple, not
+/// array, not Map/any).
+fn spread_struct_fields(
+    gamma: &mut Gamma,
+    op_ty: TyId,
+    span: Span,
+) -> Result<Vec<(Ustr, TyId)>, CompilerError> {
+    let r = resolve(gamma, op_ty, span);
+
+    match *gamma.get(r) {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            params,
+        } => {
+            let sid = resolve_struct(gamma, name).ok_or_else(|| {
+                CompilerError::new_with_label(span, format!("cannot spread `{}`: not a struct", name))
+            })?;
+
+            let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
+            let subs = struct_arg_subs(gamma, &def, r, params);
+            def.fields
+                .iter()
+                .map(|f| Ok((f.name, substitute(gamma, f.ty, &subs, span)?)))
+                .collect()
+        }
+
+        _ => comp_error!(
+            span,
+            "cannot spread `{}` into call arguments: expected a nominal struct",
+            gamma.workspace.render(Some(&gamma.out), r)
+        ),
+    }
+}
+
 fn reorder_call_args(
     c: BodyCtx,
+    gamma: &mut Gamma,
     args: &[Idx<Expr>],
     param_names: &[Ustr],
     num_required: usize,
     span: Span,
-) -> Result<Vec<Option<Idx<Expr>>>, CompilerError> {
-    let mut slots: Vec<Option<Idx<Expr>>> = vec![None; param_names.len()];
+) -> Result<Vec<Option<SlotFill>>, CompilerError> {
+    let mut slots: Vec<Option<SlotFill>> = vec![None; param_names.len()];
     let mut pos = 0usize;
 
     for &arg in args {
+        // Struct spread `..op`: each field of the operand fills the param slot
+        // of the same name (rules 2/4/5).
+        if c.body.spread_args.contains(&arg) {
+            let op_ty = infer_expr(c, gamma, arg)?;
+            let aspan = c.body.expr_spans[arg];
+            for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
+                let pi = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
+                    CompilerError::new_with_label(
+                        span,
+                        format!("spread field `{}` names no parameter of the callee", fname),
+                    )
+                })?;
+                match slots[pi] {
+                    // rule 5: two spreads supplying the same param.
+                    Some(SlotFill::SpreadField(..)) => {
+                        comp_error!(span, "two spreads both supply parameter `{}`", fname)
+                    }
+                    // rule 4: a named/positional arg written BEFORE the spread.
+                    Some(SlotFill::Direct(_)) => comp_error!(
+                        span,
+                        "parameter `{}` is given before the spread that also supplies it",
+                        fname
+                    ),
+                    None => slots[pi] = Some(SlotFill::SpreadField(arg, fty)),
+                }
+            }
+            continue;
+        }
+
         match c.body.arg_names.get(&arg) {
             // positional
             None => {
@@ -3938,7 +4017,10 @@ fn reorder_call_args(
                     );
                 }
 
-                slots[pos] = Some(arg);
+                if slots[pos].is_some() {
+                    comp_error!(span, "Multiple values provided for parameter `{}`", param_names[pos]);
+                }
+                slots[pos] = Some(SlotFill::Direct(arg));
                 pos += 1;
             }
 
@@ -3947,11 +4029,15 @@ fn reorder_call_args(
                     CompilerError::new_with_label(span, format!("unknown parameter `{}`", nm))
                 })?;
 
-                if slots[pi].is_some() {
-                    comp_error!(span, "Multiple values provided for parameter `{}`", nm);
+                match slots[pi] {
+                    // rule 3: a named arg AFTER a spread overrides that field.
+                    Some(SlotFill::SpreadField(..)) | None => {
+                        slots[pi] = Some(SlotFill::Direct(arg))
+                    }
+                    Some(SlotFill::Direct(_)) => {
+                        comp_error!(span, "Multiple values provided for parameter `{}`", nm)
+                    }
                 }
-
-                slots[pi] = Some(arg);
             }
         }
     }
@@ -4285,7 +4371,7 @@ fn resolve_named_call_inner(
 
     let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
 
-    let pairs: Vec<(Idx<Expr>, TyId)> = if function.is_variadic {
+    let pairs: Vec<(SlotFill, TyId)> = if function.is_variadic {
         let velem = param_tys[param_tys.len() - 1];
         let nfixed = (param_tys.len() - 1).saturating_sub(offset);
 
@@ -4304,7 +4390,7 @@ fn resolve_named_call_inner(
             .enumerate()
             .map(|(i, &arg)| {
                 (
-                    arg,
+                    SlotFill::Direct(arg),
                     if i < nfixed {
                         param_tys[offset + 1]
                     } else {
@@ -4316,6 +4402,7 @@ fn resolve_named_call_inner(
     } else {
         let slots = reorder_call_args(
             c,
+            gamma,
             &arg_list,
             &param_names[offset..],
             function.num_required.saturating_sub(offset),
@@ -4325,15 +4412,21 @@ fn resolve_named_call_inner(
         slots
             .iter()
             .enumerate()
-            .filter_map(|(i, slot)| slot.map(|arg| (arg, param_tys[offset + i])))
+            .filter_map(|(i, slot)| slot.map(|fill| (fill, param_tys[offset + i])))
             .collect()
     };
 
-    for (arg, pty) in pairs {
+    for (fill, pty) in pairs {
         let pty = substitute(gamma, pty, &subs, span)?;
-        match preinferred.get(&arg) {
-            Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
-            None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+        match fill {
+            SlotFill::Direct(arg) => match preinferred.get(&arg) {
+                Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
+                None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+            },
+            // A spread-supplied field: check the field's type against the param.
+            SlotFill::SpreadField(op, fty) => {
+                coerce(gamma, fty, pty, c.body.expr_spans[op])?
+            }
         }
     }
 

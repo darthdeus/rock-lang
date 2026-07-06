@@ -810,17 +810,6 @@ pub fn lower_expr_value(
         }
     }
 
-    // struct-spread plan: call-site spread `..arg` lowering is M2 (functional
-    // update `Ty { ..base }` is handled in the StructLiteral arm below). Reject
-    // call-site spread cleanly rather than silently drop an operand.
-    if let ExprKind::FunctionCall { args, .. } = &e.kind {
-        if let Some(sp) = args.iter().find(|x| x.is_spread) {
-            comp_error!(
-                a.e(&sp.value).span,
-                "call-site struct spread `..arg` is not yet implemented (struct-spread plan M2)"
-            );
-        }
-    }
 
     let result = match &e.kind {
         ExprKind::Null => Expr::Null,
@@ -876,6 +865,9 @@ pub fn lower_expr_value(
                     if let Some(nm) = &ca.name {
                         body.arg_names.insert(arg_idx, nm.name);
                     }
+                    if ca.is_spread {
+                        body.spread_args.insert(arg_idx);
+                    }
                 }
 
                 // A local fn-typed binding is called through its value, everything else
@@ -902,6 +894,9 @@ pub fn lower_expr_value(
                 for (arg_idx, ca) in args_range.into_iter().skip(1).zip(args.iter()) {
                     if let Some(nm) = &ca.name {
                         body.arg_names.insert(arg_idx, nm.name);
+                    }
+                    if ca.is_spread {
+                        body.spread_args.insert(arg_idx);
                     }
                 }
 
