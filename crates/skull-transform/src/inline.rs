@@ -74,6 +74,16 @@ struct CalleeBody {
     insts: usize,
     /// `@inline`-forced (bypassed the size caps). Diagnostic only.
     forced: bool,
+    /// Param cells this callee NEVER whole-`Store`s (only reads / `Field` /
+    /// `StoreField`). Their arg can be COALESCED — an arg that is a plain
+    /// `Load(c)` binds the cloned param directly to the caller cell `c` instead
+    /// of copying `Store(param, Load(c))`. Removing the whole-cell copy is what
+    /// lets a mutated-by-ref cursor struct stay a SINGLE cell so
+    /// `scalarize_struct_cells` (SROA) can peel it (the zero-alloc iterator
+    /// path). Sound because field-writeback through a by-ref arg is already the
+    /// language semantics, and a param the callee reassigns whole is excluded
+    /// (aliasing it to the caller cell would clobber the caller's variable).
+    coalescable_params: Vec<bool>,
 }
 
 /// One splice the inliner performed, for the `skull-inline-stats` diagnostic
@@ -172,6 +182,29 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<CalleeBody
     }
     let reachable_insts: usize = reachable.iter().map(|&b| mf.blocks[b].insts.len()).sum();
 
+    // A param is coalescable iff nothing in the body rebinds its cell WHOLE (a
+    // `Store` to it, or defining it as a multi-return dest / map cursor). Reads
+    // and `Field`/`StoreField` don't count — those are exactly what coalescing
+    // preserves (field-writeback through the shared cell).
+    let mut rebound: HashSet<Idx<Cell>> = HashSet::default();
+    for (_, inst) in mf.insts.iter() {
+        match inst {
+            Inst::Store { cell, .. } => {
+                rebound.insert(*cell);
+            }
+            Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
+                rebound.extend(dests.iter().copied());
+            }
+            Inst::MapNext { key_cell, val_cell, .. } => {
+                rebound.insert(*key_cell);
+                rebound.insert(*val_cell);
+            }
+            _ => {}
+        }
+    }
+    let coalescable_params: Vec<bool> =
+        mf.params.iter().map(|p| !rebound.contains(p)).collect();
+
     if matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
         // Straight: entry ends in Return, so it is the only reachable block.
         if !force && reachable_insts > STRAIGHT_INSTS {
@@ -181,7 +214,7 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<CalleeBody
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
         };
-        Some(CalleeBody { func: mf, kind: Kind::Straight, ret_arity, reachable: Vec::new(), insts: reachable_insts, forced: force })
+        Some(CalleeBody { func: mf, kind: Kind::Straight, ret_arity, reachable: Vec::new(), insts: reachable_insts, forced: force, coalescable_params })
     } else {
         // General: uniform return arity across every reachable Return.
         let mut arities = reachable
@@ -197,7 +230,7 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<CalleeBody
         if !force && reachable_insts > GENERAL_INSTS {
             return None;
         }
-        Some(CalleeBody { func: mf, kind: Kind::General, ret_arity, reachable, insts: reachable_insts, forced: force })
+        Some(CalleeBody { func: mf, kind: Kind::General, ret_arity, reachable, insts: reachable_insts, forced: force, coalescable_params })
     }
 }
 
@@ -328,11 +361,14 @@ fn find_site(
 fn clone_cells_insts(
     caller: &mut MirFunc,
     callee: &MirFunc,
+    overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
 ) -> (HashMap<Idx<Inst>, Idx<Inst>>, HashMap<Idx<Cell>, Idx<Cell>>) {
     let mut cell_map = HashMap::default();
     cell_map.reserve(callee.cells.len());
     for (cid, cell) in callee.cells.iter() {
-        cell_map.insert(cid, caller.cells.alloc(cell.clone()));
+        // A coalesced param maps to the caller cell its arg loads (no fresh copy).
+        let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        cell_map.insert(cid, mapped);
     }
     let mut inst_map = HashMap::default();
     inst_map.reserve(callee.insts.len());
@@ -357,6 +393,7 @@ fn clone_cells_insts(
 fn clone_all(
     caller: &mut MirFunc,
     callee: &MirFunc,
+    overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
 ) -> (
     HashMap<Idx<Inst>, Idx<Inst>>,
     HashMap<Idx<Cell>, Idx<Cell>>,
@@ -365,7 +402,9 @@ fn clone_all(
     let mut cell_map = HashMap::default();
     cell_map.reserve(callee.cells.len());
     for (cid, cell) in callee.cells.iter() {
-        cell_map.insert(cid, caller.cells.alloc(cell.clone()));
+        // A coalesced param maps to the caller cell its arg loads (no fresh copy).
+        let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        cell_map.insert(cid, mapped);
     }
     let mut block_map = HashMap::default();
     block_map.reserve(callee.blocks.len());
@@ -479,6 +518,31 @@ fn subst_all(func: &mut MirFunc, from: Idx<Inst>, to: Idx<Inst>) {
     }
 }
 
+/// For each coalescable param whose arg is a plain `Load(c)`, map the callee
+/// param cell -> the caller cell `c` (so the clone binds the param directly to
+/// it) and flag the param so the splice skips its `Store(param, arg)` copy.
+/// Removing that whole-cell copy is what keeps a by-ref-mutated cursor struct a
+/// SINGLE cell, which SROA can then scalarize (the zero-alloc iterator path).
+fn coalesce_overrides(
+    caller: &MirFunc,
+    cand: &CalleeBody,
+    args: &[Idx<Inst>],
+) -> (HashMap<Idx<Cell>, Idx<Cell>>, Vec<bool>) {
+    let callee = &cand.func;
+    let mut overrides = HashMap::default();
+    let mut coalesced = vec![false; callee.params.len()];
+    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+        if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Inst::Load(c) = caller.insts[*arg] {
+            overrides.insert(*param, c);
+            coalesced[i] = true;
+        }
+    }
+    (overrides, coalesced)
+}
+
 /// Splice candidate `cand` into `func` at `site`, removing the call. Returns the
 /// new top-level (reachable) blocks the splice added, for the driver to fold into
 /// its top-level set (straight adds none).
@@ -498,14 +562,19 @@ fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<Block>> 
 /// own terminator.
 fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) {
     let callee = &cand.func;
-    let (inst_map, cell_map) = clone_cells_insts(func, callee);
-
-    // Arg -> param-cell stores.
-    let mut arg_stores = Vec::new();
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
     };
-    for (param, arg) in callee.params.iter().zip(args.iter()) {
+    let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
+    let (inst_map, cell_map) = clone_cells_insts(func, callee, &overrides);
+
+    // Arg -> param-cell stores (coalesced params are aliased to the caller cell,
+    // so they need no copy).
+    let mut arg_stores = Vec::new();
+    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+        if coalesced[i] {
+            continue;
+        }
         let pc = cell_map[param];
         arg_stores.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
     }
@@ -560,12 +629,12 @@ fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) {
 /// `Goto`s the continuation.
 fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<Block>> {
     let callee = &cand.func;
-    let (inst_map, cell_map, block_map) = clone_all(func, callee);
-    let entry_clone = block_map[&callee.entry];
-
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
     };
+    let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
+    let (inst_map, cell_map, block_map) = clone_all(func, callee, &overrides);
+    let entry_clone = block_map[&callee.entry];
 
     // Split the caller block at the call.
     let old = std::mem::take(&mut func.blocks[bid].insts);
@@ -591,9 +660,13 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<
         Site::Multi { .. } => None,
     };
 
-    // Prefix: before | arg-stores; Goto the cloned entry.
+    // Prefix: before | arg-stores; Goto the cloned entry. Coalesced params are
+    // aliased to the caller cell (via `overrides`), so they need no copy.
     let mut prefix = before;
-    for (param, arg) in callee.params.iter().zip(args.iter()) {
+    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+        if coalesced[i] {
+            continue;
+        }
         let pc = cell_map[param];
         prefix.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
     }

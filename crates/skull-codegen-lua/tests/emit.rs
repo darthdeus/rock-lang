@@ -532,3 +532,75 @@ end
 "
     );
 }
+
+/// Full pre-emit pipeline (mirrors `mir_emit.rs`): lower -> `inline_functions`
+/// -> `cleanup` -> emit. The honest artifact for zero-alloc claims: an `@inline`
+/// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
+/// inliner has run, which `emit_clean` does NOT do.
+fn emit_inlined(src: &str, fn_name: &str) -> String {
+    use std::sync::LazyLock;
+    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let self_ref = FuncRef { module: mid, func: fid };
+    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    let mut cache = skull_transform::InlineCache::default();
+    skull_transform::inline_functions(&ws, &scx, self_ref, &mut func, &mut cache);
+    skull_transform::cleanup(&mut func);
+    let ctx = CodegenCtx::new(&ws);
+    emit_function(&ws, &ctx, self_ref, &func)
+}
+
+// --- Slice 4 acceptance gate: an @inline user iterator driven by `for`
+// scalarizes its cursor struct to per-field locals; the loop allocates nothing.
+const ZERO_ALLOC_ITER_SRC: &str = "
+struct IntRange { lo: int, hi: int }
+struct IntRangeIter { cur: int, hi: int }
+
+@inline
+fn iter(r: IntRange) -> IntRangeIter { return IntRangeIter { cur: r.lo, hi: r.hi } }
+
+@inline
+fn next(it: IntRangeIter) -> (bool, int) {
+    if it.cur >= it.hi { return (false, 0) }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+fn sum_range(lo: int, hi: int) -> int {
+    let total = 0
+    for x in (IntRange { lo: lo, hi: hi }) { total += x }
+    return total
+}";
+
+#[test]
+fn for_user_iter_inline_is_zero_alloc() {
+    let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
+    assert!(
+        !lua.contains("__rock_create_struct"),
+        "cursor struct must scalarize away, no create_struct:\n{lua}"
+    );
+    assert!(
+        !lua.contains('{'),
+        "@inline iter/next over a `for` must leave no table constructor:\n{lua}"
+    );
+}
