@@ -1050,34 +1050,9 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 
 // Range functions
 
-// Iterator function
-inline(lua) fn iter(collection: any) -> any = """
-local collection_type = type(collection)
-
-if collection_type == "table" then
--- Check if it's already an iterator (has vec/arena/map and index fields)
-if (collection.vec and collection.index ~= nil) or
-   (collection.arena and collection.index ~= nil) or
-   (collection.map and collection.index ~= nil) then
-    -- Already an iterator, return as-is
-    return collection
--- Check if it's a Vec
-elseif collection.data and collection.len and type(collection.len) == "number" then
-    return { vec = collection, index = 0 }
--- Check if it's an Arena
-elseif collection.entries and collection.free_indices then
-    return { arena = collection, index = 0 }
--- Otherwise treat as Map
-else
-    return { map = collection, keys = nil, index = 0 }
-end
-end
-
--- Fallback
-return { map = collection, keys = nil, index = 0 }
-"""
-
-// Simplified iterator functions - each returns a simple iterator function
+// Closure iterators backing the `enumerate()` overloads below. The `iter`/`next`
+// protocol for user types lives in the desugar arc (docs/iterator-implementation-plan.md);
+// these three predate it and are kept only until enumerate folds into that model.
 @nomangle inline(lua) fn __rock_iter_arena(collection: any) -> any = """
 local iter_index = 0
 return function()
@@ -1097,41 +1072,6 @@ return function()
         end
     end
     return nil
-end
-"""
-
-// Simple iteration for Arena - returns just data values for "for data in arena" patterns
-@nomangle inline(lua) fn __rock_iter_arena_simple(collection: any) -> any = """
-local iter_index = 0
-return function()
-    while iter_index < vec_len(collection.entries) do
-        local entry_wrapped = vec_get(collection.entries, iter_index)
-        iter_index = iter_index + 1
-        if entry_wrapped and entry_wrapped ~= nil then
-            -- Unwrap the entry (vec_get returns wrapped values)
-            local entry = entry_wrapped
-            if type(entry_wrapped) == "table" and entry_wrapped.__wrapped then
-                entry = entry_wrapped.__wrapped
-            end
-            if entry and entry.is_occupied then
-                return entry.data
-            end
-        end
-    end
-    return nil
-end
-"""
-
-@nomangle inline(lua) fn __rock_iter_vec(collection: any) -> any = """
-if type(collection) == "function" then return collection end
-local iter_index = 0
-return function()
-    if iter_index >= collection.len then
-        return nil
-    end
-    local idx = iter_index
-    iter_index = iter_index + 1
-    return {idx, collection.data[idx + 1]}
 end
 """
 
@@ -1282,17 +1222,6 @@ fn swap_remove<T>(vec: [T], index: int) -> T? {
         local result = {idx, val}
         idx = idx + 1
         return result
-    end
-"""
-
-// Closure iterator for native Lua tables (![...] syntax).
-@nomangle inline(lua) fn __rock_iter_native_array(arr: any) -> any = """
-    local iter_index = 0
-    local len = #arr
-    return function()
-        if iter_index >= len then return nil end
-        iter_index = iter_index + 1
-        return arr[iter_index]
     end
 """
 
