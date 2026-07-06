@@ -268,6 +268,13 @@ pub struct BodyInference {
     pub expr_types: ArenaMap<Idx<Expr>, TyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, TyId>,
     pub resolved_overload_calls: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
+    /// `for x in <coll>` over a user type: the resolved `(iter_fn, next_fn)` for
+    /// the iter/next protocol desugar, keyed by the For's iter `Idx<Expr>`.
+    /// Separate from `resolved_overload_calls` so it can't collide with the
+    /// collection expr's own call resolution (e.g. `for x in foo()`). skull's
+    /// `lower_for` reads it to emit the desugared loop.
+    pub for_iter_protocol:
+        FxHashMap<Idx<Expr>, ((ModuleId, Idx<Function>), (ModuleId, Idx<Function>))>,
 
     pub ty_arena: Arena<TypeExpr>,
     pub ty_spans: ArenaMap<Idx<TypeExpr>, Span>,

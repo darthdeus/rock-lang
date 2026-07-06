@@ -3536,6 +3536,19 @@ impl Builder<'_> {
                 BindingPattern::Tuple(_) => Err(gap("for-range with a tuple pattern")),
             };
         }
+        // User iterator protocol (bone recorded iter/next fns for this For):
+        // desugar to `it = iter(coll); loop { (ok, ..) = next(it); !ok -> break }`.
+        // Only populated for non-builtin collections, so this never shadows a
+        // builtin template.
+        if let Some((iter_fn, next_fn)) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).copied()) {
+            return self.lower_for_user_iter(
+                &vars,
+                iter,
+                body,
+                FuncRef { module: iter_fn.0, func: iter_fn.1 },
+                FuncRef { module: next_fn.0, func: next_fn.1 },
+            );
+        }
         if let Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
@@ -3563,6 +3576,71 @@ impl Builder<'_> {
             }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
         }
+    }
+
+    /// `for <pat> in <coll>` over a user type via the iter/next protocol (bone
+    /// recorded the resolved fns). Desugars to:
+    ///   it = iter(coll)
+    ///   loop { let (ok, <pat>) = next(it); if !ok break; <body> }
+    /// `next` returns a tuple, so slice-1's multi-return ABI makes the per-element
+    /// `next` call zero-alloc (a `CallMulti` into `[ok, elem..]` dests). `it` lives
+    /// in a cell so `next` mutates the same cursor each turn. `continue` re-enters
+    /// the header (runs `next` again); `break` exits.
+    fn lower_for_user_iter(
+        &mut self,
+        vars: &BindingPattern,
+        iter_expr: Idx<Expr>,
+        body: Idx<Expr>,
+        iter_fn: FuncRef,
+        next_fn: FuncRef,
+    ) -> Result<(), CompilerError> {
+        let coll = self.lower_expr(iter_expr)?;
+        let it_val = self.emit_cur(Inst::Call { func: iter_fn, args: vec![coll] });
+        let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
+        self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
+
+        // next returns `(bool, E)` / `(bool, A, B, ...)`: arity = 1 + element leaves.
+        let n = self.ws.module(next_fn.module).functions[next_fn.func]
+            .return_ty
+            .and_then(|t| tuple_arity(self.ws, t))
+            .ok_or_else(|| gap("for-iter `next` must return a tuple"))?;
+        if n < 2 {
+            return Err(gap("for-iter `next` must return `(bool, E)`"));
+        }
+
+        let header = self.f.new_block();
+        let body_bb = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        // header: (ok, elem..) = next(it); branch on ok.
+        self.cur = header;
+        let it_load = self.emit_cur(Inst::Load(it_cell));
+        let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        self.emit_cur(Inst::CallMulti { dests: dests.clone(), func: next_fn, args: vec![it_load] });
+        let ok = self.emit_cur(Inst::Load(dests[0]));
+        self.f.set_term(self.cur, Term::Branch { cond: ok, then_bb: body_bb, else_bb: exit });
+
+        // body: bind the pattern to the element leaves. A single element binds
+        // directly; multiple (`next -> (bool, A, B)`) pack into a MakeTuple that
+        // `bind_for_pattern` elides against a matching tuple pattern (no alloc).
+        self.cur = body_bb;
+        let elem_val = if n == 2 {
+            self.emit_cur(Inst::Load(dests[1]))
+        } else {
+            let loads: Vec<Idx<Inst>> =
+                dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            self.emit_cur(Inst::MakeTuple(loads))
+        };
+        self.bind_for_pattern(vars, elem_val);
+        self.loop_targets.push((header, exit));
+        self.lower_stmt_expr(body)?;
+        self.loop_targets.pop();
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(header));
+        }
+        self.cur = exit;
+        Ok(())
     }
 
     /// The variant names of `e`'s enum type (empty if `e` is not an enum) — used

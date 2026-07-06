@@ -4664,8 +4664,148 @@ fn infer_for_elem(
             let iter_ty = infer_expr(c, gamma, iter)?;
             let iter_ty = resolve(gamma, iter_ty, span);
 
-            for_elem_ty(gamma, iter_ty, span)
+            match for_elem_ty(gamma, iter_ty, span) {
+                Ok(elem) => Ok(elem),
+                // Not a builtin collection: try the user iterator protocol
+                // `iter(coll) -> It`, `next(It) -> (bool, E)`. The recorded
+                // (iter_fn, next_fn) drive skull's for-loop desugar.
+                Err(_not_builtin) => resolve_for_iter_protocol(c, gamma, iter, iter_ty, span),
+            }
         }
+    }
+}
+
+/// `for x in coll` where `coll` is not a builtin collection: resolve the user
+/// iterator protocol `iter(coll) -> It`, `next(It) -> (bool, E)`, record the two
+/// fns keyed by the For's `iter` expr (for skull's desugar), and return the
+/// element type E. E is a single type for `next -> (bool, E)`, or a tuple for
+/// `next -> (bool, A, B, ...)` so `for (a, b) in coll` destructures.
+fn resolve_for_iter_protocol(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    iter_expr: Idx<Expr>,
+    coll_ty: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    let (iter_fn, it_ty) =
+        match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), coll_ty, span) {
+            Ok(x) => x,
+            Err(_) => comp_error!(
+                span,
+                "type `{}` is not iterable: not a builtin collection and no `iter({})` function in scope",
+                gamma.render(coll_ty),
+                gamma.render(coll_ty)
+            ),
+        };
+
+    let (next_fn, next_ret) =
+        match resolve_unary_by_recv(c, gamma, Ustr::from("next"), it_ty, span) {
+            Ok(x) => x,
+            Err(_) => comp_error!(
+                span,
+                "`iter` yields `{}`, but there is no `next({}) -> (bool, E)` function to drive the loop",
+                gamma.render(it_ty),
+                gamma.render(it_ty)
+            ),
+        };
+
+    let elem = for_iter_next_elem(gamma, next_ret, span)?;
+    gamma.out.for_iter_protocol.insert(iter_expr, (iter_fn, next_fn));
+    Ok(elem)
+}
+
+/// Resolve a unary call `name(recv)` by the receiver's TYPE alone (no arg expr) --
+/// the iterator protocol calls `iter(coll)` / `next(it)` on synthesized values.
+/// Reuses `select_overload` via the `recv_ty` slot, then instantiates generics
+/// and returns the resolved `(callee, return_ty)`. Does NOT record into
+/// `resolved_overload_calls` (the caller stores it in `for_iter_protocol`).
+fn resolve_unary_by_recv(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    name: Ustr,
+    recv_ty: TyId,
+    span: Span,
+) -> Result<((ModuleId, Idx<Function>), TyId), CompilerError> {
+    let candidates = resolve_callee(gamma, name);
+    if candidates.is_empty() {
+        comp_error!(span, "no `{}` function in scope", name);
+    }
+    let recv_ty = resolve(gamma, recv_ty, span);
+
+    let (mid, fid) = if candidates.len() == 1 {
+        candidates[0]
+    } else {
+        select_overload(
+            c,
+            gamma,
+            &candidates,
+            Some(recv_ty),
+            &[],
+            &FxHashMap::default(),
+            &[recv_ty],
+            name,
+            span,
+        )?
+    };
+
+    let function = &gamma.workspace.module(mid).functions[fid];
+    let generics = function.generics.clone();
+    let n_params = function.param_decls.len();
+    let num_required = function.num_required;
+    let param0 = function.param_decls.first().map(|p| p.ty);
+    let ret = function.return_ty;
+
+    // The protocol is unary: exactly one required receiver parameter.
+    if n_params != 1 || num_required != 1 {
+        comp_error!(span, "`{}` must take exactly one argument to drive a `for` loop", name);
+    }
+    let Some(p0) = param0 else {
+        comp_error!(span, "`{}` has no receiver parameter", name);
+    };
+
+    let (subs, _) = gamma.instantiate_generics(&generics, span)?;
+    let p0_sub = substitute(gamma, p0, &subs, span)?;
+    coerce(gamma, recv_ty, p0_sub, span)?;
+
+    let ret = ret.unwrap_or_else(|| gamma.workspace.builtins.unit());
+    let ret_sub = substitute(gamma, ret, &subs, span)?;
+    Ok(((mid, fid), resolve(gamma, ret_sub, span)))
+}
+
+/// Element type of a `next() -> (bool, E)` return: the tuple tail. `(bool, E)`
+/// yields `E`; `(bool, A, B, ...)` yields the tuple `(A, B, ...)`. The first
+/// element must be `bool` (the done flag) and there must be at least one element.
+fn for_iter_next_elem(gamma: &mut Gamma, next_ret: TyId, span: Span) -> Result<TyId, CompilerError> {
+    let next_ret = resolve(gamma, next_ret, span);
+    let TypeExpr::Tuple { elements } = *gamma.get(next_ret) else {
+        comp_error!(span, "`next` must return `(bool, E)`, got `{}`", gamma.render(next_ret));
+    };
+    let elems: Vec<_> = elements.into_iter().collect();
+    if elems.len() < 2 {
+        comp_error!(
+            span,
+            "`next` must return `(bool, E)` (a done-flag plus at least one element), got `{}`",
+            gamma.render(next_ret)
+        );
+    }
+
+    let first = resolve(gamma, next_ret.with_idx(elems[0]), span);
+    if !matches!(gamma.get(first), TypeExpr::Builtin(BuiltinTy::Bool)) {
+        comp_error!(
+            span,
+            "`next`'s first return must be `bool` (the done flag), got `{}`",
+            gamma.render(first)
+        );
+    }
+
+    if elems.len() == 2 {
+        Ok(resolve(gamma, next_ret.with_idx(elems[1]), span))
+    } else {
+        let tail: Vec<TyId> = elems[1..]
+            .iter()
+            .map(|&e| resolve(gamma, next_ret.with_idx(e), span))
+            .collect();
+        Ok(tuple_of(gamma, &tail, span))
     }
 }
 

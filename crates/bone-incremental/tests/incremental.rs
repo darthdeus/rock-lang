@@ -771,6 +771,43 @@ fn count_points() -> int {
 }
 
 #[test]
+fn oracle_for_iter_protocol_invalidates_on_next_edit() {
+    // `for x in <user type>` resolves the iter/next protocol (bone records the
+    // fns in `for_iter_protocol`). Removing `next` must re-typecheck the loop and
+    // surface the error; restoring recovers. `assert_matches_batch` (inside
+    // `update`) also proves the side-table is recomputed identically to a fresh
+    // batch check after each edit.
+    let with_next = "\
+struct R { hi: int }
+struct RIt { cur: int, hi: int }
+fn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }
+fn next(it: RIt) -> (bool, int) {
+    if it.cur < it.hi { let v = it.cur; it.cur = it.cur + 1; (true, v) } else { (false, 0) }
+}
+fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
+";
+    let mut h = Harness::new(&[("it.rock", with_next)]);
+    h.assert_clean();
+
+    // Drop `next` -> the loop can't resolve the protocol.
+    let without_next = "\
+struct R { hi: int }
+struct RIt { cur: int, hi: int }
+fn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }
+fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
+";
+    h.update("it.rock", without_next);
+    assert!(
+        !h.session.diagnostics().is_empty(),
+        "removing `next` must break the for-loop over R"
+    );
+
+    // Restore -> recovers.
+    h.update("it.rock", with_next);
+    h.assert_clean();
+}
+
+#[test]
 fn delete_of_signature_dependency_surfaces_dependent_error() {
     // b.rock names `Point` in a SIGNATURE. With total lowering, removing a.rock
     // (Point's definition) is a normal remove via the full rebuild: b.rock's
