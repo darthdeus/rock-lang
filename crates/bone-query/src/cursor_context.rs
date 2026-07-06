@@ -47,7 +47,7 @@ fn token_replacement_munge(src: &str, offset: usize) -> Option<(String, usize)> 
     out.push_str(&src[..s]);
     out.push_str("__rock_completion__");
     out.push_str(&src[e..]);
-    Some((crate::backend::balance_delimiters(out), s))
+    Some((crate::completion::classify::balance_delimiters(out), s))
 }
 
 /// Offset of the `}` matching the `{` at `open` (None when unbalanced).
@@ -120,7 +120,7 @@ impl CursorAst {
     /// fallback there.
     pub(crate) fn at(src: &str, offset: usize) -> Option<CursorAst> {
         let file = Ustr::from("<cursor>");
-        let mut candidates: Vec<(String, usize)> = crate::backend::completion_munges(src, offset)
+        let mut candidates: Vec<(String, usize)> = crate::completion::classify::completion_munges(src, offset)
             .into_iter()
             .map(|m| (m, offset))
             .collect();
@@ -134,7 +134,7 @@ impl CursorAst {
             s.push_str(head);
             s.push_str("__rock_completion__,");
             s.push_str(tail);
-            candidates.push((crate::backend::balance_delimiters(s), offset));
+            candidates.push((crate::completion::classify::balance_delimiters(s), offset));
         }
         // Arm-completing sentinel: `E::<cursor>` in a FRESH match arm (no
         // `=>` typed yet) -- every plain munge leaves an incomplete arm that
@@ -146,7 +146,7 @@ impl CursorAst {
             s.push_str(head);
             s.push_str("__rock_completion__ => {}");
             s.push_str(tail);
-            candidates.push((crate::backend::balance_delimiters(s), offset));
+            candidates.push((crate::completion::classify::balance_delimiters(s), offset));
         }
         candidates.push((src.to_string(), offset));
         // A candidate can parse while recovery mangles the cursor region:
