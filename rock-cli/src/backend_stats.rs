@@ -26,7 +26,7 @@ use crate::Result;
 use crate::bone_backend::{self, BonePhaseTimes};
 use crate::skull_backend::{self, SkullPhaseTimes};
 use colored::Colorize;
-use rock_syntax::prelude::SourceFiles;
+use rock_core::SourceFiles;
 use std::time::Duration;
 
 /// Counters + timings from type-checking the whole loaded source set through
