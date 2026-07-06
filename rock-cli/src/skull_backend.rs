@@ -56,7 +56,7 @@ fn skull_emit_full(
 /// `semantic` mirror `BonePhaseTimes` (skull shares bone's front half: same
 /// `parse_rock` + `semantic_pass`), so they're directly comparable; `emit` is
 /// the codegen skull adds on top (`skull::emit_workspace`). Consumed by
-/// `backend-stats` for the 3-way rock/bone/skull comparison.
+/// `backend-stats` for the bone-vs-skull comparison.
 #[derive(Default, Clone)]
 pub struct SkullPhaseTimes {
     pub parse: Duration,

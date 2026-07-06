@@ -157,8 +157,8 @@ pub(crate) fn bone_session(
 
 /// Run bone's full pipeline once, timing each stage separately. This is the one
 /// place the bone calls live; everything else (check, test, profile,
-/// `backend-stats`) layers on top so the timing split is consistent. Reuses
-/// rock's standard `Instant` timing approach — no coupling to bone, which stays
+/// `backend-stats`) layers on top so the timing split is consistent. Timed with
+/// plain `Instant`s at the call boundaries — no coupling to bone, which stays
 /// uninstrumented.
 pub fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), CompilerError>, BonePhaseTimes) {
     let mut times = BonePhaseTimes::default();
@@ -263,7 +263,8 @@ pub(crate) fn entry_module_id(
 /// together with the stdlib as ONE workspace (the only way cross-file references
 /// resolve). Unlike `bone_pipeline_timed` (one file in isolation), this is what
 /// `backend-stats` uses so the bone column measures the same whole-project work
-/// `rock` does — a per-file loop would reject every file that names a sibling.
+/// a real compile does — a per-file loop would reject every file that names a
+/// sibling.
 pub(crate) fn bone_workspace_timed(
     sources: &SourceFiles,
 ) -> (
