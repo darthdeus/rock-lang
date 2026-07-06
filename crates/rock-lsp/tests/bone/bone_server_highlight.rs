@@ -5,6 +5,7 @@
 //! symbol-aware references query. Drives the adapter directly with a bone-backed
 //! LspWorkspace, the same way the server does on a request.
 
+use crate::common::bone_ws;
 use lsp_types::*;
 use rock_lsp::{do_document_highlight_workspace, LspWorkspace};
 use std::str::FromStr;
@@ -17,13 +18,6 @@ fn main() {
     print(count)
 }
 ";
-
-fn bone_ws(path: &std::path::Path) -> LspWorkspace {
-    std::fs::write(path, SRC).unwrap();
-    let mut ws = LspWorkspace::new();
-    ws.bone.update(path.to_str().unwrap(), SRC.to_string());
-    ws
-}
 
 fn highlight_at(ws: &mut LspWorkspace, path: &std::path::Path, line: u32, ch: u32)
     -> Vec<DocumentHighlight>
@@ -45,7 +39,7 @@ fn highlight_at(ws: &mut LspWorkspace, path: &std::path::Path, line: u32, ch: u3
 fn highlights_all_occurrences_of_a_local() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
-    let mut ws = bone_ws(&path);
+    let mut ws = bone_ws(&path, SRC);
 
     // Cursor on the `count` declaration (line 1, the `c` at char 8).
     let hl = highlight_at(&mut ws, &path, 1, 8);
@@ -67,7 +61,7 @@ fn highlights_all_occurrences_of_a_local() {
 fn highlight_from_a_use_site_finds_the_same_set() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
-    let mut ws = bone_ws(&path);
+    let mut ws = bone_ws(&path, SRC);
 
     // Cursor on the `count` use inside print() (line 3, char 10).
     let hl = highlight_at(&mut ws, &path, 3, 10);

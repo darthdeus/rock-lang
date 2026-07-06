@@ -6,44 +6,9 @@
 //! no-op cases (exhaustive / wildcard) are all exercised here -- there's no
 //! `.rock.lsp` fixture type for code actions.
 
+use crate::common::*;
 use lsp_types::*;
-use rock_lsp::{compute_code_actions_workspace, LspWorkspace};
-use std::str::FromStr;
-
-fn bone_ws(path: &std::path::Path, src: &str) -> LspWorkspace {
-    std::fs::write(path, src).unwrap();
-    let mut ws = LspWorkspace::new();
-    ws.bone.update(path.to_str().unwrap(), src.to_string());
-    ws
-}
-
-fn params_at(path: &std::path::Path, line: u32, ch: u32) -> CodeActionParams {
-    CodeActionParams {
-        text_document: TextDocumentIdentifier {
-            uri: Uri::from_str(&format!("file://{}", path.display())).unwrap(),
-        },
-        range: Range {
-            start: Position::new(line, ch),
-            end: Position::new(line, ch),
-        },
-        context: CodeActionContext {
-            diagnostics: vec![],
-            only: None,
-            trigger_kind: None,
-        },
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
-    }
-}
-
-fn run(src: &str, line: u32, ch: u32) -> Vec<CodeAction> {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock");
-    let mut ws = bone_ws(&path, src);
-    compute_code_actions_workspace(&mut ws, &params_at(&path, line, ch))
-        .unwrap()
-        .unwrap_or_default()
-}
+use rock_lsp::compute_code_actions_workspace;
 
 fn new_text(action: &CodeAction) -> String {
     let edit = action.edit.as_ref().expect("action should carry an edit");

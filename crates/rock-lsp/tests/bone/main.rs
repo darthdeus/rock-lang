@@ -1,3 +1,5 @@
+mod common;
+
 mod bone_completion_incomplete;
 mod bone_generate_function_action;
 mod bone_match_arms_action;
