@@ -481,10 +481,17 @@ fn verify_pure_expr(
         };
     }
     match c.body.expr_arena[e] {
-        Expr::Global(name) => errors.push(CompilerError::new_with_label(
-            span,
-            format!("`@pure` function reads global `{}` (mutable state)", name),
-        )),
+        Expr::Global(name) => {
+            // const globals are read-only (assignment/incdec rejected,
+            // re-initialized unconditionally on hot reload); reading one
+            // is pure. Only mutable globals break purity.
+            if !ws.const_globals.contains(&name) {
+                errors.push(CompilerError::new_with_label(
+                    span,
+                    format!("`@pure` function reads global `{}` (mutable state)", name),
+                ))
+            }
+        }
         Expr::Assign { target, value } => {
             errors.push(CompilerError::new_with_label(
                 span,
@@ -1036,6 +1043,17 @@ pub fn infer_expr_used(
         }
 
         Expr::IncDec { target, .. } => {
+            // Same const-rebind rejection as Expr::Assign/CompoundAssign;
+            // `CONST++` is a write with extra steps.
+            if let Expr::Global(name) = c.body.expr_arena[*target] {
+                if gamma.workspace.const_globals.contains(&name) {
+                    comp_error!(
+                        expr_span,
+                        "cannot assign to const `{}`; consts are read-only",
+                        name
+                    );
+                }
+            }
             let inner_ty = infer_expr(c, gamma, *target)?;
             resolve(gamma, inner_ty, c.body.expr_spans[*target])
         }
