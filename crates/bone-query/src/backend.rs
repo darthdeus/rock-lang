@@ -3594,6 +3594,25 @@ fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, m
     arg_rank_key(type_rank, kind, cand, query, dist, method).encode(cand)
 }
 
+/// sort_text for a CLOSED-SET completion (struct-literal / record-variant
+/// field names, enum-qualified variants): match band + fine against the
+/// typed prefix lead, and the DECLARATION index rides `dist` -- for a closed
+/// set the author's declaration order is the browse order, so it breaks
+/// ties instead of the alphabetical name suffix.
+fn closed_set_sort_text(name: &str, prefix: &[u8], decl_idx: usize) -> String {
+    let score = fuzzy_score(name.as_bytes(), prefix);
+    let (exact, band) = match_band_exact(name, prefix, prefix);
+    RankKey {
+        exact,
+        band,
+        dist: decl_idx.min(99) as u16,
+        fine: RankKey::fine(score),
+        len: RankKey::len_key(score, name.len()),
+        ..Default::default()
+    }
+    .encode(name)
+}
+
 /// The `RankKey` behind `arg_sort_text` -- the reach source emits it as a
 /// `Cand` fact and defers the encode to materialization.
 fn arg_rank_key(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> RankKey {
@@ -5070,19 +5089,23 @@ fn enum_record_field_completions(
         if fields.is_empty() {
             continue;
         }
-        return Some(
-            fields
-                .into_iter()
-                .filter(|(name, _)| prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes()))
-                .map(|(name, ty)| CompletionItem {
-                    label: format!("{name}: {ty}"),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(ty),
-                    insert_text: Some(name),
-                    ..Default::default()
-                })
-                .collect(),
-        );
+        let mut items: Vec<CompletionItem> = fields
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (name, _))| {
+                prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())
+            })
+            .map(|(i, (name, ty))| CompletionItem {
+                label: format!("{name}: {ty}"),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(ty),
+                sort_text: Some(closed_set_sort_text(&name, prefix.as_bytes(), i)),
+                insert_text: Some(name),
+                ..Default::default()
+            })
+            .collect();
+        items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+        return Some(items);
     }
 
     None
@@ -5119,20 +5142,22 @@ fn struct_literal_field_completions(
         .filter(|n| !n.is_empty())
         .collect();
 
-    Some(
-        fields
-            .into_iter()
-            .filter(|(n, _)| !present.contains(n))
-            .filter(|(n, _)| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
-            .map(|(n, ty)| CompletionItem {
-                label: format!("{n}: {ty}"),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(ty),
-                insert_text: Some(n),
-                ..Default::default()
-            })
-            .collect(),
-    )
+    let mut items: Vec<CompletionItem> = fields
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (n, _))| !present.contains(n))
+        .filter(|(_, (n, _))| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
+        .map(|(i, (n, ty))| CompletionItem {
+            label: format!("{n}: {ty}"),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(ty),
+            sort_text: Some(closed_set_sort_text(&n, prefix.as_bytes(), i)),
+            insert_text: Some(n),
+            ..Default::default()
+        })
+        .collect();
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    Some(items)
 }
 
 /// True if the `Enum::Variant` being completed at `offset` sits in a match-arm
@@ -5317,9 +5342,11 @@ fn enum_qualified_completions(
     let none_match = !prefix.is_empty() && !all.iter().any(|(v, _)| matches_prefix(v));
     let force_filter = none_match.then(|| prefix.to_string());
 
-    all.into_iter()
-        .filter(|(v, _)| none_match || matches_prefix(v))
-        .map(|(v, shape)| {
+    let mut items: Vec<CompletionItem> = all
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (v, _))| none_match || matches_prefix(v))
+        .map(|(i, (v, shape))| {
             use crate::query::VariantShape;
             let (insert_text, insert_text_format) = match (pattern, shape) {
                 (false, VariantShape::Tuple) => {
@@ -5331,6 +5358,7 @@ fn enum_qualified_completions(
                 _ => (None, None),
             };
             CompletionItem {
+                sort_text: Some(closed_set_sort_text(&v, prefix.as_bytes(), i)),
                 label: v,
                 kind: Some(CompletionItemKind::ENUM_MEMBER),
                 filter_text: force_filter.clone(),
@@ -5339,7 +5367,9 @@ fn enum_qualified_completions(
                 ..Default::default()
             }
         })
-        .collect()
+        .collect();
+    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+    items
 }
 
 /// Struct-field completions for `receiver.<field>`. The live body is broken by

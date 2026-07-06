@@ -23,7 +23,29 @@ fn labels_at(src: &str) -> Vec<String> {
     let (s, pos) = marked(src);
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, s);
-    bone.completion(PATH, pos).into_iter().map(|c| c.label).collect()
+    let items = bone.completion(PATH, pos);
+    // Every corpus fixture doubles as an invariant-suite position
+    // (docs/completion-v2-design.md M4): the position-blind response
+    // invariants must hold wherever a ranking decision is pinned.
+    let prefix = typed_prefix(src);
+    let violations = bone_query::invariants::completion_response_violations(&items, &prefix);
+    assert!(
+        violations.is_empty(),
+        "response invariants violated (prefix {prefix:?}): {violations:?}"
+    );
+    items.into_iter().map(|c| c.label).collect()
+}
+
+/// The raw identifier prefix directly before the `$0` cursor marker (what the
+/// user typed).
+fn typed_prefix(marked_src: &str) -> String {
+    let off = marked_src.find("$0").expect("fixture must contain the `$0` cursor marker");
+    let head = &marked_src.as_bytes()[..off];
+    let start = head
+        .iter()
+        .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .map_or(0, |i| i + 1);
+    String::from_utf8_lossy(&head[start..]).into_owned()
 }
 
 /// Index of the first label equal to `needle`.

@@ -73,7 +73,7 @@ fn field(s: Option<&str>) -> String {
     s.map(esc).unwrap_or_else(|| "-".to_string())
 }
 
-pub fn completion_sweep(path: &str, stride: usize) -> Result<()> {
+pub fn completion_sweep(path: &str, stride: usize, check: bool) -> Result<()> {
     let dir = Path::new(path);
     if !dir.is_dir() {
         anyhow::bail!("completion-sweep expects a project directory, got `{path}`");
@@ -93,6 +93,7 @@ pub fn completion_sweep(path: &str, stride: usize) -> Result<()> {
     let mut out = std::io::BufWriter::new(stdout.lock());
     let mut n_positions = 0usize;
     let mut n_items = 0usize;
+    let mut n_violations = 0usize;
 
     for f in &files {
         let abs = fs_err::canonicalize(f)?;
@@ -105,6 +106,24 @@ pub fn completion_sweep(path: &str, stride: usize) -> Result<()> {
             let items = bone.completion(&abs_str, pos);
             n_positions += 1;
             n_items += items.len();
+            // `--check`: enforce the position-blind response invariants
+            // (docs/completion-v2-design.md M4) at every swept position --
+            // the real-project rung of the invariant suite.
+            if check {
+                let violations = bone_query::invariants::completion_response_violations(
+                    &items,
+                    prefix_at(&text, off),
+                );
+                for v in &violations {
+                    eprintln!(
+                        "INVARIANT {rel}:{}:{} prefix=\"{}\": {v}",
+                        pos.line + 1,
+                        pos.character + 1,
+                        esc(prefix_at(&text, off)),
+                    );
+                }
+                n_violations += violations.len();
+            }
             writeln!(
                 out,
                 "=== {rel}:{}:{} prefix=\"{}\"",
@@ -135,5 +154,11 @@ pub fn completion_sweep(path: &str, stride: usize) -> Result<()> {
         "completion-sweep: {} files, {n_positions} positions (stride {stride}), {n_items} items",
         files.len()
     );
+    if check {
+        if n_violations > 0 {
+            anyhow::bail!("completion-sweep --check: {n_violations} invariant violations");
+        }
+        eprintln!("completion-sweep --check: invariants hold at all {n_positions} positions");
+    }
     Ok(())
 }

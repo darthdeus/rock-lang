@@ -9,11 +9,9 @@ const PATH: &str = "/tmp/rock_lsp_bone_completion_ctx.rock";
 fn labels(src: &str, line: u32, ch: u32) -> Vec<String> {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let mut out: Vec<String> = bone
-        .completion(PATH, Position::new(line, ch))
-        .into_iter()
-        .map(|c| c.label)
-        .collect();
+    let items = bone.completion(PATH, Position::new(line, ch));
+    check_invariants(src, line, ch, &items);
+    let mut out: Vec<String> = items.into_iter().map(|c| c.label).collect();
     out.sort();
     out
 }
@@ -22,10 +20,44 @@ fn labels(src: &str, line: u32, ch: u32) -> Vec<String> {
 fn item(src: &str, line: u32, ch: u32, label: &str) -> CompletionItem {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    bone.completion(PATH, Position::new(line, ch))
+    let items = bone.completion(PATH, Position::new(line, ch));
+    check_invariants(src, line, ch, &items);
+    items
         .into_iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("no completion `{label}` at {line}:{ch}"))
+}
+
+/// Every context fixture doubles as an invariant-suite position
+/// (docs/completion-v2-design.md M4): the position-blind response invariants
+/// must hold in every completion context this file exercises.
+fn check_invariants(src: &str, line: u32, ch: u32, items: &[CompletionItem]) {
+    let off: usize =
+        src.lines().take(line as usize).map(|l| l.len() + 1).sum::<usize>() + ch as usize;
+    let head = &src.as_bytes()[..off.min(src.len())];
+    let start = head
+        .iter()
+        .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .map_or(0, |i| i + 1);
+    let prefix = String::from_utf8_lossy(&head[start..]).into_owned();
+    let violations = bone_query::invariants::completion_response_violations(items, &prefix);
+    assert!(
+        violations.is_empty(),
+        "response invariants violated at {line}:{ch} (prefix {prefix:?}): {violations:?}"
+    );
+}
+
+#[test]
+fn member_ufcs_overloads_dedup_to_one_item() {
+    // Two overloads of `rotate` on the receiver struct must surface as ONE
+    // member item (same label, same insert -- the duplicate is popup noise;
+    // the general path already dedups overloads by name, first-wins).
+    let src = "struct Vec2 { x: float, y: float }\n\
+               fn rotate(v: Vec2, angle: float) -> Vec2 { v }\n\
+               fn rotate(v: Vec2, rhs: Vec2) -> Vec2 { v }\n\
+               fn r(p: Vec2) {\n  p.\n}\n";
+    let l = labels(src, 4, 4);
+    assert_eq!(l.iter().filter(|s| s.as_str() == "rotate").count(), 1, "{l:?}");
 }
 
 #[test]

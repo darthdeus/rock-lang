@@ -462,7 +462,7 @@ impl Args {
             .arg(Arg::new("stdout").long("stdout").action(ArgAction::SetTrue)
                 .help("Print formatted output to stdout instead of updating files - for fmt command"))
             .arg(Arg::new("check").long("check").action(ArgAction::SetTrue)
-                .help("Check if files are already formatted (exit code 1 if not) - for fmt command"))
+                .help("For `rock fmt`: check if files are already formatted (exit 1 if not). For `rock completion-sweep`: enforce the completion response invariants at every position (exit 1 on violation)."))
             .arg(Arg::new("iters").long("iters").default_value("1")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of iterations for compilation (used for profiling)"))

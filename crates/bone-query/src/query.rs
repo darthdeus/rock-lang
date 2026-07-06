@@ -2339,13 +2339,17 @@ pub struct UfcsMethod {
 /// `recv.` member completion.
 pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
     let mut out = Vec::new();
+    // Overloads collapse to one method item (identical label + insert --
+    // the duplicate is popup noise), first-wins to match the general path's
+    // per-name fn dedup.
+    let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
     for m in ws.modules.iter() {
         for f in m.functions.values() {
             if f.name.as_str().starts_with("__") {
                 continue;
             }
             if let Some(p0) = f.param_decls.first() {
-                if struct_name_of_ty(ws, None, p0.ty) == Some(name) {
+                if struct_name_of_ty(ws, None, p0.ty) == Some(name) && seen.insert(f.name) {
                     out.push(UfcsMethod {
                         name: f.name.to_string(),
                         signature: render_fn_signature(ws, f.name, f),

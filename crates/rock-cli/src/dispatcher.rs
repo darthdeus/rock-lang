@@ -463,7 +463,11 @@ impl CommandContext {
         // the other completion harnesses.
         if self.args.command == CliCommand::CompletionSweep {
             let path = self.get_path_or_current()?;
-            return crate::completion_sweep::completion_sweep(&path, self.args.stride);
+            return crate::completion_sweep::completion_sweep(
+                &path,
+                self.args.stride,
+                self.args.check,
+            );
         }
         // lsp-survey is the stats-driven slow-edit hunter (BoneWorkspace);
         // dispatched early like the other iter-* / LSP profilers.
