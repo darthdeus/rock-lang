@@ -965,40 +965,23 @@ impl BoneWorkspace {
         // whole project (warm stdlib + dependencies like the engine) resolves a
         // cross-file receiver type at incremental cost -- plain prefix completion
         // (the fall-through below) uses the live workspace directly.
-        // AST cursor classifier (docs/cursor-context-plan.md): parses the
-        // munged buffer once and answers the context queries structurally.
-        // None only when every ladder rung fails to tokenize -- the byte
-        // scanners stay as the documented fallback on that frontier.
-        let cursor_ast = crate::cursor_context::CursorAst::at(src, offset);
-        // Call-arg slot, shared by the member / field-ref / ranking paths.
-        // The receiver anchor is the receiver expr's END offset (the byte
-        // fallback's dot offset serves the same "just past the receiver"
-        // role in method_receiver_ty).
-        let arg_ctx = cursor_ast.as_ref().and_then(|cx| cx.call_arg());
-        // Member access (`.`) is the most specific trigger: a `recv.field` even
-        // inside a struct-literal field value (`Foo { x: recv.<cursor> }`) is
-        // member completion, not field completion -- so it's checked first.
-        let member_segments = cursor_ast.as_ref().and_then(|cx| cx.member_path());
-        if let Some(segments) = member_segments {
+        // The cursor classification, computed ONCE (CompletionCx: the AST
+        // classifier over the munge ladder plus every context consultation;
+        // docs/cursor-context-plan.md + completion-v2-design.md M2b). The
+        // dispatch below tries the slots most-specific-first; a `recv.field`
+        // even inside a struct-literal field value is member completion.
+        let cx = classify(src, offset);
+        if let Some(segments) = cx.member.clone() {
             // In a call-arg position, a member completion (`recv.field`) also
             // surfaces TRANSITIVE suffix paths whose deep type matches the
             // expected param (`recv.movable.grid`), and direct members that fit
             // the slot rank first. The typed session is built INSIDE the member
             // variant (member TyIds live in that workspace); here we just pass
             // the enclosing (callee, arg index).
-            let arg_slot = arg_ctx.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
-            // Slot-anchored expected type (assignment/comparison RHS,
-            // typed-`let`, `return`) -- the member list type-directs from the
-            // same anchor the general path uses (`mob.ai_state = other.|`
-            // boosts `other`'s MobAiState-typed members).
-            let anchor = cursor_ast.as_ref().and_then(slot_anchor);
-            // Bool-field soft boost: the chain is the whole `if`/`while`
-            // condition. Structural from the classifier; byte fallback on
-            // the tokenize frontier.
-            let bool_ctx = cursor_ast.as_ref().is_some_and(|cx| cx.bool_condition_chain());
+            let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
             let mut items = member_completions(
-                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot, anchor,
-                proj.reach.as_ref(), bool_ctx,
+                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot, cx.anchor,
+                proj.reach.as_ref(), cx.bool_chain,
             );
             if next_is_open_paren {
                 strip_call_template(&mut items);
@@ -1015,7 +998,7 @@ impl BoneWorkspace {
         // field ref (live signature says FieldOf, or a `.` is already typed);
         // `field_ref_arg_completions` returns None -> falls through to normal
         // completion (e.g. enum-shorthand `.Variant` in an arg).
-        if let Some((callee, arg_idx, _)) = arg_ctx.clone() {
+        if let Some((callee, arg_idx, _)) = cx.arg_call.clone() {
             let lead_dot = leading_dot(src, offset);
             // Skip the variant only when the live signature is KNOWN and clearly
             // not a field ref. If the callee is unknown live (the incomplete arg
@@ -1042,8 +1025,7 @@ impl BoneWorkspace {
                 }
             }
         }
-        let enum_rec = cursor_ast.as_ref().and_then(|cx| cx.enum_record());
-        if let Some((enum_name, variant)) = enum_rec {
+        if let Some((enum_name, variant)) = cx.enum_record.clone() {
             // Falls through (None) when the head isn't a record variant -- a unit/
             // tuple variant as a block head (`if x == Enum::Variant { .. }`) is NOT
             // a record literal, so the block still gets global completion.
@@ -1054,8 +1036,7 @@ impl BoneWorkspace {
                 return items;
             }
         }
-        let enum_base = cursor_ast.as_ref().and_then(|cx| cx.qualified_base());
-        if let Some(enum_name) = enum_base {
+        if let Some(enum_name) = cx.qualified.clone() {
             let mut items = enum_qualified_completions(
                 &mut proj.session, path, src, offset, &enum_name, &prefix,
             );
@@ -1065,8 +1046,7 @@ impl BoneWorkspace {
             path_ms("enum-qualified path", items.len());
             return items;
         }
-        let struct_lit = cursor_ast.as_ref().and_then(|cx| cx.struct_literal());
-        if let Some((struct_name, brace_open)) = struct_lit {
+        if let Some((struct_name, brace_open)) = cx.struct_literal.clone() {
             // Falls through (None) when the head isn't actually a struct, so a
             // `match X {` / `if Cond {` block still gets global completion.
             if let Some(items) = struct_literal_field_completions(
@@ -1081,7 +1061,7 @@ impl BoneWorkspace {
         // `deco` declarations, not the fn/type namespace. Detected from the `@`
         // trigger and served from the live workspace (decorators are declared in
         // the engine, so they're present even if the edited module dropped out).
-        if decorator_context(src, offset) {
+        if cx.decorator {
             let items = decorator_completions(proj.session.workspace(), &prefix);
             path_ms("decorator path", items.len());
             return items;
@@ -1123,11 +1103,10 @@ impl BoneWorkspace {
         };
         // Type-vs-expression slot governs enum completion (bare `Enum` in a type
         // slot, qualified `Enum::Variant` values in an expression slot).
-        let expr_position = !cursor_ast.as_ref().is_some_and(|cx| cx.is_type_position());
+        let expr_position = cx.expr_position;
         // After a `yield`/`yield*`, coroutine-returning fns rank first (the
         // `yield* frame(1)` delegation pattern).
-        let after_yield =
-            expr_position && cursor_ast.as_ref().is_some_and(|cx| cx.after_yield());
+        let after_yield = cx.after_yield;
         // Param-name + fn-prefix type heuristic (param TYPE slot only): a param
         // named `e`/`entity` suggests the (generic) `Entity` type; the enclosing
         // fn's name prefix picks the payload (`mob_attack_co` -> `Mob` ->
@@ -1135,8 +1114,8 @@ impl BoneWorkspace {
         // `Entity<$0>` (cursor parked in the generic slot), never bare `Entity`.
         let mut entity_hint = false;
         let mut entity_payload: Option<Ustr> = None;
-        if !expr_position {
-            if let Some((pn, fn_name)) = cursor_ast.as_ref().and_then(|cx| cx.param_type()) {
+        {
+            if let Some((pn, fn_name)) = cx.param_type.clone() {
                 if is_entity_param_name(&pn) {
                     entity_hint = true;
                     entity_payload = fn_prefix_struct(ws, &fn_name);
@@ -1158,55 +1137,7 @@ impl BoneWorkspace {
         // rendered-string list stays alongside as the reachability index's
         // keys and as the fallback rung when no typed session can be built
         // (broken body, no cached inference for the cursor body).
-        let arg_call = arg_ctx;
-        let field_slot = if arg_call.is_none() {
-            cursor_ast.as_ref().and_then(|cx| cx.struct_field_value())
-        } else {
-            None
-        };
-        let mut expected = arg_call.as_ref().and_then(|(callee, idx, _recv)| {
-            // Receiver type for UFCS overload filtering: structural from the
-            // classifier (the receiver is an AST node -- a chain receiver's
-            // type is its callee's unique return type, no paren rescanning);
-            // the byte scanner remains the tokenize-frontier fallback.
-            let recv_ty = cursor_ast.as_ref().and_then(|cx| {
-                cx.call_receiver().and_then(|a| match a {
-                    crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
-                        fn_unique_return_ty(ws, &name)
-                    }
-                    crate::cursor_context::ReceiverAnchor::End(e) => e
-                        .checked_sub(1)
-                        .and_then(|last| bone_semantic::query::type_at(ws, mid, inf, last))
-                        .map(|ta| ta.ty),
-                })
-            });
-            ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx as usize, recv_ty)
-        });
-        if expected.is_none() {
-            // Struct-literal field VALUE slot (`Name { field: <cursor> }`):
-            // the expected type is that field's declared type, so an enum-
-            // typed field surfaces its variants type-directed. Inside a lambda
-            // body assigned to a function-typed field (`is_open: () => x|`),
-            // the body returns the field's RETURN type, so type-direct on that.
-            expected = field_slot.as_ref().and_then(|(sname, fname, is_lambda)| {
-                let slot = if *is_lambda {
-                    crate::query::struct_field_fn_return_ty(ws, sname, fname)
-                        .or_else(|| crate::query::struct_field_ty(ws, sname, fname))
-                } else {
-                    crate::query::struct_field_ty(ws, sname, fname)
-                }?;
-                ExpectedArg::for_slot(ws, mid, inf, offset, slot)
-            });
-        }
-        if expected.is_none() && arg_call.is_none() && field_slot.is_none() {
-            // Slot-anchored contexts beyond call args / struct fields
-            // (assignment/comparison RHS, typed-`let` init, `return`) -- the
-            // same `slot_anchor` the member path consumes.
-            expected = cursor_ast
-                .as_ref()
-                .and_then(slot_anchor)
-                .and_then(|a| expected_for_anchor(ws, mid, inf, offset, a));
-        }
+        let mut expected = cx.expected(ws, mid, inf, offset);
         // Declared renders of the typed session's surviving slots -- the
         // string-keyed reachability index's targets, receiver-FILTERED by
         // construction (only overloads the receiver coerces into contribute, so
@@ -1442,7 +1373,7 @@ impl BoneWorkspace {
         // expression candidates and ranked in the top (type_rank 0) bucket, so
         // `greet(gr|)` surfaces `greeting:` above the identifier fallback while
         // `grid` etc. stay. Skips params already passed positionally or by name.
-        if let Some(nargs) = cursor_ast.as_ref().and_then(|cx| cx.named_arg_slot()) {
+        if let Some(nargs) = cx.named_arg.as_ref() {
             for (i, (pname, pty)) in callee_param_names(ws, &nargs.callee).into_iter().enumerate() {
                 if i < nargs.positional || nargs.named.iter().any(|n| n.as_str() == pname.as_str()) {
                     continue;
@@ -1467,8 +1398,7 @@ impl BoneWorkspace {
         // `CoFrame` struct existing (stone projects); otherwise the generic
         // `Coroutine<$0>` snippet stands in.
         let coframe = struct_exists(ws, "CoFrame");
-        let coroutine_slot =
-            cursor_ast.as_ref().is_some_and(|cx| cx.coroutine_first_generic_arg());
+        let coroutine_slot = cx.coroutine_generic;
         if coroutine_slot {
             // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0.
             if coframe && clean_match(b"CoFrame", prefix.as_bytes()) {
@@ -5170,6 +5100,131 @@ fn member_completions(
         }
     }
     Vec::new()
+}
+
+/// The cursor's completion classification, computed ONCE per request by
+/// [`classify`] -- every context consultation lives there, so a new syntax
+/// case is one field + one consultation + one dispatch arm
+/// (docs/completion-v2-design.md M2b). Field order below is the dispatch
+/// precedence. Classification is SYNTACTIC; handlers may still fall through
+/// at runtime (an `X {` head that isn't a struct, a call slot that isn't
+/// FieldOf), which is why the dispatcher keeps an ordered attempt chain
+/// rather than a single-winner match.
+struct CompletionCx {
+    /// The recovered-AST classifier over the munge ladder; None only on the
+    /// tokenize frontier (byte-scanner fallbacks own that).
+    ast: Option<crate::cursor_context::CursorAst>,
+    /// `recv.pa|` -- pure ident receiver chain (most specific trigger).
+    member: Option<Vec<String>>,
+    /// Enclosing call with the cursor in an ARG slot: (callee, idx,
+    /// receiver end). Field-ref gate + expected-type input.
+    arg_call: Option<(String, u32, Option<usize>)>,
+    /// `Enum::Variant { fi| }` record-literal field names.
+    enum_record: Option<(String, String)>,
+    /// `Enum::|` / `Struct::|` qualified-path members.
+    qualified: Option<String>,
+    /// `Name { fi| }` struct-literal field-NAME slot.
+    struct_literal: Option<(String, usize)>,
+    /// `@deco|` decorator namespace (byte trigger; live even when the
+    /// module dropped out).
+    decorator: bool,
+    /// `Name { field: <cursor> }` field-VALUE slot -- only when NOT in a
+    /// call arg (the arg slot is the more specific expected-type source).
+    field_value: Option<(String, String, bool)>,
+    /// Slot-anchored expected type (assign/compare RHS, typed-`let`,
+    /// `return`) -- consumed by BOTH the general and the member path.
+    anchor: Option<SlotAnchor>,
+    /// The whole `if`/`while` condition chain (bool-member soft boost).
+    bool_chain: bool,
+    /// Value slot vs type-annotation slot (governs the enum universe).
+    expr_position: bool,
+    /// After `yield`/`yield*` -- coroutine fns promote. Expr position only.
+    after_yield: bool,
+    /// Param TYPE slot `fn f(name: Ty|)`: (param name, enclosing fn name)
+    /// -- the Entity<T> idiom input. Type position only.
+    param_type: Option<(String, String)>,
+    /// Direct-call named-arg slot (`f(na|)` offers `name:` items).
+    named_arg: Option<crate::cursor_context::NamedArgSlot>,
+    /// First generic arg of `Coroutine<|>` (CoFrame synth).
+    coroutine_generic: bool,
+}
+
+/// Classify the cursor for completion: parse the munge ladder once, consult
+/// every classifier once, and encode the cross-classifier guards (field
+/// value yields to call arg; yield/Entity hints are universe-gated) in one
+/// place instead of scattered call sites.
+fn classify(src: &str, offset: usize) -> CompletionCx {
+    let ast = crate::cursor_context::CursorAst::at(src, offset);
+    let cx = ast.as_ref();
+    let arg_call = cx.and_then(|c| c.call_arg());
+    let expr_position = !cx.is_some_and(|c| c.is_type_position());
+    CompletionCx {
+        member: cx.and_then(|c| c.member_path()),
+        enum_record: cx.and_then(|c| c.enum_record()),
+        qualified: cx.and_then(|c| c.qualified_base()),
+        struct_literal: cx.and_then(|c| c.struct_literal()),
+        decorator: decorator_context(src, offset),
+        field_value: if arg_call.is_none() {
+            cx.and_then(|c| c.struct_field_value())
+        } else {
+            None
+        },
+        anchor: cx.and_then(slot_anchor),
+        bool_chain: cx.is_some_and(|c| c.bool_condition_chain()),
+        after_yield: expr_position && cx.is_some_and(|c| c.after_yield()),
+        param_type: if expr_position { None } else { cx.and_then(|c| c.param_type()) },
+        named_arg: cx.and_then(|c| c.named_arg_slot()),
+        coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
+        arg_call,
+        expr_position,
+        ast,
+    }
+}
+
+impl CompletionCx {
+    /// The typed expected-slot session, resolved in context precedence:
+    /// call-arg slot (UFCS-receiver-filtered), struct-literal field value,
+    /// then the slot anchors. The ONE expected-type deriver for the general
+    /// path; the member path resolves the same `arg_call`/`anchor` inputs
+    /// against its variant workspace.
+    fn expected<'a>(
+        &self,
+        ws: &'a Workspace,
+        mid: ModuleId,
+        inf: &'a InferenceResult,
+        offset: usize,
+    ) -> Option<ExpectedArg<'a>> {
+        if let Some((callee, idx, _recv)) = self.arg_call.as_ref() {
+            // Receiver type for UFCS overload filtering: structural from the
+            // classifier (a chain receiver's type is its callee's unique
+            // return type, no paren rescanning).
+            let recv_ty = self.ast.as_ref().and_then(|cx| {
+                cx.call_receiver().and_then(|a| match a {
+                    crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
+                        fn_unique_return_ty(ws, &name)
+                    }
+                    crate::cursor_context::ReceiverAnchor::End(e) => e
+                        .checked_sub(1)
+                        .and_then(|last| bone_semantic::query::type_at(ws, mid, inf, last))
+                        .map(|ta| ta.ty),
+                })
+            });
+            return ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx as usize, recv_ty);
+        }
+        if let Some((sname, fname, is_lambda)) = self.field_value.as_ref() {
+            // `Name { field: <cursor> }`: the field's declared type. Inside a
+            // lambda body assigned to a function-typed field
+            // (`is_open: () => x|`), the body returns the field's RETURN type.
+            let slot = if *is_lambda {
+                crate::query::struct_field_fn_return_ty(ws, sname, fname)
+                    .or_else(|| crate::query::struct_field_ty(ws, sname, fname))
+            } else {
+                crate::query::struct_field_ty(ws, sname, fname)
+            }?;
+            return ExpectedArg::for_slot(ws, mid, inf, offset, slot);
+        }
+        self.anchor.and_then(|a| expected_for_anchor(ws, mid, inf, offset, a))
+    }
 }
 
 /// Where the expected type of the current slot comes from, beyond the
