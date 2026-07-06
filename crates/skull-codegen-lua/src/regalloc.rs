@@ -154,8 +154,7 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) => {
             push(*x)
         }
-        Inst::Call { args, .. } => args.iter().for_each(|a| push(*a)),
-        Inst::CallMulti { args, .. } => args.iter().for_each(|a| push(*a)),
+        Inst::Call { args, .. } | Inst::CallMulti { args, .. } => args.iter().for_each(|a| push(*a)),
         Inst::CallValue { callee, args } => {
             push(*callee);
             args.iter().for_each(|a| push(*a));
@@ -166,8 +165,7 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::MakeTuple(vs) | Inst::MakeArray(vs) | Inst::MakeVec(vs) => {
             vs.iter().for_each(|a| push(*a))
         }
-        Inst::MakeStruct { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
-        Inst::MakeValueStruct { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
+        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(|a| push(*a));
             named.iter().for_each(|(_, a)| push(*a));
