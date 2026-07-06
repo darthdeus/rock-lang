@@ -21,6 +21,7 @@ ustr = { workspace = true }
 ustr = { workspace = true }
 rock-host = { path = "../rock-host" }
 skull-parser = { path = "../skull-parser" }
+skull-transform = { path = "../skull-transform" }
 
 [lints]
 workspace = true

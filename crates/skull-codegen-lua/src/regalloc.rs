@@ -160,6 +160,10 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             push(*callee);
             args.iter().for_each(|a| push(*a));
         }
+        Inst::CallValueMulti { callee, args, .. } => {
+            push(*callee);
+            args.iter().for_each(|a| push(*a));
+        }
         // A closure captures cells (not values); its body's value uses live in
         // its own scope, colored separately.
         Inst::Lambda { .. } => {}
@@ -434,6 +438,7 @@ fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     match inst {
         Inst::Store { cell, .. } => push(*cell),
         Inst::CallMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
+        Inst::CallValueMulti { dests, .. } => dests.iter().for_each(|d| push(*d)),
         Inst::MapNext { key_cell, val_cell, .. } => {
             push(*key_cell);
             push(*val_cell);

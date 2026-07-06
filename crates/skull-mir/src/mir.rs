@@ -182,6 +182,16 @@ pub enum Inst {
         callee: Idx<Inst>,
         args: Vec<Idx<Inst>>,
     },
+    /// Indirect call whose result is a tuple returned via the multi-return ABI:
+    /// the fn-value returns N values bound positionally into `dests`
+    /// (`d0, d1, ... = callee(args)`). The `CallValue` analogue of [`Inst::CallMulti`]
+    /// -- a multi-assign so Lua doesn't truncate the multi-return. Leaves are read
+    /// back via [`Inst::Load`] of each dest cell.
+    CallValueMulti {
+        dests: Vec<Idx<Cell>>,
+        callee: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+    },
 
     /// A closure value (`x => expr` / `(a, b) => { .. }`). Its body is a sub-CFG
     /// rooted at `entry`, allocated in the SAME blocks/insts/cells arenas as the
@@ -330,6 +340,7 @@ impl Inst {
                 | Inst::StoreGlobal { .. }
                 | Inst::MapNext { .. }
                 | Inst::CallMulti { .. }
+                | Inst::CallValueMulti { .. }
                 | Inst::CoroSetInner { .. }
                 | Inst::CoroHook { .. }
                 | Inst::ArrayPush { .. }

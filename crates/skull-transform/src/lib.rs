@@ -396,7 +396,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             match &func.insts[i] {
-                Inst::CallMulti { dests, .. } => {
+                Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
                     dests.iter().for_each(|c| disq[raw(*c) as usize] = true)
                 }
                 Inst::Lambda { params, .. } => {
@@ -862,6 +862,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::Call { args, .. } => args.iter().for_each(&mut p),
         Inst::CallMulti { args, .. } => args.iter().for_each(&mut p),
         Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
+        Inst::CallValueMulti { callee, args, .. } => { p(callee); args.iter().for_each(&mut p); }
         Inst::MakeTuple(vs) | Inst::MakeArray(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
         Inst::MakeStruct { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
         Inst::MakeValueStruct { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
@@ -906,6 +907,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::Call { args, .. } => args.iter_mut().for_each(&mut f),
         Inst::CallMulti { args, .. } => args.iter_mut().for_each(&mut f),
         Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
+        Inst::CallValueMulti { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::MakeTuple(vs) | Inst::MakeArray(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
         Inst::MakeStruct { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
         Inst::MakeValueStruct { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),

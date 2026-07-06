@@ -1639,6 +1639,7 @@ impl Emitter<'_> {
             | Inst::StoreGlobal { .. }
             | Inst::MapNext { .. }
             | Inst::CallMulti { .. }
+            | Inst::CallValueMulti { .. }
             | Inst::CoroSetInner { .. }
             | Inst::CoroHook { .. }
             | Inst::ArrayPush { .. } => unreachable!("effect has no value"),
@@ -1809,6 +1810,22 @@ impl Emitter<'_> {
                 }
                 let callee = mangle::mangle_fn(self.ws, func_of(self.ws, *func), &self.ctx.overloaded);
                 let _ = write!(out, " = {callee}(");
+                self.write_csv(out, args);
+                out.push_str(")\n");
+            }
+            // Indirect multi-return: `d0, d1, ... = callee(args)` -- a tuple
+            // returned through a fn-value. Multi-assign so Lua doesn't truncate.
+            Inst::CallValueMulti { dests, callee, args } => {
+                out.push_str("  ");
+                for (i, c) in dests.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write_cellname(out, self.frame, self.cell_colors, *c);
+                }
+                out.push_str(" = ");
+                self.write_opnd(out, *callee);
+                out.push('(');
                 self.write_csv(out, args);
                 out.push_str(")\n");
             }

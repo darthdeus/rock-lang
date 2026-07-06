@@ -34,6 +34,39 @@ fn emit(src: &str, fn_name: &str) -> String {
     emit_dump(vec![ast], fn_name)
 }
 
+/// Like [`emit_std`] but runs `skull_transform::cleanup` (copy-prop + DCE) before
+/// emitting -- the artifact the REAL pipeline ships (`mir_emit.rs`). Needed to
+/// assert allocation-shape claims (a dead `MakeTuple` left by the raw lowering is
+/// removed here, so `no table` assertions reflect what actually runs).
+fn emit_clean(src: &str, fn_name: &str) -> String {
+    use std::sync::LazyLock;
+    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    skull_transform::cleanup(&mut func);
+    let ctx = CodegenCtx::new(&ws);
+    emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func)
+}
+
 /// Emit EVERY lowerable function in the `<test>` module, run a Lua `driver`
 /// expression (e.g. `"sign(-5)"`) under luajit, and return its trimmed stdout.
 /// The deeper oracle: it proves the emitted Lua is valid AND computes correctly,
@@ -410,6 +443,66 @@ fn emits_interpolation_as_flat_concat() {
 // can't emit that scaffolding (it would need a dep on `skull`), so it can't
 // execute a scalarized-enum match; per-function match shape is pinned by
 // skull-mir's `match_enum_*` lowering tests.
+
+// --- Slice 1: multi-return ABI for tuple-returning fns ---
+
+#[test]
+fn tuple_return_callee_splats_multi_value() {
+    // A fn whose return type is a tuple returns N values, NOT `return ({a, b})`
+    // (one table alloc per call). The MakeTuple in return position is elided.
+    let body = emit_clean("fn pair() -> (bool, int) { return (true, 42) }", "pair");
+    assert!(
+        !body.contains("{"),
+        "tuple return must splat to multi-value, not build a table:\n{body}"
+    );
+    assert!(
+        body.contains("do return (true), (42) end"),
+        "expected `do return (true), (42) end`:\n{body}"
+    );
+}
+
+#[test]
+fn tuple_return_tail_expr_splats() {
+    // Tail-position tuple (no explicit `return`) splats the same way.
+    let body = emit_clean("fn pair() -> (bool, int) { (true, 42) }", "pair");
+    assert!(!body.contains("{"), "tail tuple must not build a table:\n{body}");
+    assert!(
+        body.contains("do return (true), (42) end"),
+        "expected `do return (true), (42) end`:\n{body}"
+    );
+}
+
+#[test]
+fn tuple_destructure_caller_uses_multi_assign() {
+    // `let (a, b) = f()` where f returns a tuple emits a multi-assign
+    // `<a>, <b> = f(...)`, not a table build + `[1]`/`[2]` indexing. Zero alloc.
+    let src = "\
+fn pair() -> (bool, int) { (true, 42) }\n\
+fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
+    let body = emit_clean(src, "use_it");
+    assert!(
+        !body.contains("{"),
+        "destructure must be zero-alloc multi-assign, not a table build:\n{body}"
+    );
+    assert!(
+        body.lines().any(|l| l.contains(", ") && l.contains("= pair(")),
+        "expected a multi-assign call line `a, b = pair(...)`:\n{body}"
+    );
+}
+
+#[test]
+fn tuple_boxed_use_still_packs_table() {
+    // A tuple result stored whole (not destructured) still materializes a table
+    // so downstream `.0` indexing is unchanged. This pins the pack path.
+    let src = "\
+fn pair() -> (bool, int) { (true, 42) }\n\
+fn use_it() -> int { let t = pair(); t.1 }";
+    let body = emit_clean(src, "use_it");
+    assert!(
+        body.contains("[1]") || body.contains("[2]"),
+        "boxed tuple use must index a packed table:\n{body}"
+    );
+}
 
 #[test]
 fn if_as_value_branch_and_cell_join() {

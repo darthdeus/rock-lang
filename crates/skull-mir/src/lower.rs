@@ -196,6 +196,18 @@ fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     }
 }
 
+/// Arity of a tuple RETURN type -- `Some(n)` iff `ty` is a (non-nullable) tuple
+/// `(A, B, ...)`. Drives the multi-return ABI: a tuple-returning fn returns its N
+/// elements as N Lua values instead of one heap table (slice 1,
+/// `docs/iterator-implementation-plan.md`). A `Nullable(Tuple)` return stays boxed
+/// (no room for the null discriminant across a multi-value boundary).
+fn tuple_arity(ws: &Workspace, ty: TyId) -> Option<usize> {
+    match static_ty(ws, ty)? {
+        TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
+        _ => None,
+    }
+}
+
 /// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE
 /// of scalars (int/float/bool) becomes a `value`-struct-style cdata
 /// `{ int32 __tag; <T0> _0; <T1> _1; ... }` -- reusing the whole value-struct
@@ -812,6 +824,7 @@ pub fn lower_function(
         resume_arg,
         param_shapes,
         ret_shape,
+        ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         group_binds: HashMap::new(),
     };
     b.lower_params();
@@ -858,6 +871,7 @@ pub fn lower_global(
         resume_arg: None,
         param_shapes: Vec::new(),
         ret_shape: None,
+        ret_tuple: None,
         group_binds: HashMap::new(),
     };
     b.lower_root()?;
@@ -903,6 +917,7 @@ pub fn lower_decorator(
         resume_arg: None,
         param_shapes: Vec::new(),
         ret_shape: None,
+        ret_tuple: None,
         group_binds: HashMap::new(),
     };
     // `target` is param 0, then the decorator's declared params.
@@ -943,6 +958,10 @@ struct Builder<'a> {
     param_shapes: Vec<Option<ValueShape>>,
     /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
     ret_shape: Option<ValueShape>,
+    /// `Some(n)` when the fn's return type is a tuple of arity `n` -- it returns
+    /// N Lua values (multi-return ABI), not one heap table. Set for named fns;
+    /// lambdas decide per-body at their own return site.
+    ret_tuple: Option<usize>,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1072,7 +1091,27 @@ impl Builder<'_> {
             let r = self.lower_expr_repr(e)?;
             return Ok(self.repr_to_leaves(&r, &shape));
         }
+        if let Some(n) = self.ret_tuple {
+            let v = self.lower_expr(e)?;
+            return Ok(self.tuple_return_operands(v, n));
+        }
         Ok(vec![self.lower_expr(e)?])
+    }
+
+    /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
+    /// in return position (the common `return (a, b)` and the `return f()` forward
+    /// where `f()` lowered to `MakeTuple(loads)`) is elided to its operands -- no
+    /// table alloc. A tuple value from elsewhere (a var/field holding a packed
+    /// table) is unpacked with `TupleIndex`.
+    fn tuple_return_operands(&mut self, v: Idx<Inst>, n: usize) -> Vec<Idx<Inst>> {
+        if let Inst::MakeTuple(vs) = &self.f.insts[v] {
+            if vs.len() == n {
+                return vs.clone();
+            }
+        }
+        (0..n)
+            .map(|i| self.emit_cur(Inst::TupleIndex { base: v, index: i }))
+            .collect()
     }
 
     /// Lower a statement sequence into the current block. Returns `true` if a
@@ -1503,13 +1542,26 @@ impl Builder<'_> {
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;
-                // A closure body is value-position: return its value. (A block
-                // body with a tail returns the tail; a statement-only block
-                // returns unit.)
+                // The lambda body returns via the LAMBDA's ABI, not the enclosing
+                // fn's: a bone-desugared `() => e` body is a block with a `return e`
+                // statement, so the return machinery (`return_leaves`) must see the
+                // lambda's own return shape. A tuple-returning lambda splats N values
+                // so an indirect call site can capture them (multi-return ABI); the
+                // enclosing value-struct `ret_shape` never applies (a lambda is
+                // called through a boxed fn-value). Save/restore around the body.
+                let saved_ret_tuple = self.ret_tuple;
+                let saved_ret_shape = self.ret_shape.take();
+                self.ret_tuple = self.lambda_ret_tuple_arity(e);
                 let v = self.lower_expr(body)?;
                 if self.is_open() {
-                    self.f.set_term(self.cur, Term::Return(vec![v]));
+                    let leaves = match self.ret_tuple {
+                        Some(n) => self.tuple_return_operands(v, n),
+                        None => vec![v],
+                    };
+                    self.f.set_term(self.cur, Term::Return(leaves));
                 }
+                self.ret_tuple = saved_ret_tuple;
+                self.ret_shape = saved_ret_shape;
                 self.cur = saved;
                 Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }))
             }
@@ -1880,7 +1932,8 @@ impl Builder<'_> {
             for a in args {
                 argv.push(self.lower_expr(a)?);
             }
-            self.emit_cur(Inst::CallValue { callee: fieldv, args: argv })
+            let arity = self.peeled_tuple_arity(e);
+            self.emit_call_value_n(arity, fieldv, argv)
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             let func = self.resolve_funcref(e, method)?;
@@ -1894,7 +1947,16 @@ impl Builder<'_> {
                 for a in arg_idxs {
                     argv.push(self.lower_expr(a)?);
                 }
-                self.emit_cur(Inst::Call { func, args: argv })
+                // A tuple-returning method splats N values; capture + pack into
+                // the single (boxed, nullable) safe-nav result.
+                let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
+                match ret_ty.and_then(|t| tuple_arity(self.ws, t)) {
+                    Some(n) => {
+                        let r = self.emit_tuple_call(func, argv, n);
+                        self.pack(r)
+                    }
+                    None => self.emit_cur(Inst::Call { func, args: argv }),
+                }
             }
         };
         self.store_and_join(result, cv, join);
@@ -2163,18 +2225,15 @@ impl Builder<'_> {
                         if let Some(&recv_expr) = arg_idxs.first() {
                             if self.struct_field_is_fn(recv_expr, name) {
                                 let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field: name });
-                                return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue {
-                                    callee: fieldv,
-                                    args: arg_vals[1..].to_vec(),
-                                })));
+                                let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec());
+                                return Ok(ValueRepr::Scalar(v));
                             }
                         }
                         // `g(args)` where `g` is a fn-typed module global.
                         if self.is_fn_global(name) {
                             let g = self.emit_cur(Inst::Global(name));
-                            return Ok(ValueRepr::Scalar(
-                                self.emit_cur(Inst::CallValue { callee: g, args: arg_vals }),
-                            ));
+                            let v = self.emit_call_value(e, g, arg_vals);
+                            return Ok(ValueRepr::Scalar(v));
                         }
                     }
                     Err(gap_err)
@@ -2190,20 +2249,16 @@ impl Builder<'_> {
                 let callee_v = self.emit_cur(Inst::Load(cell));
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue {
-                    callee: callee_v,
-                    args: arg_vals,
-                })))
+                let v = self.emit_call_value(e, callee_v, arg_vals);
+                Ok(ValueRepr::Scalar(v))
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
                 let callee_v = self.lower_expr(ve)?;
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue {
-                    callee: callee_v,
-                    args: arg_vals,
-                })))
+                let v = self.emit_call_value(e, callee_v, arg_vals);
+                Ok(ValueRepr::Scalar(v))
             }
         }
     }
@@ -2218,12 +2273,18 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
     ) -> Result<ValueRepr, CompilerError> {
+        let ret_tuple = self.ws.module(func.module).functions[func.func]
+            .return_ty
+            .and_then(|t| tuple_arity(self.ws, t));
         if !fn_uses_scalar_abi(self.ws, self.scx, func) {
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
                 arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?
             };
+            if let Some(n) = ret_tuple {
+                return Ok(self.emit_tuple_call(func, args, n));
+            }
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args })));
         }
         let args = self.scalar_call_args(func, arg_idxs, any_named)?;
@@ -2240,7 +2301,48 @@ impl Builder<'_> {
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
-            None => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args }))),
+            None => match ret_tuple {
+                Some(n) => Ok(self.emit_tuple_call(func, args, n)),
+                None => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args }))),
+            },
+        }
+    }
+
+    /// A direct call to a tuple-returning fn under the multi-return ABI: the
+    /// callee returns N values, captured into N dest cells via [`Inst::CallMulti`].
+    /// The result value is `MakeTuple(loads)` -- a boxed use materializes the
+    /// table (same as the old ABI), a destructure elides it (`bind_for_pattern`).
+    fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, n: usize) -> ValueRepr {
+        let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+        let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads)))
+    }
+
+    /// An indirect call `callee(args)`. If the call's result type is a tuple, the
+    /// fn-value (a lambda or named fn used as a value) returns N values under the
+    /// multi-return ABI, captured via [`Inst::CallValueMulti`] -- a multi-assign
+    /// `d0, d1 = callee(args)` (a plain `CallValue` in table position would
+    /// truncate to the first return). The result is `MakeTuple(loads)`: boxed use
+    /// materializes the table, a destructure elides it. The ABI is decided by the
+    /// call's STATIC type, so direct and indirect callees of the same fn-type
+    /// agree with no callee-identity analysis.
+    fn emit_call_value(&mut self, e: Idx<Expr>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
+        self.emit_call_value_n(self.expr_tuple_arity(e), callee, args)
+    }
+
+    /// [`Self::emit_call_value`] with an explicit tuple arity (the safe-nav call
+    /// paths pass the nil-peeled arity, since their expr type is `(..)?`).
+    fn emit_call_value_n(&mut self, arity: Option<usize>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
+        match arity {
+            Some(n) => {
+                let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+                self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args });
+                let loads: Vec<Idx<Inst>> =
+                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                self.emit_cur(Inst::MakeTuple(loads))
+            }
+            None => self.emit_cur(Inst::CallValue { callee, args }),
         }
     }
 
@@ -3936,6 +4038,19 @@ impl Builder<'_> {
                 self.binds.insert(raw(*b), cell);
             }
             BindingPattern::Tuple(subs) => {
+                // Fast path: destructuring a fresh `MakeTuple` (a tuple literal or a
+                // multi-return call packed as `MakeTuple(loads)`) binds directly to
+                // its operands -- no table alloc, no `TupleIndex`. This is what makes
+                // `let (ok, x) = next(it)` zero-alloc (slice 1).
+                if let Inst::MakeTuple(vs) = &self.f.insts[value] {
+                    if vs.len() == subs.len() {
+                        let vs = vs.clone();
+                        for (sub, v) in subs.iter().zip(vs) {
+                            self.bind_for_pattern(sub, v);
+                        }
+                        return;
+                    }
+                }
                 for (i, sub) in subs.iter().enumerate() {
                     let elem = self.emit_cur(Inst::TupleIndex { base: value, index: i });
                     self.bind_for_pattern(sub, elem);
@@ -5151,6 +5266,44 @@ impl Builder<'_> {
         self.resolve_ty(ty)
     }
 
+    /// `Some(n)` iff `e`'s inferred type is a (non-nullable) tuple of arity `n`.
+    /// Used to route a tuple result across a call boundary (the call expr's own
+    /// type IS the callee's return type, so direct and INDIRECT calls agree).
+    /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
+    /// bare tuple and get mis-splatted.
+    fn expr_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+        self.tyid_tuple_arity(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
+    }
+
+    /// `Some(n)` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple of
+    /// arity `n` -- the lambda body then splats N values so an indirect call site
+    /// captures them (multi-return ABI). Read off the lambda's inferred `fn(..) ->
+    /// (..)` type so it agrees with the call site's `expr_tuple_arity`.
+    fn lambda_ret_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::Function { ret, .. } = self.ty_node(ty)? else { return None };
+        self.tyid_tuple_arity(self.resolve_tyid(ty.with_idx(ret))?)
+    }
+
+    fn tyid_tuple_arity(&self, ty: TyId) -> Option<usize> {
+        match self.ty_node(ty)? {
+            TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
+            _ => None,
+        }
+    }
+
+    /// `Some(n)` iff `e`'s type is a tuple OR a `(tuple)?` of arity `n` -- the
+    /// nil-peeled form for safe-nav calls, whose result type is nullable but whose
+    /// callee still splats the inner tuple.
+    fn peeled_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let inner = match self.ty_node(ty)? {
+            TypeExpr::Nullable(i) => self.resolve_tyid(ty.with_idx(i))?,
+            _ => ty,
+        };
+        self.tyid_tuple_arity(inner)
+    }
+
     fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
         let te = self.ty_node(ty)?;
         match te {
@@ -5611,7 +5764,10 @@ fn f() {
     }
 
     #[test]
-    fn tuple_literal_builds_a_tuple() {
+    fn tuple_return_splats_multi_value() {
+        // A tuple-return fn splats its N elements (multi-return ABI) instead of
+        // returning one heap table. The `tuple` inst here is dead (elided from the
+        // return) and DCE'd by `cleanup` before codegen.
         assert_eq!(
             mir("fn f() -> (int, bool) { (1, true) }", "f"),
             "\
@@ -5620,7 +5776,7 @@ fn f() {
     v0 = const 1
     v1 = const true
     v2 = tuple [v0, v1]
-    return v2
+    return v0, v1
 }"
         );
     }

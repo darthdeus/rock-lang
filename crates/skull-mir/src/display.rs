@@ -129,6 +129,11 @@ fn fmt_inst(
             let a = args.iter().map(|id| format!("v{}", num[id])).collect::<Vec<_>>().join(", ");
             format!("call_value v{}({a})", v(*callee))
         }
+        Inst::CallValueMulti { dests, callee, args } => {
+            let d = dests.iter().map(|c| format!("c{}", raw(*c))).collect::<Vec<_>>().join(", ");
+            let a = args.iter().map(|id| format!("v{}", num[id])).collect::<Vec<_>>().join(", ");
+            format!("{d} = call_value v{}({a})", v(*callee))
+        }
         Inst::Lambda { params, entry } => {
             let ps = params.iter().map(|c| format!("c{}", raw(*c))).collect::<Vec<_>>().join(", ");
             format!("lambda ({ps}) -> bb{}", raw(*entry))
