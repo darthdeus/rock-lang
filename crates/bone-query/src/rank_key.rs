@@ -24,6 +24,18 @@
 /// - `dist`: reach hop distance; 0 for direct candidates.
 /// - `method`: 1 for a callable (needs args / has side effects), 0 else.
 /// - `fine`: `9999 - clamped fuzzy score` -- the within-band tiebreak.
+/// - `prox`: definition proximity to the request file -- 0 same file,
+///   1 same project root, 2 other workspace code (engine/deps), 3 stdlib/
+///   builtins. Late PRIOR: decides only where match quality ties (the
+///   whole empty-prefix browse, score ties at typed prefixes).
+/// - `freq`: workspace reference count, log-bucketed (0 hot / 1 warm /
+///   2 rare-or-unknown; FREQ_HOT/FREQ_WARM in the tuning block). Priors
+///   land AFTER prox: "my file first, then the popular stuff", and
+///   stdlib-internal call-count inflation stays contained in prox tier 3.
+/// - `rec`: scope recency for LOCALS -- in-scope bindings ranked by
+///   declaration position, closest above the cursor first (params carry
+///   the earliest spans, so an inner `let` beats an enclosing param on
+///   ties). 0 (neutral) for every other kind.
 /// - `len`: candidate length when there IS a match (score > 0), else 0 --
 ///   shorter-first among equals, but an empty prefix must NOT reorder by
 ///   length (short stdlib names would bury longer user symbols).
@@ -37,6 +49,9 @@ pub(crate) struct RankKey {
     pub dist: u16,
     pub method: u8,
     pub fine: u16,
+    pub prox: u8,
+    pub freq: u8,
+    pub rec: u8,
     pub len: u16,
 }
 
@@ -70,6 +85,9 @@ impl RankKey {
             dist: self.dist.min(99),
             method: self.method.min(9),
             fine: self.fine.min(9999),
+            prox: self.prox.min(9),
+            freq: self.freq.min(9),
+            rec: self.rec.min(9),
             len: self.len.min(999),
         }
     }
@@ -79,7 +97,7 @@ impl RankKey {
     /// Lexicographic order of these strings == `(RankKey, ci name)` order.
     pub fn encode(&self, name: &str) -> String {
         format!(
-            "{}{}{}{}{}{:02}{}{:04}{:03}{}",
+            "{}{}{}{}{}{:02}{}{:04}{}{}{}{:03}{}",
             self.exact.min(9),
             self.type_rank.min(9),
             self.band.min(9),
@@ -88,6 +106,9 @@ impl RankKey {
             self.dist.min(99),
             self.method.min(9),
             self.fine.min(9999),
+            self.prox.min(9),
+            self.freq.min(9),
+            self.rec.min(9),
             self.len.min(999),
             name.to_lowercase(),
         )
@@ -100,12 +121,12 @@ impl RankKey {
 /// is not a RankKey encoding (foreign/legacy sort_texts).
 pub fn explain_sort_text(st: &str) -> Option<String> {
     let b = st.as_bytes();
-    if b.len() < 15 || !b[..15].iter().all(|c| c.is_ascii_digit()) {
+    if b.len() < 18 || !b[..18].iter().all(|c| c.is_ascii_digit()) {
         return None;
     }
     let fine: u32 = st[8..12].parse().ok()?;
     Some(format!(
-        "exact={} type_rank={} band={} case={} kind={} dist={} method={} score={} len={}",
+        "exact={} type_rank={} band={} case={} kind={} dist={} method={} score={} prox={} freq={} rec={} len={}",
         &st[0..1],
         &st[1..2],
         &st[2..3],
@@ -114,7 +135,10 @@ pub fn explain_sort_text(st: &str) -> Option<String> {
         &st[5..7],
         &st[7..8],
         9999 - fine,
-        &st[12..15],
+        &st[12..13],
+        &st[13..14],
+        &st[14..15],
+        &st[15..18],
     ))
 }
 
@@ -128,7 +152,7 @@ mod tests {
     fn encode_order_agrees_with_ord() {
         let base = RankKey::default();
         let mut keys = vec![base];
-        for f in 0..9u8 {
+        for f in 0..12u8 {
             let mut k = base;
             match f {
                 0 => k.exact = 1,
@@ -139,7 +163,10 @@ mod tests {
                 5 => k.dist = 99,
                 6 => k.method = 1,
                 7 => k.fine = 9999,
-                8 => k.len = 999,
+                8 => k.prox = 3,
+                9 => k.freq = 2,
+                10 => k.rec = 9,
+                11 => k.len = 999,
                 _ => unreachable!(),
             }
             keys.push(k);
@@ -149,6 +176,9 @@ mod tests {
         keys.push(RankKey { band: 1, fine: 9999, ..base });
         keys.push(RankKey { band: 2, fine: 0, ..base });
         keys.push(RankKey { dist: 12, method: 1, ..base });
+        keys.push(RankKey { fine: 100, prox: 3, ..base });
+        keys.push(RankKey { prox: 1, freq: 2, ..base });
+        keys.push(RankKey { freq: 1, rec: 4, ..base });
         for a in &keys {
             for b in &keys {
                 let by_struct = a.cmp(b);
@@ -177,6 +207,9 @@ mod tests {
             dist: 99,
             method: 1,
             fine: 9999,
+            prox: 9,
+            freq: 9,
+            rec: 9,
             len: 999,
         };
         assert_eq!(k.clamped(), k);
@@ -200,12 +233,15 @@ mod tests {
             dist: 4,
             method: 1,
             fine: RankKey::fine(1021),
+            prox: 2,
+            freq: 1,
+            rec: 0,
             len: 22,
         };
         let ex = explain_sort_text(&k.encode("target_grid")).expect("decodes");
         assert_eq!(
             ex,
-            "exact=1 type_rank=2 band=3 case=0 kind=1 dist=04 method=1 score=1021 len=022"
+            "exact=1 type_rank=2 band=3 case=0 kind=1 dist=04 method=1 score=1021 prox=2 freq=1 rec=0 len=022"
         );
         assert!(explain_sort_text("not-a-key").is_none());
     }

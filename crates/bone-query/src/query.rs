@@ -2334,7 +2334,7 @@ pub fn locals_in_scope(
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
-) -> Vec<(Ustr, hir::BindingKind, String, Option<TyId>)> {
+) -> Vec<(Ustr, hir::BindingKind, String, Option<TyId>, usize)> {
     let mut out = Vec::new();
     let Some(module) = ws.modules.get(mid.index()) else {
         return out;
@@ -2390,7 +2390,11 @@ pub fn locals_in_scope(
             (Some(bi), Some(t)) => ws.render(Some(bi), t),
             _ => String::new(),
         };
-        out.push((binding.name, binding.kind, ty, ty_id));
+        let decl_end = body
+            .binding_spans
+            .get(b_idx)
+            .map_or(0, |s| s.offset_range.1);
+        out.push((binding.name, binding.kind, ty, ty_id, decl_end));
     }
 
     out
@@ -3468,6 +3472,13 @@ pub struct CompletionEntry {
     /// `test_`-named. Outside test files the facade demotes these to the
     /// bottom kind bucket (4).
     pub test_scoped: bool,
+    /// The defining module's file -- the facade classifies it into the
+    /// proximity tier (`RankKey::prox`) against the request file + project
+    /// root. Locals carry the request file; builtins/keywords `<builtin>`.
+    pub def_file: ustr::Ustr,
+    /// Scope-recency rank for locals (closest declaration above the cursor
+    /// = 0, capped at 9); 0 for every other kind.
+    pub rec: u8,
 }
 
 pub struct SymbolEntry {
@@ -3542,8 +3553,19 @@ pub fn completion(
 
     // Locals/params in scope shadow the global namespace -- emit them first and
     // let the shared `seen` set suppress a same-named global.
+    let req_file = ws.modules.get(mid.index()).map_or_else(ustr::Ustr::default, |m| m.file);
     if expr_position {
-        for (name, kind, ty, ty_id) in locals_in_scope(ws, mid, inf, offset) {
+        let locals = locals_in_scope(ws, mid, inf, offset);
+        // Scope recency: rank by declaration position DESC (closest above
+        // the cursor = 0). Params carry the earliest spans, so an inner
+        // `let` beats an enclosing param on ties.
+        let mut by_decl: Vec<usize> = (0..locals.len()).collect();
+        by_decl.sort_by_key(|&i| std::cmp::Reverse(locals[i].4));
+        let mut rec_of = vec![0u8; locals.len()];
+        for (rank, &i) in by_decl.iter().enumerate() {
+            rec_of[i] = rank.min(9) as u8;
+        }
+        for (i, (name, kind, ty, ty_id, _decl)) in locals.into_iter().enumerate() {
             if !matches(name.as_str()) {
                 continue;
             }
@@ -3559,6 +3581,8 @@ pub fn completion(
                     takes_params: false,
                     variant_shape: None,
                     test_scoped: false,
+                    def_file: req_file,
+                    rec: rec_of[i],
                 });
             }
         }
@@ -3591,11 +3615,13 @@ pub fn completion(
                 takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
                 variant_shape: None,
                 test_scoped: scoped(name.as_str()),
+                def_file: m.file,
+                rec: 0,
             });
         }
         for name in m.struct_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()) });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         // A user enum in an expression slot is offered as its qualified
@@ -3631,16 +3657,18 @@ pub fn completion(
                             takes_params: false,
                             variant_shape: Some(VariantShape::of(&v.payload)),
                             test_scoped: scoped(name.as_str()),
+                            def_file: m.file,
+                            rec: 0,
                         });
                     }
                 }
             } else if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()) });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for name in m.newtypes_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()) });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()), def_file: m.file, rec: 0 });
             }
         }
         for (name, gidx) in m.global_by_name.iter() {
@@ -3660,6 +3688,8 @@ pub fn completion(
                     takes_params: false,
                     variant_shape: None,
                     test_scoped: scoped(name.as_str()),
+                    def_file: m.file,
+                    rec: 0,
                 });
             }
         }
@@ -3682,6 +3712,8 @@ pub fn completion(
                     takes_params: false,
                     variant_shape: None,
                     test_scoped: false,
+                    def_file: ustr::Ustr::from("<builtin>"),
+                    rec: 0,
                 });
             }
         }
@@ -3701,6 +3733,8 @@ pub fn completion(
                     takes_params: false,
                     variant_shape: None,
                     test_scoped: false,
+                    def_file: req_file,
+                    rec: 0,
                 });
             }
         }
@@ -3964,7 +3998,7 @@ pub fn hole_info(
     let ty = type_at_offset(ws, mid, inf, offset);
     let in_scope = locals_in_scope(ws, mid, inf, offset)
         .into_iter()
-        .map(|(name, _kind, ty, _ty_id)| (name.to_string(), ty))
+        .map(|(name, _kind, ty, _ty_id, _decl)| (name.to_string(), ty))
         .collect();
     Some(HoleInfo { kind, ty, in_scope, span })
 }

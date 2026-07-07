@@ -358,7 +358,7 @@ pub(crate) fn call_through_param_completions(
     // reach expansion are precomputed in `index` (the slow part, now cached).
     let locals: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
         .into_iter()
-        .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty))
+        .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty))
         .collect();
 
     // Call-through is a synthesized, bottom-ranked (bucket 4) convenience; the

@@ -1062,3 +1062,77 @@ fn tests_dir_symbols_rank_normally_inside_test_files() {
         "no demotion inside a test file"
     );
 }
+
+// -- Priors: proximity + scope recency (late tiebreak, post-fine) ------------
+
+/// sort_text digit at `idx` (0-based) for `label` at the cursor.
+fn key_digit(path: &str, src: &str, label: &str, idx: usize) -> char {
+    let (s, pos) = marked(src);
+    let mut bone = BoneWorkspace::new();
+    bone.update(path, s);
+    let items = bone.completion(path, pos);
+    let it = items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion `{label}`"));
+    it.sort_text.as_deref().expect("sort_text").as_bytes()[idx] as char
+}
+
+const PROX_DIGIT: usize = 12;
+const REC_DIGIT: usize = 14;
+
+#[test]
+fn same_file_fn_outranks_stdlib_fns_at_empty_prefix() {
+    // Empty-prefix browse: the file's own fn (alphabetically LAST, so only
+    // the proximity rung can lift it past the cap and the stdlib) ranks
+    // above stdlib fns like `abs`.
+    let labels = labels_at("fn zzz_mine() {}\nfn r() {\n  $0\n}\n");
+    assert!(
+        rank_in(&labels, "zzz_mine") < rank_in(&labels, "abs"),
+        "same-file fn must outrank stdlib fns at empty prefix: {:?}...",
+        &labels[..labels.len().min(12)]
+    );
+}
+
+#[test]
+fn prox_digits_same_file_vs_stdlib() {
+    let src = "fn zzz_mine() {}\nfn r() {\n  $0\n}\n";
+    assert_eq!(key_digit(PATH, src, "zzz_mine", PROX_DIGIT), '0', "same-file fn is prox 0");
+    assert_eq!(key_digit(PATH, src, "abs", PROX_DIGIT), '3', "stdlib fn is prox 3");
+}
+
+#[test]
+fn sibling_project_file_is_prox_one() {
+    let (_dir, main, _helper) = tests_dir_project();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&main, std::fs::read_to_string(&main).unwrap());
+    // `aaa_helper` is defined in tests/helpers.rock -- same project root.
+    let items = bone.completion(&main, Position::new(2, 7));
+    let it = items.iter().find(|c| c.label == "aaa_helper").expect("offered");
+    assert_eq!(
+        it.sort_text.as_deref().expect("sort_text").as_bytes()[PROX_DIGIT] as char,
+        '1',
+        "same-project sibling file is prox 1"
+    );
+}
+
+#[test]
+fn recent_local_beats_enclosing_param_on_ties() {
+    // `d` is a whole-prefix match on both; every match rung ties until the
+    // recency digit -- the fresh `let dmg` (closest declaration above the
+    // cursor) must beat the param `dt`, which today wins on shorter length.
+    let labels = labels_at("fn r(dt: float) {\n  let dmg = 1.0\n  d$0\n}\n");
+    assert!(
+        rank_in(&labels, "dmg") < rank_in(&labels, "dt"),
+        "the most recent binding must win the tie: {labels:?}"
+    );
+}
+
+#[test]
+fn rec_digits_order_locals_by_declaration_position() {
+    let src = "fn r(dt: float) {\n  let alpha = 1\n  let dmg = 1.0\n  $0\n}\n";
+    // Closest declaration above the cursor first: dmg 0, alpha 1, dt 2.
+    assert_eq!(key_digit(PATH, src, "dmg", REC_DIGIT), '0');
+    assert_eq!(key_digit(PATH, src, "alpha", REC_DIGIT), '1');
+    assert_eq!(key_digit(PATH, src, "dt", REC_DIGIT), '2');
+}

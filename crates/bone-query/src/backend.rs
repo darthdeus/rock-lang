@@ -1140,6 +1140,25 @@ impl BoneWorkspace {
         let after_yield = cx.after_yield;
         // Test-scoped symbols demote outside test files (kind bucket 4).
         let demote_tests = !crate::query::is_test_path(path);
+        // Proximity tier of a defining file vs the request (late prior:
+        // 0 same file, 1 same project root, 2 other workspace code,
+        // 3 stdlib/builtins), memoized per file per request.
+        let root = Self::root_for(path).to_string_lossy().into_owned();
+        let mut prox_memo: HashMap<ustr::Ustr, u8> = HashMap::new();
+        let mut prox_of = move |def_file: ustr::Ustr| -> u8 {
+            *prox_memo.entry(def_file).or_insert_with(|| {
+                let f = def_file.as_str();
+                if f == path {
+                    0
+                } else if f.starts_with('<') || f.split(['/', '\\']).any(|s| s == "stdlib") {
+                    3
+                } else if f.starts_with(&root) {
+                    1
+                } else {
+                    2
+                }
+            })
+        };
         // ForIn: `for x in |` wants an iterable. Local candidate TyIds may
         // index the cursor body's BodyInference, so resolve it once for the
         // `is_iterable_ty` checks in the ranking loop.
@@ -1339,6 +1358,9 @@ impl BoneWorkspace {
                     dist: 0,
                     method,
                     fine: RankKey::fine(score),
+                    prox: prox_of(c.def_file),
+                    freq: 0,
+                    rec: c.rec,
                     len: RankKey::len_key(score, name.len()),
                 };
                 Cand::new(key, CandName::Sym(c.name), CandShape::Entry(c))
@@ -1502,7 +1524,7 @@ impl BoneWorkspace {
             // global (docs/completion-ranking-design.md, principle 3).
             let mut roots: Vec<(String, String, u8)> = crate::query::locals_in_scope(ws, mid, inf, offset)
                 .into_iter()
-                .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty, 0))
+                .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty, 0))
                 .collect();
             for m in ws.modules.iter() {
                 for (gname, gidx) in m.global_by_name.iter() {
