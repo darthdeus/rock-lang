@@ -1043,6 +1043,26 @@ impl BoneWorkspace {
             path_ms("member path", items.len());
             return items;
         }
+        // Member access on a receiver the name-walk can't encode (`x.find().|`,
+        // `xs[i].|`): resolve the receiver's type via inference and offer its
+        // members. Same builder as the name-path above.
+        if let Some(recv_end) = cx.member_recv_end {
+            let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
+            let mut items = member_completions_by_receiver(
+                &mut proj.session, path, src, offset, recv_end, &prefix, arg_slot, cx.anchor,
+                proj.reach.as_ref(), cx.bool_chain,
+            );
+            // A non-struct receiver (`scale(x).|` -> int) has no members; fall
+            // through to general completion rather than suppress it -- the
+            // pre-existing behavior when this receiver couldn't be resolved.
+            if !items.is_empty() {
+                if next_is_open_paren {
+                    strip_call_template(&mut items);
+                }
+                path_ms("member path (recv-ty)", items.len());
+                return items;
+            }
+        }
         // Field-reference key path: a call-arg slot whose expected param is
         // `FieldOf<Struct, V>` completes to Struct's fields of type V (the
         // typechecker's invariance) -- offered whether or not the leading `.`

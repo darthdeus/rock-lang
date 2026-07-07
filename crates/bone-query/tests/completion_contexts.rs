@@ -182,6 +182,34 @@ fn member_access_offers_fields_and_ufcs_methods() {
 }
 
 #[test]
+fn member_completion_on_a_plain_call_receiver() {
+    // `find_spell().<cursor>` must offer the RETURN struct's fields. Regression:
+    // `member_path` walked only Ident/FieldAccess receivers, returning None on a
+    // FunctionCall receiver -- so member completion never fired and the request
+    // fell through to scope completion (200 locals). Capture:
+    // 1783458255-player.rock (`spell.find_spell().cast_tim`).
+    let src = "struct SpellDef { cast_time: float, mana: int }\n\
+               fn find_spell() -> SpellDef { SpellDef { cast_time: 1.0, mana: 2 } }\n\
+               fn r() {\n  find_spell().\n}\n";
+    let l = labels(src, 3, 15); // after `find_spell().`
+    assert!(l.contains(&"cast_time: float".to_string()), "call-receiver fields: {l:?}");
+    assert!(l.contains(&"mana: int".to_string()), "call-receiver fields: {l:?}");
+}
+
+#[test]
+fn member_completion_on_a_ufcs_call_receiver() {
+    // The real-capture shape: `spell.find_spell().<cursor>` where `find_spell`
+    // is a UFCS method (first param is the receiver). The chained call's return
+    // struct fields must be offered.
+    let src = "struct SpellDef { cast_time: float, mana: int }\n\
+               fn find_spell(kind: int) -> SpellDef { SpellDef { cast_time: 1.0, mana: 2 } }\n\
+               fn r(spell: int) {\n  spell.find_spell().\n}\n";
+    let l = labels(src, 3, 21); // after `spell.find_spell().`
+    assert!(l.contains(&"cast_time: float".to_string()), "ufcs-call-receiver fields: {l:?}");
+    assert!(l.contains(&"mana: int".to_string()), "ufcs-call-receiver fields: {l:?}");
+}
+
+#[test]
 fn member_in_fn_returning_a_struct_is_not_a_struct_literal() {
     // Regression: `fn c() -> Result { return res. }` -- the `-> Result {` body
     // brace must NOT be read as a `Result { }` literal; `res.` is member access.

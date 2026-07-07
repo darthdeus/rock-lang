@@ -2551,41 +2551,77 @@ fn inferred_struct_fields(
 
     let b_idx = find_binding_by_name(body, head, offset)?;
     let recv_ty = *bi.binding_types.get(b_idx)?;
+    struct_fields_of_ty(ws, Some(bi), recv_ty).map(|(fields, _)| fields)
+}
 
-    let (sname, args) = struct_app_args(ws, bi, recv_ty)?;
+/// Fields (name, rendered type, TyId) + struct name of the struct a `TyId`
+/// denotes. Generic-aware when `bi` is present -- App args substitute the
+/// struct's generic params so `Pair<int, string>` yields `first: int` /
+/// `second: string`, not `A` / `B`. Falls back to structural name resolution
+/// (a `Static` type with no generics -- e.g. a fn return type). `None` when
+/// `ty` isn't a nominal struct (peeling `Nullable`).
+fn struct_fields_of_ty(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    ty: TyId,
+) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr)> {
+    if let Some(bi) = bi {
+        if let Some((sname, args)) = struct_app_args(ws, bi, ty) {
+            let sdef = struct_def_by_name(ws, sname)?;
+            // Positional generic-param names of the struct, so a field whose type
+            // is `Generic(_, "A")` maps to the inferred arg at that position.
+            let gnames: Vec<Ustr> = sdef
+                .generics
+                .iter()
+                .filter_map(|g| match deref_ty(ws, None, *g)? {
+                    hir::TypeExpr::Generic(_, n) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            let fields = sdef
+                .fields
+                .iter()
+                .map(|f| {
+                    // Generic field -> the receiver's inferred type arg (a TyId in
+                    // `bi`, the same arena a query-time ExpectedArg is seeded from);
+                    // else the declared static field type.
+                    let (rendered, ty_id) = match deref_ty(ws, None, f.ty) {
+                        Some(hir::TypeExpr::Generic(_, gname)) => gnames
+                            .iter()
+                            .position(|n| n == gname)
+                            .and_then(|i| args.get(i))
+                            .map(|arg| (ws.render(Some(bi), *arg), Some(*arg)))
+                            .unwrap_or_else(|| (ws.render(None, f.ty), Some(f.ty))),
+                        _ => (ws.render(None, f.ty), Some(f.ty)),
+                    };
+                    (f.name.to_string(), rendered, ty_id)
+                })
+                .collect();
+            return Some((fields, sname));
+        }
+    }
+    let sname = struct_name_of_ty(ws, None, ty)?;
     let sdef = struct_def_by_name(ws, sname)?;
-
-    // Positional generic-param names of the struct, so a field whose type is
-    // `Generic(_, "A")` maps to the inferred arg at that position.
-    let gnames: Vec<Ustr> = sdef
-        .generics
+    let fields = sdef
+        .fields
         .iter()
-        .filter_map(|g| match deref_ty(ws, None, *g)? {
-            hir::TypeExpr::Generic(_, n) => Some(*n),
-            _ => None,
-        })
+        .map(|f| (f.name.to_string(), ws.render(None, f.ty), Some(f.ty)))
         .collect();
+    Some((fields, sname))
+}
 
-    Some(
-        sdef.fields
-            .iter()
-            .map(|f| {
-                // Generic field -> the receiver's inferred type arg (a TyId in
-                // `bi`, the same arena a query-time ExpectedArg is seeded from);
-                // else the declared static field type.
-                let (rendered, ty_id) = match deref_ty(ws, None, f.ty) {
-                    Some(hir::TypeExpr::Generic(_, gname)) => gnames
-                        .iter()
-                        .position(|n| n == gname)
-                        .and_then(|i| args.get(i))
-                        .map(|arg| (ws.render(Some(bi), *arg), Some(*arg)))
-                        .unwrap_or_else(|| (ws.render(None, f.ty), Some(f.ty))),
-                    _ => (ws.render(None, f.ty), Some(f.ty)),
-                };
-                (f.name.to_string(), rendered, ty_id)
-            })
-            .collect(),
-    )
+/// Fields + struct name of a member RECEIVER expression whose type the
+/// structural name-walk can't encode -- a call (`x.find_spell().|`), index, etc.
+/// `recv_end` is the receiver expr's end offset; `type_at` at `recv_end-1`
+/// yields its inferred TyId, which `struct_fields_of_ty` turns into members.
+pub(crate) fn struct_members_of_receiver_expr(
+    ws: &Workspace,
+    mid: ModuleId,
+    recv_end: usize,
+) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr)> {
+    let inf = ws.inference(mid)?;
+    let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end.checked_sub(1)?)?;
+    struct_fields_of_ty(ws, ta.body, ta.ty)
 }
 
 /// `(struct name, inferred type args)` if `ty` is a nominal-struct `App`
