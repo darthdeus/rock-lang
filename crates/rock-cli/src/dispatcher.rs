@@ -475,6 +475,11 @@ impl CommandContext {
         if self.args.command == CliCommand::CompletionReplay {
             return crate::completion_replay::completion_replay(&self.args.files);
         }
+        // completion-episodes stitches log rows into episodes of user
+        // struggle and prints the tuning metrics (docs/completion-episodes.md).
+        if self.args.command == CliCommand::CompletionEpisodes {
+            return crate::completion_episodes::completion_episodes(&self.args.files);
+        }
         // lsp-survey is the stats-driven slow-edit hunter (BoneWorkspace);
         // dispatched early like the other iter-* / LSP profilers.
         if self.args.command == CliCommand::LspSurvey {

@@ -38,6 +38,7 @@ mod error_test;
 mod file_watcher;
 pub mod game_runtime;
 mod formatting;
+mod completion_episodes;
 mod completion_replay;
 mod completion_sweep;
 mod iter_completion;
@@ -190,6 +191,13 @@ pub enum CliCommand {
     /// aggregate MRR. The M6 tuning oracle of `docs/completion-v2-design.md`.
     /// See `completion_replay::completion_replay`.
     CompletionReplay,
+    /// `rock completion-episodes <log.jsonl>...` -- stitch completion-log rows
+    /// into episodes of user struggle (accept / typed_out / abandoned; the
+    /// final word at the anchor is ground truth) and print the tuning
+    /// metrics: chars-to-top3, never-surfaced leaderboard, hunted accepts,
+    /// repeat-struggle words. `docs/completion-episodes.md`. See
+    /// `completion_episodes::completion_episodes`.
+    CompletionEpisodes,
     /// `rock iter-cascade <project> [--iters N --warmup W]` -- tight loop benching
     /// the Interface-tier RE-LOWER cascade: a field edit on a high-fan-in TYPE
     /// re-lowers every module whose interface references it (vs `iter-reinfer`,
@@ -230,6 +238,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterCompletion,
             Self::CompletionSweep,
             Self::CompletionReplay,
+            Self::CompletionEpisodes,
             Self::IterCascade,
             Self::BackendStats,
         ]
@@ -272,6 +281,7 @@ impl CliCommand {
             Self::IterCompletion => "iter-completion",
             Self::CompletionSweep => "completion-sweep",
             Self::CompletionReplay => "completion-replay",
+            Self::CompletionEpisodes => "completion-episodes",
             Self::IterCascade => "iter-cascade",
             Self::BackendStats => "backend-stats",
         }
