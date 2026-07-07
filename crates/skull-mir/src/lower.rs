@@ -1363,6 +1363,27 @@ impl Builder<'_> {
             }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
 
+            // A reached `?` hole is a not-yet-filled marker: raise a readable
+            // runtime error (naming the hole) rather than silently evaluating to
+            // nil. `error` diverges, so the trailing nil is never read -- it only
+            // satisfies the expression's value slot.
+            Expr::Hole(name) => {
+                let label = match name {
+                    Some(n) => format!("reached unfilled hole ?{n}"),
+                    None => "reached unfilled hole ?".to_string(),
+                };
+                let msg = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(label.as_str()))));
+                let func = self
+                    .ws
+                    .functions_by_name
+                    .get(&Ustr::from("error"))
+                    .and_then(|l| l.first())
+                    .map(|&(module, func)| FuncRef { module, func })
+                    .ok_or_else(|| gap("stdlib `error` missing for hole lowering"))?;
+                self.emit_cur(Inst::Call { func, args: vec![msg] });
+                Ok(self.emit_cur(Inst::Const(Lit::Nil)))
+            }
+
             // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
             // records the target on `e`); a scalar uses the native op.
             Expr::Not(x) => {
