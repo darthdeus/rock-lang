@@ -2102,6 +2102,114 @@ fn next<T>(it: VecIter<T>) -> (bool, T) {
     return (true, v)
 }
 
+// Iterator combinators -- lazy wrapper iterators over any `I: Iterator<T>`
+// (structural: any type with `next(I) -> (bool, T)`). All `@inline`: a chain
+// like `v.iter().map(f).filter(p)` fully inlines at its `for` loop, SROA peels
+// every cursor, and the map-only spine recovers FORL -- the chain IS the
+// hand-written loop (`docs/iterator-desugaring-investigation.md`).
+// Shapes are load-bearing: map/enumerate are straight-line; filter/take_while
+// fetch OUTSIDE the skip loop (the skip body must not run on the pass path or
+// LuaJIT blacklists the trace at light hole densities -- the 8.8x cliff).
+
+struct MapIter<I, T, U> {
+    __inner: I,
+    __f: fn(T) -> U,
+}
+
+@inline
+fn map<I: Iterator<T>, T, U>(it: I, f: fn(T) -> U) -> MapIter<I, T, U> {
+    return MapIter { __inner: it, __f: f }
+}
+
+@inline
+fn next<I: Iterator<T>, T, U>(it: MapIter<I, T, U>) -> (bool, U) {
+    let (ok, x) = next(it.__inner)
+    if !ok { return (false, phantom()) }
+    return (true, (it.__f)(x))
+}
+
+struct FilterIter<I, T> {
+    __inner: I,
+    __pred: fn(T) -> bool,
+}
+
+@inline
+fn filter<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> FilterIter<I, T> {
+    return FilterIter { __inner: it, __pred: pred }
+}
+
+@inline
+fn next<I: Iterator<T>, T>(it: FilterIter<I, T>) -> (bool, T) {
+    let (ok, x) = next(it.__inner)
+    if !ok { return (false, phantom()) }
+    let cur = x
+    while !(it.__pred)(cur) {
+        let (ok2, y) = next(it.__inner)
+        if !ok2 { return (false, phantom()) }
+        cur = y
+    }
+    return (true, cur)
+}
+
+struct EnumIter<I, T> {
+    __inner: I,
+    __i: int,
+}
+
+@inline
+fn enumerate<I: Iterator<T>, T>(it: I) -> EnumIter<I, T> {
+    return EnumIter { __inner: it, __i: -1 }
+}
+
+@inline
+fn next<I: Iterator<T>, T>(it: EnumIter<I, T>) -> (bool, int, T) {
+    let (ok, x) = next(it.__inner)
+    if !ok { return (false, 0, phantom()) }
+    it.__i = it.__i + 1
+    return (true, it.__i, x)
+}
+
+struct ZipIter<I1, I2, A, B> {
+    __a: I1,
+    __b: I2,
+}
+
+@inline
+fn zip<I1: Iterator<A>, I2: Iterator<B>, A, B>(a: I1, b: I2) -> ZipIter<I1, I2, A, B> {
+    return ZipIter { __a: a, __b: b }
+}
+
+@inline
+fn next<I1: Iterator<A>, I2: Iterator<B>, A, B>(it: ZipIter<I1, I2, A, B>) -> (bool, A, B) {
+    let (ok_a, x) = next(it.__a)
+    if !ok_a { return (false, phantom(), phantom()) }
+    let (ok_b, y) = next(it.__b)
+    if !ok_b { return (false, phantom(), phantom()) }
+    return (true, x, y)
+}
+
+struct TakeWhileIter<I, T> {
+    __inner: I,
+    __pred: fn(T) -> bool,
+    __done: bool,
+}
+
+@inline
+fn take_while<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> TakeWhileIter<I, T> {
+    return TakeWhileIter { __inner: it, __pred: pred, __done: false }
+}
+
+@inline
+fn next<I: Iterator<T>, T>(it: TakeWhileIter<I, T>) -> (bool, T) {
+    if it.__done { return (false, phantom()) }
+    let (ok, x) = next(it.__inner)
+    if !ok || !(it.__pred)(x) {
+        it.__done = true
+        return (false, phantom())
+    }
+    return (true, x)
+}
+
 // Vec operations
 
 fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {

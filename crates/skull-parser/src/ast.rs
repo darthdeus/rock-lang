@@ -457,10 +457,13 @@ pub struct Param {
     pub is_variadic: bool,
 }
 
-/// A generic parameter `T` or `T = Default`. Mirrors rock's `GenericParam`.
+/// A generic parameter `T`, `T = Default`, or `I: Iterator<T>`. Mirrors rock's
+/// `GenericParam` plus the bound: the only bound the compiler knows today is
+/// the builtin `Iterator<T>` (validated in bone, not here).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Generic {
     pub name: Ident,
+    pub bound: Option<Idx<TypeExprData>>,
     pub default: Option<Idx<TypeExprData>>,
 }
 

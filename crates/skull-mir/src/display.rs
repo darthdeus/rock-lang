@@ -116,6 +116,14 @@ fn fmt_inst(
         Inst::Shl(a, b) => bin("bit.shl", a, b),
         Inst::Shr(a, b) => bin("bit.shr", a, b),
 
+        Inst::CallBoundMulti { dests, generic_idx, args } => {
+            let ds = dests
+                .iter()
+                .map(|c| format!("c{}", raw(*c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{ds} = call_bound <I{generic_idx}>({})", list(args))
+        }
         Inst::Call { func, args } => {
             let a = args.iter().map(|id| format!("v{}", num[id])).collect::<Vec<_>>().join(", ");
             format!("call {}:{}({a})", func.module.0, raw(func.func))

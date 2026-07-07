@@ -932,12 +932,17 @@ impl Parser {
                 Ok(id) => id,
                 Err(_) => break,
             };
+            let bound = if self.eat(TokenKind::Colon) {
+                self.parse_type().ok()
+            } else {
+                None
+            };
             let default = if self.eat(TokenKind::Assign) {
                 self.parse_type().ok()
             } else {
                 None
             };
-            out.push(Generic { name, default });
+            out.push(Generic { name, bound, default });
             self.skip_comments(); // `<T /* c */>`
             if !self.eat(TokenKind::Comma) {
                 break;

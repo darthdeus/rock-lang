@@ -58,6 +58,11 @@ pub struct Gamma<'a> {
 
     pub quiet: bool,
 
+    /// The enclosing fn's `Iterator` bounds: `(generic VarId, index into
+    /// `Function.generics`, declared element type)`. Set by `check_function`;
+    /// empty for unbounded fns and non-fn bodies.
+    pub fn_bounds: Vec<(VarId, usize, TyId)>,
+
     pub out: BodyInference,
 }
 
@@ -85,6 +90,8 @@ impl<'a> Gamma<'a> {
             body_errors: Vec::new(),
 
             quiet: false,
+
+            fn_bounds: Vec::new(),
 
             out: BodyInference {
                 body_generation: body.generation,
@@ -131,6 +138,15 @@ impl<'a> Gamma<'a> {
         self.out.ty_spans.insert(idx, span);
 
         ty
+    }
+
+    /// The enclosing fn's `Iterator` bound on the generic with this VarId, if
+    /// any: `(index into Function.generics, declared element type)`.
+    pub fn fn_bound_for(&self, v: VarId) -> Option<(usize, TyId)> {
+        self.fn_bounds
+            .iter()
+            .find(|(var, _, _)| *var == v)
+            .map(|&(_, idx, elem)| (idx, elem))
     }
 
     pub fn trial<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -292,6 +308,12 @@ pub fn check_function(
     let body = &module.bodies[&BodyOwner::Function(f_id)];
     let mut gamma = Gamma::new(ws, body, module_id);
     let c = BodyCtx { module, body };
+
+    for (idx, (g, b)) in f.generics.iter().zip(f.generic_bounds.iter()).enumerate() {
+        let Some(elem) = *b else { continue };
+        let TypeExpr::Generic(var_id, _) = *gamma.get(*g) else { continue };
+        gamma.fn_bounds.push((var_id, idx, elem));
+    }
 
     if f.is_coroutine {
         if let Some(ret) = f.return_ty {
@@ -1199,6 +1221,17 @@ pub fn infer_expr_used(
             None => match resolve_callee(gamma, *name).as_slice() {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();
+
+                    // A bounded fn only exists monomorphized-by-inlining at its
+                    // call sites; as a value it would need a runtime identity
+                    // its placeholder bound-calls can't have.
+                    if function.generic_bounds.iter().any(Option::is_some) {
+                        comp_error!(
+                            expr_span,
+                            "`{}` has `Iterator` bounds and cannot be used as a value; call it directly",
+                            name
+                        );
+                    }
 
                     let param_tys = function.param_decls.iter().map(|p| p.ty).collect_vec();
 
@@ -3316,6 +3349,26 @@ fn score_candidate(
         }
     }
 
+    // An `Iterator`-bounded candidate only fits if its bounds hold for this
+    // instantiation: a bare `it: I` unifies with ANY arg (`[int]`, Arena, ..),
+    // so without this check a bounded combinator would tie with -- or shadow --
+    // the concrete overloads (`map([T], f)`, `map(Arena<T>, f)`).
+    let f = &gamma.workspace.module(mid).functions[fid];
+    if f.generic_bounds.iter().any(Option::is_some) {
+        let mut tree = BoundTree::default();
+        let mut done = FxHashSet::default();
+        let conforms = gamma.trial(|g| {
+            check_iterator_bounds(c, g, f, &subs, &mut tree, &mut done, false, 0, span).is_ok()
+        });
+        if !conforms {
+            gamma.out.rollback_to(snap);
+            return None;
+        }
+        // Bounds that fit only structurally still rank below an exact concrete
+        // overload -- prefer the specialized fn when both match.
+        total += 1;
+    }
+
     // for (dty, &aty) in declared.iter().zip(arg_tys) {
     //     let pty = match substitute(gamma, *dty, &subs, span) {
     //         Ok(t) => t,
@@ -4041,6 +4094,32 @@ fn resolve_named_call(
         }
     }
 
+    // Bound-calls: `next(x)` / `iter(x)` (either spelling incl. UFCS) where
+    // `x: I` and the enclosing fn declares `I: Iterator<E>`. There is no
+    // concrete callee at check time -- the body is checked ONCE against the
+    // bound; skull lowers these as placeholders and the instantiation-time
+    // BoundTree substitutes the concrete `next` per splice. `iter(x)` is
+    // IDENTITY (types as `I`, lowers to the argument, no call).
+    if !gamma.fn_bounds.is_empty()
+        && recv_override.is_none()
+        && args.len() == 1
+        && matches!(name.as_str(), "next" | "iter")
+    {
+        let aty = infer_expr(c, gamma, args.start())?;
+        let aty = resolve(gamma, aty, span);
+        if let TypeExpr::Generic(var_id, _) = *gamma.get(aty) {
+            if let Some((idx, elem)) = gamma.fn_bound_for(var_id) {
+                if name.as_str() == "iter" {
+                    gamma.out.bound_identity_calls.insert(call_expr);
+                    return Ok(aty);
+                }
+                gamma.out.bound_calls.insert(call_expr, idx);
+                let b = gamma.workspace.builtins.bool();
+                return Ok(tuple_of(gamma, &[b, elem], span));
+            }
+        }
+    }
+
     if candidates.is_empty() {
         if recv_override.is_none() {
             if let Some(gty) = resolve_global(gamma, name) {
@@ -4154,12 +4233,20 @@ fn resolve_named_call(
         .out
         .record_resolved_call(call_expr, callee_mid, callee_fn, span)?;
 
-    let function = &gamma.workspace.module(callee_mid).functions[callee_fn];
+    let ws = gamma.workspace;
+    let function = &ws.module(callee_mid).functions[callee_fn];
     let (subs, _arg_tys) = gamma.instantiate_generics(&function.generics, span)?;
 
     // Caller, for arg exprs
-    let callee_module = &gamma.workspace.module(callee_mid);
+    let callee_module = &ws.module(callee_mid);
     let function = &callee_module.functions[callee_fn];
+
+    // `Iterator`-bounded callee: conformance is (re)tried after every arg
+    // unification -- resolving `next(C)` is also what binds the bound's elem
+    // generic, and a LATER lambda arg (`map(it, x => ..)`) must see it bound.
+    let has_bounds = function.generic_bounds.iter().any(Option::is_some);
+    let mut bound_tree = BoundTree::default();
+    let mut bounds_done: FxHashSet<usize> = FxHashSet::default();
 
     let mut param_tys = Vec::with_capacity(c.body.param_bindings.len());
     let mut param_names = Vec::with_capacity(c.body.param_bindings.len());
@@ -4241,11 +4328,23 @@ fn resolve_named_call(
     };
 
     for (arg, pty) in pairs {
+        if has_bounds {
+            check_iterator_bounds(
+                c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, false, 0, span,
+            )?;
+        }
         let pty = substitute(gamma, pty, &subs, span)?;
         match preinferred.get(&arg) {
             Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
             None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
         }
+    }
+
+    if has_bounds {
+        check_iterator_bounds(
+            c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, true, 0, span,
+        )?;
+        gamma.out.bound_call_trees.insert(call_expr, bound_tree);
     }
 
     // A non-`@pure` callee may reassign a global, so its call invalidates every
@@ -4630,6 +4729,30 @@ fn bind_pattern_leaves_to(
     Ok(())
 }
 
+/// Whether `enumerate(coll)` in for-position keeps its builtin template
+/// lowering (the types `for_elem_ty` knows). Everything else routes through
+/// the stdlib `EnumIter` combinator.
+fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
+    match *gamma.get(ty) {
+        TypeExpr::App { ctor: TypeCtor::Array, .. } | TypeExpr::App { ctor: TypeCtor::Map, .. } => {
+            true
+        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
+            n.as_str(),
+            "Arena"
+                | "NativeArray"
+                | "NativeBuffer"
+                | "NativeBufferU8"
+                | "NativeBufferI8"
+                | "NativeBufferU16"
+                | "NativeBufferI16"
+                | "NativeBufferU32"
+                | "NativeBufferI32"
+        ),
+        _ => false,
+    }
+}
+
 fn infer_for_elem(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -4647,10 +4770,22 @@ fn infer_for_elem(
             Ok(gamma.workspace.builtins.int())
         }
 
+        // Builtin-collection `enumerate(coll)` keeps its template lowering
+        // (Map has no protocol iterator; the counted paths are co-fn safe).
+        // `enumerate` over anything else -- an iterator chain -- falls through
+        // to the default arm: the call resolves to the stdlib `EnumIter`
+        // combinator and the result iterates via the protocol.
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
-        } if name.as_str() == "enumerate" && args.len() == 1 => {
+        } if name.as_str() == "enumerate"
+            && args.len() == 1
+            && {
+                let coll_ty = infer_expr(c, gamma, args.start())?;
+                let coll_ty = resolve(gamma, coll_ty, span);
+                builtin_enumerable(gamma, coll_ty)
+            } =>
+        {
             let coll_ty = infer_expr(c, gamma, args.start())?;
             let coll_ty = resolve(gamma, coll_ty, span);
             let elem = for_elem_ty(gamma, coll_ty, span)?;
@@ -4691,10 +4826,17 @@ fn infer_for_elem(
 }
 
 /// `for x in coll` where `coll` is not a builtin collection: resolve the user
-/// iterator protocol `iter(coll) -> It`, `next(It) -> (bool, E)`, record the two
-/// fns keyed by the For's `iter` expr (for skull's desugar), and return the
-/// element type E. E is a single type for `next -> (bool, E)`, or a tuple for
-/// `next -> (bool, A, B, ...)` so `for (a, b) in coll` destructures.
+/// iterator protocol and record it keyed by the For's `iter` expr (for skull's
+/// desugar), returning the element type E. E is a single type for
+/// `next -> (bool, E)`, or a tuple for `next -> (bool, A, B, ...)` so
+/// `for (a, b) in coll` destructures.
+///
+/// Resolution order:
+/// - a bounded generic (`coll: I`, `I: Iterator<E>`) iterates as itself with a
+///   placeholder `next` (resolved per splice at concrete roots);
+/// - `iter(coll) -> It` when it resolves;
+/// - otherwise IDENTITY: a next-able type iterates as itself (bare combinator
+///   chains -- `for y in v.iter().map(f)` -- need no blanket `iter<I>`).
 fn resolve_for_iter_protocol(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -4702,45 +4844,241 @@ fn resolve_for_iter_protocol(
     coll_ty: TyId,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    if let TypeExpr::Generic(var_id, gname) = *gamma.get(coll_ty) {
+        let Some((idx, elem)) = gamma.fn_bound_for(var_id) else {
+            comp_error!(
+                span,
+                "`{}` is a generic type with no `Iterator` bound, so it cannot be iterated; declare it `{}: Iterator<T>`",
+                gname,
+                gname
+            );
+        };
+        gamma.out.for_iter_protocol.insert(
+            iter_expr,
+            ForIterInfo { iter_fn: None, next: BoundNext::CallerGeneric(idx) },
+        );
+        return Ok(elem);
+    }
+
     let (iter_fn, it_ty) =
         match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), coll_ty, span) {
-            Ok(x) => x,
-            Err(_) => comp_error!(
-                span,
-                "type `{}` is not iterable: not a builtin collection and no `iter({})` function in scope",
-                gamma.render(coll_ty),
-                gamma.render(coll_ty)
-            ),
+            Ok((f, ret, _subs)) => {
+                let (fm, ff) = f;
+                if gamma.workspace.module(fm).functions[ff]
+                    .generic_bounds
+                    .iter()
+                    .any(Option::is_some)
+                {
+                    comp_error!(
+                        span,
+                        "`iter({})` resolves to a fn with `Iterator` bounds; bounded `iter` fns are not supported",
+                        gamma.render(coll_ty)
+                    );
+                }
+                (Some(f), ret)
+            }
+            // Identity: the collection IS the iterator if `next` resolves on it.
+            Err(_) => (None, coll_ty),
         };
 
-    let (next_fn, next_ret) =
+    let (next_fn, next_ret, next_subs) =
         match resolve_unary_by_recv(c, gamma, Ustr::from("next"), it_ty, span) {
             Ok(x) => x,
-            Err(_) => comp_error!(
+            Err(_) if iter_fn.is_some() => comp_error!(
                 span,
                 "`iter` yields `{}`, but there is no `next({}) -> (bool, E)` function to drive the loop",
                 gamma.render(it_ty),
                 gamma.render(it_ty)
             ),
+            Err(_) => comp_error!(
+                span,
+                "type `{}` is not iterable: not a builtin collection, and neither `iter({})` nor `next({}) -> (bool, E)` is in scope",
+                gamma.render(coll_ty),
+                gamma.render(coll_ty),
+                gamma.render(coll_ty)
+            ),
         };
 
     let elem = for_iter_next_elem(gamma, next_ret, span)?;
-    gamma.out.for_iter_protocol.insert(iter_expr, (iter_fn, next_fn));
+
+    // A bounded `next` (combinator chain) resolves its inner bounds HERE -- the
+    // for-loop is the mono root; the tree drives skull's placeholder
+    // substitution when the chain inlines.
+    let next_callee = gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
+    let mut sub = BoundTree::default();
+    if next_callee.generic_bounds.iter().any(Option::is_some) {
+        let mut done = FxHashSet::default();
+        check_iterator_bounds(
+            c, gamma, &next_callee, &next_subs, &mut sub, &mut done, true, 0, span,
+        )?;
+    }
+
+    gamma.out.for_iter_protocol.insert(
+        iter_expr,
+        ForIterInfo { iter_fn, next: BoundNext::Concrete { func: next_fn, sub } },
+    );
     Ok(elem)
+}
+
+/// Check the `Iterator` bounds of `function` at an instantiation site and
+/// build the resolution tree: for each `I: Iterator<E>` with instantiation
+/// `C`, conformance is STRUCTURAL -- `next(C) -> (bool, E')` must resolve and
+/// `E'` unifies with `E` (which is HOW `E` gets inferred from `C`). The
+/// resolved `next` may itself be bounded (nested chains) -- recurse with its
+/// own substitution. An instantiation that is the enclosing fn's bounded
+/// generic records a `CallerGeneric` leaf (bound propagation).
+///
+/// `done` tracks generics already resolved: the call-site loop retries after
+/// each argument unification so a later lambda argument sees `E` already
+/// bound. `finalize` errors on bounds still unresolvable.
+#[allow(clippy::too_many_arguments)]
+fn check_iterator_bounds(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    function: &Function,
+    subs: &FxHashMap<VarId, TyId>,
+    tree: &mut BoundTree,
+    done: &mut FxHashSet<usize>,
+    finalize: bool,
+    depth: usize,
+    span: Span,
+) -> Result<(), CompilerError> {
+    if depth > 64 {
+        comp_error!(span, "`Iterator` bound resolution exceeded depth 64 (recursive iterator type?)");
+    }
+
+    for (idx, b) in function.generic_bounds.iter().enumerate() {
+        let Some(elem_decl) = *b else { continue };
+        if done.contains(&idx) {
+            continue;
+        }
+
+        let inst = substitute(gamma, function.generics[idx], subs, span)?;
+        let inst = resolve(gamma, inst, span);
+
+        match *gamma.get(inst) {
+            TypeExpr::Infer(..) => {
+                if finalize {
+                    comp_error!(
+                        span,
+                        "cannot resolve the `Iterator` bound on `{}`: the iterator type is not determined by the arguments",
+                        function.name
+                    );
+                }
+                // Not yet determined -- the caller retries after more args unify.
+            }
+
+            TypeExpr::Generic(var_id, gname) => {
+                let Some((caller_idx, caller_elem)) = gamma.fn_bound_for(var_id) else {
+                    comp_error!(
+                        span,
+                        "`{}` does not satisfy `Iterator<{}>`: it is a generic type with no `Iterator` bound",
+                        gname,
+                        gamma.render(elem_decl)
+                    );
+                };
+                let elem_expected = substitute(gamma, elem_decl, subs, span)?;
+                unify(gamma, caller_elem, elem_expected, span)?;
+                tree.next.insert(idx, BoundNext::CallerGeneric(caller_idx));
+                done.insert(idx);
+            }
+
+            _ => {
+                let (next_fn, next_ret, next_subs) =
+                    match resolve_unary_by_recv(c, gamma, Ustr::from("next"), inst, span) {
+                        Ok(x) => x,
+                        Err(_) => comp_error!(
+                            span,
+                            "`{}` does not satisfy `Iterator<{}>`: no `next({}) -> (bool, E)` function in scope",
+                            gamma.render(inst),
+                            gamma.render(elem_decl),
+                            gamma.render(inst)
+                        ),
+                    };
+                let elem_actual = bound_next_elem(gamma, next_ret, inst, span)?;
+                let elem_expected = substitute(gamma, elem_decl, subs, span)?;
+                if unify(gamma, elem_actual, elem_expected, span).is_err() {
+                    comp_error!(
+                        span,
+                        "`{}` satisfies `Iterator<{}>`, but the bound requires `Iterator<{}>`",
+                        gamma.render(inst),
+                        gamma.render(elem_actual),
+                        gamma.render(elem_expected)
+                    );
+                }
+
+                let next_callee =
+                    gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
+                let mut sub = BoundTree::default();
+                if next_callee.generic_bounds.iter().any(Option::is_some) {
+                    let mut sub_done = FxHashSet::default();
+                    check_iterator_bounds(
+                        c, gamma, &next_callee, &next_subs, &mut sub, &mut sub_done,
+                        true, depth + 1, span,
+                    )?;
+                }
+                tree.next.insert(idx, BoundNext::Concrete { func: next_fn, sub });
+                done.insert(idx);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Element type for BOUND conformance: `next` must return exactly `(bool, E)`.
+/// Multi-value iterators (`(bool, A, B)` -- ArenaIter's entity/data pair,
+/// enumerate/zip outputs) can be CONSUMED by a `for` loop but not re-wrapped
+/// by a combinator: a generic body cannot destructure an unknown-arity splat.
+fn bound_next_elem(
+    gamma: &mut Gamma,
+    next_ret: TyId,
+    inst: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    let next_ret = resolve(gamma, next_ret, span);
+    let TypeExpr::Tuple { elements } = *gamma.get(next_ret) else {
+        comp_error!(
+            span,
+            "`{}` does not satisfy `Iterator<..>`: its `next` returns `{}`, not `(bool, E)`",
+            gamma.render(inst),
+            gamma.render(next_ret)
+        );
+    };
+    let elems: Vec<_> = elements.into_iter().collect();
+    if elems.len() != 2 {
+        comp_error!(
+            span,
+            "`{}` does not satisfy `Iterator<..>`: its `next` returns `{}`; a bound requires exactly `(bool, E)` -- multi-value iterators can drive a `for` loop but cannot be wrapped by combinators",
+            gamma.render(inst),
+            gamma.render(next_ret)
+        );
+    }
+    let first = resolve(gamma, next_ret.with_idx(elems[0]), span);
+    if !matches!(gamma.get(first), TypeExpr::Builtin(BuiltinTy::Bool)) {
+        comp_error!(
+            span,
+            "`{}` does not satisfy `Iterator<..>`: `next`'s first return must be `bool` (the done flag), got `{}`",
+            gamma.render(inst),
+            gamma.render(first)
+        );
+    }
+    Ok(resolve(gamma, next_ret.with_idx(elems[1]), span))
 }
 
 /// Resolve a unary call `name(recv)` by the receiver's TYPE alone (no arg expr) --
 /// the iterator protocol calls `iter(coll)` / `next(it)` on synthesized values.
 /// Reuses `select_overload` via the `recv_ty` slot, then instantiates generics
-/// and returns the resolved `(callee, return_ty)`. Does NOT record into
-/// `resolved_overload_calls` (the caller stores it in `for_iter_protocol`).
+/// and returns the resolved `(callee, return_ty, generic subs)`. Does NOT
+/// record into `resolved_overload_calls` (the caller stores it in
+/// `for_iter_protocol` / the bound tree).
 fn resolve_unary_by_recv(
     c: BodyCtx,
     gamma: &mut Gamma,
     name: Ustr,
     recv_ty: TyId,
     span: Span,
-) -> Result<((ModuleId, Idx<Function>), TyId), CompilerError> {
+) -> Result<((ModuleId, Idx<Function>), TyId, FxHashMap<VarId, TyId>), CompilerError> {
     let candidates = resolve_callee(gamma, name);
     if candidates.is_empty() {
         comp_error!(span, "no `{}` function in scope", name);
@@ -4784,7 +5122,8 @@ fn resolve_unary_by_recv(
 
     let ret = ret.unwrap_or_else(|| gamma.workspace.builtins.unit());
     let ret_sub = substitute(gamma, ret, &subs, span)?;
-    Ok(((mid, fid), resolve(gamma, ret_sub, span)))
+    let ret_res = resolve(gamma, ret_sub, span);
+    Ok(((mid, fid), ret_res, subs))
 }
 
 /// Element type of a `next() -> (bool, E)` return: the tuple tail. `(bool, E)`

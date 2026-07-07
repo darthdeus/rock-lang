@@ -84,7 +84,6 @@ struct LoopMatch {
     y: Idx<Block>,
     /// T's branch arm on the yield side (pre-chase, kept as the `for` body entry).
     y_arm: Idx<Block>,
-    body: Idx<Block>,
     exit: Idx<Block>,
     slot: Idx<Cell>,
     /// The non-slot compare operand (the bound value).
@@ -97,8 +96,13 @@ struct LoopMatch {
     chain: Vec<Idx<Inst>>,
     /// Former back-edge preds of the head (body end + every `continue`).
     back: Vec<Idx<Block>>,
-    /// Scaffolding to clear: head chain, done-path chain, join chain.
+    /// Scaffolding to clear: head chain + every done-path block/chain.
     clear: Vec<Idx<Block>>,
+    /// The join cascade, innermost first: `(join block, insts to drop -- the
+    /// flag load and optional `not` --, yield-continuation target)`. Each is
+    /// rewritten into a pass-through (elem copies kept, `Goto(cont)`); the
+    /// LAST one's cont is the loop body.
+    joins: Vec<(Idx<Block>, Vec<Idx<Inst>>, Idx<Block>)>,
 }
 
 /// Follow a chain of empty single-goto blocks starting at `b` (inclusive),
@@ -286,21 +290,20 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
     if chase(func, jd, &mut d_join_chain) != j {
         return None;
     }
-    // J: exactly `f = load flag; branch f -> BODY | EXIT`.
-    if func.blocks[j].insts.len() != 1 {
-        return None;
-    }
-    let fload = func.blocks[j].insts[0];
-    let Inst::Load(flag) = func.insts[fload] else { return None };
-    let Term::Branch { cond: jc, then_bb: body, else_bb: exit } = func.blocks[j].term else {
-        return None;
-    };
-    if jc != fload || flag == slot || body == exit {
-        return None;
-    }
 
-    // Flag is stored as literal `true` on Y and literal `false` on D, once each.
-    let flag_const = |blk: Idx<Block>, want: bool| -> bool {
+    // D must be droppable: consts, stores to non-slot cells, or `phantom()`.
+    let d_droppable = |blk: Idx<Block>| -> bool {
+        func.blocks[blk].insts.iter().all(|&i| match &func.insts[i] {
+            Inst::Const(_) => true,
+            Inst::Store { cell, .. } if *cell != slot => true,
+            Inst::Call { func: fr, args } if args.is_empty() && fn_name(ws, *fr) == "phantom" => {
+                true
+            }
+            _ => false,
+        })
+    };
+    // Flag is stored as literal `want` in `blk`, exactly once.
+    let flag_const = |blk: Idx<Block>, flag: Idx<Cell>, want: bool| -> bool {
         let mut seen = false;
         for &i in &func.blocks[blk].insts {
             if let Inst::Store { cell, value } = &func.insts[i] {
@@ -316,18 +319,137 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         }
         seen
     };
-    if !flag_const(y, true) || !flag_const(d, false) {
-        return None;
-    }
 
-    // D must be droppable: consts, stores to non-slot cells, or `phantom()`.
-    for &i in &func.blocks[d].insts {
-        match &func.insts[i] {
-            Inst::Const(_) => {}
-            Inst::Store { cell, .. } if *cell != slot => {}
-            Inst::Call { func: fr, args } if args.is_empty() && fn_name(ws, *fr) == "phantom" => {}
-            _ => return None,
+    // Peel the JOIN CASCADE. A plain user iterator has ONE flag join
+    // (`J: f = load flag; branch f -> BODY | EXIT`). An inlined combinator
+    // chain (MapIter over VecIter, ..) has one PER LAYER: each inner `next`'s
+    // ok-flag joins into the enclosing `next`'s destructure, whose `if !ok`
+    // branches to the NEXT done-propagation block (false side) or continues
+    // transforming the element (true side) toward the next join. Peel level by
+    // level: the false side chasing to a droppable done block that stores the
+    // next flag `false` means one more level; anything else is the loop EXIT
+    // and the true side is the BODY. Each join is later rewritten into a
+    // pass-through (its elem-copy insts kept, flag load dropped), so the
+    // yield path runs straight T -> Y -> J1' -> .. -> Jn' -> BODY.
+    struct Join {
+        j: Idx<Block>,
+        /// Insts to drop from J at rewrite (the flag load + optional `not`).
+        drop: Vec<Idx<Inst>>,
+        /// The yield-continuation arm J branches to (raw, pre-chase).
+        cont: Idx<Block>,
+        flag: Idx<Cell>,
+        fload: Idx<Inst>,
+    }
+    let mut joins: Vec<Join> = Vec::new();
+    let mut done_blocks: Vec<Idx<Block>> = vec![d];
+    let mut done_chains: Vec<Idx<Block>> = d_join_chain;
+    // Per level: the yield-side blocks that must store `flag = true`.
+    let mut yield_sources: Vec<Vec<Idx<Block>>> = vec![vec![y]];
+    let mut cur_j = j;
+    let (body, exit) = loop {
+        if joins.len() > 8 {
+            return None; // cap cascade depth
         }
+        let cur_d = *done_blocks.last().unwrap();
+        if !d_droppable(cur_d) {
+            return None;
+        }
+        // J's insts: the flag load feeding the branch (directly or through a
+        // single `not`), plus elem copies (loads / stores to non-slot cells /
+        // consts) that stay on the rewritten pass-through.
+        let Term::Branch { cond: jc, then_bb, else_bb } = func.blocks[cur_j].term else {
+            return None;
+        };
+        let jinsts: HashSet<Idx<Inst>> = func.blocks[cur_j].insts.iter().copied().collect();
+        let (fload, drop, flag_is_then) = match &func.insts[jc] {
+            Inst::Load(_) => (jc, vec![jc], true),
+            Inst::Not(x) => {
+                if !jinsts.contains(&jc) {
+                    return None;
+                }
+                (*x, vec![*x, jc], false)
+            }
+            _ => return None,
+        };
+        if !jinsts.contains(&fload) {
+            return None;
+        }
+        let Inst::Load(flag) = func.insts[fload] else { return None };
+        if flag == slot || then_bb == else_bb {
+            return None;
+        }
+        for &i in &func.blocks[cur_j].insts {
+            if i == fload || i == jc {
+                continue;
+            }
+            match &func.insts[i] {
+                Inst::Const(_) | Inst::Load(_) => {}
+                Inst::Store { cell, .. } if *cell != slot && *cell != flag => {}
+                _ => return None,
+            }
+        }
+        // `flag == true` is the yield side (stored true by this level's yield
+        // sources, false by its done block).
+        let (cont_arm, done_arm) = if flag_is_then { (then_bb, else_bb) } else { (else_bb, then_bb) };
+        if !flag_const(cur_d, flag, false) {
+            return None;
+        }
+        if !yield_sources
+            .last()
+            .unwrap()
+            .iter()
+            .any(|&yb| flag_const(yb, flag, true))
+        {
+            return None;
+        }
+        joins.push(Join { j: cur_j, drop, cont: cont_arm, flag, fload });
+
+        // Probe the done arm: another done-propagation block means one more
+        // level; anything else is the real EXIT.
+        let mut done_arm_chain = Vec::new();
+        let dn = chase(func, done_arm, &mut done_arm_chain);
+        let deeper = d_droppable(dn)
+            && matches!(func.blocks[dn].term, Term::Goto(_))
+            && func.blocks[dn].insts.iter().any(|&i| {
+                matches!(&func.insts[i], Inst::Store { value, .. }
+                    if matches!(&func.insts[*value], Inst::Const(Lit::Bool(false))))
+            });
+        if !deeper {
+            break (cont_arm, done_arm);
+        }
+        done_blocks.push(dn);
+        done_chains.extend(done_arm_chain);
+
+        // Walk the yield side (single goto-linked path, insts allowed) to the
+        // next join, which must equal the done side's convergence.
+        let Term::Goto(dgoto) = func.blocks[dn].term else { return None };
+        let mut next_chain = Vec::new();
+        let next_j = chase(func, dgoto, &mut next_chain);
+        done_chains.extend(next_chain);
+        let mut ysrc = Vec::new();
+        let mut yb = cont_arm;
+        let mut steps = 0;
+        loop {
+            // Yield-side hop blocks stay LIVE (the rewritten pass-through path
+            // runs through them) -- never into the clear list.
+            let mut hops = Vec::new();
+            let c = chase(func, yb, &mut hops);
+            if c == next_j {
+                break;
+            }
+            ysrc.push(c);
+            let Term::Goto(nxt) = func.blocks[c].term else { return None };
+            yb = nxt;
+            steps += 1;
+            if steps > 16 {
+                return None;
+            }
+        }
+        yield_sources.push(ysrc);
+        cur_j = next_j;
+    };
+    if body == exit {
+        return None;
     }
 
     // Y: exactly one slot store, a `slot + 1` increment, no slot read after it.
@@ -457,26 +579,34 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         return None;
     }
 
-    // Flag hygiene: its only read is J's branch load (D's `false` store dies
-    // with D, so any other reader would observe the change).
-    for (bid, blk) in func.blocks.iter() {
-        for &i in &blk.insts {
-            if matches!(&func.insts[i], Inst::Load(c) if *c == flag) && (bid != j || i != fload) {
-                return None;
+    // Flag hygiene, per level: a flag's only read is its own join's branch
+    // load (the done-side `false` store dies with the done block, so any
+    // other reader would observe the change).
+    for jn in &joins {
+        for (bid, blk) in func.blocks.iter() {
+            for &i in &blk.insts {
+                if matches!(&func.insts[i], Inst::Load(c) if *c == jn.flag)
+                    && (bid != jn.j || i != jn.fload)
+                {
+                    return None;
+                }
             }
         }
     }
-    // Done-value hygiene: cells D stores are never read outside the loop (an
-    // outside reader would observe the dropped done-value write).
-    for &i in &func.blocks[d].insts {
-        if let Inst::Store { cell, .. } = &func.insts[i] {
-            for (bid, blk) in func.blocks.iter() {
-                if in_loop.contains(&bid) || bid == j {
-                    continue;
-                }
-                for &k in &blk.insts {
-                    if matches!(&func.insts[k], Inst::Load(c) if c == cell) {
-                        return None;
+    // Done-value hygiene, per level: cells a done block stores are never read
+    // outside the loop (an outside reader would observe the dropped write).
+    let join_set: HashSet<Idx<Block>> = joins.iter().map(|jn| jn.j).collect();
+    for &dk in &done_blocks {
+        for &i in &func.blocks[dk].insts {
+            if let Inst::Store { cell, .. } = &func.insts[i] {
+                for (bid, blk) in func.blocks.iter() {
+                    if in_loop.contains(&bid) || join_set.contains(&bid) {
+                        continue;
+                    }
+                    for &k in &blk.insts {
+                        if matches!(&func.insts[k], Inst::Load(c) if c == cell) {
+                            return None;
+                        }
                     }
                 }
             }
@@ -522,21 +652,23 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         .filter(|i| chain_set.contains(i))
         .collect();
 
-    // Scaffolding to clear once unlinked.
+    // Scaffolding to clear once unlinked: the head chain and every done-path
+    // block. The joins are NOT cleared -- they rewrite into yield pass-throughs
+    // -- and neither are the Y->J hop chains (live on the yield path).
     let mut clear = head_chain;
-    clear.push(d);
+    clear.extend(done_blocks);
     clear.extend(d_chain);
-    clear.extend(d_join_chain);
-    clear.extend(y_join_chain);
-    clear.push(j);
-    clear.retain(|&bk| bk != t && bk != y && bk != y_arm);
+    clear.extend(done_chains);
+    clear.retain(|&bk| bk != t && bk != y && bk != y_arm && !join_set.contains(&bk));
+
+    let join_rewrites: Vec<(Idx<Block>, Vec<Idx<Inst>>, Idx<Block>)> =
+        joins.iter().map(|jn| (jn.j, jn.drop.clone(), jn.cont)).collect();
 
     Some(LoopMatch {
         t,
         p,
         y,
         y_arm,
-        body,
         exit,
         slot,
         bound,
@@ -545,6 +677,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         chain,
         back,
         clear,
+        joins: join_rewrites,
     })
 }
 
@@ -568,10 +701,15 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
         else_bb: m.exit,
     };
 
-    // Y drops the increment (the `for` owns it now) and runs straight into
-    // the body; its dead flag store falls to DCE once J is gone.
+    // Y drops the increment (the `for` owns it now) and keeps flowing into
+    // the join cascade; each join becomes a pass-through -- flag load (and
+    // `not`) dropped, elem copies kept, straight `Goto` to its yield arm (the
+    // last one's arm IS the body). The now-dead flag stores fall to DCE.
     func.blocks[m.y].insts.remove(m.incr_pos);
-    func.blocks[m.y].term = Term::Goto(m.body);
+    for (jb, drop, cont) in &m.joins {
+        func.blocks[*jb].insts.retain(|i| !drop.contains(i));
+        func.blocks[*jb].term = Term::Goto(*cont);
+    }
 
     // Dedicated 4-inst latch (the exact `latch_slot` shape); every former
     // back-edge -- loop end AND continue -- goes through it.

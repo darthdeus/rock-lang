@@ -563,13 +563,17 @@ impl<'a> Printer<'a> {
         if generics.is_empty() {
             return nil();
         }
-        let items = generics.iter().map(|g| match g.default {
-            Some(d) => Doc::concat([
-                Doc::text(kw(g.name.name)),
-                Doc::text(" = "),
-                self.type_expr(d),
-            ]),
-            None => Doc::text(kw(g.name.name)),
+        let items = generics.iter().map(|g| {
+            let mut parts = vec![Doc::text(kw(g.name.name))];
+            if let Some(b) = g.bound {
+                parts.push(Doc::text(": "));
+                parts.push(self.type_expr(b));
+            }
+            if let Some(d) = g.default {
+                parts.push(Doc::text(" = "));
+                parts.push(self.type_expr(d));
+            }
+            Doc::concat(parts)
         });
         Doc::concat([Doc::text("<"), Doc::join(Doc::text(", "), items), Doc::text(">")])
     }

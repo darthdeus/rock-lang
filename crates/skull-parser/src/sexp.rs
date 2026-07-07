@@ -150,9 +150,15 @@ impl Ast {
         }
         let inner = gs
             .iter()
-            .map(|g| match g.default {
-                Some(d) => format!("{}={}", g.name.name, self.type_sexp(d)),
-                None => g.name.name.to_string(),
+            .map(|g| {
+                let mut s = g.name.name.to_string();
+                if let Some(b) = g.bound {
+                    s = format!("{}:{}", s, self.type_sexp(b));
+                }
+                if let Some(d) = g.default {
+                    s = format!("{}={}", s, self.type_sexp(d));
+                }
+                s
             })
             .collect::<Vec<_>>()
             .join(" ");

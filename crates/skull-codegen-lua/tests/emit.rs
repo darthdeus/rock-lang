@@ -102,7 +102,8 @@ fn run(src: &str, driver: &str) -> String {
         if let Ok(mut func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
             // The real pipeline: stdlib callees (VecIter's iter/next under a
             // `for x in vec`) inline away, so the chunk stays self-contained.
-            skull_transform::inline_functions(&ws, &scx, fref, &mut func, &mut cache);
+            skull_transform::inline_functions(&ws, &scx, fref, &mut func, &mut cache)
+                .expect("inline failed");
             skull_transform::cleanup(&mut func);
             skull_transform::recover_counted_loops(&ws, &mut func);
             lua.push_str(&emit_function(&ws, &ctx, fref, &func));
@@ -570,7 +571,8 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let mut cache = skull_transform::InlineCache::default();
-    skull_transform::inline_functions(&ws, &scx, self_ref, &mut func, &mut cache);
+    skull_transform::inline_functions(&ws, &scx, self_ref, &mut func, &mut cache)
+        .expect("inline failed");
     skull_transform::cleanup(&mut func);
     skull_transform::recover_counted_loops(&ws, &mut func);
     let ctx = CodegenCtx::new(&ws);
@@ -707,5 +709,54 @@ fn for_real_vec_loop_is_forl_zero_alloc() {
     assert!(
         !lua.contains("next"),
         "iter/next must be fully inlined, no residual protocol call:\n{lua}"
+    );
+}
+
+// --- Slice 6 acceptance gate: combinator chains flatten. The bounded
+// `map`/`filter` `next` bodies inline via placeholder substitution (the
+// BoundTree), the cursors scalarize, and a map-only spine (counted structure
+// preserved) recovers FORL. filter keeps the goto skip loop -- its template
+// baseline anyway -- but still allocates nothing and leaves no protocol call.
+#[test]
+fn map_only_chain_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_mapped(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().map(x => x * 2) { total += x }
+            return total
+        }",
+        "sum_mapped",
+    );
+    assert!(
+        lua.contains("for "),
+        "map-only chain must recover a numeric `for` (FORL):\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct"),
+        "chain must not allocate (MapIter/VecIter cursors scalarize):\n{lua}"
+    );
+    assert!(
+        !lua.contains("next"),
+        "chain must fully inline, no residual `next` call:\n{lua}"
+    );
+}
+
+#[test]
+fn map_filter_chain_is_zero_alloc_no_residual_next() {
+    let lua = emit_inlined(
+        "fn sum_kept(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().map(x => x * 2).filter(x => x > 2) { total += x }
+            return total
+        }",
+        "sum_kept",
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct"),
+        "map+filter chain must not allocate (all cursors scalarize):\n{lua}"
+    );
+    assert!(
+        !lua.contains("next"),
+        "map+filter chain must fully inline, no residual `next` call:\n{lua}"
     );
 }

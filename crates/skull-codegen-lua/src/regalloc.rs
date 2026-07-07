@@ -156,6 +156,7 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         }
         Inst::Call { args, .. } => args.iter().for_each(|a| push(*a)),
         Inst::CallMulti { args, .. } => args.iter().for_each(|a| push(*a)),
+        Inst::CallBoundMulti { args, .. } => args.iter().for_each(|a| push(*a)),
         Inst::CallValue { callee, args } => {
             push(*callee);
             args.iter().for_each(|a| push(*a));

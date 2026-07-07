@@ -24,7 +24,7 @@ use bone_semantic::hir::{
 };
 use ustr::Ustr;
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::ModuleId;
+use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId};
 use comfy_la_arena::{Idx, IdxRange};
 use skull_parser::CompilerError;
 
@@ -2199,6 +2199,34 @@ impl Builder<'_> {
                 }
             }
         }
+        // Bound-calls inside an `Iterator`-bounded body (`next(x)` / `iter(x)`
+        // where `x: I`): `iter` is IDENTITY (the arg is the iterator, no call);
+        // `next` is a placeholder [`Inst::CallBoundMulti`] -- the concrete
+        // callee is substituted per splice from the site's `BoundTree`.
+        if let Some(inf) = self.inf {
+            if inf.bound_identity_calls.contains(&e) {
+                let [arg] = arg_idxs[..] else {
+                    return Err(gap("bound `iter` call with non-unary args"));
+                };
+                return Ok(ValueRepr::Scalar(self.lower_expr(arg)?));
+            }
+            if let Some(&gidx) = inf.bound_calls.get(&e) {
+                let [arg] = arg_idxs[..] else {
+                    return Err(gap("bound `next` call with non-unary args"));
+                };
+                let arg_v = self.lower_expr(arg)?;
+                // Bound conformance fixes the shape at exactly `(bool, E)`.
+                let dests: Vec<Idx<Cell>> = (0..2).map(|_| self.f.new_cell(None)).collect();
+                self.emit_cur(Inst::CallBoundMulti {
+                    dests: dests.clone(),
+                    generic_idx: gidx as u32,
+                    args: vec![arg_v],
+                });
+                let loads: Vec<Idx<Inst>> =
+                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                return Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads))));
+            }
+        }
         let any_named = arg_idxs.iter().any(|a| self.body.arg_names.contains_key(a));
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at
@@ -2215,7 +2243,7 @@ impl Builder<'_> {
             // INDIRECT call: a fn-typed struct field via UFCS (`recv.f(a)` ==
             // `f(recv, a)`, no real fn `f`) or a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
-                Ok(func) => self.lower_direct_call_repr(func, &arg_idxs, any_named),
+                Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
                     if !any_named {
                         let arg_vals: Vec<Idx<Inst>> =
@@ -2267,12 +2295,22 @@ impl Builder<'_> {
     /// value ABI, value args splat to leaves and a value return arrives as N
     /// leaves via [`Inst::CallMulti`] (rebuilt into a `Group`); otherwise it is a
     /// plain boxed [`Inst::Call`].
+    ///
+    /// A call of an `Iterator`-bounded callee carries bone's resolution tree
+    /// (keyed by the call expr `e`); it is re-recorded against the emitted call
+    /// inst so the inliner can substitute the placeholders inside the callee.
     fn lower_direct_call_repr(
         &mut self,
+        e: Idx<Expr>,
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
     ) -> Result<ValueRepr, CompilerError> {
+        let tree = self
+            .inf
+            .and_then(|i| i.bound_call_trees.get(&e))
+            .filter(|t| !t.is_empty())
+            .cloned();
         let ret_tuple = self.ws.module(func.module).functions[func.func]
             .return_ty
             .and_then(|t| tuple_arity(self.ws, t));
@@ -2283,9 +2321,13 @@ impl Builder<'_> {
                 arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?
             };
             if let Some(n) = ret_tuple {
-                return Ok(self.emit_tuple_call(func, args, n));
+                return Ok(self.emit_tuple_call_tree(func, args, n, tree));
             }
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args })));
+            let call = self.emit_cur(Inst::Call { func, args });
+            if let Some(t) = tree {
+                self.f.bound_trees.insert(call, t);
+            }
+            return Ok(ValueRepr::Scalar(call));
         }
         let args = self.scalar_call_args(func, arg_idxs, any_named)?;
         let ret_shape = self.ws.module(func.module).functions[func.func]
@@ -2295,15 +2337,24 @@ impl Builder<'_> {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+                let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+                if let Some(t) = tree {
+                    self.f.bound_trees.insert(call, t);
+                }
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
             None => match ret_tuple {
-                Some(n) => Ok(self.emit_tuple_call(func, args, n)),
-                None => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args }))),
+                Some(n) => Ok(self.emit_tuple_call_tree(func, args, n, tree)),
+                None => {
+                    let call = self.emit_cur(Inst::Call { func, args });
+                    if let Some(t) = tree {
+                        self.f.bound_trees.insert(call, t);
+                    }
+                    Ok(ValueRepr::Scalar(call))
+                }
             },
         }
     }
@@ -2313,8 +2364,24 @@ impl Builder<'_> {
     /// The result value is `MakeTuple(loads)` -- a boxed use materializes the
     /// table (same as the old ABI), a destructure elides it (`bind_for_pattern`).
     fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, n: usize) -> ValueRepr {
+        self.emit_tuple_call_tree(func, args, n, None)
+    }
+
+    /// [`Self::emit_tuple_call`] recording an `Iterator`-bound resolution tree
+    /// against the emitted call inst (chain roots like a directly-called
+    /// bounded `next`).
+    fn emit_tuple_call_tree(
+        &mut self,
+        func: FuncRef,
+        args: Vec<Idx<Inst>>,
+        n: usize,
+        tree: Option<bone_semantic::prelude::BoundTree>,
+    ) -> ValueRepr {
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-        self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+        let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+        if let Some(t) = tree {
+            self.f.bound_trees.insert(call, t);
+        }
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads)))
     }
@@ -3536,18 +3603,13 @@ impl Builder<'_> {
                 BindingPattern::Tuple(_) => Err(gap("for-range with a tuple pattern")),
             };
         }
-        // User iterator protocol (bone recorded iter/next fns for this For):
+        // User iterator protocol (bone recorded the resolution for this For):
         // desugar to `it = iter(coll); loop { (ok, ..) = next(it); !ok -> break }`.
         // Only populated for non-builtin collections, so this never shadows a
-        // builtin template.
-        if let Some((iter_fn, next_fn)) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).copied()) {
-            return self.lower_for_user_iter(
-                &vars,
-                iter,
-                body,
-                FuncRef { module: iter_fn.0, func: iter_fn.1 },
-                FuncRef { module: next_fn.0, func: next_fn.1 },
-            );
+        // builtin template. `iter_fn: None` = identity (the collection IS the
+        // iterator); a `CallerGeneric` next = placeholder in a bounded body.
+        if let Some(info) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).cloned()) {
+            return self.lower_for_user_iter(&vars, iter, body, &info);
         }
         if let Expr::Call {
             callee: Callee::Unresolved { name, .. },
@@ -3591,31 +3653,49 @@ impl Builder<'_> {
     }
 
     /// `for <pat> in <coll>` over a user type via the iter/next protocol (bone
-    /// recorded the resolved fns). Desugars to:
-    ///   it = iter(coll)
+    /// recorded the resolution). Desugars to:
+    ///   it = iter(coll)        -- or `it = coll` when iter is identity
     ///   loop { let (ok, <pat>) = next(it); if !ok break; <body> }
     /// `next` returns a tuple, so slice-1's multi-return ABI makes the per-element
     /// `next` call zero-alloc (a `CallMulti` into `[ok, elem..]` dests). `it` lives
     /// in a cell so `next` mutates the same cursor each turn. `continue` re-enters
     /// the header (runs `next` again); `break` exits.
+    ///
+    /// A `Concrete` next with a non-empty bound tree is a combinator-chain root:
+    /// the tree is recorded against the emitted `CallMulti` so the inliner can
+    /// substitute the placeholders inside the spliced callee. A `CallerGeneric`
+    /// next (a `for` over a bounded generic inside a bounded body) emits the
+    /// placeholder [`Inst::CallBoundMulti`] directly.
     fn lower_for_user_iter(
         &mut self,
         vars: &BindingPattern,
         iter_expr: Idx<Expr>,
         body: Idx<Expr>,
-        iter_fn: FuncRef,
-        next_fn: FuncRef,
+        info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
         let coll = self.lower_expr(iter_expr)?;
-        let it_val = self.emit_cur(Inst::Call { func: iter_fn, args: vec![coll] });
+        let it_val = match info.iter_fn {
+            Some((m, f)) => {
+                self.emit_cur(Inst::Call { func: FuncRef { module: m, func: f }, args: vec![coll] })
+            }
+            None => coll,
+        };
         let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
         self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
 
-        // next returns `(bool, E)` / `(bool, A, B, ...)`: arity = 1 + element leaves.
-        let n = self.ws.module(next_fn.module).functions[next_fn.func]
-            .return_ty
-            .and_then(|t| tuple_arity(self.ws, t))
-            .ok_or_else(|| gap("for-iter `next` must return a tuple"))?;
+        // next returns `(bool, E)` / `(bool, A, B, ...)`: arity = 1 + element
+        // leaves. A placeholder next is always arity 2 (bound conformance
+        // requires exactly `(bool, E)`).
+        let n = match &info.next {
+            BoundNext::Concrete { func: (m, f), .. } => self
+                .ws
+                .module(*m)
+                .functions[*f]
+                .return_ty
+                .and_then(|t| tuple_arity(self.ws, t))
+                .ok_or_else(|| gap("for-iter `next` must return a tuple"))?,
+            BoundNext::CallerGeneric(_) => 2,
+        };
         if n < 2 {
             return Err(gap("for-iter `next` must return `(bool, E)`"));
         }
@@ -3630,7 +3710,26 @@ impl Builder<'_> {
         self.cur = header;
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-        self.emit_cur(Inst::CallMulti { dests: dests.clone(), func: next_fn, args: vec![it_load] });
+        match &info.next {
+            BoundNext::Concrete { func: (m, f), sub } => {
+                let func = FuncRef { module: *m, func: *f };
+                let call = self.emit_cur(Inst::CallMulti {
+                    dests: dests.clone(),
+                    func,
+                    args: vec![it_load],
+                });
+                if !sub.is_empty() {
+                    self.f.bound_trees.insert(call, sub.clone());
+                }
+            }
+            BoundNext::CallerGeneric(gidx) => {
+                self.emit_cur(Inst::CallBoundMulti {
+                    dests: dests.clone(),
+                    generic_idx: *gidx as u32,
+                    args: vec![it_load],
+                });
+            }
+        }
         let ok = self.emit_cur(Inst::Load(dests[0]));
         self.f.set_term(self.cur, Term::Branch { cond: ok, then_bb: body_bb, else_bb: exit });
 

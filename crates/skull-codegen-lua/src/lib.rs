@@ -1643,6 +1643,12 @@ impl Emitter<'_> {
             | Inst::CoroSetInner { .. }
             | Inst::CoroHook { .. }
             | Inst::ArrayPush { .. } => unreachable!("effect has no value"),
+
+            // Substituted by the inliner (or rejected by mir_emit's residual
+            // check) long before codegen.
+            Inst::CallBoundMulti { .. } => {
+                unreachable!("placeholder bound-call must be substituted before emit")
+            }
         }
     }
 

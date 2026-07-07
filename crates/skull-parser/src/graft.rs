@@ -92,6 +92,7 @@ fn graft_generics(src: &Ast, dst: &mut Ast, gs: &[Generic]) -> Vec<Generic> {
     gs.iter()
         .map(|g| Generic {
             name: g.name.clone(),
+            bound: g.bound.map(|t| graft_type(src, dst, t)),
             default: g.default.map(|t| graft_type(src, dst, t)),
         })
         .collect()

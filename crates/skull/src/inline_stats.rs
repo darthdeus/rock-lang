@@ -61,8 +61,11 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
             let Ok(mut mf) = skull_mir::lower::lower_function(ws, &scx, module.id, fid) else {
                 continue;
             };
-            let (_deps, splices) =
-                skull_transform::inline_functions(ws, &scx, self_ref, &mut mf, &mut cache);
+            let Ok((_deps, splices)) =
+                skull_transform::inline_functions(ws, &scx, self_ref, &mut mf, &mut cache)
+            else {
+                continue;
+            };
             if splices.is_empty() {
                 continue;
             }

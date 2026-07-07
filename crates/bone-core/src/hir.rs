@@ -445,6 +445,11 @@ pub struct Function {
     pub is_coroutine: bool,
     pub is_variadic: bool,
     pub generics: Vec<TyId>,
+    /// Parallel to `generics`: `Some(elem)` == the param is declared
+    /// `I: Iterator<elem>` (the only bound the compiler knows). Checked
+    /// structurally at instantiation: `C` satisfies `Iterator<E>` iff
+    /// `next(C) -> (bool, E)` resolves.
+    pub generic_bounds: Vec<Option<TyId>>,
     pub param_decls: Vec<ParamDecl>,
 
     pub num_required: usize,

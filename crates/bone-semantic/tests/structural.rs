@@ -546,6 +546,7 @@ fn structurally_equal_compounds_reassign_is_ok() {
         is_coroutine: false,
         is_variadic: false,
         generics: vec![],
+        generic_bounds: vec![],
         param_decls: vec![],
         num_required: 0,
         return_ty: None,
