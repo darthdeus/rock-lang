@@ -2886,7 +2886,16 @@ pub fn completion(
     // score in the caller (`arg_sort_text`) then ranks tight runs first.
     // `prefix` is already lowercased.
     let pfx = prefix.as_bytes();
-    let matches = |name: &str| -> bool { clean_match(name.as_bytes(), pfx) };
+    // `_`-prefixed symbols are soft-private (the member-completion
+    // convention): hidden unless the user is explicitly typing a `_` prefix.
+    // Also keeps `__` compiler/stdlib internals out of the general list.
+    let show_private = prefix.starts_with('_');
+    let matches = |name: &str| -> bool {
+        if name.starts_with('_') && !show_private {
+            return false;
+        }
+        clean_match(name.as_bytes(), pfx)
+    };
 
     // A TYPE slot offers the type universe only: structs / bare enums /
     // newtypes / builtins. Locals, globals, and functions are values -- not
@@ -2961,6 +2970,12 @@ pub fn completion(
                     // NotGround -- camelCase-aware) or the qualified form (a
                     // `tarnog` Enum+variant query), dropping mid-word scatter.
                     let vname = v.name.as_str();
+                    // Same soft-private gate as `matches`, against the
+                    // enum AND variant names.
+                    if (name.as_str().starts_with('_') || vname.starts_with('_')) && !show_private
+                    {
+                        continue;
+                    }
                     let hit = pfx.is_empty()
                         || clean_match(vname.as_bytes(), pfx)
                         || clean_match(qualified.as_bytes(), pfx);

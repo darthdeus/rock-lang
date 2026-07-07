@@ -540,6 +540,38 @@ fn relaxed_guard_offers_local_seeded_call_through_on_short_fn_prefix() {
     );
 }
 
+// -- `_`-prefix soft-private: hidden from the general list unless the user is
+//    explicitly typing a `_` prefix (same convention as member completion). --
+
+#[test]
+fn underscore_prefixed_symbols_hidden_from_general_list() {
+    // `_helper` (fn), `_PRIV` (global), and `_loc` (local) are soft-private;
+    // a plain prefix must not surface them, and stdlib `__` internals stay
+    // out the same way.
+    let labels = labels_at(
+        "fn _helper() {}\n\
+         global _PRIV: int = 1\n\
+         fn visible_helper() {}\n\
+         fn r() {\n  let _loc = 2\n  let visible_loc = 3\n  he$0\n}\n",
+    );
+    assert!(labels.iter().any(|l| l == "visible_helper"), "{labels:?}");
+    assert!(
+        !labels.iter().any(|l| l == "_helper" || l == "_PRIV" || l == "_loc"),
+        "soft-private symbols must not surface on a plain prefix: {labels:?}"
+    );
+}
+
+#[test]
+fn typing_underscore_surfaces_soft_private_symbols() {
+    let labels = labels_at(
+        "fn _helper() {}\n\
+         global _PRIV: int = 1\n\
+         fn r() {\n  _$0\n}\n",
+    );
+    assert!(labels.iter().any(|l| l == "_helper"), "{labels:?}");
+    assert!(labels.iter().any(|l| l == "_PRIV"), "{labels:?}");
+}
+
 #[test]
 fn reach_path_flood_is_kept_and_ranked_not_dropped() {
     // A local `s: S` with 15 int fields fills the `feed(<int>)` arg slot with
