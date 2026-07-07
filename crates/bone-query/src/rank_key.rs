@@ -19,7 +19,8 @@
 ///   2 clean word-boundary subsequence, 3 scattered; 0 on an empty query.
 /// - `case`: smart-case mismatch count (0-9); 0 (neutral) in typed slots.
 /// - `kind`: locality ladder -- 0 local/param, 1 global, 2 fn/type,
-///   3 variant; 0 (neutral) where a path ranks one kind only.
+///   3 variant, 4 test-scoped symbol outside test files; 0 (neutral)
+///   where a path ranks one kind only.
 /// - `dist`: reach hop distance; 0 for direct candidates.
 /// - `method`: 1 for a callable (needs args / has side effects), 0 else.
 /// - `fine`: `9999 - clamped fuzzy score` -- the within-band tiebreak.

@@ -1138,6 +1138,8 @@ impl BoneWorkspace {
         // After a `yield`/`yield*`, coroutine-returning fns rank first (the
         // `yield* frame(1)` delegation pattern).
         let after_yield = cx.after_yield;
+        // Test-scoped symbols demote outside test files (kind bucket 4).
+        let demote_tests = !crate::query::is_test_path(path);
         // ForIn: `for x in |` wants an iterable. Local candidate TyIds may
         // index the cursor body's BodyInference, so resolve it once for the
         // `is_iterable_ty` checks in the ranking loop.
@@ -1233,6 +1235,11 @@ impl BoneWorkspace {
                 // fn would truncate them away entirely; within bucket 2 the
                 // `method` tiebreak already orders non-fns ahead of functions.
                 let kind = match c.kind {
+                    // Test-scoped symbols (tests/-dir or test_-named) sink to
+                    // the bottom kind bucket OUTSIDE test files; the band rung
+                    // still leads, so an explicitly typed `test_` prefix
+                    // surfaces them (docs/completion-v2-design.md heuristics).
+                    _ if demote_tests && c.test_scoped => 4,
                     SymCat::Local | SymCat::Param => 0,
                     // After `yield`/`yield*`, a coroutine fn is the expected
                     // operand -- promote it above plain fns/types.

@@ -925,3 +925,140 @@ fn member_field_coercing_to_nullable_slot_ranks_first() {
     assert!(z.is_some() && a.is_some(), "both fields offered: {labels:?}");
     assert!(z < a, "int field must type-direct above string in an int? slot: {labels:?}");
 }
+
+// -- test_* / tests-dir demotion outside test files ---------------------------
+
+fn rank_in(labels: &[String], needle: &str) -> usize {
+    labels
+        .iter()
+        .position(|l| l == needle)
+        .unwrap_or_else(|| panic!("no completion `{needle}` in {labels:?}"))
+}
+
+/// The `kind` digit (RankKey position 4) of `label`'s sort_text at the
+/// cursor -- the demotion rung under test, independent of cap truncation
+/// and match band.
+fn kind_digit(path: &str, src: &str, label: &str) -> char {
+    let (s, pos) = marked(src);
+    let mut bone = BoneWorkspace::new();
+    bone.update(path, s);
+    let items = bone.completion(path, pos);
+    let it = items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion `{label}`"));
+    it.sort_text.as_deref().expect("sort_text").as_bytes()[4] as char
+}
+
+#[test]
+fn test_prefixed_fn_demotes_outside_test_files() {
+    // In a NON-test file, a `test_`-named fn rides the bottom kind bucket
+    // (4) even when explicitly surfaced by a matching prefix.
+    let src = "fn test_apply() {}
+fn r() {
+  test_ap$0
+}
+";
+    assert_eq!(
+        kind_digit(PATH, src, "test_apply"),
+        '4',
+        "test_-prefixed fn must ride kind bucket 4 outside test files"
+    );
+}
+
+#[test]
+fn test_prefixed_fn_keeps_normal_kind_inside_test_files() {
+    // Same fixture completed in a file under a `tests/` segment: no
+    // demotion -- test symbols rank normally among their own.
+    let src = "fn test_apply() {}
+fn r() {
+  test_ap$0
+}
+";
+    assert_eq!(
+        kind_digit("/tmp/tests/rock_lsp_ranking_t.rock", src, "test_apply"),
+        '2',
+        "no demotion inside a test file"
+    );
+}
+
+#[test]
+fn typing_test_prefix_still_surfaces_test_fns() {
+    // The band rung IS the escape hatch: an explicit `test_ap` prefix is a
+    // case-exact prefix match on the test fn, which outranks every scattered
+    // non-test candidate -- no demotion override needed.
+    let labels = labels_at(
+        "fn test_apply() {}\n\
+         fn zap_thing() {}\n\
+         fn r() {\n  test_ap$0\n}\n",
+    );
+    assert_eq!(
+        rank_in(&labels, "test_apply"),
+        0,
+        "explicitly typed test_ prefix must surface the test fn first: {labels:?}"
+    );
+}
+
+/// A game file + a `tests/` sibling: the tests-dir fn demotes in the game
+/// file and ranks normally at home.
+fn tests_dir_project() -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"tp\"\n").unwrap();
+    std::fs::create_dir(dir.path().join("tests")).unwrap();
+    std::fs::write(
+        dir.path().join("main.rock"),
+        "fn zzz_real() {}\nfn game() {\n  aaa_h\n}\nfn game2() {\n  zzz_r\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("tests").join("helpers.rock"),
+        "fn aaa_helper() {}\nfn sim_run() {\n  aaa_h\n}\n",
+    )
+    .unwrap();
+    let main = bone_query::canonicalize_lenient(&dir.path().join("main.rock").to_string_lossy());
+    let helper = bone_query::canonicalize_lenient(
+        &dir.path().join("tests").join("helpers.rock").to_string_lossy(),
+    );
+    (dir, main, helper)
+}
+
+fn kind_digit_at(bone: &mut BoneWorkspace, path: &str, pos: Position, label: &str) -> char {
+    let items = bone.completion(path, pos);
+    let it = items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion `{label}`"));
+    it.sort_text.as_deref().expect("sort_text").as_bytes()[4] as char
+}
+
+#[test]
+fn tests_dir_symbols_demote_in_game_files() {
+    let (_dir, main, _helper) = tests_dir_project();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&main, std::fs::read_to_string(&main).unwrap());
+    // Cursor after the `aaa_h` prefix in `game`'s body (line 2, col 7).
+    let pos = Position::new(2, 7);
+    assert_eq!(
+        kind_digit_at(&mut bone, &main, pos, "aaa_helper"),
+        '4',
+        "tests-dir fn must ride kind bucket 4 in a game file"
+    );
+    assert_eq!(
+        kind_digit_at(&mut bone, &main, Position::new(5, 7), "zzz_real"),
+        '2',
+        "game fns keep their normal kind"
+    );
+}
+
+#[test]
+fn tests_dir_symbols_rank_normally_inside_test_files() {
+    let (_dir, _main, helper) = tests_dir_project();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&helper, std::fs::read_to_string(&helper).unwrap());
+    let pos = Position::new(2, 7);
+    assert_eq!(
+        kind_digit_at(&mut bone, &helper, pos, "aaa_helper"),
+        '2',
+        "no demotion inside a test file"
+    );
+}

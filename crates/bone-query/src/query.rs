@@ -1146,6 +1146,13 @@ fn global_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
     out
 }
 
+/// Whether `path` sits under a `tests/` directory segment -- the test-file
+/// rule shared by the demotion's "is the symbol test-scoped" and "am I in a
+/// test file" sides.
+pub(crate) fn is_test_path(path: &str) -> bool {
+    path.split(['/', '\\']).any(|seg| seg == "tests")
+}
+
 /// `true` if `offset` falls in `[span.start, span.start + len)` -- the leading
 /// `len` bytes of a span (where the name token always sits, for type ctors and
 /// struct-literal heads).
@@ -3457,6 +3464,10 @@ pub struct CompletionEntry {
     /// construction shape -- drives the payload template (`($0)` / `{ $0 }`).
     /// `None` for every other kind.
     pub variant_shape: Option<VariantShape>,
+    /// Test-scoped: defined in a module under a `tests/` path segment, or
+    /// `test_`-named. Outside test files the facade demotes these to the
+    /// bottom kind bucket (4).
+    pub test_scoped: bool,
 }
 
 pub struct SymbolEntry {
@@ -3547,12 +3558,17 @@ pub fn completion(
                     ty: ty_id,
                     takes_params: false,
                     variant_shape: None,
+                    test_scoped: false,
                 });
             }
         }
     }
 
     for m in ws.modules.iter() {
+        // Test-scoped iff defined under a `tests/` path segment or
+        // `test_`-named -- the facade demotes these outside test files.
+        let m_test = is_test_path(m.file.as_str());
+        let scoped = |n: &str| m_test || n.starts_with("test_");
         for (name, fns) in m.functions_by_name.iter() {
             if !expr_position {
                 break;
@@ -3574,11 +3590,12 @@ pub fn completion(
                 ty: None,
                 takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
                 variant_shape: None,
+                test_scoped: scoped(name.as_str()),
             });
         }
         for name in m.struct_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, ty: None, takes_params: false, variant_shape: None });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Struct, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()) });
             }
         }
         // A user enum in an expression slot is offered as its qualified
@@ -3613,16 +3630,17 @@ pub fn completion(
                             ty: None,
                             takes_params: false,
                             variant_shape: Some(VariantShape::of(&v.payload)),
+                            test_scoped: scoped(name.as_str()),
                         });
                     }
                 }
             } else if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, ty: None, takes_params: false, variant_shape: None });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Enum, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()) });
             }
         }
         for name in m.newtypes_by_name.keys() {
             if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, ty: None, takes_params: false, variant_shape: None });
+                out.push(CompletionEntry { name: *name, kind: SymCat::Newtype, detail: None, ty: None, takes_params: false, variant_shape: None, test_scoped: scoped(name.as_str()) });
             }
         }
         for (name, gidx) in m.global_by_name.iter() {
@@ -3641,6 +3659,7 @@ pub fn completion(
                     ty: Some(m.globals[*gidx].ty),
                     takes_params: false,
                     variant_shape: None,
+                    test_scoped: scoped(name.as_str()),
                 });
             }
         }
@@ -3662,6 +3681,7 @@ pub fn completion(
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
+                    test_scoped: false,
                 });
             }
         }
@@ -3680,6 +3700,7 @@ pub fn completion(
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
+                    test_scoped: false,
                 });
             }
         }
