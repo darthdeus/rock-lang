@@ -459,6 +459,9 @@ pub(crate) struct CompletionCx {
     pub(crate) ast: Option<crate::cursor_context::CursorAst>,
     /// `recv.pa|` -- pure ident receiver chain (most specific trigger).
     pub(crate) member: Option<Vec<String>>,
+    /// `x.find().|` / `xs[i].|` -- member receiver the name-walk can't encode;
+    /// the receiver expr's end offset, resolved via inference (`type_at`).
+    pub(crate) member_recv_end: Option<usize>,
     /// Enclosing call with the cursor in an ARG slot: (callee, idx,
     /// receiver end). Field-ref gate + expected-type input.
     pub(crate) arg_call: Option<(String, u32, Option<usize>)>,
@@ -509,6 +512,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     let expr_position = !cx.is_some_and(|c| c.is_type_position());
     CompletionCx {
         member: cx.and_then(|c| c.member_path()),
+        member_recv_end: cx.and_then(|c| c.member_receiver_end()),
         enum_record: cx.and_then(|c| c.enum_record()),
         qualified: cx.and_then(|c| c.qualified_base()),
         struct_literal: cx.and_then(|c| c.struct_literal()),

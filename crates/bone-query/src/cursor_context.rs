@@ -810,6 +810,41 @@ impl CursorAst {
         Some(segs)
     }
 
+    /// The END offset of a member receiver that ISN'T a plain name path -- a
+    /// call (`x.find_spell().|`), index, etc. `member_path` returns None for
+    /// these (a call has no name segment), but the receiver's TYPE still
+    /// resolves via inference at this offset. None when the cursor is in the
+    /// receiver, or the receiver IS a name path (the structural name-walk owns
+    /// that -- inference-free, so robust when a munge breaks inference).
+    pub(crate) fn member_receiver_end(&self) -> Option<usize> {
+        let chain = self.expr_chain();
+        let &node = chain.first()?;
+        let (ExprKind::FieldAccess(recv, member) | ExprKind::SafeNavigation(recv, member)) =
+            &self.expr(node).kind
+        else {
+            return None;
+        };
+        if self.probe < member.span.offset_range.0 {
+            return None; // cursor in the receiver, not the member slot
+        }
+        if self.is_name_path(*recv) {
+            return None; // name-walk handles it
+        }
+        Some(self.expr(*recv).span.offset_range.1)
+    }
+
+    /// A receiver expression reachable as `ident(.field)*` -- exactly what
+    /// `member_path` can encode as name segments.
+    fn is_name_path(&self, mut cur: Idx<ExprData>) -> bool {
+        loop {
+            match &self.expr(cur).kind {
+                ExprKind::Ident(_) => return true,
+                ExprKind::FieldAccess(r, _) | ExprKind::SafeNavigation(r, _) => cur = *r,
+                _ => return false,
+            }
+        }
+    }
+
     /// The UFCS receiver of the call whose arg slot the cursor sits in, as a
     /// structural anchor. None when the cursor isn't in a method call's args
     /// (matches `call_arg`'s Some-with-receiver cases exactly).

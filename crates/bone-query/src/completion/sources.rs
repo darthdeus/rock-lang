@@ -1006,6 +1006,48 @@ pub(crate) fn member_ty_match(mut expected: Option<&mut ExpectedArg>, ty_id: Opt
     }
 }
 
+/// Member completion for a receiver the structural name-walk can't encode -- a
+/// call (`x.find_spell().|`), index, etc. Its type comes from inference:
+/// `recv_end` is the receiver expr's end offset (BEFORE the cursor, so stable
+/// across the completion munges), and `struct_members_of_receiver_expr` reads
+/// its TyId via `type_at`. Fields + struct name then feed the shared builder.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn member_completions_by_receiver(
+    session: &mut Session,
+    path: &str,
+    src: &str,
+    offset: usize,
+    recv_end: usize,
+    prefix: &str,
+    arg_slot: Option<(String, usize)>,
+    anchor: Option<SlotAnchor>,
+    reach: Option<&crate::reachability::ReachabilityIndex>,
+    bool_ctx: bool,
+) -> Vec<CompletionItem> {
+    for munged in completion_munges(src, offset) {
+        let attempt = analyze_variant(session, path, &munged, |ws| {
+            let Some(mid) = user_module_for_path(ws, path) else {
+                return Vec::new();
+            };
+            let Some((fields, recv_struct)) =
+                crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)
+            else {
+                return Vec::new();
+            };
+            build_member_items(
+                ws, mid, offset, fields, Some(recv_struct), prefix, arg_slot.clone(), anchor,
+                reach, bool_ctx,
+            )
+        });
+        if let Some(items) = attempt {
+            if !items.is_empty() {
+                return items;
+            }
+        }
+    }
+    Vec::new()
+}
+
 pub(crate) fn member_completion_items(
     ws: &Workspace,
     path: &str,
@@ -1017,17 +1059,40 @@ pub(crate) fn member_completion_items(
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
 ) -> Vec<CompletionItem> {
-    {
-        // The CURRENT file's module (where the receiver/offset live) -- not just
-        // "first non-builtin", which is wrong now that the whole project loads.
-        let Some(mid) = user_module_for_path(ws, path) else {
-            return Vec::new();
-        };
+    // The CURRENT file's module (where the receiver/offset live) -- not just
+    // "first non-builtin", which is wrong now that the whole project loads.
+    let Some(mid) = user_module_for_path(ws, path) else {
+        return Vec::new();
+    };
+    // Name-path receiver (`recv.field.field`): resolve struct + fields
+    // structurally (no inference). A call/index receiver is resolved from its
+    // INFERRED type instead -- see `member_completion_items_by_receiver`.
+    let fields = crate::query::struct_fields_for_path(ws, mid, offset, segments);
+    let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
+    build_member_items(
+        ws, mid, offset, fields, recv_struct, prefix, arg_slot, anchor, reach, bool_ctx,
+    )
+}
 
-        let fields = crate::query::struct_fields_for_path(ws, mid, offset, segments);
+/// Shared item-builder for both receiver-resolution strategies (structural
+/// name-walk and inferred receiver type): UFCS methods, type-directed
+/// field/method ordering, Entity `get` boost, arg-position transitive reach.
+#[allow(clippy::too_many_arguments)]
+fn build_member_items(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+    fields: Vec<(String, String, Option<TyId>)>,
+    recv_struct: Option<Ustr>,
+    prefix: &str,
+    arg_slot: Option<(String, usize)>,
+    anchor: Option<SlotAnchor>,
+    reach: Option<&crate::reachability::ReachabilityIndex>,
+    bool_ctx: bool,
+) -> Vec<CompletionItem> {
+    {
         // UFCS methods: functions whose first param is the receiver's struct,
         // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
-        let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
         let methods = recv_struct
             .map(|name| crate::query::ufcs_methods(ws, name))
             .unwrap_or_default();
