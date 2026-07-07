@@ -2080,6 +2080,28 @@ struct Vec<T> {
     len: int,
 }
 
+// Vec iteration -- `for x in vec` desugars through this iter/next pair
+// (skull inlines both, SROA peels the cursor, and the FORL-recovery pass
+// re-emits a native numeric `for`; parity with the old builtin template is
+// pinned by `for_real_vec_loop_is_forl_zero_alloc` in skull-codegen-lua).
+struct VecIter<T> {
+    vec: [T],
+    i: int,
+}
+
+@inline
+fn iter<T>(v: [T]) -> VecIter<T> {
+    return VecIter { vec: v, i: 0 }
+}
+
+@inline
+fn next<T>(it: VecIter<T>) -> (bool, T) {
+    if it.i >= it.vec.len { return (false, phantom()) }
+    let v = it.vec[it.i]
+    it.i = it.i + 1
+    return (true, v)
+}
+
 // Vec operations
 
 fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {

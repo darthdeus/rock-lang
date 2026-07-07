@@ -96,9 +96,16 @@ fn run(src: &str, driver: &str) -> String {
     let ctx = CodegenCtx::new(&ws);
     let scx = skull_mir::lower::ScalarCtx::new(&ws);
     let mut lua = String::from("local bit = require('bit')\n");
+    let mut cache = skull_transform::InlineCache::default();
     for (fid, _) in ws.module(mid).functions.iter() {
-        if let Ok(func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
-            lua.push_str(&emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func));
+        let fref = FuncRef { module: mid, func: fid };
+        if let Ok(mut func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
+            // The real pipeline: stdlib callees (VecIter's iter/next under a
+            // `for x in vec`) inline away, so the chunk stays self-contained.
+            skull_transform::inline_functions(&ws, &scx, fref, &mut func, &mut cache);
+            skull_transform::cleanup(&mut func);
+            skull_transform::recover_counted_loops(&ws, &mut func);
+            lua.push_str(&emit_function(&ws, &ctx, fref, &func));
         }
     }
     lua.push_str(&format!("print({})\n", driver));
@@ -252,8 +259,8 @@ fn exec_vec_index() {
 
 #[test]
 fn exec_for_over_array() {
-    // for-over-array lowers to the `Len` + `Index` insts (self-contained, no
-    // stdlib `len`/`get` call).
+    // `[T]` iterates via the stdlib VecIter protocol; the inline pass splices
+    // iter/next away so the emitted fn is still self-contained.
     let src = "
 fn total(xs: [int]) -> int {
     let s = 0;
@@ -672,5 +679,33 @@ fn for_vec_backed_iter_inline_emits_forl() {
     assert!(
         !lua.contains(">="),
         "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
+    );
+}
+
+// --- Slice 5 acceptance gate: a REAL `[T]` for-loop routes through the stdlib
+// VecIter protocol (no skull template) and still compiles to the same
+// zero-alloc native `for` the deleted template emitted. Parity measured at
+// ~1.0x, 0 bytes/elem (benchmarks/iterator-zero-alloc/vec_parity.rock).
+#[test]
+fn for_real_vec_loop_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_vec(xs: [int]) -> int {
+            let total = 0
+            for x in xs { total += x }
+            return total
+        }",
+        "sum_vec",
+    );
+    assert!(
+        lua.contains("for "),
+        "real [T] loop must print as a numeric `for` via VecIter + FORL recovery:\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct"),
+        "real [T] loop must not allocate (VecIter cursor scalarizes):\n{lua}"
+    );
+    assert!(
+        !lua.contains("next"),
+        "iter/next must be fully inlined, no residual protocol call:\n{lua}"
     );
 }

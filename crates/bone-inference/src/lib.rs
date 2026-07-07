@@ -4664,6 +4664,18 @@ fn infer_for_elem(
             let iter_ty = infer_expr(c, gamma, iter)?;
             let iter_ty = resolve(gamma, iter_ty, span);
 
+            // `[T]` routes through the stdlib iterator protocol (`VecIter`):
+            // the desugar + @inline + SROA + FORL recovery emit the same
+            // native numeric `for` the deleted skull template did.
+            // `for_elem_ty` keeps its Array arm -- `enumerate(vec)` above
+            // still calls it directly for the element type.
+            if matches!(
+                *gamma.get(iter_ty),
+                TypeExpr::App { ctor: TypeCtor::Array, .. }
+            ) {
+                return resolve_for_iter_protocol(c, gamma, iter, iter_ty, span);
+            }
+
             match for_elem_ty(gamma, iter_ty, span) {
                 Ok(elem) => Ok(elem),
                 // Not a builtin collection: try the user iterator protocol

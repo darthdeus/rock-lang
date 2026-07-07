@@ -1,6 +1,8 @@
 //! @no_check
 //! For loops: `for x in iter { body }`. The loop variable binds to the iterable's
 //! element type (range -> int, `[T]` -> T). The `for` itself is a statement (unit).
+//! `[T]` iterates via the iter/next protocol (stdlib `VecIter`); these fixtures
+//! compile stdlib-free, so array sections carry a local FIter protocol.
 
 //- for_range
 fn f() -> int {
@@ -12,6 +14,9 @@ fn f() -> int {
 }
 
 //- for_array
+struct FIter<T> { last: T }
+fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }
+fn next<T>(it: FIter<T>) -> (bool, T) { return (false, it.last) }
 fn f(xs: [int]) -> int {
     for x in xs {
         let y = x
@@ -45,6 +50,9 @@ fn f(m: Map<int, string>) -> int {
 
 // Tuple patterns also destructure an array of tuples element-wise.
 //- for_tuple_array
+struct FIter<T> { last: T }
+fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }
+fn next<T>(it: FIter<T>) -> (bool, T) { return (false, it.last) }
 fn f(xs: [(int, string)]) -> int {
     for (a, b) in xs {
         let p = a
@@ -66,7 +74,12 @@ fn f(m: Map<int, string>) -> int {
 }
 
 // Destructuring a non-tuple element with a tuple pattern must be rejected.
+// (The local protocol makes the array iterable, so the failure is the pattern
+// arity -- not a missing-iterator error.)
 //- for_tuple_on_scalar @fail
+struct FIter<T> { last: T }
+fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }
+fn next<T>(it: FIter<T>) -> (bool, T) { return (false, it.last) }
 fn f(xs: [int]) -> int {
     for (a, b) in xs {
         let p = a

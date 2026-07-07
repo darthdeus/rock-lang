@@ -11,6 +11,9 @@
 //! Verified vs rock.
 
 //- for_nested_tuple
+struct FIter<T> { last: T }
+fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }
+fn next<T>(it: FIter<T>) -> (bool, T) { return (false, it.last) }
 fn f() -> int {
     let xs: [(int, (int, string))] = [(1, (2, "a"))]
     let last = 0
@@ -23,6 +26,9 @@ fn f() -> int {
 }
 
 //- for_flat_tuple_still_works
+struct FIter<T> { last: T }
+fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }
+fn next<T>(it: FIter<T>) -> (bool, T) { return (false, it.last) }
 fn f() -> int {
     let xs: [(int, string)] = [(1, "a"), (2, "b")]
     let result = 0

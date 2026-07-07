@@ -3571,7 +3571,14 @@ impl Builder<'_> {
             return self.lower_for_arena(&vars, iter, body, false);
         }
         match self.coll_kind(iter) {
-            ContainerKind::Vec | ContainerKind::NativeArray | ContainerKind::NativeBuffer => {
+            // `for x in [T]` always arrives with `for_iter_protocol` populated
+            // (bone routes Array to the stdlib VecIter protocol); reaching the
+            // dispatch means bone and skull disagree -- reject, don't emit a
+            // second lowering. `enumerate(vec)` keeps its own path above.
+            ContainerKind::Vec => Err(gap(
+                "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
+            )),
+            ContainerKind::NativeArray | ContainerKind::NativeBuffer => {
                 self.lower_for_array(vars, iter, body)
             }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
@@ -5982,13 +5989,15 @@ fn f(c0) {
 
     #[test]
     fn for_over_array_indexes_each_element() {
+        // Native array: the builtin counted template. (`[T]` routes through
+        // the stdlib VecIter protocol instead and never reaches this path.)
         assert_eq!(
-            mir("fn f(xs: [int]) { for x in xs { } }", "f"),
+            mir("fn f(xs: ![int]) { for x in xs { } }", "f"),
             "\
 fn f(c0) {
   bb0:
     v0 = load c0
-    v1 = len.Vec v0
+    v1 = len.NativeArray v0
     v2 = const 0
     store c1, v2
     goto bb1
@@ -5998,7 +6007,7 @@ fn f(c0) {
     branch v4 -> bb2, bb4
   bb2:
     v5 = load c1
-    v6 = index.Vec v0[v5]
+    v6 = index.NativeArray v0[v5]
     store c2, v6
     goto bb3
   bb3:
