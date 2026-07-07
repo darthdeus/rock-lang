@@ -2041,11 +2041,16 @@ fn next<T>(it: VecIter<T>) -> (bool, T) {
 // Iterator combinators -- lazy wrapper iterators over any `I: Iterator<T>`
 // (structural: any type with `next(I) -> (bool, T)`). All `@inline`: a chain
 // like `v.iter().map(f).filter(p)` fully inlines at its `for` loop, SROA peels
-// every cursor, and the map-only spine recovers FORL -- the chain IS the
+// every cursor, and the FORL-recovery pass (`skull-transform/src/forl.rs`)
+// rewrites the whole chain into a native counted `for` -- the chain IS the
 // hand-written loop (`docs/iterator-desugaring-investigation.md`).
-// Shapes are load-bearing: map/enumerate are straight-line; filter/take_while
-// fetch OUTSIDE the skip loop (the skip body must not run on the pass path or
-// LuaJIT blacklists the trace at light hole densities -- the 8.8x cliff).
+// Shapes are load-bearing for that matcher: map/enumerate are straight-line;
+// filter fetches INSIDE its skip loop and take_while separates its two stop
+// causes, so each layer contributes either a plain ok-flag join, a skip edge
+// back to the fetch head, or a stop edge to a done block -- the shapes
+// forl.rs peels. The fetch-outside rule (the 8.8x standalone-`next()` trace
+// cliff) does NOT apply here: bounded combinators are always fully inlined
+// (residual bound calls are compile errors), so no callable `next()` exists.
 
 struct MapIter<I, T, U> {
     __inner: I,
@@ -2076,15 +2081,12 @@ fn filter<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> FilterIter<I, T> {
 
 @inline
 fn next<I: Iterator<T>, T>(it: FilterIter<I, T>) -> (bool, T) {
-    let (ok, x) = next(it.__inner)
-    if !ok { return (false, phantom()) }
-    let cur = x
-    while !(it.__pred)(cur) {
-        let (ok2, y) = next(it.__inner)
-        if !ok2 { return (false, phantom()) }
-        cur = y
+    loop {
+        let (ok, x) = next(it.__inner)
+        if !ok { return (false, phantom()) }
+        if (it.__pred)(x) { return (true, x) }
     }
-    return (true, cur)
+    return (false, phantom())
 }
 
 struct EnumIter<I, T> {
@@ -2139,7 +2141,11 @@ fn take_while<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> TakeWhileIter<I,
 fn next<I: Iterator<T>, T>(it: TakeWhileIter<I, T>) -> (bool, T) {
     if it.__done { return (false, phantom()) }
     let (ok, x) = next(it.__inner)
-    if !ok || !(it.__pred)(x) {
+    if !ok {
+        it.__done = true
+        return (false, phantom())
+    }
+    if !(it.__pred)(x) {
         it.__done = true
         return (false, phantom())
     }

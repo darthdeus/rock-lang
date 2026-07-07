@@ -760,3 +760,81 @@ fn map_filter_chain_is_zero_alloc_no_residual_next() {
         "map+filter chain must fully inline, no residual `next` call:\n{lua}"
     );
 }
+
+// --- Skip-loop FORL recovery: a filter/take_while layer's reject edge becomes
+// a `continue` (skip) or a jump to the loop exit (stop), so the whole chain
+// still rewrites into the codegen CountedLoop shape -- the doc-blessed flat
+// `for + skip-branch` (docs/iterator-desugaring-investigation.md C3). The goto
+// form of the same filter chain measured 1.82x a hand-fused loop
+// (benchmarks/iterator-zero-alloc/chain_parity.rock).
+#[test]
+fn filter_chain_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_kept(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().filter(x => x > 2) { total += x }
+            return total
+        }",
+        "sum_kept",
+    );
+    assert!(
+        lua.contains("for "),
+        "filter chain must recover a numeric `for` (skip edge -> continue):\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
+        "filter chain must stay zero-alloc, fully inlined:\n{lua}"
+    );
+}
+
+#[test]
+fn map_filter_chain_is_forl() {
+    let lua = emit_inlined(
+        "fn sum_kept(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().map(x => x * 2).filter(x => x > 2) { total += x }
+            return total
+        }",
+        "sum_kept",
+    );
+    assert!(
+        lua.contains("for "),
+        "map+filter chain must recover a numeric `for`:\n{lua}"
+    );
+}
+
+#[test]
+fn take_while_chain_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_prefix(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().take_while(x => x < 10) { total += x }
+            return total
+        }",
+        "sum_prefix",
+    );
+    assert!(
+        lua.contains("for "),
+        "take_while chain must recover a numeric `for` (stop edge -> exit):\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
+        "take_while chain must stay zero-alloc, fully inlined:\n{lua}"
+    );
+}
+
+#[test]
+fn filter_take_while_mixed_chain_is_forl() {
+    let lua = emit_inlined(
+        "fn sum_mixed(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().filter(x => x % 2 == 0).take_while(x => x < 100) { total += x }
+            return total
+        }",
+        "sum_mixed",
+    );
+    assert!(
+        lua.contains("for "),
+        "filter+take_while chain must recover a numeric `for`:\n{lua}"
+    );
+}

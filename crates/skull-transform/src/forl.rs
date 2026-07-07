@@ -30,6 +30,21 @@
 //! back-edge/continue; the preheader targets T; H/D/J are cleared (the
 //! detector's `slot_sound` scans ALL arena blocks, incl. unreachable ones).
 //!
+//! Skip-loop layers (filter/take_while) extend the join cascade with three
+//! shapes, turning the chain into the flat `for + skip-branch` the
+//! investigation doc blesses (`docs/iterator-desugaring-investigation.md` C3):
+//! - **skip edge** (filter reject): a yield-path branch whose reject arm
+//!   chases back to the fetch head (T or a guard). Rewritten to target the
+//!   latch -- a `continue`.
+//! - **stop edge** (take_while reject): a yield-path branch whose reject arm
+//!   chases to a droppable done block storing the NEXT level's flag `false`.
+//!   Rewritten to target EXIT -- a `break`.
+//! - **guard** (take_while `__done`): a head-chain block
+//!   `g = load cell; branch g -> done | fetch`. `g` is provably false at
+//!   every entry (init-false store outside the loop; `true` stores only in
+//!   done/stop blocks, which exit the rewritten loop and are cleared; no
+//!   other reader), so the guard drops with the head chain.
+//!
 //! Continue stays correct: the old code increments PRE-body (inside the
 //! inlined `next`), so `continue -> H` re-tested an already-advanced slot; the
 //! new code strips that increment and `continue -> L` performs it instead --
@@ -103,6 +118,20 @@ struct LoopMatch {
     /// rewritten into a pass-through (elem copies kept, `Goto(cont)`); the
     /// LAST one's cont is the loop body.
     joins: Vec<(Idx<Block>, Vec<Idx<Inst>>, Idx<Block>)>,
+    /// Skip-reject arms `(branch block, raw arm target)`: a filter reject
+    /// that re-enters the fetch. Retargeted to the latch (a `continue`).
+    skips: Vec<(Idx<Block>, Idx<Block>)>,
+    /// Stop-reject arms `(branch block, raw arm target)`: a take_while
+    /// reject whose done path exits the loop. Retargeted to EXIT (a `break`).
+    stops: Vec<(Idx<Block>, Idx<Block>)>,
+}
+
+/// A take_while `__done` guard on the head chain.
+struct GuardInfo {
+    b: Idx<Block>,
+    gload: Idx<Inst>,
+    cell: Idx<Cell>,
+    done_arm: Idx<Block>,
 }
 
 /// Follow a chain of empty single-goto blocks starting at `b` (inclusive),
@@ -204,11 +233,46 @@ fn fn_name(ws: &Workspace, fr: FuncRef) -> &str {
 }
 
 fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch> {
-    // Head -> test block through empty gotos.
+    // Head -> test block through empty gotos, allowing take_while `__done`
+    // GUARD blocks on the way: `g = load cell; branch g -> done | fetch`
+    // (possibly through a `not`). The continue arm must be the g == false arm
+    // -- the guard is dropped on the proof that g is false at every entry,
+    // verified fn-wide after the peel.
     let mut head_chain = Vec::new();
-    let t = chase(func, h, &mut head_chain);
-    let Term::Branch { cond, then_bb, else_bb } = func.blocks[t].term else {
-        return None;
+    let mut guards: Vec<GuardInfo> = Vec::new();
+    let mut cur = h;
+    let (t, cond, then_bb, else_bb) = loop {
+        let c = chase(func, cur, &mut head_chain);
+        let Term::Branch { cond, then_bb, else_bb } = func.blocks[c].term else {
+            return None;
+        };
+        if matches!(
+            &func.insts[cond],
+            Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+        ) {
+            break (c, cond, then_bb, else_bb);
+        }
+        if guards.len() >= 4 || then_bb == else_bb {
+            return None;
+        }
+        let cinsts = &func.blocks[c].insts;
+        let (gload, cont_arm) = match &func.insts[cond] {
+            Inst::Load(_) if cinsts.len() == 1 && cinsts[0] == cond => (cond, else_bb),
+            Inst::Not(x)
+                if cinsts.len() == 2
+                    && cinsts.contains(&cond)
+                    && cinsts.contains(x)
+                    && matches!(func.insts[*x], Inst::Load(_)) =>
+            {
+                (*x, then_bb)
+            }
+            _ => return None,
+        };
+        let done_arm = if cont_arm == then_bb { else_bb } else { then_bb };
+        let Inst::Load(gcell) = func.insts[gload] else { return None };
+        guards.push(GuardInfo { b: c, gload, cell: gcell, done_arm });
+        head_chain.push(c);
+        cur = cont_arm;
     };
 
     // The compare, with the slot on either side.
@@ -338,13 +402,23 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         /// The yield-continuation arm J branches to (raw, pre-chase).
         cont: Idx<Block>,
         flag: Idx<Cell>,
-        fload: Idx<Inst>,
     }
     let mut joins: Vec<Join> = Vec::new();
     let mut done_blocks: Vec<Idx<Block>> = vec![d];
     let mut done_chains: Vec<Idx<Block>> = d_join_chain;
     // Per level: the yield-side blocks that must store `flag = true`.
     let mut yield_sources: Vec<Vec<Idx<Block>>> = vec![vec![y]];
+    // Yield-path hop blocks (live after the rewrite; part of the flag-read
+    // live set below).
+    let mut live_hops: Vec<Idx<Block>> = y_join_chain;
+    let mut skips: Vec<(Idx<Block>, Idx<Block>)> = Vec::new();
+    let mut stops: Vec<(Idx<Block>, Idx<Block>)> = Vec::new();
+    // Stop arms' done blocks: verified to store the NEXT level's flag `false`
+    // once that flag is known (top of the following peel iteration).
+    let mut pending_stops: Vec<(Idx<Block>, Idx<Block>, Idx<Block>)> = Vec::new();
+    let mut stop_dones: Vec<Idx<Block>> = Vec::new();
+    // Reject-arm hop chains + stop done chains: dead after the retarget.
+    let mut reject_chains: Vec<Idx<Block>> = Vec::new();
     let mut cur_j = j;
     let (body, exit) = loop {
         if joins.len() > 8 {
@@ -356,7 +430,10 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         }
         // J's insts: the flag load feeding the branch (directly or through a
         // single `not`), plus elem copies (loads / stores to non-slot cells /
-        // consts) that stay on the rewritten pass-through.
+        // consts) that stay on the rewritten pass-through. A store to the
+        // flag cell itself is an elem copy REUSING the cell (SROA coalesces a
+        // level's ok flag onto the for-desugar's dest cells) -- allowed only
+        // AFTER the flag load, so the branch still tests the entry value.
         let Term::Branch { cond: jc, then_bb, else_bb } = func.blocks[cur_j].term else {
             return None;
         };
@@ -378,15 +455,34 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         if flag == slot || then_bb == else_bb {
             return None;
         }
+        let mut seen_fload = false;
         for &i in &func.blocks[cur_j].insts {
-            if i == fload || i == jc {
+            if i == fload {
+                seen_fload = true;
+                continue;
+            }
+            if i == jc {
                 continue;
             }
             match &func.insts[i] {
                 Inst::Const(_) | Inst::Load(_) => {}
-                Inst::Store { cell, .. } if *cell != slot && *cell != flag => {}
+                Inst::Store { cell, .. } if *cell == flag => {
+                    if !seen_fload {
+                        return None;
+                    }
+                }
+                Inst::Store { cell, .. } if *cell != slot => {}
                 _ => return None,
             }
+        }
+        // Stop arms recorded on the walk INTO this join reject at this
+        // level: their done block must store this flag false.
+        for (sb, sa, sd) in pending_stops.drain(..) {
+            if !d_droppable(sd) || !flag_const(sd, flag, false) {
+                return None;
+            }
+            stops.push((sb, sa));
+            stop_dones.push(sd);
         }
         // `flag == true` is the yield side (stored true by this level's yield
         // sources, false by its done block).
@@ -402,7 +498,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         {
             return None;
         }
-        joins.push(Join { j: cur_j, drop, cont: cont_arm, flag, fload });
+        joins.push(Join { j: cur_j, drop, cont: cont_arm, flag });
 
         // Probe the done arm: another done-propagation block means one more
         // level; anything else is the real EXIT.
@@ -420,12 +516,42 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         done_blocks.push(dn);
         done_chains.extend(done_arm_chain);
 
-        // Walk the yield side (single goto-linked path, insts allowed) to the
-        // next join, which must equal the done side's convergence.
+        // Walk the yield side to the next join (the done side's convergence).
+        // The path is goto-linked, insts allowed; a BRANCH block on it must
+        // have exactly one reject arm -- a skip (chases to the fetch head: T
+        // or a guard) or a stop (chases to a droppable done block converging
+        // at the next join) -- and the walk continues on the other arm.
         let Term::Goto(dgoto) = func.blocks[dn].term else { return None };
         let mut next_chain = Vec::new();
         let next_j = chase(func, dgoto, &mut next_chain);
         done_chains.extend(next_chain);
+        // `Some((target, is_skip))` = reject arm; `None` = not one.
+        let classify = |arm: Idx<Block>,
+                            chains: &mut Vec<Idx<Block>>|
+         -> Option<(Idx<Block>, bool)> {
+            let mut hops = Vec::new();
+            let x = chase(func, arm, &mut hops);
+            if x == t || guards.iter().any(|g| g.b == x) {
+                chains.extend(hops);
+                return Some((x, true));
+            }
+            if let Term::Goto(g) = func.blocks[x].term {
+                let mut h2 = Vec::new();
+                if chase(func, g, &mut h2) == next_j
+                    && d_droppable(x)
+                    && func.blocks[x].insts.iter().any(|&i| {
+                        matches!(&func.insts[i], Inst::Store { value, .. }
+                            if matches!(&func.insts[*value], Inst::Const(Lit::Bool(false))))
+                    })
+                {
+                    chains.extend(hops);
+                    chains.push(x);
+                    chains.extend(h2);
+                    return Some((x, false));
+                }
+            }
+            None
+        };
         let mut ysrc = Vec::new();
         let mut yb = cont_arm;
         let mut steps = 0;
@@ -434,12 +560,34 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
             // runs through them) -- never into the clear list.
             let mut hops = Vec::new();
             let c = chase(func, yb, &mut hops);
+            live_hops.extend(hops);
             if c == next_j {
                 break;
             }
             ysrc.push(c);
-            let Term::Goto(nxt) = func.blocks[c].term else { return None };
-            yb = nxt;
+            match func.blocks[c].term {
+                Term::Goto(nxt) => yb = nxt,
+                Term::Branch { then_bb: tb, else_bb: eb, .. } => {
+                    if tb == eb {
+                        return None;
+                    }
+                    let ct = classify(tb, &mut reject_chains);
+                    let ce = classify(eb, &mut reject_chains);
+                    let (arm_raw, rej, cont2) = match (ct, ce) {
+                        (Some(r), None) => (tb, r, eb),
+                        (None, Some(r)) => (eb, r, tb),
+                        _ => return None,
+                    };
+                    let (target, is_skip) = rej;
+                    if is_skip {
+                        skips.push((c, arm_raw));
+                    } else {
+                        pending_stops.push((c, arm_raw, target));
+                    }
+                    yb = cont2;
+                }
+                _ => return None,
+            }
             steps += 1;
             if steps > 16 {
                 return None;
@@ -448,7 +596,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         yield_sources.push(ysrc);
         cur_j = next_j;
     };
-    if body == exit {
+    if body == exit || !pending_stops.is_empty() {
         return None;
     }
 
@@ -579,24 +727,113 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         return None;
     }
 
-    // Flag hygiene, per level: a flag's only read is its own join's branch
-    // load (the done-side `false` store dies with the done block, so any
-    // other reader would observe the change).
+    // Guard verification (post-peel, in_loop known). Each guard's done arm
+    // must chase to a droppable block storing some peeled join's flag `false`
+    // and converging at that join (structurally a done block for that level);
+    // it joins the clear list. The guard cell `g` must be provably false at
+    // every loop entry: all out-of-loop stores are `false` (>=1), all in-loop
+    // stores are `true` AND sit in blocks whose control exits the rewritten
+    // loop (done/stop/guard-done blocks -- all cleared), and the guard load
+    // is g's only read fn-wide.
+    let mut guard_clear: Vec<Idx<Block>> = Vec::new();
+    for g in &guards {
+        let mut hops = Vec::new();
+        let dg = chase(func, g.done_arm, &mut hops);
+        let Term::Goto(gg) = func.blocks[dg].term else { return None };
+        let mut h2 = Vec::new();
+        let tgt = chase(func, gg, &mut h2);
+        let Some(jn) = joins.iter().find(|jn| jn.j == tgt) else { return None };
+        if !d_droppable(dg) || !flag_const(dg, jn.flag, false) {
+            return None;
+        }
+        guard_clear.extend(hops);
+        guard_clear.push(dg);
+        guard_clear.extend(h2);
+    }
+    let g_store_blocks: HashSet<Idx<Block>> = done_blocks
+        .iter()
+        .chain(stop_dones.iter())
+        .chain(guard_clear.iter())
+        .copied()
+        .collect();
+    for g in &guards {
+        if g.cell == slot {
+            return None;
+        }
+        let mut init_false = 0usize;
+        for (bid, blk) in func.blocks.iter() {
+            for &i in &blk.insts {
+                match &func.insts[i] {
+                    Inst::Store { cell, value } if *cell == g.cell => {
+                        if in_loop.contains(&bid) {
+                            if !matches!(&func.insts[*value], Inst::Const(Lit::Bool(true)))
+                                || !g_store_blocks.contains(&bid)
+                            {
+                                return None;
+                            }
+                        } else {
+                            if !matches!(&func.insts[*value], Inst::Const(Lit::Bool(false))) {
+                                return None;
+                            }
+                            init_false += 1;
+                        }
+                    }
+                    Inst::Load(c) if *c == g.cell => {
+                        if i != g.gload {
+                            return None;
+                        }
+                    }
+                    Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. }
+                        if dests.contains(&g.cell) =>
+                    {
+                        return None
+                    }
+                    Inst::MapNext { key_cell, val_cell, .. }
+                        if *key_cell == g.cell || *val_cell == g.cell =>
+                    {
+                        return None
+                    }
+                    Inst::Lambda { params, .. } if params.contains(&g.cell) => return None,
+                    _ => {}
+                }
+            }
+        }
+        if init_false == 0 {
+            return None;
+        }
+    }
+
+    // Flag hygiene, per level: every read of a level flag must sit on the
+    // LIVE yield path (T, Y, the joins, yield-source blocks and their hops)
+    // -- there no store feeding it is dropped, so it sees identical values
+    // pre/post rewrite. SROA reuses one cell as several levels' flags and as
+    // an elem temp (the for-desugar dest cells), so "only the join's own
+    // fload" is too strict; a read anywhere else (body, after the loop, a
+    // closure) could observe a dropped done-path store.
+    let live_set: HashSet<Idx<Block>> = joins
+        .iter()
+        .map(|jn| jn.j)
+        .chain(yield_sources.iter().flatten().copied())
+        .chain(live_hops.iter().copied())
+        .chain([t, y, y_arm])
+        .collect();
     for jn in &joins {
         for (bid, blk) in func.blocks.iter() {
             for &i in &blk.insts {
                 if matches!(&func.insts[i], Inst::Load(c) if *c == jn.flag)
-                    && (bid != jn.j || i != jn.fload)
+                    && !live_set.contains(&bid)
+                    && !guards.iter().any(|g| g.gload == i)
                 {
                     return None;
                 }
             }
         }
     }
-    // Done-value hygiene, per level: cells a done block stores are never read
-    // outside the loop (an outside reader would observe the dropped write).
+    // Done-value hygiene, per level: cells a done/stop/guard-done block
+    // stores are never read outside the loop (an outside reader would
+    // observe the dropped write).
     let join_set: HashSet<Idx<Block>> = joins.iter().map(|jn| jn.j).collect();
-    for &dk in &done_blocks {
+    for &dk in done_blocks.iter().chain(stop_dones.iter()).chain(guard_clear.iter()) {
         for &i in &func.blocks[dk].insts {
             if let Inst::Store { cell, .. } = &func.insts[i] {
                 for (bid, blk) in func.blocks.iter() {
@@ -652,14 +889,21 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         .filter(|i| chain_set.contains(i))
         .collect();
 
-    // Scaffolding to clear once unlinked: the head chain and every done-path
-    // block. The joins are NOT cleared -- they rewrite into yield pass-throughs
-    // -- and neither are the Y->J hop chains (live on the yield path).
+    // Scaffolding to clear once unlinked: the head chain (guards included),
+    // every done-path block (stop and guard done blocks too), and the
+    // reject-arm hop chains. The joins are NOT cleared -- they rewrite into
+    // yield pass-throughs -- and neither are the Y->J hop chains or
+    // yield-walk hops (live on the yield path).
     let mut clear = head_chain;
     clear.extend(done_blocks);
     clear.extend(d_chain);
     clear.extend(done_chains);
-    clear.retain(|&bk| bk != t && bk != y && bk != y_arm && !join_set.contains(&bk));
+    clear.extend(stop_dones);
+    clear.extend(reject_chains);
+    clear.extend(guard_clear);
+    clear.retain(|&bk| {
+        bk != t && bk != y && bk != y_arm && !join_set.contains(&bk) && !live_set.contains(&bk)
+    });
 
     let join_rewrites: Vec<(Idx<Block>, Vec<Idx<Inst>>, Idx<Block>)> =
         joins.iter().map(|jn| (jn.j, jn.drop.clone(), jn.cont)).collect();
@@ -678,6 +922,8 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
         back,
         clear,
         joins: join_rewrites,
+        skips,
+        stops,
     })
 }
 
@@ -712,7 +958,10 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
     }
 
     // Dedicated 4-inst latch (the exact `latch_slot` shape); every former
-    // back-edge -- loop end AND continue -- goes through it.
+    // back-edge -- loop end AND continue -- goes through it. A filter's skip
+    // edge becomes a `continue` (through the latch: the element was fetched,
+    // so the slot advances); a take_while's stop edge becomes a `break`
+    // (straight to EXIT -- its done-propagation path is cleared).
     let l = func.new_block();
     let ll = func.insts.alloc(Inst::Load(m.slot));
     let lc = func.insts.alloc(Inst::Const(Lit::Int(1)));
@@ -722,6 +971,12 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
     func.blocks[l].term = Term::Goto(m.t);
     for &bp in &m.back {
         retarget(&mut func.blocks[bp].term, h, l);
+    }
+    for &(sb, raw) in &m.skips {
+        retarget(&mut func.blocks[sb].term, raw, l);
+    }
+    for &(sb, raw) in &m.stops {
+        retarget(&mut func.blocks[sb].term, raw, m.exit);
     }
     func.blocks[m.p].term = Term::Goto(m.t);
 

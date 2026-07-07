@@ -201,6 +201,74 @@ pub fn cleanup(func: &mut MirFunc) {
             break;
         }
     }
+    if fold_const_branches(func) {
+        dce(func);
+    }
+}
+
+/// Fold `Branch` on a constant bool condition into a `Goto`, then clear blocks
+/// no longer reachable from any root (fn entry, lambda entries, co-fn defer
+/// guards -- the latter two are detached sub-CFGs by design and must survive).
+/// `loop {}` lowers to a `while true` shape whose const branch hides the loop
+/// head from the FORL matcher's goto-chase (the filter combinator's skip loop)
+/// and leaves a dead exit arm in the emitted Lua. Returns whether anything
+/// changed (the dead `Const` conditions are left for a DCE round).
+pub fn fold_const_branches(func: &mut MirFunc) -> bool {
+    let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
+    let mut changed = false;
+    for b in &bids {
+        if let Term::Branch { cond, then_bb, else_bb } = func.blocks[*b].term {
+            if let Inst::Const(Lit::Bool(v)) = func.insts[cond] {
+                func.blocks[*b].term = Term::Goto(if v { then_bb } else { else_bb });
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return false;
+    }
+    let mut roots = vec![func.entry];
+    roots.extend(func.coro_defers.iter().map(|(_, e)| *e));
+    for (_, inst) in func.insts.iter() {
+        if let Inst::Lambda { entry, .. } = inst {
+            roots.push(*entry);
+        }
+    }
+    let mut reach: rustc_hash::FxHashSet<Idx<Block>> = roots.iter().copied().collect();
+    let mut stack = roots;
+    while let Some(b) = stack.pop() {
+        term_targets_each(&func.blocks[b].term, &mut |t| {
+            if reach.insert(t) {
+                stack.push(t);
+            }
+        });
+    }
+    for b in bids {
+        if !reach.contains(&b) {
+            func.blocks[b].insts.clear();
+            func.blocks[b].term = Term::Unreachable;
+        }
+    }
+    true
+}
+
+/// Block targets of a terminator.
+fn term_targets_each(term: &Term, f: &mut impl FnMut(Idx<Block>)) {
+    match term {
+        Term::Goto(t) => f(*t),
+        Term::Branch { then_bb, else_bb, .. } => {
+            f(*then_bb);
+            f(*else_bb);
+        }
+        Term::Switch { cases, default, .. } => {
+            for (_, b) in cases {
+                f(*b);
+            }
+            f(*default);
+        }
+        Term::Yield { resume, .. } => f(*resume),
+        Term::Return(_) | Term::Unreachable => {}
+    }
 }
 
 /// Scalarize `buf[i] = <value-struct literal>` for a `NativeBuffer<value>`.
