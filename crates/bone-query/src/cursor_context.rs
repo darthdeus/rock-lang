@@ -86,6 +86,10 @@ pub(crate) struct NamedArgSlot {
     pub callee: String,
     pub positional: usize,
     pub named: Vec<String>,
+    /// Probe offsets inside each `..spread` operand supplied before the cursor.
+    /// The caller resolves each operand's struct type and treats its fields as
+    /// already-supplied params.
+    pub spread_probes: Vec<usize>,
 }
 
 enum RecordHead {
@@ -399,7 +403,7 @@ impl CursorAst {
     fn record_ctx(&self) -> Option<RecordCtx> {
         for &node in self.expr_chain().iter() {
             let (head, fields) = match &self.expr(node).kind {
-                ExprKind::StructLiteral { name, fields } => {
+                ExprKind::StructLiteral { name, fields, .. } => {
                     (RecordHead::Struct(name.name.to_string(), name.span.offset_range.1), fields)
                 }
                 ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => (
@@ -668,6 +672,7 @@ impl CursorAst {
         };
         let mut positional = 0usize;
         let mut named: Vec<String> = Vec::new();
+        let mut spread_probes: Vec<usize> = Vec::new();
         for a in args.iter() {
             if cursor_arg == Some(a.value) {
                 continue; // the slot being typed, not a supplied arg
@@ -678,12 +683,18 @@ impl CursorAst {
             if cursor_arg.is_none() && self.expr(a.value).span.offset_range.1 > self.probe {
                 continue;
             }
+            if a.is_spread {
+                // Probe just inside the operand's end to resolve its struct type.
+                let (s, e) = self.expr(a.value).span.offset_range;
+                spread_probes.push(e.saturating_sub(1).max(s));
+                continue;
+            }
             match &a.name {
                 Some(n) => named.push(n.name.to_string()),
                 None => positional += 1,
             }
         }
-        Some(NamedArgSlot { callee, positional, named })
+        Some(NamedArgSlot { callee, positional, named, spread_probes })
     }
 
     /// TYPE-vs-expression slot: true when the innermost node containing the

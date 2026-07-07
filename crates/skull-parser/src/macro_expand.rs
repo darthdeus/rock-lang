@@ -725,7 +725,12 @@ fn splat_expand_block(ast: &mut Ast, b: Idx<BlockData>, variadic: &HashMap<Ustr,
                 Some(items) => {
                     for c in items {
                         let v = clone_expr(ast, c);
-                        new_args.push(FunctionCallArg { name: None, value: v, is_splat: false });
+                        new_args.push(FunctionCallArg {
+                            name: None,
+                            value: v,
+                            is_splat: false,
+                            is_spread: false,
+                        });
                     }
                 }
                 None => new_args.push(a),
@@ -1321,8 +1326,11 @@ fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &HashSet<Ustr>, occ: &mut Ve
                 refs_in_expr(ast, a.value, names, occ);
             }
         }
-        ExprKind::StructLiteral { name, fields, .. } => {
+        ExprKind::StructLiteral { name, bases, fields } => {
             note(name, names, occ);
+            for b in bases {
+                refs_in_expr(ast, *b, names, occ);
+            }
             for (_, v) in fields {
                 refs_in_expr(ast, *v, names, occ);
             }

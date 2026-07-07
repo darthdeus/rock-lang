@@ -1428,11 +1428,13 @@ impl Builder<'_> {
             }
             // A value-struct literal is built via the repr layer (so a callsite
             // can splat it without a cdata); a plain struct is a Lua table.
-            Expr::StructLiteral { name, fields } if self.is_value_struct(name) => {
-                let r = self.value_literal_repr(name, fields)?;
+            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
+                let r = self.value_literal_repr(name, fields, bases)?;
                 Ok(self.pack(r))
             }
-            Expr::StructLiteral { name, fields } => self.lower_struct_literal(name, fields),
+            Expr::StructLiteral { name, fields, bases } => {
+                self.lower_struct_literal(name, fields, bases)
+            }
             Expr::EnumVariant {
                 enum_name,
                 variant,
@@ -2137,7 +2139,11 @@ impl Builder<'_> {
                 }
             }
         }
-        let any_named = arg_idxs.iter().any(|a| self.body.arg_names.contains_key(a));
+        // A spread arg fills param slots by field name, so it takes the
+        // slot-reordering path just like a named arg.
+        let any_named = arg_idxs
+            .iter()
+            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at
             // runtime -- the wrapped value IS the inner -- so it lowers to the
@@ -2329,6 +2335,16 @@ impl Builder<'_> {
         let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
+            // Struct spread `..op`: decompose into per-field reprs (a struct-
+            // literal operand is elided) and place each into its param slot.
+            if self.body.spread_args.contains(&a) {
+                for (fname, r) in self.spread_field_reprs(a)? {
+                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
+                        slots[pidx] = Some(r);
+                    }
+                }
+                continue;
+            }
             let r = self.lower_expr_repr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
@@ -2564,8 +2580,8 @@ impl Builder<'_> {
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
-            Expr::StructLiteral { name, fields } if self.is_value_struct(name) => {
-                self.value_literal_repr(name, fields)
+            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
+                self.value_literal_repr(name, fields, bases)
             }
             // A cdata-eligible enum construction stays an unboxed Group `[tag, _0]`
             // (so a callsite/field can splat it without a cdata round-trip); `pack`
@@ -2594,7 +2610,20 @@ impl Builder<'_> {
         &mut self,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<ValueRepr, CompilerError> {
+        // Functional-update base: evaluate once (before fields). A Group base
+        // projects its parts directly (no cdata); a boxed base reads fields off
+        // the packed cdata (the normal value-field read). Inference guarantees
+        // at most one base of this struct's type.
+        let base_repr: Option<ValueRepr> = match bases.into_iter().next() {
+            Some(b) => Some(self.lower_expr_repr(b)?),
+            None => None,
+        };
+        let base_boxed: Option<Idx<Inst>> = match &base_repr {
+            Some(ValueRepr::Group { .. }) | None => None,
+            Some(other) => Some(self.pack(other.clone())),
+        };
         let mut litmap: Vec<(Ustr, ValueRepr)> = Vec::new();
         let mut by_value: HashMap<u32, ValueRepr> = HashMap::new();
         for fidx in fields {
@@ -2616,10 +2645,23 @@ impl Builder<'_> {
                 for fname in decl {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
-                        None => {
-                            let v = self.lower_struct_default(name, fname)?;
-                            fs.push(ValueRepr::Scalar(v));
-                        }
+                        None => match (&base_repr, base_boxed) {
+                            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+                                let i = self
+                                    .field_index(*bn, fname)
+                                    .expect("functional-update base covers every field");
+                                fs.push(parts[i].clone());
+                            }
+                            (Some(_), Some(bi)) => {
+                                fs.push(ValueRepr::Scalar(
+                                    self.emit_cur(Inst::Field { base: bi, field: fname }),
+                                ));
+                            }
+                            _ => {
+                                let v = self.lower_struct_default(name, fname)?;
+                                fs.push(ValueRepr::Scalar(v));
+                            }
+                        },
                     }
                 }
                 fs
@@ -2651,6 +2693,18 @@ impl Builder<'_> {
         let mut slots: Vec<Option<Idx<Inst>>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
+            // Struct spread `..op`: decompose the operand into per-field values
+            // (a struct-literal operand is elided) and place each into the param
+            // slot of the same name. bone verified every field matches a param;
+            // a named arg after the spread overrides via last-write-wins.
+            if self.body.spread_args.contains(&a) {
+                for (fname, fv) in self.spread_field_insts(a)? {
+                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
+                        slots[pidx] = Some(fv);
+                    }
+                }
+                continue;
+            }
             let v = self.lower_expr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
@@ -4530,7 +4584,15 @@ impl Builder<'_> {
         &mut self,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        // Functional-update base (`Struct { ..base, .. }`): evaluate once, before
+        // fields (source order), and read unwritten fields off it. Inference
+        // guarantees at most one base and that it has this struct's type.
+        let base_inst: Option<Idx<Inst>> = match bases.into_iter().next() {
+            Some(b) => Some(self.lower_expr(b)?),
+            None => None,
+        };
         // A field GROUP (`Struct { a + b + c: expr }`) expands to several fields
         // sharing ONE `value` Expr index; evaluate each distinct value-expr once
         // (correct eval count, and grouped fields share the same instance), in
@@ -4574,12 +4636,19 @@ impl Builder<'_> {
                     } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
                         fs.push((fname, v));
                     } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
-                        // Defaulted flat field: lower the default box, spread its slots.
-                        let dv = self.lower_struct_default(name, fname)?;
+                        // Unwritten flat field: from the base if present, else the
+                        // struct default; spread the box into slots either way.
+                        let dv = match base_inst {
+                            Some(bi) => self.emit_cur(Inst::Field { base: bi, field: fname }),
+                            None => self.lower_struct_default(name, fname)?,
+                        };
                         let cells = self.spread_box_to_cells(dv, &shape);
                         fs.extend(self.flat_literal_slots(fname, cells));
                     } else {
-                        let v = self.lower_struct_default(name, fname)?;
+                        let v = match base_inst {
+                            Some(bi) => self.emit_cur(Inst::Field { base: bi, field: fname }),
+                            None => self.lower_struct_default(name, fname)?,
+                        };
                         fs.push((fname, v));
                     }
                 }
@@ -5142,6 +5211,151 @@ impl Builder<'_> {
                 .unwrap_or(false),
             _ => false,
         }
+    }
+
+    /// The declared field names of a call-site spread operand `..op`, in struct
+    /// order. bone-inference has already verified the operand is a nominal
+    /// struct whose fields all match callee params.
+    fn spread_operand_fields(&self, op: Idx<Expr>) -> Result<Vec<Ustr>, CompilerError> {
+        match self.expr_ty(op) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self
+                .struct_field_names(name)
+                .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields"))),
+            _ => Err(gap("spread operand is not a nominal struct")),
+        }
+    }
+
+    /// A spread operand `..op` decomposed to (field name, boxed value) pairs. A
+    /// struct-LITERAL operand is ELIDED: its field exprs lower directly (base
+    /// first, then explicit fields in source order for side effects; unwritten
+    /// fields from a functional-update base or the struct default), so no
+    /// intermediate table is built. Any other operand -- and a literal with a
+    /// flattened-enum field, which needs slot expansion -- is lowered once and
+    /// its fields read off it.
+    fn spread_field_insts(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[op].clone() {
+            let decl = self.struct_field_names(name).unwrap_or_default();
+            if !decl.iter().any(|f| self.flat_field_of_struct(name, *f).is_some()) {
+                let base_inst = match bases.into_iter().next() {
+                    Some(b) => Some(self.lower_expr(b)?),
+                    None => None,
+                };
+                let mut explicit: Vec<(Ustr, Idx<Inst>)> = Vec::new();
+                let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
+                for fidx in fields {
+                    let lf = self.body.struct_lit_field_arena[fidx];
+                    let key: u32 = lf.value.into_raw().into();
+                    let v = match by_value.get(&key) {
+                        Some(&v) => v,
+                        None => {
+                            let v = self.lower_expr(lf.value)?;
+                            by_value.insert(key, v);
+                            v
+                        }
+                    };
+                    explicit.push((lf.name, v));
+                }
+                let mut out = Vec::new();
+                for fname in decl {
+                    let v = if let Some((_, v)) = explicit.iter().find(|(n, _)| *n == fname) {
+                        *v
+                    } else if let Some(bi) = base_inst {
+                        self.emit_cur(Inst::Field { base: bi, field: fname })
+                    } else {
+                        self.lower_struct_default(name, fname)?
+                    };
+                    out.push((fname, v));
+                }
+                return Ok(out);
+            }
+        }
+        let base = self.lower_expr(op)?;
+        let mut out = Vec::new();
+        for f in self.spread_operand_fields(op)? {
+            out.push((f, self.emit_cur(Inst::Field { base, field: f })));
+        }
+        Ok(out)
+    }
+
+    /// The `ValueRepr` form of [`spread_field_insts`], for the scalar-ABI arg
+    /// path. Same literal-elision; a Group base projects its parts, a boxed base
+    /// reads fields off the packed cdata.
+    fn spread_field_reprs(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, ValueRepr)>, CompilerError> {
+        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[op].clone() {
+            let decl = self.struct_field_names(name).unwrap_or_default();
+            if !decl.iter().any(|f| self.flat_field_of_struct(name, *f).is_some()) {
+                let base_repr = match bases.into_iter().next() {
+                    Some(b) => Some(self.lower_expr_repr(b)?),
+                    None => None,
+                };
+                let base_boxed = match &base_repr {
+                    Some(ValueRepr::Group { .. }) | None => None,
+                    Some(other) => Some(self.pack(other.clone())),
+                };
+                let mut explicit: Vec<(Ustr, ValueRepr)> = Vec::new();
+                let mut by_value: HashMap<u32, ValueRepr> = HashMap::new();
+                for fidx in fields {
+                    let lf = self.body.struct_lit_field_arena[fidx];
+                    let key: u32 = lf.value.into_raw().into();
+                    let r = match by_value.get(&key) {
+                        Some(r) => r.clone(),
+                        None => {
+                            let r = self.lower_expr_repr(lf.value)?;
+                            by_value.insert(key, r.clone());
+                            r
+                        }
+                    };
+                    explicit.push((lf.name, r));
+                }
+                let mut out = Vec::new();
+                for fname in decl {
+                    let r = if let Some((_, r)) = explicit.iter().find(|(n, _)| *n == fname) {
+                        r.clone()
+                    } else {
+                        self.spread_base_field_repr(&base_repr, base_boxed, name, fname)?
+                    };
+                    out.push((fname, r));
+                }
+                return Ok(out);
+            }
+        }
+        let base_repr = self.lower_expr_repr(op)?;
+        let base_boxed = match &base_repr {
+            ValueRepr::Group { .. } => None,
+            other => Some(self.pack(other.clone())),
+        };
+        let name = match self.expr_ty(op) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => name,
+            _ => return Err(gap("spread operand is not a nominal struct")),
+        };
+        let mut out = Vec::new();
+        for fname in self.struct_field_names(name).unwrap_or_default() {
+            let r = self.spread_base_field_repr(&Some(base_repr.clone()), base_boxed, name, fname)?;
+            out.push((fname, r));
+        }
+        Ok(out)
+    }
+
+    /// Read field `fname` from an already-lowered spread base: project a Group
+    /// part, or read the field off the packed cdata; a missing base falls back
+    /// to the struct default.
+    fn spread_base_field_repr(
+        &mut self,
+        base_repr: &Option<ValueRepr>,
+        base_boxed: Option<Idx<Inst>>,
+        name: Ustr,
+        fname: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        Ok(match (base_repr, base_boxed) {
+            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+                let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
+                parts[i].clone()
+            }
+            (Some(_), Some(bi)) => {
+                ValueRepr::Scalar(self.emit_cur(Inst::Field { base: bi, field: fname }))
+            }
+            _ => ValueRepr::Scalar(self.lower_struct_default(name, fname)?),
+        })
     }
 
     /// The resolved type of an expression (chasing `Infer` vars + peeling

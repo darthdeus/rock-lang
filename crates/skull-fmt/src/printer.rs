@@ -1372,8 +1372,15 @@ impl<'a> Printer<'a> {
             ExprKind::NativeArrayLiteral(items) => self.list("![", "]", items, data.span),
             ExprKind::Tuple(items) => self.tuple(items, data.span),
 
-            ExprKind::StructLiteral { name, fields } => {
-                self.struct_literal(kw(name.name), fields, data.span)
+            ExprKind::StructLiteral { name, bases, fields } => {
+                // Functional-update literals (`Foo { ..base, x: 1 }`) slice
+                // verbatim -- the structural struct_literal path doesn't carry
+                // bases yet, and passthrough guarantees round-trip.
+                if bases.is_empty() {
+                    self.struct_literal(kw(name.name), fields, data.span)
+                } else {
+                    self.raw(data.span)
+                }
             }
             ExprKind::EnumVariantRecord {
                 enum_name,
@@ -1679,6 +1686,9 @@ impl<'a> Printer<'a> {
         }
         let arg_doc = |a: &FunctionCallArg| {
             let v = self.expr(a.value);
+            if a.is_spread {
+                return Doc::concat([Doc::text(".."), v]);
+            }
             let v = if a.is_splat {
                 Doc::concat([v, Doc::text("...")])
             } else {
@@ -1862,7 +1872,8 @@ impl<'a> Printer<'a> {
     /// so it preserves both a hugged call and a deliberately-broken one.
     fn hugs_trailing_arg(&self, args: &[FunctionCallArg], span: Span) -> bool {
         let Some(last) = args.last() else { return false };
-        if last.name.is_some() || last.is_splat || !self.is_huggable_arg(last.value) {
+        if last.name.is_some() || last.is_splat || last.is_spread || !self.is_huggable_arg(last.value)
+        {
             return false;
         }
         let prior = &args[..args.len() - 1];
@@ -1893,7 +1904,7 @@ impl<'a> Printer<'a> {
         // (start_line, end_line, start_offset, end_offset) per arg, or None if the
         // arg isn't a single-line non-splat value.
         let info = |a: &FunctionCallArg| -> Option<(usize, usize, usize, usize)> {
-            if a.is_splat {
+            if a.is_splat || a.is_spread {
                 return None;
             }
             let v = self.ast.e(&a.value).span;
