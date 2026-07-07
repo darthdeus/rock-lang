@@ -754,7 +754,81 @@ pub fn references<'t>(
         }
     }
 
+    if let Some(name) = global_at(ws, mid, offset) {
+        return plain(global_references(ws, name));
+    }
+
     Vec::new()
+}
+
+/// The DECLARED global the cursor is on: its `global` declaration name, or a
+/// use site (`Expr::Global` -- reads, assign/compound-assign targets, string
+/// interpolation, `_G.name`). Gated on the name existing in some module's
+/// global namespace, so an unresolved-typo ident never triggers a walk.
+fn global_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
+    let is_declared =
+        |n: &Ustr| ws.modules.iter().any(|m| m.global_by_name.contains_key(n));
+    let module = ws.modules.get(mid.index())?;
+
+    for g in module.globals.values() {
+        if span_contains(&g.name_span, offset) {
+            return Some(g.name);
+        }
+    }
+
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let iv = body
+        .node_index()
+        .find(offset, offset + 1)
+        .min_by_key(|x| x.stop - x.start)?;
+    if let NodeRef::Expr(e) = iv.val {
+        if let hir::Expr::Global(n) = &body.expr_arena[e] {
+            if is_declared(n) {
+                return Some(*n);
+            }
+        }
+    }
+    None
+}
+
+/// Every reference to global `name` across all modules: each `global`
+/// declaration name (one namespace -- same name IS the same global) and every
+/// `Expr::Global` use. Use spans are clipped to the TRAILING name token so
+/// `_G.name` and `&name` forms rename the identifier only (a plain ident is
+/// its own trailing token).
+fn global_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
+    let len = name.as_str().len();
+    let mut out: Vec<Span> = Vec::new();
+    let mut push = |sp: Span| {
+        if !out
+            .iter()
+            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+        {
+            out.push(sp);
+        }
+    };
+
+    for m in ws.modules.iter() {
+        if let Some(gidx) = m.global_by_name.get(&name) {
+            push(m.globals[*gidx].name_span);
+        }
+        for body in m.bodies.values() {
+            for (e, expr) in body.expr_arena.iter() {
+                if matches!(expr, hir::Expr::Global(n) if *n == name) {
+                    if let Some(sp) = body.expr_spans.get(e) {
+                        let end = sp.offset_range.1;
+                        push(Span {
+                            offset_range: (end - len, end),
+                            ..*sp
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    out
 }
 
 /// `true` if `offset` falls in `[span.start, span.start + len)` -- the leading
