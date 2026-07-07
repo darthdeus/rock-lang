@@ -1761,6 +1761,102 @@ fn member_path_inside_a_comment_gets_global_completion() {
     );
 }
 
+/// Response labels in RANK order (unsorted) -- for ordering assertions.
+fn ordered_labels(src: &str, line: u32, ch: u32) -> Vec<String> {
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let items = bone.completion(PATH, Position::new(line, ch));
+    check_invariants(src, line, ch, &items);
+    items.into_iter().map(|c| c.label).collect()
+}
+
+fn rank_of(labels: &[String], needle: &str) -> usize {
+    labels
+        .iter()
+        .position(|l| l == needle)
+        .unwrap_or_else(|| panic!("no completion `{needle}` in {labels:?}"))
+}
+
+// -- PatternPos: a match-arm pattern HEAD is a slot for the scrutinee's enum;
+//    its variants rank first, and patterns bind (no payload template). -------
+
+#[test]
+fn match_arm_head_ranks_scrutinee_variants_first() {
+    // Fresh arm, empty prefix: the scrutinee enum's variants outrank every
+    // value-universe candidate (the scrutinee local included).
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    \n  }\n}\n";
+    let l = ordered_labels(src, 4, 4);
+    let mut head: Vec<&str> = l.iter().take(3).map(|s| s.as_str()).collect();
+    head.sort_unstable();
+    assert_eq!(
+        head,
+        ["AiState::Combat", "AiState::Flee", "AiState::Idle"],
+        "the scrutinee enum's variants must BE the top of the arm-head list: {:?}...",
+        &l[..l.len().min(8)]
+    );
+}
+
+#[test]
+fn match_arm_head_variant_beats_prefix_matching_global() {
+    // Typed prefix `co`: the scrutinee variant `Combat` must outrank the
+    // case-exact-prefix global `count` -- type relevance dominates band,
+    // exactly as in a typed call-arg slot.
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    co\n  }\n}\n";
+    let l = ordered_labels(src, 4, 6);
+    assert!(
+        rank_of(&l, "AiState::Combat") < rank_of(&l, "count"),
+        "scrutinee variant must outrank a prefix-matching global in an arm head: {l:?}"
+    );
+}
+
+#[test]
+fn match_arm_head_variant_binds_not_constructs() {
+    // Patterns bind, they don't construct: a tuple variant completed in an
+    // arm head inserts the bare qualified name, never the `($0)` payload
+    // template (parity with the `Enum::|` qualified path's pattern rule).
+    let src = "enum Sig { Num(int), Flag }\n\
+               fn f(s: Sig) {\n  match s {\n    \n  }\n}\n";
+    let it = item(src, 3, 4, "Sig::Num");
+    let insert = it.insert_text.as_deref().unwrap_or("Sig::Num");
+    assert!(
+        !insert.contains('('),
+        "arm-head tuple variant must insert the bare name (bind, not construct): {insert:?}"
+    );
+}
+
+#[test]
+fn match_arm_head_promotes_with_unclosed_braces_at_eof() {
+    // The mid-typing worst case: fresh match, nothing closed yet. The arm-
+    // completing munge (`co__rock_completion__ => {}` + balancing) must still
+    // resolve the scrutinee and promote its variants.
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    co";
+    let l = ordered_labels(src, 4, 6);
+    assert!(
+        rank_of(&l, "AiState::Combat") < rank_of(&l, "count"),
+        "scrutinee variant must outrank the global with unclosed braces at EOF: {l:?}"
+    );
+}
+
+#[test]
+fn match_arm_body_is_a_value_slot_no_variant_promotion() {
+    // Control: AFTER the `=>` the slot is a value expression -- the normal
+    // ladder holds (prefix-matching global above the scattered variant).
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    AiState::Idle => co\n  }\n}\n";
+    let l = ordered_labels(src, 4, 23);
+    assert!(
+        rank_of(&l, "count") < rank_of(&l, "AiState::Combat"),
+        "no variant promotion in an arm BODY (value slot): {l:?}"
+    );
+}
+
 #[test]
 fn unspaced_less_than_comparison_is_expression_position() {
     // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot

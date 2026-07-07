@@ -19,7 +19,7 @@ use crate::backend::{
 use crate::query::{clean_match, SymCat};
 use crate::rank_key::RankKey;
 
-use super::classify::{completion_munges, in_pattern_position, SlotAnchor};
+use super::classify::{balance_delimiters, completion_munges, in_pattern_position, SlotAnchor};
 use super::rank::*;
 use super::select::*;
 
@@ -700,7 +700,7 @@ pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<Complet
                     detail: (!params.is_empty()).then(|| format!("deco ({})", params.join(", "))),
                 },
             );
-            out.push(materialize_cand(cand, &no_sigs, false));
+            out.push(materialize_cand(cand, &no_sigs, false, false));
         }
     }
     out.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
@@ -885,6 +885,40 @@ pub(crate) fn enum_qualified_completions(
         .collect();
     items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     items
+}
+
+/// The enum a match-arm pattern HEAD expects: the scrutinee's nominal type,
+/// when it names an enum. A half-typed head (`match s { co`) breaks the live
+/// parse at the missing `=>`, so each attempt is analyzed as a speculative
+/// Session variant; the first munge COMPLETES the arm
+/// (`<head>__rock_completion__ => {}`) for a fresh head, the standard
+/// sentinel pair covers a head whose `=>` is already typed. The anchor sits
+/// before the cursor, so it resolves identically in every variant workspace.
+pub(crate) fn pattern_scrutinee_enum(
+    session: &mut Session,
+    path: &str,
+    src: &str,
+    offset: usize,
+    anchor: usize,
+) -> Option<String> {
+    let off = offset.min(src.len());
+    let (head, tail) = src.split_at(off);
+    let arm_munge = balance_delimiters(format!("{head}__rock_completion__ => {{}}{tail}"));
+    let [m1, m2] = completion_munges(src, offset);
+    for munged in [arm_munge, m1, m2] {
+        let hit = analyze_variant(session, path, &munged, |ws| {
+            let mid = user_module_for_path(ws, path)?;
+            let inf = ws.inference(mid)?;
+            let at = bone_semantic::query::type_at(ws, mid, inf, anchor)?;
+            let name = nominal_base(ws, at.body, at.ty)?;
+            (!crate::query::enum_variants_with_shape(ws, name.as_str()).is_empty())
+                .then(|| name.to_string())
+        });
+        if let Some(Some(name)) = hit {
+            return Some(name);
+        }
+    }
+    None
 }
 
 /// Struct-field completions for `receiver.<field>`. The live body is broken by

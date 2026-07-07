@@ -179,11 +179,15 @@ pub(crate) fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
 /// here. `strip_call` = the cursor sits directly before an existing `(`
 /// (e.g. `cw` over the callee of `world_to_screen(x)`): call-template
 /// shapes insert the bare name so the existing parens are reused instead of
-/// doubled.
+/// doubled. `pattern` = the cursor sits in a match-arm pattern HEAD:
+/// patterns bind, they don't construct, so a variant inserts its bare
+/// qualified name and never the payload template (the same rule the
+/// `Enum::|` qualified path applies).
 pub(crate) fn materialize_cand(
     cand: Cand,
     fn_sigs: &HashMap<ustr::Ustr, String>,
     strip_call: bool,
+    pattern: bool,
 ) -> CompletionItem {
     let sort_text = Some(cand.key.encode(cand.name.as_str()));
     match cand.shape {
@@ -219,6 +223,7 @@ pub(crate) fn materialize_cand(
                     (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
                 }
                 SymCat::Function => (Some(format!("{}()", c.name)), None),
+                SymCat::Variant if pattern => (None, None),
                 SymCat::Variant => match c.variant_shape {
                     Some(crate::query::VariantShape::Tuple) if strip_call => {
                         (Some(c.name.to_string()), None)

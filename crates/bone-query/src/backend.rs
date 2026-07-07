@@ -1075,11 +1075,34 @@ impl BoneWorkspace {
         // Prefer the live session; but if the buffer is broken so the strict
         // session dropped the module, reparse it with RECOVERY so scope
         // completion still works mid-edit (backlog #21).
+        // PatternPos: a match-arm pattern HEAD is a slot for the scrutinee's
+        // enum. Resolve the scrutinee type at the classifier's anchor (through
+        // the variant munges -- the half-typed head usually breaks the live
+        // parse); when it names an enum, its variants take the type rung and
+        // reach/call-through synths (not valid patterns) stay out. Fails open:
+        // an unresolved scrutinee or a non-enum match changes nothing.
+        let pattern_pos = cx.pattern_scrutinee.is_some();
+        let pattern_enum: Option<String> = cx.pattern_scrutinee.and_then(|a| {
+            pattern_scrutinee_enum(&mut proj.session, path, src, offset, a)
+        });
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
             let t = std::time::Instant::now();
+            // A half-typed arm HEAD (`match s { co`) is what broke the parse:
+            // complete it (` => {}` at the cursor) so the recovery reparse
+            // keeps the match -- and its scrutinee, which the pattern rung
+            // below resolves -- instead of dropping the statement.
+            let fixed = if pattern_pos {
+                let mut s = String::with_capacity(src.len() + 8);
+                s.push_str(&src[..offset.min(src.len())]);
+                s.push_str(" => {}");
+                s.push_str(&src[offset.min(src.len())..]);
+                s
+            } else {
+                src.to_string()
+            };
             let ws = proj.session.combined_unexpanded().ok().and_then(|combined| {
-                reparse_with_project(&combined, path, &balance_delimiters(src.to_string()))
+                reparse_with_project(&combined, path, &balance_delimiters(fixed))
             });
             if prof {
                 eprintln!(
@@ -1202,7 +1225,17 @@ impl BoneWorkspace {
                     SymCat::Variant => 3,
                     _ => 2,
                 };
-                let type_rank = if let Some(exp) = expected.as_mut() {
+                let type_rank = if let Some(pe) = pattern_enum.as_deref() {
+                    // Pattern slot: only a variant of the scrutinee's enum IS
+                    // a pattern of the expected type (locals/fns don't pattern-
+                    // match; they stay offered but below, fail-open). The
+                    // variant's enum name rides its `detail`, same fact the
+                    // typed-slot rung reads.
+                    match c.kind {
+                        SymCat::Variant if c.detail.as_deref() == Some(pe) => 0,
+                        _ => 2,
+                    }
+                } else if let Some(exp) = expected.as_mut() {
                     match c.kind {
                         // A local/param/global whose type COERCES into the
                         // expected slot (bone's real relation: generics
@@ -1232,9 +1265,10 @@ impl BoneWorkspace {
                 let name = c.name.as_str();
                 // Smart-case leading rank, NON-arg path only: measure against the
                 // variant NAME (the user types it; `Enum::` uppercasing would
-                // skew it). In arg position the expected-TYPE bucket must stay
-                // dominant over case, so leave case neutral (0) there.
-                let case_rank = if !has_expected {
+                // skew it). In arg position (and a pattern slot) the expected-
+                // TYPE bucket must stay dominant over case, so leave case
+                // neutral (0) there.
+                let case_rank = if !has_expected && pattern_enum.is_none() {
                     let case_target =
                         if c.kind == SymCat::Variant { name.rsplit("::").next().unwrap_or(name) } else { name };
                     case_mismatch_rank(case_target.as_bytes(), q_raw)
@@ -1403,7 +1437,9 @@ impl BoneWorkspace {
         // table, not the old per-root O(functions) `ufcs_methods` scan. Ranked
         // with the type-matching variables (rank 0), shortest paths first.
         let t_reach = std::time::Instant::now();
-        if !expected_types.is_empty() {
+        // A pattern head is not a value slot: a dotted reach path is not a
+        // valid pattern, so the expansion is suppressed there.
+        if !expected_types.is_empty() && !pattern_pos {
             let reach_owned;
             let reach = match &proj.reach {
                 Some(r) => r,
@@ -1480,7 +1516,8 @@ impl BoneWorkspace {
         // gap: a LOCAL-SEEDED promoted call-through (bucket 0/1) could survive the
         // cap but is skipped here at a >=MAX short prefix; acceptable under the
         // `isIncomplete` contract (the user narrows and it reappears).
-        if expr_position && sink.len() < MAX_COMPLETION_ITEMS {
+        // Suppressed in a pattern head like reach: `f(arg)` is not a pattern.
+        if expr_position && !pattern_pos && sink.len() < MAX_COMPLETION_ITEMS {
             // reach (for local-arg expansion) + the precomputed call-through
             // index, both cached on the project and rebuilt only on non-BodyOnly
             // edits. The one-shot CLI path has neither cached -> build throwaways.
@@ -1549,7 +1586,7 @@ impl BoneWorkspace {
         sink.cands.truncate(MAX_COMPLETION_ITEMS);
         sink.cands
             .into_iter()
-            .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren))
+            .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren, pattern_pos))
             .collect()
     }
 

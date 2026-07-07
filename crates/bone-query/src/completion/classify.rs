@@ -284,8 +284,18 @@ pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
     if i + 1 < b.len() && b[i] == b'=' && b[i + 1] == b'>' {
         return true;
     }
-    // Fresh arm: no `=>` yet. Find the start of the `Enum::Variant` path the
-    // cursor is in (ident bytes + `:` run backward).
+    // Fresh arm: no `=>` yet -- the arm-head classification below.
+    match_arm_scrutinee(src, offset).is_some()
+}
+
+/// When the cursor sits in a match-arm pattern HEAD (fresh arm or an
+/// already-`=>`ed one being retyped), the byte anchor of the SCRUTINEE's last
+/// byte -- `type_at` there is the scrutinee's type, which names the enum
+/// whose variants the pattern slot expects. `None` in every other position.
+pub(crate) fn match_arm_scrutinee(src: &str, offset: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    // Start of the `Enum::Variant` path the cursor is in (ident bytes + `:`
+    // run backward).
     let mut start = offset.min(b.len());
     while start > 0 && (is_ident_byte(b[start - 1]) || b[start - 1] == b':') {
         start -= 1;
@@ -300,31 +310,32 @@ pub(crate) fn in_pattern_position(src: &str, offset: usize) -> bool {
         p -= 1;
     }
     if p == 0 || !matches!(b[p - 1], b'{' | b',' | b'}') {
-        return false;
+        return None;
     }
-    enclosing_block_is_match(b, start)
+    match_scrutinee_end(b, start)
 }
 
-/// Whether the innermost block enclosing byte `from` is the body of a `match`
-/// expression -- i.e. `from` sits in an arm position. Walks backward to the
-/// nearest unmatched `{` (balancing `()[]{}`); a `(`/`[` reached first means we
-/// are inside a call/index, not a block, so not a match. From that `{`, scans the
+/// When the innermost block enclosing byte `from` is the body of a `match`
+/// expression, the index of the scrutinee's LAST byte (the non-ws byte just
+/// before the match `{`); `None` otherwise. Walks backward to the nearest
+/// unmatched `{` (balancing `()[]{}`); a `(`/`[` reached first means we are
+/// inside a call/index, not a block, so not a match. From that `{`, scans the
 /// scrutinee back to the `match` keyword: only `()`/`[]`-balanced scrutinee
 /// tokens may intervene; a `{`/`}`/`;` boundary at depth 0 ends the search
 /// (the brace governs something else, e.g. a fn body or struct literal).
-pub(crate) fn enclosing_block_is_match(b: &[u8], from: usize) -> bool {
+pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
     let mut depth = 0i32;
     let mut i = from;
     let brace = loop {
         if i == 0 {
-            return false;
+            return None;
         }
         i -= 1;
         match b[i] {
             b')' | b']' | b'}' => depth += 1,
             b'(' | b'[' => {
                 if depth == 0 {
-                    return false; // inside a call / index group, not a block
+                    return None; // inside a call / index group, not a block
                 }
                 depth -= 1;
             }
@@ -337,6 +348,13 @@ pub(crate) fn enclosing_block_is_match(b: &[u8], from: usize) -> bool {
             _ => {}
         }
     };
+    let mut end = brace;
+    while end > 0 && b[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
     // Scan the scrutinee backward from the `{` to the governing keyword.
     let mut j = brace;
     let mut depth = 0i32;
@@ -346,29 +364,29 @@ pub(crate) fn enclosing_block_is_match(b: &[u8], from: usize) -> bool {
             b')' | b']' => depth += 1,
             b'(' | b'[' => {
                 if depth == 0 {
-                    return false;
+                    return None;
                 }
                 depth -= 1;
             }
-            b'{' | b'}' | b';' if depth == 0 => return false,
+            b'{' | b'}' | b';' if depth == 0 => return None,
             c if depth == 0 && is_ident_byte(c) => {
                 // Read this whole word. `match` -> the brace is a match body.
                 // Any other word is part of the scrutinee (`match foo.bar {`) or
                 // the head of some other construct (`fn r() {`); keep scanning
                 // back -- the `{`/`}`/`;` boundary arms above stop a non-match
                 // brace before a spurious earlier `match` can be reached.
-                let end = j + 1;
+                let word_end = j + 1;
                 while j > 0 && is_ident_byte(b[j - 1]) {
                     j -= 1;
                 }
-                if &b[j..end] == b"match" {
-                    return true;
+                if &b[j..word_end] == b"match" {
+                    return Some(end - 1);
                 }
             }
             _ => {}
         }
     }
-    false
+    None
 }
 
 /// The cursor's completion classification, computed ONCE per request by
@@ -416,6 +434,10 @@ pub(crate) struct CompletionCx {
     pub(crate) named_arg: Option<crate::cursor_context::NamedArgSlot>,
     /// First generic arg of `Coroutine<|>` (CoFrame synth).
     pub(crate) coroutine_generic: bool,
+    /// Match-arm pattern HEAD: the byte anchor of the enclosing `match`'s
+    /// scrutinee (its last byte). The slot expects the scrutinee's enum --
+    /// variants rank first and patterns bind (no payload template).
+    pub(crate) pattern_scrutinee: Option<usize>,
 }
 
 /// Classify the cursor for completion: parse the munge ladder once, consult
@@ -444,6 +466,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
         param_type: if expr_position { None } else { cx.and_then(|c| c.param_type()) },
         named_arg: cx.and_then(|c| c.named_arg_slot()),
         coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
+        pattern_scrutinee: match_arm_scrutinee(src, offset),
         arg_call,
         expr_position,
         ast,
