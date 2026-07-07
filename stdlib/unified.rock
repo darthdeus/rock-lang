@@ -1842,7 +1842,7 @@ inline(lua) fn get_os() -> string = """
     end
 """
 
-inline(lua) fn phantom<T>() -> T = """return nil"""
+@inline inline(lua) fn phantom<T>() -> T = """return nil"""
 inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
 inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
 inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""

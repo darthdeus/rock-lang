@@ -565,6 +565,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     let mut cache = skull_transform::InlineCache::default();
     skull_transform::inline_functions(&ws, &scx, self_ref, &mut func, &mut cache);
     skull_transform::cleanup(&mut func);
+    skull_transform::recover_counted_loops(&ws, &mut func);
     let ctx = CodegenCtx::new(&ws);
     emit_function(&ws, &ctx, self_ref, &func)
 }
@@ -641,5 +642,35 @@ fn for_vec_backed_iter_inline_is_zero_alloc() {
     assert!(
         !lua.contains('{'),
         "vec-backed @inline iterator loop must leave no table constructor:\n{lua}"
+    );
+}
+
+// --- Slice 4.5 acceptance gate: the desugared+inlined counted loop is rewritten
+// into the codegen CountedLoop shape and prints as a native numeric `for` (FORL
+// bytecode). The goto-LOOP form of the same loop measured 1.8x slower on a
+// type-stable 2M-element sum (docs/iterator-implementation-plan.md, slice 4.5).
+#[test]
+fn for_user_iter_inline_emits_forl() {
+    let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
+    assert!(
+        lua.contains("for "),
+        "desugared counted loop must print as a numeric `for`:\n{lua}"
+    );
+    assert!(
+        !lua.contains(">="),
+        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
+    );
+}
+
+#[test]
+fn for_vec_backed_iter_inline_emits_forl() {
+    let lua = emit_inlined(ZERO_ALLOC_VEC_BACKED_SRC, "sum_myvec");
+    assert!(
+        lua.contains("for "),
+        "vec-backed desugared loop must print as a numeric `for` (bound hoisted):\n{lua}"
+    );
+    assert!(
+        !lua.contains(">="),
+        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
     );
 }

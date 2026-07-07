@@ -27,7 +27,9 @@ use comfy_la_arena::{Idx, RawIdx};
 use skull_codegen_lua::{emit_named_framed, mangled, CodegenCtx, FrameCtx};
 use skull_mir::mir::*;
 
+mod forl;
 mod inline;
+pub use forl::recover_counted_loops;
 pub use inline::{inline_functions, InlineCache, SpliceRecord};
 
 const STATE: &str = "__state";

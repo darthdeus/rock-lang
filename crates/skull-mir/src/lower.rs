@@ -3611,6 +3611,7 @@ impl Builder<'_> {
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
         let exit = self.f.new_block();
+        self.f.for_iter_headers.push(header);
         self.f.set_term(self.cur, Term::Goto(header));
 
         // header: (ok, elem..) = next(it); branch on ok.

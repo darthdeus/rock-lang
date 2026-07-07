@@ -633,6 +633,7 @@ fn emit_body_chunk(
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
     skull_transform::cleanup(&mut mf); // drop dead values + dead-cell stores
+    skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
     times.cleanup = tc.elapsed();
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, overloaded, &mf);

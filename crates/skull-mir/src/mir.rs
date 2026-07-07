@@ -443,6 +443,13 @@ pub struct MirFunc {
     /// normal scope-exit splice, so terminal cleanup (kill/error) runs exactly
     /// the still-pending defers.
     pub coro_defers: Vec<(Idx<Cell>, Idx<Block>)>,
+    /// Loop-head blocks emitted by `lower_for_user_iter` (the desugared
+    /// `for x in <user iter>` back-edge/continue target). The FORL-recovery
+    /// pass (`skull_transform::recover_counted_loops`) is gated on these tags:
+    /// only a desugared iterator loop may have its bound snapshot-hoisted
+    /// (iterator invalidation is recorded UB), never a user-written `while`.
+    /// The id survives inlining: `splice_general` keeps the call block's id.
+    pub for_iter_headers: Vec<Idx<Block>>,
 }
 
 impl MirFunc {
@@ -459,6 +466,7 @@ impl MirFunc {
             is_coroutine: false,
             resume_arg: None,
             coro_defers: Vec::new(),
+            for_iter_headers: Vec::new(),
         }
     }
 
