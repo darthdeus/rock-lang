@@ -1132,7 +1132,7 @@ end
     vec.data[vec.len] = item
 """
 
-@nomangle fn vec_get<T>(vec: [T], index: int) -> T? {
+@nomangle @inline fn vec_get<T>(vec: [T], index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
@@ -1141,7 +1141,7 @@ end
 
 // Safe accessor matching the unified `.get(i) -> T?` surface across all
 // collection types. `v[i]` is the direct counterpart.
-fn get<T>(vec: [T], index: int) -> T? {
+@inline fn get<T>(vec: [T], index: int) -> T? {
     return vec_get(vec, index)
 }
 
@@ -1322,12 +1322,12 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 """
 
 // Unwrap functions for nullable types (moved early to support vec functions)
-@nomangle inline(lua) fn is_null(value: any) -> bool = "return value == nil"
+@nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
 
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
 @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
 
-@nomangle fn unwrap<T>(value: T?) -> T {
+@nomangle @inline fn unwrap<T>(value: T?) -> T {
     if value != null { return value }
     error("unwrap() called on null value\n" + __debug_traceback())
     return phantom()
@@ -2454,6 +2454,40 @@ fn random<T>(arena: Arena<T>) -> (Entity<T>, T)? {
     }
 
     return null
+}
+
+// Arena iteration -- `for (e, v) in arena` desugars through this iter/next
+// pair. The skip loop is FETCH-OUTSIDE (one candidate fetched before the
+// while; the loop body runs only on a dead/nil slot) -- the naive
+// fetch-inside shape blacklists to the interpreter at light fragmentation
+// (docs/iterator-desugaring-investigation.md, 8.8x at 10% holes).
+struct ArenaIter<T> {
+    arena: Arena<T>,
+    entries: [ArenaEntry<T>],
+    n: int,
+    i: int,
+}
+
+@inline
+fn iter<T>(a: Arena<T>) -> ArenaIter<T> {
+    // entries/len snapshot once per loop, matching the old template's
+    // preheader hoist (mutation mid-iteration is recorded UB).
+    return ArenaIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
+}
+
+@inline
+fn next<T>(it: ArenaIter<T>) -> (bool, Entity<T>, T) {
+    let i = it.i
+    if i >= it.n { return (false, phantom(), phantom()) }
+    let slot = it.entries.get(i)
+    while is_null(slot) || !slot.unwrap().is_occupied {
+        i = i + 1
+        if i >= it.n { it.i = i; return (false, phantom(), phantom()) }
+        slot = it.entries.get(i)
+    }
+    let e = slot.unwrap()
+    it.i = i + 1
+    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e.data)
 }
 
 // Arena functional methods

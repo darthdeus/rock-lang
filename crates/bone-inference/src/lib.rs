@@ -4666,13 +4666,16 @@ fn infer_for_elem(
 
             // `[T]` routes through the stdlib iterator protocol (`VecIter`):
             // the desugar + @inline + SROA + FORL recovery emit the same
-            // native numeric `for` the deleted skull template did.
-            // `for_elem_ty` keeps its Array arm -- `enumerate(vec)` above
-            // still calls it directly for the element type.
-            if matches!(
-                *gamma.get(iter_ty),
-                TypeExpr::App { ctor: TypeCtor::Array, .. }
-            ) {
+            // native numeric `for` the deleted skull template did. `Arena<T>`
+            // likewise routes through `ArenaIter` (fetch-outside skip shape).
+            // `for_elem_ty` keeps its Array/Arena arms -- `enumerate(..)`
+            // above still calls it directly for the element type.
+            let is_protocol_builtin = match *gamma.get(iter_ty) {
+                TypeExpr::App { ctor: TypeCtor::Array, .. } => true,
+                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n.as_str() == "Arena",
+                _ => false,
+            };
+            if is_protocol_builtin {
                 return resolve_for_iter_protocol(c, gamma, iter, iter_ty, span);
             }
 

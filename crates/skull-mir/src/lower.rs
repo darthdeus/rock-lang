@@ -3568,7 +3568,12 @@ impl Builder<'_> {
             // value, so the call runs exactly once (no per-iteration re-eval).
         }
         if self.iter_is_arena(iter) {
-            return self.lower_for_arena(&vars, iter, body, false);
+            // Direct `for .. in arena` arrives with `for_iter_protocol`
+            // populated (bone routes Arena to the stdlib ArenaIter); only
+            // `enumerate(arena)` still uses the template above.
+            return Err(gap(
+                "for over Arena must route through the iterator protocol (for_iter_protocol missing)",
+            ));
         }
         match self.coll_kind(iter) {
             // `for x in [T]` always arrives with `for_iter_protocol` populated
