@@ -14,6 +14,14 @@
 //! Pass ONE source per run -- the same accept recorded by both sides would
 //! count twice (join key: client `chosen.record_id` == server `record_id`).
 //!
+//! Raw logs are a noisy DISCOVERY stream (bad accepts, typo prefixes,
+//! survivorship), not ground truth; their MRR is only a drift canary.
+//! Curated rows (`tests/completion-corpus/`, committed) are the tuning
+//! benchmark: the same shapes plus `expect` -- the human-verified label
+//! from triage, overriding what was accepted (a bad accept is corrected,
+//! not dropped) -- and an optional `note`, echoed per-case. Triage: sort
+//! this command's output ascending; misses and worst ranks lead.
+//!
 //! Per case, the disk text is restored after the probe so a mid-edit
 //! (often non-parsing) recorded buffer can't bleed into later cases.
 
@@ -28,6 +36,7 @@ struct ReplayCase {
     prefix: String,
     label: String,
     buffer_text: String,
+    note: Option<String>,
 }
 
 enum ParsedRow {
@@ -66,6 +75,10 @@ fn parse_row(row: &serde_json::Value) -> ParsedRow {
         return ParsedRow::Other;
     };
     let (Some(path), Some(label)) = (path, label) else { return ParsedRow::Other };
+    // A curated row's triage verdict: `expect` is the human-verified label
+    // (bad accepts get corrected, not dropped) and overrides what was
+    // actually accepted at record time.
+    let label = row.get("expect").and_then(|v| v.as_str()).unwrap_or(label);
     let (Some(line), Some(character)) = (
         row.pointer("/pos/line").and_then(|v| v.as_u64()),
         row.pointer("/pos/character").and_then(|v| v.as_u64()),
@@ -81,6 +94,7 @@ fn parse_row(row: &serde_json::Value) -> ParsedRow {
         prefix: row.get("prefix").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         label: label.to_string(),
         buffer_text: buffer_text.to_string(),
+        note: row.get("note").and_then(|v| v.as_str()).map(|s| s.to_string()),
     })
 }
 
@@ -143,13 +157,14 @@ fn replay_cases(
             };
             writeln!(
                 out,
-                "{rr:.4} rank={} {}:{}:{} prefix=\"{}\" label=\"{}\"",
+                "{rr:.4} rank={} {}:{}:{} prefix=\"{}\" label=\"{}\"{}",
                 rank.map(|r| r.to_string()).unwrap_or_else(|| "miss".to_string()),
                 case.path,
                 case.pos.line + 1,
                 case.pos.character + 1,
                 case.prefix,
                 case.label,
+                case.note.as_deref().map(|n| format!(" note=\"{n}\"")).unwrap_or_default(),
             )?;
             sum.mrr += rr;
         }
@@ -241,6 +256,17 @@ fn r(player: Player) {
                 "pos": { "line": 5, "character": 8 },
                 "chosen": { "label": top },
             }),
+            // Curated row: the RECORDED accept was wrong (a bad accept);
+            // triage corrected it via `expect`, which must override the
+            // accepted label. The note rides into the per-case output.
+            serde_json::json!({
+                "source": "server", "path": path_str,
+                "pos": { "line": 5, "character": 8 }, "prefix": "pg",
+                "buffer_text": SRC,
+                "accepted": { "index": 3, "label": "the_bad_accept" },
+                "expect": top,
+                "note": "curated: bad accept corrected",
+            }),
         ];
         let jsonl: String = rows.iter().map(|r| format!("{r}\n")).collect();
         fs_err::write(&corpus, jsonl).unwrap();
@@ -248,16 +274,24 @@ fn r(player: Player) {
         let mut out = Vec::new();
         let sum = replay_cases(&[corpus.to_string_lossy().to_string()], &mut out).unwrap();
 
-        assert_eq!(sum.rows, 5);
-        assert_eq!(sum.replayed, 3);
+        assert_eq!(sum.rows, 6);
+        assert_eq!(sum.replayed, 4);
         assert_eq!(sum.skipped_no_buffer, 1, "pre-buffer accept counted, not replayed");
-        assert_eq!(sum.hits_at[0], 2, "both live-#1 picks replay at rank 1");
+        assert_eq!(sum.hits_at[0], 3, "live-#1 picks + expect-corrected row at rank 1");
         assert_eq!(sum.misses, 1);
-        assert!((sum.mrr - 2.0 / 3.0).abs() < 1e-9, "MRR (1 + 1 + 0)/3, got {}", sum.mrr);
+        assert!((sum.mrr - 3.0 / 4.0).abs() < 1e-9, "MRR (1 + 1 + 0 + 1)/4, got {}", sum.mrr);
 
         let text = String::from_utf8(out).unwrap();
-        assert_eq!(text.lines().count(), 3, "one output line per replayed case");
+        assert_eq!(text.lines().count(), 4, "one output line per replayed case");
         assert!(text.contains("rank=miss"), "miss rendered:\n{text}");
         assert!(text.contains("rank=1"), "hit rendered:\n{text}");
+        assert!(
+            !text.contains("the_bad_accept"),
+            "expect must override the recorded label:\n{text}"
+        );
+        assert!(
+            text.contains("curated: bad accept corrected"),
+            "note rides into the per-case output:\n{text}"
+        );
     }
 }
