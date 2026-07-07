@@ -465,7 +465,9 @@ fn remap_clone(
     match inst {
         Inst::Load(c) => *c = cm[c],
         Inst::Store { cell, .. } => *cell = cm[cell],
-        Inst::CallMulti { dests, .. } | Inst::CallBoundMulti { dests, .. } => {
+        Inst::CallMulti { dests, .. }
+        | Inst::CallBoundMulti { dests, .. }
+        | Inst::CallValueMulti { dests, .. } => {
             for d in dests {
                 *d = cm[d];
             }
