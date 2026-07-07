@@ -38,6 +38,7 @@ mod error_test;
 mod file_watcher;
 pub mod game_runtime;
 mod formatting;
+mod completion_replay;
 mod completion_sweep;
 mod iter_completion;
 mod iter_lsp;
@@ -183,6 +184,12 @@ pub enum CliCommand {
     /// byte-identity diffing across a refactor. The M0 gate of
     /// `docs/completion-v2-design.md`. See `completion_sweep::completion_sweep`.
     CompletionSweep,
+    /// `rock completion-replay <corpus.jsonl>...` -- re-rank recorded
+    /// completion accepts (nvim completion_log / ROCK_LSP_RECORD rows carrying
+    /// the full buffer) against the CURRENT ranker and report per-case ranks +
+    /// aggregate MRR. The M6 tuning oracle of `docs/completion-v2-design.md`.
+    /// See `completion_replay::completion_replay`.
+    CompletionReplay,
     /// `rock iter-cascade <project> [--iters N --warmup W]` -- tight loop benching
     /// the Interface-tier RE-LOWER cascade: a field edit on a high-fan-in TYPE
     /// re-lowers every module whose interface references it (vs `iter-reinfer`,
@@ -222,6 +229,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterReinfer,
             Self::IterCompletion,
             Self::CompletionSweep,
+            Self::CompletionReplay,
             Self::IterCascade,
             Self::BackendStats,
         ]
@@ -263,6 +271,7 @@ impl CliCommand {
             Self::IterReinfer => "iter-reinfer",
             Self::IterCompletion => "iter-completion",
             Self::CompletionSweep => "completion-sweep",
+            Self::CompletionReplay => "completion-replay",
             Self::IterCascade => "iter-cascade",
             Self::BackendStats => "backend-stats",
         }

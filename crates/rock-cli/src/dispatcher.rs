@@ -469,6 +469,12 @@ impl CommandContext {
                 self.args.check,
             );
         }
+        // completion-replay re-ranks recorded accepts against the current
+        // ranker and reports MRR (docs/completion-v2-design.md M6);
+        // dispatched early like the other completion harnesses.
+        if self.args.command == CliCommand::CompletionReplay {
+            return crate::completion_replay::completion_replay(&self.args.files);
+        }
         // lsp-survey is the stats-driven slow-edit hunter (BoneWorkspace);
         // dispatched early like the other iter-* / LSP profilers.
         if self.args.command == CliCommand::LspSurvey {
