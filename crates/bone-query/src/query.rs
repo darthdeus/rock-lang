@@ -699,15 +699,25 @@ impl RefSite {
     }
 }
 
-pub fn references(
+/// Source-text lookup for reference walks whose HIR carries no span for a
+/// token (named-arg labels, `?.method` names): path -> current file text.
+/// `None` (file not tracked) fails open -- the site is skipped, never
+/// mis-spanned.
+pub type TextOf<'a, 't> = &'a dyn Fn(&str) -> Option<&'t str>;
+
+pub fn references<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
+    text_of: TextOf<'_, 't>,
 ) -> Vec<RefSite> {
     let plain = |spans: Vec<Span>| spans.into_iter().map(RefSite::plain).collect();
 
-    if let Some(local) = local_references(ws, mid, offset) {
+    if let Some(mut local) = local_references(ws, mid, offset) {
+        // A fn PARAM also renames at callers' named-arg labels
+        // (`spawn_it(count: 3)`), resolved per-overload.
+        local.extend(param_named_arg_sites(ws, mid, offset, text_of));
         return local;
     }
 
@@ -740,7 +750,7 @@ pub fn references(
     if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
         let name = ws.modules.get(fmid.index()).map(|m| m.functions[fid].name);
         if let Some(name) = name {
-            return plain(function_references_by_name(ws, name));
+            return plain(function_references_by_name(ws, name, text_of));
         }
     }
 
@@ -929,13 +939,50 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         }
                     }
                     // `recv.field` where recv is a `sname` (type-checked).
-                    hir::Expr::FieldAccess { base, field: fname } if *fname == field => {
+                    // `recv?.field` resolves identically -- `struct_app_args`
+                    // unwraps the base's nullable.
+                    hir::Expr::FieldAccess { base, field: fname }
+                    | hir::Expr::SafeNav { base, field: fname }
+                        if *fname == field =>
+                    {
                         let resolves = bi
                             .and_then(|bi| bi.expr_types.get(*base).copied())
                             .and_then(|t| bi.map(|bi| (bi, t)))
                             .and_then(|(bi, t)| struct_app_args(ws, bi, t))
                             .is_some_and(|(n, _)| n == sname);
                         if resolves {
+                            if let Some(sp) = body.expr_spans.get(e) {
+                                let end = sp.offset_range.1;
+                                push(RefSite::plain(Span {
+                                    offset_range: (end - flen, end),
+                                    ..*sp
+                                }));
+                            }
+                        }
+                    }
+                    // `.field` sibling ref: a default body of THIS struct
+                    // (`boosted: int = .power`), or a `FieldOf<sname, V>`-typed
+                    // key-path arg. Span ends at the name (leading dot stays).
+                    hir::Expr::SiblingRef(n) if *n == field => {
+                        let of_struct = match owner {
+                            hir::BodyOwner::StructDefaults(sidx) => {
+                                m.structs[*sidx].name == sname
+                            }
+                            _ => bi.is_some_and(|bi| {
+                                bi.expr_types
+                                    .get(e)
+                                    .copied()
+                                    .and_then(|t| struct_app_args(ws, bi, t))
+                                    .and_then(|(ctor, args)| {
+                                        (ctor.as_str() == "FieldOf")
+                                            .then(|| args.into_iter().next())
+                                            .flatten()
+                                    })
+                                    .and_then(|t0| struct_app_args(ws, bi, t0))
+                                    .is_some_and(|(sn, _)| sn == sname)
+                            }),
+                        };
+                        if of_struct {
                             if let Some(sp) = body.expr_spans.get(e) {
                                 let end = sp.offset_range.1;
                                 push(RefSite::plain(Span {
@@ -1042,14 +1089,30 @@ fn for_each_nominal_annotation(
         matches!(te, hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } if *n == name)
     };
     for iv in body.node_index().iter() {
-        let te = match iv.val {
+        // A `Mob?` annotation is ONE node whose TypeExpr is Nullable(inner)
+        // with no separate node for the inner nominal -- unwrap before the
+        // match so nullable forms rename too (the name still leads the span,
+        // so the leading-name clip below lands on the identifier).
+        let hit = match iv.val {
             NodeRef::StaticTy { mid: tmid, idx } => {
-                ws.modules.get(tmid.index()).map(|tm| &tm.ty_arena[idx])
+                ws.modules.get(tmid.index()).is_some_and(|tm| {
+                    let mut te = &tm.ty_arena[idx];
+                    while let hir::TypeExpr::Nullable(i) = te {
+                        te = &tm.ty_arena[*i];
+                    }
+                    on_nominal(te)
+                })
             }
-            NodeRef::LocalTy(idx) => Some(&body.lowered_tys[idx]),
-            _ => None,
+            NodeRef::LocalTy(idx) => {
+                let mut te = &body.lowered_tys[idx];
+                while let hir::TypeExpr::Nullable(i) = te {
+                    te = &body.lowered_tys[*i];
+                }
+                on_nominal(te)
+            }
+            _ => false,
         };
-        if te.is_some_and(on_nominal) {
+        if hit {
             f(&Span {
                 file,
                 line_range: (0, 0),
@@ -1406,23 +1469,7 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
 
-    let b = body
-        .node_index()
-        .find(offset, offset + 1)
-        .min_by_key(|x| x.stop - x.start)
-        .and_then(|iv| match iv.val {
-            NodeRef::Binding(b) => Some(b),
-            NodeRef::Expr(e) => match &body.expr_arena[e] {
-                hir::Expr::Var(b) => Some(*b),
-                hir::Expr::Call {
-                    callee: hir::Callee::Local(b),
-                    ..
-                } => Some(*b),
-                _ => None,
-            },
-
-            _ => None,
-        })?;
+    let b = binding_at(body, offset)?;
 
     let name = body.binding_arena[b].name;
     let name_len = name.as_str().len();
@@ -1491,6 +1538,137 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
     Some(out)
 }
 
+/// When `offset` targets a declared PARAM of a fn (decl name or a body use),
+/// the named-arg label sites at every call that RESOLVES to that fn
+/// (`spawn_it(count: 3)`), exact per-overload via `resolved_overload_calls`.
+/// HIR keeps arg-name labels without spans (`Body::arg_names`), so the label
+/// token is located in source text directly before the arg value's span.
+/// Empty when the target isn't a fn param (lambda params have no named-arg
+/// call sites) or text is unavailable -- fail open, never mis-spanned.
+fn param_named_arg_sites<'t>(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+    text_of: TextOf<'_, 't>,
+) -> Vec<RefSite> {
+    let Some(module) = ws.modules.get(mid.index()) else { return Vec::new() };
+    let Some(owner) = module.body_at(offset) else { return Vec::new() };
+    let hir::BodyOwner::Function(target_fid) = owner else { return Vec::new() };
+    let Some(body) = module.bodies.get(&owner) else { return Vec::new() };
+    let Some(b) = binding_at(body, offset) else { return Vec::new() };
+    if body.binding_arena[b].kind != hir::BindingKind::Param
+        || !body.param_bindings.into_iter().any(|p| p == b)
+    {
+        return Vec::new();
+    }
+    let pname = body.binding_arena[b].name;
+
+    let mut out = Vec::new();
+    for (cm, inf) in ws.inferences_iter() {
+        let Some(cmod) = ws.modules.get(cm.index()) else { continue };
+        for (cowner, bi) in inf.per_fn.iter() {
+            let Some(cbody) = cmod.bodies.get(cowner) else { continue };
+            for (call_idx, (rmid, rfid)) in bi.resolved_overload_calls.iter() {
+                if !(*rmid == mid && *rfid == target_fid) {
+                    continue;
+                }
+                let args = match &cbody.expr_arena[*call_idx] {
+                    hir::Expr::Call { args, .. } => *args,
+                    hir::Expr::SafeNavCall { args, .. } => *args,
+                    _ => continue,
+                };
+                for a in args.into_iter() {
+                    if cbody.arg_names.get(&a) != Some(&pname) {
+                        continue;
+                    }
+                    let Some(asp) = cbody.expr_spans.get(a) else { continue };
+                    let Some(text) = text_of(asp.file.as_str()) else { continue };
+                    if let Some(span) =
+                        named_label_before(text, asp.offset_range.0, pname.as_str(), asp)
+                    {
+                        out.push(RefSite::plain(span));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The binding the cursor is on in `body`: its declaration name token, a
+/// `Var` use, or a local-callee use. The innermost-node resolution
+/// `local_references` uses.
+fn binding_at(body: &hir::Body, offset: usize) -> Option<Idx<hir::BindingInfo>> {
+    body.node_index()
+        .find(offset, offset + 1)
+        .min_by_key(|x| x.stop - x.start)
+        .and_then(|iv| match iv.val {
+            NodeRef::Binding(b) => Some(b),
+            NodeRef::Expr(e) => match &body.expr_arena[e] {
+                hir::Expr::Var(b) => Some(*b),
+                hir::Expr::Call {
+                    callee: hir::Callee::Local(b),
+                    ..
+                } => Some(*b),
+                _ => None,
+            },
+            _ => None,
+        })
+}
+
+/// The `label:` token directly before an arg value starting at `value_start`:
+/// backward over ws, a `:`, ws, then exactly `label` as a whole word. `None`
+/// when the shape doesn't match (fail open -- no edit beats a wrong edit).
+fn named_label_before(text: &str, value_start: usize, label: &str, like: &Span) -> Option<Span> {
+    let b = text.as_bytes();
+    let mut i = value_start.min(b.len());
+    while i > 0 && b[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || b[i - 1] != b':' {
+        return None;
+    }
+    i -= 1;
+    while i > 0 && b[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    let end = i;
+    let start = end.checked_sub(label.len())?;
+    if text.get(start..end) != Some(label) {
+        return None;
+    }
+    if start > 0 && (b[start - 1] == b'_' || b[start - 1].is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(Span {
+        offset_range: (start, end),
+        ..*like
+    })
+}
+
+/// The first whole-word occurrence of `ident` inside `text[start..end)`, as a
+/// span cloned from `like`. `None` when absent (fail open).
+fn ident_span_in(text: &str, start: usize, end: usize, ident: &str, like: &Span) -> Option<Span> {
+    let hay = text.get(start..end.min(text.len()))?;
+    let hb = hay.as_bytes();
+    let is_ident = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
+    let mut from = 0;
+    while let Some(p) = hay[from..].find(ident) {
+        let abs = from + p;
+        let after = abs + ident.len();
+        let before_ok = abs == 0 || !is_ident(hb[abs - 1]);
+        let after_ok = after >= hb.len() || !is_ident(hb[after]);
+        if before_ok && after_ok {
+            return Some(Span {
+                offset_range: (start + abs, start + after),
+                ..*like
+            });
+        }
+        from = abs + 1;
+    }
+    None
+}
+
 fn function_target(
     ws: &Workspace,
     mid: ModuleId,
@@ -1543,7 +1721,11 @@ fn function_target(
 /// Name-based (not a single `(mid, fid)`) so renaming touches **all overloads**
 /// sharing the name and **every** call that resolves to any of them -- rename
 /// of an overloaded or cross-file function is then complete.
-fn function_references_by_name(ws: &Workspace, name: Ustr) -> Vec<Span> {
+fn function_references_by_name<'t>(
+    ws: &Workspace,
+    name: Ustr,
+    text_of: TextOf<'_, 't>,
+) -> Vec<Span> {
     let mut out = Vec::new();
 
     // Every overload's declaration name.
@@ -1574,12 +1756,34 @@ fn function_references_by_name(ws: &Workspace, name: Ustr) -> Vec<Span> {
                     .get(cmid.index())
                     .is_some_and(|cm| cm.functions[*cfid].name == name);
                 if resolves_to_name {
-                    if let hir::Expr::Call {
-                        callee: hir::Callee::Unresolved { name_span, .. },
-                        ..
-                    } = &body.expr_arena[*call_idx]
-                    {
-                        out.push(*name_span);
+                    match &body.expr_arena[*call_idx] {
+                        hir::Expr::Call {
+                            callee: hir::Callee::Unresolved { name_span, .. },
+                            ..
+                        } => out.push(*name_span),
+                        // `recv?.method()` -- HIR keeps no method-token span,
+                        // so locate the first whole-word `name` after the
+                        // receiver in source text (nothing but `?.` and ws
+                        // precedes it). Fails open when text is unavailable.
+                        hir::Expr::SafeNavCall { receiver, .. } => {
+                            let (Some(sp), Some(rsp)) = (
+                                body.expr_spans.get(*call_idx),
+                                body.expr_spans.get(*receiver),
+                            ) else {
+                                continue;
+                            };
+                            let Some(text) = text_of(sp.file.as_str()) else { continue };
+                            if let Some(span) = ident_span_in(
+                                text,
+                                rsp.offset_range.1,
+                                sp.offset_range.1,
+                                name.as_str(),
+                                sp,
+                            ) {
+                                out.push(span);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

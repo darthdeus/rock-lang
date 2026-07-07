@@ -72,13 +72,14 @@ pub fn type_definition(
 /// rename is safe for them. Globals and struct/enum generics aren't covered
 /// yet. Shorthand sites (`S { x }`) carry a [`crate::query::Shorthand`] tag so
 /// rename expands them instead of replacing the shared token.
-pub fn references(
+pub fn references<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
+    text_of: crate::query::TextOf<'_, 't>,
 ) -> Vec<crate::query::RefSite> {
-    crate::query::references(ws, mid, inf, offset)
+    crate::query::references(ws, mid, inf, offset, text_of)
 }
 
 // ---------------------------------------------------------------------------

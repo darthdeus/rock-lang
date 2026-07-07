@@ -922,7 +922,11 @@ impl BoneWorkspace {
         let Some(inf) = ws.inference(mid) else {
             return Vec::new();
         };
-        gaps::references(ws, mid, inf, offset)
+        // Text lookup for the walks whose HIR carries no token span (named-arg
+        // labels, `?.method` names) -- `proj.texts` holds every tracked file.
+        gaps::references(ws, mid, inf, offset, &|f| {
+            proj.texts.get(f).map(|s| s.as_str())
+        })
     }
 
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
