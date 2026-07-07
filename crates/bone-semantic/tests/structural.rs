@@ -1125,3 +1125,43 @@ fn redundant_safe_nav_field_rejected() {
         "`?.` on a nullable receiver is meaningful and accepted"
     );
 }
+
+/// Unfuck #32: when every overload is rejected and the only near-miss is an
+/// `Iterator`-bounded candidate that failed CONFORMANCE (params fit, bounds
+/// did not), the error surfaces `check_iterator_bounds`' precise reason
+/// appended to the "No overload for ..." headline (`select_overload`'s
+/// `bound_fail` slot, filled by `score_candidate`).
+#[test]
+fn all_rejected_overload_error_surfaces_bound_conformance_reason() {
+    let src = r#"
+struct Multi { i: int }
+fn next(it: Multi) -> (bool, int, int) { return (false, 0, 0) }
+fn wrap<I: Iterator<T>, T>(x: I, n: int) -> int { return n }
+fn wrap(x: string, n: int) -> int { return n }
+fn main() {
+    let m = Multi { i: 0 }
+    let _ = wrap(m, 1)
+}
+"#;
+    let ws = check(src).expect("body errors are collected, not aborted");
+    let mid = ws.modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let inf = ws.inference(mid).expect("user module inferred");
+    let msgs: Vec<&str> = inf
+        .errors
+        .values()
+        .flatten()
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("No overload for `wrap`")),
+        "the call must reject: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("does not satisfy")),
+        "the bound-conformance rejection reason must be surfaced: {msgs:?}"
+    );
+}

@@ -2669,9 +2669,16 @@ fn select_overload(
 ) -> Result<(ModuleId, Idx<Function>), CompilerError> {
     let mut best: Option<(usize, (ModuleId, Idx<Function>))> = None;
     let mut tied = false;
+    // The bound-conformance failure of an otherwise-fitting `Iterator`-bounded
+    // candidate (params fit, bounds did not). When EVERY candidate rejects,
+    // this is the near-miss the user needs to see -- the generic "No overload"
+    // headline alone hides e.g. "EnumIter's `next` yields multiple values".
+    let mut bound_fail: Option<CompilerError> = None;
 
     for &(mid, fid) in candidates {
-        if let Some(cost) = score_candidate(c, gamma, mid, fid, recv_ty, args, arg_ty, span) {
+        if let Some(cost) =
+            score_candidate(c, gamma, mid, fid, recv_ty, args, arg_ty, span, &mut bound_fail)
+        {
             match best {
                 None => {
                     best = Some((cost, (mid, fid)));
@@ -2700,14 +2707,23 @@ fn select_overload(
                 .join(", ")
         ),
 
-        None => comp_error!(
-            span,
-            "No overload for `{name}` with argument types ({})",
-            arg_tys_msg
+        None => {
+            let args_msg = arg_tys_msg
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
-                .join(", ")
-        ),
+                .join(", ");
+            match bound_fail {
+                Some(be) => comp_error!(
+                    span,
+                    "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}",
+                    be.message
+                ),
+                None => comp_error!(
+                    span,
+                    "No overload for `{name}` with argument types ({args_msg})"
+                ),
+            }
+        }
     }
 }
 
@@ -3238,6 +3254,7 @@ fn score_candidate(
     args: &[Idx<Expr>],
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
     span: Span,
+    bound_fail: &mut Option<CompilerError>,
 ) -> Option<usize> {
     let snap = gamma.out.checkpoint();
 
@@ -3357,10 +3374,21 @@ fn score_candidate(
     if f.generic_bounds.iter().any(Option::is_some) {
         let mut tree = BoundTree::default();
         let mut done = FxHashSet::default();
+        let mut berr: Option<CompilerError> = None;
         let conforms = gamma.trial(|g| {
-            check_iterator_bounds(c, g, f, &subs, &mut tree, &mut done, false, 0, span).is_ok()
+            match check_iterator_bounds(c, g, f, &subs, &mut tree, &mut done, false, 0, span) {
+                Ok(()) => true,
+                Err(e) => {
+                    berr = Some(e);
+                    false
+                }
+            }
         });
         if !conforms {
+            // Keep the FIRST bound failure for the all-rejected diagnostic.
+            if bound_fail.is_none() {
+                *bound_fail = berr;
+            }
             gamma.out.rollback_to(snap);
             return None;
         }
