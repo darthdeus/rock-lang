@@ -541,24 +541,19 @@ fn relaxed_guard_offers_local_seeded_call_through_on_short_fn_prefix() {
 }
 
 #[test]
-fn diversity_caps_reach_path_flood_in_the_visible_top() {
-    // A local `s: S` with 15 int fields floods the `feed(<int>)` arg slot with 15
-    // dotted reach paths (`s.a`..`s.o`). Without a diversity cap they fill the
-    // visible top and bury every other kind; the cap keeps at most 3 dotted paths
-    // in the top window, deferring the rest just below (kept, never dropped).
+fn reach_path_flood_is_kept_and_ranked_not_dropped() {
+    // A local `s: S` with 15 int fields fills the `feed(<int>)` arg slot with
+    // 15 dotted reach paths (`s.a`..`s.o`). They all rank as right-type values
+    // and stay browsable -- the response is capped, never silently thinned.
+    // (The old array-only diversity pass was deleted: the real client sorts
+    // array order dead-last, so it never took effect -- unfuck-backlog #30.)
     let labels = labels_at(
         "fn feed(x: int) {}\n\
          struct S { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int }\n\
          fn r(s: S) {\n  feed($0)\n}\n",
     );
-    let paths_in_window = labels.iter().take(12).filter(|l| l.contains('.')).count();
     let paths_total = labels.iter().filter(|l| l.contains('.')).count();
-    assert!(
-        paths_in_window <= 3,
-        "at most 3 reach paths in the visible top-12: {:?}",
-        &labels[..labels.len().min(14)]
-    );
-    assert!(paths_total >= 15, "overflow paths deferred, not dropped: {paths_total} paths total");
+    assert!(paths_total >= 15, "all reach paths offered: {paths_total} paths total");
 }
 
 #[test]

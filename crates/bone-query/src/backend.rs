@@ -1265,7 +1265,7 @@ impl BoneWorkspace {
                     fine: RankKey::fine(score),
                     len: RankKey::len_key(score, name.len()),
                 };
-                Cand::new(key, CandName::Sym(c.name), false, CandShape::Entry(c))
+                Cand::new(key, CandName::Sym(c.name), CandShape::Entry(c))
             })
             .collect();
         // We only need the BEST `MAX_COMPLETION_ITEMS`, not a full ordering --
@@ -1299,7 +1299,6 @@ impl BoneWorkspace {
                 sink.push(Cand::new(
                     key,
                     CandName::Owned(label),
-                    false,
                     CandShape::EntitySynth { payload: entity_payload },
                 ));
             }
@@ -1329,7 +1328,6 @@ impl BoneWorkspace {
                 sink.push(Cand::new(
                     key,
                     CandName::Sym(pname),
-                    false,
                     CandShape::NamedArg { pname, pty },
                 ));
             }
@@ -1352,7 +1350,6 @@ impl BoneWorkspace {
                 sink.push(Cand::new(
                     key,
                     CandName::Owned("CoFrame".to_string()),
-                    false,
                     CandShape::CoFrame,
                 ));
             }
@@ -1368,7 +1365,6 @@ impl BoneWorkspace {
                 sink.push(Cand::new(
                     key,
                     CandName::Owned("Coroutine<CoFrame>".to_string()),
-                    false,
                     CandShape::Coroutine { with_coframe: true },
                 ));
             }
@@ -1380,7 +1376,6 @@ impl BoneWorkspace {
             sink.push(Cand::new(
                 key,
                 CandName::Owned("Coroutine<>".to_string()),
-                false,
                 CandShape::Coroutine { with_coframe: false },
             ));
         }
@@ -1395,7 +1390,6 @@ impl BoneWorkspace {
             sink.push(Cand::new(
                 key,
                 CandName::Owned(label.to_string()),
-                false,
                 CandShape::CoReturn { coframe },
             ));
         }
@@ -1463,7 +1457,6 @@ impl BoneWorkspace {
                     sink.push(Cand::new(
                         rk,
                         CandName::Owned(key),
-                        true,
                         CandShape::Reach {
                             final_ty: p.final_ty,
                             is_method: p.is_method,
@@ -1554,9 +1547,6 @@ impl BoneWorkspace {
         }
         sink.cands.sort_by(cand_cmp);
         sink.cands.truncate(MAX_COMPLETION_ITEMS);
-        // Keep the visible top varied: a flood of reach paths must not bury other
-        // kinds (docs/completion-ranking-design.md, Divergence 3).
-        diversify_cands(&mut sink.cands);
         sink.cands
             .into_iter()
             .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren))

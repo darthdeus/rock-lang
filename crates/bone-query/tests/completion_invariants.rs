@@ -3,11 +3,7 @@
 //! position-blind checker (`bone_query::invariants`, hooked into every
 //! corpus helper and `rock completion-sweep --check`) cannot see.
 //!
-//! Absent until their blockers resolve:
-//! - array-order == sortText-order: blocked on docs/unfuck-backlog.md #30
-//!   (diversify reorders the array but not the keys; client behavior
-//!   question pending).
-//! - response-under-budget: `just compl-perf-gate` is that gate.
+//! Not here: response-under-budget (`just compl-perf-gate` is that gate).
 
 use bone_query::BoneWorkspace;
 use lsp_types::Position;

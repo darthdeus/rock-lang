@@ -147,6 +147,7 @@ pub(crate) fn field_ref_arg_completions(
             });
         }
     }
+    out.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     Some(out)
 }
 
@@ -218,20 +219,17 @@ pub(crate) struct CtFn {
 /// One candidate arg value for a call-through synth, with the structural
 /// facts recorded at construction (not re-derived from the rendered text):
 /// `method` = the path traverses a method call on ANY hop (the per-fn
-/// method-chain cap and the confident-autofill exclusion key off it),
-/// `path` = a dotted access path rather than a direct value/variant (the
-/// diversity class).
+/// method-chain cap and the confident-autofill exclusion key off it).
 #[derive(Clone)]
 pub(crate) struct CtArg {
     pub(crate) text: String,
     pub(crate) payload: ArgPayload,
     pub(crate) method: bool,
-    pub(crate) path: bool,
 }
 
 impl CtArg {
     pub(crate) fn direct(text: String, payload: ArgPayload) -> Self {
-        CtArg { text, payload, method: false, path: false }
+        CtArg { text, payload, method: false }
     }
 
     pub(crate) fn reach(root: &str, p: &crate::reachability::ReachPath) -> Self {
@@ -240,7 +238,7 @@ impl CtArg {
         } else {
             format!("{root}.{}", p.suffix)
         };
-        CtArg { text, payload: ArgPayload::None, method: p.via_call, path: true }
+        CtArg { text, payload: ArgPayload::None, method: p.via_call }
     }
 }
 
@@ -596,14 +594,9 @@ pub(crate) fn call_through_param_completions(
             len: RankKey::len_key(score, call.len()),
             ..key
         };
-        // Path-shaped for diversity when the arg is a dotted access path or
-        // renders a payload hole (`f(V(...))` / `f(V { ... })`) -- the synth
-        // shapes the visible-window cap exists for.
-        let path_like = a.path || a.payload != ArgPayload::None;
         sink.push(Cand::new(
             key,
             CandName::Owned(call),
-            path_like,
             CandShape::CallThrough {
                 fname,
                 arg: a.text.clone(),
@@ -680,9 +673,7 @@ pub(crate) fn fn_prefix_struct(ws: &Workspace, fn_name: &str) -> Option<Ustr> {
 pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<CompletionItem> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    // Decorators materialize through the shared shape but keep declaration
-    // order (no select/cap -- the namespace is small and the client sorts by
-    // sort_text).
+    // Materializes through the shared shape; no cap (the namespace is small).
     let no_sigs = HashMap::new();
     for m in ws.modules.iter() {
         for (_, dec) in m.decorators.iter() {
@@ -705,7 +696,6 @@ pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<Complet
             let cand = Cand::new(
                 key,
                 CandName::Sym(dec.name),
-                false,
                 CandShape::Decorator {
                     detail: (!params.is_empty()).then(|| format!("deco ({})", params.join(", "))),
                 },
@@ -713,6 +703,7 @@ pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<Complet
             out.push(materialize_cand(cand, &no_sigs, false));
         }
     }
+    out.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     out
 }
 
@@ -1138,6 +1129,9 @@ pub(crate) fn member_completion_items(
                 }
             }
         }
+        // Response arrays go out in rank order (array == sortText, the
+        // invariant every path upholds).
+        items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
         items
     }
 }

@@ -6,9 +6,6 @@
 //!
 //! Context-DEPENDENT invariants (typed-slot ordering, universe gating) live
 //! in `tests/completion_invariants.rs` with fixtures that know their slot.
-//! The array-order == sortText-order invariant is deliberately absent until
-//! the diversify question resolves (docs/unfuck-backlog.md #30: `diversify`
-//! reorders the array but sortText still encodes the pre-diversity rank).
 
 use lsp_types::CompletionItem;
 
@@ -42,6 +39,24 @@ pub fn completion_response_violations(
                         it.label
                     ));
                 }
+            }
+        }
+    }
+
+    // Array order == sortText order: the response array is emitted in rank
+    // order, so what a client shows matches what the server ranked whether
+    // it sorts by sortText or takes the array as-is. There is no sanctioned
+    // post-sort reordering (the array-only `diversify` pass was deleted as a
+    // live no-op -- the real client sorts array order dead-last).
+    for pair in items.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        if let (Some(sa), Some(sb)) = (a.sort_text.as_deref(), b.sort_text.as_deref()) {
+            if sa > sb {
+                violations.push(format!(
+                    "array order disagrees with sortText order: `{}` ({sa:?}) \
+                     precedes `{}` ({sb:?})",
+                    a.label, b.label
+                ));
             }
         }
     }
@@ -114,6 +129,20 @@ mod tests {
     }
 
     #[test]
+    fn array_order_disagreeing_with_sort_text_reported() {
+        use crate::rank_key::RankKey;
+        let first = RankKey { band: 2, ..Default::default() }.encode("zeta");
+        let second = RankKey::default().encode("alpha");
+        // `zeta` (worse key) placed before `alpha` (better key) in the array.
+        let items = [item("zeta", Some(&first)), item("alpha", Some(&second))];
+        let v = completion_response_violations(&items, "");
+        assert!(v.iter().any(|m| m.contains("array order disagrees")), "{v:?}");
+        // Sorted arrays are clean.
+        let ok = [item("alpha", Some(&second)), item("zeta", Some(&first))];
+        assert!(completion_response_violations(&ok, "").is_empty());
+    }
+
+    #[test]
     fn non_exact_ranking_above_exact_reported() {
         use crate::rank_key::RankKey;
         // The failure mode: a path fails to put the exact-label item in the
@@ -131,10 +160,10 @@ mod tests {
         use crate::rank_key::RankKey;
         // A named-arg style item (`wea:`) whose RANK name is exactly the
         // prefix legitimately outranks the exact-label item on type_rank --
-        // both are exact-tier. Array order is irrelevant to the invariant.
+        // both are exact-tier.
         let named = RankKey::default().encode("wea");
         let local = RankKey { type_rank: 2, ..Default::default() }.encode("wea");
-        let items = [item("wea", Some(&local)), item("wea:", Some(&named))];
+        let items = [item("wea:", Some(&named)), item("wea", Some(&local))];
         assert!(completion_response_violations(&items, "wea").is_empty());
     }
 }

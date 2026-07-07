@@ -54,20 +54,18 @@ pub(crate) const REACH_CAP: usize = 64;
 pub(crate) const CALL_THROUGH_CAP: usize = 10;
 pub(crate) const PER_FN_METHOD_CAP: usize = 2;
 
-/// Diversity: within the first `DIVERSITY_WINDOW` visible slots, at most
-/// `REACH_PATH_TOP_CAP` dotted reach paths -- the overflow defers just below
-/// (kept, browsable) so a same-type path flood can't bury other kinds.
-pub(crate) const DIVERSITY_WINDOW: usize = 12;
-pub(crate) const REACH_PATH_TOP_CAP: usize = 3;
-
 // === Completion candidate pipeline (docs/completion-v2-design.md, M3) ========
 //
 // Stage B/D of completion-v2: every general-path source emits fact-shaped
-// `Cand`s into a `Sink`; ONE select (RankKey order) + the diversity pass run
-// on the facts; `CompletionItem`s (labels, inserts, details) materialize in
+// `Cand`s into a `Sink`; ONE select (RankKey order) runs on the facts;
+// `CompletionItem`s (labels, inserts, details) materialize in
 // `materialize_cand` for the post-cap survivors only. Sources never build
 // display strings for ranking, and no post-pass reverse-engineers structure
-// from labels.
+// from labels. The response array is emitted in sort_text order (the
+// invariant every path upholds; `bone_query::invariants`) -- there is no
+// post-sort reordering pass (`diversify` was deleted: it reordered only the
+// array, which the real client sorts dead-last, so it was a live no-op --
+// unfuck-backlog #30 resolution, `cdac37939`).
 
 /// The name a candidate ranks and sorts under -- the string `RankKey::encode`
 /// appends and the ci-alphabetical tiebreak compares. NOT always the display
@@ -113,22 +111,18 @@ pub(crate) enum CandShape {
 }
 
 /// A fact-shaped completion candidate: rank key + rank/tiebreak name +
-/// diversity class + materialization facts. `key` is stored CLAMPED
-/// (`RankKey::clamped`) so `cand_cmp` and the client's sort_text string
-/// order agree at any field value.
+/// materialization facts. `key` is stored CLAMPED (`RankKey::clamped`) so
+/// `cand_cmp` and the client's sort_text string order agree at any field
+/// value.
 pub(crate) struct Cand {
     pub(crate) key: RankKey,
     pub(crate) name: CandName,
-    /// The diversity unit `diversify` caps in the visible window: a dotted
-    /// access path (reach) or a call synth rendering a dotted arg / payload
-    /// hole -- the flood-prone shapes.
-    pub(crate) path_like: bool,
     pub(crate) shape: CandShape,
 }
 
 impl Cand {
-    pub(crate) fn new(key: RankKey, name: CandName, path_like: bool, shape: CandShape) -> Self {
-        Cand { key: key.clamped(), name, path_like, shape }
+    pub(crate) fn new(key: RankKey, name: CandName, shape: CandShape) -> Self {
+        Cand { key: key.clamped(), name, shape }
     }
 }
 
@@ -178,41 +172,6 @@ pub(crate) fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
     a.key
         .cmp(&b.key)
         .then_with(|| ci_cmp(a.name.as_str().as_bytes(), b.name.as_str().as_bytes()))
-}
-
-/// Diversity re-rank over the already-sorted candidates: keep the ranked
-/// order but stop a flood of path-shaped items (`Cand::path_like`) from
-/// filling the visible top and burying other kinds (a fn / enum variant /
-/// direct value the user actually wants). Within the first
-/// `DIVERSITY_WINDOW` slots, at most `REACH_PATH_TOP_CAP` path-likes are
-/// kept; the overflow is DEFERRED to just after the window (never dropped --
-/// browsable by scrolling / narrowing). Tunable; see
-/// `docs/completion-ranking-design.md` (Divergence 3, diversity).
-pub(crate) fn diversify_cands(cands: &mut Vec<Cand>) {
-    if cands.len() <= REACH_PATH_TOP_CAP {
-        return;
-    }
-    let mut window: Vec<Cand> = Vec::with_capacity(cands.len());
-    let mut deferred: Vec<Cand> = Vec::new();
-    let mut rest: Vec<Cand> = Vec::new();
-    let mut paths = 0;
-    for c in cands.drain(..) {
-        if window.len() >= DIVERSITY_WINDOW {
-            rest.push(c);
-        } else if c.path_like {
-            if paths >= REACH_PATH_TOP_CAP {
-                deferred.push(c);
-            } else {
-                paths += 1;
-                window.push(c);
-            }
-        } else {
-            window.push(c);
-        }
-    }
-    window.append(&mut deferred);
-    window.append(&mut rest);
-    *cands = window;
 }
 
 /// Stage D: render ONE surviving candidate to its `CompletionItem`. Every
