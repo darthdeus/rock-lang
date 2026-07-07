@@ -48,6 +48,11 @@ pub(crate) const MAX_COMPLETION_ITEMS: usize = 200;
 /// general arg-position expansion and the member transitive-path expansion.
 pub(crate) const REACH_CAP: usize = 64;
 
+/// Frequency prior buckets (`RankKey::freq`): >= HOT refs -> 0, >= WARM ->
+/// 1, else 2. Placeholder thresholds until the M6 replay corpus tunes them.
+pub(crate) const FREQ_HOT: u32 = 16;
+pub(crate) const FREQ_WARM: u32 = 3;
+
 /// Call-through: max synthesized `f(arg)` items kept overall, and max
 /// METHOD-CHAIN args kept per fn (direct values / field paths are uncapped so
 /// sibling fields stay browsable; the global cap backstops the total).

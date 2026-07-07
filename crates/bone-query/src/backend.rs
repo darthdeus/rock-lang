@@ -94,6 +94,9 @@ fn warm_stdlib() -> Vec<skull_parser::Ast> {
 struct BoneProject {
     session: Session,
     texts: HashMap<String, String>,
+    /// Workspace reference counts per name (`build_freq_index`) -- the
+    /// `freq` prior. Rebuilt with the other type caches.
+    freq: Option<HashMap<ustr::Ustr, u32>>,
     /// Per-file unfilled-hole diagnostics, cached across edits. `hole_diagnostics_for`
     /// REPARSES a file, so recomputing it for every tracked file on every keystroke
     /// reparses the whole compilation unit (~130 files on mag) when only the edited
@@ -267,7 +270,7 @@ impl BoneWorkspace {
                 session: Session::new(warm_stdlib(), Vec::new())
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: HashMap::new(),
-                hole_cache: HashMap::new(),
+                freq: None, hole_cache: HashMap::new(),
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
@@ -327,7 +330,7 @@ impl BoneWorkspace {
                 let texts = files.into_iter().collect();
                 self.projects.insert(
                     root,
-                    BoneProject { session, texts, hole_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
                 );
             }
             Err(e) => {
@@ -450,6 +453,7 @@ impl BoneWorkspace {
                 );
             }
             proj.call_through = Some(ct);
+            proj.freq = Some(build_freq_index(proj.session.workspace()));
         }
         let uf_ms = t_uf.elapsed().as_secs_f64() * 1000.0;
 
@@ -1224,6 +1228,25 @@ impl BoneWorkspace {
                 &local_sigs
             }
         };
+        // Frequency prior: workspace ref counts, log-bucketed. Locals ride
+        // the recency rung instead (uniform 0 here).
+        let freq_owned;
+        let freq: &HashMap<ustr::Ustr, u32> = match proj.freq.as_ref() {
+            Some(f) => f,
+            None => {
+                freq_owned = build_freq_index(ws);
+                &freq_owned
+            }
+        };
+        let freq_bucket = |n: u32| -> u8 {
+            if n >= FREQ_HOT {
+                0
+            } else if n >= FREQ_WARM {
+                1
+            } else {
+                2
+            }
+        };
         // Rank EVERY candidate (full accuracy) as a fact-shaped `Cand`, then
         // materialize a CompletionItem only for the post-cap survivors
         // (`materialize_cand`). The rank is a `RankKey` (rank_key.rs) whose
@@ -1359,7 +1382,10 @@ impl BoneWorkspace {
                     method,
                     fine: RankKey::fine(score),
                     prox: prox_of(c.def_file),
-                    freq: 0,
+                    freq: match c.kind {
+                        SymCat::Local | SymCat::Param => 0,
+                        _ => freq_bucket(freq.get(&c.name).copied().unwrap_or(0)),
+                    },
                     rec: c.rec,
                     len: RankKey::len_key(score, name.len()),
                 };

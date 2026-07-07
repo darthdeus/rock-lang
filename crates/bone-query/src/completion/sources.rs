@@ -632,6 +632,44 @@ pub(crate) fn build_fn_sigs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
     sigs
 }
 
+/// Workspace reference counts per NAME (one namespace -- overloads pool,
+/// matching rename semantics): call sites (incl. `?.` method calls), global
+/// reads/writes, struct literals, enum-variant qualifiers, and
+/// type-annotation ctors. Feeds the `freq` prior rung, log-bucketed via
+/// `FREQ_HOT`/`FREQ_WARM`. Cached on `BoneProject` and rebuilt with the
+/// other type caches on non-BodyOnly edits -- a body edit's +-1 ref can't
+/// realistically flip a log bucket.
+pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
+    use bone_semantic::hir::{self, TypeCtor, TypeExpr};
+    let mut counts: HashMap<Ustr, u32> = HashMap::new();
+    for m in ws.modules.iter() {
+        for te in m.ty_arena.values() {
+            if let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = te {
+                *counts.entry(*n).or_insert(0) += 1;
+            }
+        }
+        for body in m.bodies.values() {
+            for te in body.lowered_tys.values() {
+                if let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = te {
+                    *counts.entry(*n).or_insert(0) += 1;
+                }
+            }
+            for (_, expr) in body.expr_arena.iter() {
+                let n = match expr {
+                    hir::Expr::Call { callee: hir::Callee::Unresolved { name, .. }, .. } => *name,
+                    hir::Expr::SafeNavCall { method, .. } => *method,
+                    hir::Expr::Global(n) => *n,
+                    hir::Expr::StructLiteral { name, .. } => *name,
+                    hir::Expr::EnumVariant { enum_name, .. } => *enum_name,
+                    _ => continue,
+                };
+                *counts.entry(n).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 /// True if any overload of `name` declares a return type rendering to one of
 /// `expected`. Used to rank functions returning the wanted type just below
 /// variables of that type.

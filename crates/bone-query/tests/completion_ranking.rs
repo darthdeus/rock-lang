@@ -1136,3 +1136,39 @@ fn rec_digits_order_locals_by_declaration_position() {
     assert_eq!(key_digit(PATH, src, "alpha", REC_DIGIT), '1');
     assert_eq!(key_digit(PATH, src, "dt", REC_DIGIT), '2');
 }
+
+const FREQ_DIGIT: usize = 13;
+
+#[test]
+fn hot_fn_outranks_cold_fn_at_empty_prefix() {
+    // `zz_hot` referenced 16x, `aa_cold` never -- ci-alphabetical order
+    // OPPOSES, so only the frequency rung can flip it (same file, same kind).
+    let mut body = String::new();
+    for _ in 0..16 {
+        body.push_str("  zz_hot()\n");
+    }
+    let src = format!("fn zz_hot() {{}}\nfn aa_cold() {{}}\nfn r() {{\n{body}  $0\n}}\n");
+    let labels = labels_at(&src);
+    assert!(
+        rank_in(&labels, "zz_hot") < rank_in(&labels, "aa_cold"),
+        "hot fn must outrank the never-referenced fn at empty prefix: {:?}...",
+        &labels[..labels.len().min(10)]
+    );
+}
+
+#[test]
+fn freq_digits_bucket_by_reference_count() {
+    let mut body = String::new();
+    for _ in 0..16 {
+        body.push_str("  zz_hot()\n");
+    }
+    for _ in 0..3 {
+        body.push_str("  mm_warm()\n");
+    }
+    let src = format!(
+        "fn zz_hot() {{}}\nfn mm_warm() {{}}\nfn aa_cold() {{}}\nfn r() {{\n{body}  $0\n}}\n"
+    );
+    assert_eq!(key_digit(PATH, &src, "zz_hot", FREQ_DIGIT), '0', "16 refs = hot bucket");
+    assert_eq!(key_digit(PATH, &src, "mm_warm", FREQ_DIGIT), '1', "3 refs = warm bucket");
+    assert_eq!(key_digit(PATH, &src, "aa_cold", FREQ_DIGIT), '2', "0 refs = rare bucket");
+}
