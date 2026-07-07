@@ -71,36 +71,42 @@ fn no_wrong_type_value_above_right_type_in_typed_slot() {
     );
 }
 
-// -- Invariant (SENTINEL): no Values-universe candidate in a TypePos slot. ----
+// -- Invariant: no Values-universe candidate in a TypePos slot. ---------------
 
 #[test]
-fn values_leak_into_param_type_slot_sentinel() {
-    // PINNED BUG: a param TYPE slot (`w: W|`) still offers value-universe
-    // candidates -- the param `w` itself, value-typed globals, and every
-    // fuzzy-matching fn -- because `crate::query::completion` only uses
-    // `expr_position` to switch enum rendering, not to gate the universe.
-    // Correct behavior: a type slot offers types (structs/enums/newtypes/
-    // type synths) only. If this assertion ever fails, the universe gating
-    // landed -- flip both assertions to `!labels.contains(...)` and move
-    // this test out of the sentinel section.
+fn param_type_slot_offers_types_only() {
+    // A param TYPE slot (`w: W|`) offers the type universe only: structs /
+    // bare enums / newtypes / builtins / type synths. Values (the param `w`
+    // itself, value-typed globals) and functions are gated out.
     let labels = labels_at(
         "struct Weapon { dmg: float }\n\
          global wcount: int = 3\n\
          fn wield(x: float) {}\n\
          fn use_weapon(w: W$0) {}\n",
     );
-    assert!(
-        labels.iter().any(|l| l == "wcount"),
-        "PINNED BEHAVIOR (BUG): the value-typed global `wcount` is offered in a \
-         param TYPE slot. If it is now absent, universe gating landed -- flip \
-         this assertion and the one below."
-    );
-    assert!(
-        labels.iter().any(|l| l == "wield"),
-        "PINNED BEHAVIOR (BUG): the fn `wield` is offered in a param TYPE slot. \
-         If it is now absent, universe gating landed -- flip this assertion."
-    );
-    // The type itself is present either way -- this half is the permanent
-    // (non-sentinel) guard.
     assert!(labels.iter().any(|l| l == "Weapon"), "the struct must be offered: {labels:?}");
+    assert!(
+        !labels.iter().any(|l| l == "wcount" || l == "w"),
+        "value-universe candidates must not appear in a param TYPE slot: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l == "wield"),
+        "functions must not appear in a param TYPE slot: {labels:?}"
+    );
+}
+
+#[test]
+fn let_annotation_type_slot_offers_types_only() {
+    // Same gate through a typed-`let` annotation slot (`let x: W| = ..`).
+    let labels = labels_at(
+        "struct Weapon { dmg: float }\n\
+         global wcount: int = 3\n\
+         fn wield(x: float) {}\n\
+         fn r() {\n  let x: w$0 = 0\n}\n",
+    );
+    assert!(labels.iter().any(|l| l == "Weapon"), "the struct must be offered: {labels:?}");
+    assert!(
+        !labels.iter().any(|l| l == "wcount" || l == "wield"),
+        "values/functions must not appear in a let-annotation TYPE slot: {labels:?}"
+    );
 }

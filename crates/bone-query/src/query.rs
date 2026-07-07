@@ -2888,29 +2888,40 @@ pub fn completion(
     let pfx = prefix.as_bytes();
     let matches = |name: &str| -> bool { clean_match(name.as_bytes(), pfx) };
 
+    // A TYPE slot offers the type universe only: structs / bare enums /
+    // newtypes / builtins. Locals, globals, and functions are values -- not
+    // valid in a type position, so they're gated out entirely (misclassified
+    // slots fail open: `expr_position` defaults true when no type node
+    // encloses the cursor).
+
     // Locals/params in scope shadow the global namespace -- emit them first and
     // let the shared `seen` set suppress a same-named global.
-    for (name, kind, ty, ty_id) in locals_in_scope(ws, mid, inf, offset) {
-        if !matches(name.as_str()) {
-            continue;
-        }
-        if seen.insert(name) {
-            out.push(CompletionEntry {
-                name,
-                kind: match kind {
-                    BindingKind::Param => SymCat::Param,
-                    BindingKind::Let => SymCat::Local,
-                },
-                detail: (!ty.is_empty()).then_some(ty),
-                ty: ty_id,
-                takes_params: false,
-                variant_shape: None,
-            });
+    if expr_position {
+        for (name, kind, ty, ty_id) in locals_in_scope(ws, mid, inf, offset) {
+            if !matches(name.as_str()) {
+                continue;
+            }
+            if seen.insert(name) {
+                out.push(CompletionEntry {
+                    name,
+                    kind: match kind {
+                        BindingKind::Param => SymCat::Param,
+                        BindingKind::Let => SymCat::Local,
+                    },
+                    detail: (!ty.is_empty()).then_some(ty),
+                    ty: ty_id,
+                    takes_params: false,
+                    variant_shape: None,
+                });
+            }
         }
     }
 
     for m in ws.modules.iter() {
         for (name, fns) in m.functions_by_name.iter() {
+            if !expr_position {
+                break;
+            }
             if !matches(name.as_str()) {
                 continue;
             }
@@ -2974,6 +2985,9 @@ pub fn completion(
             }
         }
         for (name, gidx) in m.global_by_name.iter() {
+            if !expr_position {
+                break;
+            }
             if matches(name.as_str()) && seen.insert(*name) {
                 // Carry the rendered type in `detail` -- both for the inline
                 // `: type` hint and so arg-position ranking can recognise a
