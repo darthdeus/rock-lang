@@ -680,7 +680,7 @@ deco init on_reload {
 // (e.g. `let r = 0..10; for x in r {}`). In the in-place case
 // `for x in 0..10 {}`, loops.rs strips the `__range(a,b)` marker and emits a
 // native numeric for — this function body is unreachable there. Returns a
-// Vec-shaped `{data, len}` so __rock_iter_vec_simple can iterate the result.
+// Vec-shaped `{data, len}` so the result iterates and indexes like a Vec.
 @nomangle inline(lua) fn __range(start_val: int, end_val: int) -> any = """
     local t = {}
     for i = start_val, end_val - 1 do
@@ -1050,62 +1050,6 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 
 // Range functions
 
-// Closure iterators backing the `enumerate()` overloads below. The `iter`/`next`
-// protocol for user types lives in the desugar arc (docs/iterator-implementation-plan.md);
-// these three predate it and are kept only until enumerate folds into that model.
-@nomangle inline(lua) fn __rock_iter_arena(collection: any) -> any = """
-local iter_index = 0
-return function()
-    while iter_index < vec_len(collection.entries) do
-        local entry_wrapped = vec_get(collection.entries, iter_index)
-        iter_index = iter_index + 1
-        if entry_wrapped and entry_wrapped ~= nil then
-            -- Unwrap the entry (vec_get returns wrapped values)
-            local entry = entry_wrapped
-            if type(entry_wrapped) == "table" and entry_wrapped.__wrapped then
-                entry = entry_wrapped.__wrapped
-            end
-            if entry and entry.is_occupied then
-                local entity = __rock_create_struct("Entity", { _arena = collection, _index = entry.index, _generation = entry.generation })
-                return {entity, entry.data}
-            end
-        end
-    end
-    return nil
-end
-"""
-
-// Simple iteration for Vec - returns just values for "for value in vec" patterns
-// Passthrough: if collection is already a closure iterator, return it as-is.
-// This allows enumerate() to return closures that the for-loop wraps transparently.
-@nomangle inline(lua) fn __rock_iter_vec_simple(collection: any) -> any = """
-if type(collection) == "function" then return collection end
-local iter_index = 0
-return function()
-    if iter_index >= collection.len then
-        return nil
-    end
-    iter_index = iter_index + 1
-    return collection.data[iter_index]
-end
-"""
-
-@nomangle inline(lua) fn __rock_iter_map(collection: any) -> any = """
-local keys = {}
-for k, _ in pairs(collection) do
-    table.insert(keys, k)
-end
-local iter_index = 0
-return function()
-    iter_index = iter_index + 1
-    if iter_index > #keys then
-        return nil
-    end
-    local key = keys[iter_index]
-    return {key, collection[key]}
-end
-"""
-
 // THE Vec constructor. Two roles, one function:
 //   - typed (`-> [T]`): the type checker resolves `[...]` / `[]` literals to a
 //     `vec_new` call so a Vec is `[T]`, not `any`. rock codegen also lowers
@@ -1213,32 +1157,39 @@ fn swap_remove<T>(vec: [T], index: int) -> T? {
     return value
 }
 
-// Generic enumerate combinator — wraps any closure iterator with a 0-based index counter.
-@nomangle inline(lua) fn __rock_enumerate(iter_fn: any) -> any = """
-    local idx = 0
-    return function()
-        local val = iter_fn()
-        if val == nil then return nil end
-        local result = {idx, val}
-        idx = idx + 1
-        return result
-    end
-"""
+// enumerate() materializes an eager [(int, value)] Vec. In for-position
+// (`for (i, x) in enumerate(coll)`) bone keeps the builtin template lowering
+// (`builtin_enumerable`) and never calls these overloads; they serve non-`for`
+// uses (`let it = enumerate(v)`), so the declared Vec type is the real runtime
+// shape. Chains (`v.iter().enumerate()`) resolve to the EnumIter overload.
 
-// enumerate() returns a lazy closure iterator yielding (index, value) pairs.
-// Each overload has a type-specific body — no runtime dispatch needed.
+fn enumerate<T>(collection: [T]) -> [(int, T)] {
+    let out: [(int, T)] = []
+    for i in 0..collection.len {
+        out.push((i, collection[i]))
+    }
+    return out
+}
 
-inline(lua) fn enumerate<T>(collection: [T]) -> [(int, T)] = """
-    return __rock_enumerate(__rock_iter_vec_simple(collection))
-"""
+fn enumerate<T>(collection: Arena<T>) -> [(int, (Entity<T>, T))] {
+    let out: [(int, (Entity<T>, T))] = []
+    let i = 0
+    for (e, v) in collection {
+        out.push((i, (e, v)))
+        i = i + 1
+    }
+    return out
+}
 
-inline(lua) fn enumerate<T>(collection: Arena<T>) -> [(int, (Entity<T>, T))] = """
-    return __rock_enumerate(__rock_iter_arena(collection))
-"""
-
-inline(lua) fn enumerate<K, V>(collection: Map<K, V>) -> [(int, (K, V))] = """
-    return __rock_enumerate(__rock_iter_map(collection))
-"""
+fn enumerate<K, V>(collection: Map<K, V>) -> [(int, (K, V))] {
+    let out: [(int, (K, V))] = []
+    let i = 0
+    for (k, v) in collection {
+        out.push((i, (k, v)))
+        i = i + 1
+    }
+    return out
+}
 
 // NativeBuffer enumerate: for-loop codegen intercepts `for ... in enumerate(buf)`
 // via unwrap_enumerate_expr and emits a direct numeric loop reading buf.ptr[i].
@@ -1286,30 +1237,15 @@ inline(lua) fn enumerate(collection: NativeBufferU32) -> [(int, int)] = """
     return out
 """
 
-// rev() reverses any [T] into a new Vec, iterating in reverse order.
-// enumerate<T>([T]) returns a Lua closure at runtime (not a materialized Vec),
-// so the type() dispatch is live for rev(enumerate(v)).
-inline(lua) fn rev<T>(collection: [T]) -> [T] = """
-    local data, len
-    if type(collection) == "function" then
-        data = {}
-        len = 0
-        while true do
-            local item = collection()
-            if item == nil then break end
-            len = len + 1
-            data[len] = item
-        end
-    else
-        data = collection.data
-        len = collection.len
-    end
-    local result_data = {}
-    for i = len, 1, -1 do
-        result_data[len - i + 1] = data[i]
-    end
-    return { data = result_data, len = len }
-"""
+// rev() reverses any [T] into a new Vec.
+fn rev<T>(collection: [T]) -> [T] {
+    let out: [T] = []
+    let n = collection.len
+    for i in 0..n {
+        out.push(collection[n - 1 - i])
+    }
+    return out
+}
 
 // Null coalesce operator
 inline(lua) fn __op_null_coalesce<T>(a: T?, b: T) -> T = """
