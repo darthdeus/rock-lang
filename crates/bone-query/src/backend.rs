@@ -156,8 +156,9 @@ pub struct MatchArmsFill {
     pub missing: usize,
 }
 
-/// The "fill struct fields" edit: a text replacement that inserts `field: ?`
-/// for each missing required field, and how many fields it adds.
+/// The "fill struct fields" edit: a text replacement that inserts each missing
+/// required field -- shorthand `field` when an in-scope binding matches its name
+/// and type, else a `field: ?` hole -- and how many fields it adds.
 pub struct StructFieldsFill {
     pub range: Range,
     pub new_text: String,
@@ -680,7 +681,15 @@ impl BoneWorkspace {
         let ws = proj.session.workspace();
         let mid = user_module_for_path(ws, path)?;
         let inf = ws.inference(mid)?;
-        let span = gaps::definition(ws, mid, inf, offset)?;
+        // Enum-variant match patterns resolve from the raw AST FIRST (the HIR
+        // pattern node isn't in `node_index`), mirroring the hover path.
+        let pat_def = proj
+            .session
+            .files
+            .get(path)
+            .and_then(|uf| reparse_user_file(uf, path))
+            .and_then(|ast| crate::query::enum_variant_pattern_def(ws, &ast, offset));
+        let span = pat_def.or_else(|| gaps::definition(ws, mid, inf, offset))?;
         self.location_from_span(proj, &span)
     }
 
@@ -807,10 +816,10 @@ impl BoneWorkspace {
     }
 
     /// A "fill struct fields" edit when the cursor is inside a struct literal
-    /// `Name { ... }` missing required fields. Inserts `field: ?` (a Rock
-    /// expression hole) for each missing field, keeping the literal's single- or
-    /// multi-line shape, or None when nothing's missing. See
-    /// `query::struct_fields_fill`.
+    /// `Name { ... }` missing required fields. For each missing field inserts the
+    /// shorthand `field` when an in-scope binding matches its name and type, else
+    /// a `field: ?` hole, keeping the literal's single- or multi-line shape, or
+    /// None when nothing's missing. See `query::struct_fields_fill`.
     pub fn fill_struct_fields(&self, path: &str, pos: Position) -> Option<StructFieldsFill> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -834,7 +843,9 @@ impl BoneWorkspace {
         let last = src.get(..content_end)?.chars().next_back();
         let needs_comma = !matches!(last, Some('{') | Some(','));
 
-        let fields: Vec<String> = missing.iter().map(|n| format!("{n}: ?")).collect();
+        // `struct_fields_fill` already returns ready field snippets -- a bare
+        // `field` when an in-scope binding matches (shorthand), else `field: ?`.
+        let fields: Vec<String> = missing.clone();
 
         let new_text = if multiline {
             // Indent inserted fields like the existing ones (or the brace line +
@@ -947,6 +958,21 @@ impl BoneWorkspace {
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
 
     pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
+        self.completion_with_trigger(path, pos, false)
+    }
+
+    /// Completion, told whether this request was auto-fired by the space trigger
+    /// character. A space trigger on a line whose prefix (up to the cursor) is
+    /// only whitespace is auto-indentation inserted by `<CR>`, not a real
+    /// "space after a token" context (`let x = |`); we suppress it so a bare
+    /// newline doesn't pop the menu (and `<CR><CR>` doesn't accept item 1).
+    /// Manual invokes / identifier typing pass `false` and are never suppressed.
+    pub fn completion_with_trigger(
+        &mut self,
+        path: &str,
+        pos: Position,
+        space_triggered: bool,
+    ) -> Vec<CompletionItem> {
         // `&mut self`: the context-triggered paths (member/enum/struct/field-ref)
         // analyze the completion munge as a speculative Session variant
         // (`with_file_variant`), which mutates and restores the live session.
@@ -960,6 +986,11 @@ impl BoneWorkspace {
         };
         let src = src.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
+        // Space-triggered on an all-whitespace line prefix == `<CR>` auto-indent,
+        // not a real space-after-token context: suppress the popup.
+        if space_triggered && line_prefix_is_blank(src, offset) {
+            return Vec::new();
+        }
         let prefix_raw = ident_prefix(src, offset).to_string();
         let prefix = prefix_raw.to_lowercase();
         // Every early-return path below reports its total under BONE_LSP_PROFILE;
@@ -3364,6 +3395,15 @@ pub fn last_completion_phase_timings() -> CompletionPhaseTimings {
 /// recorded prefix can never diverge from what the ranker matched against.
 pub fn ident_prefix_at(src: &str, pos: Position) -> &str {
     crate::completion::classify::ident_prefix(src, offset_at_line_col(src, pos.line, pos.character))
+}
+
+/// True when the current line from its start up to `offset` is empty or only
+/// spaces/tabs -- a bare/indented newline, where a space trigger is `<CR>`
+/// auto-indent rather than a token-following space.
+fn line_prefix_is_blank(src: &str, offset: usize) -> bool {
+    let line_start = src.get(..offset).and_then(|s| s.rfind('\n')).map_or(0, |i| i + 1);
+    src.get(line_start..offset)
+        .is_some_and(|p| p.chars().all(|c| c == ' ' || c == '\t'))
 }
 
 /// Re-type-check the WHOLE project with the current file replaced by `munged`,

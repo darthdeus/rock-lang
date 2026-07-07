@@ -62,7 +62,17 @@ pub fn definition_at(
                 def_of_name(ws, *name)
             }
 
-            hir::Expr::EnumVariant { enum_name, .. } => def_of_name(ws, *enum_name),
+            // The variant name -> the variant decl; the enum qualifier -> the
+            // enum decl.
+            hir::Expr::EnumVariant { enum_name, variant, variant_span, .. } => {
+                let (vs, ve) = variant_span.offset_range;
+                if vs <= offset && offset < ve {
+                    variant_def_span(ws, Some(*enum_name), *variant)
+                        .or_else(|| def_of_name(ws, *enum_name))
+                } else {
+                    def_of_name(ws, *enum_name)
+                }
+            }
 
             // `recv.field` -> the field's declaration in recv's struct.
             hir::Expr::FieldAccess { base, field } => {
@@ -344,6 +354,27 @@ pub fn hover_at(
                                     return Some((fenced(&sig), span));
                                 }
                             }
+                            // Variant construction (`Enum::Variant(..)`): the
+                            // variant name -> the variant + payload, the enum
+                            // qualifier -> the full enum body.
+                            hir::Expr::EnumVariant {
+                                enum_name,
+                                enum_name_span,
+                                variant,
+                                variant_span,
+                                ..
+                            } => {
+                                let (vs, ve) = variant_span.offset_range;
+                                if vs <= offset && offset < ve {
+                                    if let Some(s) = render_variant(ws, Some(*enum_name), *variant) {
+                                        return Some((s, *variant_span));
+                                    }
+                                } else if enum_name_span.offset_range.0 <= offset && offset < vs {
+                                    if let Some(s) = render_enum_def(ws, *enum_name) {
+                                        return Some((s, *enum_name_span));
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                         let ty = *bi.expr_types.get(e)?;
@@ -405,6 +436,13 @@ pub fn hover_at(
         let (s, e) = en.name_span.offset_range;
         if s <= offset && offset < e {
             return render_enum_def(ws, en.name).map(|d| (d, en.name_span));
+        }
+        // A variant declaration name (`Casting(..)` in the enum body).
+        for v in &en.variants {
+            let (vs, ve) = v.name_span.offset_range;
+            if vs <= offset && offset < ve {
+                return render_variant(ws, Some(en.name), v.name).map(|d| (d, v.name_span));
+            }
         }
     }
     for nt in module.newtypes.values() {
@@ -473,11 +511,47 @@ pub fn fn_signature_hover(
     None
 }
 
-/// `enum Name { V1, V2, ... }`, fenced. None if `name` isn't an enum.
+/// The full `enum Name { V1, V2(T, U), V3 { f: T }, .. }` definition block,
+/// fenced. None if `name` isn't an enum.
 fn render_enum_def(ws: &Workspace, name: Ustr) -> Option<String> {
     let edef = enum_def_by_name(ws, name)?;
-    let variants: Vec<&str> = edef.variants.iter().map(|v| v.name.as_str()).collect();
-    Some(fenced(&format!("enum {} {{ {} }}", name, variants.join(", "))))
+    let mut out = format!("enum {} {{\n", name);
+    for v in &edef.variants {
+        out.push_str(&format!("  {},\n", render_variant_payload(ws, v)));
+    }
+    out.push('}');
+    Some(fenced(&out))
+}
+
+/// A single variant's `Name` / `Name(T, U)` / `Name { f: T }` form (no enum
+/// qualifier), for use inside an enum body or a variant hover.
+fn render_variant_payload(ws: &Workspace, v: &hir::EnumVariantDef) -> String {
+    match &v.payload {
+        hir::VariantPayload::Unit => v.name.to_string(),
+        hir::VariantPayload::Tuple(tys) => {
+            let parts: Vec<String> = tys.iter().map(|t| ws.render(None, *t)).collect();
+            format!("{}({})", v.name, parts.join(", "))
+        }
+        hir::VariantPayload::Record(fields) => {
+            let parts: Vec<String> =
+                fields.iter().map(|f| format!("{}: {}", f.name, ws.render(None, f.ty))).collect();
+            format!("{} {{ {} }}", v.name, parts.join(", "))
+        }
+    }
+}
+
+/// A variant *reference*'s hover: `Enum::Variant(payload)`, fenced. None if the
+/// variant is unknown.
+fn render_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<String> {
+    let edef = enum_def_for_variant(ws, enum_name, variant)?;
+    let v = edef.variants.iter().find(|v| v.name == variant)?;
+    Some(fenced(&format!("{}::{}", edef.name, render_variant_payload(ws, v))))
+}
+
+/// Declaration span (the variant name) of `Enum::Variant`. None if unknown.
+fn variant_def_span(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Option<Span> {
+    let edef = enum_def_for_variant(ws, enum_name, variant)?;
+    edef.variants.iter().find(|v| v.name == variant).map(|v| v.name_span)
 }
 
 /// Hover text for a type annotation (`m: Movable`, `-> Vec2`): a bare nominal
@@ -2769,32 +2843,138 @@ fn pat_variant_hover(
     offset: usize,
 ) -> Option<(String, Span)> {
     use skull_parser::Pattern;
-    let on = |sp: Span| {
-        let (s, e) = sp.offset_range;
-        s <= offset && offset < e
-    };
     match pat {
         Pattern::EnumVariant { enum_name, variant_name, args } => {
-            // Cover the whole `enum_name :: variant_name` range so the `::`
-            // resolves to the enum too (not the enclosing match expr).
-            let full = match enum_name {
-                Some(en) => Span {
-                    offset_range: (en.span.offset_range.0, variant_name.span.offset_range.1),
-                    ..variant_name.span
-                },
-                None => variant_name.span,
-            };
-            if on(full) {
-                let want = enum_name.as_ref().map(|i| i.name);
-                if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
-                    return Some((format!("Type: enum {}", edef.name), full));
-                }
+            if let Some(hit) = variant_head_hover(ws, enum_name, variant_name, offset) {
+                return Some(hit);
             }
             args.as_ref()
                 .and_then(|ps| ps.iter().find_map(|sub| pat_variant_hover(ws, sub, offset)))
         }
+        // An enum record-variant pattern (`E::B { .. }`); a bare struct head
+        // (`Point { .. }`) resolves to `None` here and falls through to the
+        // struct-def hover in `hover_record_pat`.
+        Pattern::Record { enum_name, name: Some(variant_name), fields, .. } => {
+            if let Some(hit) = variant_head_hover(ws, enum_name, variant_name, offset) {
+                return Some(hit);
+            }
+            fields.iter().find_map(|(_, sub)| pat_variant_hover(ws, sub, offset))
+        }
         Pattern::Tuple(ps) | Pattern::Or(ps) => {
             ps.iter().find_map(|sub| pat_variant_hover(ws, sub, offset))
+        }
+        _ => None,
+    }
+}
+
+/// Hover for the head of a variant pattern (`Enum::Variant` / `Variant`): the
+/// variant name renders the variant with its payload, the enum qualifier (incl.
+/// the `::`) renders the full enum body. `None` when `offset` is on neither, or
+/// when the head names a struct rather than a known enum variant.
+fn variant_head_hover(
+    ws: &Workspace,
+    enum_name: &Option<skull_parser::Ident>,
+    variant_name: &skull_parser::Ident,
+    offset: usize,
+) -> Option<(String, Span)> {
+    let on = |sp: Span| {
+        let (s, e) = sp.offset_range;
+        s <= offset && offset < e
+    };
+    let want = enum_name.as_ref().map(|i| i.name);
+    if on(variant_name.span) {
+        if let Some(s) = render_variant(ws, want, variant_name.name) {
+            return Some((s, variant_name.span));
+        }
+    }
+    if let Some(en) = enum_name {
+        // The qualifier plus the `::` up to the variant name.
+        let qual = Span {
+            offset_range: (en.span.offset_range.0, variant_name.span.offset_range.0),
+            ..en.span
+        };
+        if on(qual) {
+            if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
+                if let Some(s) = render_enum_def(ws, edef.name) {
+                    return Some((s, en.span));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Declaration span for the head of a variant pattern: the variant name -> the
+/// variant decl, the enum qualifier -> the enum decl. Mirrors
+/// [`variant_head_hover`].
+fn variant_head_def(
+    ws: &Workspace,
+    enum_name: &Option<skull_parser::Ident>,
+    variant_name: &skull_parser::Ident,
+    offset: usize,
+) -> Option<Span> {
+    let on = |sp: Span| {
+        let (s, e) = sp.offset_range;
+        s <= offset && offset < e
+    };
+    let want = enum_name.as_ref().map(|i| i.name);
+    if on(variant_name.span) {
+        if let Some(sp) = variant_def_span(ws, want, variant_name.name) {
+            return Some(sp);
+        }
+    }
+    if let Some(en) = enum_name {
+        let qual = Span {
+            offset_range: (en.span.offset_range.0, variant_name.span.offset_range.0),
+            ..en.span
+        };
+        if on(qual) {
+            if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
+                return Some(edef.name_span);
+            }
+        }
+    }
+    None
+}
+
+/// Goto-definition for an enum-variant match pattern, resolved from the raw AST
+/// (the HIR pattern node isn't in `node_index`). Mirrors
+/// [`enum_variant_pattern_hover`].
+pub fn enum_variant_pattern_def(
+    ws: &Workspace,
+    ast: &skull_parser::Ast,
+    offset: usize,
+) -> Option<Span> {
+    for ed in ast.exprs.values() {
+        if let skull_parser::ExprKind::Match { arms, .. } = &ed.kind {
+            for arm in arms {
+                if let Some(hit) = pat_variant_def(ws, &arm.pattern, offset) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn pat_variant_def(ws: &Workspace, pat: &skull_parser::Pattern, offset: usize) -> Option<Span> {
+    use skull_parser::Pattern;
+    match pat {
+        Pattern::EnumVariant { enum_name, variant_name, args } => {
+            if let Some(hit) = variant_head_def(ws, enum_name, variant_name, offset) {
+                return Some(hit);
+            }
+            args.as_ref()
+                .and_then(|ps| ps.iter().find_map(|sub| pat_variant_def(ws, sub, offset)))
+        }
+        Pattern::Record { enum_name, name: Some(variant_name), fields, .. } => {
+            if let Some(hit) = variant_head_def(ws, enum_name, variant_name, offset) {
+                return Some(hit);
+            }
+            fields.iter().find_map(|(_, sub)| pat_variant_def(ws, sub, offset))
+        }
+        Pattern::Tuple(ps) | Pattern::Or(ps) => {
+            ps.iter().find_map(|sub| pat_variant_def(ws, sub, offset))
         }
         _ => None,
     }
@@ -3177,10 +3357,12 @@ fn match_missing_variants<'a>(
 
 /// If `offset` is inside a struct literal `Name { ... }` that's missing one or
 /// more REQUIRED fields (declared on the struct, no default, not already given),
-/// return the literal's span and the missing field names in declaration order.
-/// None when the cursor isn't in such a literal, the struct is unknown, or every
-/// required field is already present. Fields WITH a default are not reported --
-/// omitting them is legal, so the literal isn't incomplete without them.
+/// return the literal's span and a ready insertion snippet per missing field in
+/// declaration order: the shorthand `field` when an in-scope binding matches the
+/// field's name and type, else a `field: ?` hole. None when the cursor isn't in
+/// such a literal, the struct is unknown, or every required field is already
+/// present. Fields WITH a default are not reported -- omitting them is legal, so
+/// the literal isn't incomplete without them.
 pub fn struct_fields_fill(
     ws: &Workspace,
     mid: ModuleId,
@@ -3226,11 +3408,29 @@ pub fn struct_fields_fill(
         present.insert(body.struct_lit_field_arena[fidx].name);
     }
 
+    // Each missing field becomes a ready snippet: the shorthand `field` when an
+    // in-scope binding matches its name AND type (the innermost binding of that
+    // name, so a wrong-type shadow doesn't false-match), else a `field: ?` hole.
+    let scope = locals_in_scope(ws, mid, inf, offset);
+    let innermost_ty = |fname: Ustr| -> Option<&str> {
+        scope
+            .iter()
+            .filter(|(name, ..)| *name == fname)
+            .max_by_key(|(.., end)| *end)
+            .map(|(_, _, ty, ..)| ty.as_str())
+    };
+
     let missing: Vec<String> = sdef
         .fields
         .iter()
         .filter(|f| !f.has_default && !present.contains(&f.name))
-        .map(|f| f.name.to_string())
+        .map(|f| {
+            if innermost_ty(f.name) == Some(ws.render(None, f.ty).as_str()) {
+                f.name.to_string() // shorthand: `field`
+            } else {
+                format!("{}: ?", f.name)
+            }
+        })
         .collect();
 
     if missing.is_empty() {

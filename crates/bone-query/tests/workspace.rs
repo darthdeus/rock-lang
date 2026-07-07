@@ -182,10 +182,10 @@ fn hover_on_a_struct_record_pattern_head_shows_the_struct() {
 }
 
 #[test]
-fn hover_on_an_enum_variant_pattern_names_the_enum() {
-    // Hovering `MobKind::Skeleton` in a match arm resolves to the enum, NOT the
-    // match's result type ("string"). The match expr is no longer a catch-all;
-    // the variant pattern is resolved from the raw AST.
+fn hover_on_an_enum_variant_pattern_resolves_variant_and_qualifier() {
+    // In `MobKind::Skeleton`, the VARIANT name hovers the variant, the
+    // QUALIFIER hovers the full enum body -- never the match's result type
+    // ("string"). The variant pattern is resolved from the raw AST.
     let src = "enum MobKind { Skeleton, Zombie }\nfn name(k: MobKind) -> string {\n  match k {\n    MobKind::Skeleton => \"s\"\n    MobKind::Zombie => \"z\"\n  }\n}\n";
     let bone = fresh(src);
     let text = |pos| match bone.hover(PATH, pos).map(|h| h.contents) {
@@ -194,10 +194,11 @@ fn hover_on_an_enum_variant_pattern_names_the_enum() {
     };
     // line 3: `    MobKind::Skeleton => "s"` -- qualifier col 4, variant col 13.
     let variant = text(Position::new(3, 16));
-    assert!(variant.contains("enum MobKind"), "variant pattern -> enum: {variant:?}");
+    assert!(variant.contains("MobKind::Skeleton"), "variant -> variant: {variant:?}");
     assert!(!variant.contains("string"), "must not be the match result type: {variant:?}");
     let qualifier = text(Position::new(3, 5));
     assert!(qualifier.contains("enum MobKind"), "enum qualifier -> enum: {qualifier:?}");
+    assert!(qualifier.contains("Skeleton") && qualifier.contains("Zombie"), "qualifier -> full body: {qualifier:?}");
 }
 
 #[test]
