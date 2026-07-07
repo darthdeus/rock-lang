@@ -1843,6 +1843,72 @@ fn match_arm_head_promotes_with_unclosed_braces_at_eof() {
     );
 }
 
+// -- ForIn: the `for x in |` slot ranks iterable-typed candidates first. -----
+
+#[test]
+fn for_in_slot_ranks_iterable_global_first() {
+    // `MOBS: [Mob]` is iterable; the int global and the fn share the prefix
+    // but aren't -- type relevance dominates band (mob_spawn is a case-exact
+    // prefix match, MOBS only ci).
+    let src = "struct Mob { hp: int }\n\
+               global MOBS: [Mob] = []\n\
+               global MOB_COUNT: int = 0\n\
+               fn mob_spawn() {}\n\
+               fn r() {\n  for m in mo\n}\n";
+    let l = ordered_labels(src, 5, 13);
+    assert!(
+        rank_of(&l, "MOBS") < rank_of(&l, "MOB_COUNT"),
+        "iterable global must outrank the int global in a for-in slot: {l:?}"
+    );
+    assert!(
+        rank_of(&l, "MOBS") < rank_of(&l, "mob_spawn"),
+        "iterable global must outrank the case-exact-prefix fn in a for-in slot: {l:?}"
+    );
+}
+
+#[test]
+fn for_in_tuple_pattern_ranks_map_local_first() {
+    // Tuple binding (`for (k, v) in`) classifies too; a Map local is the
+    // iterable, the int local isn't. The int local sorts alphabetically
+    // FIRST (`apples` < `scores`), so only the iterable rung can flip it.
+    let src = "fn r() {\n  let scores: Map<string, int> = map_new()\n  let apples = 0\n  for (k, v) in \n}\n";
+    let l = ordered_labels(src, 3, 16);
+    assert!(
+        rank_of(&l, "scores") < rank_of(&l, "apples"),
+        "Map local must outrank the int local in a for-in slot: {l:?}"
+    );
+}
+
+#[test]
+fn for_in_slot_ranks_iterable_returning_fn_on_the_fn_rung() {
+    // A fn RETURNING an iterable rides rung 1: above wrong-type values
+    // (rung 2), below direct iterable values (rung 0).
+    let src = "struct Mob { hp: int }\n\
+               global MOBS: [Mob] = []\n\
+               fn all_mobs() -> [Mob] { return MOBS }\n\
+               fn r(alpha: int) {\n  for m in al\n}\n";
+    let l = ordered_labels(src, 4, 13);
+    assert!(
+        rank_of(&l, "all_mobs") < rank_of(&l, "alpha"),
+        "iterable-returning fn must outrank the wrong-type param in a for-in slot: {l:?}"
+    );
+}
+
+#[test]
+fn value_slot_control_no_iterable_promotion() {
+    // Control: in a plain value slot the normal ladder holds -- the
+    // case-exact-prefix fn beats the ci-prefix iterable global.
+    let src = "struct Mob { hp: int }\n\
+               global MOBS: [Mob] = []\n\
+               fn mob_spawn() {}\n\
+               fn r() {\n  let x = mo\n}\n";
+    let l = ordered_labels(src, 4, 12);
+    assert!(
+        rank_of(&l, "mob_spawn") < rank_of(&l, "MOBS"),
+        "no iterable promotion outside a for-in slot: {l:?}"
+    );
+}
+
 #[test]
 fn match_arm_body_is_a_value_slot_no_variant_promotion() {
     // Control: AFTER the `=>` the slot is a value expression -- the normal

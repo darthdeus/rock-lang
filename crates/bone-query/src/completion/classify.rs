@@ -389,6 +389,62 @@ pub(crate) fn match_scrutinee_end(b: &[u8], from: usize) -> Option<usize> {
     None
 }
 
+/// True when the cursor's ident sits in the ITERABLE slot of a `for` loop
+/// (`for x in |`, `for (k, v) in |`): preceded by the `in` keyword, a
+/// binding pattern (plain ident or `(..)` tuple), and the `for` keyword.
+/// Pure byte heuristic, same family as `co_fn_return_slot`.
+pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
+    let b = src.as_bytes();
+    let mut p = offset.min(b.len());
+    while p > 0 && is_ident_byte(b[p - 1]) {
+        p -= 1;
+    }
+    let skip_ws = |p: &mut usize| while *p > 0 && b[*p - 1].is_ascii_whitespace() { *p -= 1; };
+    skip_ws(&mut p);
+    let in_end = p;
+    while p > 0 && is_ident_byte(b[p - 1]) {
+        p -= 1;
+    }
+    if &b[p..in_end] != b"in" {
+        return false;
+    }
+    skip_ws(&mut p);
+    if p > 0 && b[p - 1] == b')' {
+        // `(a, b)` tuple binding: balance back to its `(`
+        let mut depth = 0i32;
+        loop {
+            if p == 0 {
+                return false;
+            }
+            p -= 1;
+            match b[p] {
+                b')' => depth += 1,
+                b'(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        let e = p;
+        while p > 0 && is_ident_byte(b[p - 1]) {
+            p -= 1;
+        }
+        if p == e {
+            return false;
+        }
+    }
+    skip_ws(&mut p);
+    let for_end = p;
+    while p > 0 && is_ident_byte(b[p - 1]) {
+        p -= 1;
+    }
+    &b[p..for_end] == b"for"
+}
+
 /// The cursor's completion classification, computed ONCE per request by
 /// [`classify`] -- every context consultation lives there, so a new syntax
 /// case is one field + one consultation + one dispatch arm
@@ -438,6 +494,8 @@ pub(crate) struct CompletionCx {
     /// scrutinee (its last byte). The slot expects the scrutinee's enum --
     /// variants rank first and patterns bind (no payload template).
     pub(crate) pattern_scrutinee: Option<usize>,
+    /// `for x in |` iterable slot -- iterable-typed candidates rank first.
+    pub(crate) for_in: bool,
 }
 
 /// Classify the cursor for completion: parse the munge ladder once, consult
@@ -467,6 +525,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
         named_arg: cx.and_then(|c| c.named_arg_slot()),
         coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
         pattern_scrutinee: match_arm_scrutinee(src, offset),
+        for_in: for_in_iterable_slot(src, offset),
         arg_call,
         expr_position,
         ast,

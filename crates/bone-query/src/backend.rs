@@ -1134,6 +1134,18 @@ impl BoneWorkspace {
         // After a `yield`/`yield*`, coroutine-returning fns rank first (the
         // `yield* frame(1)` delegation pattern).
         let after_yield = cx.after_yield;
+        // ForIn: `for x in |` wants an iterable. Local candidate TyIds may
+        // index the cursor body's BodyInference, so resolve it once for the
+        // `is_iterable_ty` checks in the ranking loop.
+        let for_in = cx.for_in;
+        let cursor_bi = for_in
+            .then(|| {
+                ws.modules
+                    .get(mid.index())
+                    .and_then(|m| m.body_at(offset))
+                    .and_then(|o| inf.per_fn.get(&o))
+            })
+            .flatten();
         // Param-name + fn-prefix type heuristic (param TYPE slot only): a param
         // named `e`/`entity` suggests the (generic) `Entity` type; the enclosing
         // fn's name prefix picks the payload (`mob_attack_co` -> `Mob` ->
@@ -1235,6 +1247,25 @@ impl BoneWorkspace {
                         SymCat::Variant if c.detail.as_deref() == Some(pe) => 0,
                         _ => 2,
                     }
+                } else if for_in {
+                    // ForIn slot: an ITERABLE value (bone's `for_elem_ty`
+                    // judgment, mirrored in `is_iterable_ty`) rides rung 0,
+                    // a fn returning one rung 1 -- the expected-type ladder
+                    // with a type PREDICATE instead of a single slot type.
+                    match c.kind {
+                        SymCat::Local | SymCat::Param | SymCat::Global
+                            if c.ty.is_some_and(|t| is_iterable_ty(ws, cursor_bi, t)) =>
+                        {
+                            0
+                        }
+                        SymCat::Function
+                            if fn_unique_return_ty(ws, c.name.as_str())
+                                .is_some_and(|t| is_iterable_ty(ws, None, t)) =>
+                        {
+                            1
+                        }
+                        _ => 2,
+                    }
                 } else if let Some(exp) = expected.as_mut() {
                     match c.kind {
                         // A local/param/global whose type COERCES into the
@@ -1265,10 +1296,10 @@ impl BoneWorkspace {
                 let name = c.name.as_str();
                 // Smart-case leading rank, NON-arg path only: measure against the
                 // variant NAME (the user types it; `Enum::` uppercasing would
-                // skew it). In arg position (and a pattern slot) the expected-
-                // TYPE bucket must stay dominant over case, so leave case
-                // neutral (0) there.
-                let case_rank = if !has_expected && pattern_enum.is_none() {
+                // skew it). In arg position (and the pattern / for-in slots)
+                // the expected-TYPE bucket must stay dominant over case, so
+                // leave case neutral (0) there.
+                let case_rank = if !has_expected && pattern_enum.is_none() && !for_in {
                     let case_target =
                         if c.kind == SymCat::Variant { name.rsplit("::").next().unwrap_or(name) } else { name };
                     case_mismatch_rank(case_target.as_bytes(), q_raw)
@@ -3157,6 +3188,30 @@ pub(crate) fn bind_generic(
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// Structural mirror of bone-inference's `for_elem_ty` ITERABLE judgment
+/// (keep the shape list in sync): `[T]`, `Map<K, V>`, `Arena<T>`, and the
+/// native array/buffer nominals. Drives the ForIn completion rung.
+pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bool {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    match ty_of(ws, body, ty) {
+        TypeExpr::App { ctor: TypeCtor::Array, .. }
+        | TypeExpr::App { ctor: TypeCtor::Map, .. } => true,
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
+            n.as_str(),
+            "Arena"
+                | "NativeArray"
+                | "NativeBuffer"
+                | "NativeBufferU8"
+                | "NativeBufferI8"
+                | "NativeBufferU16"
+                | "NativeBufferI16"
+                | "NativeBufferU32"
+                | "NativeBufferI32"
+        ),
+        _ => false,
     }
 }
 
