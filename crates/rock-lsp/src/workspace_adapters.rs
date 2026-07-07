@@ -143,7 +143,10 @@ pub fn do_completion_workspace(
     let _span = tracing::debug_span!("do_completion_workspace").entered();
     let file_path = get_file_path_from_params(&params.text_document_position)?;
     let pos = params.text_document_position.position;
-    let items = workspace.bone.completion(&file_path, pos);
+    let mut items = workspace.bone.completion(&file_path, pos);
+    // Corpus recorder (ROCK_LSP_RECORD): snapshot the request + tag items
+    // with the accept command. No-op when recording is off.
+    crate::completion_record::stash_and_tag(&workspace.bone, &file_path, pos, &mut items);
     // Both the FILTERING and the match-quality RANKING are prefix-sensitive,
     // so the result for an empty/short prefix is not a superset the client
     // can correctly re-filter: the popup-open response (often empty-prefix,

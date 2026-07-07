@@ -1,4 +1,5 @@
 mod bone_completion_incomplete;
+mod bone_completion_record;
 mod bone_generate_function_action;
 mod bone_match_arms_action;
 mod bone_semantic_tokens;

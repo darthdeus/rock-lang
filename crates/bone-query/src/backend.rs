@@ -566,6 +566,17 @@ impl BoneWorkspace {
         }
     }
 
+    /// Current text of `path` as this workspace sees it -- the editor-buffer
+    /// view the last `update` applied, not the disk copy. Recorder/debug
+    /// surface (the completion corpus records the exact text it ranked).
+    pub fn file_text(&self, path: &str) -> Option<&str> {
+        let path_c = self.canon(path);
+        self.project(path_c.as_str())?
+            .texts
+            .get(path_c.as_str())
+            .map(|s| s.as_str())
+    }
+
     // -- Feature: hover (implemented via bone_semantic::query::type_at) ---------------
 
     pub fn hover(&self, path: &str, pos: Position) -> Option<Hover> {
@@ -3333,9 +3344,17 @@ thread_local! {
 }
 
 /// Read the phase timings recorded by the most recent `completion()` call ON
-/// THIS THREAD. For the in-process profiler (`rock iter-completion`) only.
+/// THIS THREAD. For the in-process profiler (`rock iter-completion`) and the
+/// corpus recorder.
 pub fn last_completion_phase_timings() -> CompletionPhaseTimings {
     LAST_COMPLETION_PHASES.with(|c| c.get())
+}
+
+/// The identifier prefix ending at `pos` -- THE prefix definition completion's
+/// own filter uses (`ident_prefix`), exposed for the corpus recorder so the
+/// recorded prefix can never diverge from what the ranker matched against.
+pub fn ident_prefix_at(src: &str, pos: Position) -> &str {
+    crate::completion::classify::ident_prefix(src, offset_at_line_col(src, pos.line, pos.character))
 }
 
 /// Re-type-check the WHOLE project with the current file replaced by `munged`,
