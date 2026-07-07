@@ -48,6 +48,31 @@ fn check_invariants(src: &str, line: u32, ch: u32, items: &[CompletionItem]) {
 }
 
 #[test]
+fn struct_literal_required_fields_rank_above_defaulted() {
+    // In `Cfg { |` the fields WITHOUT defaults (`name`, `id`) must rank
+    // above the defaulted ones (`scale`, `volume`) -- the literal is
+    // incomplete until the required fields are supplied. Within each tier,
+    // declaration order holds.
+    let src = "struct Cfg { scale: float = 1.0, name: string, volume: float = 0.5, id: int }\n\
+               fn r() {\n  let c = Cfg { \n}\n";
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let items = bone.completion(PATH, Position::new(2, 16));
+    check_invariants(src, 2, 16, &items);
+    let ordered: Vec<String> = items.into_iter().map(|c| c.label).collect();
+    let pos = |l: &str| ordered.iter().position(|x| x == l);
+    let (name, id) = (pos("name: string"), pos("id: int"));
+    let (scale, volume) = (pos("scale: float"), pos("volume: float"));
+    assert!(name.is_some() && id.is_some() && scale.is_some() && volume.is_some(), "{ordered:?}");
+    assert!(
+        name < scale && name < volume && id < scale && id < volume,
+        "required fields must rank above defaulted ones: {ordered:?}"
+    );
+    assert!(name < id, "declaration order within the required tier: {ordered:?}");
+    assert!(scale < volume, "declaration order within the defaulted tier: {ordered:?}");
+}
+
+#[test]
 fn member_ufcs_overloads_dedup_to_one_item() {
     // Two overloads of `rotate` on the receiver struct must surface as ONE
     // member item (same label, same insert -- the duplicate is popup noise;

@@ -741,7 +741,7 @@ pub(crate) fn enum_record_field_completions(
                 label: format!("{name}: {ty}"),
                 kind: Some(CompletionItemKind::FIELD),
                 detail: Some(ty),
-                sort_text: Some(closed_set_sort_text(&name, prefix.as_bytes(), i)),
+                sort_text: Some(closed_set_sort_text(&name, prefix.as_bytes(), 0, i)),
                 insert_text: Some(name),
                 ..Default::default()
             })
@@ -787,13 +787,21 @@ pub(crate) fn struct_literal_field_completions(
     let mut items: Vec<CompletionItem> = fields
         .into_iter()
         .enumerate()
-        .filter(|(_, (n, _))| !present.contains(n))
-        .filter(|(_, (n, _))| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
-        .map(|(i, (n, ty))| CompletionItem {
+        .filter(|(_, (n, _, _))| !present.contains(n))
+        .filter(|(_, (n, _, _))| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
+        .map(|(i, (n, ty, has_default))| CompletionItem {
             label: format!("{n}: {ty}"),
             kind: Some(CompletionItemKind::FIELD),
             detail: Some(ty),
-            sort_text: Some(closed_set_sort_text(&n, prefix.as_bytes(), i)),
+            // Required fields (no default) tier above defaulted ones -- the
+            // literal is incomplete until they're supplied; declaration
+            // order within each tier.
+            sort_text: Some(closed_set_sort_text(
+                &n,
+                prefix.as_bytes(),
+                u8::from(has_default),
+                i,
+            )),
             insert_text: Some(n),
             ..Default::default()
         })
@@ -865,7 +873,7 @@ pub(crate) fn enum_qualified_completions(
                 _ => (None, None),
             };
             CompletionItem {
-                sort_text: Some(closed_set_sort_text(&v, prefix.as_bytes(), i)),
+                sort_text: Some(closed_set_sort_text(&v, prefix.as_bytes(), 0, i)),
                 label: v,
                 kind: Some(CompletionItemKind::ENUM_MEMBER),
                 filter_text: force_filter.clone(),

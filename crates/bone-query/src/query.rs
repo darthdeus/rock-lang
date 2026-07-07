@@ -2365,14 +2365,15 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
     out
 }
 
-/// Fields `(name, rendered_type)` of struct `name`, or empty if it isn't a
-/// struct. Drives struct-literal field completion (`Name { <field> }`).
-pub fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, String)> {
+/// Fields `(name, rendered_type, has_default)` of struct `name`, or empty if
+/// it isn't a struct. Drives struct-literal field completion
+/// (`Name { <field> }`); `has_default` ranks required fields first there.
+pub fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, String, bool)> {
     match struct_def_by_name(ws, Ustr::from(name)) {
         Some(sdef) => sdef
             .fields
             .iter()
-            .map(|f| (f.name.to_string(), ws.render(None, f.ty)))
+            .map(|f| (f.name.to_string(), ws.render(None, f.ty), f.has_default))
             .collect(),
         None => Vec::new(),
     }

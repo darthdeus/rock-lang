@@ -260,14 +260,17 @@ pub(crate) fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], d
 
 /// sort_text for a CLOSED-SET completion (struct-literal / record-variant
 /// field names, enum-qualified variants): match band + fine against the
-/// typed prefix lead, and the DECLARATION index rides `dist` -- for a closed
-/// set the author's declaration order is the browse order, so it breaks
-/// ties instead of the alphabetical name suffix.
-pub(crate) fn closed_set_sort_text(name: &str, prefix: &[u8], decl_idx: usize) -> String {
+/// typed prefix lead, `tier` rides `type_rank` (struct-literal REQUIRED
+/// fields tier above defaulted ones; 0 where the set has no tiers), and the
+/// DECLARATION index rides `dist` -- for a closed set the author's
+/// declaration order is the browse order, so it breaks ties instead of the
+/// alphabetical name suffix.
+pub(crate) fn closed_set_sort_text(name: &str, prefix: &[u8], tier: u8, decl_idx: usize) -> String {
     let score = fuzzy_score(name.as_bytes(), prefix);
     let (exact, band) = match_band_exact(name, prefix, prefix);
     RankKey {
         exact,
+        type_rank: tier,
         band,
         dist: decl_idx.min(99) as u16,
         fine: RankKey::fine(score),
