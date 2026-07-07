@@ -733,18 +733,29 @@ pub fn references<'t>(
         return plain(enum_references(ws, name));
     }
 
+    if let Some(name) = newtype_decl_at(ws, mid, offset) {
+        return plain(newtype_references(ws, name, text_of));
+    }
+
     if let Some(name) = struct_at(ws, mid, inf, offset) {
         // `struct_at` matches any Nominal annotation ctor, including enums
-        // (`c: Color`) -- route those to the enum walk so the declaration and
-        // `Color::` qualifiers rename too.
+        // (`c: Color`) and newtypes (`id: UserId`) -- route those to their
+        // own walks so declarations and ctor/qualifier sites rename too.
         if enum_def_by_name(ws, name).is_some() {
             return plain(enum_references(ws, name));
+        }
+        if newtype_declared(ws, name) {
+            return plain(newtype_references(ws, name, text_of));
         }
         return plain(struct_references(ws, name));
     }
 
     if let Some((sname, field)) = struct_field_at(ws, mid, inf, offset) {
         return field_references(ws, sname, field);
+    }
+
+    if let Some((ename, variant, field)) = variant_field_at(ws, mid, offset) {
+        return variant_field_references(ws, ename, variant, field);
     }
 
     if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
@@ -758,7 +769,311 @@ pub fn references<'t>(
         return plain(global_references(ws, name));
     }
 
+    if let Some(name) = decorator_at(ws, mid, offset, text_of) {
+        return plain(decorator_references(ws, name, text_of));
+    }
+
     Vec::new()
+}
+
+fn newtype_declared(ws: &Workspace, name: Ustr) -> bool {
+    ws.modules.iter().any(|m| m.newtypes_by_name.contains_key(&name))
+}
+
+/// The newtype whose DECLARATION name the cursor is on (`newtype UserId(int)`).
+fn newtype_decl_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
+    let module = ws.modules.get(mid.index())?;
+    module
+        .newtypes
+        .values()
+        .find(|nt| span_contains(&nt.name_span, offset))
+        .map(|nt| nt.name)
+}
+
+/// Every reference to newtype `name`: the declaration name, `Nominal`
+/// type-annotation ctors, and constructor calls (`UserId(42)`). The newtype
+/// ITEM registers a self-ty node whose span starts at the `newtype` keyword,
+/// so annotation sites are text-verified before pushing -- a clipped span
+/// that isn't literally the name is dropped (no edit beats a wrong edit).
+fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -> Vec<Span> {
+    let len = name.as_str().len();
+    let mut out: Vec<Span> = Vec::new();
+    let mut push = |sp: Span| {
+        if !out
+            .iter()
+            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+        {
+            out.push(sp);
+        }
+    };
+
+    for m in ws.modules.iter() {
+        if let Some(idx) = m.newtypes_by_name.get(&name) {
+            push(m.newtypes[*idx].name_span);
+        }
+        let text = text_of(m.file.as_str());
+        for body in m.bodies.values() {
+            for_each_nominal_annotation(ws, m.file, body, name, &mut |sp| {
+                let clipped = leading_name_span(sp, len);
+                let verified = text.is_none_or(|t| {
+                    t.get(clipped.offset_range.0..clipped.offset_range.1)
+                        == Some(name.as_str())
+                });
+                if verified {
+                    push(clipped);
+                }
+            });
+            for (_, expr) in body.expr_arena.iter() {
+                if let hir::Expr::Call {
+                    callee: hir::Callee::Unresolved { name: cn, name_span },
+                    ..
+                } = expr
+                {
+                    if *cn == name {
+                        push(*name_span);
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// The `(enum, variant, field)` of the record-variant payload field the
+/// cursor is on: the field's DECLARATION (`Potion { strength: int }`) or an
+/// explicit field name in a record-variant LITERAL. Shorthand pattern tokens
+/// resolve as bindings first (`local_references`), same as struct patterns.
+fn variant_field_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<(Ustr, Ustr, Ustr)> {
+    let module = ws.modules.get(mid.index())?;
+
+    for en in module.enums.values() {
+        for v in &en.variants {
+            if let hir::VariantPayload::Record(fields) = &v.payload {
+                for f in fields {
+                    if span_contains(&f.span, offset) {
+                        return Some((en.name, v.name, f.name));
+                    }
+                }
+            }
+        }
+    }
+
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    for (_, expr) in body.expr_arena.iter() {
+        if let hir::Expr::EnumVariant {
+            enum_name,
+            variant,
+            args: hir::VariantArgs::Record(fields),
+            ..
+        } = expr
+        {
+            for fidx in *fields {
+                let f = &body.struct_lit_field_arena[fidx];
+                if span_contains(&f.name_span, offset) {
+                    return Some((*enum_name, *variant, f.name));
+                }
+            }
+        }
+    }
+
+    for pat in body.pattern_arena.values() {
+        if let hir::Pattern::Record {
+            enum_name: Some(en),
+            name: Some(v),
+            fields,
+            ..
+        } = pat
+        {
+            for fidx in *fields {
+                let f = &body.record_pat_field_arena[fidx];
+                if span_contains(&f.name_span, offset) {
+                    return Some((*en, *v, f.name));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Every reference to record-variant payload field `ename::variant.field`:
+/// the declaration, literal field names, and record-pattern field names --
+/// shorthand sites expand keeping the binding, mirroring struct fields.
+fn variant_field_references(
+    ws: &Workspace,
+    ename: Ustr,
+    variant: Ustr,
+    field: Ustr,
+) -> Vec<RefSite> {
+    let mut out: Vec<RefSite> = Vec::new();
+    let mut push = |site: RefSite| {
+        if !out
+            .iter()
+            .any(|s| s.span.offset_range == site.span.offset_range && s.span.file == site.span.file)
+        {
+            out.push(site);
+        }
+    };
+
+    for m in ws.modules.iter() {
+        if let Some(idx) = m.enums_by_name.get(&ename) {
+            if let Some(v) = m.enums[*idx].variants.iter().find(|v| v.name == variant) {
+                if let hir::VariantPayload::Record(fields) = &v.payload {
+                    if let Some(f) = fields.iter().find(|f| f.name == field) {
+                        push(RefSite::plain(f.span));
+                    }
+                }
+            }
+        }
+
+        for body in m.bodies.values() {
+            for (_, expr) in body.expr_arena.iter() {
+                if let hir::Expr::EnumVariant {
+                    enum_name,
+                    variant: v,
+                    args: hir::VariantArgs::Record(fields),
+                    ..
+                } = expr
+                {
+                    if !(*enum_name == ename && *v == variant) {
+                        continue;
+                    }
+                    for fidx in *fields {
+                        let f = &body.struct_lit_field_arena[fidx];
+                        if f.name == field {
+                            let is_shorthand = body
+                                .expr_spans
+                                .get(f.value)
+                                .is_some_and(|vs| vs.offset_range == f.name_span.offset_range);
+                            push(RefSite {
+                                span: f.name_span,
+                                shorthand: is_shorthand.then_some(Shorthand::KeepBinding(f.name)),
+                            });
+                        }
+                    }
+                }
+            }
+
+            for pat in body.pattern_arena.values() {
+                if let hir::Pattern::Record {
+                    enum_name: Some(en),
+                    name: Some(v),
+                    fields,
+                    ..
+                } = pat
+                {
+                    if !(*en == ename && *v == variant) {
+                        continue;
+                    }
+                    for fidx in *fields {
+                        let f = &body.record_pat_field_arena[fidx];
+                        if f.name == field {
+                            let is_shorthand = match body.pattern_arena[f.pat] {
+                                hir::Pattern::Bind(b) => body
+                                    .binding_spans
+                                    .get(b)
+                                    .is_some_and(|bs| bs.offset_range == f.name_span.offset_range),
+                                _ => false,
+                            };
+                            push(RefSite {
+                                span: f.name_span,
+                                shorthand: is_shorthand.then_some(Shorthand::KeepBinding(f.name)),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// The DECLARED decorator the cursor is on: its name token inside the
+/// `deco name(..)` declaration (located in text -- `DecoratorDef` keeps no
+/// name span), or an `@name` application on a fn (gated on a declaration
+/// existing, so builtin annotations like `@test` never resolve here).
+fn decorator_at<'t>(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+    text_of: TextOf<'_, 't>,
+) -> Option<Ustr> {
+    let module = ws.modules.get(mid.index())?;
+
+    for d in module.decorators.values() {
+        let Some(text) = text_of(d.span.file.as_str()) else { continue };
+        if let Some(sp) = decl_name_span_in(
+            text,
+            d.span.offset_range.0,
+            d.span.offset_range.1,
+            d.name.as_str(),
+            &d.span,
+        ) {
+            if span_contains(&sp, offset) {
+                return Some(d.name);
+            }
+        }
+    }
+
+    for f in module.functions.values() {
+        for a in &f.annotations {
+            if span_contains(&a.name.span, offset) && decorator_declared(ws, a.name.name) {
+                return Some(a.name.name);
+            }
+        }
+    }
+
+    None
+}
+
+fn decorator_declared(ws: &Workspace, name: Ustr) -> bool {
+    ws.modules
+        .iter()
+        .any(|m| m.decorators.values().any(|d| d.name == name))
+}
+
+/// Every reference to decorator `name`: each `deco` declaration's name token
+/// (text-located) and every `@name` application on a fn.
+fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    let mut push = |sp: Span| {
+        if !out
+            .iter()
+            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+        {
+            out.push(sp);
+        }
+    };
+
+    for m in ws.modules.iter() {
+        for d in m.decorators.values() {
+            if d.name != name {
+                continue;
+            }
+            let Some(text) = text_of(d.span.file.as_str()) else { continue };
+            if let Some(sp) = decl_name_span_in(
+                text,
+                d.span.offset_range.0,
+                d.span.offset_range.1,
+                name.as_str(),
+                &d.span,
+            ) {
+                push(sp);
+            }
+        }
+        for f in m.functions.values() {
+            for a in &f.annotations {
+                if a.name.name == name {
+                    push(a.name.span);
+                }
+            }
+        }
+    }
+
+    out
 }
 
 /// The DECLARED global the cursor is on: its `global` declaration name, or a
@@ -1544,6 +1859,13 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
     let body = module.bodies.get(&owner)?;
 
     let b = binding_at(body, offset)?;
+    // The decorator's implicit `target` binding is compiler-synthesized; its
+    // span covers the decl head, so a cursor on `deco name {` would resolve
+    // here and clip a bogus `target`-length span out of the declaration. Not
+    // renameable -- fall through (the decorator arm owns the decl name).
+    if body.deco_target == Some(b) {
+        return None;
+    }
 
     let name = body.binding_arena[b].name;
     let name_len = name.as_str().len();
@@ -1721,8 +2043,26 @@ fn named_label_before(text: &str, value_start: usize, label: &str, like: &Span) 
 }
 
 /// The first whole-word occurrence of `ident` inside `text[start..end)`, as a
-/// span cloned from `like`. `None` when absent (fail open).
+/// span cloned from `like`. `None` when absent (fail open). With
+/// `before_open`, only an occurrence whose next non-ws byte is `(` or `{`
+/// matches -- the decl-NAME position in `deco [init] name[(..)] { .. }`
+/// (`deco init init {` needs it: the first `init` is the contextual kind).
 fn ident_span_in(text: &str, start: usize, end: usize, ident: &str, like: &Span) -> Option<Span> {
+    ident_span_where(text, start, end, ident, like, false)
+}
+
+fn decl_name_span_in(text: &str, start: usize, end: usize, ident: &str, like: &Span) -> Option<Span> {
+    ident_span_where(text, start, end, ident, like, true)
+}
+
+fn ident_span_where(
+    text: &str,
+    start: usize,
+    end: usize,
+    ident: &str,
+    like: &Span,
+    before_open: bool,
+) -> Option<Span> {
     let hay = text.get(start..end.min(text.len()))?;
     let hb = hay.as_bytes();
     let is_ident = |c: u8| c == b'_' || c.is_ascii_alphanumeric();
@@ -1732,7 +2072,14 @@ fn ident_span_in(text: &str, start: usize, end: usize, ident: &str, like: &Span)
         let after = abs + ident.len();
         let before_ok = abs == 0 || !is_ident(hb[abs - 1]);
         let after_ok = after >= hb.len() || !is_ident(hb[after]);
-        if before_ok && after_ok {
+        let open_ok = !before_open || {
+            let mut i = after;
+            while i < hb.len() && hb[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            i < hb.len() && (hb[i] == b'(' || hb[i] == b'{')
+        };
+        if before_ok && after_ok && open_ok {
             return Some(Span {
                 offset_range: (start + abs, start + after),
                 ..*like
