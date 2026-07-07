@@ -9,11 +9,9 @@ const PATH: &str = "/tmp/rock_lsp_bone_completion_ctx.rock";
 fn labels(src: &str, line: u32, ch: u32) -> Vec<String> {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    let mut out: Vec<String> = bone
-        .completion(PATH, Position::new(line, ch))
-        .into_iter()
-        .map(|c| c.label)
-        .collect();
+    let items = bone.completion(PATH, Position::new(line, ch));
+    check_invariants(src, line, ch, &items);
+    let mut out: Vec<String> = items.into_iter().map(|c| c.label).collect();
     out.sort();
     out
 }
@@ -22,10 +20,69 @@ fn labels(src: &str, line: u32, ch: u32) -> Vec<String> {
 fn item(src: &str, line: u32, ch: u32, label: &str) -> CompletionItem {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
-    bone.completion(PATH, Position::new(line, ch))
+    let items = bone.completion(PATH, Position::new(line, ch));
+    check_invariants(src, line, ch, &items);
+    items
         .into_iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("no completion `{label}` at {line}:{ch}"))
+}
+
+/// Every context fixture doubles as an invariant-suite position
+/// (docs/completion-v2-design.md M4): the position-blind response invariants
+/// must hold in every completion context this file exercises.
+fn check_invariants(src: &str, line: u32, ch: u32, items: &[CompletionItem]) {
+    let off: usize =
+        src.lines().take(line as usize).map(|l| l.len() + 1).sum::<usize>() + ch as usize;
+    let head = &src.as_bytes()[..off.min(src.len())];
+    let start = head
+        .iter()
+        .rposition(|b| !(b.is_ascii_alphanumeric() || *b == b'_'))
+        .map_or(0, |i| i + 1);
+    let prefix = String::from_utf8_lossy(&head[start..]).into_owned();
+    let violations = bone_query::invariants::completion_response_violations(items, &prefix);
+    assert!(
+        violations.is_empty(),
+        "response invariants violated at {line}:{ch} (prefix {prefix:?}): {violations:?}"
+    );
+}
+
+#[test]
+fn struct_literal_required_fields_rank_above_defaulted() {
+    // In `Cfg { |` the fields WITHOUT defaults (`name`, `id`) must rank
+    // above the defaulted ones (`scale`, `volume`) -- the literal is
+    // incomplete until the required fields are supplied. Within each tier,
+    // declaration order holds.
+    let src = "struct Cfg { scale: float = 1.0, name: string, volume: float = 0.5, id: int }\n\
+               fn r() {\n  let c = Cfg { \n}\n";
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let items = bone.completion(PATH, Position::new(2, 16));
+    check_invariants(src, 2, 16, &items);
+    let ordered: Vec<String> = items.into_iter().map(|c| c.label).collect();
+    let pos = |l: &str| ordered.iter().position(|x| x == l);
+    let (name, id) = (pos("name: string"), pos("id: int"));
+    let (scale, volume) = (pos("scale: float"), pos("volume: float"));
+    assert!(name.is_some() && id.is_some() && scale.is_some() && volume.is_some(), "{ordered:?}");
+    assert!(
+        name < scale && name < volume && id < scale && id < volume,
+        "required fields must rank above defaulted ones: {ordered:?}"
+    );
+    assert!(name < id, "declaration order within the required tier: {ordered:?}");
+    assert!(scale < volume, "declaration order within the defaulted tier: {ordered:?}");
+}
+
+#[test]
+fn member_ufcs_overloads_dedup_to_one_item() {
+    // Two overloads of `rotate` on the receiver struct must surface as ONE
+    // member item (same label, same insert -- the duplicate is popup noise;
+    // the general path already dedups overloads by name, first-wins).
+    let src = "struct Vec2 { x: float, y: float }\n\
+               fn rotate(v: Vec2, angle: float) -> Vec2 { v }\n\
+               fn rotate(v: Vec2, rhs: Vec2) -> Vec2 { v }\n\
+               fn r(p: Vec2) {\n  p.\n}\n";
+    let l = labels(src, 4, 4);
+    assert_eq!(l.iter().filter(|s| s.as_str() == "rotate").count(), 1, "{l:?}");
 }
 
 #[test]
@@ -658,9 +715,11 @@ fn arg_position_ranks_expected_enum_variant_first() {
                fn reject_target(e: TargetError) {}\n\
                fn r() {\n  reject_target(nog)\n}\n";
     let it = item(src, 3, 19, "TargetError::NotGround");
+    // Arg layout is `{exact}{type_rank}..`; `nog` is not an exact name, so the
+    // expected-type bucket is the second digit.
     assert!(
-        it.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
-        "expected-type variant should rank in bucket 0: {:?}",
+        it.sort_text.as_deref().is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
+        "expected-type variant should rank in type bucket 0: {:?}",
         it.sort_text
     );
 }
@@ -692,9 +751,11 @@ fn arg_position_ranks_expected_type_global_first() {
                fn apply_cfg(c: Cfg) {}\n\
                fn r() {\n  apply_cfg(gam)\n}\n";
     let it = item(src, 4, 15, "GAME_CFG");
+    // Arg layout is `{exact}{type_rank}..`; `gam` is not an exact name, so the
+    // expected-type bucket is the second digit.
     assert!(
-        it.sort_text.as_deref().is_some_and(|s| s.starts_with('0')),
-        "expected-type global should rank in bucket 0: {:?}",
+        it.sort_text.as_deref().is_some_and(|s| s.starts_with("00") || s.starts_with("10")),
+        "expected-type global should rank in type bucket 0: {:?}",
         it.sort_text
     );
 }
@@ -1697,6 +1758,168 @@ fn member_path_inside_a_comment_gets_global_completion() {
     assert!(
         l.contains(&"volume_reset".to_string()),
         "global fn must be offered inside a comment (not member fields): {l:?}"
+    );
+}
+
+/// Response labels in RANK order (unsorted) -- for ordering assertions.
+fn ordered_labels(src: &str, line: u32, ch: u32) -> Vec<String> {
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let items = bone.completion(PATH, Position::new(line, ch));
+    check_invariants(src, line, ch, &items);
+    items.into_iter().map(|c| c.label).collect()
+}
+
+fn rank_of(labels: &[String], needle: &str) -> usize {
+    labels
+        .iter()
+        .position(|l| l == needle)
+        .unwrap_or_else(|| panic!("no completion `{needle}` in {labels:?}"))
+}
+
+// -- PatternPos: a match-arm pattern HEAD is a slot for the scrutinee's enum;
+//    its variants rank first, and patterns bind (no payload template). -------
+
+#[test]
+fn match_arm_head_ranks_scrutinee_variants_first() {
+    // Fresh arm, empty prefix: the scrutinee enum's variants outrank every
+    // value-universe candidate (the scrutinee local included).
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    \n  }\n}\n";
+    let l = ordered_labels(src, 4, 4);
+    let mut head: Vec<&str> = l.iter().take(3).map(|s| s.as_str()).collect();
+    head.sort_unstable();
+    assert_eq!(
+        head,
+        ["AiState::Combat", "AiState::Flee", "AiState::Idle"],
+        "the scrutinee enum's variants must BE the top of the arm-head list: {:?}...",
+        &l[..l.len().min(8)]
+    );
+}
+
+#[test]
+fn match_arm_head_variant_beats_prefix_matching_global() {
+    // Typed prefix `co`: the scrutinee variant `Combat` must outrank the
+    // case-exact-prefix global `count` -- type relevance dominates band,
+    // exactly as in a typed call-arg slot.
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    co\n  }\n}\n";
+    let l = ordered_labels(src, 4, 6);
+    assert!(
+        rank_of(&l, "AiState::Combat") < rank_of(&l, "count"),
+        "scrutinee variant must outrank a prefix-matching global in an arm head: {l:?}"
+    );
+}
+
+#[test]
+fn match_arm_head_variant_binds_not_constructs() {
+    // Patterns bind, they don't construct: a tuple variant completed in an
+    // arm head inserts the bare qualified name, never the `($0)` payload
+    // template (parity with the `Enum::|` qualified path's pattern rule).
+    let src = "enum Sig { Num(int), Flag }\n\
+               fn f(s: Sig) {\n  match s {\n    \n  }\n}\n";
+    let it = item(src, 3, 4, "Sig::Num");
+    let insert = it.insert_text.as_deref().unwrap_or("Sig::Num");
+    assert!(
+        !insert.contains('('),
+        "arm-head tuple variant must insert the bare name (bind, not construct): {insert:?}"
+    );
+}
+
+#[test]
+fn match_arm_head_promotes_with_unclosed_braces_at_eof() {
+    // The mid-typing worst case: fresh match, nothing closed yet. The arm-
+    // completing munge (`co__rock_completion__ => {}` + balancing) must still
+    // resolve the scrutinee and promote its variants.
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    co";
+    let l = ordered_labels(src, 4, 6);
+    assert!(
+        rank_of(&l, "AiState::Combat") < rank_of(&l, "count"),
+        "scrutinee variant must outrank the global with unclosed braces at EOF: {l:?}"
+    );
+}
+
+// -- ForIn: the `for x in |` slot ranks iterable-typed candidates first. -----
+
+#[test]
+fn for_in_slot_ranks_iterable_global_first() {
+    // `MOBS: [Mob]` is iterable; the int global and the fn share the prefix
+    // but aren't -- type relevance dominates band (mob_spawn is a case-exact
+    // prefix match, MOBS only ci).
+    let src = "struct Mob { hp: int }\n\
+               global MOBS: [Mob] = []\n\
+               global MOB_COUNT: int = 0\n\
+               fn mob_spawn() {}\n\
+               fn r() {\n  for m in mo\n}\n";
+    let l = ordered_labels(src, 5, 13);
+    assert!(
+        rank_of(&l, "MOBS") < rank_of(&l, "MOB_COUNT"),
+        "iterable global must outrank the int global in a for-in slot: {l:?}"
+    );
+    assert!(
+        rank_of(&l, "MOBS") < rank_of(&l, "mob_spawn"),
+        "iterable global must outrank the case-exact-prefix fn in a for-in slot: {l:?}"
+    );
+}
+
+#[test]
+fn for_in_tuple_pattern_ranks_map_local_first() {
+    // Tuple binding (`for (k, v) in`) classifies too; a Map local is the
+    // iterable, the int local isn't. The int local sorts alphabetically
+    // FIRST (`apples` < `scores`), so only the iterable rung can flip it.
+    let src = "fn r() {\n  let scores: Map<string, int> = map_new()\n  let apples = 0\n  for (k, v) in \n}\n";
+    let l = ordered_labels(src, 3, 16);
+    assert!(
+        rank_of(&l, "scores") < rank_of(&l, "apples"),
+        "Map local must outrank the int local in a for-in slot: {l:?}"
+    );
+}
+
+#[test]
+fn for_in_slot_ranks_iterable_returning_fn_on_the_fn_rung() {
+    // A fn RETURNING an iterable rides rung 1: above wrong-type values
+    // (rung 2), below direct iterable values (rung 0).
+    let src = "struct Mob { hp: int }\n\
+               global MOBS: [Mob] = []\n\
+               fn all_mobs() -> [Mob] { return MOBS }\n\
+               fn r(alpha: int) {\n  for m in al\n}\n";
+    let l = ordered_labels(src, 4, 13);
+    assert!(
+        rank_of(&l, "all_mobs") < rank_of(&l, "alpha"),
+        "iterable-returning fn must outrank the wrong-type param in a for-in slot: {l:?}"
+    );
+}
+
+#[test]
+fn value_slot_control_no_iterable_promotion() {
+    // Control: in a plain value slot the normal ladder holds -- the
+    // case-exact-prefix fn beats the ci-prefix iterable global.
+    let src = "struct Mob { hp: int }\n\
+               global MOBS: [Mob] = []\n\
+               fn mob_spawn() {}\n\
+               fn r() {\n  let x = mo\n}\n";
+    let l = ordered_labels(src, 4, 12);
+    assert!(
+        rank_of(&l, "mob_spawn") < rank_of(&l, "MOBS"),
+        "no iterable promotion outside a for-in slot: {l:?}"
+    );
+}
+
+#[test]
+fn match_arm_body_is_a_value_slot_no_variant_promotion() {
+    // Control: AFTER the `=>` the slot is a value expression -- the normal
+    // ladder holds (prefix-matching global above the scattered variant).
+    let src = "enum AiState { Idle, Combat, Flee }\n\
+               global count: int = 0\n\
+               fn tick(s: AiState) {\n  match s {\n    AiState::Idle => co\n  }\n}\n";
+    let l = ordered_labels(src, 4, 23);
+    assert!(
+        rank_of(&l, "count") < rank_of(&l, "AiState::Combat"),
+        "no variant promotion in an arm BODY (value slot): {l:?}"
     );
 }
 

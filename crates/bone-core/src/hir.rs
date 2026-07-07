@@ -177,6 +177,11 @@ pub struct Body {
     // TODO: make this IdxMap instead and A/B benchmark?
     pub arg_names: FxHashMap<Idx<Expr>, Ustr>,
     pub method_call_recvs: FxHashSet<Idx<Expr>>,
+    /// Call args written as a struct spread `..op` (keyed by the operand's expr
+    /// Idx). The operand's fields expand into named args at this position;
+    /// resolved in bone-inference, codegen'd in skull-mir. Never also in
+    /// `arg_names`.
+    pub spread_args: FxHashSet<Idx<Expr>>,
 
     // Owner's body expression:
     // - fn body (none for lua/extern)
@@ -228,6 +233,7 @@ impl Default for Body {
 
             arg_names: Default::default(),
             method_call_recvs: Default::default(),
+            spread_args: Default::default(),
 
             root: Default::default(),
             root_scope: None,
@@ -642,6 +648,10 @@ pub enum Expr {
     StructLiteral {
         name: Ustr,
         fields: IdxRange<StructLitField>,
+        /// Functional-update bases (`Ty { ..base, .. }`), evaluated before
+        /// fields. Empty for a plain literal. Each base has the same nominal
+        /// type as the literal; unwritten fields are copied from it.
+        bases: IdxRange<Expr>,
     },
 
     FieldAccess {

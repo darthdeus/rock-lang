@@ -14,7 +14,11 @@ pub mod query;
 pub mod reachability;
 
 mod backend;
+mod completion;
 mod cursor_context;
+pub mod invariants;
+mod rank_key;
 pub use backend::*;
+pub use rank_key::explain_sort_text;
 
 mod ctags;

@@ -810,6 +810,7 @@ pub fn lower_expr_value(
         }
     }
 
+
     let result = match &e.kind {
         ExprKind::Null => Expr::Null,
         ExprKind::Unit => Expr::Unit,
@@ -864,6 +865,9 @@ pub fn lower_expr_value(
                     if let Some(nm) = &ca.name {
                         body.arg_names.insert(arg_idx, nm.name);
                     }
+                    if ca.is_spread {
+                        body.spread_args.insert(arg_idx);
+                    }
                 }
 
                 // A local fn-typed binding is called through its value, everything else
@@ -890,6 +894,9 @@ pub fn lower_expr_value(
                 for (arg_idx, ca) in args_range.into_iter().skip(1).zip(args.iter()) {
                     if let Some(nm) = &ca.name {
                         body.arg_names.insert(arg_idx, nm.name);
+                    }
+                    if ca.is_spread {
+                        body.spread_args.insert(arg_idx);
                     }
                 }
 
@@ -1095,7 +1102,10 @@ pub fn lower_expr_value(
             }
         }
 
-        ExprKind::StructLiteral { name, fields } => {
+        ExprKind::StructLiteral { name, bases, fields } => {
+            // Functional-update bases evaluate before fields.
+            let base_range = lower_exprs(ctx, a, body, scope, bases.iter())?;
+
             let mut entries = Vec::new();
 
             for (names, value) in fields.iter() {
@@ -1115,6 +1125,7 @@ pub fn lower_expr_value(
             Expr::StructLiteral {
                 name: name.name,
                 fields,
+                bases: base_range,
             }
         }
 

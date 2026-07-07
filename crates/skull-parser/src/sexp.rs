@@ -345,9 +345,14 @@ impl Ast {
                 } else {
                     let args_str = args
                         .iter()
-                        .map(|arg| match &arg.name {
-                            Some(name) => format!("{}: {}", name.name, self.expr_sexp(arg.value)),
-                            None => self.expr_sexp(arg.value),
+                        .map(|arg| {
+                            if arg.is_spread {
+                                return format!("..{}", self.expr_sexp(arg.value));
+                            }
+                            match &arg.name {
+                                Some(name) => format!("{}: {}", name.name, self.expr_sexp(arg.value)),
+                                None => self.expr_sexp(arg.value),
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join(" ");
@@ -396,8 +401,22 @@ impl Ast {
                 )
             }
 
-            ExprKind::StructLiteral { name, fields } => {
-                format!("(struct {} (data {}))", name.name, self.flat_fields_sexp(fields))
+            ExprKind::StructLiteral { name, bases, fields } => {
+                if bases.is_empty() {
+                    format!("(struct {} (data {}))", name.name, self.flat_fields_sexp(fields))
+                } else {
+                    let bases_str = bases
+                        .iter()
+                        .map(|b| format!("..{}", self.expr_sexp(*b)))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!(
+                        "(struct {} (bases {}) (data {}))",
+                        name.name,
+                        bases_str,
+                        self.flat_fields_sexp(fields)
+                    )
+                }
             }
 
             ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => {

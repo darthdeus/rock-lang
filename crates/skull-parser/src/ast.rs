@@ -49,7 +49,11 @@ pub enum CallSyntax {
 pub struct FunctionCallArg {
     pub name: Option<Ident>,
     pub value: Idx<ExprData>,
+    /// Macro splat `...rest` (expanded at macro-expansion time).
     pub is_splat: bool,
+    /// Struct spread `..expr` — the operand's fields become named args at this
+    /// position. Orthogonal to `is_splat`; the two are never both set.
+    pub is_spread: bool,
 }
 
 /// Mirror of rock's `FormatSpecifier`. Carries the static spec fields *and*
@@ -187,6 +191,9 @@ pub enum ExprKind {
     /// shorthand `{ x }` expands to `([x], Ident(x))`, mirroring rock.
     StructLiteral {
         name: Ident,
+        /// `..base` operands (functional update), in source order, always
+        /// preceding `fields`. Empty for a plain literal.
+        bases: Vec<Idx<ExprData>>,
         fields: Vec<(Vec<Ident>, Idx<ExprData>)>,
     },
 

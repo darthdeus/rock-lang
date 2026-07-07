@@ -120,7 +120,7 @@ fn definition_of_global() {
 fn assert_refs(src: &str, cursor_off: usize, expected: &[usize]) {
     let (ws, mid) = ws_of(src);
     let inf = ws.inference(mid).expect("user module inferred");
-    let spans = references(&ws, mid, inf, cursor_off);
+    let spans = references(&ws, mid, inf, cursor_off, &|_| Some(src));
     assert_eq!(
         spans.len(),
         expected.len(),
@@ -161,7 +161,7 @@ fn references_of_parameter() {
 fn refs_at(src: &str, cursor_off: usize) -> Vec<(usize, usize)> {
     let (ws, mid) = ws_of(src);
     let inf = ws.inference(mid).expect("user module inferred");
-    references(&ws, mid, inf, cursor_off)
+    references(&ws, mid, inf, cursor_off, &|_| Some(src))
         .iter()
         .map(|s| s.span.offset_range)
         .collect()

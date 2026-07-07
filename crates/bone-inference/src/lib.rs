@@ -503,10 +503,17 @@ fn verify_pure_expr(
         };
     }
     match c.body.expr_arena[e] {
-        Expr::Global(name) => errors.push(CompilerError::new_with_label(
-            span,
-            format!("`@pure` function reads global `{}` (mutable state)", name),
-        )),
+        Expr::Global(name) => {
+            // const globals are read-only (assignment/incdec rejected,
+            // re-initialized unconditionally on hot reload); reading one
+            // is pure. Only mutable globals break purity.
+            if !ws.const_globals.contains(&name) {
+                errors.push(CompilerError::new_with_label(
+                    span,
+                    format!("`@pure` function reads global `{}` (mutable state)", name),
+                ))
+            }
+        }
         Expr::Assign { target, value } => {
             errors.push(CompilerError::new_with_label(
                 span,
@@ -639,7 +646,7 @@ fn verify_pure_expr(
         }
         // A `value` struct literal is byte-value (pure); a heap struct literal
         // has observable identity.
-        Expr::StructLiteral { name, fields } => {
+        Expr::StructLiteral { name, fields, bases } => {
             let is_value = ws
                 .struct_by_name
                 .get(&name)
@@ -650,6 +657,9 @@ fn verify_pure_expr(
                     "`@pure` function constructs a heap struct literal (identity observable); only `value` structs are allowed"
                         .to_string(),
                 ));
+            }
+            for b in bases {
+                go!(b);
             }
             for fld in fields {
                 go!(c.body.struct_lit_field_arena[fld].value);
@@ -1058,6 +1068,17 @@ pub fn infer_expr_used(
         }
 
         Expr::IncDec { target, .. } => {
+            // Same const-rebind rejection as Expr::Assign/CompoundAssign;
+            // `CONST++` is a write with extra steps.
+            if let Expr::Global(name) = c.body.expr_arena[*target] {
+                if gamma.workspace.const_globals.contains(&name) {
+                    comp_error!(
+                        expr_span,
+                        "cannot assign to const `{}`; consts are read-only",
+                        name
+                    );
+                }
+            }
             let inner_ty = infer_expr(c, gamma, *target)?;
             resolve(gamma, inner_ty, c.body.expr_spans[*target])
         }
@@ -1615,9 +1636,10 @@ pub fn infer_expr_used(
             }
         }
 
-        Expr::StructLiteral { name, fields } => {
+        Expr::StructLiteral { name, fields, bases } => {
             let name = *name;
             let fields = *fields;
+            let bases = *bases;
 
             let sid = resolve_struct(gamma, name).ok_or_else(|| {
                 CompilerError::new_with_label(expr_span, format!("unknown struct `{}`", name))
@@ -1636,14 +1658,32 @@ pub fn infer_expr_used(
 
             let what = format!("struct `{}`", name);
 
-            check_named_fields(c, gamma, &def.fields, &provided, &subs, expr_span, &what)?;
-
             let ctor = match name.as_str() {
                 "Vec" => TypeCtor::Array,
                 _ => TypeCtor::Nominal(name),
             };
+            let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
 
-            gamma.app_with_ctor(ctor, &arg_tys, expr_span)
+            // Functional update `Ty { ..base, .. }`: each base must have the same
+            // nominal type as the literal (rule 6). A single base covers every
+            // unwritten field. Multiple bases of the same type would all supply
+            // every field (rule 5 collision), so only one is allowed.
+            let has_base = !bases.is_empty();
+            if bases.into_iter().count() > 1 {
+                comp_error!(
+                    expr_span,
+                    "a functional-update literal takes at most one `..base`"
+                );
+            }
+            for b in bases {
+                check_expr(c, gamma, b, result_ty, c.body.expr_spans[b])?;
+            }
+
+            check_named_fields(
+                c, gamma, &def.fields, &provided, &subs, expr_span, &what, has_base,
+            )?;
+
+            result_ty
         }
 
         Expr::FieldAccess { base, field } => {
@@ -1793,7 +1833,7 @@ pub fn infer_expr_used(
                         })
                         .collect();
 
-                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what)?;
+                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what, false)?;
                 }
 
                 _ => comp_error!(
@@ -2249,13 +2289,22 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             },
         ) => {
             if ctor_a != ctor_b {
-                unify_fail!(
-                    gamma,
-                    span,
-                    "Failed to unify {} and {}, different generic constructors",
-                    gamma.workspace.render(Some(&gamma.out), a),
-                    gamma.workspace.render(Some(&gamma.out), b)
-                )
+                let a_str = gamma.workspace.render(Some(&gamma.out), a);
+                let b_str = gamma.workspace.render(Some(&gamma.out), b);
+
+                // Both sides are plain nominals (structs/enums with no type
+                // args) far more often than generics; "different generic
+                // constructors" is nonsense for those. Only mention generics
+                // when a side actually has type parameters.
+                if params_a.is_empty() && params_b.is_empty() {
+                    unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+                } else {
+                    unify_fail!(
+                        gamma,
+                        span,
+                        "type mismatch: expected `{b_str}`, found `{a_str}` (different type constructors)"
+                    )
+                }
             }
 
             if params_a.len() != params_b.len() {
@@ -2798,6 +2847,9 @@ fn check_named_fields(
     subs: &FxHashMap<VarId, TyId>,
     span: Span,
     what: &str,
+    // A functional-update base (`{ ..base }`) copies every unwritten field, so
+    // missing-field errors are suppressed when a base is present.
+    base_covers_all: bool,
 ) -> Result<(), CompilerError> {
     let mut seen: Vec<Ustr> = Vec::new();
 
@@ -2818,9 +2870,11 @@ fn check_named_fields(
         check_expr(c, gamma, *fvalue, fty, vspan)?
     }
 
-    for f in fields {
-        if !seen.contains(&f.name) && !f.has_default {
-            comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
+    if !base_covers_all {
+        for f in fields {
+            if !seen.contains(&f.name) && !f.has_default {
+                comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
+            }
         }
     }
 
@@ -3318,6 +3372,7 @@ fn score_candidate(
 
     let slots = match reorder_call_args(
         c,
+        gamma,
         args,
         &pnames[offset..],
         f.num_required.saturating_sub(offset),
@@ -3344,13 +3399,16 @@ fn score_candidate(
         };
 
         match slot {
-            Some(arg) => {
-                let aty = match arg_ty.get(arg) {
-                    Some(&t) => t,
-                    None => {
-                        gamma.out.rollback_to(snap);
-                        return None;
-                    }
+            Some(fill) => {
+                let aty = match fill {
+                    SlotFill::Direct(arg) => match arg_ty.get(arg) {
+                        Some(&t) => t,
+                        None => {
+                            gamma.out.rollback_to(snap);
+                            return None;
+                        }
+                    },
+                    SlotFill::SpreadField(_, fty) => *fty,
                 };
 
                 match fit_cost(gamma, aty, pty, span) {
@@ -3961,17 +4019,92 @@ fn coroutine_yrn(
     }
 }
 
+/// How a callee parameter slot is filled after `..spread` expansion.
+#[derive(Clone, Copy)]
+enum SlotFill {
+    /// A written positional or named argument.
+    Direct(Idx<Expr>),
+    /// A field pulled from a spread operand: (operand expr, field type). The
+    /// param slot index encodes which field; skull-mir re-derives the name.
+    SpreadField(Idx<Expr>, TyId),
+}
+
+/// The (name, type) of every field of a call-site spread operand. The operand
+/// must be a nominal struct with statically known fields (rule: not tuple, not
+/// array, not Map/any).
+fn spread_struct_fields(
+    gamma: &mut Gamma,
+    op_ty: TyId,
+    span: Span,
+) -> Result<Vec<(Ustr, TyId)>, CompilerError> {
+    let r = resolve(gamma, op_ty, span);
+
+    match *gamma.get(r) {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            params,
+        } => {
+            let sid = resolve_struct(gamma, name).ok_or_else(|| {
+                CompilerError::new_with_label(span, format!("cannot spread `{}`: not a struct", name))
+            })?;
+
+            let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
+            let subs = struct_arg_subs(gamma, &def, r, params);
+            def.fields
+                .iter()
+                .map(|f| Ok((f.name, substitute(gamma, f.ty, &subs, span)?)))
+                .collect()
+        }
+
+        _ => comp_error!(
+            span,
+            "cannot spread `{}` into call arguments: expected a nominal struct",
+            gamma.workspace.render(Some(&gamma.out), r)
+        ),
+    }
+}
+
 fn reorder_call_args(
     c: BodyCtx,
+    gamma: &mut Gamma,
     args: &[Idx<Expr>],
     param_names: &[Ustr],
     num_required: usize,
     span: Span,
-) -> Result<Vec<Option<Idx<Expr>>>, CompilerError> {
-    let mut slots: Vec<Option<Idx<Expr>>> = vec![None; param_names.len()];
+) -> Result<Vec<Option<SlotFill>>, CompilerError> {
+    let mut slots: Vec<Option<SlotFill>> = vec![None; param_names.len()];
     let mut pos = 0usize;
 
     for &arg in args {
+        // Struct spread `..op`: each field of the operand fills the param slot
+        // of the same name (rules 2/4/5).
+        if c.body.spread_args.contains(&arg) {
+            let op_ty = infer_expr(c, gamma, arg)?;
+            let aspan = c.body.expr_spans[arg];
+            for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
+                let pi = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
+                    CompilerError::new_with_label(
+                        span,
+                        format!("spread field `{}` names no parameter of the callee", fname),
+                    )
+                })?;
+                match slots[pi] {
+                    // rule 5: two spreads supplying the same param.
+                    Some(SlotFill::SpreadField(..)) => {
+                        comp_error!(span, "two spreads both supply parameter `{}`", fname)
+                    }
+                    // rule 4: a named/positional arg written BEFORE the spread.
+                    Some(SlotFill::Direct(_)) => comp_error!(
+                        span,
+                        "parameter `{}` is given before the spread that also supplies it",
+                        fname
+                    ),
+                    None => slots[pi] = Some(SlotFill::SpreadField(arg, fty)),
+                }
+            }
+            continue;
+        }
+
         match c.body.arg_names.get(&arg) {
             // positional
             None => {
@@ -3983,7 +4116,10 @@ fn reorder_call_args(
                     );
                 }
 
-                slots[pos] = Some(arg);
+                if slots[pos].is_some() {
+                    comp_error!(span, "Multiple values provided for parameter `{}`", param_names[pos]);
+                }
+                slots[pos] = Some(SlotFill::Direct(arg));
                 pos += 1;
             }
 
@@ -3992,11 +4128,15 @@ fn reorder_call_args(
                     CompilerError::new_with_label(span, format!("unknown parameter `{}`", nm))
                 })?;
 
-                if slots[pi].is_some() {
-                    comp_error!(span, "Multiple values provided for parameter `{}`", nm);
+                match slots[pi] {
+                    // rule 3: a named arg AFTER a spread overrides that field.
+                    Some(SlotFill::SpreadField(..)) | None => {
+                        slots[pi] = Some(SlotFill::Direct(arg))
+                    }
+                    Some(SlotFill::Direct(_)) => {
+                        comp_error!(span, "Multiple values provided for parameter `{}`", nm)
+                    }
                 }
-
-                slots[pi] = Some(arg);
             }
         }
     }
@@ -4073,6 +4213,59 @@ fn resolve_newtype(gamma: &Gamma, name: Ustr) -> Option<NewtypeId> {
 }
 
 fn resolve_named_call(
+    gamma: &mut Gamma,
+    c: BodyCtx,
+    name: Ustr,
+    recv_override: Option<TyId>,
+    args: IdxRange<Expr>,
+    call_expr: Idx<Expr>,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    let res = resolve_named_call_inner(gamma, c, name, recv_override, args, call_expr, span);
+
+    let Err(e) = res else { return res };
+    if gamma.quiet {
+        return Err(e);
+    }
+
+    // `recv.name(...)` that failed to resolve: if `recv` has a field `name`
+    // that isn't callable, the `()` is almost certainly a slip (a field read
+    // written as a call). Gate on the failure being about the receiver or the
+    // call itself, so a later-arg mismatch under a legit UFCS call keeps its
+    // real error.
+    let (recv_ty, recv_span) = match recv_override {
+        Some(r) => (resolve(gamma, r, span), None),
+        None if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
+            match infer_expr(c, gamma, args.start()) {
+                Ok(t) => (resolve(gamma, t, span), Some(c.body.expr_spans[args.start()])),
+                Err(_) => return Err(e),
+            }
+        }
+        None => return Err(e),
+    };
+
+    let err_span = e.labels.first().map(|l| l.span);
+    let about_receiver = err_span == Some(span) || (recv_span.is_some() && err_span == recv_span);
+    if about_receiver {
+        if let Ok(fty) = struct_field_ty(gamma, recv_ty, name, span) {
+            let fty = resolve(gamma, fty, span);
+            if !matches!(gamma.get(fty), TypeExpr::Function { .. }) {
+                let recv_str = gamma.workspace.render(Some(&gamma.out), recv_ty);
+                let fty_str = gamma.workspace.render(Some(&gamma.out), fty);
+                return Err(CompilerError::new_with_label(
+                    span,
+                    format!(
+                        "`{name}` is a field of `{recv_str}` (type `{fty_str}`), not a method -- remove the `()` to read the field"
+                    ),
+                ));
+            }
+        }
+    }
+
+    Err(e)
+}
+
+fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
     name: Ustr,
@@ -4311,7 +4504,7 @@ fn resolve_named_call(
 
     let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
 
-    let pairs: Vec<(Idx<Expr>, TyId)> = if function.is_variadic {
+    let pairs: Vec<(SlotFill, TyId)> = if function.is_variadic {
         let velem = param_tys[param_tys.len() - 1];
         let nfixed = (param_tys.len() - 1).saturating_sub(offset);
 
@@ -4330,7 +4523,7 @@ fn resolve_named_call(
             .enumerate()
             .map(|(i, &arg)| {
                 (
-                    arg,
+                    SlotFill::Direct(arg),
                     if i < nfixed {
                         param_tys[offset + 1]
                     } else {
@@ -4342,6 +4535,7 @@ fn resolve_named_call(
     } else {
         let slots = reorder_call_args(
             c,
+            gamma,
             &arg_list,
             &param_names[offset..],
             function.num_required.saturating_sub(offset),
@@ -4351,20 +4545,26 @@ fn resolve_named_call(
         slots
             .iter()
             .enumerate()
-            .filter_map(|(i, slot)| slot.map(|arg| (arg, param_tys[offset + i])))
+            .filter_map(|(i, slot)| slot.map(|fill| (fill, param_tys[offset + i])))
             .collect()
     };
 
-    for (arg, pty) in pairs {
+    for (fill, pty) in pairs {
         if has_bounds {
             check_iterator_bounds(
                 c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, false, 0, span,
             )?;
         }
         let pty = substitute(gamma, pty, &subs, span)?;
-        match preinferred.get(&arg) {
-            Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
-            None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+        match fill {
+            SlotFill::Direct(arg) => match preinferred.get(&arg) {
+                Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
+                None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+            },
+            // A spread-supplied field: check the field's type against the param.
+            SlotFill::SpreadField(op, fty) => {
+                coerce(gamma, fty, pty, c.body.expr_spans[op])?
+            }
         }
     }
 

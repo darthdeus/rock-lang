@@ -149,6 +149,7 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
                     name: a.name,
                     value: ce(ast, a.value),
                     is_splat: a.is_splat,
+                    is_spread: a.is_spread,
                 })
                 .collect(),
             syntax,
@@ -168,8 +169,9 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
             ExprKind::NativeArrayLiteral(xs.into_iter().map(|x| ce(ast, x)).collect())
         }
         ExprKind::Tuple(xs) => ExprKind::Tuple(xs.into_iter().map(|x| ce(ast, x)).collect()),
-        ExprKind::StructLiteral { name, fields } => ExprKind::StructLiteral {
+        ExprKind::StructLiteral { name, bases, fields } => ExprKind::StructLiteral {
             name,
+            bases: bases.into_iter().map(|b| ce(ast, b)).collect(),
             fields: fields.into_iter().map(|(ns, v)| (ns, ce(ast, v))).collect(),
         },
         ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => ExprKind::EnumVariantRecord {

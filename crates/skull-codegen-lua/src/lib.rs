@@ -826,9 +826,9 @@ fn render_spliced_inline_lua(out: &mut String, body: &str, shape: InlineLuaShape
 }
 
 /// Is this (return-free) `inline(lua)` body a single bare expression (so it can
-/// be the RHS of `lv = …`), vs a statement / multi-statement unit body? Mirrors
-/// rock's `is_expr_body` (rock-codegen `anf/emit.rs`): any statement-keyword
-/// start, a top-level `=` assignment, `;`, or a second non-blank line => stmts.
+/// be the RHS of `lv = …`), vs a statement / multi-statement unit body? Any
+/// statement-keyword start, a top-level `=` assignment, `;`, or a second
+/// non-blank line => stmts.
 fn is_expr_inline_lua_body(s: &str) -> bool {
     let t = s.trim();
     let mut lines = t.lines().filter(|l| !l.trim().is_empty());

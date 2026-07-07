@@ -264,6 +264,7 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
                     name: a.name.clone(),
                     value: ge(dst, a.value),
                     is_splat: a.is_splat,
+                    is_spread: a.is_spread,
                 })
                 .collect(),
             syntax: syntax.clone(),
@@ -283,8 +284,9 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
             ExprKind::NativeArrayLiteral(xs.iter().map(|x| ge(dst, *x)).collect())
         }
         ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| ge(dst, *x)).collect()),
-        ExprKind::StructLiteral { name, fields } => ExprKind::StructLiteral {
+        ExprKind::StructLiteral { name, bases, fields } => ExprKind::StructLiteral {
             name: name.clone(),
+            bases: bases.iter().map(|b| ge(dst, *b)).collect(),
             fields: fields.iter().map(|(ns, v)| (ns.clone(), ge(dst, *v))).collect(),
         },
         ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => ExprKind::EnumVariantRecord {

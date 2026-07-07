@@ -228,20 +228,20 @@ fn bone_accepts_case(files: &[(String, String)]) -> bool {
 ///    rejects them as scope-walker limitations). Pinned by
 ///    bone-semantic/tests/structural.rs.
 ///
-/// 2. **Codegen-level** (`@inline` / if-let): rock rejects these in POST-type-
-///    check passes (`InlinePass` inline-safety, `InlineLuaValidation`, an if-let
-///    pattern rule). But skull's inliner is more sophisticated than rock's -- it
-///    HOISTS non-dup-safe args (verified: a param-mutating `@inline` called with
-///    a side-effecting arg evaluates it exactly once) and handles param-capturing
-///    closures and literal if-let patterns. skull COMPILES AND RUNS all six
-///    correctly (verified by run + the full skull-diff corpus, 0 divergences),
-///    so rock's conservative rejection is unnecessary. See backlog #20.
+/// 2. **Codegen-level** (`@inline` / if-let): these fixtures were authored as
+///    rejections for a stricter inliner that flagged arg-duplication hazards and
+///    a literal if-let pattern rule. skull's inliner HOISTS non-dup-safe args
+///    (verified: a param-mutating `@inline` called with a side-effecting arg
+///    evaluates it exactly once) and handles param-capturing closures and
+///    literal if-let patterns, so it COMPILES AND RUNS all six correctly
+///    (verified by run + the full skull-diff corpus, 0 divergences) -- the
+///    conservative rejection is unnecessary. See backlog #20.
 const BONE_ERROR_DIVERGENCES: &[&str] = &[
     // type-level (@pure identity-pure)
     "pure_match_pattern_bind",
     "pure_self_recursion",
-    // codegen-level (rock InlinePass / InlineLuaValidation / if-let over-rejection;
-    // skull compiles + runs these correctly)
+    // codegen-level (inline-safety / if-let over-rejection; skull compiles +
+    // runs these correctly)
     "inline_assigns_whole_param",
     "inline_assigns_param_field",
     "inline_compound_assigns_param",

@@ -1113,6 +1113,85 @@ fn redundant_null_coalesce_rejected() {
     );
 }
 
+// Collect every body-level error message across the user module. Used by the
+// diagnostic-quality tests below, which assert on the rendered wording rather
+// than just `is_err`.
+fn all_err_msgs(src: &str) -> Vec<String> {
+    let ws = check(src).expect("body-level errors are collected, not fatal");
+    let mut msgs = Vec::new();
+    for m in ws.modules.iter() {
+        if m.id == ModuleId::builtin() {
+            continue;
+        }
+        if let Some(inf) = ws.inference(m.id) {
+            for errs in inf.errors.values() {
+                for e in errs {
+                    msgs.push(e.message.clone());
+                }
+            }
+        }
+    }
+    msgs
+}
+
+// A plain nominal mismatch (no generics on either side) must not be reported
+// as "different generic constructors" -- it must name both types plainly.
+#[test]
+fn nominal_mismatch_message_names_both_types() {
+    let src = "\
+struct Mob { x: int }
+struct Data { y: int }
+fn take(m: Mob) -> int { return m.x }
+fn caller(d: Data) -> int { return take(d) }";
+    let msgs = all_err_msgs(src);
+    let joined = msgs.join(" | ");
+    assert!(
+        msgs.iter().any(|m| m.contains("Mob") && m.contains("Data")),
+        "mismatch message should name both `Mob` and `Data`: {joined}"
+    );
+    assert!(
+        !joined.contains("generic constructors"),
+        "non-generic nominal mismatch must not say 'generic constructors': {joined}"
+    );
+}
+
+// `recv.field()` where `field` is a non-callable field and a same-named free
+// fn exists (so UFCS is attempted and fails on the receiver type) -- the error
+// must point at the field/`()` slip, not a bare unify failure.
+#[test]
+fn field_called_as_method_with_shadowing_free_fn() {
+    let src = "\
+struct Data { cooldown: float = 1.5 }
+struct Thing { id: int }
+fn make() -> Data { return Data { cooldown: 2.0 } }
+fn cooldown(t: Thing) -> float { return 9.0 }
+fn caller() -> float { return make().cooldown() }";
+    let joined = all_err_msgs(src).join(" | ");
+    assert!(
+        joined.contains("cooldown") && joined.contains("field") && joined.contains("()"),
+        "should flag `cooldown` as a field called with `()`: {joined}"
+    );
+}
+
+// Same slip, but no same-named free fn at all -- must NOT say "Function
+// doesn't exist" (the field plainly exists); it must flag the field.
+#[test]
+fn field_called_as_method_no_free_fn() {
+    let src = "\
+struct Data { cooldown: float = 1.5 }
+fn make() -> Data { return Data { cooldown: 2.0 } }
+fn caller() -> float { return make().cooldown() }";
+    let joined = all_err_msgs(src).join(" | ");
+    assert!(
+        !joined.contains("doesn't exist"),
+        "field exists -- must not claim the function doesn't exist: {joined}"
+    );
+    assert!(
+        joined.contains("cooldown") && joined.contains("field"),
+        "should flag `cooldown` as a field: {joined}"
+    );
+}
+
 #[test]
 fn redundant_safe_nav_field_rejected() {
     // `?.` on a non-nullable receiver is dead.

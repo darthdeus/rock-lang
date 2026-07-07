@@ -67,18 +67,23 @@ pub fn type_definition(
 /// Drives both find-references and rename.
 ///
 /// Delegates to `crate::query::references`, which resolves **local bindings,
-/// params, functions** (incl. UFCS call sites), **structs + fields**, **enums
-/// + variants**, and **fn generic type params** with name-precise spans, so
-/// rename is safe for them. Globals and struct/enum generics aren't covered
-/// yet. Shorthand sites (`S { x }`) carry a [`crate::query::Shorthand`] tag so
-/// rename expands them instead of replacing the shared token.
-pub fn references(
+/// params** (incl. callers' named-arg labels), **functions** (incl. UFCS and
+/// `?.` call sites), **globals**, **structs + fields** (incl. `?.`/`.field`
+/// sites and nullable annotations), **enums + variants**, and **fn generic
+/// type params** with name-precise spans, so rename is safe for them.
+/// Not covered (refused, never partial): newtypes, record-variant payload
+/// fields, decorators, macro names, struct/enum-level generics --
+/// `docs/lsp-rename-gaps.md`. Shorthand sites (`S { x }`) carry a
+/// [`crate::query::Shorthand`] tag so rename expands them instead of
+/// replacing the shared token.
+pub fn references<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
+    text_of: crate::query::TextOf<'_, 't>,
 ) -> Vec<crate::query::RefSite> {
-    crate::query::references(ws, mid, inf, offset)
+    crate::query::references(ws, mid, inf, offset, text_of)
 }
 
 // ---------------------------------------------------------------------------

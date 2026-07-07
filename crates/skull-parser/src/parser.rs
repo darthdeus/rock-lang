@@ -510,7 +510,7 @@ impl Parser {
             }
             let is_splat = self.eat(TokenKind::TripleDot); // `inner!(...rest)`
             let value = self.parse_macro_arg(true)?;
-            args.push(FunctionCallArg { name: None, value, is_splat });
+            args.push(FunctionCallArg { name: None, value, is_splat, is_spread: false });
             self.skip_comments();
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -580,7 +580,7 @@ impl Parser {
                     && !self.at_end()
                 {
                     let v = self.parse_macro_arg(true)?;
-                    targs.push(FunctionCallArg { name: None, value: v, is_splat: false });
+                    targs.push(FunctionCallArg { name: None, value: v, is_splat: false, is_spread: false });
                     if !self.eat(TokenKind::Comma) {
                         break;
                     }
@@ -1615,7 +1615,7 @@ impl Parser {
                         let call = self.parse_sigil_call(func)?;
                         // Prepend the receiver as the first argument (UFCS).
                         if let ExprKind::FunctionCall { args, .. } = &mut self.ast.exprs[call].kind {
-                            args.insert(0, FunctionCallArg { name: None, value: recv, is_splat: false });
+                            args.insert(0, FunctionCallArg { name: None, value: recv, is_splat: false, is_spread: false });
                         }
                         // The UFCS call spans the receiver too (`recv.method!(..)`),
                         // matching rock — `parse_sigil_call` only spanned `method!(..)`.
@@ -1801,7 +1801,7 @@ impl Parser {
             }
             let is_splat = self.eat(TokenKind::TripleDot);
             let value = self.with_allow_literals(allow, |p| p.parse_expr(arg_min_bp))?;
-            args.push(FunctionCallArg { name: None, value, is_splat });
+            args.push(FunctionCallArg { name: None, value, is_splat, is_spread: false });
 
             // Continue only if the next token can start another argument, on
             // the same line, outside delimiters, and isn't an operator.
@@ -1858,7 +1858,7 @@ impl Parser {
                 span,
                 ExprKind::FunctionCall {
                     func: left,
-                    args: vec![FunctionCallArg { name: None, value: right, is_splat: false }],
+                    args: vec![FunctionCallArg { name: None, value: right, is_splat: false, is_spread: false }],
                     syntax: CallSyntax::Normal,
                 },
             );
@@ -1878,8 +1878,8 @@ impl Parser {
                 ExprKind::FunctionCall {
                     func: callee,
                     args: vec![
-                        FunctionCallArg { name: None, value: left, is_splat: false },
-                        FunctionCallArg { name: None, value: right, is_splat: false },
+                        FunctionCallArg { name: None, value: left, is_splat: false, is_spread: false },
+                        FunctionCallArg { name: None, value: right, is_splat: false, is_spread: false },
                     ],
                     syntax: CallSyntax::Binary(op),
                 },
@@ -1928,6 +1928,19 @@ impl Parser {
         let mut seen_named = false;
         while self.kind() != TokenKind::CloseParen && !self.at_end() {
             self.skip_comments();
+            // Struct spread `..expr` — the operand's fields expand into named
+            // args at this position (resolved in bone). A spread carries no
+            // name and may legally follow a named arg, so it's detected before
+            // the positional-after-named check.
+            if self.kind() == TokenKind::DoubleDot {
+                self.advance();
+                let value = self.with_allow_literals(true, |p| p.parse_expr(0))?;
+                args.push(FunctionCallArg { name: None, value, is_splat: false, is_spread: true });
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+                continue;
+            }
             let name = if matches!(self.kind(), TokenKind::Ident(_))
                 && self.peek_kind() == TokenKind::Colon
             {
@@ -1945,7 +1958,7 @@ impl Parser {
             // expr and macro splat expansion couldn't recognize it.
             let is_splat = self.eat(TokenKind::TripleDot);
             let value = self.with_allow_literals(true, |p| p.parse_expr(0))?;
-            args.push(FunctionCallArg { name, value, is_splat });
+            args.push(FunctionCallArg { name, value, is_splat, is_spread: false });
             if !self.eat(TokenKind::Comma) {
                 break;
             }
@@ -1981,7 +1994,7 @@ impl Parser {
         let lambda = self
             .ast
             .expr(body_span, ExprKind::Lambda { params: vec![], return_ty: None, body });
-        let lambda_arg = FunctionCallArg { name: None, value: lambda, is_splat: false };
+        let lambda_arg = FunctionCallArg { name: None, value: lambda, is_splat: false, is_spread: false };
 
         // Append to an existing call, else wrap `left` in a new call.
         if matches!(self.ast.exprs[left].kind, ExprKind::FunctionCall { .. }) {
@@ -2181,7 +2194,11 @@ impl Parser {
                     self.advance(); // `::`
                     let member = self.expect_ident()?;
                     if self.struct_literal_follows() {
-                        let fields = self.parse_struct_fields()?;
+                        let (bases, fields) = self.parse_struct_fields()?;
+                        if !bases.is_empty() {
+                            return Err(self
+                                .err("functional-update `..base` is not supported on enum variants"));
+                        }
                         let span = self.span_from(start);
                         return Ok(self.ast.expr(
                             span,
@@ -2195,9 +2212,9 @@ impl Parser {
                     let span = self.span_from(start);
                     Ok(self.ast.expr(span, ExprKind::QualifiedIdent { base, member }))
                 } else if self.struct_literal_follows() {
-                    let fields = self.parse_struct_fields()?;
+                    let (bases, fields) = self.parse_struct_fields()?;
                     let span = self.span_from(start);
-                    Ok(self.ast.expr(span, ExprKind::StructLiteral { name: base, fields }))
+                    Ok(self.ast.expr(span, ExprKind::StructLiteral { name: base, bases, fields }))
                 } else {
                     Ok(self.ast.expr(start, ExprKind::Ident(base)))
                 }
@@ -2636,14 +2653,32 @@ impl Parser {
 
     /// Parse `{ f1: v1, f2 + f3: v, f4 }` field list (shared by struct
     /// literals and enum record-variant construction).
-    fn parse_struct_fields(&mut self) -> PResult<Vec<(Vec<Ident>, Idx<ExprData>)>> {
+    #[allow(clippy::type_complexity)]
+    fn parse_struct_fields(
+        &mut self,
+    ) -> PResult<(Vec<Idx<ExprData>>, Vec<(Vec<Ident>, Idx<ExprData>)>)> {
         self.expect(TokenKind::OpenCurly)?;
         self.delimiter_depth += 1;
+        let mut bases = Vec::new();
         let mut fields = Vec::new();
         while self.kind() != TokenKind::CloseCurly && !self.at_end() {
             self.skip_comments();
             if self.kind() == TokenKind::CloseCurly {
                 break;
+            }
+            // Functional-update base `..expr` -- must precede all fields.
+            if self.kind() == TokenKind::DoubleDot {
+                self.advance();
+                if !fields.is_empty() {
+                    return Err(self.err("spread base `..` must come before field overrides"));
+                }
+                let base = self.with_allow_literals(true, |p| p.parse_expr(0))?;
+                bases.push(base);
+                self.skip_comments();
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+                continue;
             }
             let mut names = vec![self.expect_ident()?];
             while self.kind() == TokenKind::Plus {
@@ -2666,7 +2701,7 @@ impl Parser {
         self.skip_comments();
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseCurly)?;
-        Ok(fields)
+        Ok((bases, fields))
     }
 
     fn parse_match(&mut self) -> PResult<Idx<ExprData>> {
