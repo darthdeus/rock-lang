@@ -2692,9 +2692,13 @@ pub(crate) fn struct_members_of_receiver_expr(
 }
 
 /// Rendered ELEMENT type of a Vec receiver (`POS_HIST: [Vec2]` -> "Vec2"), for
-/// element-aware UFCS filtering on the name-path. Resolves the single-binding /
-/// global head (the common Vec receiver); `None` for anything else, so UFCS
-/// falls back to name-only matching (over-broad but safe).
+/// element-aware UFCS filtering on the name-walk FALLBACK. Resolves the
+/// single-binding / global head (the common Vec receiver); `None` for a
+/// multi-segment receiver, so its UFCS filtering degrades to name-only there.
+/// Only reached when `type_at` couldn't resolve the receiver (unknown callee /
+/// broken parse); the primary path computes `vec_elem` from the inferred type
+/// (`struct_members_of_receiver_expr`), so element filtering is exact for every
+/// receiver shape outside the fallback.
 pub(crate) fn receiver_vec_elem(
     ws: &Workspace,
     mid: ModuleId,
