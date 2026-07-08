@@ -959,6 +959,17 @@ pub(crate) fn pattern_scrutinee_enum(
     None
 }
 
+/// Whether an open paren already follows the cursor (skipping inline
+/// whitespace) -- `recv.le|()`. A method item must then insert the bare name,
+/// not `name()`/`name($0)`, or the accepted completion doubles the parens.
+/// Read from the ORIGINAL source, before any completion munge.
+pub(crate) fn open_paren_follows(src: &str, offset: usize) -> bool {
+    src.as_bytes()[offset..]
+        .iter()
+        .find(|&&b| b != b' ' && b != b'\t')
+        == Some(&b'(')
+}
+
 /// Struct-field completions for `receiver.<field>`. The live body is broken by
 /// the trigger `.`, so this munges in a synthetic identifier (rust-analyzer's
 /// technique) to get a parseable file, then resolves the receiver's struct
@@ -977,10 +988,12 @@ pub(crate) fn member_completions(
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
 ) -> Vec<CompletionItem> {
+    let paren_follows = open_paren_follows(src, offset);
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
             member_completion_items(
                 ws, path, offset, segments, prefix, arg_slot.clone(), anchor, reach, bool_ctx,
+                paren_follows,
             )
         });
         if let Some(items) = attempt {
@@ -1024,6 +1037,7 @@ pub(crate) fn member_completions_by_receiver(
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
 ) -> Vec<CompletionItem> {
+    let paren_follows = open_paren_follows(src, offset);
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
             let Some(mid) = user_module_for_path(ws, path) else {
@@ -1036,7 +1050,7 @@ pub(crate) fn member_completions_by_receiver(
             };
             build_member_items(
                 ws, mid, offset, fields, Some(recv_struct), vec_elem, prefix, arg_slot.clone(),
-                anchor, reach, bool_ctx,
+                anchor, reach, bool_ctx, paren_follows,
             )
         });
         if let Some(items) = attempt {
@@ -1048,6 +1062,7 @@ pub(crate) fn member_completions_by_receiver(
     Vec::new()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn member_completion_items(
     ws: &Workspace,
     path: &str,
@@ -1058,6 +1073,7 @@ pub(crate) fn member_completion_items(
     anchor: Option<SlotAnchor>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
+    paren_follows: bool,
 ) -> Vec<CompletionItem> {
     // The CURRENT file's module (where the receiver/offset live) -- not just
     // "first non-builtin", which is wrong now that the whole project loads.
@@ -1072,6 +1088,7 @@ pub(crate) fn member_completion_items(
     let vec_elem = crate::query::receiver_vec_elem(ws, mid, offset, segments);
     build_member_items(
         ws, mid, offset, fields, recv_struct, vec_elem, prefix, arg_slot, anchor, reach, bool_ctx,
+        paren_follows,
     )
 }
 
@@ -1093,6 +1110,9 @@ fn build_member_items(
     anchor: Option<SlotAnchor>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
+    // A `(` already follows the cursor -- method items insert the bare name so
+    // accepting doesn't double the parens (`recv.le|()` -> `recv.len()`).
+    paren_follows: bool,
 ) -> Vec<CompletionItem> {
     {
         // UFCS methods: functions whose first param is the receiver's struct,
@@ -1182,8 +1202,11 @@ fn build_member_items(
                 // Inline `(params) -> ret`. A method with args left after the
                 // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
                 // inside); one with no remaining args inserts `name()` as plain
-                // text so the cursor lands after the `)`.
-                let (insert_text, insert_text_format) = if m.takes_args {
+                // text so the cursor lands after the `)`. When a `(` already
+                // follows, insert the bare name -- the parens are already there.
+                let (insert_text, insert_text_format) = if paren_follows {
+                    (Some(m.name.clone()), None)
+                } else if m.takes_args {
                     (Some(format!("{}($0)", m.name)), Some(InsertTextFormat::SNIPPET))
                 } else {
                     (Some(format!("{}()", m.name)), None)
@@ -1261,7 +1284,9 @@ fn build_member_items(
                     }
                     let (label, kind, insert_text, insert_text_format) = if p.is_method {
                         let call = format!("{}()", p.suffix);
-                        let (insert, fmt) = if p.takes_args {
+                        let (insert, fmt) = if paren_follows {
+                            (p.suffix.clone(), None)
+                        } else if p.takes_args {
                             (format!("{}($0)", p.suffix), Some(InsertTextFormat::SNIPPET))
                         } else {
                             (call.clone(), None)

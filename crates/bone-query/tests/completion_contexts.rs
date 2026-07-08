@@ -1990,6 +1990,24 @@ fn chained_member_on_inferred_local_offers_vec_methods() {
 }
 
 #[test]
+fn method_completion_omits_parens_when_they_already_follow() {
+    // `c.items.le|()` -- accepting `len` must NOT re-append `()` (would yield
+    // `len()()`). When a `(` already follows the cursor, insert the bare name.
+    let src = "struct Item { kind: int }\n\
+               struct Corpse { items: [Item], name: string }\n\
+               fn r(c: Corpse) {\n  let n = c.items.le()\n}\n";
+    let it = item(src, 3, 20, "len");
+    assert_eq!(it.insert_text.as_deref(), Some("len"), "no doubled parens: {it:?}");
+
+    // Control: no trailing paren -> the method DOES bring its own `()`.
+    let src2 = "struct Item { kind: int }\n\
+                struct Corpse { items: [Item], name: string }\n\
+                fn r(c: Corpse) {\n  let n = c.items.le\n}\n";
+    let it2 = item(src2, 3, 20, "len");
+    assert_eq!(it2.insert_text.as_deref(), Some("len()"), "brings its own parens: {it2:?}");
+}
+
+#[test]
 fn unspaced_less_than_comparison_is_expression_position() {
     // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot
     // and offers the bare enum instead of qualified variants. It's a
