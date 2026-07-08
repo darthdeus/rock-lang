@@ -24,7 +24,7 @@ use bone_semantic::hir::{
 };
 use ustr::Ustr;
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::ModuleId;
+use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId};
 use comfy_la_arena::{Idx, IdxRange};
 use skull_parser::CompilerError;
 
@@ -192,6 +192,18 @@ fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
             }
             _ => None,
         },
+        _ => None,
+    }
+}
+
+/// Arity of a tuple RETURN type -- `Some(n)` iff `ty` is a (non-nullable) tuple
+/// `(A, B, ...)`. Drives the multi-return ABI: a tuple-returning fn returns its N
+/// elements as N Lua values instead of one heap table (slice 1,
+/// `docs/iterator-implementation-plan.md`). A `Nullable(Tuple)` return stays boxed
+/// (no room for the null discriminant across a multi-value boundary).
+fn tuple_arity(ws: &Workspace, ty: TyId) -> Option<usize> {
+    match static_ty(ws, ty)? {
+        TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
         _ => None,
     }
 }
@@ -812,6 +824,7 @@ pub fn lower_function(
         resume_arg,
         param_shapes,
         ret_shape,
+        ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         group_binds: HashMap::new(),
     };
     b.lower_params();
@@ -858,6 +871,7 @@ pub fn lower_global(
         resume_arg: None,
         param_shapes: Vec::new(),
         ret_shape: None,
+        ret_tuple: None,
         group_binds: HashMap::new(),
     };
     b.lower_root()?;
@@ -903,6 +917,7 @@ pub fn lower_decorator(
         resume_arg: None,
         param_shapes: Vec::new(),
         ret_shape: None,
+        ret_tuple: None,
         group_binds: HashMap::new(),
     };
     // `target` is param 0, then the decorator's declared params.
@@ -943,6 +958,10 @@ struct Builder<'a> {
     param_shapes: Vec<Option<ValueShape>>,
     /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
     ret_shape: Option<ValueShape>,
+    /// `Some(n)` when the fn's return type is a tuple of arity `n` -- it returns
+    /// N Lua values (multi-return ABI), not one heap table. Set for named fns;
+    /// lambdas decide per-body at their own return site.
+    ret_tuple: Option<usize>,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1072,7 +1091,27 @@ impl Builder<'_> {
             let r = self.lower_expr_repr(e)?;
             return Ok(self.repr_to_leaves(&r, &shape));
         }
+        if let Some(n) = self.ret_tuple {
+            let v = self.lower_expr(e)?;
+            return Ok(self.tuple_return_operands(v, n));
+        }
         Ok(vec![self.lower_expr(e)?])
+    }
+
+    /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
+    /// in return position (the common `return (a, b)` and the `return f()` forward
+    /// where `f()` lowered to `MakeTuple(loads)`) is elided to its operands -- no
+    /// table alloc. A tuple value from elsewhere (a var/field holding a packed
+    /// table) is unpacked with `TupleIndex`.
+    fn tuple_return_operands(&mut self, v: Idx<Inst>, n: usize) -> Vec<Idx<Inst>> {
+        if let Inst::MakeTuple(vs) = &self.f.insts[v] {
+            if vs.len() == n {
+                return vs.clone();
+            }
+        }
+        (0..n)
+            .map(|i| self.emit_cur(Inst::TupleIndex { base: v, index: i }))
+            .collect()
     }
 
     /// Lower a statement sequence into the current block. Returns `true` if a
@@ -1324,6 +1363,27 @@ impl Builder<'_> {
             }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
 
+            // A reached `?` hole is a not-yet-filled marker: raise a readable
+            // runtime error (naming the hole) rather than silently evaluating to
+            // nil. `error` diverges, so the trailing nil is never read -- it only
+            // satisfies the expression's value slot.
+            Expr::Hole(name) => {
+                let label = match name {
+                    Some(n) => format!("reached unfilled hole ?{n}"),
+                    None => "reached unfilled hole ?".to_string(),
+                };
+                let msg = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(label.as_str()))));
+                let func = self
+                    .ws
+                    .functions_by_name
+                    .get(&Ustr::from("error"))
+                    .and_then(|l| l.first())
+                    .map(|&(module, func)| FuncRef { module, func })
+                    .ok_or_else(|| gap("stdlib `error` missing for hole lowering"))?;
+                self.emit_cur(Inst::Call { func, args: vec![msg] });
+                Ok(self.emit_cur(Inst::Const(Lit::Nil)))
+            }
+
             // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
             // records the target on `e`); a scalar uses the native op.
             Expr::Not(x) => {
@@ -1428,11 +1488,13 @@ impl Builder<'_> {
             }
             // A value-struct literal is built via the repr layer (so a callsite
             // can splat it without a cdata); a plain struct is a Lua table.
-            Expr::StructLiteral { name, fields } if self.is_value_struct(name) => {
-                let r = self.value_literal_repr(name, fields)?;
+            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
+                let r = self.value_literal_repr(name, fields, bases)?;
                 Ok(self.pack(r))
             }
-            Expr::StructLiteral { name, fields } => self.lower_struct_literal(name, fields),
+            Expr::StructLiteral { name, fields, bases } => {
+                self.lower_struct_literal(name, fields, bases)
+            }
             Expr::EnumVariant {
                 enum_name,
                 variant,
@@ -1503,13 +1565,26 @@ impl Builder<'_> {
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;
-                // A closure body is value-position: return its value. (A block
-                // body with a tail returns the tail; a statement-only block
-                // returns unit.)
+                // The lambda body returns via the LAMBDA's ABI, not the enclosing
+                // fn's: a bone-desugared `() => e` body is a block with a `return e`
+                // statement, so the return machinery (`return_leaves`) must see the
+                // lambda's own return shape. A tuple-returning lambda splats N values
+                // so an indirect call site can capture them (multi-return ABI); the
+                // enclosing value-struct `ret_shape` never applies (a lambda is
+                // called through a boxed fn-value). Save/restore around the body.
+                let saved_ret_tuple = self.ret_tuple;
+                let saved_ret_shape = self.ret_shape.take();
+                self.ret_tuple = self.lambda_ret_tuple_arity(e);
                 let v = self.lower_expr(body)?;
                 if self.is_open() {
-                    self.f.set_term(self.cur, Term::Return(vec![v]));
+                    let leaves = match self.ret_tuple {
+                        Some(n) => self.tuple_return_operands(v, n),
+                        None => vec![v],
+                    };
+                    self.f.set_term(self.cur, Term::Return(leaves));
                 }
+                self.ret_tuple = saved_ret_tuple;
+                self.ret_shape = saved_ret_shape;
                 self.cur = saved;
                 Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }))
             }
@@ -1880,7 +1955,8 @@ impl Builder<'_> {
             for a in args {
                 argv.push(self.lower_expr(a)?);
             }
-            self.emit_cur(Inst::CallValue { callee: fieldv, args: argv })
+            let arity = self.peeled_tuple_arity(e);
+            self.emit_call_value_n(arity, fieldv, argv)
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             let func = self.resolve_funcref(e, method)?;
@@ -1894,7 +1970,16 @@ impl Builder<'_> {
                 for a in arg_idxs {
                     argv.push(self.lower_expr(a)?);
                 }
-                self.emit_cur(Inst::Call { func, args: argv })
+                // A tuple-returning method splats N values; capture + pack into
+                // the single (boxed, nullable) safe-nav result.
+                let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
+                match ret_ty.and_then(|t| tuple_arity(self.ws, t)) {
+                    Some(n) => {
+                        let r = self.emit_tuple_call(func, argv, n);
+                        self.pack(r)
+                    }
+                    None => self.emit_cur(Inst::Call { func, args: argv }),
+                }
             }
         };
         self.store_and_join(result, cv, join);
@@ -2137,7 +2222,39 @@ impl Builder<'_> {
                 }
             }
         }
-        let any_named = arg_idxs.iter().any(|a| self.body.arg_names.contains_key(a));
+        // Bound-calls inside an `Iterator`-bounded body (`next(x)` / `iter(x)`
+        // where `x: I`): `iter` is IDENTITY (the arg is the iterator, no call);
+        // `next` is a placeholder [`Inst::CallBoundMulti`] -- the concrete
+        // callee is substituted per splice from the site's `BoundTree`.
+        if let Some(inf) = self.inf {
+            if inf.bound_identity_calls.contains(&e) {
+                let [arg] = arg_idxs[..] else {
+                    return Err(gap("bound `iter` call with non-unary args"));
+                };
+                return Ok(ValueRepr::Scalar(self.lower_expr(arg)?));
+            }
+            if let Some(&gidx) = inf.bound_calls.get(&e) {
+                let [arg] = arg_idxs[..] else {
+                    return Err(gap("bound `next` call with non-unary args"));
+                };
+                let arg_v = self.lower_expr(arg)?;
+                // Bound conformance fixes the shape at exactly `(bool, E)`.
+                let dests: Vec<Idx<Cell>> = (0..2).map(|_| self.f.new_cell(None)).collect();
+                self.emit_cur(Inst::CallBoundMulti {
+                    dests: dests.clone(),
+                    generic_idx: gidx as u32,
+                    args: vec![arg_v],
+                });
+                let loads: Vec<Idx<Inst>> =
+                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                return Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads))));
+            }
+        }
+        // A spread arg fills param slots by field name, so it takes the
+        // slot-reordering path just like a named arg.
+        let any_named = arg_idxs
+            .iter()
+            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
         match callee {
             // A transparent newtype constructor (`UserId(5)`) is identity at
             // runtime -- the wrapped value IS the inner -- so it lowers to the
@@ -2153,7 +2270,7 @@ impl Builder<'_> {
             // INDIRECT call: a fn-typed struct field via UFCS (`recv.f(a)` ==
             // `f(recv, a)`, no real fn `f`) or a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
-                Ok(func) => self.lower_direct_call_repr(func, &arg_idxs, any_named),
+                Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
                     if !any_named {
                         let arg_vals: Vec<Idx<Inst>> =
@@ -2163,18 +2280,15 @@ impl Builder<'_> {
                         if let Some(&recv_expr) = arg_idxs.first() {
                             if self.struct_field_is_fn(recv_expr, name) {
                                 let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field: name });
-                                return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue {
-                                    callee: fieldv,
-                                    args: arg_vals[1..].to_vec(),
-                                })));
+                                let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec());
+                                return Ok(ValueRepr::Scalar(v));
                             }
                         }
                         // `g(args)` where `g` is a fn-typed module global.
                         if self.is_fn_global(name) {
                             let g = self.emit_cur(Inst::Global(name));
-                            return Ok(ValueRepr::Scalar(
-                                self.emit_cur(Inst::CallValue { callee: g, args: arg_vals }),
-                            ));
+                            let v = self.emit_call_value(e, g, arg_vals);
+                            return Ok(ValueRepr::Scalar(v));
                         }
                     }
                     Err(gap_err)
@@ -2190,20 +2304,16 @@ impl Builder<'_> {
                 let callee_v = self.emit_cur(Inst::Load(cell));
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue {
-                    callee: callee_v,
-                    args: arg_vals,
-                })))
+                let v = self.emit_call_value(e, callee_v, arg_vals);
+                Ok(ValueRepr::Scalar(v))
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
                 let callee_v = self.lower_expr(ve)?;
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue {
-                    callee: callee_v,
-                    args: arg_vals,
-                })))
+                let v = self.emit_call_value(e, callee_v, arg_vals);
+                Ok(ValueRepr::Scalar(v))
             }
         }
     }
@@ -2212,19 +2322,39 @@ impl Builder<'_> {
     /// value ABI, value args splat to leaves and a value return arrives as N
     /// leaves via [`Inst::CallMulti`] (rebuilt into a `Group`); otherwise it is a
     /// plain boxed [`Inst::Call`].
+    ///
+    /// A call of an `Iterator`-bounded callee carries bone's resolution tree
+    /// (keyed by the call expr `e`); it is re-recorded against the emitted call
+    /// inst so the inliner can substitute the placeholders inside the callee.
     fn lower_direct_call_repr(
         &mut self,
+        e: Idx<Expr>,
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
     ) -> Result<ValueRepr, CompilerError> {
+        let tree = self
+            .inf
+            .and_then(|i| i.bound_call_trees.get(&e))
+            .filter(|t| !t.is_empty())
+            .cloned();
+        let ret_tuple = self.ws.module(func.module).functions[func.func]
+            .return_ty
+            .and_then(|t| tuple_arity(self.ws, t));
         if !fn_uses_scalar_abi(self.ws, self.scx, func) {
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
                 arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?
             };
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args })));
+            if let Some(n) = ret_tuple {
+                return Ok(self.emit_tuple_call_tree(func, args, n, tree));
+            }
+            let call = self.emit_cur(Inst::Call { func, args });
+            if let Some(t) = tree {
+                self.f.bound_trees.insert(call, t);
+            }
+            return Ok(ValueRepr::Scalar(call));
         }
         let args = self.scalar_call_args(func, arg_idxs, any_named)?;
         let ret_shape = self.ws.module(func.module).functions[func.func]
@@ -2234,13 +2364,79 @@ impl Builder<'_> {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+                let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+                if let Some(t) = tree {
+                    self.f.bound_trees.insert(call, t);
+                }
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
-            None => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args }))),
+            None => match ret_tuple {
+                Some(n) => Ok(self.emit_tuple_call_tree(func, args, n, tree)),
+                None => {
+                    let call = self.emit_cur(Inst::Call { func, args });
+                    if let Some(t) = tree {
+                        self.f.bound_trees.insert(call, t);
+                    }
+                    Ok(ValueRepr::Scalar(call))
+                }
+            },
+        }
+    }
+
+    /// A direct call to a tuple-returning fn under the multi-return ABI: the
+    /// callee returns N values, captured into N dest cells via [`Inst::CallMulti`].
+    /// The result value is `MakeTuple(loads)` -- a boxed use materializes the
+    /// table (same as the old ABI), a destructure elides it (`bind_for_pattern`).
+    fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, n: usize) -> ValueRepr {
+        self.emit_tuple_call_tree(func, args, n, None)
+    }
+
+    /// [`Self::emit_tuple_call`] recording an `Iterator`-bound resolution tree
+    /// against the emitted call inst (chain roots like a directly-called
+    /// bounded `next`).
+    fn emit_tuple_call_tree(
+        &mut self,
+        func: FuncRef,
+        args: Vec<Idx<Inst>>,
+        n: usize,
+        tree: Option<bone_semantic::prelude::BoundTree>,
+    ) -> ValueRepr {
+        let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
+        if let Some(t) = tree {
+            self.f.bound_trees.insert(call, t);
+        }
+        let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads)))
+    }
+
+    /// An indirect call `callee(args)`. If the call's result type is a tuple, the
+    /// fn-value (a lambda or named fn used as a value) returns N values under the
+    /// multi-return ABI, captured via [`Inst::CallValueMulti`] -- a multi-assign
+    /// `d0, d1 = callee(args)` (a plain `CallValue` in table position would
+    /// truncate to the first return). The result is `MakeTuple(loads)`: boxed use
+    /// materializes the table, a destructure elides it. The ABI is decided by the
+    /// call's STATIC type, so direct and indirect callees of the same fn-type
+    /// agree with no callee-identity analysis.
+    fn emit_call_value(&mut self, e: Idx<Expr>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
+        self.emit_call_value_n(self.expr_tuple_arity(e), callee, args)
+    }
+
+    /// [`Self::emit_call_value`] with an explicit tuple arity (the safe-nav call
+    /// paths pass the nil-peeled arity, since their expr type is `(..)?`).
+    fn emit_call_value_n(&mut self, arity: Option<usize>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
+        match arity {
+            Some(n) => {
+                let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+                self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args });
+                let loads: Vec<Idx<Inst>> =
+                    dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                self.emit_cur(Inst::MakeTuple(loads))
+            }
+            None => self.emit_cur(Inst::CallValue { callee, args }),
         }
     }
 
@@ -2329,6 +2525,16 @@ impl Builder<'_> {
         let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
+            // Struct spread `..op`: decompose into per-field reprs (a struct-
+            // literal operand is elided) and place each into its param slot.
+            if self.body.spread_args.contains(&a) {
+                for (fname, r) in self.spread_field_reprs(a)? {
+                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
+                        slots[pidx] = Some(r);
+                    }
+                }
+                continue;
+            }
             let r = self.lower_expr_repr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
@@ -2564,8 +2770,8 @@ impl Builder<'_> {
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
-            Expr::StructLiteral { name, fields } if self.is_value_struct(name) => {
-                self.value_literal_repr(name, fields)
+            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
+                self.value_literal_repr(name, fields, bases)
             }
             // A cdata-eligible enum construction stays an unboxed Group `[tag, _0]`
             // (so a callsite/field can splat it without a cdata round-trip); `pack`
@@ -2594,7 +2800,20 @@ impl Builder<'_> {
         &mut self,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<ValueRepr, CompilerError> {
+        // Functional-update base: evaluate once (before fields). A Group base
+        // projects its parts directly (no cdata); a boxed base reads fields off
+        // the packed cdata (the normal value-field read). Inference guarantees
+        // at most one base of this struct's type.
+        let base_repr: Option<ValueRepr> = match bases.into_iter().next() {
+            Some(b) => Some(self.lower_expr_repr(b)?),
+            None => None,
+        };
+        let base_boxed: Option<Idx<Inst>> = match &base_repr {
+            Some(ValueRepr::Group { .. }) | None => None,
+            Some(other) => Some(self.pack(other.clone())),
+        };
         let mut litmap: Vec<(Ustr, ValueRepr)> = Vec::new();
         let mut by_value: HashMap<u32, ValueRepr> = HashMap::new();
         for fidx in fields {
@@ -2616,10 +2835,23 @@ impl Builder<'_> {
                 for fname in decl {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
-                        None => {
-                            let v = self.lower_struct_default(name, fname)?;
-                            fs.push(ValueRepr::Scalar(v));
-                        }
+                        None => match (&base_repr, base_boxed) {
+                            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+                                let i = self
+                                    .field_index(*bn, fname)
+                                    .expect("functional-update base covers every field");
+                                fs.push(parts[i].clone());
+                            }
+                            (Some(_), Some(bi)) => {
+                                fs.push(ValueRepr::Scalar(
+                                    self.emit_cur(Inst::Field { base: bi, field: fname }),
+                                ));
+                            }
+                            _ => {
+                                let v = self.lower_struct_default(name, fname)?;
+                                fs.push(ValueRepr::Scalar(v));
+                            }
+                        },
                     }
                 }
                 fs
@@ -2651,6 +2883,18 @@ impl Builder<'_> {
         let mut slots: Vec<Option<Idx<Inst>>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
+            // Struct spread `..op`: decompose the operand into per-field values
+            // (a struct-literal operand is elided) and place each into the param
+            // slot of the same name. bone verified every field matches a param;
+            // a named arg after the spread overrides via last-write-wins.
+            if self.body.spread_args.contains(&a) {
+                for (fname, fv) in self.spread_field_insts(a)? {
+                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
+                        slots[pidx] = Some(fv);
+                    }
+                }
+                continue;
+            }
             let v = self.lower_expr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
                 Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
@@ -3434,6 +3678,14 @@ impl Builder<'_> {
                 BindingPattern::Tuple(_) => Err(gap("for-range with a tuple pattern")),
             };
         }
+        // User iterator protocol (bone recorded the resolution for this For):
+        // desugar to `it = iter(coll); loop { (ok, ..) = next(it); !ok -> break }`.
+        // Only populated for non-builtin collections, so this never shadows a
+        // builtin template. `iter_fn: None` = identity (the collection IS the
+        // iterator); a `CallerGeneric` next = placeholder in a bounded body.
+        if let Some(info) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).cloned()) {
+            return self.lower_for_user_iter(&vars, iter, body, &info);
+        }
         if let Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
@@ -3453,14 +3705,129 @@ impl Builder<'_> {
             // value, so the call runs exactly once (no per-iteration re-eval).
         }
         if self.iter_is_arena(iter) {
-            return self.lower_for_arena(&vars, iter, body, false);
+            // Direct `for .. in arena` arrives with `for_iter_protocol`
+            // populated (bone routes Arena to the stdlib ArenaIter); only
+            // `enumerate(arena)` still uses the template above.
+            return Err(gap(
+                "for over Arena must route through the iterator protocol (for_iter_protocol missing)",
+            ));
         }
         match self.coll_kind(iter) {
-            ContainerKind::Vec | ContainerKind::NativeArray | ContainerKind::NativeBuffer => {
+            // `for x in [T]` always arrives with `for_iter_protocol` populated
+            // (bone routes Array to the stdlib VecIter protocol); reaching the
+            // dispatch means bone and skull disagree -- reject, don't emit a
+            // second lowering. `enumerate(vec)` keeps its own path above.
+            ContainerKind::Vec => Err(gap(
+                "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
+            )),
+            ContainerKind::NativeArray | ContainerKind::NativeBuffer => {
                 self.lower_for_array(vars, iter, body)
             }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
         }
+    }
+
+    /// `for <pat> in <coll>` over a user type via the iter/next protocol (bone
+    /// recorded the resolution). Desugars to:
+    ///   it = iter(coll)        -- or `it = coll` when iter is identity
+    ///   loop { let (ok, <pat>) = next(it); if !ok break; <body> }
+    /// `next` returns a tuple, so slice-1's multi-return ABI makes the per-element
+    /// `next` call zero-alloc (a `CallMulti` into `[ok, elem..]` dests). `it` lives
+    /// in a cell so `next` mutates the same cursor each turn. `continue` re-enters
+    /// the header (runs `next` again); `break` exits.
+    ///
+    /// A `Concrete` next with a non-empty bound tree is a combinator-chain root:
+    /// the tree is recorded against the emitted `CallMulti` so the inliner can
+    /// substitute the placeholders inside the spliced callee. A `CallerGeneric`
+    /// next (a `for` over a bounded generic inside a bounded body) emits the
+    /// placeholder [`Inst::CallBoundMulti`] directly.
+    fn lower_for_user_iter(
+        &mut self,
+        vars: &BindingPattern,
+        iter_expr: Idx<Expr>,
+        body: Idx<Expr>,
+        info: &ForIterInfo,
+    ) -> Result<(), CompilerError> {
+        let coll = self.lower_expr(iter_expr)?;
+        let it_val = match info.iter_fn {
+            Some((m, f)) => {
+                self.emit_cur(Inst::Call { func: FuncRef { module: m, func: f }, args: vec![coll] })
+            }
+            None => coll,
+        };
+        let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
+        self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
+
+        // next returns `(bool, E)` / `(bool, A, B, ...)`: arity = 1 + element
+        // leaves. A placeholder next is always arity 2 (bound conformance
+        // requires exactly `(bool, E)`).
+        let n = match &info.next {
+            BoundNext::Concrete { func: (m, f), .. } => self
+                .ws
+                .module(*m)
+                .functions[*f]
+                .return_ty
+                .and_then(|t| tuple_arity(self.ws, t))
+                .ok_or_else(|| gap("for-iter `next` must return a tuple"))?,
+            BoundNext::CallerGeneric(_) => 2,
+        };
+        if n < 2 {
+            return Err(gap("for-iter `next` must return `(bool, E)`"));
+        }
+
+        let header = self.f.new_block();
+        let body_bb = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.for_iter_headers.push(header);
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        // header: (ok, elem..) = next(it); branch on ok.
+        self.cur = header;
+        let it_load = self.emit_cur(Inst::Load(it_cell));
+        let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        match &info.next {
+            BoundNext::Concrete { func: (m, f), sub } => {
+                let func = FuncRef { module: *m, func: *f };
+                let call = self.emit_cur(Inst::CallMulti {
+                    dests: dests.clone(),
+                    func,
+                    args: vec![it_load],
+                });
+                if !sub.is_empty() {
+                    self.f.bound_trees.insert(call, sub.clone());
+                }
+            }
+            BoundNext::CallerGeneric(gidx) => {
+                self.emit_cur(Inst::CallBoundMulti {
+                    dests: dests.clone(),
+                    generic_idx: *gidx as u32,
+                    args: vec![it_load],
+                });
+            }
+        }
+        let ok = self.emit_cur(Inst::Load(dests[0]));
+        self.f.set_term(self.cur, Term::Branch { cond: ok, then_bb: body_bb, else_bb: exit });
+
+        // body: bind the pattern to the element leaves. A single element binds
+        // directly; multiple (`next -> (bool, A, B)`) pack into a MakeTuple that
+        // `bind_for_pattern` elides against a matching tuple pattern (no alloc).
+        self.cur = body_bb;
+        let elem_val = if n == 2 {
+            self.emit_cur(Inst::Load(dests[1]))
+        } else {
+            let loads: Vec<Idx<Inst>> =
+                dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            self.emit_cur(Inst::MakeTuple(loads))
+        };
+        self.bind_for_pattern(vars, elem_val);
+        self.loop_targets.push((header, exit));
+        self.lower_stmt_expr(body)?;
+        self.loop_targets.pop();
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(header));
+        }
+        self.cur = exit;
+        Ok(())
     }
 
     /// The variant names of `e`'s enum type (empty if `e` is not an enum) — used
@@ -3936,6 +4303,19 @@ impl Builder<'_> {
                 self.binds.insert(raw(*b), cell);
             }
             BindingPattern::Tuple(subs) => {
+                // Fast path: destructuring a fresh `MakeTuple` (a tuple literal or a
+                // multi-return call packed as `MakeTuple(loads)`) binds directly to
+                // its operands -- no table alloc, no `TupleIndex`. This is what makes
+                // `let (ok, x) = next(it)` zero-alloc (slice 1).
+                if let Inst::MakeTuple(vs) = &self.f.insts[value] {
+                    if vs.len() == subs.len() {
+                        let vs = vs.clone();
+                        for (sub, v) in subs.iter().zip(vs) {
+                            self.bind_for_pattern(sub, v);
+                        }
+                        return;
+                    }
+                }
                 for (i, sub) in subs.iter().enumerate() {
                     let elem = self.emit_cur(Inst::TupleIndex { base: value, index: i });
                     self.bind_for_pattern(sub, elem);
@@ -4530,7 +4910,15 @@ impl Builder<'_> {
         &mut self,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        // Functional-update base (`Struct { ..base, .. }`): evaluate once, before
+        // fields (source order), and read unwritten fields off it. Inference
+        // guarantees at most one base and that it has this struct's type.
+        let base_inst: Option<Idx<Inst>> = match bases.into_iter().next() {
+            Some(b) => Some(self.lower_expr(b)?),
+            None => None,
+        };
         // A field GROUP (`Struct { a + b + c: expr }`) expands to several fields
         // sharing ONE `value` Expr index; evaluate each distinct value-expr once
         // (correct eval count, and grouped fields share the same instance), in
@@ -4574,12 +4962,19 @@ impl Builder<'_> {
                     } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
                         fs.push((fname, v));
                     } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
-                        // Defaulted flat field: lower the default box, spread its slots.
-                        let dv = self.lower_struct_default(name, fname)?;
+                        // Unwritten flat field: from the base if present, else the
+                        // struct default; spread the box into slots either way.
+                        let dv = match base_inst {
+                            Some(bi) => self.emit_cur(Inst::Field { base: bi, field: fname }),
+                            None => self.lower_struct_default(name, fname)?,
+                        };
                         let cells = self.spread_box_to_cells(dv, &shape);
                         fs.extend(self.flat_literal_slots(fname, cells));
                     } else {
-                        let v = self.lower_struct_default(name, fname)?;
+                        let v = match base_inst {
+                            Some(bi) => self.emit_cur(Inst::Field { base: bi, field: fname }),
+                            None => self.lower_struct_default(name, fname)?,
+                        };
                         fs.push((fname, v));
                     }
                 }
@@ -5144,11 +5539,194 @@ impl Builder<'_> {
         }
     }
 
+    /// The declared field names of a call-site spread operand `..op`, in struct
+    /// order. bone-inference has already verified the operand is a nominal
+    /// struct whose fields all match callee params.
+    fn spread_operand_fields(&self, op: Idx<Expr>) -> Result<Vec<Ustr>, CompilerError> {
+        match self.expr_ty(op) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self
+                .struct_field_names(name)
+                .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields"))),
+            _ => Err(gap("spread operand is not a nominal struct")),
+        }
+    }
+
+    /// A spread operand `..op` decomposed to (field name, boxed value) pairs. A
+    /// struct-LITERAL operand is ELIDED: its field exprs lower directly (base
+    /// first, then explicit fields in source order for side effects; unwritten
+    /// fields from a functional-update base or the struct default), so no
+    /// intermediate table is built. Any other operand -- and a literal with a
+    /// flattened-enum field, which needs slot expansion -- is lowered once and
+    /// its fields read off it.
+    fn spread_field_insts(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[op].clone() {
+            let decl = self.struct_field_names(name).unwrap_or_default();
+            if !decl.iter().any(|f| self.flat_field_of_struct(name, *f).is_some()) {
+                let base_inst = match bases.into_iter().next() {
+                    Some(b) => Some(self.lower_expr(b)?),
+                    None => None,
+                };
+                let mut explicit: Vec<(Ustr, Idx<Inst>)> = Vec::new();
+                let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
+                for fidx in fields {
+                    let lf = self.body.struct_lit_field_arena[fidx];
+                    let key: u32 = lf.value.into_raw().into();
+                    let v = match by_value.get(&key) {
+                        Some(&v) => v,
+                        None => {
+                            let v = self.lower_expr(lf.value)?;
+                            by_value.insert(key, v);
+                            v
+                        }
+                    };
+                    explicit.push((lf.name, v));
+                }
+                let mut out = Vec::new();
+                for fname in decl {
+                    let v = if let Some((_, v)) = explicit.iter().find(|(n, _)| *n == fname) {
+                        *v
+                    } else if let Some(bi) = base_inst {
+                        self.emit_cur(Inst::Field { base: bi, field: fname })
+                    } else {
+                        self.lower_struct_default(name, fname)?
+                    };
+                    out.push((fname, v));
+                }
+                return Ok(out);
+            }
+        }
+        let base = self.lower_expr(op)?;
+        let mut out = Vec::new();
+        for f in self.spread_operand_fields(op)? {
+            out.push((f, self.emit_cur(Inst::Field { base, field: f })));
+        }
+        Ok(out)
+    }
+
+    /// The `ValueRepr` form of [`spread_field_insts`], for the scalar-ABI arg
+    /// path. Same literal-elision; a Group base projects its parts, a boxed base
+    /// reads fields off the packed cdata.
+    fn spread_field_reprs(&mut self, op: Idx<Expr>) -> Result<Vec<(Ustr, ValueRepr)>, CompilerError> {
+        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[op].clone() {
+            let decl = self.struct_field_names(name).unwrap_or_default();
+            if !decl.iter().any(|f| self.flat_field_of_struct(name, *f).is_some()) {
+                let base_repr = match bases.into_iter().next() {
+                    Some(b) => Some(self.lower_expr_repr(b)?),
+                    None => None,
+                };
+                let base_boxed = match &base_repr {
+                    Some(ValueRepr::Group { .. }) | None => None,
+                    Some(other) => Some(self.pack(other.clone())),
+                };
+                let mut explicit: Vec<(Ustr, ValueRepr)> = Vec::new();
+                let mut by_value: HashMap<u32, ValueRepr> = HashMap::new();
+                for fidx in fields {
+                    let lf = self.body.struct_lit_field_arena[fidx];
+                    let key: u32 = lf.value.into_raw().into();
+                    let r = match by_value.get(&key) {
+                        Some(r) => r.clone(),
+                        None => {
+                            let r = self.lower_expr_repr(lf.value)?;
+                            by_value.insert(key, r.clone());
+                            r
+                        }
+                    };
+                    explicit.push((lf.name, r));
+                }
+                let mut out = Vec::new();
+                for fname in decl {
+                    let r = if let Some((_, r)) = explicit.iter().find(|(n, _)| *n == fname) {
+                        r.clone()
+                    } else {
+                        self.spread_base_field_repr(&base_repr, base_boxed, name, fname)?
+                    };
+                    out.push((fname, r));
+                }
+                return Ok(out);
+            }
+        }
+        let base_repr = self.lower_expr_repr(op)?;
+        let base_boxed = match &base_repr {
+            ValueRepr::Group { .. } => None,
+            other => Some(self.pack(other.clone())),
+        };
+        let name = match self.expr_ty(op) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => name,
+            _ => return Err(gap("spread operand is not a nominal struct")),
+        };
+        let mut out = Vec::new();
+        for fname in self.struct_field_names(name).unwrap_or_default() {
+            let r = self.spread_base_field_repr(&Some(base_repr.clone()), base_boxed, name, fname)?;
+            out.push((fname, r));
+        }
+        Ok(out)
+    }
+
+    /// Read field `fname` from an already-lowered spread base: project a Group
+    /// part, or read the field off the packed cdata; a missing base falls back
+    /// to the struct default.
+    fn spread_base_field_repr(
+        &mut self,
+        base_repr: &Option<ValueRepr>,
+        base_boxed: Option<Idx<Inst>>,
+        name: Ustr,
+        fname: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        Ok(match (base_repr, base_boxed) {
+            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+                let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
+                parts[i].clone()
+            }
+            (Some(_), Some(bi)) => {
+                ValueRepr::Scalar(self.emit_cur(Inst::Field { base: bi, field: fname }))
+            }
+            _ => ValueRepr::Scalar(self.lower_struct_default(name, fname)?),
+        })
+    }
+
     /// The resolved type of an expression (chasing `Infer` vars + peeling
     /// `Nullable`), or `None` when inference is absent/unsolved.
     fn expr_ty(&self, e: Idx<Expr>) -> Option<TypeExpr> {
         let ty = *self.inf?.expr_types.get(e)?;
         self.resolve_ty(ty)
+    }
+
+    /// `Some(n)` iff `e`'s inferred type is a (non-nullable) tuple of arity `n`.
+    /// Used to route a tuple result across a call boundary (the call expr's own
+    /// type IS the callee's return type, so direct and INDIRECT calls agree).
+    /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
+    /// bare tuple and get mis-splatted.
+    fn expr_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+        self.tyid_tuple_arity(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
+    }
+
+    /// `Some(n)` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple of
+    /// arity `n` -- the lambda body then splats N values so an indirect call site
+    /// captures them (multi-return ABI). Read off the lambda's inferred `fn(..) ->
+    /// (..)` type so it agrees with the call site's `expr_tuple_arity`.
+    fn lambda_ret_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::Function { ret, .. } = self.ty_node(ty)? else { return None };
+        self.tyid_tuple_arity(self.resolve_tyid(ty.with_idx(ret))?)
+    }
+
+    fn tyid_tuple_arity(&self, ty: TyId) -> Option<usize> {
+        match self.ty_node(ty)? {
+            TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
+            _ => None,
+        }
+    }
+
+    /// `Some(n)` iff `e`'s type is a tuple OR a `(tuple)?` of arity `n` -- the
+    /// nil-peeled form for safe-nav calls, whose result type is nullable but whose
+    /// callee still splats the inner tuple.
+    fn peeled_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let inner = match self.ty_node(ty)? {
+            TypeExpr::Nullable(i) => self.resolve_tyid(ty.with_idx(i))?,
+            _ => ty,
+        };
+        self.tyid_tuple_arity(inner)
     }
 
     fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
@@ -5611,7 +6189,10 @@ fn f() {
     }
 
     #[test]
-    fn tuple_literal_builds_a_tuple() {
+    fn tuple_return_splats_multi_value() {
+        // A tuple-return fn splats its N elements (multi-return ABI) instead of
+        // returning one heap table. The `tuple` inst here is dead (elided from the
+        // return) and DCE'd by `cleanup` before codegen.
         assert_eq!(
             mir("fn f() -> (int, bool) { (1, true) }", "f"),
             "\
@@ -5620,7 +6201,7 @@ fn f() {
     v0 = const 1
     v1 = const true
     v2 = tuple [v0, v1]
-    return v2
+    return v0, v1
 }"
         );
     }
@@ -5747,13 +6328,15 @@ fn f(c0) {
 
     #[test]
     fn for_over_array_indexes_each_element() {
+        // Native array: the builtin counted template. (`[T]` routes through
+        // the stdlib VecIter protocol instead and never reaches this path.)
         assert_eq!(
-            mir("fn f(xs: [int]) { for x in xs { } }", "f"),
+            mir("fn f(xs: ![int]) { for x in xs { } }", "f"),
             "\
 fn f(c0) {
   bb0:
     v0 = load c0
-    v1 = len.Vec v0
+    v1 = len.NativeArray v0
     v2 = const 0
     store c1, v2
     goto bb1
@@ -5763,7 +6346,7 @@ fn f(c0) {
     branch v4 -> bb2, bb4
   bb2:
     v5 = load c1
-    v6 = index.Vec v0[v5]
+    v6 = index.NativeArray v0[v5]
     store c2, v6
     goto bb3
   bb3:

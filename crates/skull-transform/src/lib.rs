@@ -27,7 +27,9 @@ use comfy_la_arena::{Idx, RawIdx};
 use skull_codegen_lua::{emit_named_framed, mangled, CodegenCtx, FrameCtx};
 use skull_mir::mir::*;
 
+mod forl;
 mod inline;
+pub use forl::recover_counted_loops;
 pub use inline::{inline_functions, InlineCache, SpliceRecord};
 
 const STATE: &str = "__state";
@@ -185,9 +187,88 @@ fn is_dead_value(inst: &Inst) -> bool {
 /// The standalone `copy_propagate` / `dce` keep their independent behavior.
 pub fn cleanup(func: &mut MirFunc) {
     scalarize_native_buffer_stores(func);
-    scalarize_struct_cells(func);
-    let subst = copy_propagate_subst(func);
-    dce_core(func, subst.as_deref());
+    // SROA and copy-prop/DCE INTERLEAVE to a fixpoint: peeling a cursor struct
+    // leaves its (now-dead) ctor behind, and that ctor's operand uses pin the
+    // NEXT nesting level's cell as escaping (iterator combinator chains nest
+    // cursors: MapIter{__inner: VecIter{..}}). Sweeping between rounds lets
+    // each level peel; depth = chain nesting, so this converges fast, and the
+    // no-change round costs one extra scan.
+    loop {
+        let changed = scalarize_struct_cells_once(func);
+        let subst = copy_propagate_subst(func);
+        dce_core(func, subst.as_deref());
+        if !changed {
+            break;
+        }
+    }
+    if fold_const_branches(func) {
+        dce(func);
+    }
+}
+
+/// Fold `Branch` on a constant bool condition into a `Goto`, then clear blocks
+/// no longer reachable from any root (fn entry, lambda entries, co-fn defer
+/// guards -- the latter two are detached sub-CFGs by design and must survive).
+/// `loop {}` lowers to a `while true` shape whose const branch hides the loop
+/// head from the FORL matcher's goto-chase (the filter combinator's skip loop)
+/// and leaves a dead exit arm in the emitted Lua. Returns whether anything
+/// changed (the dead `Const` conditions are left for a DCE round).
+pub fn fold_const_branches(func: &mut MirFunc) -> bool {
+    let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
+    let mut changed = false;
+    for b in &bids {
+        if let Term::Branch { cond, then_bb, else_bb } = func.blocks[*b].term {
+            if let Inst::Const(Lit::Bool(v)) = func.insts[cond] {
+                func.blocks[*b].term = Term::Goto(if v { then_bb } else { else_bb });
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return false;
+    }
+    let mut roots = vec![func.entry];
+    roots.extend(func.coro_defers.iter().map(|(_, e)| *e));
+    for (_, inst) in func.insts.iter() {
+        if let Inst::Lambda { entry, .. } = inst {
+            roots.push(*entry);
+        }
+    }
+    let mut reach: rustc_hash::FxHashSet<Idx<Block>> = roots.iter().copied().collect();
+    let mut stack = roots;
+    while let Some(b) = stack.pop() {
+        term_targets_each(&func.blocks[b].term, &mut |t| {
+            if reach.insert(t) {
+                stack.push(t);
+            }
+        });
+    }
+    for b in bids {
+        if !reach.contains(&b) {
+            func.blocks[b].insts.clear();
+            func.blocks[b].term = Term::Unreachable;
+        }
+    }
+    true
+}
+
+/// Block targets of a terminator.
+fn term_targets_each(term: &Term, f: &mut impl FnMut(Idx<Block>)) {
+    match term {
+        Term::Goto(t) => f(*t),
+        Term::Branch { then_bb, else_bb, .. } => {
+            f(*then_bb);
+            f(*else_bb);
+        }
+        Term::Switch { cases, default, .. } => {
+            for (_, b) in cases {
+                f(*b);
+            }
+            f(*default);
+        }
+        Term::Yield { resume, .. } => f(*resume),
+        Term::Return(_) | Term::Unreachable => {}
+    }
 }
 
 /// Scalarize `buf[i] = <value-struct literal>` for a `NativeBuffer<value>`.
@@ -369,7 +450,18 @@ fn ctor_fields(
 /// sound (rock proves it). Runs to a fixpoint so nested value structs (a field
 /// cell that itself holds a ctor) peel too.
 pub fn scalarize_struct_cells(func: &mut MirFunc) {
-    while scalarize_struct_cells_once(func) {}
+    let dbg = std::env::var("SROA_DEBUG").is_ok();
+    let mut round = 0;
+    while {
+        if dbg {
+            eprintln!("--- SROA round {round} input ---\n{func}");
+            round += 1;
+        }
+        scalarize_struct_cells_once(func)
+    } {}
+    if dbg {
+        eprintln!("--- SROA final ---\n{func}");
+    }
 }
 
 /// One SROA round; returns whether it rewrote anything (drives the fixpoint).
@@ -396,7 +488,9 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
             match &func.insts[i] {
-                Inst::CallMulti { dests, .. } => {
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => {
                     dests.iter().for_each(|c| disq[raw(*c) as usize] = true)
                 }
                 Inst::Lambda { params, .. } => {
@@ -428,7 +522,27 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     }
     // Only the main CFG -- a cell touched inside a closure body is opaque (the
     // closure may run on any call), so leave it whole.
+    //
+    // ALIAS stores (`Store(c, Load(o))`): a cell whose every store copies
+    // another candidate cell is the SAME object under Rock's by-ref struct
+    // semantics (the shape a spliced inner `next`'s param has after the outer
+    // cursor peels -- combinator chains nest cursors). Such a cell is UNIFIED
+    // with its root: its field accesses share the root's field cells (so
+    // by-ref mutation still lands in the shared cells) and the alias store
+    // deletes. `alias[c] = Some(o)`; mixed ctor+alias stores stay whole.
+    let mut alias: Vec<Option<Idx<Cell>>> = vec![None; nc];
     let main: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+    // Value-use counts: a ctor stored into a candidate cell must have NO use
+    // besides that store. Any other consumer (a `Field` read the interleaved
+    // copy-prop forwarded onto the ctor, a second cell store) still sees the
+    // ORIGINAL table -- splitting the cell would diverge the two.
+    let mut vuse = vec![0u32; func.insts.len()];
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            value_operands(&func.insts[i], &mut |op| vuse[raw(op) as usize] += 1);
+        }
+        term_uses_each(&b.term, &mut |op| vuse[raw(op) as usize] += 1);
+    }
     for (bid, b) in func.blocks.iter() {
         let in_main = main.contains(&bid);
         for &i in &b.insts {
@@ -439,9 +553,21 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                     disq[ck] = true;
                     continue;
                 }
+                if let Inst::Load(o) = &func.insts[*value] {
+                    if *o == *cell || alias[ck].is_some_and(|p| p != *o) || cand[ck].is_some() {
+                        disq[ck] = true;
+                    } else {
+                        alias[ck] = Some(*o);
+                    }
+                    continue;
+                }
+                if alias[ck].is_some() {
+                    disq[ck] = true;
+                    continue;
+                }
                 match ctor_fields(&func.insts[*value], cell_enum[ck]) {
                     Some((id, fields)) => {
-                        if cand[ck].is_some_and(|n| n != id) {
+                        if cand[ck].is_some_and(|n| n != id) || vuse[raw(*value) as usize] != 1 {
                             disq[ck] = true;
                         } else {
                             cand[ck] = Some(id);
@@ -456,9 +582,40 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         }
     }
 
+    // Resolve alias chains to their ctor-rooted representative. A chain that
+    // cycles, or doesn't end at a live ctor candidate, stays whole. Alias
+    // members adopt the root's struct id; their field set IS the root's.
+    let mut rep: Vec<usize> = (0..nc).collect();
+    for k in 0..nc {
+        if alias[k].is_none() || disq[k] {
+            continue;
+        }
+        let mut cur = k;
+        let mut steps = 0usize;
+        let root = loop {
+            match alias[cur] {
+                Some(o) if steps <= nc => {
+                    cur = raw(o) as usize;
+                    steps += 1;
+                }
+                Some(_) => break None, // cycle
+                None => break Some(cur),
+            }
+        };
+        match root {
+            Some(r) if !disq[r] && cand[r].is_some() => {
+                rep[k] = r;
+                cand[k] = cand[r];
+            }
+            _ => disq[k] = true,
+        }
+    }
+
     // A `Load` of a candidate cell may be used ONLY as a `Field`/`StoreField`
-    // base of a declared field. Map each such load to its cell, then scan every
-    // operand use: any other consumer means the whole struct escapes -> disqualify.
+    // base of a declared field -- or as the value of an accepted alias store
+    // within the same family (that store deletes). Map each such load to its
+    // cell, then scan every operand use: any other consumer means the whole
+    // struct escapes -> disqualify.
     let mut load_cell: HashMap<Idx<Inst>, Idx<Cell>> = HashMap::default();
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
@@ -475,7 +632,9 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             value_operands(&func.insts[i], &mut |op| {
                 if let Some(&c) = load_cell.get(&op) {
                     let known = |f: &ustr::Ustr| {
-                        cand_fields[raw(c) as usize].as_ref().is_some_and(|s| s.contains(f))
+                        cand_fields[rep[raw(c) as usize]]
+                            .as_ref()
+                            .is_some_and(|s| s.contains(f))
                     };
                     let ok = match &func.insts[i] {
                         Inst::Field { base, field } => *base == op && known(field),
@@ -483,6 +642,15 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                         // An enum positional payload read: `v[index+1]`, named `_<index>`.
                         Inst::TupleIndex { base, index } => {
                             *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
+                        }
+                        // The alias store itself: `Store(y, Load(x))` where y and x
+                        // unify to the same root. It is deleted by the rewrite.
+                        Inst::Store { cell, value } => {
+                            let yk = raw(*cell) as usize;
+                            *value == op
+                                && alias[yk].is_some()
+                                && !disq[yk]
+                                && rep[yk] == rep[raw(c) as usize]
                         }
                         _ => false,
                     };
@@ -499,6 +667,22 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         });
     }
 
+    // Disqualification is family-wide: an escaping alias member keeps the
+    // whole object (root + every member) as an aggregate, and a dead root
+    // takes its members with it. Two passes settle it (rep is one level deep).
+    for _ in 0..2 {
+        for k in 0..nc {
+            if rep[k] != k {
+                if disq[k] {
+                    disq[rep[k]] = true;
+                }
+                if disq[rep[k]] || cand[rep[k]].is_none() {
+                    disq[k] = true;
+                }
+            }
+        }
+    }
+
     // `k < nc` guards the field cells `get_field_cell` allocates during the
     // rewrite (a `StoreField`->`Store` rewrite emits a `Store` to a fresh field
     // cell that the later `store_expansions` scan sees): they are never candidates
@@ -511,7 +695,17 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         return false;
     }
 
-    // Allocate per-field cells on demand: (orig cell, field name) -> field cell.
+    // Allocate per-field cells on demand: (cell, field name) -> field cell.
+    // Alias members resolve through `rep` FIRST, so a family shares one set of
+    // field cells (by-ref mutation through any member lands in the shared cell).
+    let to_rep = |c: Idx<Cell>| -> Idx<Cell> {
+        let k = raw(c) as usize;
+        if k < nc && rep[k] != k {
+            Idx::from_raw(RawIdx::from_u32(rep[k] as u32))
+        } else {
+            c
+        }
+    };
     let mut field_cell: HashMap<(Idx<Cell>, ustr::Ustr), Idx<Cell>> = HashMap::default();
     let mut get_field_cell =
         |func: &mut MirFunc, c: Idx<Cell>, f: ustr::Ustr| -> Idx<Cell> {
@@ -542,7 +736,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         })
         .collect();
     for (i, c, field) in field_rewrites {
-        let fc = get_field_cell(func, c, field);
+        let fc = get_field_cell(func, to_rep(c), field);
         func.insts[i] = Inst::Load(fc);
     }
     // Same for an enum positional payload read `TupleIndex { base, index }` ->
@@ -561,7 +755,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         })
         .collect();
     for (i, c, field) in tuple_rewrites {
-        let fc = get_field_cell(func, c, field);
+        let fc = get_field_cell(func, to_rep(c), field);
         func.insts[i] = Inst::Load(fc);
     }
     let storefield_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr, Idx<Inst>)> = func
@@ -578,7 +772,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         })
         .collect();
     for (i, c, field, value) in storefield_rewrites {
-        let fc = get_field_cell(func, c, field);
+        let fc = get_field_cell(func, to_rep(c), field);
         func.insts[i] = Inst::Store { cell: fc, value };
     }
 
@@ -596,10 +790,33 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             _ => None,
         })
         .collect();
+    // Accepted alias stores (`Store(member, Load(..))`) DELETE: the member's
+    // accesses were rewritten onto the root's field cells above, so the
+    // whole-cell copy has nothing left to do (and keeping it would resurrect
+    // the aggregate).
+    let alias_deletions: Vec<Idx<Inst>> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, b)| b.insts.iter().copied())
+        .filter(|&i| match &func.insts[i] {
+            Inst::Store { cell, value } => {
+                let ck = raw(*cell) as usize;
+                ck < nc
+                    && alias[ck].is_some()
+                    && !disq[ck]
+                    && matches!(&func.insts[*value], Inst::Load(_))
+            }
+            _ => false,
+        })
+        .collect();
+
     // old store inst -> the per-field store insts that replace it (in order). An
     // enum's `__variant`/`__ty` are `ConstStr` (baked literals, not operands), so
     // materialize the `Const(Str)` inst here before storing it to the field cell.
     let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
+    for i in alias_deletions {
+        replacement.insert(i, Vec::new());
+    }
     for (store_i, c, fields) in store_expansions {
         let mut news = Vec::with_capacity(fields.len());
         for (fname, src) in fields {
@@ -859,8 +1076,9 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::CoroSetInner(x) => p(x),
         Inst::Format { value, .. } => p(value),
         Inst::FormatDyn { value, fmt } => { p(value); p(fmt); }
-        Inst::Call { args, .. } | Inst::CallMulti { args, .. } => args.iter().for_each(&mut p),
+        Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter().for_each(&mut p),
         Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
+        Inst::CallValueMulti { callee, args, .. } => { p(callee); args.iter().for_each(&mut p); }
         Inst::MakeTuple(vs) | Inst::MakeArray(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
         Inst::MakeEnum { positional, named, .. } => {
@@ -901,8 +1119,9 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         | Inst::CoroSetInner(x) => f(x),
         Inst::Format { value, .. } => f(value),
         Inst::FormatDyn { value, fmt } => { f(value); f(fmt); }
-        Inst::Call { args, .. } | Inst::CallMulti { args, .. } => args.iter_mut().for_each(&mut f),
+        Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter_mut().for_each(&mut f),
         Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
+        Inst::CallValueMulti { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::MakeTuple(vs) | Inst::MakeArray(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
         Inst::MakeEnum { positional, named, .. } => {

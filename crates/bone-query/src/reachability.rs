@@ -45,6 +45,11 @@ pub struct ReachPath {
     pub is_method: bool,
     /// Only meaningful when `is_method`: the final method needs a snippet hole.
     pub takes_args: bool,
+    /// ANY hop on the path (intermediate or final) is a method call -- the
+    /// "method-chain" classification call-through's per-fn cap keys off
+    /// (`is_method` only describes the final hop; `x.foo().bar` traverses a
+    /// call but ends on a field).
+    pub via_call: bool,
     pub dist: u16,
 }
 
@@ -158,7 +163,7 @@ impl ReachabilityIndex {
             let mut paths = Vec::new();
             let mut on_path: HashSet<Ustr> = HashSet::new();
             on_path.insert(src);
-            enumerate_arg_paths(&edges, src, "", 0, &mut on_path, &mut paths);
+            enumerate_arg_paths(&edges, src, "", 0, false, &mut on_path, &mut paths);
             if !paths.is_empty() {
                 arg_paths.insert(src, paths);
             }
@@ -209,7 +214,7 @@ impl ReachabilityIndex {
         }
         let mut on_path: HashSet<Ustr> = HashSet::new();
         on_path.insert(root);
-        self.dfs(root, String::new(), 0, &want, &mut on_path, &mut out);
+        self.dfs(root, String::new(), 0, false, &want, &mut on_path, &mut out);
 
         out.sort_by(|a, b| a.dist.cmp(&b.dist).then_with(|| a.suffix.cmp(&b.suffix)));
         let truncated = out.len() > cap;
@@ -222,6 +227,7 @@ impl ReachabilityIndex {
         cur: Ustr,
         prefix: String,
         depth: u16,
+        prefix_call: bool,
         want: &[Ustr],
         on_path: &mut HashSet<Ustr>,
         out: &mut Vec<ReachPath>,
@@ -251,6 +257,7 @@ impl ReachabilityIndex {
                     final_ty: e.target.to_string(),
                     is_method,
                     takes_args,
+                    via_call: prefix_call || is_method,
                     dist: depth + 1,
                 });
             }
@@ -260,10 +267,19 @@ impl ReachabilityIndex {
             // every dead branch, so only productive paths are walked.
             let traversable = matches!(e.kind, EdgeKind::Field | EdgeKind::Method { takes_args: false });
             if traversable && self.reaches_any(e.target, want) {
+                let hop_call = matches!(e.kind, EdgeKind::Method { .. });
                 let descend_prefix =
                     if prefix.is_empty() { seg_label } else { format!("{prefix}.{seg_label}") };
                 on_path.insert(e.target);
-                self.dfs(e.target, descend_prefix, depth + 1, want, on_path, out);
+                self.dfs(
+                    e.target,
+                    descend_prefix,
+                    depth + 1,
+                    prefix_call || hop_call,
+                    want,
+                    on_path,
+                    out,
+                );
                 on_path.remove(&e.target);
             }
         }
@@ -281,6 +297,7 @@ fn enumerate_arg_paths(
     cur: Ustr,
     prefix: &str,
     depth: u16,
+    prefix_call: bool,
     on_path: &mut HashSet<Ustr>,
     out: &mut Vec<ReachPath>,
 ) {
@@ -301,6 +318,7 @@ fn enumerate_arg_paths(
             final_ty: e.target.to_string(),
             is_method,
             takes_args,
+            via_call: prefix_call || is_method,
             dist: depth + 1,
         });
         // Descend through traversable edges (fields + no-arg methods) until the
@@ -314,7 +332,7 @@ fn enumerate_arg_paths(
             let descend_prefix =
                 if prefix.is_empty() { seg_label } else { format!("{prefix}.{seg_label}") };
             on_path.insert(e.target);
-            enumerate_arg_paths(edges, e.target, &descend_prefix, depth + 1, on_path, out);
+            enumerate_arg_paths(edges, e.target, &descend_prefix, depth + 1, prefix_call || is_method, on_path, out);
             on_path.remove(&e.target);
         }
     }

@@ -3,6 +3,9 @@
 //! must treat them as no-ops rather than hitting the catch-all comp_error.
 
 //- continue_break
+struct FIter<T> { last: T }
+fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }
+fn next<T>(it: FIter<T>) -> (bool, T) { return (false, it.last) }
 fn f(xs: [int], stop: bool) -> int {
     for x in xs {
         if stop { break }

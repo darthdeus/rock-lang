@@ -44,6 +44,8 @@ pub use code_actions::*;
 pub use workspace::*;
 pub use workspace_adapters::*;
 
+pub mod completion_record;
+
 pub fn debug_write(msg: String) {
     log::trace!("{}", msg);
 }
@@ -219,6 +221,14 @@ pub fn run_lsp_server() -> Result<()> {
                 change_notifications: Some(lsp_types::OneOf::Left(true)),
             }),
             file_operations: None,
+        }),
+
+        // Advertised unconditionally (nvim's exec_cmd path refuses to send a
+        // command the server doesn't declare); items only ever CARRY the
+        // command while ROCK_LSP_RECORD is active, so this is inert otherwise.
+        execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
+            commands: vec![completion_record::ACCEPT_COMMAND.to_string()],
+            work_done_progress_options: WorkDoneProgressOptions::default(),
         }),
 
         completion_provider: Some(CompletionOptions {
@@ -750,6 +760,34 @@ fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
                 if req.method == "rock/modules" {
                     let snapshot = modules_json(workspace.bone.projects_summary());
                     send_response(&connection, req.id, Ok(snapshot))?;
+                    continue;
+                }
+
+                // `rock.completionAccepted` -- the corpus recorder's accept
+                // signal, executed by the client after inserting a tagged
+                // completion item (ROCK_LSP_RECORD).
+                if req.method == "workspace/executeCommand" {
+                    let outcome = serde_json::from_value::<lsp_types::ExecuteCommandParams>(
+                        req.params.clone(),
+                    )
+                    .map_err(|e| format!("malformed executeCommand params: {e}"))
+                    .and_then(|p| completion_record::handle_execute_command(&p));
+                    match outcome {
+                        Ok(v) => send_response(&connection, req.id, Ok(v))?,
+                        Err(message) => {
+                            log::warn!("workspace/executeCommand rejected: {message}");
+                            let resp = Response {
+                                id: req.id,
+                                result: None,
+                                error: Some(lsp_server::ResponseError {
+                                    code: lsp_server::ErrorCode::InvalidParams as i32,
+                                    message,
+                                    data: None,
+                                }),
+                            };
+                            connection.sender.send(Message::Response(resp))?;
+                        }
+                    }
                     continue;
                 }
 

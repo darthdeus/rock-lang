@@ -49,7 +49,11 @@ pub enum CallSyntax {
 pub struct FunctionCallArg {
     pub name: Option<Ident>,
     pub value: Idx<ExprData>,
+    /// Macro splat `...rest` (expanded at macro-expansion time).
     pub is_splat: bool,
+    /// Struct spread `..expr` — the operand's fields become named args at this
+    /// position. Orthogonal to `is_splat`; the two are never both set.
+    pub is_spread: bool,
 }
 
 /// Mirror of rock's `FormatSpecifier`. Carries the static spec fields *and*
@@ -187,6 +191,9 @@ pub enum ExprKind {
     /// shorthand `{ x }` expands to `([x], Ident(x))`, mirroring rock.
     StructLiteral {
         name: Ident,
+        /// `..base` operands (functional update), in source order, always
+        /// preceding `fields`. Empty for a plain literal.
+        bases: Vec<Idx<ExprData>>,
         fields: Vec<(Vec<Ident>, Idx<ExprData>)>,
     },
 
@@ -457,10 +464,13 @@ pub struct Param {
     pub is_variadic: bool,
 }
 
-/// A generic parameter `T` or `T = Default`. Mirrors rock's `GenericParam`.
+/// A generic parameter `T`, `T = Default`, or `I: Iterator<T>`. Mirrors rock's
+/// `GenericParam` plus the bound: the only bound the compiler knows today is
+/// the builtin `Iterator<T>` (validated in bone, not here).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Generic {
     pub name: Ident,
+    pub bound: Option<Idx<TypeExprData>>,
     pub default: Option<Idx<TypeExprData>>,
 }
 
@@ -510,6 +520,12 @@ pub struct FunctionDef {
     /// for non-macros and expression-only macros. Spliced at module scope when
     /// the macro is invoked as a top-level statement.
     pub macro_items: Vec<Item>,
+    /// D-form surface (`fn Mob.take_damage(m, ..)`), set only by the parser:
+    /// the receiver path ident as written + how many leading entries of
+    /// `generics` came from the path (the print split point). The DESUGARED
+    /// truth lives in the normal fields (generics merged, param 0 carries the
+    /// receiver type); every consumer except skull-fmt must ignore this.
+    pub receiver_surface: Option<(Ident, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

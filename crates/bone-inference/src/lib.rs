@@ -58,6 +58,11 @@ pub struct Gamma<'a> {
 
     pub quiet: bool,
 
+    /// The enclosing fn's `Iterator` bounds: `(generic VarId, index into
+    /// `Function.generics`, declared element type)`. Set by `check_function`;
+    /// empty for unbounded fns and non-fn bodies.
+    pub fn_bounds: Vec<(VarId, usize, TyId)>,
+
     pub out: BodyInference,
 }
 
@@ -85,6 +90,8 @@ impl<'a> Gamma<'a> {
             body_errors: Vec::new(),
 
             quiet: false,
+
+            fn_bounds: Vec::new(),
 
             out: BodyInference {
                 body_generation: body.generation,
@@ -131,6 +138,15 @@ impl<'a> Gamma<'a> {
         self.out.ty_spans.insert(idx, span);
 
         ty
+    }
+
+    /// The enclosing fn's `Iterator` bound on the generic with this VarId, if
+    /// any: `(index into Function.generics, declared element type)`.
+    pub fn fn_bound_for(&self, v: VarId) -> Option<(usize, TyId)> {
+        self.fn_bounds
+            .iter()
+            .find(|(var, _, _)| *var == v)
+            .map(|&(_, idx, elem)| (idx, elem))
     }
 
     pub fn trial<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
@@ -293,6 +309,12 @@ pub fn check_function(
     let mut gamma = Gamma::new(ws, body, module_id);
     let c = BodyCtx { module, body };
 
+    for (idx, (g, b)) in f.generics.iter().zip(f.generic_bounds.iter()).enumerate() {
+        let Some(elem) = *b else { continue };
+        let TypeExpr::Generic(var_id, _) = *gamma.get(*g) else { continue };
+        gamma.fn_bounds.push((var_id, idx, elem));
+    }
+
     if f.is_coroutine {
         if let Some(ret) = f.return_ty {
             let (_y, r, _n) = coroutine_yrn(&mut gamma, ret, f.span)?;
@@ -359,9 +381,26 @@ pub fn check_function(
         let body_ty = resolve(&mut gamma, body_ty, f.span);
 
         // Return-type mismatch is recorded, but not propagated, so gamma.out is well formed
-        // and partial inference survives for hte LSP.
-        if let Err(e) = coerce(&mut gamma, body_ty, ret_ty, f.span) {
-            gamma.body_errors.push(e);
+        // and partial inference survives for the LSP. Anchor it at the value the body
+        // actually offers -- its tail expression -- not the whole `fn { .. }` span. A body
+        // that ends in a statement offers no value at all: a clearer, distinct message.
+        let tail = match c.body.expr_arena[body] {
+            Expr::Block { tail, .. } => tail,
+            _ => Some(body),
+        };
+        if let Some(tail) = tail {
+            if let Err(e) = coerce(&mut gamma, body_ty, ret_ty, c.body.expr_spans[tail]) {
+                gamma.body_errors.push(e);
+            }
+        } else if coerce(&mut gamma, body_ty, ret_ty, f.span).is_err() {
+            let ret_render = gamma.workspace.render(Some(&gamma.out), ret_ty);
+            gamma.body_errors.push(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "function `{}` must return `{}`, but its body has no return value",
+                    f.name, ret_render
+                ),
+            ));
         }
     } else {
         // no declared return (or coroutine): the body tail is discarded
@@ -481,10 +520,17 @@ fn verify_pure_expr(
         };
     }
     match c.body.expr_arena[e] {
-        Expr::Global(name) => errors.push(CompilerError::new_with_label(
-            span,
-            format!("`@pure` function reads global `{}` (mutable state)", name),
-        )),
+        Expr::Global(name) => {
+            // const globals are read-only (assignment/incdec rejected,
+            // re-initialized unconditionally on hot reload); reading one
+            // is pure. Only mutable globals break purity.
+            if !ws.const_globals.contains(&name) {
+                errors.push(CompilerError::new_with_label(
+                    span,
+                    format!("`@pure` function reads global `{}` (mutable state)", name),
+                ))
+            }
+        }
         Expr::Assign { target, value } => {
             errors.push(CompilerError::new_with_label(
                 span,
@@ -617,7 +663,7 @@ fn verify_pure_expr(
         }
         // A `value` struct literal is byte-value (pure); a heap struct literal
         // has observable identity.
-        Expr::StructLiteral { name, fields } => {
+        Expr::StructLiteral { name, fields, bases } => {
             let is_value = ws
                 .struct_by_name
                 .get(&name)
@@ -628,6 +674,9 @@ fn verify_pure_expr(
                     "`@pure` function constructs a heap struct literal (identity observable); only `value` structs are allowed"
                         .to_string(),
                 ));
+            }
+            for b in bases {
+                go!(b);
             }
             for fld in fields {
                 go!(c.body.struct_lit_field_arena[fld].value);
@@ -1036,6 +1085,17 @@ pub fn infer_expr_used(
         }
 
         Expr::IncDec { target, .. } => {
+            // Same const-rebind rejection as Expr::Assign/CompoundAssign;
+            // `CONST++` is a write with extra steps.
+            if let Expr::Global(name) = c.body.expr_arena[*target] {
+                if gamma.workspace.const_globals.contains(&name) {
+                    comp_error!(
+                        expr_span,
+                        "cannot assign to const `{}`; consts are read-only",
+                        name
+                    );
+                }
+            }
             let inner_ty = infer_expr(c, gamma, *target)?;
             resolve(gamma, inner_ty, c.body.expr_spans[*target])
         }
@@ -1199,6 +1259,17 @@ pub fn infer_expr_used(
             None => match resolve_callee(gamma, *name).as_slice() {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();
+
+                    // A bounded fn only exists monomorphized-by-inlining at its
+                    // call sites; as a value it would need a runtime identity
+                    // its placeholder bound-calls can't have.
+                    if function.generic_bounds.iter().any(Option::is_some) {
+                        comp_error!(
+                            expr_span,
+                            "`{}` has `Iterator` bounds and cannot be used as a value; call it directly",
+                            name
+                        );
+                    }
 
                     let param_tys = function.param_decls.iter().map(|p| p.ty).collect_vec();
 
@@ -1582,9 +1653,10 @@ pub fn infer_expr_used(
             }
         }
 
-        Expr::StructLiteral { name, fields } => {
+        Expr::StructLiteral { name, fields, bases } => {
             let name = *name;
             let fields = *fields;
+            let bases = *bases;
 
             let sid = resolve_struct(gamma, name).ok_or_else(|| {
                 CompilerError::new_with_label(expr_span, format!("unknown struct `{}`", name))
@@ -1603,14 +1675,32 @@ pub fn infer_expr_used(
 
             let what = format!("struct `{}`", name);
 
-            check_named_fields(c, gamma, &def.fields, &provided, &subs, expr_span, &what)?;
-
             let ctor = match name.as_str() {
                 "Vec" => TypeCtor::Array,
                 _ => TypeCtor::Nominal(name),
             };
+            let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
 
-            gamma.app_with_ctor(ctor, &arg_tys, expr_span)
+            // Functional update `Ty { ..base, .. }`: each base must have the same
+            // nominal type as the literal (rule 6). A single base covers every
+            // unwritten field. Multiple bases of the same type would all supply
+            // every field (rule 5 collision), so only one is allowed.
+            let has_base = !bases.is_empty();
+            if bases.into_iter().count() > 1 {
+                comp_error!(
+                    expr_span,
+                    "a functional-update literal takes at most one `..base`"
+                );
+            }
+            for b in bases {
+                check_expr(c, gamma, b, result_ty, c.body.expr_spans[b])?;
+            }
+
+            check_named_fields(
+                c, gamma, &def.fields, &provided, &subs, expr_span, &what, has_base,
+            )?;
+
+            result_ty
         }
 
         Expr::FieldAccess { base, field } => {
@@ -1760,7 +1850,7 @@ pub fn infer_expr_used(
                         })
                         .collect();
 
-                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what)?;
+                    check_named_fields(c, gamma, fields, &provided, &subs, expr_span, &what, false)?;
                 }
 
                 _ => comp_error!(
@@ -2216,13 +2306,22 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             },
         ) => {
             if ctor_a != ctor_b {
-                unify_fail!(
-                    gamma,
-                    span,
-                    "Failed to unify {} and {}, different generic constructors",
-                    gamma.workspace.render(Some(&gamma.out), a),
-                    gamma.workspace.render(Some(&gamma.out), b)
-                )
+                let a_str = gamma.workspace.render(Some(&gamma.out), a);
+                let b_str = gamma.workspace.render(Some(&gamma.out), b);
+
+                // Both sides are plain nominals (structs/enums with no type
+                // args) far more often than generics; "different generic
+                // constructors" is nonsense for those. Only mention generics
+                // when a side actually has type parameters.
+                if params_a.is_empty() && params_b.is_empty() {
+                    unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+                } else {
+                    unify_fail!(
+                        gamma,
+                        span,
+                        "type mismatch: expected `{b_str}`, found `{a_str}` (different type constructors)"
+                    )
+                }
             }
 
             if params_a.len() != params_b.len() {
@@ -2636,9 +2735,16 @@ fn select_overload(
 ) -> Result<(ModuleId, Idx<Function>), CompilerError> {
     let mut best: Option<(usize, (ModuleId, Idx<Function>))> = None;
     let mut tied = false;
+    // The bound-conformance failure of an otherwise-fitting `Iterator`-bounded
+    // candidate (params fit, bounds did not). When EVERY candidate rejects,
+    // this is the near-miss the user needs to see -- the generic "No overload"
+    // headline alone hides e.g. "EnumIter's `next` yields multiple values".
+    let mut bound_fail: Option<CompilerError> = None;
 
     for &(mid, fid) in candidates {
-        if let Some(cost) = score_candidate(c, gamma, mid, fid, recv_ty, args, arg_ty, span) {
+        if let Some(cost) =
+            score_candidate(c, gamma, mid, fid, recv_ty, args, arg_ty, span, &mut bound_fail)
+        {
             match best {
                 None => {
                     best = Some((cost, (mid, fid)));
@@ -2667,14 +2773,23 @@ fn select_overload(
                 .join(", ")
         ),
 
-        None => comp_error!(
-            span,
-            "No overload for `{name}` with argument types ({})",
-            arg_tys_msg
+        None => {
+            let args_msg = arg_tys_msg
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
-                .join(", ")
-        ),
+                .join(", ");
+            match bound_fail {
+                Some(be) => comp_error!(
+                    span,
+                    "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}",
+                    be.message
+                ),
+                None => comp_error!(
+                    span,
+                    "No overload for `{name}` with argument types ({args_msg})"
+                ),
+            }
+        }
     }
 }
 
@@ -2749,6 +2864,9 @@ fn check_named_fields(
     subs: &FxHashMap<VarId, TyId>,
     span: Span,
     what: &str,
+    // A functional-update base (`{ ..base }`) copies every unwritten field, so
+    // missing-field errors are suppressed when a base is present.
+    base_covers_all: bool,
 ) -> Result<(), CompilerError> {
     let mut seen: Vec<Ustr> = Vec::new();
 
@@ -2769,9 +2887,11 @@ fn check_named_fields(
         check_expr(c, gamma, *fvalue, fty, vspan)?
     }
 
-    for f in fields {
-        if !seen.contains(&f.name) && !f.has_default {
-            comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
+    if !base_covers_all {
+        for f in fields {
+            if !seen.contains(&f.name) && !f.has_default {
+                comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
+            }
         }
     }
 
@@ -3205,6 +3325,7 @@ fn score_candidate(
     args: &[Idx<Expr>],
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
     span: Span,
+    bound_fail: &mut Option<CompilerError>,
 ) -> Option<usize> {
     let snap = gamma.out.checkpoint();
 
@@ -3268,6 +3389,7 @@ fn score_candidate(
 
     let slots = match reorder_call_args(
         c,
+        gamma,
         args,
         &pnames[offset..],
         f.num_required.saturating_sub(offset),
@@ -3294,13 +3416,16 @@ fn score_candidate(
         };
 
         match slot {
-            Some(arg) => {
-                let aty = match arg_ty.get(arg) {
-                    Some(&t) => t,
-                    None => {
-                        gamma.out.rollback_to(snap);
-                        return None;
-                    }
+            Some(fill) => {
+                let aty = match fill {
+                    SlotFill::Direct(arg) => match arg_ty.get(arg) {
+                        Some(&t) => t,
+                        None => {
+                            gamma.out.rollback_to(snap);
+                            return None;
+                        }
+                    },
+                    SlotFill::SpreadField(_, fty) => *fty,
                 };
 
                 match fit_cost(gamma, aty, pty, span) {
@@ -3314,6 +3439,37 @@ fn score_candidate(
 
             None => total += 1, // omitted default param
         }
+    }
+
+    // An `Iterator`-bounded candidate only fits if its bounds hold for this
+    // instantiation: a bare `it: I` unifies with ANY arg (`[int]`, Arena, ..),
+    // so without this check a bounded combinator would tie with -- or shadow --
+    // the concrete overloads (`map([T], f)`, `map(Arena<T>, f)`).
+    let f = &gamma.workspace.module(mid).functions[fid];
+    if f.generic_bounds.iter().any(Option::is_some) {
+        let mut tree = BoundTree::default();
+        let mut done = FxHashSet::default();
+        let mut berr: Option<CompilerError> = None;
+        let conforms = gamma.trial(|g| {
+            match check_iterator_bounds(c, g, f, &subs, &mut tree, &mut done, false, 0, span) {
+                Ok(()) => true,
+                Err(e) => {
+                    berr = Some(e);
+                    false
+                }
+            }
+        });
+        if !conforms {
+            // Keep the FIRST bound failure for the all-rejected diagnostic.
+            if bound_fail.is_none() {
+                *bound_fail = berr;
+            }
+            gamma.out.rollback_to(snap);
+            return None;
+        }
+        // Bounds that fit only structurally still rank below an exact concrete
+        // overload -- prefer the specialized fn when both match.
+        total += 1;
     }
 
     // for (dty, &aty) in declared.iter().zip(arg_tys) {
@@ -3880,17 +4036,92 @@ fn coroutine_yrn(
     }
 }
 
+/// How a callee parameter slot is filled after `..spread` expansion.
+#[derive(Clone, Copy)]
+enum SlotFill {
+    /// A written positional or named argument.
+    Direct(Idx<Expr>),
+    /// A field pulled from a spread operand: (operand expr, field type). The
+    /// param slot index encodes which field; skull-mir re-derives the name.
+    SpreadField(Idx<Expr>, TyId),
+}
+
+/// The (name, type) of every field of a call-site spread operand. The operand
+/// must be a nominal struct with statically known fields (rule: not tuple, not
+/// array, not Map/any).
+fn spread_struct_fields(
+    gamma: &mut Gamma,
+    op_ty: TyId,
+    span: Span,
+) -> Result<Vec<(Ustr, TyId)>, CompilerError> {
+    let r = resolve(gamma, op_ty, span);
+
+    match *gamma.get(r) {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            params,
+        } => {
+            let sid = resolve_struct(gamma, name).ok_or_else(|| {
+                CompilerError::new_with_label(span, format!("cannot spread `{}`: not a struct", name))
+            })?;
+
+            let def = gamma.workspace.module(sid.module).structs[sid.def].clone();
+            let subs = struct_arg_subs(gamma, &def, r, params);
+            def.fields
+                .iter()
+                .map(|f| Ok((f.name, substitute(gamma, f.ty, &subs, span)?)))
+                .collect()
+        }
+
+        _ => comp_error!(
+            span,
+            "cannot spread `{}` into call arguments: expected a nominal struct",
+            gamma.workspace.render(Some(&gamma.out), r)
+        ),
+    }
+}
+
 fn reorder_call_args(
     c: BodyCtx,
+    gamma: &mut Gamma,
     args: &[Idx<Expr>],
     param_names: &[Ustr],
     num_required: usize,
     span: Span,
-) -> Result<Vec<Option<Idx<Expr>>>, CompilerError> {
-    let mut slots: Vec<Option<Idx<Expr>>> = vec![None; param_names.len()];
+) -> Result<Vec<Option<SlotFill>>, CompilerError> {
+    let mut slots: Vec<Option<SlotFill>> = vec![None; param_names.len()];
     let mut pos = 0usize;
 
     for &arg in args {
+        // Struct spread `..op`: each field of the operand fills the param slot
+        // of the same name (rules 2/4/5).
+        if c.body.spread_args.contains(&arg) {
+            let op_ty = infer_expr(c, gamma, arg)?;
+            let aspan = c.body.expr_spans[arg];
+            for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
+                let pi = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
+                    CompilerError::new_with_label(
+                        span,
+                        format!("spread field `{}` names no parameter of the callee", fname),
+                    )
+                })?;
+                match slots[pi] {
+                    // rule 5: two spreads supplying the same param.
+                    Some(SlotFill::SpreadField(..)) => {
+                        comp_error!(span, "two spreads both supply parameter `{}`", fname)
+                    }
+                    // rule 4: a named/positional arg written BEFORE the spread.
+                    Some(SlotFill::Direct(_)) => comp_error!(
+                        span,
+                        "parameter `{}` is given before the spread that also supplies it",
+                        fname
+                    ),
+                    None => slots[pi] = Some(SlotFill::SpreadField(arg, fty)),
+                }
+            }
+            continue;
+        }
+
         match c.body.arg_names.get(&arg) {
             // positional
             None => {
@@ -3902,7 +4133,10 @@ fn reorder_call_args(
                     );
                 }
 
-                slots[pos] = Some(arg);
+                if slots[pos].is_some() {
+                    comp_error!(span, "Multiple values provided for parameter `{}`", param_names[pos]);
+                }
+                slots[pos] = Some(SlotFill::Direct(arg));
                 pos += 1;
             }
 
@@ -3911,11 +4145,15 @@ fn reorder_call_args(
                     CompilerError::new_with_label(span, format!("unknown parameter `{}`", nm))
                 })?;
 
-                if slots[pi].is_some() {
-                    comp_error!(span, "Multiple values provided for parameter `{}`", nm);
+                match slots[pi] {
+                    // rule 3: a named arg AFTER a spread overrides that field.
+                    Some(SlotFill::SpreadField(..)) | None => {
+                        slots[pi] = Some(SlotFill::Direct(arg))
+                    }
+                    Some(SlotFill::Direct(_)) => {
+                        comp_error!(span, "Multiple values provided for parameter `{}`", nm)
+                    }
                 }
-
-                slots[pi] = Some(arg);
             }
         }
     }
@@ -4000,6 +4238,59 @@ fn resolve_named_call(
     call_expr: Idx<Expr>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
+    let res = resolve_named_call_inner(gamma, c, name, recv_override, args, call_expr, span);
+
+    let Err(e) = res else { return res };
+    if gamma.quiet {
+        return Err(e);
+    }
+
+    // `recv.name(...)` that failed to resolve: if `recv` has a field `name`
+    // that isn't callable, the `()` is almost certainly a slip (a field read
+    // written as a call). Gate on the failure being about the receiver or the
+    // call itself, so a later-arg mismatch under a legit UFCS call keeps its
+    // real error.
+    let (recv_ty, recv_span) = match recv_override {
+        Some(r) => (resolve(gamma, r, span), None),
+        None if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
+            match infer_expr(c, gamma, args.start()) {
+                Ok(t) => (resolve(gamma, t, span), Some(c.body.expr_spans[args.start()])),
+                Err(_) => return Err(e),
+            }
+        }
+        None => return Err(e),
+    };
+
+    let err_span = e.labels.first().map(|l| l.span);
+    let about_receiver = err_span == Some(span) || (recv_span.is_some() && err_span == recv_span);
+    if about_receiver {
+        if let Ok(fty) = struct_field_ty(gamma, recv_ty, name, span) {
+            let fty = resolve(gamma, fty, span);
+            if !matches!(gamma.get(fty), TypeExpr::Function { .. }) {
+                let recv_str = gamma.workspace.render(Some(&gamma.out), recv_ty);
+                let fty_str = gamma.workspace.render(Some(&gamma.out), fty);
+                return Err(CompilerError::new_with_label(
+                    span,
+                    format!(
+                        "`{name}` is a field of `{recv_str}` (type `{fty_str}`), not a method -- remove the `()` to read the field"
+                    ),
+                ));
+            }
+        }
+    }
+
+    Err(e)
+}
+
+fn resolve_named_call_inner(
+    gamma: &mut Gamma,
+    c: BodyCtx,
+    name: Ustr,
+    recv_override: Option<TyId>,
+    args: IdxRange<Expr>,
+    call_expr: Idx<Expr>,
+    span: Span,
+) -> Result<TyId, CompilerError> {
     let _span = tracing::info_span!("named_call", name = %name).entered();
     let candidates = resolve_callee(gamma, name);
 
@@ -4037,6 +4328,32 @@ fn resolve_named_call(
                 };
 
                 return call_fn_value(c, gamma, field_ty, call_args, span);
+            }
+        }
+    }
+
+    // Bound-calls: `next(x)` / `iter(x)` (either spelling incl. UFCS) where
+    // `x: I` and the enclosing fn declares `I: Iterator<E>`. There is no
+    // concrete callee at check time -- the body is checked ONCE against the
+    // bound; skull lowers these as placeholders and the instantiation-time
+    // BoundTree substitutes the concrete `next` per splice. `iter(x)` is
+    // IDENTITY (types as `I`, lowers to the argument, no call).
+    if !gamma.fn_bounds.is_empty()
+        && recv_override.is_none()
+        && args.len() == 1
+        && matches!(name.as_str(), "next" | "iter")
+    {
+        let aty = infer_expr(c, gamma, args.start())?;
+        let aty = resolve(gamma, aty, span);
+        if let TypeExpr::Generic(var_id, _) = *gamma.get(aty) {
+            if let Some((idx, elem)) = gamma.fn_bound_for(var_id) {
+                if name.as_str() == "iter" {
+                    gamma.out.bound_identity_calls.insert(call_expr);
+                    return Ok(aty);
+                }
+                gamma.out.bound_calls.insert(call_expr, idx);
+                let b = gamma.workspace.builtins.bool();
+                return Ok(tuple_of(gamma, &[b, elem], span));
             }
         }
     }
@@ -4154,12 +4471,20 @@ fn resolve_named_call(
         .out
         .record_resolved_call(call_expr, callee_mid, callee_fn, span)?;
 
-    let function = &gamma.workspace.module(callee_mid).functions[callee_fn];
+    let ws = gamma.workspace;
+    let function = &ws.module(callee_mid).functions[callee_fn];
     let (subs, _arg_tys) = gamma.instantiate_generics(&function.generics, span)?;
 
     // Caller, for arg exprs
-    let callee_module = &gamma.workspace.module(callee_mid);
+    let callee_module = &ws.module(callee_mid);
     let function = &callee_module.functions[callee_fn];
+
+    // `Iterator`-bounded callee: conformance is (re)tried after every arg
+    // unification -- resolving `next(C)` is also what binds the bound's elem
+    // generic, and a LATER lambda arg (`map(it, x => ..)`) must see it bound.
+    let has_bounds = function.generic_bounds.iter().any(Option::is_some);
+    let mut bound_tree = BoundTree::default();
+    let mut bounds_done: FxHashSet<usize> = FxHashSet::default();
 
     let mut param_tys = Vec::with_capacity(c.body.param_bindings.len());
     let mut param_names = Vec::with_capacity(c.body.param_bindings.len());
@@ -4196,7 +4521,7 @@ fn resolve_named_call(
 
     let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
 
-    let pairs: Vec<(Idx<Expr>, TyId)> = if function.is_variadic {
+    let pairs: Vec<(SlotFill, TyId)> = if function.is_variadic {
         let velem = param_tys[param_tys.len() - 1];
         let nfixed = (param_tys.len() - 1).saturating_sub(offset);
 
@@ -4215,7 +4540,7 @@ fn resolve_named_call(
             .enumerate()
             .map(|(i, &arg)| {
                 (
-                    arg,
+                    SlotFill::Direct(arg),
                     if i < nfixed {
                         param_tys[offset + 1]
                     } else {
@@ -4227,6 +4552,7 @@ fn resolve_named_call(
     } else {
         let slots = reorder_call_args(
             c,
+            gamma,
             &arg_list,
             &param_names[offset..],
             function.num_required.saturating_sub(offset),
@@ -4236,16 +4562,34 @@ fn resolve_named_call(
         slots
             .iter()
             .enumerate()
-            .filter_map(|(i, slot)| slot.map(|arg| (arg, param_tys[offset + i])))
+            .filter_map(|(i, slot)| slot.map(|fill| (fill, param_tys[offset + i])))
             .collect()
     };
 
-    for (arg, pty) in pairs {
-        let pty = substitute(gamma, pty, &subs, span)?;
-        match preinferred.get(&arg) {
-            Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
-            None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+    for (fill, pty) in pairs {
+        if has_bounds {
+            check_iterator_bounds(
+                c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, false, 0, span,
+            )?;
         }
+        let pty = substitute(gamma, pty, &subs, span)?;
+        match fill {
+            SlotFill::Direct(arg) => match preinferred.get(&arg) {
+                Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
+                None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+            },
+            // A spread-supplied field: check the field's type against the param.
+            SlotFill::SpreadField(op, fty) => {
+                coerce(gamma, fty, pty, c.body.expr_spans[op])?
+            }
+        }
+    }
+
+    if has_bounds {
+        check_iterator_bounds(
+            c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, true, 0, span,
+        )?;
+        gamma.out.bound_call_trees.insert(call_expr, bound_tree);
     }
 
     // A non-`@pure` callee may reassign a global, so its call invalidates every
@@ -4630,6 +4974,30 @@ fn bind_pattern_leaves_to(
     Ok(())
 }
 
+/// Whether `enumerate(coll)` in for-position keeps its builtin template
+/// lowering (the types `for_elem_ty` knows). Everything else routes through
+/// the stdlib `EnumIter` combinator.
+fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
+    match *gamma.get(ty) {
+        TypeExpr::App { ctor: TypeCtor::Array, .. } | TypeExpr::App { ctor: TypeCtor::Map, .. } => {
+            true
+        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
+            n.as_str(),
+            "Arena"
+                | "NativeArray"
+                | "NativeBuffer"
+                | "NativeBufferU8"
+                | "NativeBufferI8"
+                | "NativeBufferU16"
+                | "NativeBufferI16"
+                | "NativeBufferU32"
+                | "NativeBufferI32"
+        ),
+        _ => false,
+    }
+}
+
 fn infer_for_elem(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -4647,10 +5015,22 @@ fn infer_for_elem(
             Ok(gamma.workspace.builtins.int())
         }
 
+        // Builtin-collection `enumerate(coll)` keeps its template lowering
+        // (Map has no protocol iterator; the counted paths are co-fn safe).
+        // `enumerate` over anything else -- an iterator chain -- falls through
+        // to the default arm: the call resolves to the stdlib `EnumIter`
+        // combinator and the result iterates via the protocol.
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
-        } if name.as_str() == "enumerate" && args.len() == 1 => {
+        } if name.as_str() == "enumerate"
+            && args.len() == 1
+            && {
+                let coll_ty = infer_expr(c, gamma, args.start())?;
+                let coll_ty = resolve(gamma, coll_ty, span);
+                builtin_enumerable(gamma, coll_ty)
+            } =>
+        {
             let coll_ty = infer_expr(c, gamma, args.start())?;
             let coll_ty = resolve(gamma, coll_ty, span);
             let elem = for_elem_ty(gamma, coll_ty, span)?;
@@ -4664,8 +5044,367 @@ fn infer_for_elem(
             let iter_ty = infer_expr(c, gamma, iter)?;
             let iter_ty = resolve(gamma, iter_ty, span);
 
-            for_elem_ty(gamma, iter_ty, span)
+            // `[T]` routes through the stdlib iterator protocol (`VecIter`):
+            // the desugar + @inline + SROA + FORL recovery emit the same
+            // native numeric `for` the deleted skull template did. `Arena<T>`
+            // likewise routes through `ArenaIter` (fetch-outside skip shape).
+            // `for_elem_ty` keeps its Array/Arena arms -- `enumerate(..)`
+            // above still calls it directly for the element type.
+            let is_protocol_builtin = match *gamma.get(iter_ty) {
+                TypeExpr::App { ctor: TypeCtor::Array, .. } => true,
+                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n.as_str() == "Arena",
+                _ => false,
+            };
+            if is_protocol_builtin {
+                return resolve_for_iter_protocol(c, gamma, iter, iter_ty, span);
+            }
+
+            match for_elem_ty(gamma, iter_ty, span) {
+                Ok(elem) => Ok(elem),
+                // Not a builtin collection: try the user iterator protocol
+                // `iter(coll) -> It`, `next(It) -> (bool, E)`. The recorded
+                // (iter_fn, next_fn) drive skull's for-loop desugar.
+                Err(_not_builtin) => resolve_for_iter_protocol(c, gamma, iter, iter_ty, span),
+            }
         }
+    }
+}
+
+/// `for x in coll` where `coll` is not a builtin collection: resolve the user
+/// iterator protocol and record it keyed by the For's `iter` expr (for skull's
+/// desugar), returning the element type E. E is a single type for
+/// `next -> (bool, E)`, or a tuple for `next -> (bool, A, B, ...)` so
+/// `for (a, b) in coll` destructures.
+///
+/// Resolution order:
+/// - a bounded generic (`coll: I`, `I: Iterator<E>`) iterates as itself with a
+///   placeholder `next` (resolved per splice at concrete roots);
+/// - `iter(coll) -> It` when it resolves;
+/// - otherwise IDENTITY: a next-able type iterates as itself (bare combinator
+///   chains -- `for y in v.iter().map(f)` -- need no blanket `iter<I>`).
+fn resolve_for_iter_protocol(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    iter_expr: Idx<Expr>,
+    coll_ty: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    if let TypeExpr::Generic(var_id, gname) = *gamma.get(coll_ty) {
+        let Some((idx, elem)) = gamma.fn_bound_for(var_id) else {
+            comp_error!(
+                span,
+                "`{}` is a generic type with no `Iterator` bound, so it cannot be iterated; declare it `{}: Iterator<T>`",
+                gname,
+                gname
+            );
+        };
+        gamma.out.for_iter_protocol.insert(
+            iter_expr,
+            ForIterInfo { iter_fn: None, next: BoundNext::CallerGeneric(idx) },
+        );
+        return Ok(elem);
+    }
+
+    let (iter_fn, it_ty) =
+        match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), coll_ty, span) {
+            Ok((f, ret, _subs)) => {
+                let (fm, ff) = f;
+                if gamma.workspace.module(fm).functions[ff]
+                    .generic_bounds
+                    .iter()
+                    .any(Option::is_some)
+                {
+                    comp_error!(
+                        span,
+                        "`iter({})` resolves to a fn with `Iterator` bounds; bounded `iter` fns are not supported",
+                        gamma.render(coll_ty)
+                    );
+                }
+                (Some(f), ret)
+            }
+            // Identity: the collection IS the iterator if `next` resolves on it.
+            Err(_) => (None, coll_ty),
+        };
+
+    let (next_fn, next_ret, next_subs) =
+        match resolve_unary_by_recv(c, gamma, Ustr::from("next"), it_ty, span) {
+            Ok(x) => x,
+            Err(_) if iter_fn.is_some() => comp_error!(
+                span,
+                "`iter` yields `{}`, but there is no `next({}) -> (bool, E)` function to drive the loop",
+                gamma.render(it_ty),
+                gamma.render(it_ty)
+            ),
+            Err(_) => comp_error!(
+                span,
+                "type `{}` is not iterable: not a builtin collection, and neither `iter({})` nor `next({}) -> (bool, E)` is in scope",
+                gamma.render(coll_ty),
+                gamma.render(coll_ty),
+                gamma.render(coll_ty)
+            ),
+        };
+
+    let elem = for_iter_next_elem(gamma, next_ret, span)?;
+
+    // A bounded `next` (combinator chain) resolves its inner bounds HERE -- the
+    // for-loop is the mono root; the tree drives skull's placeholder
+    // substitution when the chain inlines.
+    let next_callee = gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
+    let mut sub = BoundTree::default();
+    if next_callee.generic_bounds.iter().any(Option::is_some) {
+        let mut done = FxHashSet::default();
+        check_iterator_bounds(
+            c, gamma, &next_callee, &next_subs, &mut sub, &mut done, true, 0, span,
+        )?;
+    }
+
+    gamma.out.for_iter_protocol.insert(
+        iter_expr,
+        ForIterInfo { iter_fn, next: BoundNext::Concrete { func: next_fn, sub } },
+    );
+    Ok(elem)
+}
+
+/// Check the `Iterator` bounds of `function` at an instantiation site and
+/// build the resolution tree: for each `I: Iterator<E>` with instantiation
+/// `C`, conformance is STRUCTURAL -- `next(C) -> (bool, E')` must resolve and
+/// `E'` unifies with `E` (which is HOW `E` gets inferred from `C`). The
+/// resolved `next` may itself be bounded (nested chains) -- recurse with its
+/// own substitution. An instantiation that is the enclosing fn's bounded
+/// generic records a `CallerGeneric` leaf (bound propagation).
+///
+/// `done` tracks generics already resolved: the call-site loop retries after
+/// each argument unification so a later lambda argument sees `E` already
+/// bound. `finalize` errors on bounds still unresolvable.
+#[allow(clippy::too_many_arguments)]
+fn check_iterator_bounds(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    function: &Function,
+    subs: &FxHashMap<VarId, TyId>,
+    tree: &mut BoundTree,
+    done: &mut FxHashSet<usize>,
+    finalize: bool,
+    depth: usize,
+    span: Span,
+) -> Result<(), CompilerError> {
+    if depth > 64 {
+        comp_error!(span, "`Iterator` bound resolution exceeded depth 64 (recursive iterator type?)");
+    }
+
+    for (idx, b) in function.generic_bounds.iter().enumerate() {
+        let Some(elem_decl) = *b else { continue };
+        if done.contains(&idx) {
+            continue;
+        }
+
+        let inst = substitute(gamma, function.generics[idx], subs, span)?;
+        let inst = resolve(gamma, inst, span);
+
+        match *gamma.get(inst) {
+            TypeExpr::Infer(..) => {
+                if finalize {
+                    comp_error!(
+                        span,
+                        "cannot resolve the `Iterator` bound on `{}`: the iterator type is not determined by the arguments",
+                        function.name
+                    );
+                }
+                // Not yet determined -- the caller retries after more args unify.
+            }
+
+            TypeExpr::Generic(var_id, gname) => {
+                let Some((caller_idx, caller_elem)) = gamma.fn_bound_for(var_id) else {
+                    comp_error!(
+                        span,
+                        "`{}` does not satisfy `Iterator<{}>`: it is a generic type with no `Iterator` bound",
+                        gname,
+                        gamma.render(elem_decl)
+                    );
+                };
+                let elem_expected = substitute(gamma, elem_decl, subs, span)?;
+                unify(gamma, caller_elem, elem_expected, span)?;
+                tree.next.insert(idx, BoundNext::CallerGeneric(caller_idx));
+                done.insert(idx);
+            }
+
+            _ => {
+                let (next_fn, next_ret, next_subs) =
+                    match resolve_unary_by_recv(c, gamma, Ustr::from("next"), inst, span) {
+                        Ok(x) => x,
+                        Err(_) => comp_error!(
+                            span,
+                            "`{}` does not satisfy `Iterator<{}>`: no `next({}) -> (bool, E)` function in scope",
+                            gamma.render(inst),
+                            gamma.render(elem_decl),
+                            gamma.render(inst)
+                        ),
+                    };
+                let elem_actual = bound_next_elem(gamma, next_ret, inst, span)?;
+                let elem_expected = substitute(gamma, elem_decl, subs, span)?;
+                if unify(gamma, elem_actual, elem_expected, span).is_err() {
+                    comp_error!(
+                        span,
+                        "`{}` satisfies `Iterator<{}>`, but the bound requires `Iterator<{}>`",
+                        gamma.render(inst),
+                        gamma.render(elem_actual),
+                        gamma.render(elem_expected)
+                    );
+                }
+
+                let next_callee =
+                    gamma.workspace.module(next_fn.0).functions[next_fn.1].clone();
+                let mut sub = BoundTree::default();
+                if next_callee.generic_bounds.iter().any(Option::is_some) {
+                    let mut sub_done = FxHashSet::default();
+                    check_iterator_bounds(
+                        c, gamma, &next_callee, &next_subs, &mut sub, &mut sub_done,
+                        true, depth + 1, span,
+                    )?;
+                }
+                tree.next.insert(idx, BoundNext::Concrete { func: next_fn, sub });
+                done.insert(idx);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Element type for BOUND conformance: `next` must return exactly `(bool, E)`.
+/// Multi-value iterators (`(bool, A, B)` -- ArenaIter's entity/data pair,
+/// enumerate/zip outputs) can be CONSUMED by a `for` loop but not re-wrapped
+/// by a combinator: a generic body cannot destructure an unknown-arity splat.
+fn bound_next_elem(
+    gamma: &mut Gamma,
+    next_ret: TyId,
+    inst: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    let next_ret = resolve(gamma, next_ret, span);
+    let TypeExpr::Tuple { elements } = *gamma.get(next_ret) else {
+        comp_error!(
+            span,
+            "`{}` does not satisfy `Iterator<..>`: its `next` returns `{}`, not `(bool, E)`",
+            gamma.render(inst),
+            gamma.render(next_ret)
+        );
+    };
+    let elems: Vec<_> = elements.into_iter().collect();
+    if elems.len() != 2 {
+        comp_error!(
+            span,
+            "`{}` does not satisfy `Iterator<..>`: its `next` returns `{}`; a bound requires exactly `(bool, E)` -- multi-value iterators can drive a `for` loop but cannot be wrapped by combinators",
+            gamma.render(inst),
+            gamma.render(next_ret)
+        );
+    }
+    let first = resolve(gamma, next_ret.with_idx(elems[0]), span);
+    if !matches!(gamma.get(first), TypeExpr::Builtin(BuiltinTy::Bool)) {
+        comp_error!(
+            span,
+            "`{}` does not satisfy `Iterator<..>`: `next`'s first return must be `bool` (the done flag), got `{}`",
+            gamma.render(inst),
+            gamma.render(first)
+        );
+    }
+    Ok(resolve(gamma, next_ret.with_idx(elems[1]), span))
+}
+
+/// Resolve a unary call `name(recv)` by the receiver's TYPE alone (no arg expr) --
+/// the iterator protocol calls `iter(coll)` / `next(it)` on synthesized values.
+/// Reuses `select_overload` via the `recv_ty` slot, then instantiates generics
+/// and returns the resolved `(callee, return_ty, generic subs)`. Does NOT
+/// record into `resolved_overload_calls` (the caller stores it in
+/// `for_iter_protocol` / the bound tree).
+fn resolve_unary_by_recv(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    name: Ustr,
+    recv_ty: TyId,
+    span: Span,
+) -> Result<((ModuleId, Idx<Function>), TyId, FxHashMap<VarId, TyId>), CompilerError> {
+    let candidates = resolve_callee(gamma, name);
+    if candidates.is_empty() {
+        comp_error!(span, "no `{}` function in scope", name);
+    }
+    let recv_ty = resolve(gamma, recv_ty, span);
+
+    let (mid, fid) = if candidates.len() == 1 {
+        candidates[0]
+    } else {
+        select_overload(
+            c,
+            gamma,
+            &candidates,
+            Some(recv_ty),
+            &[],
+            &FxHashMap::default(),
+            &[recv_ty],
+            name,
+            span,
+        )?
+    };
+
+    let function = &gamma.workspace.module(mid).functions[fid];
+    let generics = function.generics.clone();
+    let n_params = function.param_decls.len();
+    let num_required = function.num_required;
+    let param0 = function.param_decls.first().map(|p| p.ty);
+    let ret = function.return_ty;
+
+    // The protocol is unary: exactly one required receiver parameter.
+    if n_params != 1 || num_required != 1 {
+        comp_error!(span, "`{}` must take exactly one argument to drive a `for` loop", name);
+    }
+    let Some(p0) = param0 else {
+        comp_error!(span, "`{}` has no receiver parameter", name);
+    };
+
+    let (subs, _) = gamma.instantiate_generics(&generics, span)?;
+    let p0_sub = substitute(gamma, p0, &subs, span)?;
+    coerce(gamma, recv_ty, p0_sub, span)?;
+
+    let ret = ret.unwrap_or_else(|| gamma.workspace.builtins.unit());
+    let ret_sub = substitute(gamma, ret, &subs, span)?;
+    let ret_res = resolve(gamma, ret_sub, span);
+    Ok(((mid, fid), ret_res, subs))
+}
+
+/// Element type of a `next() -> (bool, E)` return: the tuple tail. `(bool, E)`
+/// yields `E`; `(bool, A, B, ...)` yields the tuple `(A, B, ...)`. The first
+/// element must be `bool` (the done flag) and there must be at least one element.
+fn for_iter_next_elem(gamma: &mut Gamma, next_ret: TyId, span: Span) -> Result<TyId, CompilerError> {
+    let next_ret = resolve(gamma, next_ret, span);
+    let TypeExpr::Tuple { elements } = *gamma.get(next_ret) else {
+        comp_error!(span, "`next` must return `(bool, E)`, got `{}`", gamma.render(next_ret));
+    };
+    let elems: Vec<_> = elements.into_iter().collect();
+    if elems.len() < 2 {
+        comp_error!(
+            span,
+            "`next` must return `(bool, E)` (a done-flag plus at least one element), got `{}`",
+            gamma.render(next_ret)
+        );
+    }
+
+    let first = resolve(gamma, next_ret.with_idx(elems[0]), span);
+    if !matches!(gamma.get(first), TypeExpr::Builtin(BuiltinTy::Bool)) {
+        comp_error!(
+            span,
+            "`next`'s first return must be `bool` (the done flag), got `{}`",
+            gamma.render(first)
+        );
+    }
+
+    if elems.len() == 2 {
+        Ok(resolve(gamma, next_ret.with_idx(elems[1]), span))
+    } else {
+        let tail: Vec<TyId> = elems[1..]
+            .iter()
+            .map(|&e| resolve(gamma, next_ret.with_idx(e), span))
+            .collect();
+        Ok(tuple_of(gamma, &tail, span))
     }
 }
 

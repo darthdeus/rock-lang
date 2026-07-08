@@ -182,10 +182,10 @@ fn hover_on_a_struct_record_pattern_head_shows_the_struct() {
 }
 
 #[test]
-fn hover_on_an_enum_variant_pattern_names_the_enum() {
-    // Hovering `MobKind::Skeleton` in a match arm resolves to the enum, NOT the
-    // match's result type ("string"). The match expr is no longer a catch-all;
-    // the variant pattern is resolved from the raw AST.
+fn hover_on_an_enum_variant_pattern_resolves_variant_and_qualifier() {
+    // In `MobKind::Skeleton`, the VARIANT name hovers the variant, the
+    // QUALIFIER hovers the full enum body -- never the match's result type
+    // ("string"). The variant pattern is resolved from the raw AST.
     let src = "enum MobKind { Skeleton, Zombie }\nfn name(k: MobKind) -> string {\n  match k {\n    MobKind::Skeleton => \"s\"\n    MobKind::Zombie => \"z\"\n  }\n}\n";
     let bone = fresh(src);
     let text = |pos| match bone.hover(PATH, pos).map(|h| h.contents) {
@@ -194,10 +194,11 @@ fn hover_on_an_enum_variant_pattern_names_the_enum() {
     };
     // line 3: `    MobKind::Skeleton => "s"` -- qualifier col 4, variant col 13.
     let variant = text(Position::new(3, 16));
-    assert!(variant.contains("enum MobKind"), "variant pattern -> enum: {variant:?}");
+    assert!(variant.contains("MobKind::Skeleton"), "variant -> variant: {variant:?}");
     assert!(!variant.contains("string"), "must not be the match result type: {variant:?}");
     let qualifier = text(Position::new(3, 5));
     assert!(qualifier.contains("enum MobKind"), "enum qualifier -> enum: {qualifier:?}");
+    assert!(qualifier.contains("Skeleton") && qualifier.contains("Zombie"), "qualifier -> full body: {qualifier:?}");
 }
 
 #[test]
@@ -665,24 +666,19 @@ fn main() {
 }
 
 #[test]
-fn rename_newtype_refuses_rather_than_corrupting_stdlib() {
-    // Regression (DESTRUCTIVE): a newtype's auto-generated `__op_add` shares the
-    // newtype's name_span, so `function_target` resolved the decl name to it and
-    // `function_references_by_name("__op_add")` matched every `__op_add` across
-    // the warm stdlib -- 80+ edits rewriting json.rock / unified.rock. The
-    // `__`-op skip in `function_target` neutralizes that, so the decl now
-    // resolves to no sites and rename refuses.
-    //
-    // SENTINEL: real newtype rename is pending the enum/variant HIR-span work
-    // (docs/lsp-rename-coverage.md). When it lands this returns Some -- flip to
-    // assert the in-file edit sites (decl + `Health(..)` ctor) and that nothing
-    // leaks outside the user file.
+fn rename_newtype_edits_decl_and_ctor_in_file_only() {
+    // Newtype rename resolves the decl name + `Health(..)` ctor calls and
+    // must NOT leak outside the user file. (The hazard this guards: a
+    // newtype's auto-generated `__op_add` shares the newtype's name_span; if
+    // the decl ever resolves as that function again, the walk would rewrite
+    // every `__op_add` across the warm stdlib -- 80+ destructive edits.)
     let src = "newtype Health(int)\nfn main() {\n  let h = Health(5)\n}\n";
     let bone = fresh(src);
-    assert!(
-        bone.rename(PATH, Position::new(0, 9), "Hp").is_none(),
-        "newtype rename now resolves -- implement full support and flip this sentinel"
-    );
+    let edit = bone.rename(PATH, Position::new(0, 9), "Hp").expect("newtype rename resolves");
+    let changes = edit.changes.expect("changes");
+    assert_eq!(changes.len(), 1, "edits stay in the user file: {changes:?}");
+    let lines = rename_lines(&bone, Position::new(0, 9), "Hp", "Health".len());
+    assert_eq!(lines, vec![0, 2], "decl + ctor call");
 }
 
 #[test]

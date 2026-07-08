@@ -197,6 +197,94 @@ fn broken_two() -> bool { return 42 }";
     );
 }
 
+// --- Return-type mismatch diagnostics: span + message quality. ---
+//
+// A fn whose body doesn't satisfy the declared return type must NOT underline
+// the whole `fn { .. }` span. When the body has a tail expression, blame the
+// tail; when it ends in a statement (no value at all), say so plainly instead
+// of leaking the internal `()` type into "Failed to unify () and string".
+
+/// The source slice a byte-offset span covers.
+fn text<'a>(src: &'a str, span: &Span) -> &'a str {
+    let (s, e) = span.offset_range;
+    &src[s..e]
+}
+
+/// All errors recorded against the named function's body.
+fn recorded_errors<'a>(
+    ws: &'a bone_semantic::inference::Workspace,
+    fn_name: &str,
+) -> &'a [CompilerError] {
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let hir = ws.module(mid);
+    let (idx, _) = hir
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .unwrap_or_else(|| panic!("fn {fn_name} exists"));
+    let inf = ws.inference(mid).expect("user module inferred");
+    inf.errors
+        .get(&BodyOwner::Function(idx))
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
+#[test]
+fn return_mismatch_underlines_tail_expr_not_whole_fn() {
+    let src = "fn f() -> string {\n    let y = 1\n    y\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded return-type error");
+    let span = err.labels.first().expect("labeled error").span;
+    assert_eq!(
+        text(src, &span),
+        "y",
+        "return mismatch must underline the tail expr `y`, not the whole fn"
+    );
+}
+
+#[test]
+fn missing_return_value_says_so_instead_of_unifying_unit() {
+    let src = "fn f() -> string {\n    let y = 1\n    let z = 2\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded return-type error");
+    assert!(
+        err.message.contains("no return value"),
+        "a statement-tailed body must report a missing return value, got: {:?}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("()"),
+        "the internal unit type must not leak into the message, got: {:?}",
+        err.message
+    );
+    // ...anchored somewhere narrow, never the whole 4-line fn.
+    let span = err.labels.first().expect("labeled error").span;
+    assert!(
+        text(src, &span).len() < src.len(),
+        "must not underline the entire function body"
+    );
+}
+
+#[test]
+fn return_mismatch_does_not_mask_genuine_body_error() {
+    let src = "fn f() -> string {\n    let w = undefined_symbol_here\n    let z = 1\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    assert!(
+        errs.iter().any(|e| e.message.contains("undefined_symbol_here")),
+        "the real `Undefined global` error must survive, not be masked by the \
+         return-type error; got: {:?}",
+        errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 // Companion to body_type_error_does_not_abort_other_bodies for the
 // non-function BodyOwners: check_module has a separate `?` loop per owner
 // kind (decorators, globals, struct defaults), and the early global-init
@@ -546,6 +634,7 @@ fn structurally_equal_compounds_reassign_is_ok() {
         is_coroutine: false,
         is_variadic: false,
         generics: vec![],
+        generic_bounds: vec![],
         param_decls: vec![],
         num_required: 0,
         return_ty: None,
@@ -1112,6 +1201,85 @@ fn redundant_null_coalesce_rejected() {
     );
 }
 
+// Collect every body-level error message across the user module. Used by the
+// diagnostic-quality tests below, which assert on the rendered wording rather
+// than just `is_err`.
+fn all_err_msgs(src: &str) -> Vec<String> {
+    let ws = check(src).expect("body-level errors are collected, not fatal");
+    let mut msgs = Vec::new();
+    for m in ws.modules.iter() {
+        if m.id == ModuleId::builtin() {
+            continue;
+        }
+        if let Some(inf) = ws.inference(m.id) {
+            for errs in inf.errors.values() {
+                for e in errs {
+                    msgs.push(e.message.clone());
+                }
+            }
+        }
+    }
+    msgs
+}
+
+// A plain nominal mismatch (no generics on either side) must not be reported
+// as "different generic constructors" -- it must name both types plainly.
+#[test]
+fn nominal_mismatch_message_names_both_types() {
+    let src = "\
+struct Mob { x: int }
+struct Data { y: int }
+fn take(m: Mob) -> int { return m.x }
+fn caller(d: Data) -> int { return take(d) }";
+    let msgs = all_err_msgs(src);
+    let joined = msgs.join(" | ");
+    assert!(
+        msgs.iter().any(|m| m.contains("Mob") && m.contains("Data")),
+        "mismatch message should name both `Mob` and `Data`: {joined}"
+    );
+    assert!(
+        !joined.contains("generic constructors"),
+        "non-generic nominal mismatch must not say 'generic constructors': {joined}"
+    );
+}
+
+// `recv.field()` where `field` is a non-callable field and a same-named free
+// fn exists (so UFCS is attempted and fails on the receiver type) -- the error
+// must point at the field/`()` slip, not a bare unify failure.
+#[test]
+fn field_called_as_method_with_shadowing_free_fn() {
+    let src = "\
+struct Data { cooldown: float = 1.5 }
+struct Thing { id: int }
+fn make() -> Data { return Data { cooldown: 2.0 } }
+fn cooldown(t: Thing) -> float { return 9.0 }
+fn caller() -> float { return make().cooldown() }";
+    let joined = all_err_msgs(src).join(" | ");
+    assert!(
+        joined.contains("cooldown") && joined.contains("field") && joined.contains("()"),
+        "should flag `cooldown` as a field called with `()`: {joined}"
+    );
+}
+
+// Same slip, but no same-named free fn at all -- must NOT say "Function
+// doesn't exist" (the field plainly exists); it must flag the field.
+#[test]
+fn field_called_as_method_no_free_fn() {
+    let src = "\
+struct Data { cooldown: float = 1.5 }
+fn make() -> Data { return Data { cooldown: 2.0 } }
+fn caller() -> float { return make().cooldown() }";
+    let joined = all_err_msgs(src).join(" | ");
+    assert!(
+        !joined.contains("doesn't exist"),
+        "field exists -- must not claim the function doesn't exist: {joined}"
+    );
+    assert!(
+        joined.contains("cooldown") && joined.contains("field"),
+        "should flag `cooldown` as a field: {joined}"
+    );
+}
+
 #[test]
 fn redundant_safe_nav_field_rejected() {
     // `?.` on a non-nullable receiver is dead.
@@ -1122,5 +1290,45 @@ fn redundant_safe_nav_field_rejected() {
     assert!(
         !bone_rejects("struct Bar { val: int }\nfn f(b: Bar?) -> int? { return b?.val }"),
         "`?.` on a nullable receiver is meaningful and accepted"
+    );
+}
+
+/// Unfuck #32: when every overload is rejected and the only near-miss is an
+/// `Iterator`-bounded candidate that failed CONFORMANCE (params fit, bounds
+/// did not), the error surfaces `check_iterator_bounds`' precise reason
+/// appended to the "No overload for ..." headline (`select_overload`'s
+/// `bound_fail` slot, filled by `score_candidate`).
+#[test]
+fn all_rejected_overload_error_surfaces_bound_conformance_reason() {
+    let src = r#"
+struct Multi { i: int }
+fn next(it: Multi) -> (bool, int, int) { return (false, 0, 0) }
+fn wrap<I: Iterator<T>, T>(x: I, n: int) -> int { return n }
+fn wrap(x: string, n: int) -> int { return n }
+fn main() {
+    let m = Multi { i: 0 }
+    let _ = wrap(m, 1)
+}
+"#;
+    let ws = check(src).expect("body errors are collected, not aborted");
+    let mid = ws.modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let inf = ws.inference(mid).expect("user module inferred");
+    let msgs: Vec<&str> = inf
+        .errors
+        .values()
+        .flatten()
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("No overload for `wrap`")),
+        "the call must reject: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("does not satisfy")),
+        "the bound-conformance rejection reason must be surfaced: {msgs:?}"
     );
 }

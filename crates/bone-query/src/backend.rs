@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, Diagnostic, DiagnosticSeverity,
-    DocumentHighlight, InsertTextFormat,
+    CompletionItem, Diagnostic, DiagnosticSeverity,
+    DocumentHighlight,
     DocumentSymbol, Hover,
     HoverContents, InlayHint, InlayHintKind, InlayHintLabel, Location, MarkupContent, MarkupKind,
     ParameterInformation, ParameterLabel, Position, Range, SemanticToken, SemanticTokenModifier,
@@ -36,7 +36,12 @@ use bone_incremental::session::{Session, UpdateTier};
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
-use crate::query::{clean_match, fz_boundary, SymCat};
+use crate::completion::classify::*;
+use crate::completion::rank::*;
+use crate::completion::select::*;
+use crate::completion::sources::*;
+use crate::query::{clean_match, SymCat};
+use crate::rank_key::RankKey;
 
 /// Re-parse a tracked user file from its stored text. The Session no longer
 /// retains the AST (it is transient -- the per-body HIR is the incremental
@@ -89,6 +94,9 @@ fn warm_stdlib() -> Vec<skull_parser::Ast> {
 struct BoneProject {
     session: Session,
     texts: HashMap<String, String>,
+    /// Workspace reference counts per name (`build_freq_index`) -- the
+    /// `freq` prior. Rebuilt with the other type caches.
+    freq: Option<HashMap<ustr::Ustr, u32>>,
     /// Per-file unfilled-hole diagnostics, cached across edits. `hole_diagnostics_for`
     /// REPARSES a file, so recomputing it for every tracked file on every keystroke
     /// reparses the whole compilation unit (~130 files on mag) when only the edited
@@ -148,8 +156,9 @@ pub struct MatchArmsFill {
     pub missing: usize,
 }
 
-/// The "fill struct fields" edit: a text replacement that inserts `field: ?`
-/// for each missing required field, and how many fields it adds.
+/// The "fill struct fields" edit: a text replacement that inserts each missing
+/// required field -- shorthand `field` when an in-scope binding matches its name
+/// and type, else a `field: ?` hole -- and how many fields it adds.
 pub struct StructFieldsFill {
     pub range: Range,
     pub new_text: String,
@@ -262,7 +271,7 @@ impl BoneWorkspace {
                 session: Session::new(warm_stdlib(), Vec::new())
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: HashMap::new(),
-                hole_cache: HashMap::new(),
+                freq: None, hole_cache: HashMap::new(),
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
@@ -322,7 +331,7 @@ impl BoneWorkspace {
                 let texts = files.into_iter().collect();
                 self.projects.insert(
                     root,
-                    BoneProject { session, texts, hole_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
                 );
             }
             Err(e) => {
@@ -445,6 +454,7 @@ impl BoneWorkspace {
                 );
             }
             proj.call_through = Some(ct);
+            proj.freq = Some(build_freq_index(proj.session.workspace()));
         }
         let uf_ms = t_uf.elapsed().as_secs_f64() * 1000.0;
 
@@ -557,6 +567,17 @@ impl BoneWorkspace {
         }
     }
 
+    /// Current text of `path` as this workspace sees it -- the editor-buffer
+    /// view the last `update` applied, not the disk copy. Recorder/debug
+    /// surface (the completion corpus records the exact text it ranked).
+    pub fn file_text(&self, path: &str) -> Option<&str> {
+        let path_c = self.canon(path);
+        self.project(path_c.as_str())?
+            .texts
+            .get(path_c.as_str())
+            .map(|s| s.as_str())
+    }
+
     // -- Feature: hover (implemented via bone_semantic::query::type_at) ---------------
 
     pub fn hover(&self, path: &str, pos: Position) -> Option<Hover> {
@@ -660,7 +681,15 @@ impl BoneWorkspace {
         let ws = proj.session.workspace();
         let mid = user_module_for_path(ws, path)?;
         let inf = ws.inference(mid)?;
-        let span = gaps::definition(ws, mid, inf, offset)?;
+        // Enum-variant match patterns resolve from the raw AST FIRST (the HIR
+        // pattern node isn't in `node_index`), mirroring the hover path.
+        let pat_def = proj
+            .session
+            .files
+            .get(path)
+            .and_then(|uf| reparse_user_file(uf, path))
+            .and_then(|ast| crate::query::enum_variant_pattern_def(ws, &ast, offset));
+        let span = pat_def.or_else(|| gaps::definition(ws, mid, inf, offset))?;
         self.location_from_span(proj, &span)
     }
 
@@ -787,10 +816,10 @@ impl BoneWorkspace {
     }
 
     /// A "fill struct fields" edit when the cursor is inside a struct literal
-    /// `Name { ... }` missing required fields. Inserts `field: ?` (a Rock
-    /// expression hole) for each missing field, keeping the literal's single- or
-    /// multi-line shape, or None when nothing's missing. See
-    /// `query::struct_fields_fill`.
+    /// `Name { ... }` missing required fields. For each missing field inserts the
+    /// shorthand `field` when an in-scope binding matches its name and type, else
+    /// a `field: ?` hole, keeping the literal's single- or multi-line shape, or
+    /// None when nothing's missing. See `query::struct_fields_fill`.
     pub fn fill_struct_fields(&self, path: &str, pos: Position) -> Option<StructFieldsFill> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -814,7 +843,9 @@ impl BoneWorkspace {
         let last = src.get(..content_end)?.chars().next_back();
         let needs_comma = !matches!(last, Some('{') | Some(','));
 
-        let fields: Vec<String> = missing.iter().map(|n| format!("{n}: ?")).collect();
+        // `struct_fields_fill` already returns ready field snippets -- a bare
+        // `field` when an in-scope binding matches (shorthand), else `field: ?`.
+        let fields: Vec<String> = missing.clone();
 
         let new_text = if multiline {
             // Indent inserted fields like the existing ones (or the brace line +
@@ -917,12 +948,31 @@ impl BoneWorkspace {
         let Some(inf) = ws.inference(mid) else {
             return Vec::new();
         };
-        gaps::references(ws, mid, inf, offset)
+        // Text lookup for the walks whose HIR carries no token span (named-arg
+        // labels, `?.method` names) -- `proj.texts` holds every tracked file.
+        gaps::references(ws, mid, inf, offset, &|f| {
+            proj.texts.get(f).map(|s| s.as_str())
+        })
     }
 
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
 
     pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
+        self.completion_with_trigger(path, pos, false)
+    }
+
+    /// Completion, told whether this request was auto-fired by the space trigger
+    /// character. A space trigger on a line whose prefix (up to the cursor) is
+    /// only whitespace is auto-indentation inserted by `<CR>`, not a real
+    /// "space after a token" context (`let x = |`); we suppress it so a bare
+    /// newline doesn't pop the menu (and `<CR><CR>` doesn't accept item 1).
+    /// Manual invokes / identifier typing pass `false` and are never suppressed.
+    pub fn completion_with_trigger(
+        &mut self,
+        path: &str,
+        pos: Position,
+        space_triggered: bool,
+    ) -> Vec<CompletionItem> {
         // `&mut self`: the context-triggered paths (member/enum/struct/field-ref)
         // analyze the completion munge as a speculative Session variant
         // (`with_file_variant`), which mutates and restores the live session.
@@ -936,6 +986,11 @@ impl BoneWorkspace {
         };
         let src = src.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
+        // Space-triggered on an all-whitespace line prefix == `<CR>` auto-indent,
+        // not a real space-after-token context: suppress the popup.
+        if space_triggered && line_prefix_is_blank(src, offset) {
+            return Vec::new();
+        }
         let prefix_raw = ident_prefix(src, offset).to_string();
         let prefix = prefix_raw.to_lowercase();
         // Every early-return path below reports its total under BONE_LSP_PROFILE;
@@ -964,41 +1019,49 @@ impl BoneWorkspace {
         // whole project (warm stdlib + dependencies like the engine) resolves a
         // cross-file receiver type at incremental cost -- plain prefix completion
         // (the fall-through below) uses the live workspace directly.
-        // AST cursor classifier (docs/cursor-context-plan.md): parses the
-        // munged buffer once and answers the context queries structurally.
-        // None only when every ladder rung fails to tokenize -- the byte
-        // scanners stay as the documented fallback on that frontier.
-        let cursor_ast = crate::cursor_context::CursorAst::at(src, offset);
-        // Call-arg slot, shared by the member / field-ref / ranking paths.
-        // The receiver anchor is the receiver expr's END offset (the byte
-        // fallback's dot offset serves the same "just past the receiver"
-        // role in method_receiver_ty).
-        let arg_ctx = cursor_ast.as_ref().and_then(|cx| cx.call_arg());
-        // Member access (`.`) is the most specific trigger: a `recv.field` even
-        // inside a struct-literal field value (`Foo { x: recv.<cursor> }`) is
-        // member completion, not field completion -- so it's checked first.
-        let member_segments = cursor_ast.as_ref().and_then(|cx| cx.member_path());
-        if let Some(segments) = member_segments {
+        // The cursor classification, computed ONCE (CompletionCx: the AST
+        // classifier over the munge ladder plus every context consultation;
+        // docs/cursor-context-plan.md + completion-v2-design.md M2b). The
+        // dispatch below tries the slots most-specific-first; a `recv.field`
+        // even inside a struct-literal field value is member completion.
+        let cx = classify(src, offset);
+        if let Some(segments) = cx.member.clone() {
             // In a call-arg position, a member completion (`recv.field`) also
             // surfaces TRANSITIVE suffix paths whose deep type matches the
             // expected param (`recv.movable.grid`), and direct members that fit
             // the slot rank first. The typed session is built INSIDE the member
             // variant (member TyIds live in that workspace); here we just pass
             // the enclosing (callee, arg index).
-            let arg_slot = arg_ctx.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
-            // Bool-field soft boost: the chain is the whole `if`/`while`
-            // condition. Structural from the classifier; byte fallback on
-            // the tokenize frontier.
-            let bool_ctx = cursor_ast.as_ref().is_some_and(|cx| cx.bool_condition_chain());
+            let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
             let mut items = member_completions(
-                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot,
-                proj.reach.as_ref(), bool_ctx,
+                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot, cx.anchor,
+                proj.reach.as_ref(), cx.bool_chain,
             );
             if next_is_open_paren {
                 strip_call_template(&mut items);
             }
             path_ms("member path", items.len());
             return items;
+        }
+        // Member access on a receiver the name-walk can't encode (`x.find().|`,
+        // `xs[i].|`): resolve the receiver's type via inference and offer its
+        // members. Same builder as the name-path above.
+        if let Some(recv_end) = cx.member_recv_end {
+            let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
+            let mut items = member_completions_by_receiver(
+                &mut proj.session, path, src, offset, recv_end, &prefix, arg_slot, cx.anchor,
+                proj.reach.as_ref(), cx.bool_chain,
+            );
+            // A non-struct receiver (`scale(x).|` -> int) has no members; fall
+            // through to general completion rather than suppress it -- the
+            // pre-existing behavior when this receiver couldn't be resolved.
+            if !items.is_empty() {
+                if next_is_open_paren {
+                    strip_call_template(&mut items);
+                }
+                path_ms("member path (recv-ty)", items.len());
+                return items;
+            }
         }
         // Field-reference key path: a call-arg slot whose expected param is
         // `FieldOf<Struct, V>` completes to Struct's fields of type V (the
@@ -1009,7 +1072,7 @@ impl BoneWorkspace {
         // field ref (live signature says FieldOf, or a `.` is already typed);
         // `field_ref_arg_completions` returns None -> falls through to normal
         // completion (e.g. enum-shorthand `.Variant` in an arg).
-        if let Some((callee, arg_idx, _)) = arg_ctx.clone() {
+        if let Some((callee, arg_idx, _)) = cx.arg_call.clone() {
             let lead_dot = leading_dot(src, offset);
             // Skip the variant only when the live signature is KNOWN and clearly
             // not a field ref. If the callee is unknown live (the incomplete arg
@@ -1036,8 +1099,7 @@ impl BoneWorkspace {
                 }
             }
         }
-        let enum_rec = cursor_ast.as_ref().and_then(|cx| cx.enum_record());
-        if let Some((enum_name, variant)) = enum_rec {
+        if let Some((enum_name, variant)) = cx.enum_record.clone() {
             // Falls through (None) when the head isn't a record variant -- a unit/
             // tuple variant as a block head (`if x == Enum::Variant { .. }`) is NOT
             // a record literal, so the block still gets global completion.
@@ -1048,8 +1110,7 @@ impl BoneWorkspace {
                 return items;
             }
         }
-        let enum_base = cursor_ast.as_ref().and_then(|cx| cx.qualified_base());
-        if let Some(enum_name) = enum_base {
+        if let Some(enum_name) = cx.qualified.clone() {
             let mut items = enum_qualified_completions(
                 &mut proj.session, path, src, offset, &enum_name, &prefix,
             );
@@ -1059,8 +1120,7 @@ impl BoneWorkspace {
             path_ms("enum-qualified path", items.len());
             return items;
         }
-        let struct_lit = cursor_ast.as_ref().and_then(|cx| cx.struct_literal());
-        if let Some((struct_name, brace_open)) = struct_lit {
+        if let Some((struct_name, brace_open)) = cx.struct_literal.clone() {
             // Falls through (None) when the head isn't actually a struct, so a
             // `match X {` / `if Cond {` block still gets global completion.
             if let Some(items) = struct_literal_field_completions(
@@ -1075,7 +1135,7 @@ impl BoneWorkspace {
         // `deco` declarations, not the fn/type namespace. Detected from the `@`
         // trigger and served from the live workspace (decorators are declared in
         // the engine, so they're present even if the edited module dropped out).
-        if decorator_context(src, offset) {
+        if cx.decorator {
             let items = decorator_completions(proj.session.workspace(), &prefix);
             path_ms("decorator path", items.len());
             return items;
@@ -1085,11 +1145,34 @@ impl BoneWorkspace {
         // Prefer the live session; but if the buffer is broken so the strict
         // session dropped the module, reparse it with RECOVERY so scope
         // completion still works mid-edit (backlog #21).
+        // PatternPos: a match-arm pattern HEAD is a slot for the scrutinee's
+        // enum. Resolve the scrutinee type at the classifier's anchor (through
+        // the variant munges -- the half-typed head usually breaks the live
+        // parse); when it names an enum, its variants take the type rung and
+        // reach/call-through synths (not valid patterns) stay out. Fails open:
+        // an unresolved scrutinee or a non-enum match changes nothing.
+        let pattern_pos = cx.pattern_scrutinee.is_some();
+        let pattern_enum: Option<String> = cx.pattern_scrutinee.and_then(|a| {
+            pattern_scrutinee_enum(&mut proj.session, path, src, offset, a)
+        });
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
             let t = std::time::Instant::now();
+            // A half-typed arm HEAD (`match s { co`) is what broke the parse:
+            // complete it (` => {}` at the cursor) so the recovery reparse
+            // keeps the match -- and its scrutinee, which the pattern rung
+            // below resolves -- instead of dropping the statement.
+            let fixed = if pattern_pos {
+                let mut s = String::with_capacity(src.len() + 8);
+                s.push_str(&src[..offset.min(src.len())]);
+                s.push_str(" => {}");
+                s.push_str(&src[offset.min(src.len())..]);
+                s
+            } else {
+                src.to_string()
+            };
             let ws = proj.session.combined_unexpanded().ok().and_then(|combined| {
-                reparse_with_project(&combined, path, &balance_delimiters(src.to_string()))
+                reparse_with_project(&combined, path, &balance_delimiters(fixed))
             });
             if prof {
                 eprintln!(
@@ -1117,11 +1200,43 @@ impl BoneWorkspace {
         };
         // Type-vs-expression slot governs enum completion (bare `Enum` in a type
         // slot, qualified `Enum::Variant` values in an expression slot).
-        let expr_position = !cursor_ast.as_ref().is_some_and(|cx| cx.is_type_position());
+        let expr_position = cx.expr_position;
         // After a `yield`/`yield*`, coroutine-returning fns rank first (the
         // `yield* frame(1)` delegation pattern).
-        let after_yield =
-            expr_position && cursor_ast.as_ref().is_some_and(|cx| cx.after_yield());
+        let after_yield = cx.after_yield;
+        // Test-scoped symbols demote outside test files (kind bucket 4).
+        let demote_tests = !crate::query::is_test_path(path);
+        // Proximity tier of a defining file vs the request (late prior:
+        // 0 same file, 1 same project root, 2 other workspace code,
+        // 3 stdlib/builtins), memoized per file per request.
+        let root = Self::root_for(path).to_string_lossy().into_owned();
+        let mut prox_memo: HashMap<ustr::Ustr, u8> = HashMap::new();
+        let mut prox_of = move |def_file: ustr::Ustr| -> u8 {
+            *prox_memo.entry(def_file).or_insert_with(|| {
+                let f = def_file.as_str();
+                if f == path {
+                    0
+                } else if f.starts_with('<') || f.split(['/', '\\']).any(|s| s == "stdlib") {
+                    3
+                } else if f.starts_with(&root) {
+                    1
+                } else {
+                    2
+                }
+            })
+        };
+        // ForIn: `for x in |` wants an iterable. Local candidate TyIds may
+        // index the cursor body's BodyInference, so resolve it once for the
+        // `is_iterable_ty` checks in the ranking loop.
+        let for_in = cx.for_in;
+        let cursor_bi = for_in
+            .then(|| {
+                ws.modules
+                    .get(mid.index())
+                    .and_then(|m| m.body_at(offset))
+                    .and_then(|o| inf.per_fn.get(&o))
+            })
+            .flatten();
         // Param-name + fn-prefix type heuristic (param TYPE slot only): a param
         // named `e`/`entity` suggests the (generic) `Entity` type; the enclosing
         // fn's name prefix picks the payload (`mob_attack_co` -> `Mob` ->
@@ -1129,8 +1244,8 @@ impl BoneWorkspace {
         // `Entity<$0>` (cursor parked in the generic slot), never bare `Entity`.
         let mut entity_hint = false;
         let mut entity_payload: Option<Ustr> = None;
-        if !expr_position {
-            if let Some((pn, fn_name)) = cursor_ast.as_ref().and_then(|cx| cx.param_type()) {
+        {
+            if let Some((pn, fn_name)) = cx.param_type.clone() {
                 if is_entity_param_name(&pn) {
                     entity_hint = true;
                     entity_payload = fn_prefix_struct(ws, &fn_name);
@@ -1152,46 +1267,7 @@ impl BoneWorkspace {
         // rendered-string list stays alongside as the reachability index's
         // keys and as the fallback rung when no typed session can be built
         // (broken body, no cached inference for the cursor body).
-        let arg_call = arg_ctx;
-        let field_slot = if arg_call.is_none() {
-            cursor_ast.as_ref().and_then(|cx| cx.struct_field_value())
-        } else {
-            None
-        };
-        let mut expected = arg_call.as_ref().and_then(|(callee, idx, _recv)| {
-            // Receiver type for UFCS overload filtering: structural from the
-            // classifier (the receiver is an AST node -- a chain receiver's
-            // type is its callee's unique return type, no paren rescanning);
-            // the byte scanner remains the tokenize-frontier fallback.
-            let recv_ty = cursor_ast.as_ref().and_then(|cx| {
-                cx.call_receiver().and_then(|a| match a {
-                    crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
-                        fn_unique_return_ty(ws, &name)
-                    }
-                    crate::cursor_context::ReceiverAnchor::End(e) => e
-                        .checked_sub(1)
-                        .and_then(|last| bone_semantic::query::type_at(ws, mid, inf, last))
-                        .map(|ta| ta.ty),
-                })
-            });
-            ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx as usize, recv_ty)
-        });
-        if expected.is_none() {
-            // Struct-literal field VALUE slot (`Name { field: <cursor> }`):
-            // the expected type is that field's declared type, so an enum-
-            // typed field surfaces its variants type-directed. Inside a lambda
-            // body assigned to a function-typed field (`is_open: () => x|`),
-            // the body returns the field's RETURN type, so type-direct on that.
-            expected = field_slot.as_ref().and_then(|(sname, fname, is_lambda)| {
-                let slot = if *is_lambda {
-                    crate::query::struct_field_fn_return_ty(ws, sname, fname)
-                        .or_else(|| crate::query::struct_field_ty(ws, sname, fname))
-                } else {
-                    crate::query::struct_field_ty(ws, sname, fname)
-                }?;
-                ExpectedArg::for_slot(ws, mid, inf, offset, slot)
-            });
-        }
+        let mut expected = cx.expected(ws, mid, inf, offset);
         // Declared renders of the typed session's surviving slots -- the
         // string-keyed reachability index's targets, receiver-FILTERED by
         // construction (only overloads the receiver coerces into contribute, so
@@ -1214,37 +1290,98 @@ impl BoneWorkspace {
                 &local_sigs
             }
         };
-        // Rank EVERY candidate (full accuracy), then materialize a CompletionItem
-        // only for the post-cap survivors. The rank key is exactly what
-        // `sort_text` encodes -- `{type_rank}{9999-score:04}{dist:02}{method}{lc}`
-        // -- and `dist` is 0 for all direct candidates, so ordering by the tuple
-        // `(type_rank, 9999-score, method, name-ci)` is identical to a sort_text
-        // string sort. Ranking allocates NOTHING per candidate: `fuzzy_score`
-        // lowercases the name inline and the tiebreak compares names
-        // case-insensitively inline (`ci_cmp`). Only the sort_text string, the fn
-        // signature `detail`, `insert_text`/`label_details`, and the
-        // `CompletionItem` itself are built for the ~200 we keep, not the ~2500 we
-        // cap away. `type_rank` is the leading bucket:
-        //   - ARG position: 0 = var/param/global/variant of the expected type,
-        //     1 = fn returning it, 2 = everything else.
-        //   - non-arg: rank by KIND -- 0 = in-scope local/param, 1 = global,
-        //     2 = function / struct / bare enum / newtype, 3 = enum-member
-        //     variant, so variables beat functions/types beat enum members,
-        //     fuzzy-ranking within each bucket. Call-through items sit at bucket
-        //     4, below all direct candidates.
-        struct RankedCand {
-            case_rank: u8,
-            type_rank: u8,
-            key2: u16,
-            method: u8,
-            entry: crate::query::CompletionEntry,
-        }
+        // Frequency prior: workspace ref counts, log-bucketed. Locals ride
+        // the recency rung instead (uniform 0 here).
+        let freq_owned;
+        let freq: &HashMap<ustr::Ustr, u32> = match proj.freq.as_ref() {
+            Some(f) => f,
+            None => {
+                freq_owned = build_freq_index(ws);
+                &freq_owned
+            }
+        };
+        let freq_bucket = |n: u32| -> u8 {
+            if n >= FREQ_HOT {
+                0
+            } else if n >= FREQ_WARM {
+                1
+            } else {
+                2
+            }
+        };
+        // Rank EVERY candidate (full accuracy) as a fact-shaped `Cand`, then
+        // materialize a CompletionItem only for the post-cap survivors
+        // (`materialize_cand`). The rank is a `RankKey` (rank_key.rs) whose
+        // `Ord` IS the `sort_text` encoding, so the O(n) select and the
+        // final string sort cannot disagree. Ranking allocates NOTHING per
+        // candidate: `fuzzy_score` lowercases the name inline and the tiebreak
+        // compares names case-insensitively inline (`ci_cmp`). Only the
+        // sort_text string, the fn signature `detail`,
+        // `insert_text`/`label_details`, and the `CompletionItem` itself are
+        // built for the ~200 we keep, not the ~2500 we cap away. `type_rank` is
+        // the typed ladder (0 = var/param/global/variant of the expected type,
+        // 1 = fn returning it, 2 = else; all 0 when no type is inferable) and
+        // `kind` the locality ladder -- primary bucket without a type, the
+        // post-band tiebreak with one.
         let q = prefix.as_bytes();
         let q_raw = prefix_raw.as_bytes();
-        let mut ranked: Vec<RankedCand> = cands
+        let mut general: Vec<Cand> = cands
             .into_iter()
             .map(|c| {
-                let type_rank = if let Some(exp) = expected.as_mut() {
+                // Locality/kind ladder, always computed: variables first
+                // (locals/params, then globals), then functions / structs /
+                // bare enums / newtypes, then enum-member VARIANTS last. In a
+                // typed slot it is the post-band tiebreak (a right-type local
+                // beats a right-type global); with no expected type it is the
+                // primary kind bucket. Structs sit in bucket 2 (NOT below
+                // functions): on an EMPTY prefix the cap keeps the best
+                // MAX_COMPLETION_ITEMS, and burying types under every stdlib
+                // fn would truncate them away entirely; within bucket 2 the
+                // `method` tiebreak already orders non-fns ahead of functions.
+                let kind = match c.kind {
+                    // Test-scoped symbols (tests/-dir or test_-named) sink to
+                    // the bottom kind bucket OUTSIDE test files; the band rung
+                    // still leads, so an explicitly typed `test_` prefix
+                    // surfaces them (docs/completion-v2-design.md heuristics).
+                    _ if demote_tests && c.test_scoped => 4,
+                    SymCat::Local | SymCat::Param => 0,
+                    // After `yield`/`yield*`, a coroutine fn is the expected
+                    // operand -- promote it above plain fns/types.
+                    SymCat::Function if after_yield && fn_is_coroutine(ws, c.name.as_str()) => 0,
+                    SymCat::Global => 1,
+                    SymCat::Variant => 3,
+                    _ => 2,
+                };
+                let type_rank = if let Some(pe) = pattern_enum.as_deref() {
+                    // Pattern slot: only a variant of the scrutinee's enum IS
+                    // a pattern of the expected type (locals/fns don't pattern-
+                    // match; they stay offered but below, fail-open). The
+                    // variant's enum name rides its `detail`, same fact the
+                    // typed-slot rung reads.
+                    match c.kind {
+                        SymCat::Variant if c.detail.as_deref() == Some(pe) => 0,
+                        _ => 2,
+                    }
+                } else if for_in {
+                    // ForIn slot: an ITERABLE value (bone's `for_elem_ty`
+                    // judgment, mirrored in `is_iterable_ty`) rides rung 0,
+                    // a fn returning one rung 1 -- the expected-type ladder
+                    // with a type PREDICATE instead of a single slot type.
+                    match c.kind {
+                        SymCat::Local | SymCat::Param | SymCat::Global
+                            if c.ty.is_some_and(|t| is_iterable_ty(ws, cursor_bi, t)) =>
+                        {
+                            0
+                        }
+                        SymCat::Function
+                            if fn_unique_return_ty(ws, c.name.as_str())
+                                .is_some_and(|t| is_iterable_ty(ws, None, t)) =>
+                        {
+                            1
+                        }
+                        _ => 2,
+                    }
+                } else if let Some(exp) = expected.as_mut() {
                     match c.kind {
                         // A local/param/global whose type COERCES into the
                         // expected slot (bone's real relation: generics
@@ -1267,175 +1404,97 @@ impl BoneWorkspace {
                         _ => 2,
                     }
                 } else {
-                    // No expected type: rank by KIND. Variables first
-                    // (locals/params, then globals), then functions / structs /
-                    // bare enums / newtypes, then enum-member VARIANTS last. Enum
-                    // members are only top-priority in a typed arg position (the
-                    // branch above) that expects their enum. Structs sit in
-                    // bucket 2 (NOT below functions): on an EMPTY prefix the cap
-                    // keeps the best MAX_COMPLETION_ITEMS, and burying types under
-                    // every stdlib fn would truncate them away entirely; within
-                    // bucket 2 the `method` tiebreak already orders non-fns
-                    // (structs/types) ahead of functions.
-                    match c.kind {
-                        SymCat::Local | SymCat::Param => 0,
-                        // After `yield`/`yield*`, a coroutine fn is the expected
-                        // operand -- promote it above plain fns/types.
-                        SymCat::Function if after_yield && fn_is_coroutine(ws, c.name.as_str()) => 0,
-                        SymCat::Global => 1,
-                        SymCat::Variant => 3,
-                        _ => 2,
-                    }
+                    // No expected type: the kind ladder is the whole bucket.
+                    0
                 };
                 let method = u8::from(c.kind == SymCat::Function);
                 let name = c.name.as_str();
                 // Smart-case leading rank, NON-arg path only: measure against the
                 // variant NAME (the user types it; `Enum::` uppercasing would
-                // skew it). In arg position the expected-TYPE bucket must stay
-                // dominant over case, so leave case neutral (0) there.
-                let case_rank = if !has_expected {
+                // skew it). In arg position (and the pattern / for-in slots)
+                // the expected-TYPE bucket must stay dominant over case, so
+                // leave case neutral (0) there.
+                let case_rank = if !has_expected && pattern_enum.is_none() && !for_in {
                     let case_target =
                         if c.kind == SymCat::Variant { name.rsplit("::").next().unwrap_or(name) } else { name };
                     case_mismatch_rank(case_target.as_bytes(), q_raw)
                 } else {
                     0
                 };
-                let score = if c.kind == SymCat::Variant {
+                let (score, lead) = if c.kind == SymCat::Variant {
                     // The user types the variant NAME (`nog` -> `NotGround`);
                     // score against it, but keep the qualified score too so a
                     // `tarnog` (Enum + variant) query still ranks.
                     let vname = name.rsplit("::").next().unwrap_or(name);
-                    fuzzy_score(vname.as_bytes(), q).max(fuzzy_score(name.as_bytes(), q))
+                    let s = fuzzy_score(vname.as_bytes(), q).max(fuzzy_score(name.as_bytes(), q));
+                    let l = leading_run_len(vname.as_bytes(), q).max(leading_run_len(name.as_bytes(), q));
+                    (s, l)
                 } else {
-                    fuzzy_score(name.as_bytes(), q)
+                    (fuzzy_score(name.as_bytes(), q), leading_run_len(name.as_bytes(), q))
                 };
-                let key2 = (9999 - score.clamp(0, 9999)) as u16;
-                RankedCand { case_rank, type_rank, key2, method, entry: c }
+                // A leading contiguous run (you typed the start of the name)
+                // beats a scattered all-boundary match on a longer name -- the
+                // fine score alone over-rewards boundary-rich names
+                // (docs/completion-ranking-design.md Divergence 1). Only reorders
+                // within a band; well below fuzzy_score's whole-prefix +1000.
+                let score = score + (lead as i32) * 100;
+                // Coarse match band + exact-name flag: classified against the
+                // variant tail too (the user types `Combat`, not
+                // `MobAiState::Combat`), mirroring the score's vname handling.
+                let (exact, band) = match_band_exact(name, q, q_raw);
+                let key = RankKey {
+                    exact,
+                    type_rank,
+                    band,
+                    case: case_rank,
+                    kind,
+                    dist: 0,
+                    method,
+                    fine: RankKey::fine(score),
+                    prox: prox_of(c.def_file),
+                    freq: match c.kind {
+                        SymCat::Local | SymCat::Param => 0,
+                        _ => freq_bucket(freq.get(&c.name).copied().unwrap_or(0)),
+                    },
+                    rec: c.rec,
+                    len: RankKey::len_key(score, name.len()),
+                };
+                Cand::new(key, CandName::Sym(c.name), CandShape::Entry(c))
             })
             .collect();
         // We only need the BEST `MAX_COMPLETION_ITEMS`, not a full ordering --
-        // the `rank_and_cap` below re-sorts the kept set by sort_text. So select
-        // the top-N in O(n) (`select_nth_unstable_by`) rather than sort all in
-        // O(n log n); at empty prefix that is ~2500 candidates.
-        // Non-arg (no expected type) ranks score-first; arg position keeps the
-        // expected-type bucket dominant. Mirrors the two `sort_text_with_score`
-        // layouts so the O(n) top-N select agrees with the final string sort.
+        // the final sort below re-orders the kept set anyway. So select the
+        // top-N in O(n) (`select_nth_unstable_by`) rather than sort all in
+        // O(n log n); at empty prefix that is ~2500 candidates. `cand_cmp` IS
+        // the sort_text encoding order, so the select agrees with the final
+        // sort by construction.
         let score_leads = !has_expected;
-        let rank_cmp = |a: &RankedCand, b: &RankedCand| {
-            let primary = if score_leads {
-                // MATCH QUALITY leads, then the smart-case tiebreak, then KIND: a
-                // strong match on a SCREAMING_CONST is no longer buried below a
-                // weaker case-clean one; case only decides near-ties.
-                (a.key2, a.case_rank, a.type_rank, a.method)
-                    .cmp(&(b.key2, b.case_rank, b.type_rank, b.method))
-            } else {
-                // Expected-type bucket leads (case neutral in arg position).
-                (a.case_rank, a.type_rank, a.key2, a.method)
-                    .cmp(&(b.case_rank, b.type_rank, b.key2, b.method))
-            };
-            primary
-                // Shorter-first tiebreak, matching the `{len:03}` in sort_text --
-                // only when there's a real match (key2 < 9999 == score > 0); at
-                // empty prefix (key2 == 9999) keep the alphabetical order.
-                .then_with(|| {
-                    if a.key2 < 9999 {
-                        a.entry.name.as_str().len().cmp(&b.entry.name.as_str().len())
-                    } else {
-                        std::cmp::Ordering::Equal
-                    }
-                })
-                .then_with(|| ci_cmp(a.entry.name.as_str().as_bytes(), b.entry.name.as_str().as_bytes()))
-        };
-        if ranked.len() > MAX_COMPLETION_ITEMS {
-            ranked.select_nth_unstable_by(MAX_COMPLETION_ITEMS, rank_cmp);
-            ranked.truncate(MAX_COMPLETION_ITEMS);
+        if general.len() > MAX_COMPLETION_ITEMS {
+            general.select_nth_unstable_by(MAX_COMPLETION_ITEMS, cand_cmp);
+            general.truncate(MAX_COMPLETION_ITEMS);
         }
-        let mut out: Vec<CompletionItem> = ranked
-            .into_iter()
-            .map(|r| {
-                let RankedCand { case_rank, type_rank, key2, method, entry: c } = r;
-                // Reconstruct the exact sort_text the old per-candidate path
-                // produced: `9999 - key2` recovers the clamped score.
-                let sort_text = Some(sort_text_with_score(
-                    case_rank,
-                    type_rank,
-                    c.name.as_str(),
-                    9999 - key2 as i32,
-                    0,
-                    method,
-                    score_leads,
-                ));
-                // Function `detail` is the cached signature, materialized HERE for
-                // survivors only; non-fn kinds carry their (cheap) detail already.
-                let detail = match c.kind {
-                    SymCat::Function => fn_sigs.get(&c.name).cloned(),
-                    _ => c.detail,
-                };
-                // The full detail goes in the panel; a concise form renders inline
-                // next to the label in the popup (a fn's `(params) -> ret`, a
-                // binding's `: type`).
-                let label_details = fn_or_type_label_details(c.kind, detail.as_deref());
-                // A function with params accepts as a snippet `name($0)` ->
-                // inserts `name()` with the cursor parked between the parens (the
-                // client shows a snippet marker, e.g. nvim-cmp's `~`). A param-less
-                // function inserts `name()` as plain text so the cursor lands AFTER
-                // the `)` -- there's nothing to fill.
-                // A qualified `Enum::Variant` value in an expression slot carries
-                // the same payload template as the `Enum::` path: tuple -> `($0)`,
-                // record -> `{ $0 }`, unit -> bare.
-                let (insert_text, insert_text_format) = match c.kind {
-                    // `on_killed`/`on_resume`/`on_hot_reload` are contextual
-                    // lifecycle-hook keywords with a statement BLOCK form
-                    // (`on_killed { .. }`) -- complete to the block, not a call.
-                    SymCat::Function if is_lifecycle_hook(c.name.as_str()) => {
-                        (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
-                    }
-                    SymCat::Function if c.takes_params => {
-                        (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
-                    }
-                    SymCat::Function => (Some(format!("{}()", c.name)), None),
-                    SymCat::Variant => match c.variant_shape {
-                        Some(crate::query::VariantShape::Tuple) => {
-                            (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
-                        }
-                        Some(crate::query::VariantShape::Record) => {
-                            (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
-                        }
-                        _ => (None, None),
-                    },
-                    _ => (None, None),
-                };
-                CompletionItem {
-                    label: c.name.to_string(),
-                    kind: Some(completion_kind(c.kind)),
-                    label_details,
-                    detail,
-                    insert_text,
-                    insert_text_format,
-                    sort_text,
-                    ..Default::default()
-                }
-            })
-            .collect();
+        let mut sink = Sink::new();
+        sink.cands = general;
         // Synthesized generic `Entity<..>` from the param-name + fn-prefix
-        // heuristic. Pushed directly (not a workspace symbol) with the minimal
-        // sort_text so it ranks first among the type candidates. With an inferred
-        // payload it's the concrete `Entity<Mob>` (plain insert); without one it's
-        // the `Entity<$0>` snippet so the cursor lands in the generic slot.
+        // heuristic. Emitted directly (not a workspace symbol) with the minimal
+        // rank key so it ranks first among the type candidates. With an inferred
+        // payload it's the concrete `Entity<Mob>`; without one the `Entity<$0>`
+        // snippet parks the cursor in the generic slot (materialize_cand).
         if entity_hint {
-            let (label, insert, fmt) = match entity_payload {
-                Some(p) => (format!("Entity<{p}>"), format!("Entity<{p}>"), None),
-                None => ("Entity<>".to_string(), "Entity<$0>".to_string(), Some(InsertTextFormat::SNIPPET)),
+            let label = match entity_payload {
+                Some(p) => format!("Entity<{p}>"),
+                None => "Entity<>".to_string(),
             };
             if clean_match(label.as_bytes(), prefix.as_bytes()) {
-                out.push(CompletionItem {
-                    label: label.clone(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    insert_text: Some(insert),
-                    insert_text_format: fmt,
-                    sort_text: Some(sort_text_with_score(0, 0, &label, 9999, 0, 0, score_leads)),
+                let key = RankKey {
+                    len: RankKey::len_key(9999, label.len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Owned(label),
+                    CandShape::EntitySynth { payload: entity_payload },
+                ));
             }
         }
         // Named-arg completions: at a DIRECT call arg slot, offer the callee's
@@ -1443,23 +1502,37 @@ impl BoneWorkspace {
         // expression candidates and ranked in the top (type_rank 0) bucket, so
         // `greet(gr|)` surfaces `greeting:` above the identifier fallback while
         // `grid` etc. stay. Skips params already passed positionally or by name.
-        if let Some(nargs) = cursor_ast.as_ref().and_then(|cx| cx.named_arg_slot()) {
+        if let Some(nargs) = cx.named_arg.as_ref() {
+            // Params already supplied by a `..spread` operand's fields.
+            let spread_covered: std::collections::HashSet<Ustr> = nargs
+                .spread_probes
+                .iter()
+                .flat_map(|&p| crate::query::struct_field_names_at(ws, mid, inf, p))
+                .collect();
             for (i, (pname, pty)) in callee_param_names(ws, &nargs.callee).into_iter().enumerate() {
-                if i < nargs.positional || nargs.named.iter().any(|n| n.as_str() == pname.as_str()) {
+                if i < nargs.positional
+                    || nargs.named.iter().any(|n| n.as_str() == pname.as_str())
+                    || spread_covered.contains(&pname)
+                {
                     continue;
                 }
                 if !prefix.is_empty() && !clean_match(pname.as_str().as_bytes(), prefix.as_bytes()) {
                     continue;
                 }
                 let score = fuzzy_score(pname.as_str().as_bytes(), prefix.as_bytes());
-                out.push(CompletionItem {
-                    label: format!("{pname}:"),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(pty),
-                    insert_text: Some(format!("{pname}: ")),
-                    sort_text: Some(sort_text_with_score(0, 0, pname.as_str(), score, 0, 0, score_leads)),
+                let (ex, bd) = match_band_exact(pname.as_str(), prefix.as_bytes(), prefix_raw.as_bytes());
+                let key = RankKey {
+                    exact: ex,
+                    band: bd,
+                    fine: RankKey::fine(score),
+                    len: RankKey::len_key(score, pname.as_str().len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Sym(pname),
+                    CandShape::NamedArg { pname, pty },
+                ));
             }
         }
         // Coroutine ergonomics: `CoFrame` is the dominant Stone yield type
@@ -1467,57 +1540,61 @@ impl BoneWorkspace {
         // `CoFrame` struct existing (stone projects); otherwise the generic
         // `Coroutine<$0>` snippet stands in.
         let coframe = struct_exists(ws, "CoFrame");
-        let coroutine_slot =
-            cursor_ast.as_ref().is_some_and(|cx| cx.coroutine_first_generic_arg());
+        let coroutine_slot = cx.coroutine_generic;
         if coroutine_slot {
-            // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0.
+            // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0,
+            // superseding the plain struct symbol.
             if coframe && clean_match(b"CoFrame", prefix.as_bytes()) {
-                out.retain(|it| it.label != "CoFrame");
-                out.push(CompletionItem {
-                    label: "CoFrame".to_string(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    sort_text: Some(sort_text_with_score(0, 0, "CoFrame", 9999, 0, 0, score_leads)),
+                sink.retain_not_named("CoFrame");
+                let key = RankKey {
+                    len: RankKey::len_key(9999, "CoFrame".len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Owned("CoFrame".to_string()),
+                    CandShape::CoFrame,
+                ));
             }
         } else if !expr_position && !prefix.is_empty() && clean_match(b"Coroutine", prefix.as_bytes()) {
             // (b) completing the `Coroutine` type name -> snippet forms replace
             // the bare type: `Coroutine<CoFrame>` first, `Coroutine<$0>` second.
-            out.retain(|it| it.label != "Coroutine");
+            sink.retain_not_named("Coroutine");
             if coframe {
-                out.push(CompletionItem {
-                    label: "Coroutine<CoFrame>".to_string(),
-                    kind: Some(CompletionItemKind::STRUCT),
-                    insert_text: Some("Coroutine<CoFrame>".to_string()),
-                    sort_text: Some(sort_text_with_score(0, 0, "Coroutine<CoFrame>", 9999, 0, 0, score_leads)),
+                let key = RankKey {
+                    len: RankKey::len_key(9999, "Coroutine<CoFrame>".len()),
                     ..Default::default()
-                });
+                };
+                sink.push(Cand::new(
+                    key,
+                    CandName::Owned("Coroutine<CoFrame>".to_string()),
+                    CandShape::Coroutine { with_coframe: true },
+                ));
             }
-            out.push(CompletionItem {
-                label: "Coroutine<>".to_string(),
-                kind: Some(CompletionItemKind::STRUCT),
-                insert_text: Some("Coroutine<$0>".to_string()),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                sort_text: Some(sort_text_with_score(0, 0, "Coroutine<>", 9998, 0, 0, score_leads)),
+            let key = RankKey {
+                fine: RankKey::fine(9998),
+                len: RankKey::len_key(9998, "Coroutine<>".len()),
                 ..Default::default()
-            });
+            };
+            sink.push(Cand::new(
+                key,
+                CandName::Owned("Coroutine<>".to_string()),
+                CandShape::Coroutine { with_coframe: false },
+            ));
         }
         // (c) `co fn NAME()|` with no return type -> offer the `-> Coroutine<..>`
         // return type to the right of `)`.
         if prefix.is_empty() && co_fn_return_slot(src.as_bytes(), offset) {
-            let (label, insert, fmt) = if coframe {
-                ("-> Coroutine<CoFrame>", "-> Coroutine<CoFrame>", None)
-            } else {
-                ("-> Coroutine<>", "-> Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
-            };
-            out.push(CompletionItem {
-                label: label.to_string(),
-                kind: Some(CompletionItemKind::SNIPPET),
-                insert_text: Some(insert.to_string()),
-                insert_text_format: fmt,
-                sort_text: Some(sort_text_with_score(0, 0, label, 9999, 0, 0, score_leads)),
+            let label = if coframe { "-> Coroutine<CoFrame>" } else { "-> Coroutine<>" };
+            let key = RankKey {
+                len: RankKey::len_key(9999, label.len()),
                 ..Default::default()
-            });
+            };
+            sink.push(Cand::new(
+                key,
+                CandName::Owned(label.to_string()),
+                CandShape::CoReturn { coframe },
+            ));
         }
         let rank_ms = t_build.elapsed().as_secs_f64() * 1000.0;
         // Reachability-path candidates: in arg position with a known expected
@@ -1529,7 +1606,9 @@ impl BoneWorkspace {
         // table, not the old per-root O(functions) `ufcs_methods` scan. Ranked
         // with the type-matching variables (rank 0), shortest paths first.
         let t_reach = std::time::Instant::now();
-        if !expected_types.is_empty() {
+        // A pattern head is not a value slot: a dotted reach path is not a
+        // valid pattern, so the expansion is suppressed there.
+        if !expected_types.is_empty() && !pattern_pos {
             let reach_owned;
             let reach = match &proj.reach {
                 Some(r) => r,
@@ -1539,24 +1618,25 @@ impl BoneWorkspace {
                 }
             };
             let pfx = prefix.as_bytes();
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             // Roots: in-scope locals/params PLUS every global (Rock has one global
             // namespace across files, so `player.movable.grid` works where
             // `player` is a global from another file -- `locals_in_scope` omits
             // globals).
-            let mut roots: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
+            // Root locality rides the kind rung: a path seeded from a LOCAL
+            // ranks with locals (a method on a local yielding the type is a
+            // top-tier candidate), a global-rooted path with globals -- so a
+            // deep chain off some global can't outrank a direct right-type
+            // global (docs/completion-ranking-design.md, principle 3).
+            let mut roots: Vec<(String, String, u8)> = crate::query::locals_in_scope(ws, mid, inf, offset)
                 .into_iter()
-                .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty))
+                .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty, 0))
                 .collect();
             for m in ws.modules.iter() {
                 for (gname, gidx) in m.global_by_name.iter() {
-                    roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty)));
+                    roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty), 1));
                 }
             }
-            // UX cap on paths surfaced per root, ranked by distance -- principled
-            // "k shortest ways", not a depth limit. `truncated` is logged below.
-            const REACH_CAP: usize = 64;
-            for (vname, vty) in roots {
+            for (vname, vty, root_kind) in roots {
                 let res = reach.paths_to(&vty, &expected_types, REACH_CAP);
                 if res.truncated && lsp_profile_enabled() {
                     eprintln!("[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}");
@@ -1571,34 +1651,23 @@ impl BoneWorkspace {
                     if !pfx.is_empty() && !clean_match(key.as_bytes(), pfx) {
                         continue;
                     }
-                    if !seen.insert(key.clone()) {
+                    if !sink.admit(&key) {
                         continue;
                     }
-                    let (label, kind, insert_text, insert_text_format) = if p.is_method {
-                        let call = format!("{key}()");
-                        let (insert, fmt) = if p.takes_args {
-                            (format!("{key}($0)"), Some(InsertTextFormat::SNIPPET))
-                        } else {
-                            (format!("{key}()"), None)
-                        };
-                        (format!("{call} -> {}", p.final_ty), CompletionItemKind::METHOD, insert, fmt)
-                    } else {
-                        (format!("{key}: {}", p.final_ty), CompletionItemKind::FIELD, key.clone(), None)
-                    };
                     // A reachability path IS a value of the expected type
                     // (type_rank 0); the shared key folds in match quality
                     // (prefix on the root beats a scattered subsequence), the
-                    // hop distance, and field-before-method.
-                    let sort_text = arg_sort_text(0, &key, pfx, p.dist, u8::from(p.is_method));
-                    out.push(CompletionItem {
-                        label,
-                        kind: Some(kind),
-                        detail: Some(p.final_ty),
-                        insert_text: Some(insert_text),
-                        insert_text_format,
-                        sort_text: Some(sort_text),
-                        ..Default::default()
-                    });
+                    // root locality, the hop distance, and field-before-method.
+                    let rk = arg_rank_key(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method));
+                    sink.push(Cand::new(
+                        rk,
+                        CandName::Owned(key),
+                        CandShape::Reach {
+                            final_ty: p.final_ty,
+                            is_method: p.is_method,
+                            takes_args: p.takes_args,
+                        },
+                    ));
                 }
             }
         }
@@ -1609,15 +1678,15 @@ impl BoneWorkspace {
         let t_ct = std::time::Instant::now();
         let mut ct_counts = CtCounts::default();
         // Skip call-through entirely when the general (+ reach) candidates already
-        // fill the cap: call-through items are bucket 4 (sort_text "4..."), so
-        // they sort AFTER every general (bucket 0-3) / reach (bucket 0) item, and
-        // the final `rank_and_cap` keeps only the best `MAX_COMPLETION_ITEMS`.
-        // If `out` already holds that many bucket-<4 items, every call-through
-        // item would be truncated -- so computing them is pure waste. This is
-        // EXACT (the output is byte-identical) and removes the worst keystrokes,
-        // which are exactly the high-general-count short prefixes (e.g. `sp` ->
-        // 229 general candidates -> all call-through truncated anyway).
-        if expr_position && out.len() < MAX_COMPLETION_ITEMS {
+        // fill the cap: MOST call-through items are bucket 4 (sort_text "1..."),
+        // sorting AFTER every general (bucket 0-3) / reach item, so the final
+        // cap truncates them -- computing them is waste. Removes the
+        // worst keystrokes (high-general-count short prefixes, `sp` -> 229). Known
+        // gap: a LOCAL-SEEDED promoted call-through (bucket 0/1) could survive the
+        // cap but is skipped here at a >=MAX short prefix; acceptable under the
+        // `isIncomplete` contract (the user narrows and it reappears).
+        // Suppressed in a pattern head like reach: `f(arg)` is not a pattern.
+        if expr_position && !pattern_pos && sink.len() < MAX_COMPLETION_ITEMS {
             // reach (for local-arg expansion) + the precomputed call-through
             // index, both cached on the project and rebuilt only on non-BodyOnly
             // edits. The one-shot CLI path has neither cached -> build throwaways.
@@ -1637,10 +1706,18 @@ impl BoneWorkspace {
                     &ct_owned
                 }
             };
-            let (ct_items, c) =
-                call_through_param_completions(ws, mid, inf, offset, &prefix, ct, reach, score_leads);
-            ct_counts = c;
-            out.extend(ct_items);
+            ct_counts = call_through_param_completions(
+                ws,
+                mid,
+                inf,
+                offset,
+                &prefix,
+                ct,
+                reach,
+                score_leads,
+                expected.as_mut(),
+                &mut sink,
+            );
         }
         let call_through_ms = t_ct.elapsed().as_secs_f64() * 1000.0;
         LAST_COMPLETION_PHASES.with(|c| {
@@ -1650,7 +1727,7 @@ impl BoneWorkspace {
                 reach_ms,
                 call_through_ms,
                 n_general: n_cands,
-                n_out: out.len(),
+                n_out: sink.len(),
                 ct_fns: ct_counts.fns,
                 ct_arg_iters: ct_counts.arg_iters,
                 ct_survivors: ct_counts.survivors,
@@ -1659,19 +1736,27 @@ impl BoneWorkspace {
         if lsp_profile_enabled() {
             eprintln!(
                 "[bone completion] candidates {cands_ms:.2}ms ({n_cands} cands)  rank {rank_ms:.2}  reach {reach_ms:.2}  call-through {call_through_ms:.2}  ({} items, prefix {:?})",
-                out.len(),
+                sink.len(),
                 prefix
             );
         }
-        // The list is served `isIncomplete: true`, so cap it: the client
-        // re-queries per keystroke and the server re-scores, so returning the
-        // whole workspace (2539 items at empty prefix) is pure wasted
-        // serialization -- the dominant end-to-end completion cost.
-        rank_and_cap(&mut out, MAX_COMPLETION_ITEMS, "completion");
-        if next_is_open_paren {
-            strip_call_template(&mut out);
+        // ONE select over the facts. The list is served `isIncomplete: true`,
+        // so cap it: the client re-queries per keystroke and the server
+        // re-scores, so returning the whole workspace (2539 items at empty
+        // prefix) is pure wasted serialization -- the dominant end-to-end
+        // completion cost.
+        if sink.cands.len() > MAX_COMPLETION_ITEMS && lsp_profile_enabled() {
+            eprintln!(
+                "[bone completion] completion truncated {} -> {MAX_COMPLETION_ITEMS}",
+                sink.cands.len()
+            );
         }
-        out
+        sink.cands.sort_by(cand_cmp);
+        sink.cands.truncate(MAX_COMPLETION_ITEMS);
+        sink.cands
+            .into_iter()
+            .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren, pattern_pos))
+            .collect()
     }
 
     // -- Feature: rename + prepare-rename (stubbed: gaps::references) --------
@@ -2864,7 +2949,7 @@ fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
 /// `FieldOf<..>` slot, decided on the param's nominal head. None when no
 /// overload is known live (unknown callee / arity) -- the caller treats that
 /// as "can't rule it out".
-fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Option<bool> {
+pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Option<bool> {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     let name = Ustr::from(callee);
     let mut any = false;
@@ -2888,27 +2973,6 @@ fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Op
     any.then_some(found)
 }
 
-/// Declared params of every fn named `callee`, unioned across overloads in
-/// first-seen order (param name + rendered declared type). Drives named-arg
-/// completion at a call site.
-fn callee_param_names(ws: &Workspace, callee: &str) -> Vec<(Ustr, String)> {
-    let name = Ustr::from(callee);
-    let mut out: Vec<(Ustr, String)> = Vec::new();
-    for m in ws.modules.iter() {
-        let Some(fns) = m.functions_by_name.get(&name) else { continue };
-        for (fmid, fid) in fns {
-            let f = &ws.modules[fmid.index()].functions[*fid];
-            for p in &f.param_decls {
-                if out.iter().any(|(n, _)| *n == p.name) {
-                    continue;
-                }
-                out.push((p.name, ws.render(None, p.ty)));
-            }
-        }
-    }
-    out
-}
-
 /// Typed expected-type oracle for one completion request's arg slot
 /// (docs/assignable-plan.md). The callee's surviving overloads' params are
 /// instantiated ONCE per overload (fresh vars) in a scratch
@@ -2918,7 +2982,7 @@ fn callee_param_names(ws: &Workspace, callee: &str) -> Vec<(Ustr, String)> {
 /// receiver coerces into each overload's first param and its bindings are
 /// KEPT -- the receiver's instantiation is what the arg slot must agree with
 /// (`nums.add_all(|)`: receiver `[int]` binds T, so the slot expects `[int]`).
-struct ExpectedArg<'a> {
+pub(crate) struct ExpectedArg<'a> {
     gamma: Gamma<'a>,
     span: Span,
     slots: Vec<TyId>,
@@ -2927,7 +2991,7 @@ struct ExpectedArg<'a> {
     /// construction (only overloads the receiver coerces into contribute). The
     /// reach graph is nominal-name keyed, so consuming these is a graph lookup,
     /// not a type compare -- bone's `coerce` is the only type-comparison path.
-    rendered: Vec<String>,
+    pub(crate) rendered: Vec<String>,
     memo: HashMap<TyId, bool>,
     ret_memo: HashMap<TyId, bool>,
 }
@@ -2957,7 +3021,7 @@ impl<'a> ExpectedArg<'a> {
 
     /// Session for `callee(.. <arg_idx> ..)`; `recv` is the UFCS receiver's
     /// type when the call is `recv.callee(..)`.
-    fn for_call(
+    pub(crate) fn for_call(
         ws: &'a Workspace,
         mid: ModuleId,
         inf: &InferenceResult,
@@ -3011,7 +3075,7 @@ impl<'a> ExpectedArg<'a> {
 
     /// Session for a single concrete expected slot (struct-literal field
     /// value / lambda-body return type).
-    fn for_slot(
+    pub(crate) fn for_slot(
         ws: &'a Workspace,
         mid: ModuleId,
         inf: &InferenceResult,
@@ -3037,7 +3101,7 @@ impl<'a> ExpectedArg<'a> {
     /// `coerce` under trial; bindings rolled back so candidates stay
     /// independent. Memoized per candidate TyId (candidates repeat few
     /// distinct types across a ~2500-entry ranking pass).
-    fn accepts(&mut self, ty: TyId) -> bool {
+    pub(crate) fn accepts(&mut self, ty: TyId) -> bool {
         if let Some(&b) = self.memo.get(&ty) {
             return b;
         }
@@ -3060,7 +3124,7 @@ impl<'a> ExpectedArg<'a> {
     /// Would a CALL of fn `name` produce this slot's type? The candidate fn's
     /// own generics instantiate fresh (`clone(xs)` CAN return `[int]`), then
     /// its return coerces into a slot; everything rolls back.
-    fn accepts_fn_returning(&mut self, ws: &Workspace, name: &str) -> bool {
+    pub(crate) fn accepts_fn_returning(&mut self, ws: &Workspace, name: &str) -> bool {
         let n = Ustr::from(name);
         let span = self.span;
         let slots = self.slots.clone();
@@ -3103,7 +3167,7 @@ impl<'a> ExpectedArg<'a> {
     /// The slot expects nominal type `name` -- the enum-variant fast path
     /// (`Enum::V` candidates carry their enum's NAME, not a TyId). Unwraps
     /// one level of nullable so an `E?` param still boosts `E::..` variants.
-    fn expects_nominal(&self, name: &str) -> bool {
+    pub(crate) fn expects_nominal(&self, name: &str) -> bool {
         use bone_semantic::hir::{TypeCtor, TypeExpr};
         self.slots.iter().any(|&slot| {
             let te = *self.gamma.get(slot);
@@ -3120,7 +3184,7 @@ impl<'a> ExpectedArg<'a> {
 /// overloads disagree / any lacks a return type. Agreement is decided on the
 /// RENDERED form (structural sameness across overloads' Static arenas), but
 /// the TyId is what flows on -- the typed compare never re-parses the string.
-fn fn_unique_return_ty(ws: &Workspace, name: &str) -> Option<TyId> {
+pub(crate) fn fn_unique_return_ty(ws: &Workspace, name: &str) -> Option<TyId> {
     let n = Ustr::from(name);
     let mut ret: Option<(TyId, String)> = None;
     for m in ws.modules.iter() {
@@ -3139,23 +3203,10 @@ fn fn_unique_return_ty(ws: &Workspace, name: &str) -> Option<TyId> {
     ret.map(|(t, _)| t)
 }
 
-/// True when a leading `.` sits just before the partial identifier under the
-/// cursor (a key-path `.field`, not member access -- `receiver_path` already
-/// returned for a receiver-preceded dot). Decides insert text: `co` when the
-/// dot is present, `.co` to add it.
-fn leading_dot(src: &str, offset: usize) -> bool {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    i > 0 && b[i - 1] == b'.'
-}
-
 /// Start offsets of the arg segments that begin before `offset`, within the
 /// innermost enclosing call -- used to resolve a callee generic (`T`) from a
 /// sibling arg's inferred type. `[]` if not inside a call.
-fn preceding_arg_starts(src: &str, offset: usize) -> Vec<usize> {
+pub(crate) fn preceding_arg_starts(src: &str, offset: usize) -> Vec<usize> {
     let b = src.as_bytes();
     let end = offset.min(b.len());
     let mut i = end;
@@ -3206,7 +3257,7 @@ fn preceding_arg_starts(src: &str, offset: usize) -> Vec<usize> {
 
 /// Fetch a `TypeExpr` for a `TyId` from the right arena, following `Infer`
 /// substitutions so a solved inference var reads as its concrete type.
-fn ty_of(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bone_semantic::hir::TypeExpr {
+pub(crate) fn ty_of(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bone_semantic::hir::TypeExpr {
     use bone_semantic::hir::{BuiltinTy, TypeExpr};
     let te = match ty {
         TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
@@ -3225,7 +3276,7 @@ fn ty_of(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bone_semanti
 
 /// Resolve `ty` through `Infer` substitutions to its canonical `TyId`, whose
 /// child indices are valid via `with_idx`.
-fn resolved_tyid(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> TyId {
+pub(crate) fn resolved_tyid(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> TyId {
     use bone_semantic::hir::TypeExpr;
     let te = match ty {
         TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
@@ -3245,7 +3296,7 @@ fn resolved_tyid(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> TyId
 /// Walk `param` (a callee param type carrying generics) against `arg` (an
 /// inferred concrete type) in parallel; return the `arg` subtree bound to the
 /// generic named `target`. Recurses through App and Nullable.
-fn bind_generic(
+pub(crate) fn bind_generic(
     ws: &Workspace,
     target: Ustr,
     p_body: Option<&BodyInference>,
@@ -3278,119 +3329,37 @@ fn bind_generic(
     }
 }
 
+/// Structural mirror of bone-inference's `for_elem_ty` ITERABLE judgment
+/// (keep the shape list in sync): `[T]`, `Map<K, V>`, `Arena<T>`, and the
+/// native array/buffer nominals. Drives the ForIn completion rung.
+pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bool {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    match ty_of(ws, body, ty) {
+        TypeExpr::App { ctor: TypeCtor::Array, .. }
+        | TypeExpr::App { ctor: TypeCtor::Map, .. } => true,
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
+            n.as_str(),
+            "Arena"
+                | "NativeArray"
+                | "NativeBuffer"
+                | "NativeBufferU8"
+                | "NativeBufferI8"
+                | "NativeBufferU16"
+                | "NativeBufferI16"
+                | "NativeBufferU32"
+                | "NativeBufferI32"
+        ),
+        _ => false,
+    }
+}
+
 /// The base nominal (struct) name of `ty`, if it is a `Nominal` App.
-fn nominal_base(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
+pub(crate) fn nominal_base(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     match ty_of(ws, body, ty) {
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name),
         _ => None,
     }
-}
-
-/// Field-ref completions for a call-arg slot. `None` if the slot's expected
-/// param isn't `FieldOf<Struct, V>` (caller falls through to normal
-/// completion); `Some(items)` when it is -- offering the struct's fields whose
-/// declared type is exactly V (the typechecker's invariance), whether or not
-/// the leading `.` is typed. A generic `T` is resolved from a preceding sibling
-/// arg's inferred type.
-fn field_ref_arg_completions(
-    ws: &Workspace,
-    path: &str,
-    src: &str,
-    offset: usize,
-    callee: &str,
-    arg_idx: usize,
-    prefix: &str,
-    lead_dot: bool,
-) -> Option<Vec<CompletionItem>> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let name = Ustr::from(callee);
-    let (fmid, fid) = ws
-        .modules
-        .iter()
-        .find_map(|m| m.functions_by_name.get(&name).and_then(|l| l.first()).copied())?;
-    let f = &ws.modules[fmid.index()].functions[fid];
-    let param = f.param_decls.get(arg_idx)?.ty;
-
-    // The slot must be `FieldOf<T, V>`.
-    let (t_idx, v_idx) = match ty_of(ws, None, param) {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if n.as_str() == "FieldOf" && params.len() == 2 =>
-        {
-            let mut it = params.into_iter();
-            (it.next().unwrap(), it.next().unwrap())
-        }
-        _ => return None,
-    };
-    let v_str = ws.render(None, param.with_idx(v_idx));
-
-    // Resolve T -> a concrete struct name (directly, or via a sibling arg).
-    let t_name = match ty_of(ws, None, param.with_idx(t_idx)) {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-        TypeExpr::Generic(_, gname) => {
-            let mid = user_module_for_path(ws, path)?;
-            let inf = ws.inference(mid)?;
-            let starts = preceding_arg_starts(src, offset);
-            let mut resolved = None;
-            for (i, &aoff) in starts.iter().enumerate().take(arg_idx) {
-                let Some(pty) = f.param_decls.get(i).map(|p| p.ty) else {
-                    continue;
-                };
-                let Some(at) = bone_semantic::query::type_at(ws, mid, inf, aoff) else {
-                    continue;
-                };
-                if let Some(bound) = bind_generic(ws, gname, None, pty, at.body, at.ty) {
-                    if let Some(sn) = nominal_base(ws, at.body, bound) {
-                        resolved = Some(sn);
-                        break;
-                    }
-                }
-            }
-            resolved?
-        }
-        _ => return None,
-    };
-
-    let pfx = prefix.as_bytes();
-    let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for m in ws.modules.iter() {
-        let Some(&idx) = m.struct_by_name.get(&t_name) else {
-            continue;
-        };
-        for fld in &m.structs[idx].fields {
-            let fty = ws.render(None, fld.ty);
-            if fty != v_str {
-                continue;
-            }
-            if !(prefix.is_empty() || clean_match(fld.name.as_bytes(), pfx)) {
-                continue;
-            }
-            if !seen.insert(fld.name) {
-                continue;
-            }
-            // Dot already typed -> insert the bare name; otherwise add it.
-            let insert = if lead_dot {
-                fld.name.to_string()
-            } else {
-                format!(".{}", fld.name)
-            };
-            out.push(CompletionItem {
-                sort_text: Some(arg_sort_text(0, fld.name.as_str(), pfx, 1, 0)),
-                // The label carries the leading `.` -- a field ref IS `.co` (no
-                // receiver), unlike member completion where the `recv.` is
-                // already typed. `filter_text` stays the bare name so typing
-                // `co` (with or without the dot) still matches.
-                label: format!(".{}: {}", fld.name, fty),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(fty),
-                insert_text: Some(insert),
-                filter_text: Some(fld.name.to_string()),
-                ..Default::default()
-            });
-        }
-    }
-    Some(out)
 }
 
 /// fzf-style fuzzy score of an already-lowercased `query` against an
@@ -3426,15 +3395,6 @@ pub struct CompletionPhaseTimings {
     pub ct_survivors: usize,
 }
 
-/// Per-fn counters accumulated inside `call_through_param_completions`, returned
-/// to `completion()` so it can fold them into the phase timings.
-#[derive(Clone, Copy, Default)]
-struct CtCounts {
-    fns: usize,
-    arg_iters: usize,
-    survivors: usize,
-}
-
 thread_local! {
     static LAST_COMPLETION_PHASES: std::cell::Cell<CompletionPhaseTimings> = const {
         std::cell::Cell::new(CompletionPhaseTimings {
@@ -3452,1041 +3412,26 @@ thread_local! {
 }
 
 /// Read the phase timings recorded by the most recent `completion()` call ON
-/// THIS THREAD. For the in-process profiler (`rock iter-completion`) only.
+/// THIS THREAD. For the in-process profiler (`rock iter-completion`) and the
+/// corpus recorder.
 pub fn last_completion_phase_timings() -> CompletionPhaseTimings {
     LAST_COMPLETION_PHASES.with(|c| c.get())
 }
 
-// Shared fuzzy-scoring constants + boundary rule -- used by `fuzzy_score` and by
-// the call-through partition decomposition (`fuzzy_prefix_scores` /
-// `fuzzy_suffix_scores`), which MUST score identically to `fuzzy_score` for the
-// decomposition `score = max_s(prefix[s] + suffix[s])` to stay byte-exact.
-const FZ_MISS: i32 = -1_000_000;
-const FZ_BASE: i32 = 1;
-const FZ_BOUNDARY: i32 = 10; // matched char at a word start
-const FZ_CONSEC: i32 = 8; // matched char right after the previous match (run)
-const FZ_FIRST: i32 = 10; // extra for matching at absolute position 0
-
-
-fn fuzzy_score(cand: &[u8], query: &[u8]) -> i32 {
-    const MISS: i32 = FZ_MISS;
-    const BASE: i32 = FZ_BASE;
-    const BOUNDARY: i32 = FZ_BOUNDARY;
-    const CONSEC: i32 = FZ_CONSEC;
-    const FIRST: i32 = FZ_FIRST;
-    if query.is_empty() {
-        return 0;
-    }
-    let n = cand.len();
-    if n == 0 {
-        return MISS;
-    }
-    let boundary = |j: usize| fz_boundary(cand, j);
-    // The two DP rows (`prev`/`cur`, each `n` wide) are reused from a thread-
-    // local scratch -- `fuzzy_score` is called hundreds of times per keystroke
-    // (clean_match per candidate fn, arg_sort_text per survivor, the general
-    // ranking), and a per-call `vec![MISS; n]` x2 was the dominant short-prefix
-    // cost. `resize` reuses the existing capacity, so steady state is alloc-free.
-    thread_local! {
-        static SCRATCH: std::cell::RefCell<(Vec<i32>, Vec<i32>)> =
-            const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
-    }
-    SCRATCH.with(|sc| {
-        let (prev, cur) = &mut *sc.borrow_mut();
-        prev.clear();
-        prev.resize(n, MISS); // best score with query[i-1] ending at each cand pos
-        cur.clear();
-        cur.resize(n, MISS);
-        for (i, &qc) in query.iter().enumerate() {
-            // `max_prev` = best prev[k] for k < j (query[i-1] somewhere before j).
-            let mut max_prev = MISS;
-            for j in 0..n {
-                cur[j] = MISS;
-                if cand[j].to_ascii_lowercase() == qc {
-                    let mut b = BASE;
-                    if boundary(j) {
-                        b += BOUNDARY;
-                    }
-                    if j == 0 {
-                        b += FIRST;
-                    }
-                    if i == 0 {
-                        cur[j] = b;
-                    } else {
-                        let mut s = MISS;
-                        if max_prev > MISS {
-                            s = max_prev + b;
-                        }
-                        // Consecutive: query[i-1] ended exactly at j-1 -> extend the run.
-                        if j > 0 && prev[j - 1] > MISS {
-                            s = s.max(prev[j - 1] + b + CONSEC);
-                        }
-                        cur[j] = s;
-                    }
-                }
-                if prev[j] > max_prev {
-                    max_prev = prev[j];
-                }
-            }
-            std::mem::swap(prev, cur);
-        }
-        let mut best = prev.iter().copied().max().unwrap_or(MISS);
-        // A true whole-string prefix (typing the name/root from its start) is the
-        // strongest signal -- it must beat any boundary-aligned partial match
-        // elsewhere (`play` -> `player...` over `pixel_LAYer...`). Dominant bonus.
-        if best > MISS && cand.len() >= query.len() && cand[..query.len()].eq_ignore_ascii_case(query) {
-            best += 1000;
-        }
-        best
-    })
+/// The identifier prefix ending at `pos` -- THE prefix definition completion's
+/// own filter uses (`ident_prefix`), exposed for the corpus recorder so the
+/// recorded prefix can never diverge from what the ranker matched against.
+pub fn ident_prefix_at(src: &str, pos: Position) -> &str {
+    crate::completion::classify::ident_prefix(src, offset_at_line_col(src, pos.line, pos.character))
 }
 
-// --- Call-through partition decomposition (lever A) ---------------------------
-//
-// `fuzzy_score(name + "(" + arg + ")", q)` is a max over alignments of `q`. Each
-// alignment splits `q` at some index `s`: `q[..s]` matches inside the name,
-// `q[s..]` inside the arg. The `(` between them breaks any consecutive-run bonus,
-// so the two halves score INDEPENDENTLY:
-//
-//     score(name, arg, q) = max over s of [ prefix_name[s] + suffix_arg[s] ]
-//
-// `prefix_name[s]` depends only on (name, q); `suffix_arg[s]` only on (arg, q) --
-// so the arg half is computed ONCE and shared by every fn in a group, and the
-// per-(fn,arg) cost drops from a full DP to a length-`|q|` combine. EXACT: the
-// `+1000` whole-query-prefix bonus never applies to call-through (a passing fn's
-// name cannot contain all of `q`, by the noise guard `k < q.len()`), so it is
-// intentionally omitted here.
-
-/// `out[s]` = best `fuzzy_score`-style score of the prefix `q[..s]` matched as a
-/// subsequence of `cand` (`s = 0..=q.len()`), WITHOUT the `+1000` bonus. `out[0]
-/// = 0`; `out[s] = FZ_MISS` when `q[..s]` is not a subsequence. The forward DP is
-/// `fuzzy_score`'s, recording the row max after each query char.
-fn fuzzy_prefix_scores(cand: &[u8], query: &[u8], out: &mut Vec<i32>) {
-    out.clear();
-    out.push(0); // s = 0: empty prefix
-    let m = query.len();
-    let n = cand.len();
-    if m == 0 {
-        return;
-    }
-    if n == 0 {
-        out.resize(m + 1, FZ_MISS);
-        return;
-    }
-    let mut prev = vec![FZ_MISS; n];
-    let mut cur = vec![FZ_MISS; n];
-    for (i, &qc) in query.iter().enumerate() {
-        let mut max_prev = FZ_MISS;
-        let mut rowmax = FZ_MISS;
-        for j in 0..n {
-            cur[j] = FZ_MISS;
-            if cand[j].to_ascii_lowercase() == qc {
-                let mut b = FZ_BASE;
-                if fz_boundary(cand, j) {
-                    b += FZ_BOUNDARY;
-                }
-                if j == 0 {
-                    b += FZ_FIRST;
-                }
-                if i == 0 {
-                    cur[j] = b;
-                } else {
-                    let mut s = FZ_MISS;
-                    if max_prev > FZ_MISS {
-                        s = max_prev + b;
-                    }
-                    if j > 0 && prev[j - 1] > FZ_MISS {
-                        s = s.max(prev[j - 1] + b + FZ_CONSEC);
-                    }
-                    cur[j] = s;
-                }
-            }
-            if prev[j] > max_prev {
-                max_prev = prev[j];
-            }
-            if cur[j] > rowmax {
-                rowmax = cur[j];
-            }
-        }
-        out.push(rowmax); // best score of q[..=i] = prefix length i+1
-        std::mem::swap(&mut prev, &mut cur);
-    }
-}
-
-/// `out[s]` = best `fuzzy_score`-style score of the suffix `q[s..]` matched as a
-/// subsequence of `cand`, scored AS IF `cand` sits right after a `(`: `cand[0]`
-/// is a word boundary (it is -- preceded by `(`) but NOT absolute position 0, so
-/// it gets `FZ_BOUNDARY` but NOT `FZ_FIRST`. `out[q.len()] = 0`; `out[s] =
-/// FZ_MISS` when `q[s..]` is not a subsequence. Backward DP: `next[j]` = best
-/// score of `q[i+1..]` with `q[i+1]` starting at position `j`.
-fn fuzzy_suffix_scores(cand: &[u8], query: &[u8], out: &mut Vec<i32>) {
-    let m = query.len();
-    out.clear();
-    out.resize(m + 1, FZ_MISS);
-    out[m] = 0; // empty suffix
-    let n = cand.len();
-    if m == 0 || n == 0 {
-        return;
-    }
-    let mut next = vec![FZ_MISS; n]; // matchStart for q[i+1..]
-    let mut cur = vec![FZ_MISS; n];
-    for i in (0..m).rev() {
-        let qc = query[i];
-        let last = i + 1 == m;
-        // `suffmax` = max next[j'] for j' > current j (scanning j descending).
-        let mut suffmax = FZ_MISS;
-        let mut rowmax = FZ_MISS;
-        for j in (0..n).rev() {
-            cur[j] = FZ_MISS;
-            if cand[j].to_ascii_lowercase() == qc {
-                let mut b = FZ_BASE;
-                if fz_boundary(cand, j) {
-                    b += FZ_BOUNDARY; // boundary; never FZ_FIRST (not at absolute 0)
-                }
-                let cont = if last {
-                    0 // last query char: empty continuation
-                } else {
-                    // q[i+1] at some j' > j; +CONSEC only when adjacent (j'==j+1).
-                    let mut c = suffmax;
-                    if j + 1 < n && next[j + 1] > FZ_MISS {
-                        c = c.max(next[j + 1] + FZ_CONSEC);
-                    }
-                    c
-                };
-                if cont > FZ_MISS {
-                    cur[j] = b + cont;
-                }
-            }
-            if next[j] > suffmax {
-                suffmax = next[j];
-            }
-            if cur[j] > rowmax {
-                rowmax = cur[j];
-            }
-        }
-        out[i] = rowmax;
-        std::mem::swap(&mut next, &mut cur);
-    }
-}
-
-/// `max over s of prefix[s] + suffix[s]` -- the call-through partition combine.
-/// Both vectors are `q.len()+1` long; `FZ_MISS` entries (non-subsequence splits)
-/// are skipped. Returns `FZ_MISS` if no split is viable.
-fn combine_scores(prefix: &[i32], suffix: &[i32]) -> i32 {
-    let mut best = FZ_MISS;
-    for s in 0..prefix.len() {
-        if prefix[s] > FZ_MISS && suffix[s] > FZ_MISS {
-            best = best.max(prefix[s] + suffix[s]);
-        }
-    }
-    best
-}
-
-/// Ranking penalty for a call-through arg by PATH COMPLEXITY: `.` hops and `(`
-/// method calls in the arg string. A direct value or enum variant has neither
-/// (0); `player.movable.grid` pays for 2 field hops; `x.foo().image_dims()` pays
-/// 2 hops + 2 calls. The boundary-rich `fuzzy_score` over-rewards long segmented
-/// args (a scattered match on a deep method chain can out-score a tight match on
-/// a clean short path -- e.g. `tile_center(PIXEL_EDITOR.active_layer_image().image_dims())`
-/// beating `tile_center(player.movable.grid)`), so subtract this so a direct
-/// value / clean field path wins on a near-tie. It's gentle (a call costs less
-/// than one boundary bonus), so a genuinely strong fuzzy match still wins.
-fn arg_path_penalty(arg: &str) -> i32 {
-    const HOP: i32 = 1;
-    const CALL: i32 = 6;
-    let bytes = arg.as_bytes();
-    let hops = bytes.iter().filter(|&&b| b == b'.').count() as i32;
-    let calls = bytes.iter().filter(|&&b| b == b'(').count() as i32;
-    hops * HOP + calls * CALL
-}
-
-
-/// Build the arg-position `sort_text`. Ordering is most-significant first:
-/// `type_rank` (0 value-of-expected-type / 1 fn-returning-it / 2 other), then
-/// the fuzzy match score DESCENDING (long boundary-aligned runs win -- `9999 -
-/// score` so higher score sorts earlier), then `dist` (shorter paths first),
-/// then `kind` (0 field/var < 1 method/fn), then the lowercased insert string
-/// (case-insensitive tiebreak -- an UPPER_CASE global no longer wins a tie over
-/// a lowercase local). All fields are fixed-width so lexicographic compare
-/// matches the tuple.
-fn arg_sort_text(type_rank: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> String {
-    // `fuzzy_score` lowercases the candidate inline; `query` is pre-lowercased.
-    let score = fuzzy_score(cand.as_bytes(), query);
-    sort_text_with_score(0, type_rank, cand, score, dist, method, false)
-}
-
-
-/// Like [`arg_sort_text`] but with the fuzzy score supplied by the caller --
-/// used when the string the user is TYPING differs from the displayed `cand`.
-/// An enum variant displays/insert as `Enum::Variant` but the user types the
-/// VARIANT NAME, so the score is taken against `Variant` (else `nog` scores low
-/// against `targeterror::notground` -- `n` is mid-string, no position-0 bonus --
-/// and loses to a long path that starts with `n`).
-fn sort_text_with_score(
-    case_rank: u8,
-    type_rank: u8,
-    cand: &str,
-    score: i32,
-    dist: u16,
-    method: u8,
-    score_leads: bool,
-) -> String {
-    let lc = cand.to_lowercase();
-    let score = score.clamp(0, 9999);
-    // `{len:03}` before the name is a shorter-first tiebreak: equal-score
-    // candidates (e.g. two prefix matches `attacking` / `attack_timer` of
-    // `attack`) rank by length, so the tighter match wins -- without it the
-    // alphabetical name fallback puts `attack_timer` first (`_` < `i`). Gated on
-    // `score > 0`: at an EMPTY prefix every candidate scores 0 and there's no
-    // match to be "tighter" about, so length must NOT reorder (else short stdlib
-    // names bury longer user symbols past the result cap).
-    let len_key = if score > 0 { lc.len().min(999) } else { 0 };
-    let key2 = 9999 - score;
-    let d = dist.min(99);
-    if score_leads {
-        // Non-arg (plain identifier prefix): MATCH QUALITY leads, then the
-        // smart-case tiebreak, then KIND. A strong match on a SCREAMING_CONST /
-        // PascalName is no longer buried below every weaker case-clean match --
-        // case only decides near-ties (`jlog` -> `journal_log` over
-        // `JIT_TRACE_LOG_ENABLED`, both score-equal). Call-through items
-        // (type_rank >= 4) stay bucketed last regardless of their score.
-        let ct_bucket = u8::from(type_rank >= 4);
-        let kind = type_rank.min(3);
-        format!("{ct_bucket}{key2:04}{case_rank}{kind}{d:02}{method}{len_key:03}{lc}")
-    } else {
-        // Arg / member / type-directed: the expected-TYPE bucket dominates (case
-        // neutral there); score then dist then kind. Unchanged layout.
-        format!("{case_rank}{type_rank}{key2:04}{d:02}{method}{len_key:03}{lc}")
-    }
-}
-
-/// Strip a trailing `name($0)` / `name()` CALL template to the bare name when
-/// the cursor is already directly before a `(` -- reusing the existing parens
-/// instead of doubling them (`world_to_design()(x)`). Only touches call
-/// templates: `{ $0 }` record/block and `<$0>` generic templates end in `}`/`>`
-/// and a filled call-through (`foo(a, b)`) ends in `)` preceded by an arg, so
-/// none of them match the exact `($0)`/`()` suffix.
-fn strip_call_template(items: &mut [CompletionItem]) {
-    for it in items.iter_mut() {
-        let Some(t) = it.insert_text.as_deref() else { continue };
-        if let Some(bare) = t.strip_suffix("($0)").or_else(|| t.strip_suffix("()")) {
-            it.insert_text = Some(bare.to_string());
-            it.insert_text_format = None;
-        }
-    }
-}
-
-/// Smart-case leading sort digit. Greedily align `query` into `cand` as a
-/// case-INSENSITIVE subsequence (first match per query char), then count the
-/// matched positions whose CASE differs from the query char. A lowercase query
-/// over an all-caps name (`jlog` vs `JIT_..LOG..`) counts every char as a
-/// mismatch and is demoted; a case-clean match (`jlog`/`journal_log`, or an
-/// uppercase query over the caps name) scores 0. Capped at 9 (one sort digit).
-/// Both slices are ORIGINAL case; an empty query yields 0 (no reordering).
-fn case_mismatch_rank(cand: &[u8], query: &[u8]) -> u8 {
-    let mut qi = 0;
-    let mut miss = 0u32;
-    for &cc in cand {
-        if qi >= query.len() {
-            break;
-        }
-        let qc = query[qi];
-        if cc.eq_ignore_ascii_case(&qc) {
-            miss += u32::from(cc != qc);
-            qi += 1;
-        }
-    }
-    miss.min(9) as u8
-}
-
-/// Length of the longest prefix of `query` (already lowercased) that is a
-/// subsequence of `name_lc` (the function name, ALREADY lowercased -- callers
-/// pass `CtFn::name_lc` so this never re-allocates a `to_lowercase` per fn on
-/// the keystroke hot path) -- how many leading query chars the function name can
-/// absorb. Used to prefilter call-through candidates: a fn whose name can't
-/// absorb the start of the query is not a call the user is typing.
-fn prefix_subseq_len(query: &[u8], name_lc: &str) -> usize {
-    let mut qi = 0;
-    for &c in name_lc.as_bytes() {
-        if qi < query.len() && query[qi] == c {
-            qi += 1;
-        }
-    }
-    qi
-}
-
-/// Complete a whole call through its first parameter: typing `rejtanog` offers
-/// `reject_target(TargetError::NotGround)` when the fn name absorbs the start of
-/// the query and an arg value for its first param matches the rest. The
-/// candidate is `fn(arg)` -- the reachability idea one level up. v1 fills the
-/// arg from in-scope values of the param type and the type's enum UNIT variants
-/// (the motivating case); reach-path args and tuple/record payloads are TODO
-/// (`docs/completion-reachability-plan.md`).
-/// Whether a call-through arg value needs a payload snippet: a tuple variant
-/// (`Damage::Fire($..)`), a record variant (`Cfg { $.. }`), or none (a direct
-/// value, unit variant, or reach path).
-#[derive(Clone, Copy, PartialEq)]
-enum ArgPayload {
-    None,
-    Tuple,
-    Record,
-}
-
-/// Does the virtual call `name(arg)` subsequence-contain the query `q` (already
-/// lowercased), GIVEN that the fn name already absorbs `q[..k]` (where `k =
-/// prefix_subseq_len(q, name_lc)` -- the same value the noise guard computes)?
-/// The residual `q[k..]` must subsequence-match `arg`, with the `(`/`)`
-/// punctuation matched exactly as a scan of the whole `name(arg)` would.
-///
-/// Because the name-scan always lands at `qi == k`, this is BEHAVIOR-IDENTICAL to
-/// scanning the full virtual `name(arg)` per fn -- but it depends only on
-/// `(q, k, arg)`, NOT the fn name. That lets the call-through path memoize the
-/// matching args per `(param_type, k)` and share the scan across every fn in the
-/// group instead of re-testing each (fn, arg) pair (lever (b)). Equivalent to
-/// `is_subsequence(q, format!("{name}({arg})").to_lowercase())` without building
-/// the string -- the fzf "match, don't build" idea.
-fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
-    let mut qi = k.min(q.len());
-    if qi < q.len() && q[qi] == b'(' {
-        qi += 1;
-    }
-    for &c in arg.as_bytes() {
-        if qi < q.len() && c.to_ascii_lowercase() == q[qi] {
-            qi += 1;
-        }
-    }
-    if qi < q.len() && q[qi] == b')' {
-        qi += 1;
-    }
-    qi == q.len()
-}
-
-/// One call-through-eligible function: name (+ precomputed lowercase so the
-/// per-keystroke noise guard doesn't re-lowercase ~1700 names every keystroke),
-/// its first-param type (rendered), and whether it has more than one param.
-struct CtFn {
-    name: ustr::Ustr,
-    name_lc: String,
-    first_param_ty: String,
-    multiparam: bool,
-}
-
-/// Precomputed call-through index: the function table + the GLOBAL-derived arg
-/// values per param type (direct globals of the type, the type's enum variants,
-/// and reach paths from globals -- `g.movable.grid`). All a pure function of the
-/// type graph, so it is cached in `BoneProject::call_through` and rebuilt only on
-/// non-`BodyOnly` edits. The per-keystroke path adds only the (small) in-scope
-/// LOCAL args on top. Before this, `call_through_param_completions` rebuilt the
-/// whole O(types*globals) reach expansion on EVERY keystroke (20-50ms stall).
-struct CallThroughIndex {
-    fns: Vec<CtFn>,
-    /// `fns` indices bucketed by lowercase first byte of the fn name. The noise
-    /// guard requires `name_lc[0] == q[0]`, so the per-keystroke loop walks only
-    /// the `q[0]` bucket instead of every fn (and runs `prefix_subseq_len` only
-    /// for plausible candidates, not all ~1700). Built with the index (a pure
-    /// fn of the type graph).
-    fns_by_first_char: HashMap<u8, Vec<u32>>,
-    global_type_args: HashMap<String, Vec<(String, ArgPayload)>>,
-}
-
-/// Build the call-through index from a checked workspace + reach index. This is
-/// the work that used to run per keystroke -- the O(types*globals) reach
-/// expansion -- now done once per non-`BodyOnly` edit (alongside `reach`).
-fn build_call_through(
-    ws: &Workspace,
-    reach: &crate::reachability::ReachabilityIndex,
-) -> CallThroughIndex {
-    let mut fns: Vec<CtFn> = Vec::new();
-    for m in ws.modules.iter() {
-        for f in m.functions.values() {
-            if f.name.as_str().starts_with("__") {
-                continue;
-            }
-            let Some(p0) = f.param_decls.first() else { continue };
-            fns.push(CtFn {
-                name: f.name,
-                name_lc: f.name.as_str().to_lowercase(),
-                first_param_ty: ws.render(None, p0.ty),
-                multiparam: f.param_decls.len() > 1,
-            });
-        }
-    }
-    // Global roots (position-independent), each with its rendered type.
-    let mut groots: Vec<(String, String)> = Vec::new();
-    for m in ws.modules.iter() {
-        for (gname, gidx) in m.global_by_name.iter() {
-            groots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty)));
-        }
-    }
-    // Static args per distinct first-param type. Seed each needed type with its
-    // global-direct values + enum variants (no reach), then fill reach-from-
-    // globals in ONE pass over globals -- a depth-<=2 path LOOKUP per global
-    // (`arg_paths_from`), bucketed by target type. No per-(type,global) DFS.
-    let needed: std::collections::HashSet<&str> =
-        fns.iter().map(|c| c.first_param_ty.as_str()).collect();
-    let mut global_type_args: HashMap<String, Vec<(String, ArgPayload)>> = HashMap::new();
-    for t in &needed {
-        let mut vals: Vec<(String, ArgPayload)> = groots
-            .iter()
-            .filter(|(_, rt)| rt == t)
-            .map(|(n, _)| (n.clone(), ArgPayload::None))
-            .collect();
-        for (vname, shape) in crate::query::enum_variants_with_shape(ws, t) {
-            let payload = match shape {
-                crate::query::VariantShape::Unit => ArgPayload::None,
-                crate::query::VariantShape::Tuple => ArgPayload::Tuple,
-                crate::query::VariantShape::Record => ArgPayload::Record,
-            };
-            vals.push((format!("{t}::{vname}"), payload));
-        }
-        global_type_args.insert(t.to_string(), vals);
-    }
-    for (rn, rt) in &groots {
-        for p in reach.arg_paths_from(rt) {
-            if p.is_method && p.takes_args {
-                continue; // can't park a snippet hole inside the arg
-            }
-            let Some(vals) = global_type_args.get_mut(p.final_ty.as_str()) else {
-                continue; // not a first-param type any fn needs
-            };
-            let v = if p.is_method {
-                format!("{rn}.{}()", p.suffix)
-            } else {
-                format!("{rn}.{}", p.suffix)
-            };
-            vals.push((v, ArgPayload::None));
-        }
-    }
-    // Bucket fn indices by lowercase first byte for the per-keystroke first-char
-    // lookup (the noise guard's `name_lc[0] == q[0]` condition).
-    let mut fns_by_first_char: HashMap<u8, Vec<u32>> = HashMap::new();
-    for (i, cf) in fns.iter().enumerate() {
-        if let Some(&b) = cf.name_lc.as_bytes().first() {
-            fns_by_first_char.entry(b).or_default().push(i as u32);
-        }
-    }
-    CallThroughIndex { fns, fns_by_first_char, global_type_args }
-}
-
-fn call_through_param_completions(
-    ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    offset: usize,
-    prefix: &str,
-    index: &CallThroughIndex,
-    reach: &crate::reachability::ReachabilityIndex,
-    score_leads: bool,
-) -> (Vec<CompletionItem>, CtCounts) {
-    let mut counts = CtCounts::default();
-    let q = prefix.as_bytes();
-    if q.len() < 2 {
-        // 1 char only completes the fn-name's first letter -- no room for an
-        // arg yet. At 2+ chars the fn name can absorb the lead and the arg can
-        // start to match, so call-through is meaningful.
-        return (Vec::new(), counts);
-    }
-    // In-scope LOCAL roots only -- the position-dependent part. Globals + their
-    // reach expansion are precomputed in `index` (the slow part, now cached).
-    let locals: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
-        .into_iter()
-        .map(|(n, _k, ty, _ty_id)| (n.to_string(), ty))
-        .collect();
-
-    // Call-through is a synthesized, bottom-ranked (bucket 4) convenience; the
-    // GLOBAL `CAP` keeps it from burying the direct candidates. Per fn, the
-    // per-fn cap applies ONLY to METHOD-chain args (`x.foo().bar()`), which are
-    // unbounded reach-noise; direct values + field paths are NOT capped, so a
-    // committed query (`tilecenp` -> `tile_center`) can explore all the sibling
-    // fields it could pass (e.g. `player.movable.grid` AND `.prev_grid`).
-    // Call-through is the ONLY arg-suggestion path while the fn name is still an
-    // abbreviation -- arg completion needs a resolved callee to know the param
-    // type, which `tilecen(` doesn't give -- so it must be browsable, not capped.
-    const CAP: usize = 10;
-    const PER_FN_METHOD_CAP: usize = 2;
-
-    // Pass 1: walk only the first-char bucket (lever (a)) and keep the fns that
-    // clear the noise guard, recording `k` (how many leading query chars the
-    // name absorbs) and the set of distinct first-param types seen. NOISE GUARD:
-    // the name must begin at the query's first char (guaranteed by the bucket),
-    // absorb >= half of the query but NOT all of it, and land its chars cleanly
-    // (word boundaries / a run). `k` matters because the arg-side match tests the
-    // RESIDUAL `q[k..]`, which depends only on `(param_type, k)` -- NOT the name.
-    let bucket: &[u32] = index.fns_by_first_char.get(&q[0]).map_or(&[], |v| v.as_slice());
-    let mut passing: Vec<(usize, usize)> = Vec::new(); // (fn index, k)
-    // Fns whose name FULLY covers the query (`k == q.len()`): normally suppressed
-    // as fn-name browsing, but eligible for confident unique-arg autofill below.
-    let mut committed: Vec<usize> = Vec::new();
-    let mut needed: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for &fi in bucket {
-        let cf = &index.fns[fi as usize];
-        let k = prefix_subseq_len(q, &cf.name_lc);
-        if !clean_match(cf.name_lc.as_bytes(), &q[..k.min(q.len())]) {
-            continue;
-        }
-        if k == q.len() {
-            committed.push(fi as usize);
-            needed.insert(cf.first_param_ty.as_str());
-        } else if k >= q.len().div_ceil(2) {
-            counts.fns += 1;
-            passing.push((fi as usize, k));
-            needed.insert(cf.first_param_ty.as_str());
-        }
-    }
-
-    // Local-derived args per NEEDED type (local-direct + reach-from-locals),
-    // built once and immutable after -- the per-`(type, k)` match memo below
-    // borrows from it.
-    let mut local_args: HashMap<&str, Vec<(String, ArgPayload)>> = HashMap::new();
-    for &t in &needed {
-        let mut v: Vec<(String, ArgPayload)> = locals
-            .iter()
-            .filter(|(_, lt)| lt == t)
-            .map(|(n, _)| (n.clone(), ArgPayload::None))
-            .collect();
-        for (ln, lt) in &locals {
-            for p in reach.arg_paths_from(lt) {
-                if (p.is_method && p.takes_args) || p.final_ty != t {
-                    continue;
-                }
-                let val = if p.is_method {
-                    format!("{ln}.{}()", p.suffix)
-                } else {
-                    format!("{ln}.{}", p.suffix)
-                };
-                v.push((val, ArgPayload::None));
-            }
-        }
-        local_args.insert(t, v);
-    }
-
-    // (b)+(A) Per `(param_type, k)` group, share BOTH the matching-arg set AND
-    // each arg's SUFFIX score vector (`fuzzy_suffix_scores`, a pure fn of
-    // `(arg, q)`): computed once, reused by every fn in the group. The arg-side
-    // subsequence match depends only on the residual `q[k..]` (not the fn name),
-    // so the group filter is exact (`arg_matches_residual`). The per-fn score is
-    // then the partition combine `max_s(prefix_name[s] + suffix_arg[s])` (lever
-    // A) -- a length-`|q|` max, not a full DP per (fn,arg) pair. This is byte-
-    // EXACT vs the old per-pair `fuzzy_score(name(arg), q)` (the `(` junction
-    // breaks any cross-half run, and the +1000 prefix bonus never applies to a
-    // passing call-through fn), just without re-scoring the shared arg set per fn.
-    let empty: Vec<(String, ArgPayload)> = Vec::new();
-    // Per group: (arg, payload, suffix_scores, path_penalty). suffix + penalty
-    // both depend only on the arg (not the fn), so computed once and shared.
-    let mut match_memo: HashMap<(&str, usize), Vec<(&str, ArgPayload, Vec<i32>, i32)>> = HashMap::new();
-    let mut prefix_scores: Vec<i32> = Vec::new(); // reused across fns
-
-    // Collect lightweight candidates (score, fn index, arg, payload) across all
-    // fns; materialize ONLY the global top `CAP`. Per fn we keep ALL simple args
-    // (browsable fields) so the candidate pool can be large at a short prefix, but
-    // we don't `format!` items we'll drop -- rank cheap, materialize survivors
-    // (same pattern as general completion).
-    let mut cands: Vec<(i32, usize, &str, ArgPayload)> = Vec::new();
-    for (fi, k) in passing {
-        let cf = &index.fns[fi];
-        let t = cf.first_param_ty.as_str();
-        let group = match_memo.entry((t, k)).or_insert_with(|| {
-            let gargs = index.global_type_args.get(t).unwrap_or(&empty);
-            let largs = local_args.get(t).unwrap_or(&empty);
-            let mut v: Vec<(&str, ArgPayload, Vec<i32>, i32)> = Vec::new();
-            for (a, payload) in gargs.iter().chain(largs.iter()) {
-                counts.arg_iters += 1;
-                if arg_matches_residual(q, k, a) {
-                    let mut suffix = Vec::new();
-                    fuzzy_suffix_scores(a.as_bytes(), q, &mut suffix);
-                    v.push((a.as_str(), *payload, suffix, arg_path_penalty(a)));
-                }
-            }
-            v
-        });
-        counts.survivors += group.len();
-        // Prefix scores for THIS fn's name (one forward DP, reused buffer), then
-        // combine with each arg's shared suffix vector.
-        fuzzy_prefix_scores(cf.name.as_bytes(), q, &mut prefix_scores);
-        let mut scored: Vec<(i32, &str, ArgPayload)> = Vec::with_capacity(group.len());
-        for (a, payload, suffix, penalty) in group.iter() {
-            // Bias toward simpler args: a direct value / clean field path beats a
-            // deep method chain (which the boundary-rich score over-rewards). The
-            // penalty is arg-only, precomputed once per group.
-            let score = combine_scores(&prefix_scores, suffix) - penalty;
-            scored.push((score, a, *payload));
-        }
-        // Cap only METHOD-chain args (an arg string containing a `(` -- the
-        // unbounded `x.foo().bar()` reach-noise); keep ALL direct values / field
-        // paths so sibling fields are browsable. The global `CAP` backstops the
-        // total. (Method args still sort against everything in the final cap.)
-        let (mut methods, simple): (Vec<_>, Vec<_>) =
-            scored.into_iter().partition(|(_, a, _)| a.contains('('));
-        if methods.len() > PER_FN_METHOD_CAP {
-            // Best by score DESC, then arg lexical CASE-INSENSITIVE (so an
-            // UPPER_CASE global doesn't beat a lowercase field path on a tie).
-            methods.select_nth_unstable_by(PER_FN_METHOD_CAP, |x, y| {
-                y.0.cmp(&x.0).then_with(|| ci_cmp(x.1.as_bytes(), y.1.as_bytes()))
-            });
-            methods.truncate(PER_FN_METHOD_CAP);
-        }
-        for (score, a, payload) in simple.into_iter().chain(methods) {
-            cands.push((score, fi, a, payload));
-        }
-    }
-    // CONFIDENT unique-arg autofill: for a committed (full-name-match) fn, the
-    // residual query is empty so any arg "matches" -- offer `f(arg)` ONLY when the
-    // first-param type has exactly ONE in-scope producer (a local/param of that
-    // type or a single clean field path), i.e. the arg is unambiguous. Common
-    // types (many producers) stay quiet; distinctive ones (`can_cast(s)`,
-    // `spell_hotkey_label(s.kind)`) autofill even though the name covers the whole
-    // query. Method-chain args are excluded (not "the obvious value").
-    for fi in committed {
-        let cf = &index.fns[fi];
-        let t = cf.first_param_ty.as_str();
-        let confident: Vec<&(String, ArgPayload)> = local_args
-            .get(t)
-            .map(|v| v.iter().filter(|(a, _)| !a.contains('(')).collect())
-            .unwrap_or_default();
-        if let [(a, payload)] = confident.as_slice() {
-            // A full-name match with a unique, unambiguous arg is the highest-
-            // confidence call-through -- rank it above the coincidental partial
-            // (`passing`) matches (whose combined name+arg scores are far lower).
-            let score = fuzzy_score(cf.name.as_bytes(), q) + 5000;
-            cands.push((score, fi, a.as_str(), *payload));
-        }
-    }
-    // Global top `CAP` by score (then ci-arg tiebreak); materialize only those.
-    if cands.len() > CAP {
-        cands.select_nth_unstable_by(CAP, |x, y| {
-            y.0.cmp(&x.0).then_with(|| ci_cmp(x.2.as_bytes(), y.2.as_bytes()))
-        });
-        cands.truncate(CAP);
-    }
-    let mut out: Vec<CompletionItem> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (score, fi, a, payload) in cands {
-        let cf = &index.fns[fi];
-        let fname = cf.name;
-        let call = format!("{fname}({a})");
-        if !seen.insert(call.clone()) {
-            continue;
-        }
-        // Insert: a tuple/record variant arg carries a payload hole; the trailing
-        // param (when multiparam) takes `$0`, so the payload uses `$1` to keep the
-        // tab order arg-then-next-param.
-        let (insert_text, is_snippet) = match (payload, cf.multiparam) {
-            (ArgPayload::None, false) => (format!("{fname}({a})"), false),
-            (ArgPayload::None, true) => (format!("{fname}({a}, $0)"), true),
-            (ArgPayload::Tuple, false) => (format!("{fname}({a}($0))"), true),
-            (ArgPayload::Tuple, true) => (format!("{fname}({a}($1), $0)"), true),
-            (ArgPayload::Record, false) => (format!("{fname}({a} {{ $0 }})"), true),
-            (ArgPayload::Record, true) => (format!("{fname}({a} {{ $1 }}, $0)"), true),
-        };
-        let insert_text_format = is_snippet.then_some(InsertTextFormat::SNIPPET);
-        // Label shows the payload shape so a tuple/record variant reads as a call
-        // to fill, not a bare value.
-        let label = match payload {
-            ArgPayload::None => call.clone(),
-            ArgPayload::Tuple => format!("{fname}({a}(...))"),
-            ArgPayload::Record => format!("{fname}({a} {{ ... }})"),
-        };
-        out.push(CompletionItem {
-            label,
-            kind: Some(CompletionItemKind::FUNCTION),
-            insert_text: Some(insert_text),
-            insert_text_format,
-            // type_rank 4: a synthesized whole-call, below every direct candidate
-            // (vars/fns/structs/variants all rank <= 3); ranked among themselves by
-            // match quality. Reuse the score computed above.
-            sort_text: Some(sort_text_with_score(0, 4, &call, score, 0, 1, score_leads)),
-            ..Default::default()
-        });
-    }
-    // Final sort by sort_text; the global select above already bounded the count.
-    rank_and_cap(&mut out, CAP, "call-through");
-    (out, counts)
-}
-
-/// Max items returned by general (non-member) completion. Generous headroom over
-/// a screenful -- the client narrows within a keystroke and re-requests (every
-/// completion response is `isIncomplete`), so this exists only to stop
-/// serializing the whole workspace (2539 items / ~518 KB on mag at empty prefix)
-/// when the client will throw nearly all of it away and ask again.
-const MAX_COMPLETION_ITEMS: usize = 200;
-
-/// Case-insensitive ASCII byte-slice ordering -- the alloc-free equivalent of
-/// `a.to_lowercase().cmp(&b.to_lowercase())` for the (ASCII) identifier
-/// tiebreak in completion ranking. Matches the lowercased `lc` suffix that
-/// `sort_text` appends, so the tuple sort selects the same survivors a
-/// sort_text string sort would.
-fn ci_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
-    let n = a.len().min(b.len());
-    for i in 0..n {
-        let (x, y) = (a[i].to_ascii_lowercase(), b[i].to_ascii_lowercase());
-        if x != y {
-            return x.cmp(&y);
-        }
-    }
-    a.len().cmp(&b.len())
-}
-
-/// Render every function's signature once -- the dominant completion cost --
-/// keyed by name with first-overload-wins to match `crate::query::completion`'s
-/// `seen`-dedup order (modules walked in `ws.modules` order). Stored in
-/// `BoneProject::fn_sigs` and rebuilt only on non-`BodyOnly` edits, so body
-/// keystrokes reuse it instead of re-rendering the whole workspace.
-fn build_fn_sigs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
-    let mut sigs = HashMap::new();
-    for m in ws.modules.iter() {
-        for (name, fns) in m.functions_by_name.iter() {
-            if let Some((fmid, fid)) = fns.first() {
-                sigs.entry(*name).or_insert_with(|| {
-                    let f = &ws.modules[fmid.index()].functions[*fid];
-                    crate::query::render_fn_signature(ws, *name, f)
-                });
-            }
-        }
-    }
-    sigs
-}
-
-/// The single rank+cap used by every completion path: sort best-first by the
-/// precomputed `sort_text`, then drop the tail past `cap`.
-///
-/// Sound to drop the tail because completion is always served `isIncomplete:
-/// true` (see `do_completion_workspace`) -- the client re-requests per keystroke
-/// and the server re-scores against the typed prefix, so an item cut from this
-/// keystroke's `cap` reappears the moment the prefix ranks it back in. `what`
-/// labels the truncation in the `BONE_LSP_PROFILE` log.
-fn rank_and_cap(items: &mut Vec<CompletionItem>, cap: usize, what: &str) {
-    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
-    if items.len() > cap {
-        if lsp_profile_enabled() {
-            eprintln!("[bone completion] {what} truncated {} -> {cap}", items.len());
-        }
-        items.truncate(cap);
-    }
-}
-
-/// True if any overload of `name` declares a return type rendering to one of
-/// `expected`. Used to rank functions returning the wanted type just below
-/// variables of that type.
-/// Whether any function named `name` in the workspace is a `co fn`. Drives
-/// coroutine-fn ranking after a `yield`/`yield*`.
-fn fn_is_coroutine(ws: &Workspace, name: &str) -> bool {
-    let n = Ustr::from(name);
-    ws.modules.iter().any(|m| {
-        m.functions_by_name
-            .get(&n)
-            .is_some_and(|fns| fns.iter().any(|(fmid, fid)| ws.modules[fmid.index()].functions[*fid].is_coroutine))
-    })
-}
-
-/// Member sort_text used ONLY in a bool context (`if`/`while <chain>`), where no
-/// reach-path items coexist. Inserts a bool-priority digit right after the score
-/// so `bool` fields win a SCORE TIE -- a soft nudge, never overriding a
-/// better-scoring match. Mirrors `sort_text_with_score`'s layout otherwise.
-fn member_bool_sort_text(name: &str, pfx: &[u8], is_bool: bool, method: u8) -> String {
-    let lc = name.to_lowercase();
-    let score = fuzzy_score(name.as_bytes(), pfx).clamp(0, 9999);
-    let bp = u8::from(!is_bool); // 0 = bool (ranks first), 1 = everything else
-    // Leading `0` = case-neutral, aligning with `sort_text_with_score`'s
-    // `{case_rank}` column (member context does not case-rank).
-    format!("00{:04}{bp}01{method}{:03}{lc}", 9999 - score, lc.len().min(999))
-}
-
-/// Member sort_text used ONLY in a call-arg position (`callee(.., recv.<prefix>)`
-/// with a known expected param type). Inserts a type-match priority digit BEFORE
-/// the score so a field/method/reach-path whose type MATCHES the expected param
-/// DOMINATES (mirrors the global path, where a value of the expected type
-/// outranks a better-prefix candidate of the wrong type). The prefix filter still
-/// removes wrong-prefix candidates first, so this only reorders genuine matches.
-fn member_arg_sort_text(name: &str, pfx: &[u8], type_match: bool, method: u8, dist: u16) -> String {
-    let lc = name.to_lowercase();
-    let score = fuzzy_score(name.as_bytes(), pfx).clamp(0, 9999);
-    let tp = u8::from(!type_match); // 0 = matches expected type (first), 1 = else
-    let len_key = if score > 0 { lc.len().min(999) } else { 0 };
-    // Leading `0` = case-neutral, aligning with `sort_text_with_score`'s
-    // `{case_rank}` column (member context does not case-rank).
-    format!("00{tp}{:04}{:02}{method}{len_key:03}{lc}", 9999 - score, dist.min(99))
-}
-
-/// Whether a struct named `name` is defined anywhere in the workspace.
-fn struct_exists(ws: &Workspace, name: &str) -> bool {
-    let u = Ustr::from(name);
-    ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u))
-}
-
-/// True when `offset` sits just after the `)` of a `co fn NAME(..)` signature
-/// with no return type yet (`co fn spawn()|`). Pure byte heuristic; drives the
-/// `-> Coroutine<CoFrame>` return-type snippet.
-fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
-    let mut i = offset.min(src.len());
-    while i > 0 && src[i - 1].is_ascii_whitespace() {
-        i -= 1;
-    }
-    if i == 0 || src[i - 1] != b')' {
-        return false;
-    }
-    // balance back to the matching `(`
-    let mut depth = 0i32;
-    let mut k = i - 1;
-    loop {
-        match src[k] {
-            b')' => depth += 1,
-            b'(' => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => {}
-        }
-        if k == 0 {
-            return false;
-        }
-        k -= 1;
-    }
-    // before the `(`: ws, fn-name ident, ws, `fn`, ws, `co`
-    let mut p = k;
-    let skip_ws = |p: &mut usize| while *p > 0 && src[*p - 1].is_ascii_whitespace() { *p -= 1; };
-    skip_ws(&mut p);
-    let name_end = p;
-    while p > 0 && is_ident_byte(src[p - 1]) {
-        p -= 1;
-    }
-    if p == name_end {
-        return false; // no fn name
-    }
-    skip_ws(&mut p);
-    let fn_end = p;
-    while p > 0 && is_ident_byte(src[p - 1]) {
-        p -= 1;
-    }
-    if &src[p..fn_end] != b"fn" {
-        return false;
-    }
-    skip_ws(&mut p);
-    let co_end = p;
-    while p > 0 && is_ident_byte(src[p - 1]) {
-        p -= 1;
-    }
-    &src[p..co_end] == b"co" && (p == 0 || !is_ident_byte(src[p - 1]))
-}
-
-/// The contextual lifecycle-hook keywords with a statement block form
-/// (`on_killed { .. }`), parsed specially (`skull-parser` `LifecycleHook`).
-fn is_lifecycle_hook(name: &str) -> bool {
-    matches!(name, "on_killed" | "on_resume" | "on_hot_reload")
-}
-
-/// Param names that conventionally hold an `Entity<T>` (the `e`/`entity` idiom).
-fn is_entity_param_name(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(), "e" | "ent" | "entity")
-}
-
-/// The struct named by a fn-name's first `_`-segment, capitalized (`mob_attack_co`
-/// -> `Mob`), if such a struct exists -- the payload `T` for a synthesized
-/// `Entity<T>`. None when the segment doesn't name a struct.
-fn fn_prefix_struct(ws: &Workspace, fn_name: &str) -> Option<Ustr> {
-    // Try each `_`-segment leading-first: `<type>_<verb>` (`mob_attack_co`) and
-    // `<verb>_<type>` (`spawn_mob`) both name `Mob`. Leading match wins when
-    // more than one segment is a struct (the UFCS convention).
-    fn_name.split('_').filter(|s| !s.is_empty()).find_map(|seg| {
-        let mut chars = seg.chars();
-        let cap: String = chars.next()?.to_ascii_uppercase().to_string() + chars.as_str();
-        let u = Ustr::from(&cap);
-        ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u)).then_some(u)
-    })
-}
-
-/// The identifier characters immediately preceding `offset` (a byte offset).
-/// Rock identifiers are ASCII (`[A-Za-z0-9_]`), so walking bytes never splits a
-/// multibyte codepoint -- a non-ASCII byte is not alphanumeric and stops the walk.
-fn ident_prefix(src: &str, offset: usize) -> &str {
-    let end = offset.min(src.len());
-    let bytes = src.as_bytes();
-    let mut start = end;
-    while start > 0 {
-        let c = bytes[start - 1];
-        if c == b'_' || c.is_ascii_alphanumeric() {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    &src[start..end]
-}
-
-fn is_ident_byte(c: u8) -> bool {
-    c == b'_' || c.is_ascii_alphanumeric()
-}
-
-/// True when the cursor is in decorator position (`@<ident-prefix>|`): the ident
-/// under the cursor is immediately preceded by an `@`. The `@` isn't an ident
-/// byte, so `ident_prefix` already excludes it -- this only checks the trigger.
-fn decorator_context(src: &str, offset: usize) -> bool {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    while i > 0 && is_ident_byte(b[i - 1]) {
-        i -= 1;
-    }
-    i > 0 && b[i - 1] == b'@'
-}
-
-/// Completion candidates in decorator position: every `deco` declaration in the
-/// workspace (game decorators like `@update`/`@late_draw` live in the engine),
-/// prefix-filtered. Inserts the bare name -- the `@` is already typed.
-fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<CompletionItem> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for m in ws.modules.iter() {
-        for (_, dec) in m.decorators.iter() {
-            let name = dec.name.as_str();
-            if !clean_match(name.as_bytes(), prefix.as_bytes()) || !seen.insert(name.to_string()) {
-                continue;
-            }
-            let params: Vec<String> = dec
-                .param_decls
-                .iter()
-                .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
-                .collect();
-            out.push(CompletionItem {
-                label: name.to_string(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: (!params.is_empty()).then(|| format!("deco ({})", params.join(", "))),
-                insert_text: Some(name.to_string()),
-                sort_text: Some(sort_text_with_score(0, 0, name, 9999, 0, 0, true)),
-                ..Default::default()
-            });
-        }
-    }
-    out
-}
-
-/// Completion-parseable variants of the source up to `offset`: keep the prefix
-/// (where the receiver and earlier decls live), drop the broken tail, insert a
-/// synthetic identifier so the trigger `.` has a field, then close every open
-/// `([{`. This is the standard "parse up to the cursor" fixup -- structural
-/// resolution needs only a parseable prefix, not a correct whole file.
-///
-/// Two candidates are tried in order: the bare prefix, then the prefix with an
-/// empty block appended -- the latter recovers a dangling block header
-/// (`if x.`, `while x.`, `for i in x.`) whose body the user hasn't typed.
-///
-/// Caveat: delimiter counting ignores string/comment contents, and declarations
-/// *after* the cursor are dropped -- acceptable for completion, which edits in
-/// the middle of an otherwise-defined file.
-/// Inline `labelDetails.detail` for a completion item, rendered directly after
-/// the label in the popup: a function shows `(params) -> ret` (the signature
-/// minus the redundant `fn name`); a binding/global shows `: type`. None when
-/// there's no detail. Structs/enums (label is the bare name, kind conveys it)
-/// and fields (label already `name: type`) pass `None`.
-fn fn_or_type_label_details(kind: SymCat, detail: Option<&str>) -> Option<CompletionItemLabelDetails> {
-    let d = detail?;
-    let inline = match kind {
-        // `fn name(a: T) -> R` -> `(a: T) -> R`
-        SymCat::Function => d.find('(').map_or_else(|| d.to_string(), |i| d[i..].to_string()),
-        SymCat::Local | SymCat::Param | SymCat::Global => format!(": {d}"),
-        _ => return None,
-    };
-    Some(CompletionItemLabelDetails { detail: Some(inline), description: None })
+/// True when the current line from its start up to `offset` is empty or only
+/// spaces/tabs -- a bare/indented newline, where a space trigger is `<CR>`
+/// auto-indent rather than a token-following space.
+fn line_prefix_is_blank(src: &str, offset: usize) -> bool {
+    let line_start = src.get(..offset).and_then(|s| s.rfind('\n')).map_or(0, |i| i + 1);
+    src.get(line_start..offset)
+        .is_some_and(|p| p.chars().all(|c| c == ' ' || c == '\t'))
 }
 
 /// Re-type-check the WHOLE project with the current file replaced by `munged`,
@@ -4521,7 +3466,7 @@ fn reparse_with_project(
 /// tokenize error), fall back to a single-file scratch pass over the munged
 /// text alone -- same-file types still resolve, the last rung of the old
 /// reparse ladder. `None` only when both rungs fail.
-fn analyze_variant<R>(
+pub(crate) fn analyze_variant<R>(
     session: &mut Session,
     path: &str,
     munged: &str,
@@ -4582,664 +3527,27 @@ fn reparse_with_project_inner(
     bone_semantic::semantic_passes::semantic_pass(&mut single).ok()
 }
 
-pub(crate) fn completion_munges(src: &str, offset: usize) -> [String; 2] {
-    let off = offset.min(src.len());
-    let (head, tail) = src.split_at(off);
-
-    // Inject a sentinel identifier at the cursor (rust-analyzer's technique) so
-    // the in-progress `recv.` / `Foo {` parses, then KEEP the rest of the file:
-    // items defined AFTER the cursor (e.g. a UFCS method later in the same file)
-    // must stay in the parse, or they're silently missing from completion.
-    // skull-parser recovers at item/statement granularity, so the partially
-    // sentinel-mangled current statement drops by itself without taking the tail
-    // with it. balance_delimiters runs over head+tail together, so a delimiter
-    // the tail already closes adds no spurious closer.
-    let mk = |inject: &str| {
-        let mut s = String::with_capacity(src.len() + 32);
-        s.push_str(head);
-        s.push_str("__rock_completion__");
-        s.push_str(inject);
-        s.push_str(tail);
-        balance_delimiters(s)
-    };
-
-    [mk(""), mk(" {}")]
-}
-
-/// Append a closer for every still-open `([{` in `s` (innermost first).
-///
-/// Brace counting skips `//` line comments and `"`-delimited strings, so a brace
-/// in trailing prose (`// missing }`) or a string literal isn't mistaken for real
-/// nesting. When the completion munge keeps the file tail, the tail often ends in
-/// a `// ...` comment with no trailing newline; the appended closers go on a fresh
-/// line so they aren't swallowed by that comment (which would leave the enclosing
-/// block unclosed and fail the whole parse). An unterminated string is closed too.
-pub(crate) fn balance_delimiters(mut s: String) -> String {
-    // One stack models the whole nesting: code delimiters, strings, and the
-    // interpolation braces that re-enter CODE inside a string (`"a {expr}"`)
-    // -- an unterminated `"foo {` must close as `}"`, not `"`, or the
-    // tokenizer still fatals on the unmatched interpolation.
-    #[derive(PartialEq)]
-    enum Ctx {
-        Paren,
-        Bracket,
-        Brace,
-        /// `{` inside a string: code until the matching `}`.
-        Interp,
-        LineStr,
-        TripleStr,
-    }
-    let mut stack: Vec<Ctx> = Vec::new();
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut in_line_comment = false;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_line_comment {
-            if b == b'\n' {
-                in_line_comment = false;
-            }
-            i += 1;
-            continue;
-        }
-        match stack.last() {
-            Some(Ctx::LineStr) | Some(Ctx::TripleStr) => {
-                let triple = stack.last() == Some(&Ctx::TripleStr);
-                match b {
-                    b'\\' => i += 1, // skip the escaped character
-                    b'"' if triple && bytes.get(i + 1..i + 3) == Some(b"\"\"") => {
-                        stack.pop();
-                        i += 2;
-                    }
-                    b'"' if !triple => {
-                        stack.pop();
-                    }
-                    // `{{` emits a literal `{`; a bare `{` opens interpolation
-                    b'{' if bytes.get(i + 1) == Some(&b'{') => i += 1,
-                    b'{' => stack.push(Ctx::Interp),
-                    _ => {}
-                }
-                i += 1;
-            }
-            _ => {
-                match b {
-                    b'/' if bytes.get(i + 1) == Some(&b'/') => {
-                        in_line_comment = true;
-                        i += 1;
-                    }
-                    b'"' if bytes.get(i + 1..i + 3) == Some(b"\"\"") => {
-                        stack.push(Ctx::TripleStr);
-                        i += 2;
-                    }
-                    b'"' => stack.push(Ctx::LineStr),
-                    b'(' => stack.push(Ctx::Paren),
-                    b'[' => stack.push(Ctx::Bracket),
-                    b'{' => stack.push(Ctx::Brace),
-                    b')' | b']' | b'}' => {
-                        // a `}` closes a code Brace or pops Interp back into
-                        // its string; `)`/`]` close their code delimiter
-                        stack.pop();
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-    }
-    if in_line_comment && !stack.is_empty() {
-        s.push('\n'); // source ends inside a `//` comment; keep closers out of it
-    }
-    while let Some(c) = stack.pop() {
-        s.push_str(match c {
-            Ctx::Paren => ")",
-            Ctx::Bracket => "]",
-            Ctx::Brace => "}",
-            Ctx::Interp => "}",
-            Ctx::LineStr => "\"",
-            Ctx::TripleStr => "\"\"\"",
-        });
-    }
-    s
-}
-
-/// Field completions for an enum record-variant literal. Reparses (the
-/// incomplete `{ }` breaks the live body) and lists the variant's record fields.
-/// `None` when the head doesn't resolve to a record variant (a unit/tuple variant
-/// block head like `if x == Enum::Variant { .. }` is not a record literal) -- the
-/// caller falls through to global completion. `Some(vec![])` only when the variant
-/// IS a record but the prefix filtered every field out.
-fn enum_record_field_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
+/// Resolve a `SlotAnchor` to a typed expected-slot session against `ws` --
+/// the live workspace on the general path, the munge variant on the member
+/// path (member TyIds only resolve against the variant's Gamma).
+pub(crate) fn expected_for_anchor<'a>(
+    ws: &'a Workspace,
+    mid: ModuleId,
+    inf: &'a InferenceResult,
     offset: usize,
-    enum_name: &str,
-    variant: &str,
-    prefix: &str,
-) -> Option<Vec<CompletionItem>> {
-    for munged in completion_munges(src, offset) {
-        let Some(fields) = analyze_variant(session, path, &munged, |ws| {
-            crate::query::variant_record_fields(ws, enum_name, variant)
-        }) else {
-            continue;
-        };
-        if fields.is_empty() {
-            continue;
-        }
-        return Some(
-            fields
-                .into_iter()
-                .filter(|(name, _)| prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes()))
-                .map(|(name, ty)| CompletionItem {
-                    label: format!("{name}: {ty}"),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(ty),
-                    insert_text: Some(name),
-                    ..Default::default()
-                })
-                .collect(),
-        );
-    }
-
-    None
-}
-
-/// Field completions for `Name { <field> }`. Offers the struct's fields not
-/// already written in the literal, filtered by the prefix. Returns None (so the
-/// caller falls through to the global namespace) when `name` isn't a struct.
-fn struct_literal_field_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
-    name: &str,
-    brace_open: usize,
-    prefix: &str,
-) -> Option<Vec<CompletionItem>> {
-    // Analyze a balanced/synthetic munge as a Session variant so the struct def
-    // survives the broken literal -- and so a struct defined in another file /
-    // dependency resolves.
-    let fields = completion_munges(src, offset).into_iter().find_map(|munged| {
-        let f = analyze_variant(session, path, &munged, |ws| {
-            crate::query::struct_fields_by_name(ws, name)
-        })?;
-        (!f.is_empty()).then_some(f)
-    })?;
-
-    // Fields already written between the `{` and the cursor (`name :`), to skip.
-    let written = src.get(brace_open + 1..offset.min(src.len())).unwrap_or("");
-    let present: std::collections::HashSet<String> = written
-        .split(|c: char| c == ',' || c == '{' || c == '}')
-        .filter_map(|seg| seg.split(':').next())
-        .map(|n| n.trim().to_string())
-        .filter(|n| !n.is_empty())
-        .collect();
-
-    Some(
-        fields
-            .into_iter()
-            .filter(|(n, _)| !present.contains(n))
-            .filter(|(n, _)| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
-            .map(|(n, ty)| CompletionItem {
-                label: format!("{n}: {ty}"),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(ty),
-                insert_text: Some(n),
-                ..Default::default()
-            })
-            .collect(),
-    )
-}
-
-/// True if the `Enum::Variant` being completed at `offset` sits in a match-arm
-/// **pattern** position rather than a value position. Two heuristics, in order:
-///
-/// 1. **Forward `=>` scan** -- for an arm whose body is already present, scan
-///    past the variant name and an optional balanced payload group (`(..)` /
-///    `{..}`); the next tokens being `=>` mark an arm pattern. A value position
-///    (`let x = ..`, `return ..`, a call argument) never leads to `=>`.
-/// 2. **Backward enclosing-`match` scan** -- a FRESH arm (`SpellState::Loa|`
-///    with no `=>` typed yet) leads to no `=>`, and is lexically indistinguishable
-///    from a value position by what precedes it (`{`/`,` open blocks AND args
-///    too). The reliable signal is that the nearest enclosing block is a
-///    `match <scrutinee> { .. }`, so walk out to that brace and check it.
-///
-/// Patterns bind, they don't construct -- so in either case no payload template
-/// is offered.
-fn in_pattern_position(src: &str, offset: usize) -> bool {
-    let b = src.as_bytes();
-    let mut i = offset.min(b.len());
-    // the variant identifier under / after the cursor
-    while i < b.len() && is_ident_byte(b[i]) {
-        i += 1;
-    }
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    // an already-typed payload pattern, e.g. `Loaded(x)` / `Bandage { .. }`
-    if i < b.len() && (b[i] == b'(' || b[i] == b'{') {
-        let (open, close) = if b[i] == b'(' { (b'(', b')') } else { (b'{', b'}') };
-        let mut depth = 0i32;
-        while i < b.len() {
-            if b[i] == open {
-                depth += 1;
-            } else if b[i] == close {
-                depth -= 1;
-                if depth == 0 {
-                    i += 1;
-                    break;
-                }
-            }
-            i += 1;
-        }
-    }
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    if i + 1 < b.len() && b[i] == b'=' && b[i + 1] == b'>' {
-        return true;
-    }
-    // Fresh arm: no `=>` yet. Find the start of the `Enum::Variant` path the
-    // cursor is in (ident bytes + `:` run backward).
-    let mut start = offset.min(b.len());
-    while start > 0 && (is_ident_byte(b[start - 1]) || b[start - 1] == b':') {
-        start -= 1;
-    }
-    // The significant byte just before the path. An arm HEAD is opened by the
-    // match `{`, an arm separator `,`, or a previous arm's block-body close `}`.
-    // An arm BODY (value position) is preceded by `=>`; `let`/call/index/struct
-    // contexts by `=`/`(`/`[`/`:` -- all rejected here. This excludes arm bodies
-    // so the enclosing-`match` test below only fires for actual arm heads.
-    let mut p = start;
-    while p > 0 && b[p - 1].is_ascii_whitespace() {
-        p -= 1;
-    }
-    if p == 0 || !matches!(b[p - 1], b'{' | b',' | b'}') {
-        return false;
-    }
-    enclosing_block_is_match(b, start)
-}
-
-/// Whether the innermost block enclosing byte `from` is the body of a `match`
-/// expression -- i.e. `from` sits in an arm position. Walks backward to the
-/// nearest unmatched `{` (balancing `()[]{}`); a `(`/`[` reached first means we
-/// are inside a call/index, not a block, so not a match. From that `{`, scans the
-/// scrutinee back to the `match` keyword: only `()`/`[]`-balanced scrutinee
-/// tokens may intervene; a `{`/`}`/`;` boundary at depth 0 ends the search
-/// (the brace governs something else, e.g. a fn body or struct literal).
-fn enclosing_block_is_match(b: &[u8], from: usize) -> bool {
-    let mut depth = 0i32;
-    let mut i = from;
-    let brace = loop {
-        if i == 0 {
-            return false;
-        }
-        i -= 1;
-        match b[i] {
-            b')' | b']' | b'}' => depth += 1,
-            b'(' | b'[' => {
-                if depth == 0 {
-                    return false; // inside a call / index group, not a block
-                }
-                depth -= 1;
-            }
-            b'{' => {
-                if depth == 0 {
-                    break i;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    };
-    // Scan the scrutinee backward from the `{` to the governing keyword.
-    let mut j = brace;
-    let mut depth = 0i32;
-    while j > 0 {
-        j -= 1;
-        match b[j] {
-            b')' | b']' => depth += 1,
-            b'(' | b'[' => {
-                if depth == 0 {
-                    return false;
-                }
-                depth -= 1;
-            }
-            b'{' | b'}' | b';' if depth == 0 => return false,
-            c if depth == 0 && is_ident_byte(c) => {
-                // Read this whole word. `match` -> the brace is a match body.
-                // Any other word is part of the scrutinee (`match foo.bar {`) or
-                // the head of some other construct (`fn r() {`); keep scanning
-                // back -- the `{`/`}`/`;` boundary arms above stop a non-match
-                // brace before a spurious earlier `match` can be reached.
-                let end = j + 1;
-                while j > 0 && is_ident_byte(b[j - 1]) {
-                    j -= 1;
-                }
-                if &b[j..end] == b"match" {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Variant completions for `EnumName::<variant>`. The trailing `::<partial>` is
-/// a hard error that aborts the whole module, so we truncate it back to the bare
-/// enum name (accepted as a value) and balance -- that keeps the enum *def* in
-/// the parse, which is all the variant list needs.
-///
-/// In a value position each payload-carrying variant is templated as a snippet
-/// so the caller doesn't hand-fill it: a tuple variant inserts `Variant($0)`, a
-/// record variant `Variant { $0 }`, with the cursor parked inside. Unit variants
-/// (and any variant in a match-arm pattern position) insert the bare name.
-fn enum_qualified_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
-    enum_name: &str,
-    prefix: &str,
-) -> Vec<CompletionItem> {
-    // The query only needs the enum DEF resolvable, so the standard sentinel
-    // munges (body-local -- a cheap variant tier) serve it; a truncate-at-`::`
-    // munge would delete every item after the cursor and turn the variant into
-    // an interface-tier edit.
-    let mut all = Vec::new();
-    for munged in completion_munges(src, offset) {
-        let attempt = analyze_variant(session, path, &munged, |ws| {
-            crate::query::enum_variants_with_shape(ws, enum_name)
-        });
-        if let Some(v) = attempt {
-            if !v.is_empty() {
-                all = v;
-                break;
-            }
-        }
-    }
-
-    let pattern = in_pattern_position(src, offset);
-    let matches_prefix =
-        |v: &str| prefix.is_empty() || clean_match(v.as_bytes(), prefix.as_bytes());
-    // When the in-progress prefix matches NO variant (a typo like `TextAlign::top`),
-    // returning empty hands the popup to the client's buffer-word fallback -- the
-    // worst outcome, since an enum is a closed set. Show every variant instead, and
-    // force each past the CLIENT's own prefix filter via `filter_text = prefix` (cmp
-    // re-matches the typed text against each item; without this they vanish again).
-    // The response is `is_incomplete`, so the client re-requests each keystroke and
-    // the prefix stays fresh. A partial match keeps normal narrowing + default filter.
-    let none_match = !prefix.is_empty() && !all.iter().any(|(v, _)| matches_prefix(v));
-    let force_filter = none_match.then(|| prefix.to_string());
-
-    all.into_iter()
-        .filter(|(v, _)| none_match || matches_prefix(v))
-        .map(|(v, shape)| {
-            use crate::query::VariantShape;
-            let (insert_text, insert_text_format) = match (pattern, shape) {
-                (false, VariantShape::Tuple) => {
-                    (Some(format!("{v}($0)")), Some(InsertTextFormat::SNIPPET))
-                }
-                (false, VariantShape::Record) => {
-                    (Some(format!("{v} {{ $0 }}")), Some(InsertTextFormat::SNIPPET))
-                }
-                _ => (None, None),
-            };
-            CompletionItem {
-                label: v,
-                kind: Some(CompletionItemKind::ENUM_MEMBER),
-                filter_text: force_filter.clone(),
-                insert_text,
-                insert_text_format,
-                ..Default::default()
-            }
-        })
-        .collect()
-}
-
-/// Struct-field completions for `receiver.<field>`. The live body is broken by
-/// the trigger `.`, so this munges in a synthetic identifier (rust-analyzer's
-/// technique) to get a parseable file, then resolves the receiver's struct
-/// **structurally** (no inference required). Field labels are `name: type`.
-/// Each munge is analyzed as a speculative Session variant (one incremental
-/// update + restore), not a from-scratch project pass.
-fn member_completions(
-    session: &mut Session,
-    path: &str,
-    src: &str,
-    offset: usize,
-    segments: &[String],
-    prefix: &str,
-    arg_slot: Option<(String, usize)>,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
-    bool_ctx: bool,
-) -> Vec<CompletionItem> {
-    for munged in completion_munges(src, offset) {
-        let attempt = analyze_variant(session, path, &munged, |ws| {
-            member_completion_items(
-                ws, path, offset, segments, prefix, arg_slot.clone(), reach, bool_ctx,
-            )
-        });
-        if let Some(items) = attempt {
-            if !items.is_empty() {
-                return items;
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// One munge attempt's member items, resolved against the variant workspace.
-/// Whether a member of type `ty_id` (rendered `ty_render`) type-directs into
-/// the expected arg slot. Bone's `coerce` on the TyId when present (so an `int`
-/// field boosts in an `int?`/`float`/`any` slot); rendered-string equality when
-/// the member has no stored TyId (a generic-substituted field) or there's no
-/// session. False with no session at all.
-fn member_ty_match(mut expected: Option<&mut ExpectedArg>, ty_id: Option<TyId>, ty_render: &str) -> bool {
-    let Some(exp) = expected.as_mut() else { return false };
-    match ty_id {
-        Some(t) => exp.accepts(t),
-        None => exp.rendered.iter().any(|e| e == ty_render),
-    }
-}
-
-fn member_completion_items(
-    ws: &Workspace,
-    path: &str,
-    offset: usize,
-    segments: &[String],
-    prefix: &str,
-    arg_slot: Option<(String, usize)>,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
-    bool_ctx: bool,
-) -> Vec<CompletionItem> {
-    {
-        // The CURRENT file's module (where the receiver/offset live) -- not just
-        // "first non-builtin", which is wrong now that the whole project loads.
-        let Some(mid) = user_module_for_path(ws, path) else {
-            return Vec::new();
-        };
-
-        let fields = crate::query::struct_fields_for_path(ws, mid, offset, segments);
-        // UFCS methods: functions whose first param is the receiver's struct,
-        // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
-        let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
-        let methods = recv_struct
-            .map(|name| crate::query::ufcs_methods(ws, name))
-            .unwrap_or_default();
-        if fields.is_empty() && methods.is_empty() {
-            return Vec::new();
-        }
-        // Typed expected-arg session for the enclosing call, built against THIS
-        // (variant) workspace so its Gamma resolves the member TyIds the
-        // candidates carry (docs/assignable-plan.md phase 2). `coerce` decides
-        // the member type-match, not a rendered-string `==`; the receiver-
-        // filtered `.rendered` still feeds the string-keyed reach index. None
-        // when not in an arg slot or the body has no cached inference -- then
-        // there's no type direction (kind/name order), same as before.
-        let mut expected = arg_slot.as_ref().and_then(|(callee, idx)| {
-            let inf = ws.inference(mid)?;
-            ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx, None)
-        });
-        let arg_ctx = expected.is_some();
-        // Precompute the type-match decision per member (bone's `coerce` on the
-        // member's TyId; rendered-string equality only where a TyId is absent --
-        // e.g. a generic-substituted field). Sequential because `accepts` takes
-        // `&mut` (it memoizes / rolls back trial bindings).
-        let field_match: Vec<bool> = fields
-            .iter()
-            .map(|(_, ty, ty_id)| member_ty_match(expected.as_mut(), *ty_id, ty))
-            .collect();
-        let method_match: Vec<bool> = methods
-            .iter()
-            .map(|m| member_ty_match(expected.as_mut(), m.return_ty, m.returns.as_deref().unwrap_or("")))
-            .collect();
-        // Direct members are 1-hop (dist 1): they carry a sort_text too, so they
-        // order consistently with -- and ahead of, by distance -- the transitive
-        // reach paths added below (fuzzy score is the dominant term either way).
-        let pfx = prefix.as_bytes();
-        // In an `if`/`while <chain>` condition, `bool` fields are the likely
-        // target -- soft-boost them (score-tie tiebreak only). Mutually exclusive
-        // with arg-position reach paths, so the bool-format sort_text is safe to
-        // mix only with the field/method items here.
-        // Call-arg position (a known expected param type) -- a direct field/method
-        // whose type matches that param ranks first. Mutually exclusive with
-        // `bool_ctx` (a condition chain isn't inside a call).
-        // `_`-prefixed fields are soft-private: hidden from member completion
-        // unless the user is explicitly typing an `_` prefix. Fields stay public
-        // (no type-check change) -- this is purely a display convention.
-        let show_private = prefix.starts_with('_');
-        let field_items = fields.into_iter().zip(field_match).filter_map(|((name, ty, _), tmatch)| {
-            if name.starts_with('_') && !show_private {
+    anchor: SlotAnchor,
+) -> Option<ExpectedArg<'a>> {
+    let slot = match anchor {
+        SlotAnchor::TypeAt(a) => bone_semantic::query::type_at(ws, mid, inf, a)?.ty,
+        SlotAnchor::EnclosingFnReturn => {
+            let m = ws.modules.get(mid.index())?;
+            let bone_semantic::hir::BodyOwner::Function(fid) = m.body_at(offset)? else {
                 return None;
-            }
-            (prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {
-                sort_text: Some(if bool_ctx {
-                    member_bool_sort_text(&name, pfx, ty == "bool", 0)
-                } else if arg_ctx {
-                    member_arg_sort_text(&name, pfx, tmatch, 0, 1)
-                } else {
-                    arg_sort_text(0, &name, pfx, 1, 0)
-                }),
-                label: format!("{name}: {ty}"),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(ty),
-                insert_text: Some(name),
-                ..Default::default()
-            })
-        });
-        let method_items = methods.into_iter().zip(method_match).filter_map(|(m, rmatch)| {
-            (prefix.is_empty() || clean_match(m.name.as_bytes(), prefix.as_bytes())).then(|| {
-                // Inline `(params) -> ret`. A method with args left after the
-                // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
-                // inside); one with no remaining args inserts `name()` as plain
-                // text so the cursor lands after the `)`.
-                let (insert_text, insert_text_format) = if m.takes_args {
-                    (Some(format!("{}($0)", m.name)), Some(InsertTextFormat::SNIPPET))
-                } else {
-                    (Some(format!("{}()", m.name)), None)
-                };
-                CompletionItem {
-                    sort_text: Some(if bool_ctx {
-                        member_bool_sort_text(&m.name, pfx, false, 1)
-                    } else if arg_ctx {
-                        member_arg_sort_text(&m.name, pfx, rmatch, 1, 1)
-                    } else {
-                        arg_sort_text(0, &m.name, pfx, 1, 1)
-                    }),
-                    label: m.name.clone(),
-                    label_details: fn_or_type_label_details(SymCat::Function, Some(&m.signature)),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(m.signature),
-                    insert_text,
-                    insert_text_format,
-                    ..Default::default()
-                }
-            })
-        });
-        let mut items: Vec<CompletionItem> = field_items.chain(method_items).collect();
-        // Entity receiver: `.get()` (-> T?) is the dominant accessor, almost
-        // always followed by `.unwrap()`. Rank `get` first, and offer the whole
-        // `get().unwrap()` chain (matches a `getu`/`getunwrap` prefix, which the
-        // bare `get` method can't since it filters on `starts_with`).
-        if recv_struct.is_some_and(|s| s.as_str() == "Entity") {
-            for it in items.iter_mut() {
-                if it.label == "get" {
-                    it.sort_text = Some(sort_text_with_score(0, 0, "get", 9999, 0, 0, false));
-                }
-            }
-            if clean_match(b"get().unwrap()", prefix.as_bytes()) {
-                items.push(CompletionItem {
-                    label: "get().unwrap()".to_string(),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some("unwrap the Entity's value (T)".to_string()),
-                    insert_text: Some("get().unwrap()".to_string()),
-                    sort_text: Some(sort_text_with_score(0, 0, "get().unwrap()", 9998, 0, 0, false)),
-                    ..Default::default()
-                });
-            }
+            };
+            m.functions[fid].return_ty?
         }
-        // In a call-arg position with a known expected type, also offer
-        // TRANSITIVE suffix paths through the receiver -- fields, UFCS method
-        // returns, or a MIX (`movable.to_ivec()` when the param wants an IVec2)
-        // -- via the reachability index. Multi-hop only: 1-hop fields/methods are
-        // already in `field_items`/`method_items` above. The index keys on
-        // type-name strings, so the live-built one serves the munged buffer; if
-        // it's missing, build a local one from this workspace.
-        let reach_targets: &[String] = expected.as_ref().map_or(&[], |e| &e.rendered);
-        if !reach_targets.is_empty() {
-            if let Some(rs) = recv_struct {
-                let local_idx;
-                let idx = match reach {
-                    Some(r) => r,
-                    None => {
-                        local_idx = crate::reachability::ReachabilityIndex::build(ws);
-                        &local_idx
-                    }
-                };
-                const REACH_CAP: usize = 64;
-                let res = idx.paths_to(rs.as_str(), reach_targets, REACH_CAP);
-                let pfx = prefix.as_bytes();
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for p in res.paths {
-                    if !p.suffix.contains('.') {
-                        continue; // 1-hop field/method, already offered above
-                    }
-                    if !pfx.is_empty() && !clean_match(p.suffix.as_bytes(), pfx) {
-                        continue;
-                    }
-                    if !seen.insert(p.suffix.clone()) {
-                        continue;
-                    }
-                    let (label, kind, insert_text, insert_text_format) = if p.is_method {
-                        let call = format!("{}()", p.suffix);
-                        let (insert, fmt) = if p.takes_args {
-                            (format!("{}($0)", p.suffix), Some(InsertTextFormat::SNIPPET))
-                        } else {
-                            (call.clone(), None)
-                        };
-                        (format!("{call} -> {}", p.final_ty), CompletionItemKind::METHOD, insert, fmt)
-                    } else {
-                        (format!("{}: {}", p.suffix, p.final_ty), CompletionItemKind::FIELD, p.suffix.clone(), None)
-                    };
-                    // Reach paths are type-matches by construction (paths TO the
-                    // expected type) -- prio 0, same format as the direct items.
-                    let sort_text = member_arg_sort_text(&p.suffix, pfx, true, u8::from(p.is_method), p.dist);
-                    items.push(CompletionItem {
-                        label,
-                        kind: Some(kind),
-                        detail: Some(p.final_ty),
-                        insert_text: Some(insert_text),
-                        insert_text_format,
-                        sort_text: Some(sort_text),
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-        items
-    }
+    };
+    ExpectedArg::for_slot(ws, mid, inf, offset, slot)
 }
 
 /// bone's `CompilerError.location` is 0-based in both line and col -- the same
@@ -5380,7 +3688,7 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
 
 /// Find the user module whose source file is `path` (excludes warm stdlib and
 /// the builtin module, whose file ids never match a real path).
-fn user_module_for_path(ws: &Workspace, path: &str) -> Option<ModuleId> {
+pub(crate) fn user_module_for_path(ws: &Workspace, path: &str) -> Option<ModuleId> {
     let want = Ustr::from(path);
     let found = ws.modules.iter().find(|m| m.file == want).map(|m| m.id);
     // TEMP Windows-LSP diagnostic: on a miss, dump the query path vs the
@@ -5394,20 +3702,6 @@ fn user_module_for_path(ws: &Workspace, path: &str) -> Option<ModuleId> {
         eprintln!("[lsp-debug]   ({} total modules)", ws.modules.len());
     }
     found
-}
-
-fn completion_kind(k: SymCat) -> CompletionItemKind {
-    match k {
-        SymCat::Function => CompletionItemKind::FUNCTION,
-        SymCat::Struct => CompletionItemKind::STRUCT,
-        SymCat::Enum => CompletionItemKind::ENUM,
-        SymCat::Variant => CompletionItemKind::ENUM_MEMBER,
-        SymCat::Newtype => CompletionItemKind::CLASS,
-        SymCat::Global => CompletionItemKind::VARIABLE,
-        SymCat::Local | SymCat::Param => CompletionItemKind::VARIABLE,
-        SymCat::Field => CompletionItemKind::FIELD,
-        SymCat::Keyword => CompletionItemKind::KEYWORD,
-    }
 }
 
 /// Single-letter extended-ctags kind for a top-level declaration, or None for

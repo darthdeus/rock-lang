@@ -33,6 +33,32 @@ pub fn compute_overloaded_names(ws: &Workspace) -> HashSet<Ustr> {
         .collect()
 }
 
+/// Emitting a uniquely-named Rock fn under its surface name is wrong when that
+/// name is a Lua keyword (syntax error) or a LuaJIT global the emitted runtime
+/// itself depends on -- a bare `function next(...)` silently clobbers the
+/// `next` that Map iteration templates and `pairs`-based stdlib Lua use
+/// (found live: the stdlib `VecIter` `next` broke every Map test). Such names
+/// always mangle; `extern`/`@nomangle` above still win for deliberate shadows.
+fn lua_reserved(name: &str) -> bool {
+    matches!(
+        name,
+        // keywords
+        "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for"
+        | "function" | "goto" | "if" | "in" | "local" | "nil" | "not" | "or"
+        | "repeat" | "return" | "then" | "true" | "until" | "while"
+        // LuaJIT globals (functions)
+        | "assert" | "collectgarbage" | "dofile" | "error" | "gcinfo"
+        | "getfenv" | "getmetatable" | "ipairs" | "load" | "loadfile"
+        | "loadstring" | "module" | "newproxy" | "next" | "pairs" | "pcall"
+        | "print" | "rawequal" | "rawget" | "rawlen" | "rawset" | "require"
+        | "select" | "setfenv" | "setmetatable" | "tonumber" | "tostring"
+        | "type" | "unpack" | "xpcall"
+        // LuaJIT globals (tables / values)
+        | "_G" | "_VERSION" | "arg" | "bit" | "coroutine" | "debug" | "ffi"
+        | "io" | "jit" | "math" | "os" | "package" | "string" | "table"
+    )
+}
+
 /// True if `f` carries the annotation `@<name>` (e.g. `@nomangle`, `@test`).
 fn has_annotation(f: &Function, name: &str) -> bool {
     f.annotations
@@ -44,13 +70,17 @@ fn has_annotation(f: &Function, name: &str) -> bool {
 /// header and a call site to it route through here, so they cannot drift.
 pub fn mangle_fn(ws: &Workspace, f: &Function, overloaded: &HashSet<Ustr>) -> String {
     let name = f.name.as_str();
-    if !overloaded.contains(&f.name)
-        || f.is_extern
+    if f.is_extern
         || has_annotation(f, "nomangle")
         || has_annotation(f, "test")
         || name == "main"
         || name.starts_with("test_")
     {
+        // Deliberate surface names: `extern(lua)` IS the Lua builtin (print,
+        // error); `@nomangle` is an explicit shadow the author owns.
+        return name.to_string();
+    }
+    if !overloaded.contains(&f.name) && !lua_reserved(name) {
         return name.to_string();
     }
 

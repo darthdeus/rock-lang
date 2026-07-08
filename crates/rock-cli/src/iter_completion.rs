@@ -22,7 +22,7 @@ use bone_query::{last_completion_phase_timings, offset_to_position, BoneWorkspac
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn collect_rock_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_rock_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -45,7 +45,7 @@ fn collect_rock_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-pub fn iter_completion(path: &str, iters: usize, warmup: usize) -> Result<()> {
+pub fn iter_completion(path: &str, iters: usize, warmup: usize, budget_ms: Option<f64>) -> Result<()> {
     let dir = Path::new(path);
     if !dir.is_dir() {
         anyhow::bail!("iter-completion expects a project directory, got `{path}`");
@@ -233,5 +233,27 @@ pub fn iter_completion(path: &str, iters: usize, warmup: usize) -> Result<()> {
     }
     eprintln!("  (gaps=general gather; rank=rank+materialize; reach=type-path; call-thru=fused-query)");
     eprintln!("  (ctfns=fns past noise guard; argiters=(fn,arg) pairs tested; surv=pairs matched+scored)");
+    // The perf gate (docs/completion-v2-design.md M0): fail loudly when the
+    // WORST per-keystroke median walks past the budget. Medians, not maxes --
+    // a single scheduler hiccup must not flake the gate.
+    if let Some(budget) = budget_ms {
+        let worst = by_len
+            .iter()
+            .map(|s| (med(&s.total), s.len))
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+            .unwrap_or((0.0, 0));
+        if worst.0 > budget {
+            anyhow::bail!(
+                "completion perf gate FAILED: worst keystroke median {:.2}ms (prefix `{}`) exceeds budget {budget:.2}ms",
+                worst.0,
+                &word[..worst.1],
+            );
+        }
+        eprintln!(
+            "  perf gate OK: worst keystroke median {:.2}ms (prefix `{}`) within budget {budget:.2}ms",
+            worst.0,
+            &word[..worst.1],
+        );
+    }
     Ok(())
 }

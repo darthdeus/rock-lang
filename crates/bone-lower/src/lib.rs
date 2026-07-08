@@ -810,6 +810,7 @@ pub fn lower_expr_value(
         }
     }
 
+
     let result = match &e.kind {
         ExprKind::Null => Expr::Null,
         ExprKind::Unit => Expr::Unit,
@@ -864,6 +865,9 @@ pub fn lower_expr_value(
                     if let Some(nm) = &ca.name {
                         body.arg_names.insert(arg_idx, nm.name);
                     }
+                    if ca.is_spread {
+                        body.spread_args.insert(arg_idx);
+                    }
                 }
 
                 // A local fn-typed binding is called through its value, everything else
@@ -890,6 +894,9 @@ pub fn lower_expr_value(
                 for (arg_idx, ca) in args_range.into_iter().skip(1).zip(args.iter()) {
                     if let Some(nm) = &ca.name {
                         body.arg_names.insert(arg_idx, nm.name);
+                    }
+                    if ca.is_spread {
+                        body.spread_args.insert(arg_idx);
                     }
                 }
 
@@ -1095,7 +1102,10 @@ pub fn lower_expr_value(
             }
         }
 
-        ExprKind::StructLiteral { name, fields } => {
+        ExprKind::StructLiteral { name, bases, fields } => {
+            // Functional-update bases evaluate before fields.
+            let base_range = lower_exprs(ctx, a, body, scope, bases.iter())?;
+
             let mut entries = Vec::new();
 
             for (names, value) in fields.iter() {
@@ -1115,6 +1125,7 @@ pub fn lower_expr_value(
             Expr::StructLiteral {
                 name: name.name,
                 fields,
+                bases: base_range,
             }
         }
 
@@ -1467,6 +1478,66 @@ fn function_footprint_lo(annotations: &[Annotation], f: &FunctionDef) -> usize {
         .unwrap_or(f.span.offset_range.0)
 }
 
+/// Lower a fn's generic bounds: `I: Iterator<T>` becomes `Some(elem)` at I's
+/// index. Runs AFTER `declare_generics` so a bound may reference any sibling
+/// generic, including a later one (`<I: Iterator<T>, T>`). The only bound the
+/// compiler knows is the builtin `Iterator<elem>`; anything else rejects.
+fn lower_generic_bounds(
+    ctx: &mut LowerCtx,
+    a: &Ast,
+    body: &mut Body,
+    generics: &[skull_parser::Generic],
+) -> Result<Vec<Option<TyId>>, CompilerError> {
+    let mut out = Vec::with_capacity(generics.len());
+    for g in generics {
+        let Some(b) = g.bound else {
+            out.push(None);
+            continue;
+        };
+        let bte = a.te(&b);
+        match &bte.kind {
+            skull_parser::TypeExprKind::App { ctor, args }
+                if ctor.name.as_str() == "Iterator" && args.len() == 1 =>
+            {
+                out.push(Some(lower_type_expr(ctx, a, body, a.te(&args[0]))?));
+            }
+            skull_parser::TypeExprKind::App { ctor, .. } if ctor.name.as_str() == "Iterator" => {
+                comp_error!(
+                    bte.span,
+                    "`Iterator` bound takes exactly one element type: `{}: Iterator<T>`",
+                    g.name.name
+                );
+            }
+            _ => {
+                comp_error!(
+                    bte.span,
+                    "unknown bound on `{}`: the only supported bound is `Iterator<T>`",
+                    g.name.name
+                );
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Generic bounds only mean something on FNS (structural `next` conformance at
+/// call sites); on a type declaration there is no call site to check them at.
+fn reject_generic_bounds(
+    what: &str,
+    generics: &[skull_parser::Generic],
+) -> Result<(), CompilerError> {
+    for g in generics {
+        if g.bound.is_some() {
+            comp_error!(
+                g.name.span,
+                "generic bounds are not allowed on {}; bounds only apply to fn generic parameters",
+                what
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn build_function(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -1476,6 +1547,7 @@ pub fn build_function(
     ctx.generics_in_scope.clear();
     let generic_var_ids = ctx.declare_generics(&f.generics);
     let mut body = Body::default();
+    let generic_bounds = lower_generic_bounds(ctx, a, &mut body, &f.generics)?;
 
     let return_ty = if let Some(ret_ty) = &f.return_ty {
         let typ_expr = lower_type_expr(ctx, a, &mut body, a.te(ret_ty))?;
@@ -1515,6 +1587,7 @@ pub fn build_function(
         is_coroutine: f.is_coroutine,
         is_variadic,
         generics: generic_var_ids,
+        generic_bounds,
         param_decls,
 
         num_required,
@@ -1785,6 +1858,7 @@ pub fn lower_struct_def(
     a: &Ast,
     s: &skull_parser::StructDef,
 ) -> Result<(), CompilerError> {
+    reject_generic_bounds("a struct", &s.generics)?;
     let generic_var_ids = ctx.declare_generics(&s.generics);
     let mut body = Body::default();
 
@@ -1840,6 +1914,7 @@ pub fn lower_enum_def(
     a: &Ast,
     e: &skull_parser::EnumDef,
 ) -> Result<(), CompilerError> {
+    reject_generic_bounds("an enum", &e.generics)?;
     let generic_var_ids = ctx.declare_generics(&e.generics);
     let mut body = Body::default();
 
@@ -1918,6 +1993,7 @@ pub fn lower_newtype_def(
     a: &Ast,
     n: &skull_parser::NewtypeDef,
 ) -> Result<(), CompilerError> {
+    reject_generic_bounds("a newtype", &n.generics)?;
     let generic_var_ids = ctx.declare_generics(&n.generics);
     let mut body = Body::default();
 
