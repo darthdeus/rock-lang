@@ -1974,6 +1974,22 @@ fn match_arm_body_is_a_value_slot_no_variant_promotion() {
 }
 
 #[test]
+fn chained_member_on_inferred_local_offers_vec_methods() {
+    // `c.items.le|` where `c` is an INFERRED local (`let c = mk()`, no
+    // annotation, call initializer). The single-segment path recovers the
+    // head type from inference, but the multi-segment name-walk resolved the
+    // head only structurally (declared_ty / struct-literal init / for-var /
+    // match), so an inferred local's chained member came up empty. `.items`
+    // is a `[Item]` (Vec), so `len` must be offered.
+    let src = "struct Item { kind: int }\n\
+               struct Corpse { items: [Item], name: string }\n\
+               fn mk() -> Corpse { return Corpse { items: [], name: \"\" } }\n\
+               fn r() {\n  let c = mk()\n  let n = c.items.le\n}\n";
+    let l = labels(src, 5, 18);
+    assert!(l.contains(&"len".to_string()), "Vec methods on chained inferred-local member: {l:?}");
+}
+
+#[test]
 fn unspaced_less_than_comparison_is_expression_position() {
     // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot
     // and offers the bare enum instead of qualified variants. It's a

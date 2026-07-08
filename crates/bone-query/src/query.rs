@@ -2808,6 +2808,16 @@ fn receiver_head_struct(ws: &Workspace, mid: ModuleId, offset: usize, head: &str
                 if let Some(ty) = match_pattern_binding_ty(ws, body, b_idx) {
                     return struct_name_of_ty(ws, Some(body), ty);
                 }
+                // Inferred local (`let c = mk()` -- call init, no annotation):
+                // its type lives only in inference, so recover the struct name
+                // from `binding_types` (as the single-segment path does).
+                if let Some(bi) = ws.inference(mid).and_then(|i| i.per_fn.get(&owner)) {
+                    if let Some(&ty) = bi.binding_types.get(b_idx) {
+                        if let Some((_, sname)) = struct_fields_of_ty(ws, Some(bi), ty) {
+                            return Some(sname);
+                        }
+                    }
+                }
             }
         }
     }
