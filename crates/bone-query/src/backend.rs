@@ -1063,11 +1063,14 @@ impl BoneWorkspace {
             let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
             // PRIMARY: resolve the receiver's type via inference (`type_at`).
             // Handles generic-substituted fields, tuple/newtype projections, and
-            // call/index receivers the structural name-walk can't express.
-            let mut items = member_completions_by_receiver(
+            // call/index receivers the structural name-walk can't express. `None`
+            // means the receiver isn't a members-bearing type (`scale(x)` -> int).
+            let by_recv = member_completions_by_receiver(
                 &mut proj.session, path, src, offset, recv_end, &prefix, arg_slot.clone(), cx.anchor,
                 proj.reach.as_ref(), cx.bool_chain,
             );
+            let resolved = by_recv.is_some();
+            let mut items = by_recv.unwrap_or_default();
             // FALLBACK: a pure-ident receiver whose type inference can't see --
             // the enclosing call is to an unknown fn (`newHelper(thing.|`), or a
             // parse error dropped the statement. The name-walk resolves the
@@ -1080,11 +1083,13 @@ impl BoneWorkspace {
                     );
                 }
             }
-            // A name-path member context returns even when empty -- `recv.` is
-            // member access, never a bare global (Rock has no namespaces), so
-            // suppress general completion. A complex receiver with no members
-            // (`scale(x).|` -> int) falls through to general instead.
-            if !items.is_empty() || cx.member.is_some() {
+            // This is member access: `recv.` never completes to a bare global
+            // (Rock has no namespaces). Suppress general completion whenever the
+            // receiver resolved to a members-bearing type (even if the prefix
+            // matched none -- offering globals would be invalid UFCS suggestions)
+            // or it's a name path. Only a receiver that ISN'T a members type
+            // (`scale(x).|` -> int) falls through to general.
+            if resolved || cx.member.is_some() || !items.is_empty() {
                 if next_is_open_paren {
                     strip_call_template(&mut items);
                 }

@@ -2091,6 +2091,31 @@ fn chained_member_through_inferred_local_newtype_head_in_fallback() {
 }
 
 #[test]
+fn call_receiver_suppresses_globals_when_no_member_matches() {
+    // `getitems().ce|` -- the receiver resolves to `[Item]` (a Vec), and `ce`
+    // matches no Vec member. General completion must be SUPPRESSED: leaking the
+    // global `centroid([Vec2])` / `ceil` would be an invalid UFCS suggestion
+    // (`centroid([Item])` doesn't type-check). A call receiver used to fall
+    // through to general on an empty member result; a name path never did.
+    let src = "struct Vec2 { x: float, y: float }\n\
+               struct Item { kind: int }\n\
+               fn centroid(v: [Vec2]) -> Vec2 { return v[0] }\n\
+               fn getitems() -> [Item] { return [] }\n\
+               fn r() {\n  let n = getitems().ce\n}\n";
+    let leak = labels(src, 5, 23);
+    assert!(!leak.contains(&"centroid".to_string()), "leaked [Vec2] global as UFCS: {leak:?}");
+    assert!(!leak.contains(&"ceil".to_string()), "leaked a global after member `.`: {leak:?}");
+
+    // Non-vacuous: the same receiver DOES offer its Vec members for a real
+    // prefix, so the suppression above isn't just an unresolved receiver.
+    let hit = "struct Item { kind: int }\n\
+               fn getitems() -> [Item] { return [] }\n\
+               fn r() {\n  let n = getitems().cl\n}\n";
+    let l = labels(hit, 3, 23);
+    assert!(l.contains(&"clear".to_string()), "Vec members must resolve on a call receiver: {l:?}");
+}
+
+#[test]
 fn unspaced_less_than_comparison_is_expression_position() {
     // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot
     // and offers the bare enum instead of qualified variants. It's a

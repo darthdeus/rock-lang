@@ -1019,11 +1019,17 @@ pub(crate) fn member_ty_match(mut expected: Option<&mut ExpectedArg>, ty_id: Opt
     }
 }
 
-/// Member completion for a receiver the structural name-walk can't encode -- a
-/// call (`x.find_spell().|`), index, etc. Its type comes from inference:
-/// `recv_end` is the receiver expr's end offset (BEFORE the cursor, so stable
-/// across the completion munges), and `struct_members_of_receiver_expr` reads
-/// its TyId via `type_at`. Fields + struct name then feed the shared builder.
+/// Member completion for `recv.<cursor>`, any receiver shape. Its type comes
+/// from inference: `recv_end` is the receiver expr's end offset (BEFORE the
+/// cursor, so stable across the completion munges), and
+/// `struct_members_of_receiver_expr` reads its TyId via `type_at`. Fields +
+/// struct name then feed the shared builder.
+///
+/// `None` means the receiver did NOT resolve to a members-bearing type (a
+/// non-struct like `scale(x)` -> int) -- the caller may fall through to general
+/// completion. `Some(items)` means it DID resolve; `items` may be empty when the
+/// prefix matched no member, and the caller must then SUPPRESS general
+/// completion (offering globals after `recv.` would be invalid UFCS suggestions).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn member_completions_by_receiver(
     session: &mut Session,
@@ -1036,30 +1042,30 @@ pub(crate) fn member_completions_by_receiver(
     anchor: Option<SlotAnchor>,
     reach: Option<&crate::reachability::ReachabilityIndex>,
     bool_ctx: bool,
-) -> Vec<CompletionItem> {
+) -> Option<Vec<CompletionItem>> {
     let paren_follows = open_paren_follows(src, offset);
+    let mut resolved_empty = false;
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
-            let Some(mid) = user_module_for_path(ws, path) else {
-                return Vec::new();
-            };
-            let Some((fields, recv_struct, vec_elem)) =
-                crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)
-            else {
-                return Vec::new();
-            };
-            build_member_items(
+            let mid = user_module_for_path(ws, path)?;
+            let (fields, recv_struct, vec_elem) =
+                crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)?;
+            Some(build_member_items(
                 ws, mid, offset, fields, Some(recv_struct), vec_elem, prefix, arg_slot.clone(),
                 anchor, reach, bool_ctx, paren_follows,
-            )
+            ))
         });
-        if let Some(items) = attempt {
+        // `Some(Some(items))`: this variant resolved the receiver. Prefer the
+        // first non-empty result; remember a resolved-but-empty one so we still
+        // suppress general rather than leak globals.
+        if let Some(Some(items)) = attempt {
             if !items.is_empty() {
-                return items;
+                return Some(items);
             }
+            resolved_empty = true;
         }
     }
-    Vec::new()
+    resolved_empty.then(Vec::new)
 }
 
 #[allow(clippy::too_many_arguments)]
