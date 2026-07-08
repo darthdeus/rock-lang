@@ -92,6 +92,69 @@ fn allow_of_a_different_lint_does_not_suppress() {
 }
 
 #[test]
+fn unused_param_is_flagged() {
+    let src = "fn f(a: int, b: int) -> int { a }";
+    assert_eq!(names(src), vec!["b".to_string()], "b is never read");
+}
+
+#[test]
+fn read_param_is_not_flagged() {
+    let src = "fn f(a: int) -> int { a }";
+    assert!(names(src).is_empty(), "a is read");
+}
+
+#[test]
+fn underscore_param_is_silenced() {
+    let src = "fn f(_a: int, b: int) -> int { b }";
+    assert!(names(src).is_empty(), "`_a` opts out");
+}
+
+#[test]
+fn inline_lua_fn_params_are_not_flagged() {
+    // The Lua body uses a/b invisibly (no HIR body -> root is None). Flagging
+    // these would false-positive on every FFI/inline(lua) shim.
+    let src = "inline(lua) fn add(a: int, b: int) -> int = \"\"\"return a + b\"\"\"";
+    assert!(names(src).is_empty(), "inline(lua) params are used by the Lua body: {:?}", names(src));
+}
+
+#[test]
+fn extern_fn_params_are_not_flagged() {
+    let src = "extern fn c_add(a: int, b: int) -> int";
+    assert!(names(src).is_empty(), "extern params are consumed by C");
+}
+
+#[test]
+fn lambda_param_is_not_flagged() {
+    // `a` is a lambda param (Param-kind but outside the fn's param_bindings).
+    // Only the enclosing fn's OWN params are candidates.
+    let src = "fn f() -> int {\n    let g = (a: int) => 1\n    g(5)\n}";
+    assert!(names(src).is_empty(), "lambda params are exempt: {:?}", names(src));
+}
+
+#[test]
+fn unused_match_payload_bind_is_flagged() {
+    // `n` binds the `Some` payload but is never read -> unused.
+    let src = "enum Opt {\n    Some(int),\n    None,\n}\n\
+               fn f(o: Opt) -> int {\n    \
+               match o {\n        Some(n) => 5,\n        None => 0,\n    }\n}";
+    assert_eq!(names(src), vec!["n".to_string()]);
+}
+
+#[test]
+fn read_match_payload_bind_is_not_flagged() {
+    let src = "enum Opt {\n    Some(int),\n    None,\n}\n\
+               fn f(o: Opt) -> int {\n    \
+               match o {\n        Some(n) => n,\n        None => 0,\n    }\n}";
+    assert!(names(src).is_empty(), "n is read in the arm body");
+}
+
+#[test]
+fn unused_if_let_bind_is_flagged() {
+    let src = "fn f(o: int?) -> int {\n    if let x = o {\n        7\n    } else {\n        0\n    }\n}";
+    assert_eq!(names(src), vec!["x".to_string()], "if-let bind never read");
+}
+
+#[test]
 fn match_arm_payload_less_variant_is_not_flagged() {
     // bone lowers the bare `None` arm to a Let binding; it must NOT be
     // reported as an unused variable.

@@ -157,9 +157,10 @@ fn request_stats_json(loaded_modules: usize) -> serde_json::Value {
 
 /// Snapshot for the `rock/modules` request, shaped for the modules floater:
 /// `{ total_modules, contexts: [{ kind, root, module_count, modules: [...] }] }`.
-/// bone doesn't track per-module compile timing/staleness, so those fields are
-/// null/false (the floater renders them as `-`).
-fn modules_json(summary: Vec<(String, Vec<String>)>) -> serde_json::Value {
+/// `ago_ms` is how long ago each module last (re)inferred (null if never touched
+/// this session -- rendered `-`). bone tracks no per-module compile *duration*
+/// or dep-staleness, so `last_compile_us`/`stale` stay null/false.
+fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde_json::Value {
     let total: usize = summary.iter().map(|(_, ids)| ids.len()).sum();
     let contexts: Vec<serde_json::Value> = summary
         .into_iter()
@@ -167,11 +168,11 @@ fn modules_json(summary: Vec<(String, Vec<String>)>) -> serde_json::Value {
             let module_count = ids.len();
             let modules: Vec<serde_json::Value> = ids
                 .into_iter()
-                .map(|id| {
+                .map(|m| {
                     serde_json::json!({
-                        "id": id,
+                        "id": m.id,
                         "last_compile_us": serde_json::Value::Null,
-                        "ago_ms": serde_json::Value::Null,
+                        "ago_ms": m.ago_ms,
                         "stale": false,
                         "is_stdlib": false,
                         "is_builtin": false,
