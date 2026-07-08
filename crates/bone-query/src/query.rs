@@ -2390,6 +2390,65 @@ pub fn call_param_hints(
     out
 }
 
+/// Receiver-type hints for D-form method definitions (`fn Mob.take_damage(m,
+/// ..)`): a `: <receiver>` hint after the bare receiver param `m`, so its type
+/// reads like the annotated params beside it. Gated on `receiver_surface` (the
+/// parser's D-form marker) -- ordinary annotated params already show their type
+/// in source and get no hint. The type is rendered off the surface AST because
+/// bone drops `receiver_surface` at lowering. Range-filtered to `[start, end)`.
+pub fn receiver_param_hints(ast: &Ast, start: usize, end: usize) -> Vec<(Span, String)> {
+    let mut out = Vec::new();
+    for item in &ast.items {
+        let skull_parser::ItemKind::Function(f) = &item.kind else {
+            continue;
+        };
+        if f.receiver_surface.is_none() {
+            continue;
+        }
+        let Some(recv) = f.params.first() else {
+            continue;
+        };
+        let s = recv.span.offset_range.0;
+        if s < start || s >= end {
+            continue;
+        }
+        out.push((recv.span, format!(": {}", render_type_expr(ast, recv.ty))));
+    }
+    out
+}
+
+/// Render a surface `TypeExprData` back to source-like text (`Map<K, V>`,
+/// `[int]`, `float?`). Used for D-form receiver hints, where the type lives only
+/// in the parser AST.
+fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData>) -> String {
+    use skull_parser::TypeExprKind as K;
+    let te = ast.te(&idx);
+    let join = |xs: &[skull_parser::Idx<skull_parser::TypeExprData>]| {
+        xs.iter().map(|x| render_type_expr(ast, *x)).collect::<Vec<_>>().join(", ")
+    };
+    let base = match &te.kind {
+        K::Any => "any".to_string(),
+        K::Unit => "()".to_string(),
+        K::String => "string".to_string(),
+        K::Int => "int".to_string(),
+        K::Float => "float".to_string(),
+        K::Bool => "bool".to_string(),
+        K::Ident(id) => id.name.to_string(),
+        K::Array(el) => format!("[{}]", render_type_expr(ast, *el)),
+        K::App { ctor, args } => format!("{}<{}>", ctor.name, join(args)),
+        K::Tuple(els) => format!("({})", join(els)),
+        K::Function { params, ret } => {
+            format!("fn({}) -> {}", join(params), render_type_expr(ast, *ret))
+        }
+        K::Hole(..) => "?".to_string(),
+    };
+    if te.is_nullable {
+        format!("{base}?")
+    } else {
+        base
+    }
+}
+
 /// In-scope locals + params at `offset`: every param of the enclosing function
 /// body, plus `let` bindings whose declaration ends before the cursor. Each
 /// paired with its kind and rendered inferred type (bone-native text). Drives

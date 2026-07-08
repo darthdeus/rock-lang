@@ -2139,8 +2139,18 @@ impl BoneWorkspace {
         // and a per-hint `offset_to_position` rescans from the file start each
         // time (O(hints * filesize)). With the index each is O(log n + col).
         let line_index = LineIndex::new(src);
+        // D-form receiver hints come off the surface AST (bone drops the
+        // `receiver_surface` marker at lowering), so reparse the buffer here and
+        // fold them into the bone-native hint stream as ordinary type hints.
+        let recv_hints = skull_parser::parse_module(src, Ustr::from(path))
+            .ok()
+            .map(|ast| crate::query::receiver_param_hints(&ast, start, end))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(span, label)| gaps::HintEntry { span, label, leading: false });
         gaps::inlay_hints(ws, mid, inf, start, end)
             .into_iter()
+            .chain(recv_hints)
             .map(|h| {
                 // A leading (parameter-name) hint renders before its span with
                 // trailing padding; a type hint renders after with leading padding.
