@@ -457,10 +457,13 @@ pub(crate) struct CompletionCx {
     /// The recovered-AST classifier over the munge ladder; None only on the
     /// tokenize frontier (byte-scanner fallbacks own that).
     pub(crate) ast: Option<crate::cursor_context::CursorAst>,
-    /// `recv.pa|` -- pure ident receiver chain (most specific trigger).
+    /// `recv.pa|` -- pure ident receiver chain, as name segments. The FALLBACK
+    /// receiver resolver (structural name-walk): used when `type_at` at
+    /// `member_recv_end` can't type the receiver (unknown callee / dropped
+    /// statement), where a by-name binding lookup still resolves it.
     pub(crate) member: Option<Vec<String>>,
-    /// `x.find().|` / `xs[i].|` -- member receiver the name-walk can't encode;
-    /// the receiver expr's end offset, resolved via inference (`type_at`).
+    /// `recv.<cursor>` -- the member receiver's end offset, any receiver shape.
+    /// The PRIMARY resolver: the receiver's type via inference (`type_at`).
     pub(crate) member_recv_end: Option<usize>,
     /// Enclosing call with the cursor in an ARG slot: (callee, idx,
     /// receiver end). Field-ref gate + expected-type input.

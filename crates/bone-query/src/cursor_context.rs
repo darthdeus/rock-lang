@@ -810,12 +810,14 @@ impl CursorAst {
         Some(segs)
     }
 
-    /// The END offset of a member receiver that ISN'T a plain name path -- a
-    /// call (`x.find_spell().|`), index, etc. `member_path` returns None for
-    /// these (a call has no name segment), but the receiver's TYPE still
-    /// resolves via inference at this offset. None when the cursor is in the
-    /// receiver, or the receiver IS a name path (the structural name-walk owns
-    /// that -- inference-free, so robust when a munge breaks inference).
+    /// The END offset of a member receiver (`recv.<cursor>`), whatever its shape
+    /// -- a name path (`line.start.|`), a call (`x.find().|`), an index
+    /// (`xs[i].|`). The receiver's TYPE resolves via inference (`type_at`) at
+    /// this offset. Set for name paths too (unlike before): `type_at` handles
+    /// generic-substituted fields and tuple/newtype projections the structural
+    /// name-walk can't, so completion tries it FIRST and falls back to the
+    /// name-walk (via `member_path`) when inference can't see the receiver.
+    /// None when the cursor is in the receiver rather than the member slot.
     pub(crate) fn member_receiver_end(&self) -> Option<usize> {
         let chain = self.expr_chain();
         let &node = chain.first()?;
@@ -827,22 +829,7 @@ impl CursorAst {
         if self.probe < member.span.offset_range.0 {
             return None; // cursor in the receiver, not the member slot
         }
-        if self.is_name_path(*recv) {
-            return None; // name-walk handles it
-        }
         Some(self.expr(*recv).span.offset_range.1)
-    }
-
-    /// A receiver expression reachable as `ident(.field)*` -- exactly what
-    /// `member_path` can encode as name segments.
-    fn is_name_path(&self, mut cur: Idx<ExprData>) -> bool {
-        loop {
-            match &self.expr(cur).kind {
-                ExprKind::Ident(_) => return true,
-                ExprKind::FieldAccess(r, _) | ExprKind::SafeNavigation(r, _) => cur = *r,
-                _ => return false,
-            }
-        }
     }
 
     /// The UFCS receiver of the call whose arg slot the cursor sits in, as a

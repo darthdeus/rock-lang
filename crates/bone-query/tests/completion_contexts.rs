@@ -2008,6 +2008,38 @@ fn method_completion_omits_parens_when_they_already_follow() {
 }
 
 #[test]
+fn chained_member_through_generic_struct_field() {
+    // `p.first.na|` where `first: A` is generic-substituted to `Corpse`. The
+    // old structural name-walk resolved field hops by declared type and lost
+    // the generic arg (`A` isn't a struct), so it came up empty. Resolving the
+    // receiver `p.first` via inference substitutes A=Corpse. Works for a param
+    // AND an inferred local.
+    let src = "struct Corpse { items: int, name: string }\n\
+               struct Pair<A, B> { first: A, second: B }\n\
+               fn r(p: Pair<Corpse, int>) {\n  let n = p.first.na\n}\n";
+    let l = labels(src, 3, 18);
+    assert!(l.contains(&"name: string".to_string()), "generic field chain (param): {l:?}");
+
+    let src2 = "struct Corpse { items: int, name: string }\n\
+                struct Pair<A, B> { first: A, second: B }\n\
+                fn mk() -> Pair<Corpse, int> { return Pair { first: Corpse { items: 0, name: \"\" }, second: 1 } }\n\
+                fn r() {\n  let p = mk()\n  let n = p.first.na\n}\n";
+    let l2 = labels(src2, 5, 18);
+    assert!(l2.contains(&"name: string".to_string()), "generic field chain (inferred local): {l2:?}");
+}
+
+#[test]
+fn chained_member_through_tuple_projection() {
+    // `t.0.na|` -- the receiver `t.0` is a tuple projection, which the old
+    // structural name-walk couldn't encode as a name segment (it bailed to
+    // empty). Inference types `t.0` as `Corpse`.
+    let src = "struct Corpse { items: int, name: string }\n\
+               fn r(t: (Corpse, int)) {\n  let n = t.0.na\n}\n";
+    let l = labels(src, 2, 16);
+    assert!(l.contains(&"name: string".to_string()), "tuple projection chain: {l:?}");
+}
+
+#[test]
 fn unspaced_less_than_comparison_is_expression_position() {
     // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot
     // and offers the bare enum instead of qualified variants. It's a

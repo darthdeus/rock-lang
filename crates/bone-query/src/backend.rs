@@ -1025,41 +1025,41 @@ impl BoneWorkspace {
         // dispatch below tries the slots most-specific-first; a `recv.field`
         // even inside a struct-literal field value is member completion.
         let cx = classify(src, offset);
-        if let Some(segments) = cx.member.clone() {
-            // In a call-arg position, a member completion (`recv.field`) also
-            // surfaces TRANSITIVE suffix paths whose deep type matches the
-            // expected param (`recv.movable.grid`), and direct members that fit
-            // the slot rank first. The typed session is built INSIDE the member
-            // variant (member TyIds live in that workspace); here we just pass
-            // the enclosing (callee, arg index).
-            let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
-            let mut items = member_completions(
-                &mut proj.session, path, src, offset, &segments, &prefix, arg_slot, cx.anchor,
-                proj.reach.as_ref(), cx.bool_chain,
-            );
-            if next_is_open_paren {
-                strip_call_template(&mut items);
-            }
-            path_ms("member path", items.len());
-            return items;
-        }
-        // Member access on a receiver the name-walk can't encode (`x.find().|`,
-        // `xs[i].|`): resolve the receiver's type via inference and offer its
-        // members. Same builder as the name-path above.
+        // Member access `recv.<cursor>`, one dispatch for every receiver shape.
+        // In a call-arg position this also surfaces TRANSITIVE suffix paths
+        // whose deep type matches the expected param (`recv.movable.grid`); the
+        // typed session is built INSIDE the variant (member TyIds live in that
+        // workspace), so here we just pass the enclosing (callee, arg index).
         if let Some(recv_end) = cx.member_recv_end {
             let arg_slot = cx.arg_call.as_ref().map(|(callee, idx, _)| (callee.clone(), *idx as usize));
+            // PRIMARY: resolve the receiver's type via inference (`type_at`).
+            // Handles generic-substituted fields, tuple/newtype projections, and
+            // call/index receivers the structural name-walk can't express.
             let mut items = member_completions_by_receiver(
-                &mut proj.session, path, src, offset, recv_end, &prefix, arg_slot, cx.anchor,
+                &mut proj.session, path, src, offset, recv_end, &prefix, arg_slot.clone(), cx.anchor,
                 proj.reach.as_ref(), cx.bool_chain,
             );
-            // A non-struct receiver (`scale(x).|` -> int) has no members; fall
-            // through to general completion rather than suppress it -- the
-            // pre-existing behavior when this receiver couldn't be resolved.
-            if !items.is_empty() {
+            // FALLBACK: a pure-ident receiver whose type inference can't see --
+            // the enclosing call is to an unknown fn (`newHelper(thing.|`), or a
+            // parse error dropped the statement. The name-walk resolves the
+            // receiver by binding lookup, no inference needed.
+            if items.is_empty() {
+                if let Some(segments) = cx.member.clone() {
+                    items = member_completions(
+                        &mut proj.session, path, src, offset, &segments, &prefix, arg_slot,
+                        cx.anchor, proj.reach.as_ref(), cx.bool_chain,
+                    );
+                }
+            }
+            // A name-path member context returns even when empty -- `recv.` is
+            // member access, never a bare global (Rock has no namespaces), so
+            // suppress general completion. A complex receiver with no members
+            // (`scale(x).|` -> int) falls through to general instead.
+            if !items.is_empty() || cx.member.is_some() {
                 if next_is_open_paren {
                     strip_call_template(&mut items);
                 }
-                path_ms("member path (recv-ty)", items.len());
+                path_ms("member path", items.len());
                 return items;
             }
         }
