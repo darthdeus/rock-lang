@@ -1191,6 +1191,9 @@ impl<'a> Printer<'a> {
             StatementKind::Expression(e) => self.expr(*e),
             StatementKind::Let(l) => self.let_stmt(l),
             StatementKind::Static(st) => self.static_stmt(st),
+            StatementKind::NestedFn(f) => {
+                self.header_verbatim(self.ast.s(&s).span, f.body, || self.nested_fn_stmt(f))
+            }
             StatementKind::Return { value, .. } => match value {
                 Some(v) => Doc::concat([Doc::text("return "), self.expr(*v)]),
                 None => Doc::text("return"),
@@ -1244,6 +1247,16 @@ impl<'a> Printer<'a> {
             parts.push(self.expr(v));
         }
         Doc::concat(parts)
+    }
+
+    fn nested_fn_stmt(&self, f: &NestedFn) -> Doc {
+        let mut sig = vec![Doc::text("fn "), Doc::text(kw(f.name.name)), self.params(&f.params)];
+        if let Some(ret) = f.return_ty {
+            sig.push(Doc::text(" -> "));
+            sig.push(self.type_expr(ret));
+        }
+        sig.push(Doc::text(" "));
+        Doc::concat([Doc::concat(sig), self.block(f.body)])
     }
 
     fn static_stmt(&self, st: &Static) -> Doc {

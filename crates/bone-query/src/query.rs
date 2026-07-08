@@ -2444,7 +2444,7 @@ pub fn locals_in_scope(
     for (b_idx, binding) in body.binding_arena.iter() {
         let in_scope = match binding.kind {
             hir::BindingKind::Param => true,
-            hir::BindingKind::Let | hir::BindingKind::Static => match init_end.get(&b_idx) {
+            hir::BindingKind::Let | hir::BindingKind::Static | hir::BindingKind::Fn => match init_end.get(&b_idx) {
                 Some(end) => *end <= offset,
                 None => body
                     .binding_spans
@@ -2780,7 +2780,7 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
         }
         let in_scope = match b.kind {
             hir::BindingKind::Param => true,
-            hir::BindingKind::Let | hir::BindingKind::Static => body
+            hir::BindingKind::Let | hir::BindingKind::Static | hir::BindingKind::Fn => body
                 .binding_spans
                 .get(idx)
                 .is_some_and(|s| s.offset_range.1 <= offset),
@@ -3947,7 +3947,7 @@ pub fn completion(
                     name,
                     kind: match kind {
                         BindingKind::Param => SymCat::Param,
-                        BindingKind::Let | BindingKind::Static => SymCat::Local,
+                        BindingKind::Let | BindingKind::Static | BindingKind::Fn => SymCat::Local,
                     },
                     detail: (!ty.is_empty()).then_some(ty),
                     ty: ty_id,

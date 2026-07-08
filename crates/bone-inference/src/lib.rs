@@ -511,13 +511,77 @@ fn fn_has_anno(f: &Function, name: &str) -> bool {
 /// the first reaching call's values. A `Var` whose declaration span is
 /// contained in the initializer (a lambda param, an inner `let`) is local to
 /// the init and allowed; one declared outside is the forbidden capture.
+/// Which hoisted construct is being checked -- they forbid different capture
+/// sets. A static INITIALIZER runs once so it may read nothing declared outside
+/// itself (params, locals, and sibling statics all snapshot the first reaching
+/// call). A nested fn BODY is hoisted to module scope with no enclosing frame,
+/// so it may not read enclosing params/locals -- but it MAY reference in-scope
+/// `static`s and sibling nested `fn`s, which are themselves module-level.
+#[derive(Copy, Clone)]
+enum CaptureCtx {
+    StaticInit,
+    NestedFnBody,
+}
+
 fn reject_static_init_captures(
     c: BodyCtx,
     root: Idx<Expr>,
     site: Span,
 ) -> Result<(), CompilerError> {
     let root_span = c.body.expr_spans[root];
-    reject_captures_expr(c, root, root_span, site)
+    reject_captures_expr(c, root, root_span, site, CaptureCtx::StaticInit)
+}
+
+/// A nested fn's body may not capture the enclosing frame. `body` is the body
+/// block expr; `decl_span` spans the whole `fn ..(..) { .. }` statement so the
+/// fn's OWN params (declared in the signature, before the body block) count as
+/// inside -- only bindings declared outside the declaration are captures.
+fn reject_nested_fn_captures(
+    c: BodyCtx,
+    body: Idx<Expr>,
+    decl_span: Span,
+) -> Result<(), CompilerError> {
+    reject_captures_expr(c, body, decl_span, decl_span, CaptureCtx::NestedFnBody)
+}
+
+/// Reject a binding reference (a `Var` read or a `Callee::Local` call) that
+/// escapes the hoisted construct. A binding whose declaration span is contained
+/// in `root_span` is local to the construct (a param, an inner `let`, a lambda
+/// param) and always allowed.
+fn reject_captured_binding(
+    c: BodyCtx,
+    b: Idx<hir::BindingInfo>,
+    root_span: Span,
+    site: Span,
+    mode: CaptureCtx,
+) -> Result<(), CompilerError> {
+    let bspan = c.body.binding_arena[b].span;
+    let inside = bspan.offset_range.0 >= root_span.offset_range.0
+        && bspan.offset_range.1 <= root_span.offset_range.1;
+    if inside {
+        return Ok(());
+    }
+    let name = c.body.binding_arena[b].name;
+    match mode {
+        CaptureCtx::StaticInit => comp_error!(
+            site,
+            "static initializer may not read local `{}`: the initializer runs once, not per call",
+            name
+        ),
+        CaptureCtx::NestedFnBody => {
+            if matches!(
+                c.body.binding_arena[b].kind,
+                hir::BindingKind::Let | hir::BindingKind::Param
+            ) {
+                comp_error!(
+                    site,
+                    "nested function may not read enclosing local `{}`: it is hoisted to module scope with no access to the enclosing frame",
+                    name
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn reject_captures_expr(
@@ -525,26 +589,15 @@ fn reject_captures_expr(
     e: Idx<Expr>,
     root_span: Span,
     site: Span,
+    mode: CaptureCtx,
 ) -> Result<(), CompilerError> {
     macro_rules! go {
         ($x:expr) => {
-            reject_captures_expr(c, $x, root_span, site)?
+            reject_captures_expr(c, $x, root_span, site, mode)?
         };
     }
     match c.body.expr_arena[e] {
-        Expr::Var(b) => {
-            let bspan = c.body.binding_arena[b].span;
-            let inside = bspan.offset_range.0 >= root_span.offset_range.0
-                && bspan.offset_range.1 <= root_span.offset_range.1;
-            if !inside {
-                let name = c.body.binding_arena[b].name;
-                comp_error!(
-                    site,
-                    "static initializer may not read local `{}`: the initializer runs once, not per call",
-                    name
-                );
-            }
-        }
+        Expr::Var(b) => reject_captured_binding(c, b, root_span, site, mode)?,
 
         Expr::Unit
         | Expr::Null
@@ -621,8 +674,12 @@ fn reject_captures_expr(
         }
 
         Expr::Call { callee, args } => {
-            if let Callee::Value(ve) = callee {
-                go!(ve);
+            match callee {
+                Callee::Value(ve) => go!(ve),
+                // Calling an enclosing local (a captured lambda) is a capture;
+                // calling a sibling nested fn / in-scope static is not.
+                Callee::Local(b) => reject_captured_binding(c, b, root_span, site, mode)?,
+                Callee::Unresolved { .. } => {}
             }
             for a in args {
                 go!(a);
@@ -643,7 +700,7 @@ fn reject_captures_expr(
 
         Expr::Block { statements, tail } => {
             for s in statements {
-                reject_captures_stmt(c, s, root_span, site)?;
+                reject_captures_stmt(c, s, root_span, site, mode)?;
             }
             if let Some(t) = tail {
                 go!(t);
@@ -692,10 +749,11 @@ fn reject_captures_stmt(
     s: Idx<Statement>,
     root_span: Span,
     site: Span,
+    mode: CaptureCtx,
 ) -> Result<(), CompilerError> {
     macro_rules! go {
         ($x:expr) => {
-            reject_captures_expr(c, $x, root_span, site)?
+            reject_captures_expr(c, $x, root_span, site, mode)?
         };
     }
     match c.body.statement_arena[s] {
@@ -706,6 +764,10 @@ fn reject_captures_stmt(
         | Statement::Defer(value)
         | Statement::Return(Some(value))
         | Statement::Static { value, .. } => go!(value),
+        // A doubly-nested fn's body sits inside `root_span`, so any enclosing-frame
+        // read it makes is caught by ITS own reject pass; walking the body here is
+        // harmless (every ref is span-inside `root_span`).
+        Statement::Fn { body, .. } => go!(body),
         Statement::For { iter, body, .. } => {
             go!(iter);
             go!(body);
@@ -968,6 +1030,14 @@ fn verify_pure_stmt(
                 "`@pure` function declares a `static` (writes module state)".to_string(),
             ));
         }
+        // Conservative, like the lambda case: a nested fn's body is not vetted
+        // for purity here. Put the helper at top level if it must be `@pure`.
+        Statement::Fn { .. } => {
+            errors.push(CompilerError::new_with_label(
+                c.body.statement_spans[s],
+                "`@pure` function declares a nested `fn` (its body is not vetted for purity)".to_string(),
+            ));
+        }
         Statement::Return(None)
         | Statement::Break
         | Statement::Continue
@@ -1065,6 +1135,77 @@ fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) -> Result<(
             gamma.assign_named_type(*name, binding_ty)?;
 
             reject_static_init_captures(c, *value, c.body.statement_spans[s])?;
+        }
+
+        Statement::Fn { name, params, ret_ty, body } => {
+            let (name, params, ret_ty, body) = (*name, *params, *ret_ty, *body);
+
+            // Params always carry a declared type (the signature is mandatory).
+            let mut param_tys = Vec::with_capacity(params.len());
+            for pb in params {
+                let ty = c.body.binding_arena[pb]
+                    .declared_ty
+                    .unwrap_or_else(|| gamma.workspace.builtins.error());
+                gamma.assign_named_type(pb, ty)?;
+                param_tys.push(ty);
+            }
+
+            // The nested body is hoisted and runs at call time, so no enclosing
+            // GLOBAL refinement holds inside it (mirrors `infer_lambda`); the
+            // enclosing return-context is saved and restored around it.
+            let saved_ret = gamma.declared_ret_ty.take();
+            let saved_coro = gamma.coroutine_ret.take();
+            let saved_globals: Vec<Narrow> = gamma
+                .refined_nonnull
+                .iter()
+                .filter(|(root, _)| root.is_global())
+                .cloned()
+                .collect();
+            for g in &saved_globals {
+                gamma.refined_nonnull.remove(g);
+            }
+
+            let result = (|| -> Result<(), CompilerError> {
+                match ret_ty {
+                    Some(ret) => {
+                        // Concrete signature -> assign the name its fn type BEFORE
+                        // the body so a self-recursive call resolves.
+                        let fn_ty = make_fn_ty(gamma, &param_tys, ret, span);
+                        gamma.assign_named_type(name, fn_ty)?;
+                        gamma.declared_ret_ty = Some(ret);
+
+                        let body_ty = infer_expr(c, gamma, body)?;
+                        let body_ty = resolve(gamma, body_ty, span);
+                        let tail = match c.body.expr_arena[body] {
+                            Expr::Block { tail, .. } => tail,
+                            _ => Some(body),
+                        };
+                        let cspan = tail.map(|t| c.body.expr_spans[t]).unwrap_or(span);
+                        if let Err(e) = coerce(gamma, body_ty, ret, cspan) {
+                            gamma.body_errors.push(e);
+                        }
+                    }
+                    None => {
+                        // Inferred return: the body's tail is the return type (like
+                        // a lambda). A self-recursive call needs an explicit `-> T`;
+                        // an explicit `return X` in an inferred-return nested fn is
+                        // not type-linked (v1 -- annotate the return type instead).
+                        gamma.declared_ret_ty = None;
+                        let body_ty = infer_expr(c, gamma, body)?;
+                        let body_ty = resolve(gamma, body_ty, span);
+                        let fn_ty = make_fn_ty(gamma, &param_tys, body_ty, span);
+                        gamma.assign_named_type(name, fn_ty)?;
+                    }
+                }
+                Ok(())
+            })();
+
+            gamma.refined_nonnull.extend(saved_globals);
+            gamma.coroutine_ret = saved_coro;
+            gamma.declared_ret_ty = saved_ret;
+            result?;
+
+            reject_nested_fn_captures(c, body, span)?;
         }
 
         Statement::Comment(_) => (),
@@ -4137,6 +4278,26 @@ fn infer_lambda(
     });
 
     Ok(TyId::Local(idx))
+}
+
+/// Build a `fn(P..) -> R` TyId from resolved param/ret types, reifying each into
+/// `gamma.out.ty_arena` (the same construction `infer_lambda` uses for a lambda's
+/// type). Used to type a nested `fn` name binding.
+fn make_fn_ty(gamma: &mut Gamma, param_tys: &[TyId], ret: TyId, span: Span) -> TyId {
+    let mut texps = Vec::with_capacity(param_tys.len());
+    for pt in param_tys {
+        let r = resolve(gamma, *pt, span);
+        let r = TyId::Local(reify(gamma, r, span));
+        texps.push(*gamma.get(r));
+    }
+    let params_range = alloc_contiguous(&mut gamma.out.ty_arena, texps);
+    let r = resolve(gamma, ret, span);
+    let ret_idx = reify(gamma, r, span);
+    let idx = gamma
+        .out
+        .ty_arena
+        .alloc(TypeExpr::Function { params: params_range, ret: ret_idx });
+    TyId::Local(idx)
 }
 
 /// True when `ty` is a concrete non-nullable type, so `??` / `?.` on it is

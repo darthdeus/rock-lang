@@ -226,6 +226,13 @@ impl Ast {
                 s.ty.map(|t| self.type_sexp(t)).unwrap_or_else(|| "()".to_string()),
                 self.expr_sexp(s.value),
             ),
+            StatementKind::NestedFn(f) => format!(
+                "(fn {} {} {} {})",
+                f.name.name,
+                self.params_sexp(&f.params),
+                f.return_ty.map(|t| self.type_sexp(t)).unwrap_or_else(|| "()".to_string()),
+                self.block_sexp(f.body),
+            ),
             StatementKind::Break { .. } => "(break)".to_string(),
             StatementKind::Continue { .. } => "(continue)".to_string(),
             StatementKind::For(f) => format!(

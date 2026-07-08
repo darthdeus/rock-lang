@@ -167,6 +167,24 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
             ty: st.ty.map(|t| graft_type(src, dst, t)),
             value: graft_expr(src, dst, st.value),
         }),
+        StatementKind::NestedFn(f) => StatementKind::NestedFn(NestedFn {
+            span: f.span,
+            keyword_span: f.keyword_span,
+            name: f.name.clone(),
+            params: f
+                .params
+                .iter()
+                .map(|p| Param {
+                    span: p.span,
+                    name: p.name.clone(),
+                    ty: graft_type(src, dst, p.ty),
+                    default: p.default.map(|d| graft_expr(src, dst, d)),
+                    is_variadic: p.is_variadic,
+                })
+                .collect(),
+            return_ty: f.return_ty.map(|t| graft_type(src, dst, t)),
+            body: graft_block(src, dst, f.body),
+        }),
         StatementKind::Return { keyword_span, value } => StatementKind::Return {
             keyword_span: *keyword_span,
             value: value.map(|e| graft_expr(src, dst, e)),

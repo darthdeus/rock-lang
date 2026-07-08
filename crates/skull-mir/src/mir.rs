@@ -490,6 +490,10 @@ pub struct MirFunc {
     /// itself spliced at a concrete root.
     pub bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, bone_semantic::prelude::BoundTree>,
+    /// Nested `fn`s declared in this fn's body, each lowered to its own MirFunc
+    /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
+    /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
+    pub nested_fns: Vec<MirFunc>,
 }
 
 impl MirFunc {
@@ -509,6 +513,7 @@ impl MirFunc {
             coro_defers: Vec::new(),
             for_iter_headers: Vec::new(),
             bound_trees: Default::default(),
+            nested_fns: Vec::new(),
         }
     }
 

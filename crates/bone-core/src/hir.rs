@@ -432,6 +432,10 @@ pub enum BindingKind {
     Let,
     Param,
     Static,
+    /// A nested `fn` name -- a hoisted local helper. Block-scoped like `Let`,
+    /// but its value is a zero-alloc reference to the hoisted top-level fn, and
+    /// codegen routes calls/value-refs to the `__local_*` name.
+    Fn,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -740,6 +744,17 @@ pub enum Statement {
     Static {
         name: Idx<BindingInfo>,
         value: Idx<Expr>,
+    },
+
+    /// A nested `fn` -- a hoisted local helper. `name` binds in the enclosing
+    /// scope (kind `Fn`); `params` are its own child-scope bindings; `body` is
+    /// the block, lowered in that child scope. No capture of enclosing
+    /// params/locals (rejected in inference).
+    Fn {
+        name: Idx<BindingInfo>,
+        params: IdxRange<BindingInfo>,
+        ret_ty: Option<TyId>,
+        body: Idx<Expr>,
     },
 
     Return(Option<Idx<Expr>>),

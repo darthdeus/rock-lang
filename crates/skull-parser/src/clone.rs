@@ -52,6 +52,24 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
             ty: st.ty.map(|t| clone_type(ast, t)),
             value: clone_expr(ast, st.value),
         }),
+        StatementKind::NestedFn(f) => StatementKind::NestedFn(NestedFn {
+            span: f.span,
+            keyword_span: f.keyword_span,
+            name: f.name,
+            params: f
+                .params
+                .into_iter()
+                .map(|p| Param {
+                    span: p.span,
+                    name: p.name,
+                    ty: clone_type(ast, p.ty),
+                    default: p.default.map(|d| clone_expr(ast, d)),
+                    is_variadic: p.is_variadic,
+                })
+                .collect(),
+            return_ty: f.return_ty.map(|t| clone_type(ast, t)),
+            body: clone_block(ast, f.body),
+        }),
         StatementKind::Return { keyword_span, value } => StatementKind::Return {
             keyword_span,
             value: value.map(|e| clone_expr(ast, e)),

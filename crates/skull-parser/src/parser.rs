@@ -1538,6 +1538,20 @@ impl Parser {
                 .stmt(span, StatementKind::Static(Static { span, keyword_span: Some(start), name, ty, value })));
         }
 
+        // Nested `fn` statement -- a hoisted local helper (docs/static-locals-plan.md).
+        // v1: annotations are not allowed; catch the no-arg `@name fn ..` form here
+        // for a clear message (arg-carrying annotations fall through to the generic
+        // token error).
+        if self.kind() == TokenKind::At
+            && matches!(self.peek_kind(), TokenKind::Ident(_))
+            && self.tokens.get(self.pos + 2).map(|t| t.kind) == Some(TokenKind::Fn)
+        {
+            return Err(self.err("nested functions cannot have annotations (v1)"));
+        }
+        if self.kind() == TokenKind::Fn {
+            return self.parse_nested_fn(start);
+        }
+
         match self.kind() {
             TokenKind::Let => {
                 self.advance();
@@ -1639,6 +1653,34 @@ impl Parser {
                 Ok(self.ast.stmt(span, StatementKind::Expression(e)))
             }
         }
+    }
+
+    /// Nested `fn <name>(params) [-> ret] { body }` statement. v1: no generics,
+    /// no coroutine, no D-form receiver, no inline-lua/extern body -- a plain
+    /// block body only. `start` is the `fn` token span.
+    fn parse_nested_fn(&mut self, start: Span) -> PResult<Idx<StatementData>> {
+        self.expect(TokenKind::Fn)?;
+        let name = self.expect_ident()?;
+        if self.kind() == TokenKind::LessThan {
+            return Err(self.err("nested functions cannot be generic (v1)"));
+        }
+        let params = self.parse_params(None)?;
+        self.skip_comments();
+        let return_ty = if self.eat(TokenKind::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.skip_comments();
+        if self.kind() != TokenKind::OpenCurly {
+            return Err(self.err("a nested function needs a `{ }` body"));
+        }
+        let body = self.parse_block()?;
+        let span = self.span_from(start);
+        Ok(self.ast.stmt(
+            span,
+            StatementKind::NestedFn(NestedFn { span, keyword_span: Some(start), name, params, return_ty, body }),
+        ))
     }
 
     /// Parse a `let` / `for` binding target: `x`, `(a, b)`, or `Name(x)`.

@@ -612,6 +612,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_nested_fn_basic() {
+        // `fn inc(x: int) -> int { x + 1 }` inside a body -> a `(fn ...)` statement.
+        check(
+            "fn inc(x: int) -> int { x + 1 }",
+            "(block (fn inc ((x int)) int (block (+ x 1))))",
+        );
+    }
+
+    #[test]
+    fn parse_nested_fn_no_return_type() {
+        check("fn bump() { n = n + 1 }", "(block (fn bump () () (block (= n (+ n 1)))))");
+    }
+
+    #[test]
+    fn parse_fn_is_not_a_hard_local_keyword() {
+        // `fn` as a call arg / value context stays whatever the expression parser
+        // makes of it; the nested-fn form only fires at statement start.
+        let s = body_sexp("fn outer() { fn inner() -> int { 7 }  let r = inner() }");
+        assert!(s.contains("(fn inner"), "nested fn parsed: {s}");
+    }
+
+    #[test]
     fn item_macro_splice() {
         // A macro body's items splice into the module at the invocation site.
         assert_eq!(

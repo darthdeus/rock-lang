@@ -697,6 +697,61 @@ pub fn lower_statement_value(
             Statement::Static { name: binding, value: value_idx }
         }
 
+        StatementKind::NestedFn(f) => {
+            // Name binds in the ENCLOSING scope, BEFORE the body is lowered, so a
+            // self-recursive call resolves; a not-yet-declared sibling stays a
+            // Global (decl-before-use -> mutual recursion rejected in inference).
+            let name_binding = ctx.alloc_binding(
+                body,
+                BindingInfo {
+                    name: f.name.name,
+                    kind: BindingKind::Fn,
+                    declared_ty: None,
+                    span: f.name.span,
+                },
+                f.name.span,
+            );
+            body.scope_arena[scope].bindings.insert(f.name.name, name_binding);
+
+            // Params live in a child scope whose parent is the enclosing scope,
+            // so an enclosing param/local reference still resolves (then gets
+            // rejected as a capture in inference), while the params shadow.
+            let fn_scope = body.alloc_child_scope(scope);
+            let mut binding_idxs = Vec::with_capacity(f.params.len());
+            for p in &f.params {
+                let declared_ty = Some(lower_type_expr_local(ctx, a, body, a.te(&p.ty))?);
+                let b = ctx.alloc_binding(
+                    body,
+                    BindingInfo {
+                        name: p.name.name,
+                        kind: BindingKind::Param,
+                        declared_ty,
+                        span: p.name.span,
+                    },
+                    p.span,
+                );
+                body.scope_arena[fn_scope].bindings.insert(p.name.name, b);
+                binding_idxs.push(b);
+            }
+            let params = match (binding_idxs.first(), binding_idxs.last()) {
+                (Some(lo), Some(hi)) => IdxRange::new_inclusive(*lo..=*hi),
+                _ => IdxRange::new_empty(),
+            };
+
+            let ret_ty = match &f.return_ty {
+                Some(te) => Some(lower_type_expr_local(ctx, a, body, a.te(te))?),
+                None => None,
+            };
+
+            let saved = ctx.placeholder_forbidden;
+            ctx.placeholder_forbidden = true;
+            let body_expr = lower_block(ctx, a, body, fn_scope, &f.body)?;
+            ctx.placeholder_forbidden = saved;
+            let body_idx = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
+
+            Statement::Fn { name: name_binding, params, ret_ty, body: body_idx }
+        }
+
         StatementKind::For(f) => {
             let iter = lower_expr(ctx, a, body, scope, a.e(&f.iter))?;
 

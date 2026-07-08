@@ -649,10 +649,34 @@ fn emit_body_chunk(
     let (direct_globals, direct_calls) = direct_refs(ws, overloaded, &mf);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let lua = emit_function(ws, cg, self_ref, &mf);
+    let mut lua = emit_function(ws, cg, self_ref, &mf);
+    // Nested `fn`s are hoisted to sibling top-level Lua fns in the same chunk
+    // (their `__local_*` names are already final -- emit_named, no mangling).
+    emit_nested_fns(ws, cg, &mut mf.nested_fns, &mut deps, &mut lua);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics: mf.statics.clone() })
+}
+
+/// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
+/// top-level Lua function appended to the enclosing chunk. Runs the standard
+/// cleanup pipeline per fn and folds their callee refs into the chunk's deps so
+/// an edit to a callee still invalidates the enclosing chunk.
+fn emit_nested_fns(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    nested: &mut [MirFunc],
+    deps: &mut FxHashSet<FuncRef>,
+    out: &mut String,
+) {
+    for nf in nested.iter_mut() {
+        skull_transform::cleanup(nf);
+        skull_transform::recover_counted_loops(ws, nf);
+        collect_callee_frefs(nf, deps);
+        out.push_str(&emit_named(ws, cg, nf.name.as_str(), nf));
+        let mut children = std::mem::take(&mut nf.nested_fns);
+        emit_nested_fns(ws, cg, &mut children, deps, out);
+    }
 }
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs

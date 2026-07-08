@@ -1061,6 +1061,7 @@ fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash
         | Statement::Defer(value)
         | Statement::Return(Some(value))
         | Statement::Static { value, .. } => go!(value),
+        Statement::Fn { body: b, .. } => go!(b),
         Statement::For { iter, body: b, .. } => {
             go!(iter);
             go!(b);
@@ -1135,14 +1136,21 @@ pub fn lower_function(
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
-        // Lazy: only pay the param-type render/hash when the body has a static
-        // (the tag is otherwise unused). Keeps the tag off every fn's compile.
-        static_owner: if body.statement_arena.iter().any(|(_, s)| matches!(s, Statement::Static { .. })) {
+        // Lazy: only pay the param-type render/hash when the body has a static or
+        // a nested fn (both bake the owner into a private global name that must be
+        // distinct per overload). Keeps the tag off every other fn's compile.
+        static_owner: if body
+            .statement_arena
+            .iter()
+            .any(|(_, s)| matches!(s, Statement::Static { .. } | Statement::Fn { .. }))
+        {
             static_owner_tag(ws, inf, func.name, &func.param_decls)
         } else {
             func.name
         },
         static_counters: HashMap::new(),
+        nested_fn_globals: HashMap::new(),
+        nested_fn_counters: HashMap::new(),
     };
     b.lower_params();
     b.fill_param_defaults()?;
@@ -1193,6 +1201,8 @@ pub fn lower_global(
         static_cells: HashMap::new(),
         static_owner: name,
         static_counters: HashMap::new(),
+        nested_fn_globals: HashMap::new(),
+        nested_fn_counters: HashMap::new(),
     };
     b.lower_root()?;
     Ok(Some(b.f))
@@ -1242,6 +1252,8 @@ pub fn lower_decorator(
         static_cells: HashMap::new(),
         static_owner: name,
         static_counters: HashMap::new(),
+        nested_fn_globals: HashMap::new(),
+        nested_fn_counters: HashMap::new(),
     };
     // `target` is param 0, then the decorator's declared params.
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
@@ -1301,6 +1313,13 @@ struct Builder<'a> {
     /// Per static source-name counter (source order) so shadowing duplicates get
     /// distinct cells and adding an unrelated static never renames siblings.
     static_counters: HashMap<Ustr, u32>,
+    /// Nested `fn` names: raw binding idx -> the hoisted `__local_*` global a
+    /// call / value-ref of the binding resolves to. Inherited (cloned) by a
+    /// nested fn's own builder so it can reference itself + prior siblings.
+    nested_fn_globals: HashMap<u32, Ustr>,
+    /// Per nested-fn source-name counter (source order), the `static_counters`
+    /// analogue for shadowing duplicates.
+    nested_fn_counters: HashMap<Ustr, u32>,
 }
 
 impl Builder<'_> {
@@ -1503,6 +1522,78 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
+    /// <name>_<ctr>`. The name is registered in `nested_fn_globals` BEFORE the
+    /// body is lowered so self-recursion resolves; the child inherits the
+    /// parent's in-scope statics + sibling nested fns (decl-before-use).
+    fn lower_nested_fn(
+        &mut self,
+        name: Idx<BindingInfo>,
+        params: IdxRange<BindingInfo>,
+        body: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let sname = self.body.binding_arena[name].name;
+        let ctr = {
+            let c = self.nested_fn_counters.entry(sname).or_insert(0);
+            let v = *c;
+            *c += 1;
+            v
+        };
+        let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
+        self.nested_fn_globals.insert(raw(name), hoisted);
+
+        let mf = MirFunc::new(hoisted);
+        let entry = mf.entry();
+        let mut child = Builder {
+            ws: self.ws,
+            scx: self.scx,
+            body: self.body,
+            inf: self.inf,
+            f: mf,
+            cur: entry,
+            binds: HashMap::new(),
+            loop_targets: Vec::new(),
+            defers: Vec::new(),
+            in_defer_body: false,
+            resume_arg: None,
+            param_shapes: Vec::new(),
+            ret_shape: None,
+            ret_tuple: None,
+            group_binds: HashMap::new(),
+            // In-scope statics + sibling nested fns are module-level, so the
+            // hoisted body may reference them; enclosing params/locals are NOT
+            // inherited (bone rejects capturing them).
+            static_cells: self.static_cells.clone(),
+            static_owner: hoisted,
+            static_counters: HashMap::new(),
+            nested_fn_globals: self.nested_fn_globals.clone(),
+            nested_fn_counters: HashMap::new(),
+        };
+
+        for pb in params {
+            let cell = child.f.new_cell(Some(child.body.binding_arena[pb].name));
+            child.f.params.push(cell);
+            child.binds.insert(raw(pb), cell);
+        }
+
+        child.defers.push(Vec::new());
+        if let Expr::Block { statements, tail } = child.body.expr_arena[body] {
+            let terminated = child.lower_stmts(statements)?;
+            if !terminated {
+                let leaves = child.return_leaves(tail)?;
+                child.run_top_frame()?;
+                child.f.set_term(child.cur, Term::Return(leaves));
+            }
+        } else {
+            let leaves = child.return_leaves(Some(body))?;
+            child.f.set_term(child.cur, Term::Return(leaves));
+        }
+        child.defers.pop();
+
+        self.f.nested_fns.push(child.f);
+        Ok(())
+    }
+
     fn lower_stmts(&mut self, stmts: IdxRange<Statement>) -> Result<bool, CompilerError> {
         for sidx in stmts {
             match self.body.statement_arena[sidx].clone() {
@@ -1578,6 +1669,9 @@ impl Builder<'_> {
                 }
                 Statement::Static { name, value } => {
                     self.lower_static(name, value)?;
+                }
+                Statement::Fn { name, params, ret_ty: _, body } => {
+                    self.lower_nested_fn(name, params, body)?;
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {
@@ -1746,6 +1840,11 @@ impl Builder<'_> {
             }
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
+            }
+            // A nested fn used as a value: reference the hoisted top-level fn by
+            // name (a plain global read -- zero closure alloc).
+            Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
+                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)])))
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -2709,6 +2808,14 @@ impl Builder<'_> {
             // A fn-typed local: load the cell and call through the value. An
             // indirect call can't splat — args are boxed.
             Callee::Local(b) => {
+                // A nested fn: call the hoisted top-level fn by name (no closure).
+                if let Some(&hoisted) = self.nested_fn_globals.get(&raw(b)) {
+                    let g = self.emit_cur(Inst::Global(hoisted));
+                    let arg_vals: Vec<Idx<Inst>> =
+                        arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
+                    let v = self.emit_call_value(e, g, arg_vals);
+                    return Ok(ValueRepr::Scalar(v));
+                }
                 let cell = *self
                     .binds
                     .get(&raw(b))

@@ -647,6 +647,15 @@ fn subst_in_type_exprs_block(ast: &mut Ast, b: Idx<BlockData>, ty_subs: &HashMap
                 subst_in_type(ast, t, ty_subs);
             }
         }
+        let nested_fn_tys: Vec<Idx<TypeExprData>> =
+            if let StatementKind::NestedFn(f) = &ast.stmts[s].kind {
+                f.params.iter().map(|p| p.ty).chain(f.return_ty).collect()
+            } else {
+                Vec::new()
+            };
+        for t in nested_fn_tys {
+            subst_in_type(ast, t, ty_subs);
+        }
         for e in stmt_exprs(ast, s) {
             subst_in_type_exprs(ast, e, ty_subs);
         }
@@ -1147,6 +1156,7 @@ fn stmt_exprs(ast: &Ast, s: Idx<StatementData>) -> ExprEdges {
         | StatementKind::Defer(DeferKind::Expression(e)) => smallvec![*e],
         StatementKind::Let(l) => l.value.into_iter().collect(),
         StatementKind::Static(st) => smallvec![st.value],
+        StatementKind::NestedFn(f) => f.params.iter().filter_map(|p| p.default).collect(),
         StatementKind::For(f) => smallvec![f.iter],
         StatementKind::While(w) => smallvec![w.condition],
         StatementKind::WhileLet(w) => smallvec![w.value],
@@ -1161,6 +1171,7 @@ fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
         StatementKind::WhileLet(w) => smallvec![w.body],
         StatementKind::Defer(DeferKind::Block(b)) => smallvec![*b],
         StatementKind::LifecycleHook { body, .. } => smallvec![*body],
+        StatementKind::NestedFn(f) => smallvec![f.body],
         _ => BlockEdges::new(),
     }
 }

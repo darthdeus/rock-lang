@@ -335,6 +335,7 @@ pub enum StatementKind {
     Expression(Idx<ExprData>),
     Let(Let),
     Static(Static),
+    NestedFn(NestedFn),
     /// `return [expr]` — `keyword_span` is the `return` token (rock parity).
     Return {
         keyword_span: Option<Span>,
@@ -399,6 +400,21 @@ pub struct Static {
     pub name: Ident,
     pub ty: Option<Idx<TypeExprData>>,
     pub value: Idx<ExprData>,
+}
+
+/// `fn <name>(params) [-> ret] { body }` written inside a fn body -- hoisted to
+/// a private top-level function, callable by name and passable as a zero-alloc
+/// value (docs/static-locals-plan.md). v1: no generics, no annotations,
+/// decl-before-use (self-recursion ok, no forward/mutual recursion) -- the last
+/// enforced in bone-lower, not here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NestedFn {
+    pub span: Span,
+    pub keyword_span: Option<Span>,
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub return_ty: Option<Idx<TypeExprData>>,
+    pub body: Idx<BlockData>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
