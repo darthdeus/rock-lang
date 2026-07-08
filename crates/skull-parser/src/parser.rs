@@ -790,7 +790,50 @@ impl Parser {
         extern_body: Option<FunctionBody>,
     ) -> PResult<Item> {
         let generics = self.parse_generics();
-        let params = self.parse_params()?;
+
+        // D-form probe: `fn Type<gen>.name<gen>(receiver, ..)`. The `.` after the
+        // ident+generics selects it; what we parsed as (name, generics) is then
+        // the RECEIVER PATH. Pure surface sugar -- desugars to a free fn whose
+        // param 0 is the receiver typed by the path. Not for operators (`.` can't
+        // follow an operator symbol), macros, or extern decls (edge-case table).
+        let mut receiver_surface: Option<(Ident, usize)> = None;
+        let mut receiver_ty: Option<Idx<TypeExprData>> = None;
+        let (name, generics) = if self.kind() == TokenKind::Dot {
+            if is_macro {
+                return Err(self.err("the method form `Type.name` is for functions, not macros"));
+            }
+            if extern_body.is_some() {
+                return Err(self.err(
+                    "extern functions are foreign symbols and cannot declare a receiver path",
+                ));
+            }
+            self.advance(); // `.`
+            let path_ident = name;
+            let path_generics = generics;
+            let method_name = self.expect_ident()?;
+            let method_generics = self.parse_generics();
+            if self.kind() == TokenKind::Dot {
+                return Err(self.err("the receiver path may have only one segment (`Type.name`)"));
+            }
+            for pg in &path_generics {
+                if method_generics.iter().any(|mg| mg.name.name == pg.name.name) {
+                    return Err(self.err(format!(
+                        "generic `{}` is declared in both the receiver path and the method generics",
+                        pg.name.name
+                    )));
+                }
+            }
+            receiver_ty = Some(self.synth_receiver_type(&path_ident, &path_generics));
+            let split = path_generics.len();
+            receiver_surface = Some((path_ident, split));
+            let mut merged = path_generics;
+            merged.extend(method_generics);
+            (method_name, merged)
+        } else {
+            (name, generics)
+        };
+
+        let params = self.parse_params(receiver_ty)?;
         self.skip_comments(); // `f() /* c */ -> T`
         let return_ty = if self.eat(TokenKind::Arrow) {
             Some(self.parse_type()?)
@@ -861,6 +904,7 @@ impl Parser {
                 is_coroutine,
                 is_synthetic: false,
                 macro_items,
+                receiver_surface,
             }),
         })
     }
@@ -952,10 +996,51 @@ impl Parser {
         out
     }
 
-    /// Parse a `(name: T [= default] [...], ...)` parameter list.
-    fn parse_params(&mut self) -> PResult<Vec<Param>> {
+    /// Synthesize the receiver type for a D-form path (`Map<K, V>` in
+    /// `fn Map<K, V>.get(m, ..)`) as the `Idx<TypeExprData>` `parse_type` would
+    /// build for the same text in type position: a bare/builtin ident type, or
+    /// an `App { ctor, args }` whose args are the path generics as `Ident` types.
+    fn synth_receiver_type(&mut self, ident: &Ident, path_generics: &[Generic]) -> Idx<TypeExprData> {
+        if path_generics.is_empty() {
+            let kind = match ident.name.as_str() {
+                "any" => TypeExprKind::Any,
+                "string" => TypeExprKind::String,
+                "int" => TypeExprKind::Int,
+                "float" => TypeExprKind::Float,
+                "bool" => TypeExprKind::Bool,
+                _ => TypeExprKind::Ident(ident.clone()),
+            };
+            return self.ast.ty(ident.span, kind, false);
+        }
+        let mut args = Vec::with_capacity(path_generics.len());
+        for g in path_generics {
+            args.push(self.ast.ty(g.name.span, TypeExprKind::Ident(g.name.clone()), false));
+        }
+        self.ast.ty(ident.span, TypeExprKind::App { ctor: ident.clone(), args }, false)
+    }
+
+    /// Parse a `(name: T [= default] [...], ...)` parameter list. When
+    /// `receiver_ty` is `Some` (D-form), the FIRST param is a bare identifier
+    /// with no annotation, typed by the receiver path.
+    fn parse_params(&mut self, receiver_ty: Option<Idx<TypeExprData>>) -> PResult<Vec<Param>> {
         self.expect(TokenKind::OpenParen)?;
         let mut params = Vec::new();
+        if let Some(ty) = receiver_ty {
+            self.skip_comments();
+            if self.kind() == TokenKind::CloseParen {
+                return Err(self.err("the method form requires a receiver parameter"));
+            }
+            let name = self.expect_ident()?;
+            if self.kind() == TokenKind::Colon {
+                return Err(self.err(
+                    "the receiver takes its type from the path; write it without a type annotation",
+                ));
+            }
+            let span = name.span;
+            params.push(Param { span, name, ty, default: None, is_variadic: false });
+            self.skip_comments();
+            self.eat(TokenKind::Comma);
+        }
         while self.kind() != TokenKind::CloseParen && !self.at_end() {
             self.skip_comments();
             if self.kind() == TokenKind::CloseParen {
@@ -1110,7 +1195,7 @@ impl Parser {
         }
         let name = self.expect_ident()?;
         let params = if self.kind() == TokenKind::OpenParen {
-            self.parse_params()?
+            self.parse_params(None)?
         } else {
             Vec::new()
         };

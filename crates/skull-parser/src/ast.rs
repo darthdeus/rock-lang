@@ -520,6 +520,12 @@ pub struct FunctionDef {
     /// for non-macros and expression-only macros. Spliced at module scope when
     /// the macro is invoked as a top-level statement.
     pub macro_items: Vec<Item>,
+    /// D-form surface (`fn Mob.take_damage(m, ..)`), set only by the parser:
+    /// the receiver path ident as written + how many leading entries of
+    /// `generics` came from the path (the print split point). The DESUGARED
+    /// truth lives in the normal fields (generics merged, param 0 carries the
+    /// receiver type); every consumer except skull-fmt must ignore this.
+    pub receiver_surface: Option<(Ident, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
