@@ -2065,6 +2065,32 @@ fn chained_member_through_tuple_projection_in_fallback() {
 }
 
 #[test]
+fn chained_member_through_inferred_local_tuple_head_in_fallback() {
+    // `foo(t.0.na|` where `t` is an INFERRED local (`let t = mk()`, no
+    // annotation) of tuple type, in an unknown call. The head has no declared
+    // type, so the fallback must recover the tuple type from inference
+    // (`binding_types`) before resolving `.0`.
+    let src = "struct Corpse { items: int, name: string }\n\
+               fn mk() -> (Corpse, int) { return (Corpse { items: 0, name: \"\" }, 1) }\n\
+               fn r() {\n  let t = mk()\n  foo(t.0.na\n}\n";
+    let l = labels(src, 4, 12);
+    assert!(l.contains(&"name: string".to_string()), "inferred-local tuple head in fallback: {l:?}");
+}
+
+#[test]
+fn chained_member_through_inferred_local_newtype_head_in_fallback() {
+    // `foo(w.0.na|` where `w` is an INFERRED-local newtype in an unknown call.
+    // The inferred head-name recovery must accept a newtype (not just a struct)
+    // so `.0` can then peel it.
+    let src = "struct Corpse { items: int, name: string }\n\
+               newtype Wrap(Corpse)\n\
+               fn mk() -> Wrap { return Wrap(Corpse { items: 0, name: \"\" }) }\n\
+               fn r() {\n  let w = mk()\n  foo(w.0.na\n}\n";
+    let l = labels(src, 5, 12);
+    assert!(l.contains(&"name: string".to_string()), "inferred-local newtype head in fallback: {l:?}");
+}
+
+#[test]
 fn unspaced_less_than_comparison_is_expression_position() {
     // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot
     // and offers the bare enum instead of qualified variants. It's a

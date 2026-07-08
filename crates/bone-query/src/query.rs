@@ -2802,11 +2802,12 @@ fn receiver_head_struct(ws: &Workspace, mid: ModuleId, offset: usize, head: &str
                     return struct_name_of_ty(ws, Some(body), ty);
                 }
                 // Inferred local (`let c = mk()` -- call init, no annotation):
-                // its type lives only in inference, so recover the struct name
-                // from `binding_types` (as the single-segment path does).
+                // its type lives only in inference, so recover the nominal name
+                // from `binding_types`. `nominal_name_of_ty` (not the struct-only
+                // `struct_fields_of_ty`) so a newtype head resolves too.
                 if let Some(bi) = ws.inference(mid).and_then(|i| i.per_fn.get(&owner)) {
                     if let Some(&ty) = bi.binding_types.get(b_idx) {
-                        if let Some((_, sname)) = struct_fields_of_ty(ws, Some(bi), ty) {
+                        if let Some(sname) = nominal_name_of_ty(ws, Some(bi), ty) {
                             return Some(sname);
                         }
                     }
@@ -3310,43 +3311,70 @@ fn resolve_receiver_head<'a>(
         return Some((name, rest));
     }
     let (seg0, rest2) = rest.split_first()?;
-    let ty = receiver_head_ty(ws, mid, offset, head)?;
-    Some((tuple_elem_struct(ws, ty, seg0)?, rest2))
+    let (ty, bi) = receiver_head_ty(ws, mid, offset, head)?;
+    Some((tuple_elem_struct(ws, bi, ty, seg0)?, rest2))
 }
 
-/// The declared TyId of a receiver-head binding (param / annotated `let`) or a
-/// global -- the tuple-head resolver's input. Only the declared cases (nominal
-/// `Static` types) are needed here; inferred locals resolve through the
-/// inference-first paths above.
-fn receiver_head_ty(ws: &Workspace, mid: ModuleId, offset: usize, head: &str) -> Option<TyId> {
+/// The type of a receiver-head binding (param / annotated `let` -> declared;
+/// otherwise the inferred `binding_types`) or a global, plus the inference body
+/// its TyId indexes into (`None` for `Static` declared/global types). Feeds the
+/// tuple-head resolver, which the nominal-name paths above don't cover.
+fn receiver_head_ty<'a>(
+    ws: &'a Workspace,
+    mid: ModuleId,
+    offset: usize,
+    head: &str,
+) -> Option<(TyId, Option<&'a BodyInference>)> {
     let module = ws.modules.get(mid.index())?;
     if let Some(owner) = module.body_at(offset) {
         if let Some(body) = module.bodies.get(&owner) {
             if let Some(b_idx) = find_binding_by_name(body, head, offset) {
-                if let Some(ty) = body.binding_arena[b_idx].declared_ty {
-                    return Some(ty);
+                // A param's declared type is a module-static TyId (deref with no
+                // body); a `let` annotation lowers to `Local`, which the inferred
+                // path below resolves against the inference arena instead.
+                if let Some(ty @ TyId::Static(..)) = body.binding_arena[b_idx].declared_ty {
+                    return Some((ty, None));
+                }
+                if let Some(bi) = ws.inference(mid).and_then(|i| i.per_fn.get(&owner)) {
+                    if let Some(&ty) = bi.binding_types.get(b_idx) {
+                        return Some((ty, Some(bi)));
+                    }
                 }
             }
         }
     }
     let name = Ustr::from(head);
-    module
+    let gty = module
         .global_by_name
         .get(&name)
         .map(|g| module.globals[*g].ty)
-        .or_else(|| ws.modules.iter().find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty)))
+        .or_else(|| ws.modules.iter().find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty)))?;
+    Some((gty, None))
 }
 
-/// Struct name of a tuple's `.N` element (`(Corpse, int).0` -> Corpse), from the
-/// declared tuple type (`None` body -- `Static` arena). `None` when `ty` isn't a
-/// tuple, `seg` isn't a valid index, or the element isn't a nominal struct.
-fn tuple_elem_struct(ws: &Workspace, ty: TyId, seg: &str) -> Option<Ustr> {
+/// Struct name of a tuple's `.N` element (`(Corpse, int).0` -> Corpse). `bi` is
+/// the arena the tuple's TyId indexes (`None` for a `Static` declared/global
+/// type). `None` when `ty` isn't a tuple, `seg` isn't a valid index, or the
+/// element isn't nominal.
+fn tuple_elem_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId, seg: &str) -> Option<Ustr> {
     let n: usize = seg.parse().ok()?;
-    match deref_ty(ws, None, ty)? {
+    match deref_ty(ws, bi, ty)? {
         hir::TypeExpr::Tuple { elements } => {
-            struct_name_of_ty(ws, None, ty.with_idx(elements.into_iter().nth(n)?))
+            nominal_name_of_ty(ws, bi, ty.with_idx(elements.into_iter().nth(n)?))
         }
-        hir::TypeExpr::Nullable(inner) => tuple_elem_struct(ws, ty.with_idx(*inner), seg),
+        hir::TypeExpr::Nullable(inner) => tuple_elem_struct(ws, bi, ty.with_idx(*inner), seg),
+        _ => None,
+    }
+}
+
+/// Nominal name a `TyId` denotes (struct / newtype / `Vec` for `[T]`), derefed
+/// through `bi`'s arena. The inference-aware sibling of `struct_name_of_ty`
+/// (which derefs through a `Body` instead).
+fn nominal_name_of_ty(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
+    match deref_ty(ws, bi, ty)? {
+        hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(name), .. } => Some(*name),
+        hir::TypeExpr::App { ctor: hir::TypeCtor::Array, .. } => Some(Ustr::from("Vec")),
+        hir::TypeExpr::Nullable(inner) => nominal_name_of_ty(ws, bi, ty.with_idx(*inner)),
         _ => None,
     }
 }
