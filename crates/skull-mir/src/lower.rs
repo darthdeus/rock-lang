@@ -776,12 +776,17 @@ fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) 
 /// mangled name -- skull-mir is upstream of the mangler -- but mir_emit reads
 /// the resulting cell names back verbatim from `MirFunc::statics`, so exact
 /// equality with the mangled name is not needed.
-fn static_owner_tag(ws: &Workspace, name: Ustr, params: &[bone_semantic::hir::ParamDecl]) -> Ustr {
+fn static_owner_tag(
+    ws: &Workspace,
+    inf: Option<&BodyInference>,
+    name: Ustr,
+    params: &[bone_semantic::hir::ParamDecl],
+) -> Ustr {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.as_str().hash(&mut h);
     for pd in params {
-        ws.render(None, pd.ty).hash(&mut h);
+        ws.render(inf, pd.ty).hash(&mut h);
     }
     Ustr::from(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
 }
@@ -842,7 +847,13 @@ pub fn lower_function(
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
-        static_owner: static_owner_tag(ws, func.name, &func.param_decls),
+        // Lazy: only pay the param-type render/hash when the body has a static
+        // (the tag is otherwise unused). Keeps the tag off every fn's compile.
+        static_owner: if body.statement_arena.iter().any(|(_, s)| matches!(s, Statement::Static { .. })) {
+            static_owner_tag(ws, inf, func.name, &func.param_decls)
+        } else {
+            func.name
+        },
         static_counters: HashMap::new(),
     };
     b.lower_params();
@@ -1179,7 +1190,7 @@ impl Builder<'_> {
             .and_then(|i| i.binding_types.get(name).copied())
             .or(self.body.binding_arena[name].declared_ty);
         let type_str = ty
-            .map(|t| self.ws.render(None, t))
+            .map(|t| self.ws.render(self.inf, t))
             .unwrap_or_else(|| "any".to_string());
         self.f.statics.push(StaticCell { cell, done_flag, type_str });
 
