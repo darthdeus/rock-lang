@@ -66,27 +66,77 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// `rock-lsp diagnostics <file> --backend bone`.
-pub fn diagnostics(file_path: &str) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
+/// `rock-lsp diagnostics <path> --backend bone`. `path` may be a single file or
+/// a directory (whole-project diagnostics -- see [`diagnostics_report`]).
+pub fn diagnostics(path: &str) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&diagnostics_report(path)?)?);
+    Ok(())
+}
 
+/// Diagnostics JSON for a file or a directory. A directory walks every `.rock`
+/// under it, loads each one's project once (whole-compilation-unit, so
+/// cross-file symbols and the whole-project `unused_fn` lint resolve), and
+/// reports the files that have diagnostics. Shared by the CLI handler and tests.
+pub fn diagnostics_report(path: &str) -> Result<serde_json::Value> {
+    if fs_err::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
+        return diagnostics_dir_report(path);
+    }
+    let file_path = canonical(path);
+    let src = fs_err::read_to_string(&file_path)?;
     let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
-
-    let diags = bone.diagnostics_for(&file_path);
-    let diags_json: Vec<serde_json::Value> = diags
-        .iter()
-        .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
-        .collect();
-
-    let output = json!({
+    Ok(json!({
         "file": file_path,
         "backend": "bone",
-        "diagnostics": diags_json,
-    });
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(())
+        "diagnostics": diags_to_json(bone.diagnostics_for(&file_path)),
+    }))
+}
+
+fn diagnostics_dir_report(dir: &str) -> Result<serde_json::Value> {
+    let mut files = rock_host::project::find_rock_files_at_path(dir)?;
+    files.sort();
+
+    let mut bone = BoneWorkspace::new();
+    for f in &files {
+        // Idempotent per project root: once a file's compilation unit is loaded,
+        // its siblings already have buffer text, so skip the reload. A file with
+        // no resolvable unit (standalone, no stick.toml) loads on its own.
+        if bone.file_text(f).is_some() {
+            continue;
+        }
+        bone.load_project(f);
+        if bone.file_text(f).is_none() {
+            if let Ok(src) = fs_err::read_to_string(f) {
+                bone.update(f, src);
+            }
+        }
+    }
+
+    let mut file_reports = Vec::new();
+    let mut total = 0usize;
+    for f in &files {
+        let diags = bone.diagnostics_for(f);
+        if diags.is_empty() {
+            continue;
+        }
+        total += diags.len();
+        file_reports.push(json!({ "file": f, "diagnostics": diags_to_json(diags) }));
+    }
+
+    Ok(json!({
+        "dir": canonical(dir),
+        "backend": "bone",
+        "file_count": files.len(),
+        "diagnostic_count": total,
+        "files": file_reports,
+    }))
+}
+
+fn diags_to_json(diags: Vec<lsp_types::Diagnostic>) -> Vec<serde_json::Value> {
+    diags
+        .iter()
+        .map(|d| serde_json::to_value(d).unwrap_or(serde_json::Value::Null))
+        .collect()
 }
 
 /// `rock-lsp definition <file:line:col> --backend bone`.
