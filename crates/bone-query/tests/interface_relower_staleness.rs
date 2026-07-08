@@ -78,7 +78,7 @@ fn arity_shrink_clears_dependent_error() {
         "rock_relower_arity_shrink",
         "struct Box<T> { v: T }\n",
         "struct Box { v: int }\n",
-        "fn f(b: Box) -> int { 0 }\n",
+        "fn f(b: Box) -> int { b.v }\n", // read `b` so the unused-param lint stays out of it
     );
     assert_eq!(
         incremental, restart,

@@ -3730,10 +3730,11 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
         return Vec::new();
     };
     let module = &ws.modules[mid.index()];
+    let variants = bone_lints::enum_variant_names(ws);
     let findings: Vec<_> = module
         .bodies
         .values()
-        .flat_map(bone_lints::unused_vars_in_body)
+        .flat_map(|b| bone_lints::unused_vars_in_body(b, &variants))
         .collect();
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
     bone_lints::filter_suppressed(findings, src)

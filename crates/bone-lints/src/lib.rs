@@ -4,7 +4,7 @@
 //!
 //! Plan + catalog: `docs/lint-future-plan.md`, spec `docs/linter.md`.
 
-use bone_core::hir::{BindingInfo, BodyOwner, Callee, Expr, Function, Module, Statement};
+use bone_core::hir::{BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module};
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use rock_core::errors::CompilerErrorLevel;
@@ -29,10 +29,12 @@ impl UnusedVar {
 /// Unused local bindings in a single body. A binding is "used" iff some `Var`
 /// read or local callee references it; resolution is already baked into the
 /// HIR (`Expr::Var(Idx<BindingInfo>)`), so this is a flat arena walk with no
-/// inference and no scope tracking. `_`-prefixed names are silenced.
-pub fn unused_vars_in_body(body: &Body) -> Vec<UnusedVar> {
+/// inference and no scope tracking. `_`-prefixed names are silenced. `variants`
+/// is the workspace's enum-variant names (see [`enum_variant_names`]), used to
+/// drop payload-less match arms.
+pub fn unused_vars_in_body(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<UnusedVar> {
     let read = read_bindings(body);
-    candidate_bindings(body)
+    candidate_bindings(body, variants)
         .into_iter()
         .filter(|idx| !read.contains(idx))
         .map(|idx| &body.binding_arena[idx])
@@ -41,24 +43,37 @@ pub fn unused_vars_in_body(body: &Body) -> Vec<UnusedVar> {
         .collect()
 }
 
-/// Bindings the lint reports on: `let`, destructuring `let`, and `for`-loop
-/// vars -- the forms where "this local is never used" is unambiguous. Params
-/// (lambda/fn/decorator) are `Param`-kind and excluded. Match-arm and if-let
-/// pattern binds are excluded too: bone lowers a bare `Pattern::Ident` -- even
-/// a payload-less enum variant like `Null` -- to a `Let` binding, so flagging
-/// them would false-positive on variant arms.
-fn candidate_bindings(body: &Body) -> Vec<Idx<BindingInfo>> {
-    let mut out = Vec::new();
-    for (_, stmt) in body.statement_arena.iter() {
-        match stmt {
-            Statement::Let { name, .. } => out.push(*name),
-            Statement::LetTuple { vars, .. } | Statement::For { vars, .. } => {
-                out.extend(vars.leaves())
-            }
-            _ => {}
-        }
+/// Bindings the lint reports on:
+/// - every `Let`-kind binding -- `let`, destructuring `let`, `for`-loop vars,
+///   and match-arm / if-let pattern binds. A payload-less enum-variant arm
+///   (`None =>`) lowers to a `Let` binding named after the variant, not a user
+///   variable, so variant names are dropped.
+/// - the enclosing function's OWN params (`param_bindings`). Lambda params are
+///   `Param`-kind too but sit outside `param_bindings`, so they're excluded --
+///   a lambda that ignores an arg is idiomatic. Params are skipped entirely for
+///   an opaque body (`root` is `None`: `inline(lua)` / `extern`), whose Lua/C
+///   consumes them invisibly.
+fn candidate_bindings(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<Idx<BindingInfo>> {
+    let mut out: Vec<Idx<BindingInfo>> = body
+        .binding_arena
+        .iter()
+        .filter(|(_, b)| b.kind == BindingKind::Let && !variants.contains(&b.name))
+        .map(|(idx, _)| idx)
+        .collect();
+    if body.root.is_some() {
+        out.extend(body.param_bindings);
     }
     out
+}
+
+/// Every enum-variant name across user modules. A bare variant in pattern
+/// position (`None =>`) lowers to a `Let` binding of that name; the lint must
+/// not report those as unused variables.
+pub fn enum_variant_names(ws: &Workspace) -> FxHashSet<Ustr> {
+    user_modules(ws)
+        .flat_map(|m| m.enums.iter())
+        .flat_map(|(_, e)| e.variants.iter().map(|v| v.name))
+        .collect()
 }
 
 /// Every binding read anywhere in the body. The expr arena is flat, so one
@@ -356,10 +371,9 @@ fn user_modules(ws: &Workspace) -> impl Iterator<Item = &Module> {
 /// convenience for tests and whole-workspace CLI runs; the LSP path lints a
 /// single file's bodies instead.
 pub fn unused_vars(ws: &Workspace) -> Vec<UnusedVar> {
-    ws.modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin() && !m.file.as_str().starts_with("<bone-stdlib"))
+    let variants = enum_variant_names(ws);
+    user_modules(ws)
         .flat_map(|m| m.bodies.values())
-        .flat_map(unused_vars_in_body)
+        .flat_map(|b| unused_vars_in_body(b, &variants))
         .collect()
 }
