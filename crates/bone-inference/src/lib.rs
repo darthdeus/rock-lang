@@ -381,9 +381,26 @@ pub fn check_function(
         let body_ty = resolve(&mut gamma, body_ty, f.span);
 
         // Return-type mismatch is recorded, but not propagated, so gamma.out is well formed
-        // and partial inference survives for hte LSP.
-        if let Err(e) = coerce(&mut gamma, body_ty, ret_ty, f.span) {
-            gamma.body_errors.push(e);
+        // and partial inference survives for the LSP. Anchor it at the value the body
+        // actually offers -- its tail expression -- not the whole `fn { .. }` span. A body
+        // that ends in a statement offers no value at all: a clearer, distinct message.
+        let tail = match c.body.expr_arena[body] {
+            Expr::Block { tail, .. } => tail,
+            _ => Some(body),
+        };
+        if let Some(tail) = tail {
+            if let Err(e) = coerce(&mut gamma, body_ty, ret_ty, c.body.expr_spans[tail]) {
+                gamma.body_errors.push(e);
+            }
+        } else if coerce(&mut gamma, body_ty, ret_ty, f.span).is_err() {
+            let ret_render = gamma.workspace.render(Some(&gamma.out), ret_ty);
+            gamma.body_errors.push(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "function `{}` must return `{}`, but its body has no return value",
+                    f.name, ret_render
+                ),
+            ));
         }
     } else {
         // no declared return (or coroutine): the body tail is discarded
