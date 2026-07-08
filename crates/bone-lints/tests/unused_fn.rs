@@ -72,6 +72,24 @@ fn nomangle_fn_is_a_root() {
 }
 
 #[test]
+fn fn_called_from_global_initializer_is_not_flagged() {
+    // A fn referenced only through a GLOBAL initializer (here via a lambda in a
+    // struct field) is live -- the global runs at load. bone lowers this to a
+    // BodyOwner::Global body, which the walk must treat as a reachability
+    // source, not just Function bodies. Regression: mag PANELS.close/rect
+    // callbacks (shop_close, loot_panel_rect, close_spell_panel) were
+    // false-flagged because only Function bodies were scanned.
+    let src = "struct Reg {\n    close: fn() -> (),\n}\n\
+               global REGS: [Reg] = [\n    Reg { close: () => shutdown() },\n]\n\
+               fn shutdown() {}";
+    assert!(
+        names(src).is_empty(),
+        "shutdown is called from a global initializer, must not flag: got {:?}",
+        names(src)
+    );
+}
+
+#[test]
 fn allow_comment_above_suppresses() {
     let src = "fn main() {}\n// rock: allow(unused_fn)\nfn dead() {}";
     assert_eq!(names(src), vec!["dead".to_string()], "raw finding still exists");

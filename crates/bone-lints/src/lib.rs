@@ -224,12 +224,29 @@ pub fn unused_fns_by_file(ws: &Workspace) -> FxHashMap<Ustr, Vec<UnusedFn>> {
                 stack.push((module.id, fid));
             }
         }
+        // Non-function bodies always run -- a global initializer, a struct's
+        // field defaults, a decorator body -- so any function they reference
+        // (incl. through a lambda, which is inline in the same expr arena) is a
+        // root. Missing these false-flags callbacks stored in globals.
+        for (owner, body) in module.bodies.iter() {
+            if matches!(owner, BodyOwner::Function(_)) {
+                continue;
+            }
+            for callee in body_edges(ws, module.id, *owner, body, &name_map) {
+                if reachable.insert(callee) {
+                    stack.push(callee);
+                }
+            }
+        }
     }
 
     while let Some((mid, fid)) = stack.pop() {
-        for callee in callees_of(ws, ws.module(mid), mid, fid, &name_map) {
-            if reachable.insert(callee) {
-                stack.push(callee);
+        let owner = BodyOwner::Function(fid);
+        if let Some(body) = ws.module(mid).bodies.get(&owner) {
+            for callee in body_edges(ws, mid, owner, body, &name_map) {
+                if reachable.insert(callee) {
+                    stack.push(callee);
+                }
             }
         }
     }
@@ -253,7 +270,7 @@ fn is_root(f: &Function) -> bool {
     f.is_extern || f.name.as_str() == "main" || !f.annotations.is_empty()
 }
 
-/// Callees of one function: every resolved-call edge in the body's inference
+/// Every function one body references: the resolved-call edges in its inference
 /// (calls, `for`-loop iterator protocol, and bounded-generic `next` chains --
 /// each a dispatch whose target name is not reliably textual at the call site)
 /// unioned with name-resolution of function-valued references. A function
@@ -261,18 +278,14 @@ fn is_root(f: &Function) -> bool {
 /// and never in the inference maps, so scanning `Global`/`SiblingRef` names is
 /// what keeps callbacks alive. The two nets are complementary: inference sees
 /// protocol dispatch the name-scan can't, the name-scan sees values inference
-/// can't.
-fn callees_of(
+/// can't. Works for any body owner (function, global initializer, defaults).
+fn body_edges(
     ws: &Workspace,
-    module: &Module,
     mid: ModuleId,
-    fid: Idx<Function>,
+    owner: BodyOwner,
+    body: &Body,
     name_map: &FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>)>>,
 ) -> Vec<(ModuleId, Idx<Function>)> {
-    let owner = BodyOwner::Function(fid);
-    let Some(body) = module.bodies.get(&owner) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
     if let Some(bi) = ws.inference(mid).and_then(|inf| inf.per_fn.get(&owner)) {
         inference_edges(bi, &mut out);
