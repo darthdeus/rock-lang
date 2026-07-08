@@ -1820,7 +1820,20 @@ pub fn infer_expr_used(
                 let bool_ty = gamma.workspace.builtins.bool();
                 let lhs_ty = infer_expr(c, gamma, *lhs)?;
                 unify(gamma, lhs_ty, bool_ty, c.body.expr_spans[*lhs])?;
-                let rhs_ty = infer_expr(c, gamma, *rhs)?;
+
+                // The RHS of `||` runs only when the LHS is false, so it sees the
+                // LHS's ELSE narrowings (dual of `&&`, which uses THEN narrowings).
+                let (_, else_narrows) = detect_null_narrow(gamma, c, *lhs);
+
+                let rhs_ty = infer_branch(
+                    c,
+                    gamma,
+                    *rhs,
+                    &else_narrows,
+                    c.body.expr_spans[*rhs],
+                    Use::Value,
+                )?;
+
                 unify(gamma, rhs_ty, bool_ty, c.body.expr_spans[*rhs])?;
 
                 bool_ty

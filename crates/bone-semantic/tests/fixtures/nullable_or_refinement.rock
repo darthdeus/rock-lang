@@ -1,0 +1,48 @@
+//! Intra-`||` refinement: the RHS of `||` runs only when the LHS is false, so it
+//! sees the LHS's ELSE narrowings. Dual of the `&&` RHS seeing the LHS's THEN
+//! narrowings (nullable_path_refinement `refine_and_chain`). This is what lets
+//! `if c == null || !c.in_reach()` type-check -- the guard-combine of two
+//! `if c == null { .. }` / `if !c.in_reach() { .. }` early returns.
+//!
+//! DIVERGENCE from rock: rock does not narrow across `||` operands at all
+//! (docs/nullable-refinement.md). bone implements the intended dual-of-`&&`
+//! rule; the guard-combine is the motivating case.
+
+// `x == null` false in the RHS => `x` is non-null there.
+//- refine_or_rhs_field
+struct S { v: int }
+fn f(x: S?) -> bool {
+    let ok = x == null || x.v > 0
+      //^ bool
+    return ok
+}
+
+// method-call receiver form (the mag/loot.rock case).
+//- refine_or_rhs_method
+struct Corpse { hp: int }
+fn Corpse.in_reach(c) -> bool {
+    return c.hp > 0
+}
+fn f(c: Corpse?) -> bool {
+    let ok = c == null || !c.in_reach()
+      //^ bool
+    return ok
+}
+
+// chained: each `== null` clause narrows its own path for the following clause.
+//- refine_or_rhs_chain
+struct Inner { v: int }
+struct Mid { inner: Inner? }
+fn f(m: Mid?) -> bool {
+    let ok = m == null || m.inner == null || m.inner.v > 0
+      //^ bool
+    return ok
+}
+
+// SOUNDNESS: `x != null` false in the RHS => `x` IS null there, so no narrowing.
+// The RHS `x.v` must stay a compile error (plain `.field` on a nullable).
+//- refine_or_rhs_neq_no_narrow @fail
+struct S { v: int }
+fn f(x: S?) -> bool {
+    return x != null || x.v > 0
+}
