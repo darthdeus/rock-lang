@@ -771,6 +771,21 @@ fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) 
 
 /// Lower a single function to a [`MirFunc`]. Errors (a `gap`) when the body uses
 /// a construct Phase 1 doesn't lower yet.
+/// Owner segment of a `static`'s cell name. Stable across body edits (depends
+/// only on the fn name + rendered param types), distinct per overload. Not the
+/// mangled name -- skull-mir is upstream of the mangler -- but mir_emit reads
+/// the resulting cell names back verbatim from `MirFunc::statics`, so exact
+/// equality with the mangled name is not needed.
+fn static_owner_tag(ws: &Workspace, name: Ustr, params: &[bone_semantic::hir::ParamDecl]) -> Ustr {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.as_str().hash(&mut h);
+    for pd in params {
+        ws.render(None, pd.ty).hash(&mut h);
+    }
+    Ustr::from(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
+}
+
 pub fn lower_function(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -826,6 +841,9 @@ pub fn lower_function(
         ret_shape,
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         group_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        static_owner: static_owner_tag(ws, func.name, &func.param_decls),
+        static_counters: HashMap::new(),
     };
     b.lower_params();
     b.fill_param_defaults()?;
@@ -873,6 +891,9 @@ pub fn lower_global(
         ret_shape: None,
         ret_tuple: None,
         group_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        static_owner: name,
+        static_counters: HashMap::new(),
     };
     b.lower_root()?;
     Ok(Some(b.f))
@@ -919,6 +940,9 @@ pub fn lower_decorator(
         ret_shape: None,
         ret_tuple: None,
         group_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        static_owner: name,
+        static_counters: HashMap::new(),
     };
     // `target` is param 0, then the decorator's declared params.
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
@@ -966,6 +990,18 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// `static` locals: raw binding idx -> the private global cell name a read /
+    /// write of the binding resolves to (an `Inst::Global`/`StoreGlobal`, not a
+    /// local cell). Populated by `lower_static`.
+    static_cells: HashMap<u32, Ustr>,
+    /// Owner tag baked into a static's cell name -- stable across body edits,
+    /// distinct per overload (fn name + rendered param types). NOT the mangled
+    /// name (skull-mir is upstream of the mangler); it only needs uniqueness +
+    /// stability, which mir_emit reads back verbatim from `MirFunc::statics`.
+    static_owner: Ustr,
+    /// Per static source-name counter (source order) so shadowing duplicates get
+    /// distinct cells and adding an unrelated static never renames siblings.
+    static_counters: HashMap<Ustr, u32>,
 }
 
 impl Builder<'_> {
@@ -1116,6 +1152,52 @@ impl Builder<'_> {
 
     /// Lower a statement sequence into the current block. Returns `true` if a
     /// `return` terminated the block (the rest is dead).
+    /// `static name = init` -> a private global cell + done-flag, guarded so the
+    /// initializer runs only on the first reach:
+    /// `if not <done> then <cell> = <init>; <done> = true end`. Cell/done-flag
+    /// names are recorded on `MirFunc::statics` for the mir_emit reload preamble;
+    /// reads/writes of the binding resolve to the cell global via the
+    /// `static_cells` guards in the read/assign/compound/incdec paths.
+    fn lower_static(
+        &mut self,
+        name: Idx<BindingInfo>,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let sname = self.body.binding_arena[name].name;
+        let ctr = {
+            let c = self.static_counters.entry(sname).or_insert(0);
+            let v = *c;
+            *c += 1;
+            v
+        };
+        let cell = Ustr::from(format!("__static_{}_{}_{}", self.static_owner, sname, ctr).as_str());
+        let done_flag = Ustr::from(format!("{cell}__done").as_str());
+        self.static_cells.insert(raw(name), cell);
+
+        let ty = self
+            .inf
+            .and_then(|i| i.binding_types.get(name).copied())
+            .or(self.body.binding_arena[name].declared_ty);
+        let type_str = ty
+            .map(|t| self.ws.render(None, t))
+            .unwrap_or_else(|| "any".to_string());
+        self.f.statics.push(StaticCell { cell, done_flag, type_str });
+
+        let done_v = self.emit_cur(Inst::Global(done_flag));
+        let init_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f
+            .set_term(self.cur, Term::Branch { cond: done_v, then_bb: join, else_bb: init_bb });
+        self.cur = init_bb;
+        let v = self.lower_expr(value)?;
+        self.emit_cur(Inst::StoreGlobal { name: cell, value: v });
+        let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
+        self.emit_cur(Inst::StoreGlobal { name: done_flag, value: t });
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        Ok(())
+    }
+
     fn lower_stmts(&mut self, stmts: IdxRange<Statement>) -> Result<bool, CompilerError> {
         for sidx in stmts {
             match self.body.statement_arena[sidx].clone() {
@@ -1188,6 +1270,9 @@ impl Builder<'_> {
                     let cell = self.f.new_cell(Some(self.body.binding_arena[var].name));
                     self.emit_cur(Inst::Store { cell, value: v });
                     self.binds.insert(raw(var), cell);
+                }
+                Statement::Static { name, value } => {
+                    self.lower_static(name, value)?;
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {
@@ -1353,6 +1438,9 @@ impl Builder<'_> {
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let r = self.lower_expr_repr(e)?;
                 Ok(self.pack(r))
+            }
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -1694,6 +1782,11 @@ impl Builder<'_> {
                     self.emit_cur(Inst::Store { cell: *c, value: lv });
                 }
             }
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let v = self.lower_expr(value)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: v });
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -1781,6 +1874,13 @@ impl Builder<'_> {
             None
         };
         match self.body.expr_arena[target].clone() {
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let cur = self.emit_cur(Inst::Global(name));
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: new_v });
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -1887,6 +1987,13 @@ impl Builder<'_> {
             s.emit_cur(inst)
         };
         match self.body.expr_arena[target].clone() {
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let old = self.emit_cur(Inst::Global(name));
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreGlobal { name, value: new });
+                Ok(if postfix { old } else { new })
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds

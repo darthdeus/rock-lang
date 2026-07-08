@@ -1432,6 +1432,27 @@ impl Parser {
             }
         }
 
+        // Contextual `static <name> ...` local. Only fires when `static` heads a
+        // statement and is followed by an identifier (the binding name), so
+        // `static` stays usable as an ordinary ident (`load_audio(p, static)`).
+        if matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "static")
+            && matches!(self.peek_kind(), TokenKind::Ident(_))
+        {
+            self.advance(); // `static`
+            let name = self.expect_ident()?;
+            let ty = if self.eat(TokenKind::Colon) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            self.expect(TokenKind::Assign)?;
+            let value = self.parse_expr(0)?;
+            let span = self.span_from(start);
+            return Ok(self
+                .ast
+                .stmt(span, StatementKind::Static(Static { span, keyword_span: Some(start), name, ty, value })));
+        }
+
         match self.kind() {
             TokenKind::Let => {
                 self.advance();

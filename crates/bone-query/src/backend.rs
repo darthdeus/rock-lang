@@ -2545,7 +2545,7 @@ fn semantic_classifications(
     use bone_semantic::hir::{BindingKind, BodyOwner, Expr};
     let binding_tt = |k: BindingKind| match k {
         BindingKind::Param => TT_PARAMETER,
-        BindingKind::Let => TT_VARIABLE,
+        BindingKind::Let | BindingKind::Static => TT_VARIABLE,
     };
     let mut map: HashMap<usize, (u32, u32)> = HashMap::new();
     let mut holes: Vec<Span> = Vec::new();

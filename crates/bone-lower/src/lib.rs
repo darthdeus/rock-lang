@@ -675,6 +675,28 @@ pub fn lower_statement_value(
             }
         }
 
+        StatementKind::Static(st) => {
+            let value_idx = lower_expr(ctx, a, body, scope, a.e(&st.value))?;
+
+            let declared_ty = if let Some(te) = &st.ty {
+                Some(lower_type_expr_local(ctx, a, body, a.te(te))?)
+            } else {
+                None
+            };
+
+            let binding = BindingInfo {
+                name: st.name.name,
+                kind: BindingKind::Static,
+                declared_ty,
+                span: st.name.span,
+            };
+
+            let binding = ctx.alloc_binding(body, binding, st.name.span);
+            body.scope_arena[scope].bindings.insert(st.name.name, binding);
+
+            Statement::Static { name: binding, value: value_idx }
+        }
+
         StatementKind::For(f) => {
             let iter = lower_expr(ctx, a, body, scope, a.e(&f.iter))?;
 

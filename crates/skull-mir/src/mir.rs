@@ -433,6 +433,18 @@ impl Default for Block {
     }
 }
 
+/// A `static` local's synthesized storage: a private global cell + a done-flag,
+/// discovered during lowering and surfaced to `skull::mir_emit` for the
+/// hot-reload preservation preamble + `__rock_known_globals` registration. The
+/// in-body first-reach guard is emitted inline (see `Builder::lower_static`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticCell {
+    pub cell: Ustr,
+    pub done_flag: Ustr,
+    /// Rendered type -- the `__rock_known_globals` key (reset on mismatch).
+    pub type_str: String,
+}
+
 /// A function — a CFG over cells and values. `params` are the entry block's
 /// parameter *cells* in order (params are variables, hence cells); they
 /// materialize as the Lua function parameters.
@@ -440,6 +452,8 @@ impl Default for Block {
 pub struct MirFunc {
     pub name: Ustr,
     pub params: Vec<Idx<Cell>>,
+    /// `static` cells declared in this fn's body (in source order).
+    pub statics: Vec<StaticCell>,
     pub insts: Arena<Inst>,
     pub cells: Arena<Cell>,
     pub blocks: Arena<Block>,
@@ -480,6 +494,7 @@ impl MirFunc {
         Self {
             name,
             params: Vec::new(),
+            statics: Vec::new(),
             insts: Arena::default(),
             cells: Arena::default(),
             blocks,

@@ -238,6 +238,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_static_local_inferred() {
+        // `static count = 0` -> `(static <name> <ty-or-()> <value>)`, mirroring
+        // the `(let ...)` shape. Name is a plain ident (no destructuring); the
+        // initializer is mandatory.
+        check("static count = 0", "(block (static count () 0))");
+    }
+
+    #[test]
+    fn parse_static_local_annotated() {
+        check("static scratch: [Vec2] = []", "(block (static scratch [Vec2] []))");
+    }
+
+    #[test]
+    fn parse_static_is_not_a_hard_keyword() {
+        // `static` used as an ordinary ident (a call arg) stays an ident -- the
+        // contextual keyword only fires at statement start followed by an ident.
+        let s = body_sexp(r#"fn f() { load_audio("a.wav", static) }"#);
+        assert!(s.contains("static"), "static usable as an ordinary ident: {s}");
+    }
+
+    #[test]
     fn lambda_still_parses_outside_a_guard() {
         // The block must not leak into normal lambda parsing.
         let s = body_sexp("fn f() { let g = x => x + 1 }");

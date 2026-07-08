@@ -642,6 +642,11 @@ fn subst_in_type_exprs_block(ast: &mut Ast, b: Idx<BlockData>, ty_subs: &HashMap
                 subst_in_type(ast, t, ty_subs);
             }
         }
+        if let StatementKind::Static(st) = &ast.stmts[s].kind {
+            if let Some(t) = st.ty {
+                subst_in_type(ast, t, ty_subs);
+            }
+        }
         for e in stmt_exprs(ast, s) {
             subst_in_type_exprs(ast, e, ty_subs);
         }
@@ -1141,6 +1146,7 @@ fn stmt_exprs(ast: &Ast, s: Idx<StatementData>) -> ExprEdges {
         | StatementKind::Return { value: Some(e), .. }
         | StatementKind::Defer(DeferKind::Expression(e)) => smallvec![*e],
         StatementKind::Let(l) => l.value.into_iter().collect(),
+        StatementKind::Static(st) => smallvec![st.value],
         StatementKind::For(f) => smallvec![f.iter],
         StatementKind::While(w) => smallvec![w.condition],
         StatementKind::WhileLet(w) => smallvec![w.value],

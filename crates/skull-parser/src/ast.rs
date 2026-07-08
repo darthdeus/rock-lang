@@ -334,6 +334,7 @@ pub struct StatementData {
 pub enum StatementKind {
     Expression(Idx<ExprData>),
     Let(Let),
+    Static(Static),
     /// `return [expr]` — `keyword_span` is the `return` token (rock parity).
     Return {
         keyword_span: Option<Span>,
@@ -385,6 +386,19 @@ pub struct Let {
     pub binding: Binding,
     pub ty: Option<Idx<TypeExprData>>,
     pub value: Option<Idx<ExprData>>,
+}
+
+/// `static <name>[: T] = <init>` -- a local with private module-level storage
+/// that persists across calls, initialized on first reach. The initializer is
+/// mandatory (an immutable never-written static should be a `const`). Name is a
+/// plain ident; no destructuring binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Static {
+    pub span: Span,
+    pub keyword_span: Option<Span>,
+    pub name: Ident,
+    pub ty: Option<Idx<TypeExprData>>,
+    pub value: Idx<ExprData>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
