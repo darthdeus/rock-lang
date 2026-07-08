@@ -17,6 +17,19 @@ pub(crate) const FZ_CONSEC: i32 = 8; // matched char right after the previous ma
 pub(crate) const FZ_FIRST: i32 = 10; // extra for matching at absolute position 0
 
 
+/// How many leading chars of `query` (already lowercased) match the START of
+/// `cand` contiguously, case-insensitively. `lootpa` vs `LOOT_PANEL` = 4
+/// (`loot`); vs `LATER_...` = 1 (`l`). "You typed the beginning of this name" --
+/// a strong within-band signal that a tight prefix-run match should beat a
+/// scattered all-boundary match on a longer name (design doc Divergence 1).
+pub(crate) fn leading_run_len(cand: &[u8], query: &[u8]) -> usize {
+    let mut k = 0;
+    while k < query.len() && k < cand.len() && cand[k].to_ascii_lowercase() == query[k] {
+        k += 1;
+    }
+    k
+}
+
 pub(crate) fn fuzzy_score(cand: &[u8], query: &[u8]) -> i32 {
     const MISS: i32 = FZ_MISS;
     const BASE: i32 = FZ_BASE;

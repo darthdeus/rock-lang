@@ -1421,15 +1421,23 @@ impl BoneWorkspace {
                 } else {
                     0
                 };
-                let score = if c.kind == SymCat::Variant {
+                let (score, lead) = if c.kind == SymCat::Variant {
                     // The user types the variant NAME (`nog` -> `NotGround`);
                     // score against it, but keep the qualified score too so a
                     // `tarnog` (Enum + variant) query still ranks.
                     let vname = name.rsplit("::").next().unwrap_or(name);
-                    fuzzy_score(vname.as_bytes(), q).max(fuzzy_score(name.as_bytes(), q))
+                    let s = fuzzy_score(vname.as_bytes(), q).max(fuzzy_score(name.as_bytes(), q));
+                    let l = leading_run_len(vname.as_bytes(), q).max(leading_run_len(name.as_bytes(), q));
+                    (s, l)
                 } else {
-                    fuzzy_score(name.as_bytes(), q)
+                    (fuzzy_score(name.as_bytes(), q), leading_run_len(name.as_bytes(), q))
                 };
+                // A leading contiguous run (you typed the start of the name)
+                // beats a scattered all-boundary match on a longer name -- the
+                // fine score alone over-rewards boundary-rich names
+                // (docs/completion-ranking-design.md Divergence 1). Only reorders
+                // within a band; well below fuzzy_score's whole-prefix +1000.
+                let score = score + (lead as i32) * 100;
                 // Coarse match band + exact-name flag: classified against the
                 // variant tail too (the user types `Combat`, not
                 // `MobAiState::Combat`), mirroring the score's vname handling.

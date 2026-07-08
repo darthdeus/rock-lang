@@ -92,6 +92,25 @@ fn strong_const_match_beats_weaker_snake_match() {
     assert!(c < d || d.is_none(), "FONT_SMALL (prefix match) must rank above format_new: {labels:?}");
 }
 
+#[test]
+fn contiguous_prefix_run_beats_scattered_all_boundary_match() {
+    // `LOOTPA` matches `LOOT_PANEL` as a contiguous "loot" run + "pa", and
+    // `LATER_OUT_OF_TOWN_PERSON_ASTEROID` as six scattered word-boundary hits
+    // (L-ater O-ut O-f T-own P-erson A-steroid) with no run. Both are band-2
+    // clean matches, so the fine score decides -- and the boundary-rich long
+    // name must NOT win: LOOT_PANEL is the obvious intent. (nvim
+    // completion_ranking_spec.)
+    let labels = labels_at(
+        "global LOOT_PANEL: int = 0\n\
+         global LATER_OUT_OF_TOWN_PERSON_ASTEROID: int = 0\n\
+         fn r() {\n  let x = LOOTPA$0\n}\n",
+    );
+    let loot = rank_of(&labels, "LOOT_PANEL");
+    let later = rank_of(&labels, "LATER_OUT_OF_TOWN_PERSON_ASTEROID");
+    assert!(loot.is_some(), "LOOT_PANEL must appear for `LOOTPA`: {labels:?}");
+    assert!(loot < later, "LOOT_PANEL (contiguous prefix run) must outrank the scattered match: {labels:?}");
+}
+
 // -- Type-directed arg completion: UFCS receiver is param 0, so the arg index
 //    into the callee's params is comma_count + 1. ----------------------------
 
