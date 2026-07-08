@@ -2053,6 +2053,18 @@ fn chained_member_through_tuple_projection() {
 }
 
 #[test]
+fn chained_member_through_tuple_projection_in_fallback() {
+    // `foo(t.0.na|` with `foo` undefined -- inference can't type the arg, so it
+    // hits the structural name-walk fallback. A tuple isn't nominal, so the walk
+    // has no head struct name; it must resolve `.0` on the declared tuple element
+    // type (`Corpse`) and offer its fields.
+    let src = "struct Corpse { items: int, name: string }\n\
+               fn r(t: (Corpse, int)) {\n  foo(t.0.na\n}\n";
+    let l = labels(src, 2, 12);
+    assert!(l.contains(&"name: string".to_string()), "tuple projection in fallback: {l:?}");
+}
+
+#[test]
 fn unspaced_less_than_comparison_is_expression_position() {
     // `hp<Loa|` -- the byte scanner reads `ident<` as a generic type slot
     // and offers the bare enum instead of qualified variants. It's a

@@ -2563,7 +2563,7 @@ pub fn struct_fields_for_path(
     let Some((head, rest)) = segments.split_first() else {
         return Vec::new();
     };
-    let Some(mut cur) = receiver_head_struct(ws, mid, offset, head) else {
+    let Some((mut cur, rest)) = resolve_receiver_head(ws, mid, offset, head, rest) else {
         return Vec::new();
     };
 
@@ -3288,11 +3288,67 @@ pub fn struct_name_for_path(
         }
     }
     let (head, rest) = segments.split_first()?;
-    let mut cur = receiver_head_struct(ws, mid, offset, head)?;
+    let (mut cur, rest) = resolve_receiver_head(ws, mid, offset, head, rest)?;
     for seg in rest {
         cur = field_hop_struct(ws, cur, seg)?;
     }
     Some(cur)
+}
+
+/// The receiver chain's starting struct name + the segments still to walk. A
+/// nominal head (struct/newtype) resolves directly. A TUPLE head has no name, so
+/// resolve its leading `.N` against the declared element type (a tuple isn't
+/// nominal, but its elements are), consuming that segment.
+fn resolve_receiver_head<'a>(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+    head: &str,
+    rest: &'a [String],
+) -> Option<(Ustr, &'a [String])> {
+    if let Some(name) = receiver_head_struct(ws, mid, offset, head) {
+        return Some((name, rest));
+    }
+    let (seg0, rest2) = rest.split_first()?;
+    let ty = receiver_head_ty(ws, mid, offset, head)?;
+    Some((tuple_elem_struct(ws, ty, seg0)?, rest2))
+}
+
+/// The declared TyId of a receiver-head binding (param / annotated `let`) or a
+/// global -- the tuple-head resolver's input. Only the declared cases (nominal
+/// `Static` types) are needed here; inferred locals resolve through the
+/// inference-first paths above.
+fn receiver_head_ty(ws: &Workspace, mid: ModuleId, offset: usize, head: &str) -> Option<TyId> {
+    let module = ws.modules.get(mid.index())?;
+    if let Some(owner) = module.body_at(offset) {
+        if let Some(body) = module.bodies.get(&owner) {
+            if let Some(b_idx) = find_binding_by_name(body, head, offset) {
+                if let Some(ty) = body.binding_arena[b_idx].declared_ty {
+                    return Some(ty);
+                }
+            }
+        }
+    }
+    let name = Ustr::from(head);
+    module
+        .global_by_name
+        .get(&name)
+        .map(|g| module.globals[*g].ty)
+        .or_else(|| ws.modules.iter().find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty)))
+}
+
+/// Struct name of a tuple's `.N` element (`(Corpse, int).0` -> Corpse), from the
+/// declared tuple type (`None` body -- `Static` arena). `None` when `ty` isn't a
+/// tuple, `seg` isn't a valid index, or the element isn't a nominal struct.
+fn tuple_elem_struct(ws: &Workspace, ty: TyId, seg: &str) -> Option<Ustr> {
+    let n: usize = seg.parse().ok()?;
+    match deref_ty(ws, None, ty)? {
+        hir::TypeExpr::Tuple { elements } => {
+            struct_name_of_ty(ws, None, ty.with_idx(elements.into_iter().nth(n)?))
+        }
+        hir::TypeExpr::Nullable(inner) => tuple_elem_struct(ws, ty.with_idx(*inner), seg),
+        _ => None,
+    }
 }
 
 /// One structural field hop `cur.seg` -> the next type's nominal name, for the
