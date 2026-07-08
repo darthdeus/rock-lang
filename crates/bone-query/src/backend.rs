@@ -135,6 +135,19 @@ struct BoneProject {
     /// public API has no in-project caller yet isn't dead -- so it runs only
     /// when this is true. Computed once at load, not per keystroke.
     is_bin: bool,
+    /// Last time each module was (re)inferred, keyed by module file. Stamped for
+    /// every file at load and for the `update.reinferred` set on each edit, so
+    /// `rock/modules` can render "how long ago did this recompile" -- the
+    /// incremental-perf watch view. Modules never yet touched are absent.
+    module_touched: HashMap<String, std::time::Instant>,
+}
+
+/// One module's row for the `rock/modules` snapshot: its id (file path) and how
+/// long ago it last (re)inferred, `None` if never touched this session.
+#[derive(Clone, Debug)]
+pub struct ModuleRecency {
+    pub id: String,
+    pub ago_ms: Option<u64>,
 }
 
 /// True iff the deepest `stick.toml` at or above `root` is a `bin` package
@@ -298,6 +311,7 @@ impl BoneWorkspace {
                 fn_sigs: None,
                 call_through: None,
                 is_bin,
+                module_touched: HashMap::new(),
             })
     }
 
@@ -314,18 +328,30 @@ impl BoneWorkspace {
         self.batch_load_for_file(path);
     }
 
-    /// Per-project loaded-file summary for the `rock/modules` introspection
-    /// request: `(root, sorted module ids)` for every indexed project. The LSP
-    /// serves one root per server, but a session can hold several (scratch files
-    /// keyed by parent dir), so this returns all of them as separate contexts.
-    pub fn projects_summary(&self) -> Vec<(String, Vec<String>)> {
-        let mut out: Vec<(String, Vec<String>)> = self
+    /// Per-project module summary for the `rock/modules` introspection request:
+    /// `(root, sorted [ModuleRecency])` for every indexed project, each module
+    /// carrying how long ago it last (re)inferred. The LSP serves one root per
+    /// server, but a session can hold several (scratch files keyed by parent
+    /// dir), so this returns all of them as separate contexts.
+    pub fn projects_summary(&self) -> Vec<(String, Vec<ModuleRecency>)> {
+        let now = std::time::Instant::now();
+        let mut out: Vec<(String, Vec<ModuleRecency>)> = self
             .projects
             .iter()
             .map(|(root, proj)| {
-                let mut ids: Vec<String> = proj.texts.keys().cloned().collect();
-                ids.sort();
-                (root.display().to_string(), ids)
+                let mut mods: Vec<ModuleRecency> = proj
+                    .texts
+                    .keys()
+                    .map(|id| ModuleRecency {
+                        id: id.clone(),
+                        ago_ms: proj
+                            .module_touched
+                            .get(id)
+                            .map(|t| now.duration_since(*t).as_millis() as u64),
+                    })
+                    .collect();
+                mods.sort_by(|a, b| a.id.cmp(&b.id));
+                (root.display().to_string(), mods)
             })
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -352,10 +378,14 @@ impl BoneWorkspace {
         let is_bin = stick_is_bin(&root);
         match Session::new(warm_stdlib(), files.clone()) {
             Ok(session) => {
-                let texts = files.into_iter().collect();
+                let texts: HashMap<String, String> = files.into_iter().collect();
+                // Baseline every loaded file at load time, so `ago_ms` is
+                // meaningful for modules not yet re-inferred by an edit.
+                let now = std::time::Instant::now();
+                let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 self.projects.insert(
                     root,
-                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin },
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, module_touched },
                 );
             }
             Err(e) => {
@@ -440,8 +470,15 @@ impl BoneWorkspace {
                     rebuild_type_caches = true;
                 }
                 let ws = proj.session.workspace();
-                for (mid, _) in &upd.reinferred {
-                    changed.insert(ws.module(*mid).file.as_str().to_string());
+                let touched: Vec<String> = upd
+                    .reinferred
+                    .iter()
+                    .map(|(mid, _)| ws.module(*mid).file.as_str().to_string())
+                    .collect();
+                let now = std::time::Instant::now();
+                for file in touched {
+                    proj.module_touched.insert(file.clone(), now);
+                    changed.insert(file);
                 }
             }
             Err(e) => this_file_parse_err = Some(e),

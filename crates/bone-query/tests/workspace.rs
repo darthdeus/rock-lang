@@ -544,6 +544,37 @@ fn unused_fn_is_silent_for_lib() {
     );
 }
 
+// `rock/modules` recency: modules are baselined at load, then RE-stamped as
+// they re-infer. So after a delay, a module just edited must read fresher than
+// an untouched sibling -- the incremental-perf watch view. (Asserting merely
+// "ago is Some" would pass off the load baseline alone and never exercise the
+// re-stamp; the relative freshness is what proves it.)
+#[test]
+fn edit_restamps_module_recency_below_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"p\"\n").unwrap();
+    std::fs::write(dir.path().join("a.rock"), "fn a() -> int { 1 }\n").unwrap();
+    std::fs::write(dir.path().join("b.rock"), "fn b() -> int { 1 }\n").unwrap();
+    let a = bone_query::canonicalize_lenient(&dir.path().join("a.rock").to_string_lossy());
+    let b = bone_query::canonicalize_lenient(&dir.path().join("b.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    bone.update(&a, "fn a() -> int { 2 }\n".to_string()); // batch-loads both, baselines at load
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    bone.update(&b, "fn b() -> int { 2 }\n".to_string()); // re-infers b -> re-stamps b only
+    let ago: std::collections::HashMap<String, Option<u64>> = bone
+        .projects_summary()
+        .into_iter()
+        .flat_map(|(_, mods)| mods)
+        .map(|m| (m.id, m.ago_ms))
+        .collect();
+    let ago_a = ago[&a].expect("a baselined at load");
+    let ago_b = ago[&b].expect("b stamped on edit");
+    assert!(
+        ago_b < ago_a,
+        "b just re-inferred, must read fresher than untouched a: ago_b={ago_b} ago_a={ago_a}"
+    );
+}
+
 #[test]
 fn completion_offers_global_namespace_by_prefix() {
     // Cursor after `vec` -> the stdlib's vec_* functions surface.
