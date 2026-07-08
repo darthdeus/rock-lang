@@ -2565,6 +2565,19 @@ fn struct_fields_of_ty(
     bi: Option<&BodyInference>,
     ty: TyId,
 ) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr)> {
+    // `[T]` (bone's Array ctor) is the stdlib `Vec` struct -- resolve it via
+    // whichever arena `ty` lives in (a nominal `struct_name_of_ty` can't peel
+    // an inference-arena Local). Fields come from the Vec struct def.
+    if array_elem_ty(ws, bi, ty).is_some() {
+        let name = Ustr::from("Vec");
+        let sdef = struct_def_by_name(ws, name)?;
+        let fields = sdef
+            .fields
+            .iter()
+            .map(|f| (f.name.to_string(), ws.render(None, f.ty), Some(f.ty)))
+            .collect();
+        return Some((fields, name));
+    }
     if let Some(bi) = bi {
         if let Some((sname, args)) = struct_app_args(ws, bi, ty) {
             let sdef = struct_def_by_name(ws, sname)?;
@@ -2618,10 +2631,55 @@ pub(crate) fn struct_members_of_receiver_expr(
     ws: &Workspace,
     mid: ModuleId,
     recv_end: usize,
-) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr)> {
+) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr, Option<String>)> {
     let inf = ws.inference(mid)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end.checked_sub(1)?)?;
-    struct_fields_of_ty(ws, ta.body, ta.ty)
+    let (fields, sname) = struct_fields_of_ty(ws, ta.body, ta.ty)?;
+    let vec_elem = array_elem_ty(ws, ta.body, ta.ty).map(|e| ws.render(ta.body, e));
+    Some((fields, sname, vec_elem))
+}
+
+/// Rendered ELEMENT type of a Vec receiver (`POS_HIST: [Vec2]` -> "Vec2"), for
+/// element-aware UFCS filtering on the name-path. Resolves the single-binding /
+/// global head (the common Vec receiver); `None` for anything else, so UFCS
+/// falls back to name-only matching (over-broad but safe).
+pub(crate) fn receiver_vec_elem(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+    segments: &[String],
+) -> Option<String> {
+    let [head] = segments else { return None };
+    let module = ws.modules.get(mid.index())?;
+    // Binding (param / local / inferred): its resolved type lives in the
+    // inference arena, so `render(Some(bi), ..)` is correct.
+    if let Some(owner) = module.body_at(offset) {
+        if let (Some(body), Some(bi)) = (
+            module.bodies.get(&owner),
+            ws.inference(mid).and_then(|i| i.per_fn.get(&owner)),
+        ) {
+            if let Some(b_idx) = find_binding_by_name(body, head, offset) {
+                if let Some(&ty) = bi.binding_types.get(b_idx) {
+                    if let Some(elem) = array_elem_ty(ws, Some(bi), ty) {
+                        return Some(ws.render(Some(bi), elem));
+                    }
+                }
+            }
+        }
+    }
+    // Global (may be declared in another module; its type is `Static`).
+    let name = Ustr::from(head.as_str());
+    let gty = module
+        .global_by_name
+        .get(&name)
+        .map(|g| module.globals[*g].ty)
+        .or_else(|| {
+            ws.modules
+                .iter()
+                .find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty))
+        })?;
+    let elem = array_elem_ty(ws, None, gty)?;
+    Some(ws.render(None, elem))
 }
 
 /// `(struct name, inferred type args)` if `ty` is a nominal-struct `App`
@@ -2651,6 +2709,20 @@ fn deref_ty<'a>(
     match ty {
         TyId::Static(m, idx) => Some(&ws.modules.get(m.index())?.ty_arena[idx]),
         TyId::Local(idx) => Some(&bi?.ty_arena[idx]),
+    }
+}
+
+/// The element `TyId` of a `[T]` (bone's `Array` ctor), in the same arena as
+/// `ty` (peeling `Nullable`). `None` when `ty` isn't a Vec. Used to render the
+/// element for element-aware Vec UFCS filtering.
+fn array_elem_ty(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<TyId> {
+    match deref_ty(ws, bi, ty)? {
+        hir::TypeExpr::App {
+            ctor: hir::TypeCtor::Array,
+            params,
+        } => Some(ty.with_idx(params.into_iter().next()?)),
+        hir::TypeExpr::Nullable(inner) => array_elem_ty(ws, bi, ty.with_idx(*inner)),
+        _ => None,
     }
 }
 
@@ -3069,6 +3141,13 @@ fn struct_name_of_ty(ws: &Workspace, body: Option<&Body>, ty: TyId) -> Option<Us
             ctor: hir::TypeCtor::Nominal(name),
             ..
         } => Some(*name),
+        // `[T]` is bone's `Array` ctor, type-checked as the stdlib `Vec` struct
+        // (bone's `struct_field_ty` maps it to `*VEC`); so `xs.len` and the Vec
+        // UFCS fns (whose p0 is `[T]` -> resolves here to "Vec") complete.
+        hir::TypeExpr::App {
+            ctor: hir::TypeCtor::Array,
+            ..
+        } => Some(Ustr::from("Vec")),
         // `inner` indexes the same arena as `ty`, so keep its TyId variant.
         hir::TypeExpr::Nullable(inner) => {
             let inner_ty = match ty {
@@ -3189,7 +3268,14 @@ pub struct UfcsMethod {
 /// every function (in any module) whose FIRST parameter's type is that struct.
 /// Skips compiler-generated `__` ops. Mirrors rock, which surfaces these in
 /// `recv.` member completion.
-pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
+///
+/// `recv_elem` is the receiver's rendered ELEMENT type for a Vec receiver
+/// (`[Vec2]` -> "Vec2"); when set, a candidate whose first param is `[E']`
+/// survives only if `E'` is generic (a polymorphic Vec op like `push`) or its
+/// element matches -- so `[Vec2]` doesn't offer `apply_status([Status])`, but a
+/// `[string]` receiver still gets `join([string])`. `None` (nominal receivers,
+/// or an unresolved Vec element) keeps name-only matching.
+pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<UfcsMethod> {
     let mut out = Vec::new();
     // Overloads collapse to one method item (identical label + insert --
     // the duplicate is popup noise), first-wins to match the general path's
@@ -3201,7 +3287,15 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
                 continue;
             }
             if let Some(p0) = f.param_decls.first() {
-                if struct_name_of_ty(ws, None, p0.ty) == Some(name) && seen.insert(f.name) {
+                if struct_name_of_ty(ws, None, p0.ty) != Some(name) {
+                    continue;
+                }
+                if let Some(want) = recv_elem {
+                    if !vec_param_elem_matches(ws, p0.ty, want) {
+                        continue;
+                    }
+                }
+                if seen.insert(f.name) {
                     out.push(UfcsMethod {
                         name: f.name.to_string(),
                         signature: render_fn_signature(ws, f.name, f),
@@ -3215,6 +3309,19 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr) -> Vec<UfcsMethod> {
         }
     }
     out
+}
+
+/// Whether a Vec UFCS candidate whose first param is `[E']` applies to a
+/// receiver with rendered element `want`: `E'` generic (matches any element)
+/// or `E'` renders to `want`. `p0_ty` is `Static` (param types are).
+fn vec_param_elem_matches(ws: &Workspace, p0_ty: TyId, want: &str) -> bool {
+    match array_elem_ty(ws, None, p0_ty) {
+        Some(elem) => {
+            matches!(deref_ty(ws, None, elem), Some(hir::TypeExpr::Generic(..)))
+                || ws.render(None, elem) == want
+        }
+        None => false,
+    }
 }
 
 /// Field names of the nominal struct typed at `offset` (a call-site spread
