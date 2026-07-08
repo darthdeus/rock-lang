@@ -441,8 +441,13 @@ impl Default for Block {
 pub struct StaticCell {
     pub cell: Ustr,
     pub done_flag: Ustr,
-    /// Rendered type -- the `__rock_known_globals` key (reset on mismatch).
+    /// Rendered type -- half the `__rock_known_globals` key (reset on mismatch).
     pub type_str: String,
+    /// Content hash of the initializer expression -- the other half of the key,
+    /// so editing the initializer resets + re-inits the cell on the next reload.
+    /// Stable across edits ELSEWHERE in the body (hashes names / literals, not
+    /// arena indices).
+    pub init_hash: u64,
 }
 
 /// A function — a CFG over cells and values. `params` are the entry block's
