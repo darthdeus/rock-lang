@@ -13,9 +13,11 @@ sequential = ["bone-semantic/sequential"]
 [dependencies]
 bone-semantic = { path = "../bone-semantic" }
 bone-incremental = { path = "../bone-incremental" }
+bone-lints = { path = "../bone-lints" }
 skull-parser = { path = "../skull-parser" }
 rock-tokenizer = { path = "../rock-tokenizer" }
 rock-host = { path = "../rock-host" }
+rock-core = { path = "../rock-core" }
 lsp-types = { path = "../lsp-types-manual", package = "lsp-types-manual" }
 
 rust-lapper = { workspace = true }

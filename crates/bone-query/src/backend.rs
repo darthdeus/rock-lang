@@ -103,6 +103,12 @@ struct BoneProject {
     /// file + its reinferred dependents can have changed holes. Invalidated for
     /// exactly those files in `update`.
     hole_cache: HashMap<String, Vec<Diagnostic>>,
+    /// Per-file `unused_var` lint diagnostics, cached across edits. Unlike
+    /// holes, the lint never reads inference, so a file's findings change ONLY
+    /// when that file's own text changes -- recompute the edited file, serve
+    /// the cache for every other tracked file. Gives whole-project coverage
+    /// cheaply. Invalidated for the edited file in `update`, dropped on remove.
+    lint_cache: HashMap<String, Vec<Diagnostic>>,
     /// Type-reachability index for type-directed completion paths. A pure
     /// function of the type graph (struct fields + fn signatures), so it is
     /// rebuilt only on a non-`BodyOnly` edit and reused across body keystrokes.
@@ -271,7 +277,7 @@ impl BoneWorkspace {
                 session: Session::new(warm_stdlib(), Vec::new())
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: HashMap::new(),
-                freq: None, hole_cache: HashMap::new(),
+                freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(),
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
@@ -331,7 +337,7 @@ impl BoneWorkspace {
                 let texts = files.into_iter().collect();
                 self.projects.insert(
                     root,
-                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
                 );
             }
             Err(e) => {
@@ -545,6 +551,27 @@ impl BoneWorkspace {
         }
         let holes_ms = t_holes.elapsed().as_secs_f64() * 1000.0;
 
+        // `unused_var` lint diagnostics. A file's findings depend only on its
+        // own body text (the lint never reads inference), so recompute only the
+        // edited file and serve the cache for every other tracked file --
+        // whole-project coverage without re-walking every body per keystroke.
+        for (p, diags) in by_file.iter_mut() {
+            // Broken edited file: it shows only its parse error, and the session
+            // holds stale bodies for it -- drop the cache, append no lints.
+            if p == path && this_file_parse_err.is_some() {
+                proj.lint_cache.remove(p);
+                continue;
+            }
+            let lints = if p == path || !proj.lint_cache.contains_key(p) {
+                let v = lint_diagnostics_for(proj, p);
+                proj.lint_cache.insert(p.clone(), v.clone());
+                v
+            } else {
+                proj.lint_cache.get(p).cloned().unwrap_or_default()
+            };
+            diags.extend(lints);
+        }
+
         if prof {
             eprintln!(
                 "[bone update] update_file {uf_ms:.2}ms  diag-scan {diag_ms:.2}ms  holes {holes_ms:.2}ms ({reparsed}/{} files reparsed)",
@@ -563,6 +590,7 @@ impl BoneWorkspace {
         if let Some(proj) = self.projects.get_mut(&root) {
             proj.texts.remove(path);
             proj.hole_cache.remove(path);
+            proj.lint_cache.remove(path);
             let _ = proj.session.remove_file(path);
         }
     }
@@ -667,6 +695,7 @@ impl BoneWorkspace {
             .map(|e| compiler_error_to_diagnostic(&e))
             .collect();
         diags.extend(hole_diagnostics_for(proj, path).unwrap_or_default());
+        diags.extend(lint_diagnostics_for(proj, path));
         diags
     }
 
@@ -3578,6 +3607,15 @@ pub(crate) fn expected_for_anchor<'a>(
 /// bone's `CompilerError.location` is 0-based in both line and col -- the same
 /// convention as LSP -- so it passes through unshifted (a 1-based correction
 /// would report every error one line high, masked on line 0 by saturation).
+fn severity_from_level(level: rock_core::errors::CompilerErrorLevel) -> DiagnosticSeverity {
+    use rock_core::errors::CompilerErrorLevel::*;
+    match level {
+        Error => DiagnosticSeverity::ERROR,
+        Warning => DiagnosticSeverity::WARNING,
+        Advice => DiagnosticSeverity::HINT,
+    }
+}
+
 pub fn compiler_error_to_diagnostic(e: &CompilerError) -> Diagnostic {
     // Use the label's span (whole token) when there is one; `col_range` is
     // 0-based/end-exclusive, same as LSP. Fall back to a 1-char range at the
@@ -3597,11 +3635,32 @@ pub fn compiler_error_to_diagnostic(e: &CompilerError) -> Diagnostic {
     };
     Diagnostic {
         range: Range::new(start, end),
-        severity: Some(DiagnosticSeverity::ERROR),
+        severity: Some(severity_from_level(e.level)),
         source: Some("bone".to_string()),
         message: e.message.clone(),
         ..Default::default()
     }
+}
+
+/// `unused_var` lint diagnostics (warnings) for one file: run the lint over the
+/// target module's bodies, drop `// rock: allow(unused_var)`-suppressed
+/// findings, and render each as a warning.
+fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
+    let ws = proj.session.workspace();
+    let Some(mid) = user_module_for_path(ws, path) else {
+        return Vec::new();
+    };
+    let module = &ws.modules[mid.index()];
+    let findings: Vec<_> = module
+        .bodies
+        .values()
+        .flat_map(bone_lints::unused_vars_in_body)
+        .collect();
+    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
+    bone_lints::filter_suppressed(findings, src)
+        .iter()
+        .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic()))
+        .collect()
 }
 
 /// Render a typed-hole report (kind line + `In scope:` block) as plain text.

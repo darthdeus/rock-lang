@@ -1,0 +1,16 @@
+[package]
+name = "bone-lints"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bone-core = { path = "../bone-core" }
+rock-core = { path = "../rock-core" }
+ustr = { workspace = true }
+
+[dev-dependencies]
+bone-semantic = { path = "../bone-semantic" }
+skull-parser = { path = "../skull-parser" }
+
+[lints]
+workspace = true

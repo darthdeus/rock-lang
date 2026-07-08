@@ -235,7 +235,7 @@ fn hover_on_an_enum_declaration_names_it() {
 
 #[test]
 fn clean_file_has_no_diagnostics() {
-    let src = "fn main() {\n  let x = 1\n}\n";
+    let src = "fn f() -> int {\n  let x = 1\n  x\n}\n";
     let bone = fresh(src);
     assert!(
         bone.diagnostics_for(PATH).is_empty(),
@@ -471,14 +471,33 @@ fn stdlib_using_program_type_checks() {
 #[test]
 fn edit_then_requery_updates_diagnostics() {
     let mut bone = BoneWorkspace::new();
-    bone.update(PATH, "fn main() {\n  let x: int = \"bad\"\n}\n".to_string());
+    bone.update(PATH, "fn f() -> int {\n  let x: int = \"bad\"\n  x\n}\n".to_string());
     assert!(!bone.diagnostics_for(PATH).is_empty(), "broken edit -> errors");
 
-    bone.update(PATH, "fn main() {\n  let x: int = 1\n}\n".to_string());
+    bone.update(PATH, "fn f() -> int {\n  let x: int = 1\n  x\n}\n".to_string());
     assert!(
         bone.diagnostics_for(PATH).is_empty(),
         "fixed edit -> clean: {:?}",
         bone.diagnostics_for(PATH)
+    );
+}
+
+// The live server publishes the per-file map that `update` RETURNS (not
+// `diagnostics_for`). The unused_var lint must ride that path, else nvim never
+// shows it.
+#[test]
+fn update_publishes_unused_var_warning() {
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(PATH, "fn f() -> int {\n  let dead = 1\n  2\n}\n".to_string());
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == PATH)
+        .flat_map(|(_, d)| d)
+        .collect();
+    assert!(
+        diags.iter().any(|d| d.message.contains("unused variable `dead`")
+            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
+        "update() must return the unused_var warning for the edited file: {diags:?}"
     );
 }
 
