@@ -501,6 +501,49 @@ fn update_publishes_unused_var_warning() {
     );
 }
 
+// `unused_fn` is whole-project reachability, gated to `bin` packages. A game
+// with an uncalled non-root function should see it flagged on the live path.
+#[test]
+fn update_publishes_unused_fn_warning_for_bin() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"g\"\ntype = \"bin\"\n").unwrap();
+    std::fs::write(dir.path().join("m.rock"), "fn main() {}\nfn dead() {}\n").unwrap();
+    let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == &m)
+        .flat_map(|(_, d)| d)
+        .collect();
+    assert!(
+        diags.iter().any(|d| d.message.contains("unused function `dead`")
+            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
+        "bin project must publish the unused_fn warning: {diags:?}"
+    );
+}
+
+// A `lib`'s public API is called by external consumers the project can't see,
+// so "no in-project caller" is not "dead" -- the lint must stay silent.
+#[test]
+fn unused_fn_is_silent_for_lib() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(dir.path().join("m.rock"), "fn public_api() {}\n").unwrap();
+    let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == &m)
+        .flat_map(|(_, d)| d)
+        .collect();
+    assert!(
+        !diags.iter().any(|d| d.message.contains("unused function")),
+        "lib project must NOT run unused_fn: {diags:?}"
+    );
+}
+
 #[test]
 fn completion_offers_global_namespace_by_prefix() {
     // Cursor after `vec` -> the stdlib's vec_* functions surface.

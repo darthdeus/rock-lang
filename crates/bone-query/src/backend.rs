@@ -130,6 +130,21 @@ struct BoneProject {
     /// an O(types*globals) reachability expansion on EVERY keystroke (the
     /// 20-50ms per-keystroke stall). `None` until the first build (in `update`).
     call_through: Option<CallThroughIndex>,
+    /// Whether this project is a `bin` (executable/game), from its `stick.toml`
+    /// `type` (default `bin`). The `unused_fn` lint is closed-world -- a `lib`'s
+    /// public API has no in-project caller yet isn't dead -- so it runs only
+    /// when this is true. Computed once at load, not per keystroke.
+    is_bin: bool,
+}
+
+/// True iff the deepest `stick.toml` at or above `root` is a `bin` package
+/// (the default when `type` is absent). False for a `lib`, or when no
+/// `stick.toml` exists (a standalone scratch file is not a closed world).
+fn stick_is_bin(root: &Path) -> bool {
+    matches!(
+        rock_host::stick::StickConfig::find_from_dir(root),
+        Ok(Some((_, cfg))) if cfg.package.package_type() == rock_host::stick::PackageType::Bin
+    )
 }
 
 /// All bone-backed LSP state for the running server. Holds one [`Session`] per
@@ -269,6 +284,7 @@ impl BoneWorkspace {
     }
 
     fn project_mut(&mut self, root: &Path) -> &mut BoneProject {
+        let is_bin = stick_is_bin(root);
         self.projects
             .entry(root.to_path_buf())
             .or_insert_with(|| BoneProject {
@@ -281,6 +297,7 @@ impl BoneWorkspace {
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
+                is_bin,
             })
     }
 
@@ -332,12 +349,13 @@ impl BoneWorkspace {
         let Some(files) = Self::project_sources(file_path) else {
             return; // couldn't resolve the unit; `update` still adds the one file
         };
+        let is_bin = stick_is_bin(&root);
         match Session::new(warm_stdlib(), files.clone()) {
             Ok(session) => {
                 let texts = files.into_iter().collect();
                 self.projects.insert(
                     root,
-                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None },
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin },
                 );
             }
             Err(e) => {
@@ -572,6 +590,27 @@ impl BoneWorkspace {
             diags.extend(lints);
         }
 
+        // `unused_fn` lint (bin projects only). Unlike `unused_var`, reachability
+        // is whole-project: a finding in ANY file can flip from an edit ANYWHERE
+        // (adding or removing a call keeps or kills a function), so there is no
+        // per-file cache -- recompute the whole workspace each edit and
+        // distribute by file. A `lib`'s public API has external callers we can't
+        // see, so the lint would false-flag it; hence the `is_bin` gate.
+        if proj.is_bin {
+            let by_fn = bone_lints::unused_fns_by_file(proj.session.workspace());
+            for (p, diags) in by_file.iter_mut() {
+                if p == path && this_file_parse_err.is_some() {
+                    continue;
+                }
+                let Some(findings) = by_fn.get(&Ustr::from(p.as_str())) else {
+                    continue;
+                };
+                let src = proj.texts.get(p).map(String::as_str).unwrap_or("");
+                let kept = bone_lints::filter_suppressed(findings.clone(), src);
+                diags.extend(kept.iter().map(|f| compiler_error_to_diagnostic(&f.to_diagnostic())));
+            }
+        }
+
         if prof {
             eprintln!(
                 "[bone update] update_file {uf_ms:.2}ms  diag-scan {diag_ms:.2}ms  holes {holes_ms:.2}ms ({reparsed}/{} files reparsed)",
@@ -696,6 +735,9 @@ impl BoneWorkspace {
             .collect();
         diags.extend(hole_diagnostics_for(proj, path).unwrap_or_default());
         diags.extend(lint_diagnostics_for(proj, path));
+        if proj.is_bin {
+            diags.extend(fn_lint_diagnostics_for(proj, path));
+        }
         diags
     }
 
@@ -3658,6 +3700,22 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
         .collect();
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
     bone_lints::filter_suppressed(findings, src)
+        .iter()
+        .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic()))
+        .collect()
+}
+
+/// `unused_fn` lint diagnostics for one file. Reachability is whole-project, so
+/// this runs the workspace walk and keeps only `path`'s dead functions; the
+/// caller gates it to `bin` projects. The one-shot CLI path -- the `update`
+/// path distributes the same by-file result across every tracked file.
+fn fn_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
+    let by_fn = bone_lints::unused_fns_by_file(proj.session.workspace());
+    let Some(findings) = by_fn.get(&Ustr::from(path)) else {
+        return Vec::new();
+    };
+    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
+    bone_lints::filter_suppressed(findings.clone(), src)
         .iter()
         .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic()))
         .collect()
