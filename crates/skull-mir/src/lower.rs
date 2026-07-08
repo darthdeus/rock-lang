@@ -771,6 +771,314 @@ fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) 
 
 /// Lower a single function to a [`MirFunc`]. Errors (a `gap`) when the body uses
 /// a construct Phase 1 doesn't lower yet.
+/// Owner segment of a `static`'s cell name. Stable across body edits (depends
+/// only on the fn name + rendered param types), distinct per overload. Not the
+/// mangled name -- skull-mir is upstream of the mangler -- but mir_emit reads
+/// the resulting cell names back verbatim from `MirFunc::statics`, so exact
+/// equality with the mangled name is not needed.
+fn static_owner_tag(
+    ws: &Workspace,
+    inf: Option<&BodyInference>,
+    name: Ustr,
+    params: &[bone_semantic::hir::ParamDecl],
+) -> Ustr {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.as_str().hash(&mut h);
+    for pd in params {
+        ws.render(inf, pd.ty).hash(&mut h);
+    }
+    Ustr::from(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
+}
+
+/// Content hash of a `static` initializer -- the reload key's init half. Hashes
+/// names / literals / operator kinds and recurses, but NEVER an arena `Idx`
+/// (those shift when unrelated code in the body is edited). So it changes iff
+/// the initializer's meaning changes, and editing code elsewhere in the fn
+/// leaves it untouched (the cell is preserved across that reload).
+fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map::DefaultHasher) {
+    use bone_semantic::hir::{Callee, Expr, InterpPart, VariantArgs};
+    use std::hash::Hash;
+    macro_rules! go {
+        ($x:expr) => {
+            hash_init_expr(body, $x, h)
+        };
+    }
+    macro_rules! tag {
+        ($n:expr) => {
+            ($n as u16).hash(h)
+        };
+    }
+    match body.expr_arena[e] {
+        Expr::Unit => tag!(0),
+        Expr::Null => tag!(1),
+        Expr::Hole(n) => {
+            tag!(2);
+            n.hash(h);
+        }
+        Expr::Int(v) => {
+            tag!(3);
+            v.hash(h);
+        }
+        Expr::Float(v) => {
+            tag!(4);
+            v.hash(h);
+        }
+        Expr::Bool(v) => {
+            tag!(5);
+            v.hash(h);
+        }
+        Expr::String(s) => {
+            tag!(6);
+            s.hash(h);
+        }
+        Expr::Var(b) => {
+            tag!(7);
+            body.binding_arena[b].name.hash(h);
+        }
+        Expr::Global(n) => {
+            tag!(8);
+            n.hash(h);
+        }
+        Expr::SiblingRef(n) => {
+            tag!(9);
+            n.hash(h);
+        }
+        Expr::Tuple(es) | Expr::Array(es) | Expr::NativeArray(es) => {
+            tag!(10);
+            for x in es {
+                go!(x);
+            }
+        }
+        Expr::InterpolatedString(parts) => {
+            tag!(13);
+            for p in parts {
+                match body.interp_part_arena[p] {
+                    InterpPart::Literal(s) => {
+                        tag!(130);
+                        s.hash(h);
+                    }
+                    InterpPart::Value { expr, .. } => {
+                        tag!(131);
+                        go!(expr);
+                    }
+                }
+            }
+        }
+        Expr::Not(i)
+        | Expr::BitNot(i)
+        | Expr::UnaryMinus(i)
+        | Expr::Spread(i)
+        | Expr::YieldDelegate(i) => {
+            tag!(14);
+            go!(i);
+        }
+        Expr::Return(o) => {
+            tag!(19);
+            if let Some(i) = o {
+                go!(i);
+            }
+        }
+        Expr::Yield(o) => {
+            tag!(20);
+            if let Some(i) = o {
+                go!(i);
+            }
+        }
+        Expr::Break => tag!(21),
+        Expr::Continue => tag!(22),
+        Expr::As { value, target } => {
+            tag!(23);
+            target.hash(h);
+            go!(value);
+        }
+        Expr::TupleIndex { tuple, index } => {
+            tag!(24);
+            index.hash(h);
+            go!(tuple);
+        }
+        Expr::FieldAccess { base, field } | Expr::SafeNav { base, field } => {
+            tag!(25);
+            field.hash(h);
+            go!(base);
+        }
+        Expr::IncDec { target, decrement, postfix } => {
+            tag!(27);
+            decrement.hash(h);
+            postfix.hash(h);
+            go!(target);
+        }
+        Expr::Index { base, index } => {
+            tag!(28);
+            go!(base);
+            go!(index);
+        }
+        Expr::Range { low, high } => {
+            tag!(29);
+            go!(low);
+            go!(high);
+        }
+        Expr::BinOp { op, lhs, rhs } => {
+            tag!(30);
+            std::mem::discriminant(&op).hash(h);
+            go!(lhs);
+            go!(rhs);
+        }
+        Expr::Assign { target, value } => {
+            tag!(31);
+            go!(target);
+            go!(value);
+        }
+        Expr::CompoundAssign { target, op_fn, value } => {
+            tag!(32);
+            op_fn.hash(h);
+            go!(target);
+            go!(value);
+        }
+        Expr::If { cond, then_branch, else_branch } => {
+            tag!(33);
+            go!(cond);
+            go!(then_branch);
+            if let Some(x) = else_branch {
+                go!(x);
+            }
+        }
+        Expr::IfLet { value, then_branch, else_branch, .. } => {
+            tag!(34);
+            go!(value);
+            go!(then_branch);
+            if let Some(x) = else_branch {
+                go!(x);
+            }
+        }
+        Expr::Lambda { body: b, .. } => {
+            tag!(35);
+            go!(b);
+        }
+        Expr::Block { statements, tail } => {
+            tag!(36);
+            for s in statements {
+                hash_init_stmt(body, s, h);
+            }
+            if let Some(t) = tail {
+                go!(t);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            tag!(37);
+            go!(scrutinee);
+            for a in arms {
+                let arm = body.match_arm_arena[a];
+                if let Some(g) = arm.guard {
+                    go!(g);
+                }
+                go!(arm.body);
+            }
+        }
+        Expr::Call { callee, args } => {
+            tag!(38);
+            match callee {
+                Callee::Unresolved { name, .. } => {
+                    tag!(380);
+                    name.hash(h);
+                }
+                Callee::Local(b) => {
+                    tag!(381);
+                    body.binding_arena[b].name.hash(h);
+                }
+                Callee::Value(v) => {
+                    tag!(382);
+                    go!(v);
+                }
+            }
+            for x in args {
+                go!(x);
+            }
+        }
+        Expr::SafeNavCall { receiver, method, args } => {
+            tag!(39);
+            method.hash(h);
+            go!(receiver);
+            for x in args {
+                go!(x);
+            }
+        }
+        Expr::SafeNavLet { receiver, body: b, .. } => {
+            tag!(40);
+            go!(receiver);
+            go!(b);
+        }
+        Expr::StructLiteral { name, fields, bases } => {
+            tag!(41);
+            name.hash(h);
+            for b in bases {
+                go!(b);
+            }
+            for fld in fields {
+                let f = body.struct_lit_field_arena[fld];
+                f.name.hash(h);
+                go!(f.value);
+            }
+        }
+        Expr::EnumVariant { enum_name, variant, args, .. } => {
+            tag!(42);
+            enum_name.hash(h);
+            variant.hash(h);
+            match args {
+                VariantArgs::Unit => tag!(420),
+                VariantArgs::Tuple(es) => {
+                    tag!(421);
+                    for x in es {
+                        go!(x);
+                    }
+                }
+                VariantArgs::Record(fs) => {
+                    tag!(422);
+                    for fld in fs {
+                        let f = body.struct_lit_field_arena[fld];
+                        f.name.hash(h);
+                        go!(f.value);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash_map::DefaultHasher) {
+    use bone_semantic::hir::Statement;
+    use std::hash::Hash;
+    macro_rules! go {
+        ($x:expr) => {
+            hash_init_expr(body, $x, h)
+        };
+    }
+    match body.statement_arena[s] {
+        Statement::Let { value, .. }
+        | Statement::LetTuple { value, .. }
+        | Statement::LetNewtype { value, .. }
+        | Statement::Expr(value)
+        | Statement::Defer(value)
+        | Statement::Return(Some(value))
+        | Statement::Static { value, .. } => go!(value),
+        Statement::For { iter, body: b, .. } => {
+            go!(iter);
+            go!(b);
+        }
+        Statement::While { cond, body: b } => {
+            go!(cond);
+            go!(b);
+        }
+        Statement::WhileLet { value, body: b, .. } => {
+            go!(value);
+            go!(b);
+        }
+        Statement::Return(None) | Statement::Break | Statement::Continue | Statement::Comment(_) => {
+            (b'x').hash(h)
+        }
+    }
+}
+
 pub fn lower_function(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -826,6 +1134,15 @@ pub fn lower_function(
         ret_shape,
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         group_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        // Lazy: only pay the param-type render/hash when the body has a static
+        // (the tag is otherwise unused). Keeps the tag off every fn's compile.
+        static_owner: if body.statement_arena.iter().any(|(_, s)| matches!(s, Statement::Static { .. })) {
+            static_owner_tag(ws, inf, func.name, &func.param_decls)
+        } else {
+            func.name
+        },
+        static_counters: HashMap::new(),
     };
     b.lower_params();
     b.fill_param_defaults()?;
@@ -873,6 +1190,9 @@ pub fn lower_global(
         ret_shape: None,
         ret_tuple: None,
         group_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        static_owner: name,
+        static_counters: HashMap::new(),
     };
     b.lower_root()?;
     Ok(Some(b.f))
@@ -919,6 +1239,9 @@ pub fn lower_decorator(
         ret_shape: None,
         ret_tuple: None,
         group_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        static_owner: name,
+        static_counters: HashMap::new(),
     };
     // `target` is param 0, then the decorator's declared params.
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
@@ -966,6 +1289,18 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// `static` locals: raw binding idx -> the private global cell name a read /
+    /// write of the binding resolves to (an `Inst::Global`/`StoreGlobal`, not a
+    /// local cell). Populated by `lower_static`.
+    static_cells: HashMap<u32, Ustr>,
+    /// Owner tag baked into a static's cell name -- stable across body edits,
+    /// distinct per overload (fn name + rendered param types). NOT the mangled
+    /// name (skull-mir is upstream of the mangler); it only needs uniqueness +
+    /// stability, which mir_emit reads back verbatim from `MirFunc::statics`.
+    static_owner: Ustr,
+    /// Per static source-name counter (source order) so shadowing duplicates get
+    /// distinct cells and adding an unrelated static never renames siblings.
+    static_counters: HashMap<Ustr, u32>,
 }
 
 impl Builder<'_> {
@@ -1116,6 +1451,58 @@ impl Builder<'_> {
 
     /// Lower a statement sequence into the current block. Returns `true` if a
     /// `return` terminated the block (the rest is dead).
+    /// `static name = init` -> a private global cell + done-flag, guarded so the
+    /// initializer runs only on the first reach:
+    /// `if not <done> then <cell> = <init>; <done> = true end`. Cell/done-flag
+    /// names are recorded on `MirFunc::statics` for the mir_emit reload preamble;
+    /// reads/writes of the binding resolve to the cell global via the
+    /// `static_cells` guards in the read/assign/compound/incdec paths.
+    fn lower_static(
+        &mut self,
+        name: Idx<BindingInfo>,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let sname = self.body.binding_arena[name].name;
+        let ctr = {
+            let c = self.static_counters.entry(sname).or_insert(0);
+            let v = *c;
+            *c += 1;
+            v
+        };
+        let cell = Ustr::from(format!("__static_{}_{}_{}", self.static_owner, sname, ctr).as_str());
+        let done_flag = Ustr::from(format!("{cell}__done").as_str());
+        self.static_cells.insert(raw(name), cell);
+
+        let ty = self
+            .inf
+            .and_then(|i| i.binding_types.get(name).copied())
+            .or(self.body.binding_arena[name].declared_ty);
+        let type_str = ty
+            .map(|t| self.ws.render(self.inf, t))
+            .unwrap_or_else(|| "any".to_string());
+        let init_hash = {
+            use std::hash::Hasher;
+            let mut hsh = std::collections::hash_map::DefaultHasher::new();
+            hash_init_expr(self.body, value, &mut hsh);
+            hsh.finish()
+        };
+        self.f.statics.push(StaticCell { cell, done_flag, type_str, init_hash });
+
+        let done_v = self.emit_cur(Inst::Global(done_flag));
+        let init_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f
+            .set_term(self.cur, Term::Branch { cond: done_v, then_bb: join, else_bb: init_bb });
+        self.cur = init_bb;
+        let v = self.lower_expr(value)?;
+        self.emit_cur(Inst::StoreGlobal { name: cell, value: v });
+        let t = self.emit_cur(Inst::Const(Lit::Bool(true)));
+        self.emit_cur(Inst::StoreGlobal { name: done_flag, value: t });
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        Ok(())
+    }
+
     fn lower_stmts(&mut self, stmts: IdxRange<Statement>) -> Result<bool, CompilerError> {
         for sidx in stmts {
             match self.body.statement_arena[sidx].clone() {
@@ -1188,6 +1575,9 @@ impl Builder<'_> {
                     let cell = self.f.new_cell(Some(self.body.binding_arena[var].name));
                     self.emit_cur(Inst::Store { cell, value: v });
                     self.binds.insert(raw(var), cell);
+                }
+                Statement::Static { name, value } => {
+                    self.lower_static(name, value)?;
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {
@@ -1353,6 +1743,9 @@ impl Builder<'_> {
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let r = self.lower_expr_repr(e)?;
                 Ok(self.pack(r))
+            }
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -1694,6 +2087,11 @@ impl Builder<'_> {
                     self.emit_cur(Inst::Store { cell: *c, value: lv });
                 }
             }
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let v = self.lower_expr(value)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: v });
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -1781,6 +2179,13 @@ impl Builder<'_> {
             None
         };
         match self.body.expr_arena[target].clone() {
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let cur = self.emit_cur(Inst::Global(name));
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: new_v });
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -1887,6 +2292,13 @@ impl Builder<'_> {
             s.emit_cur(inst)
         };
         match self.body.expr_arena[target].clone() {
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let old = self.emit_cur(Inst::Global(name));
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreGlobal { name, value: new });
+                Ok(if postfix { old } else { new })
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds

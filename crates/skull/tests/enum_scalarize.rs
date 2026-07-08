@@ -8,26 +8,8 @@
 //! cdata with an int field (NOT a Lua table) and works across the scalar ABI
 //! (by-value pass). See `docs/skull-enum-value-types.md`.
 
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn emit_module(src: &str) -> String {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
-}
+mod common;
+use common::{emit_mir, emit_module};
 
 const SRC: &str = r#"
 enum BlendMode { Alpha, Additive, Multiply }
@@ -51,14 +33,6 @@ fn t() {
 
 fn main() { t() }
 "#;
-
-fn emit_full(src: &str) -> skull::mir_emit::MirEmit {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
-}
 
 #[test]
 fn value_struct_with_enum_field_has_cdef_int_not_table() {
@@ -100,7 +74,7 @@ fn value_struct_with_enum_field_runs_correctly() {
         eprintln!("luajit not found; skipping execution check");
         return;
     }
-    let emit = emit_full(SRC);
+    let emit = emit_mir(SRC);
     let mut prog = emit.lua.clone();
     // Capture print, run the @test fn (`@test` names are unmangled), echo output.
     prog.push_str(
@@ -135,7 +109,7 @@ fn run_skull_test(src: &str, fn_name: &str) -> Option<String> {
         eprintln!("luajit not found; skipping execution check");
         return None;
     }
-    let mut prog = emit_full(src).lua.clone();
+    let mut prog = emit_mir(src).lua.clone();
     prog.push_str(&format!(
         "\nlocal __b=\"\"\nlocal __op=print\n\
          print=function(...) local p={{}} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \

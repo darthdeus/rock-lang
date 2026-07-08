@@ -220,6 +220,12 @@ impl Ast {
                     .map(|e| self.expr_sexp(e))
                     .unwrap_or_else(|| "null".to_string()),
             ),
+            StatementKind::Static(s) => format!(
+                "(static {} {} {})",
+                s.name.name,
+                s.ty.map(|t| self.type_sexp(t)).unwrap_or_else(|| "()".to_string()),
+                self.expr_sexp(s.value),
+            ),
             StatementKind::Break { .. } => "(break)".to_string(),
             StatementKind::Continue { .. } => "(continue)".to_string(),
             StatementKind::For(f) => format!(

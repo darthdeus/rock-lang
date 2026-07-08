@@ -11,46 +11,8 @@
 //! `skull-transform` forwards those reads to the ctor operands so DCE drops the
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
 
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-/// Emit the `<test>` module Lua through the full skull pipeline (lower -> inline
-/// -> cleanup -> emit). Stdlib is loaded so int/float casts and `%`/arithmetic
-/// ops resolve to their stdlib helpers (else the using fns fail to lower and are
-/// silently skipped).
-fn emit_module(src: &str) -> String {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
-}
-
-/// The body of `function <name>(...) ... end` from emitted module Lua. The
-/// value-struct `copy`/metatype scaffolding emits its own `<name>_ct(...)`
-/// helpers once at module scope, so a no-cdata assertion must look at the hot
-/// function only, not the whole module.
-fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    // `name` is the rock identifier; the emitted definition is mangled
-    // (`hot__int_int_int_ret_float`), so match the `function <name>` prefix.
-    let head = format!("function {name}");
-    let start = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
-    let rest = &lua[start..];
-    // First top-level `\nend\n` closes the function (nested blocks are indented
-    // `end`s, never column-0).
-    let end = rest.find("\nend\n").map(|e| e + 5).unwrap_or(rest.len());
-    &rest[..end]
-}
+mod common;
+use common::{emit_module, function_body};
 
 const VALUE_FIELD_LOOP: &str = r#"
 value Vec2 { x: float, y: float }

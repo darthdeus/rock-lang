@@ -523,6 +523,9 @@ struct Chunk {
     /// Per-stage emit time captured when this chunk was built, summed back into
     /// the `backend-stats` breakdown by [`assemble`] when the chunk is pulled.
     times: PhaseTimes,
+    /// `static` cells this body declares -- aggregated at chunk-pull for the
+    /// hot-reload preservation preamble + `__rock_known_globals` registration.
+    statics: Vec<skull_mir::mir::StaticCell>,
 }
 
 /// Per-body emit cache for incremental codegen: the expensive function chunks
@@ -628,6 +631,7 @@ fn emit_body_chunk(
             direct_globals: Vec::new(),
             direct_calls: Vec::new(),
             times,
+            statics: mf.statics.clone(),
         });
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
@@ -648,7 +652,7 @@ fn emit_body_chunk(
     let lua = emit_function(ws, cg, self_ref, &mf);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics: mf.statics.clone() })
 }
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
@@ -859,6 +863,7 @@ fn assemble(
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut direct_globals: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
+    let mut all_statics: Vec<skull_mir::mir::StaticCell> = Vec::new();
 
     // IR-agnostic load-time scaffolding (shared with the old backend).
     let ts = Instant::now();
@@ -957,6 +962,7 @@ fn assemble(
                     direct_calls.insert(key, chunk.direct_calls.clone());
                     times.add(&chunk.times);
                     out.push_str(&chunk.lua);
+                    all_statics.extend(chunk.statics.iter().cloned());
                 }
                 Some(Err(msg)) => skipped.push((mangle_fn(ws, f, overloaded), msg.clone())),
                 None => skipped.push((mangle_fn(ws, f, overloaded), "not emitted (no cached chunk)".to_string())),
@@ -996,15 +1002,41 @@ fn assemble(
         .into_iter()
         .map(|(name, init_name, line)| GlobalInit { name, deps: reach.deps_of(init_name), line })
         .collect();
+    // `static` cells: on reload, RESET (nil the cell + clear the done-flag) when
+    // the init/type key changed since last run, so the next reach re-inits with
+    // the edited initializer; an unchanged key preserves the live cell. Register
+    // both names in the snapshot so the next reload can compare. Dedup by cell.
+    let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
+    let mut static_resets = String::new();
+    let mut static_regs = String::new();
+    for sc in &all_statics {
+        if !seen_static.insert(sc.cell) {
+            continue;
+        }
+        let key = format!("{}@{:x}", sc.type_str, sc.init_hash);
+        let _ = write!(
+            static_resets,
+            "if _G.HOT_RELOAD and _G.__rock_old_globals and _G.__rock_old_globals[{:?}] ~= {:?} then {} = nil; {} = false end\n",
+            sc.cell.as_str(), key, sc.cell, sc.done_flag
+        );
+        let _ = write!(
+            static_regs,
+            "[{:?}] = {:?},[{:?}] = {:?},",
+            sc.cell.as_str(), key, sc.done_flag.as_str(), key
+        );
+    }
+
     // On a reload, snapshot the previous run's known globals so the per-global
     // guards can preserve live values whose type is unchanged.
     out.push_str("if _G.HOT_RELOAD then _G.__rock_old_globals = _G.__rock_known_globals end\n");
+    out.push_str(&static_resets);
     for line in sort_global_init_lines(inits)? {
         out.push_str(&line);
     }
     // Record this run's globals for the next reload's snapshot.
     out.push_str("_G.__rock_known_globals = {");
     out.push_str(&known_globals);
+    out.push_str(&static_regs);
     out.push_str("}\n");
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).

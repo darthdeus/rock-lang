@@ -197,6 +197,94 @@ fn broken_two() -> bool { return 42 }";
     );
 }
 
+// --- Return-type mismatch diagnostics: span + message quality. ---
+//
+// A fn whose body doesn't satisfy the declared return type must NOT underline
+// the whole `fn { .. }` span. When the body has a tail expression, blame the
+// tail; when it ends in a statement (no value at all), say so plainly instead
+// of leaking the internal `()` type into "Failed to unify () and string".
+
+/// The source slice a byte-offset span covers.
+fn text<'a>(src: &'a str, span: &Span) -> &'a str {
+    let (s, e) = span.offset_range;
+    &src[s..e]
+}
+
+/// All errors recorded against the named function's body.
+fn recorded_errors<'a>(
+    ws: &'a bone_semantic::inference::Workspace,
+    fn_name: &str,
+) -> &'a [CompilerError] {
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let hir = ws.module(mid);
+    let (idx, _) = hir
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .unwrap_or_else(|| panic!("fn {fn_name} exists"));
+    let inf = ws.inference(mid).expect("user module inferred");
+    inf.errors
+        .get(&BodyOwner::Function(idx))
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
+#[test]
+fn return_mismatch_underlines_tail_expr_not_whole_fn() {
+    let src = "fn f() -> string {\n    let y = 1\n    y\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded return-type error");
+    let span = err.labels.first().expect("labeled error").span;
+    assert_eq!(
+        text(src, &span),
+        "y",
+        "return mismatch must underline the tail expr `y`, not the whole fn"
+    );
+}
+
+#[test]
+fn missing_return_value_says_so_instead_of_unifying_unit() {
+    let src = "fn f() -> string {\n    let y = 1\n    let z = 2\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    let err = errs.first().expect("a recorded return-type error");
+    assert!(
+        err.message.contains("no return value"),
+        "a statement-tailed body must report a missing return value, got: {:?}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("()"),
+        "the internal unit type must not leak into the message, got: {:?}",
+        err.message
+    );
+    // ...anchored somewhere narrow, never the whole 4-line fn.
+    let span = err.labels.first().expect("labeled error").span;
+    assert!(
+        text(src, &span).len() < src.len(),
+        "must not underline the entire function body"
+    );
+}
+
+#[test]
+fn return_mismatch_does_not_mask_genuine_body_error() {
+    let src = "fn f() -> string {\n    let w = undefined_symbol_here\n    let z = 1\n}";
+    let ws = check(src).expect("recovered, not aborted");
+    let errs = recorded_errors(&ws, "f");
+    assert!(
+        errs.iter().any(|e| e.message.contains("undefined_symbol_here")),
+        "the real `Undefined global` error must survive, not be masked by the \
+         return-type error; got: {:?}",
+        errs.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+}
+
 // Companion to body_type_error_does_not_abort_other_bodies for the
 // non-function BodyOwners: check_module has a separate `?` loop per owner
 // kind (decorators, globals, struct defaults), and the early global-init

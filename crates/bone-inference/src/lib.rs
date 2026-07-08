@@ -381,9 +381,26 @@ pub fn check_function(
         let body_ty = resolve(&mut gamma, body_ty, f.span);
 
         // Return-type mismatch is recorded, but not propagated, so gamma.out is well formed
-        // and partial inference survives for hte LSP.
-        if let Err(e) = coerce(&mut gamma, body_ty, ret_ty, f.span) {
-            gamma.body_errors.push(e);
+        // and partial inference survives for the LSP. Anchor it at the value the body
+        // actually offers -- its tail expression -- not the whole `fn { .. }` span. A body
+        // that ends in a statement offers no value at all: a clearer, distinct message.
+        let tail = match c.body.expr_arena[body] {
+            Expr::Block { tail, .. } => tail,
+            _ => Some(body),
+        };
+        if let Some(tail) = tail {
+            if let Err(e) = coerce(&mut gamma, body_ty, ret_ty, c.body.expr_spans[tail]) {
+                gamma.body_errors.push(e);
+            }
+        } else if coerce(&mut gamma, body_ty, ret_ty, f.span).is_err() {
+            let ret_render = gamma.workspace.render(Some(&gamma.out), ret_ty);
+            gamma.body_errors.push(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "function `{}` must return `{}`, but its body has no return value",
+                    f.name, ret_render
+                ),
+            ));
         }
     } else {
         // no declared return (or coroutine): the body tail is discarded
@@ -489,6 +506,226 @@ fn fn_has_anno(f: &Function, name: &str) -> bool {
 /// subset of rock-optimizations/src/purity.rs; rock's conservative "accepted
 /// limitations" (heap struct/array literal, match-bind, ...) are deliberately
 /// NOT flagged -- documented divergence, see docs/parked/unfuck.md.
+/// A `static` initializer runs ONCE, not per call, so it may not read an
+/// enclosing param/local or a sibling static -- that would silently snapshot
+/// the first reaching call's values. A `Var` whose declaration span is
+/// contained in the initializer (a lambda param, an inner `let`) is local to
+/// the init and allowed; one declared outside is the forbidden capture.
+fn reject_static_init_captures(
+    c: BodyCtx,
+    root: Idx<Expr>,
+    site: Span,
+) -> Result<(), CompilerError> {
+    let root_span = c.body.expr_spans[root];
+    reject_captures_expr(c, root, root_span, site)
+}
+
+fn reject_captures_expr(
+    c: BodyCtx,
+    e: Idx<Expr>,
+    root_span: Span,
+    site: Span,
+) -> Result<(), CompilerError> {
+    macro_rules! go {
+        ($x:expr) => {
+            reject_captures_expr(c, $x, root_span, site)?
+        };
+    }
+    match c.body.expr_arena[e] {
+        Expr::Var(b) => {
+            let bspan = c.body.binding_arena[b].span;
+            let inside = bspan.offset_range.0 >= root_span.offset_range.0
+                && bspan.offset_range.1 <= root_span.offset_range.1;
+            if !inside {
+                let name = c.body.binding_arena[b].name;
+                comp_error!(
+                    site,
+                    "static initializer may not read local `{}`: the initializer runs once, not per call",
+                    name
+                );
+            }
+        }
+
+        Expr::Unit
+        | Expr::Null
+        | Expr::Hole(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Break
+        | Expr::Continue
+        | Expr::Global(_)
+        | Expr::SiblingRef(_)
+        | Expr::Return(None)
+        | Expr::Yield(None) => {}
+
+        Expr::Not(i)
+        | Expr::BitNot(i)
+        | Expr::UnaryMinus(i)
+        | Expr::Spread(i)
+        | Expr::YieldDelegate(i)
+        | Expr::Return(Some(i))
+        | Expr::Yield(Some(i))
+        | Expr::As { value: i, .. }
+        | Expr::TupleIndex { tuple: i, .. }
+        | Expr::FieldAccess { base: i, .. }
+        | Expr::SafeNav { base: i, .. }
+        | Expr::IncDec { target: i, .. } => go!(i),
+
+        Expr::Index { base: a, index: b }
+        | Expr::Range { low: a, high: b }
+        | Expr::BinOp { lhs: a, rhs: b, .. }
+        | Expr::Assign { target: a, value: b }
+        | Expr::CompoundAssign { target: a, value: b, .. } => {
+            go!(a);
+            go!(b);
+        }
+
+        Expr::Tuple(es) | Expr::Array(es) | Expr::NativeArray(es) => {
+            for x in es {
+                go!(x);
+            }
+        }
+
+        Expr::InterpolatedString(parts) => {
+            for p in parts {
+                if let InterpPart::Value { expr, .. } = c.body.interp_part_arena[p] {
+                    go!(expr);
+                }
+            }
+        }
+
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            go!(cond);
+            go!(then_branch);
+            if let Some(eb) = else_branch {
+                go!(eb);
+            }
+        }
+        Expr::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            go!(value);
+            go!(then_branch);
+            if let Some(eb) = else_branch {
+                go!(eb);
+            }
+        }
+
+        Expr::Call { callee, args } => {
+            if let Callee::Value(ve) = callee {
+                go!(ve);
+            }
+            for a in args {
+                go!(a);
+            }
+        }
+        Expr::SafeNavCall { receiver, args, .. } => {
+            go!(receiver);
+            for a in args {
+                go!(a);
+            }
+        }
+        Expr::SafeNavLet { receiver, body, .. } => {
+            go!(receiver);
+            go!(body);
+        }
+
+        Expr::Lambda { body, .. } => go!(body),
+
+        Expr::Block { statements, tail } => {
+            for s in statements {
+                reject_captures_stmt(c, s, root_span, site)?;
+            }
+            if let Some(t) = tail {
+                go!(t);
+            }
+        }
+
+        Expr::Match { scrutinee, arms } => {
+            go!(scrutinee);
+            for a in arms {
+                let arm = c.body.match_arm_arena[a];
+                if let Some(g) = arm.guard {
+                    go!(g);
+                }
+                go!(arm.body);
+            }
+        }
+
+        Expr::StructLiteral { fields, bases, .. } => {
+            for b in bases {
+                go!(b);
+            }
+            for fld in fields {
+                go!(c.body.struct_lit_field_arena[fld].value);
+            }
+        }
+
+        Expr::EnumVariant { args, .. } => match args {
+            VariantArgs::Unit => {}
+            VariantArgs::Tuple(es) => {
+                for x in es {
+                    go!(x);
+                }
+            }
+            VariantArgs::Record(fs) => {
+                for fld in fs {
+                    go!(c.body.struct_lit_field_arena[fld].value);
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+fn reject_captures_stmt(
+    c: BodyCtx,
+    s: Idx<Statement>,
+    root_span: Span,
+    site: Span,
+) -> Result<(), CompilerError> {
+    macro_rules! go {
+        ($x:expr) => {
+            reject_captures_expr(c, $x, root_span, site)?
+        };
+    }
+    match c.body.statement_arena[s] {
+        Statement::Let { value, .. }
+        | Statement::LetTuple { value, .. }
+        | Statement::LetNewtype { value, .. }
+        | Statement::Expr(value)
+        | Statement::Defer(value)
+        | Statement::Return(Some(value))
+        | Statement::Static { value, .. } => go!(value),
+        Statement::For { iter, body, .. } => {
+            go!(iter);
+            go!(body);
+        }
+        Statement::While { cond, body } => {
+            go!(cond);
+            go!(body);
+        }
+        Statement::WhileLet { value, body, .. } => {
+            go!(value);
+            go!(body);
+        }
+        Statement::Return(None)
+        | Statement::Break
+        | Statement::Continue
+        | Statement::Comment(_) => {}
+    }
+    Ok(())
+}
+
 fn verify_pure_expr(
     c: BodyCtx,
     ws: &Workspace,
@@ -725,6 +962,12 @@ fn verify_pure_stmt(
             go!(value);
             go!(body);
         }
+        Statement::Static { .. } => {
+            errors.push(CompilerError::new_with_label(
+                c.body.statement_spans[s],
+                "`@pure` function declares a `static` (writes module state)".to_string(),
+            ));
+        }
         Statement::Return(None)
         | Statement::Break
         | Statement::Continue
@@ -790,6 +1033,38 @@ fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) -> Result<(
             // ctx.assign_named_type(*name, inf_ty);
             // ctx.assign_type(name, ty)?;
             // ctx.assign_type(e, ty)
+        }
+
+        Statement::Static { name, value } => {
+            if gamma.coroutine_ret.is_some() {
+                comp_error!(
+                    c.body.statement_spans[s],
+                    "`static` is not allowed in a `co fn`: a shared cell across yields corrupts"
+                );
+            }
+
+            let declared = c.body.binding_arena[*name].declared_ty;
+            let binding_ty = match declared {
+                Some(ann) => {
+                    let vspan = c.body.expr_spans.get(*value).copied().unwrap_or(Span::unknown());
+                    gamma.assign_named_type(*name, ann)?;
+                    check_expr(c, gamma, *value, ann, vspan)?;
+                    ann
+                }
+
+                None => match infer_expr(c, gamma, *value) {
+                    Ok(ty) => ty,
+                    Err(e) => {
+                        let poison = gamma.workspace.builtins.error();
+                        gamma.assign_named_type(*name, poison)?;
+                        return Err(e);
+                    }
+                },
+            };
+
+            gamma.assign_named_type(*name, binding_ty)?;
+
+            reject_static_init_captures(c, *value, c.body.statement_spans[s])?;
         }
 
         Statement::Comment(_) => (),

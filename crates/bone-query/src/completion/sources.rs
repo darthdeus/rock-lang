@@ -1029,14 +1029,14 @@ pub(crate) fn member_completions_by_receiver(
             let Some(mid) = user_module_for_path(ws, path) else {
                 return Vec::new();
             };
-            let Some((fields, recv_struct)) =
+            let Some((fields, recv_struct, vec_elem)) =
                 crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)
             else {
                 return Vec::new();
             };
             build_member_items(
-                ws, mid, offset, fields, Some(recv_struct), prefix, arg_slot.clone(), anchor,
-                reach, bool_ctx,
+                ws, mid, offset, fields, Some(recv_struct), vec_elem, prefix, arg_slot.clone(),
+                anchor, reach, bool_ctx,
             )
         });
         if let Some(items) = attempt {
@@ -1069,8 +1069,9 @@ pub(crate) fn member_completion_items(
     // INFERRED type instead -- see `member_completion_items_by_receiver`.
     let fields = crate::query::struct_fields_for_path(ws, mid, offset, segments);
     let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
+    let vec_elem = crate::query::receiver_vec_elem(ws, mid, offset, segments);
     build_member_items(
-        ws, mid, offset, fields, recv_struct, prefix, arg_slot, anchor, reach, bool_ctx,
+        ws, mid, offset, fields, recv_struct, vec_elem, prefix, arg_slot, anchor, reach, bool_ctx,
     )
 }
 
@@ -1084,6 +1085,9 @@ fn build_member_items(
     offset: usize,
     fields: Vec<(String, String, Option<TyId>)>,
     recv_struct: Option<Ustr>,
+    // Receiver's rendered element type for a Vec (`[Vec2]` -> "Vec2"); filters
+    // UFCS methods to those whose element unifies. None for nominal receivers.
+    vec_elem: Option<String>,
     prefix: &str,
     arg_slot: Option<(String, usize)>,
     anchor: Option<SlotAnchor>,
@@ -1094,7 +1098,7 @@ fn build_member_items(
         // UFCS methods: functions whose first param is the receiver's struct,
         // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
         let methods = recv_struct
-            .map(|name| crate::query::ufcs_methods(ws, name))
+            .map(|name| crate::query::ufcs_methods(ws, name, vec_elem.as_deref()))
             .unwrap_or_default();
         if fields.is_empty() && methods.is_empty() {
             return Vec::new();
@@ -1147,8 +1151,15 @@ fn build_member_items(
         // unless the user is explicitly typing an `_` prefix. Fields stay public
         // (no type-check change) -- this is purely a display convention.
         let show_private = prefix.starts_with('_');
+        // `Vec.data` is the internal 1-indexed Lua storage -- soft-private like a
+        // `_`-field (surface code uses `.len` / indexing, never `.data`). Hidden
+        // here pending the stdlib rename to `_data`.
+        let hide_vec_data = recv_struct.map(|s| s.as_str() == "Vec").unwrap_or(false);
         let field_items = fields.into_iter().zip(field_match).filter_map(|((name, ty, _), tmatch)| {
             if name.starts_with('_') && !show_private {
+                return None;
+            }
+            if hide_vec_data && name == "data" {
                 return None;
             }
             (prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {

@@ -396,6 +396,12 @@ fn render_err(src: &str, e: &CompilerError) -> String {
     e.render(&sf)
 }
 
+/// `map_err` for the `skull::user_module_id` lookup — the same message at every
+/// call site.
+fn no_user_module(e: CompilerError) -> anyhow::Error {
+    anyhow::anyhow!("no user module: {}", e.message)
+}
+
 /// A skull failure: a short bucketed reason + the full rendered detail.
 struct SkullFailure {
     reason: String,
@@ -3343,7 +3349,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     let (baseline_lua, mut cache, full_ms) = {
         let ws = session.workspace();
         let mid = skull::user_module_id(ws)
-            .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
+            .map_err(no_user_module)?;
         let t_full = Instant::now();
         let (emit, c) = skull::mir_emit::emit_full(ws, mid)
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
@@ -3513,7 +3519,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
     let mut cache = {
         let ws = session.workspace();
         let mid = skull::user_module_id(ws)
-            .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
+            .map_err(no_user_module)?;
         let (_emit, c) = skull::mir_emit::emit_full(ws, mid)
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         c
@@ -3844,7 +3850,7 @@ impl SkullStone {
         let (lua, cache) = {
             let ws = session.workspace();
             let mid = skull::user_module_id(ws)
-                .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
+                .map_err(no_user_module)?;
             let (emit, c) = skull::mir_emit::emit_full(ws, mid)
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
             // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
@@ -3989,7 +3995,7 @@ impl SkullStone {
             let lua = {
                 let ws = self.session.workspace();
                 let mid = skull::user_module_id(ws)
-                    .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
+                    .map_err(no_user_module)?;
                 let (emit, c) = skull::mir_emit::emit_full(ws, mid)
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
                 self.cache = c; // resets changed_since_full
@@ -4040,7 +4046,7 @@ impl SkullStone {
         let lua = {
             let ws = self.session.workspace();
             let mid = skull::user_module_id(ws)
-                .map_err(|e| anyhow::anyhow!("no user module: {}", e.message))?;
+                .map_err(no_user_module)?;
             let (emit, c) = skull::mir_emit::emit_full(ws, mid)
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             self.cache = c; // resets changed_since_full -- the overlay is now folded in

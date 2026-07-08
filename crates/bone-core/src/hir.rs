@@ -431,6 +431,7 @@ pub struct BindingInfo {
 pub enum BindingKind {
     Let,
     Param,
+    Static,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -733,6 +734,11 @@ pub enum Statement {
     LetNewtype {
         newtype_name: Ustr,
         var: Idx<BindingInfo>,
+        value: Idx<Expr>,
+    },
+
+    Static {
+        name: Idx<BindingInfo>,
         value: Idx<Expr>,
     },
 

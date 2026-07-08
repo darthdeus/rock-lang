@@ -160,6 +160,13 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
             ty: l.ty.map(|t| graft_type(src, dst, t)),
             value: l.value.map(|e| graft_expr(src, dst, e)),
         }),
+        StatementKind::Static(st) => StatementKind::Static(Static {
+            span: st.span,
+            keyword_span: st.keyword_span,
+            name: st.name.clone(),
+            ty: st.ty.map(|t| graft_type(src, dst, t)),
+            value: graft_expr(src, dst, st.value),
+        }),
         StatementKind::Return { keyword_span, value } => StatementKind::Return {
             keyword_span: *keyword_span,
             value: value.map(|e| graft_expr(src, dst, e)),

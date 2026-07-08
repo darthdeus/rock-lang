@@ -5,10 +5,9 @@
 //! `backend = Bone`, fed via `bone.update` exactly as didOpen/didChange do --
 //! so the dispatch wiring in `lib.rs` can't silently rot.
 
+use crate::common::bone_ws;
 use lsp_types::*;
-use rock_lsp::{
-    do_document_symbols_workspace, do_workspace_symbols_workspace, LspWorkspace,
-};
+use rock_lsp::{do_document_symbols_workspace, do_workspace_symbols_workspace};
 use std::str::FromStr;
 
 const SRC: &str = "\
@@ -25,16 +24,6 @@ fn main() {
 }
 ";
 
-/// A bone-backed workspace with `SRC` opened at `path`, written to disk so the
-/// session's project-root resolution (`stick.toml` walk + canonicalize) is
-/// stable.
-fn bone_ws(path: &std::path::Path) -> LspWorkspace {
-    std::fs::write(path, SRC).unwrap();
-    let mut ws = LspWorkspace::new();
-    ws.bone.update(path.to_str().unwrap(), SRC.to_string());
-    ws
-}
-
 fn uri_of(path: &std::path::Path) -> Uri {
     Uri::from_str(&format!("file://{}", path.display())).unwrap()
 }
@@ -43,7 +32,7 @@ fn uri_of(path: &std::path::Path) -> Uri {
 fn document_symbols_returns_top_level_decls() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
-    let mut ws = bone_ws(&path);
+    let mut ws = bone_ws(&path, SRC);
 
     let params = DocumentSymbolParams {
         text_document: TextDocumentIdentifier { uri: uri_of(&path) },
@@ -64,7 +53,7 @@ fn document_symbols_returns_top_level_decls() {
 fn workspace_symbols_filters_by_query() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
-    let mut ws = bone_ws(&path);
+    let mut ws = bone_ws(&path, SRC);
 
     let params = WorkspaceSymbolParams {
         query: "heal".to_string(),

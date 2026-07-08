@@ -10,34 +10,8 @@
 //! In a loop the snapshot IS needed: the closure is (re)created each iteration and
 //! must capture THIS iteration's value, not the shared cell's final value.
 
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_host::stdlib_loader::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn emit_module(src: &str) -> String {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
-}
-
-fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
-    let head = format!("function {name}");
-    let start = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
-    let rest = &lua[start..];
-    let end = rest.find("\nend\n").map(|e| e + 5).unwrap_or(rest.len());
-    &rest[..end]
-}
+mod common;
+use common::{emit_module, function_body};
 
 // A closure created ONCE (no loop), capturing single-assignment cells a, b --
 // the `sprite_mesh_submit` shape: `let a = ..; let b = ..; defer(() => use(a,b))`.

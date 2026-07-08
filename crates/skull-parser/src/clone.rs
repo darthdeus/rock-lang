@@ -45,6 +45,13 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
             ty: l.ty.map(|t| clone_type(ast, t)),
             value: l.value.map(|e| clone_expr(ast, e)),
         }),
+        StatementKind::Static(st) => StatementKind::Static(Static {
+            span: st.span,
+            keyword_span: st.keyword_span,
+            name: st.name,
+            ty: st.ty.map(|t| clone_type(ast, t)),
+            value: clone_expr(ast, st.value),
+        }),
         StatementKind::Return { keyword_span, value } => StatementKind::Return {
             keyword_span,
             value: value.map(|e| clone_expr(ast, e)),

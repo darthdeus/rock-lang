@@ -1190,6 +1190,7 @@ impl<'a> Printer<'a> {
         match &self.ast.s(&s).kind {
             StatementKind::Expression(e) => self.expr(*e),
             StatementKind::Let(l) => self.let_stmt(l),
+            StatementKind::Static(st) => self.static_stmt(st),
             StatementKind::Return { value, .. } => match value {
                 Some(v) => Doc::concat([Doc::text("return "), self.expr(*v)]),
                 None => Doc::text("return"),
@@ -1242,6 +1243,17 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(" = "));
             parts.push(self.expr(v));
         }
+        Doc::concat(parts)
+    }
+
+    fn static_stmt(&self, st: &Static) -> Doc {
+        let mut parts = vec![Doc::text("static "), Doc::text(st.name.name.as_str().to_string())];
+        if let Some(ty) = st.ty {
+            parts.push(Doc::text(": "));
+            parts.push(self.type_expr(ty));
+        }
+        parts.push(Doc::text(" = "));
+        parts.push(self.expr(st.value));
         Doc::concat(parts)
     }
 
