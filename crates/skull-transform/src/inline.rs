@@ -25,6 +25,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
@@ -74,6 +75,16 @@ struct CalleeBody {
     insts: usize,
     /// `@inline`-forced (bypassed the size caps). Diagnostic only.
     forced: bool,
+    /// Param cells this callee NEVER whole-`Store`s (only reads / `Field` /
+    /// `StoreField`). Their arg can be COALESCED — an arg that is a plain
+    /// `Load(c)` binds the cloned param directly to the caller cell `c` instead
+    /// of copying `Store(param, Load(c))`. Removing the whole-cell copy is what
+    /// lets a mutated-by-ref cursor struct stay a SINGLE cell so
+    /// `scalarize_struct_cells` (SROA) can peel it (the zero-alloc iterator
+    /// path). Sound because field-writeback through a by-ref arg is already the
+    /// language semantics, and a param the callee reassigns whole is excluded
+    /// (aliasing it to the caller cell would clobber the caller's variable).
+    coalescable_params: Vec<bool>,
 }
 
 /// One splice the inliner performed, for the `skull-inline-stats` diagnostic
@@ -143,7 +154,15 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<CalleeBody
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
-    let force = annotation_gate(has_inline, has_pure, size_heuristic())?;
+    // An `Iterator`-bounded fn exists ONLY monomorphized-by-inlining (its body
+    // holds placeholder bound-calls and it is never emitted standalone), so it
+    // is always eligible and always forced, annotation or not.
+    let has_bounds = f.generic_bounds.iter().any(Option::is_some);
+    let force = match annotation_gate(has_inline, has_pure, size_heuristic()) {
+        Some(force) => force || has_bounds,
+        None if has_bounds => true,
+        None => return None,
+    };
     let mut mf = lower_function(ws, scx, fref.module, fref.func).ok()?;
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
@@ -172,6 +191,31 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<CalleeBody
     }
     let reachable_insts: usize = reachable.iter().map(|&b| mf.blocks[b].insts.len()).sum();
 
+    // A param is coalescable iff nothing in the body rebinds its cell WHOLE (a
+    // `Store` to it, or defining it as a multi-return dest / map cursor). Reads
+    // and `Field`/`StoreField` don't count — those are exactly what coalescing
+    // preserves (field-writeback through the shared cell).
+    let mut rebound: HashSet<Idx<Cell>> = HashSet::default();
+    for (_, inst) in mf.insts.iter() {
+        match inst {
+            Inst::Store { cell, .. } => {
+                rebound.insert(*cell);
+            }
+            Inst::CallMulti { dests, .. }
+            | Inst::CallValueMulti { dests, .. }
+            | Inst::CallBoundMulti { dests, .. } => {
+                rebound.extend(dests.iter().copied());
+            }
+            Inst::MapNext { key_cell, val_cell, .. } => {
+                rebound.insert(*key_cell);
+                rebound.insert(*val_cell);
+            }
+            _ => {}
+        }
+    }
+    let coalescable_params: Vec<bool> =
+        mf.params.iter().map(|p| !rebound.contains(p)).collect();
+
     if matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
         // Straight: entry ends in Return, so it is the only reachable block.
         if !force && reachable_insts > STRAIGHT_INSTS {
@@ -181,7 +225,7 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<CalleeBody
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
         };
-        Some(CalleeBody { func: mf, kind: Kind::Straight, ret_arity, reachable: Vec::new(), insts: reachable_insts, forced: force })
+        Some(CalleeBody { func: mf, kind: Kind::Straight, ret_arity, reachable: Vec::new(), insts: reachable_insts, forced: force, coalescable_params })
     } else {
         // General: uniform return arity across every reachable Return.
         let mut arities = reachable
@@ -197,7 +241,7 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<CalleeBody
         if !force && reachable_insts > GENERAL_INSTS {
             return None;
         }
-        Some(CalleeBody { func: mf, kind: Kind::General, ret_arity, reachable, insts: reachable_insts, forced: force })
+        Some(CalleeBody { func: mf, kind: Kind::General, ret_arity, reachable, insts: reachable_insts, forced: force, coalescable_params })
     }
 }
 
@@ -220,7 +264,7 @@ enum Site {
     /// `Inst::Call` — single (or void) result; `call_id` is the call's value.
     Single { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, fref: FuncRef, args: Vec<Idx<Inst>> },
     /// `Inst::CallMulti` — N leaves bound positionally into `dests`.
-    Multi { bid: Idx<Block>, idx: usize, dests: Vec<Idx<Cell>>, fref: FuncRef, args: Vec<Idx<Inst>> },
+    Multi { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, dests: Vec<Idx<Cell>>, fref: FuncRef, args: Vec<Idx<Inst>> },
 }
 
 impl Site {
@@ -232,6 +276,11 @@ impl Site {
     fn pos(&self) -> (Idx<Block>, usize) {
         match self {
             Site::Single { bid, idx, .. } | Site::Multi { bid, idx, .. } => (*bid, *idx),
+        }
+    }
+    fn call_id(&self) -> Idx<Inst> {
+        match self {
+            Site::Single { call_id, .. } | Site::Multi { call_id, .. } => *call_id,
         }
     }
 }
@@ -299,6 +348,7 @@ fn find_site(
                 Inst::CallMulti { dests, func: fref, args } if *fref != self_ref => Site::Multi {
                     bid,
                     idx,
+                    call_id: iid,
                     dests: dests.clone(),
                     fref: *fref,
                     args: args.clone(),
@@ -328,11 +378,14 @@ fn find_site(
 fn clone_cells_insts(
     caller: &mut MirFunc,
     callee: &MirFunc,
+    overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
 ) -> (HashMap<Idx<Inst>, Idx<Inst>>, HashMap<Idx<Cell>, Idx<Cell>>) {
     let mut cell_map = HashMap::default();
     cell_map.reserve(callee.cells.len());
     for (cid, cell) in callee.cells.iter() {
-        cell_map.insert(cid, caller.cells.alloc(cell.clone()));
+        // A coalesced param maps to the caller cell its arg loads (no fresh copy).
+        let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        cell_map.insert(cid, mapped);
     }
     let mut inst_map = HashMap::default();
     inst_map.reserve(callee.insts.len());
@@ -357,6 +410,7 @@ fn clone_cells_insts(
 fn clone_all(
     caller: &mut MirFunc,
     callee: &MirFunc,
+    overrides: &HashMap<Idx<Cell>, Idx<Cell>>,
 ) -> (
     HashMap<Idx<Inst>, Idx<Inst>>,
     HashMap<Idx<Cell>, Idx<Cell>>,
@@ -365,7 +419,9 @@ fn clone_all(
     let mut cell_map = HashMap::default();
     cell_map.reserve(callee.cells.len());
     for (cid, cell) in callee.cells.iter() {
-        cell_map.insert(cid, caller.cells.alloc(cell.clone()));
+        // A coalesced param maps to the caller cell its arg loads (no fresh copy).
+        let mapped = overrides.get(&cid).copied().unwrap_or_else(|| caller.cells.alloc(cell.clone()));
+        cell_map.insert(cid, mapped);
     }
     let mut block_map = HashMap::default();
     block_map.reserve(callee.blocks.len());
@@ -409,7 +465,9 @@ fn remap_clone(
     match inst {
         Inst::Load(c) => *c = cm[c],
         Inst::Store { cell, .. } => *cell = cm[cell],
-        Inst::CallMulti { dests, .. } => {
+        Inst::CallMulti { dests, .. }
+        | Inst::CallBoundMulti { dests, .. }
+        | Inst::CallValueMulti { dests, .. } => {
             for d in dests {
                 *d = cm[d];
             }
@@ -479,14 +537,120 @@ fn subst_all(func: &mut MirFunc, from: Idx<Inst>, to: Idx<Inst>) {
     }
 }
 
+/// For each coalescable param whose arg is a plain `Load(c)`, map the callee
+/// param cell -> the caller cell `c` (so the clone binds the param directly to
+/// it) and flag the param so the splice skips its `Store(param, arg)` copy.
+/// Removing that whole-cell copy is what keeps a by-ref-mutated cursor struct a
+/// SINGLE cell, which SROA can then scalarize (the zero-alloc iterator path).
+fn coalesce_overrides(
+    caller: &MirFunc,
+    cand: &CalleeBody,
+    args: &[Idx<Inst>],
+) -> (HashMap<Idx<Cell>, Idx<Cell>>, Vec<bool>) {
+    let callee = &cand.func;
+    let mut overrides = HashMap::default();
+    let mut coalesced = vec![false; callee.params.len()];
+    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+        if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        if let Inst::Load(c) = caller.insts[*arg] {
+            overrides.insert(*param, c);
+            coalesced[i] = true;
+        }
+    }
+    (overrides, coalesced)
+}
+
+/// Resolve every `CallerGeneric` leaf of `tree` through the splice site's own
+/// tree `n` (recursively -- a `Concrete` node's sub-tree was built in the same
+/// body, so its leaves also refer to the SITE's enclosing generics). By the
+/// time a body is emitted (bounded fns never are), every site tree is fully
+/// concrete, so a leaf that `n` cannot resolve is a compiler bug -- reject.
+fn graft_bound_tree(tree: &BoundTree, n: &BoundTree) -> Result<BoundTree, CompilerError> {
+    let mut out = BoundTree::default();
+    for (g, bn) in &tree.next {
+        out.next.insert(*g, graft_bound_next(bn, n)?);
+    }
+    Ok(out)
+}
+
+fn graft_bound_next(bn: &BoundNext, n: &BoundTree) -> Result<BoundNext, CompilerError> {
+    match bn {
+        BoundNext::Concrete { func, sub } => Ok(BoundNext::Concrete {
+            func: *func,
+            sub: graft_bound_tree(sub, n)?,
+        }),
+        BoundNext::CallerGeneric(g) => n.next.get(g).cloned().ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "internal: unresolved `Iterator` bound (generic #{g}) while inlining -- \
+                 the splice site carries no resolution for it"
+            ))
+        }),
+    }
+}
+
+/// After cloning a callee body into the caller: substitute every cloned
+/// placeholder [`Inst::CallBoundMulti`] with the concrete `next` from the
+/// site's tree, and import the callee's own carried `bound_trees` (keys
+/// remapped, `CallerGeneric` leaves grafted through the site tree) so the
+/// fixpoint can keep inlining the now-concrete calls.
+fn resolve_cloned_bound_calls(
+    func: &mut MirFunc,
+    callee: &MirFunc,
+    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    site_tree: Option<&BoundTree>,
+) -> Result<(), CompilerError> {
+    let empty = BoundTree::default();
+    let n = site_tree.unwrap_or(&empty);
+
+    for (old_id, tree) in &callee.bound_trees {
+        let new_id = inst_map[old_id];
+        let grafted = graft_bound_tree(tree, n)?;
+        if !grafted.is_empty() {
+            func.bound_trees.insert(new_id, grafted);
+        }
+    }
+
+    for (&old_id, &new_id) in inst_map {
+        let Inst::CallBoundMulti { dests, generic_idx, args } = &func.insts[new_id] else {
+            continue;
+        };
+        debug_assert!(matches!(callee.insts[old_id], Inst::CallBoundMulti { .. }));
+        let g = *generic_idx as usize;
+        match n.next.get(&g) {
+            Some(BoundNext::Concrete { func: (m, f), sub }) => {
+                let concrete = FuncRef { module: *m, func: *f };
+                let (dests, args) = (dests.clone(), args.clone());
+                if !sub.is_empty() {
+                    // The sub-tree's leaves refer to the same site generics --
+                    // graft before attaching to the substituted call.
+                    let grafted = graft_bound_tree(sub, n)?;
+                    if !grafted.is_empty() {
+                        func.bound_trees.insert(new_id, grafted);
+                    }
+                }
+                func.insts[new_id] = Inst::CallMulti { dests, func: concrete, args };
+            }
+            Some(BoundNext::CallerGeneric(_)) | None => {
+                return Err(CompilerError::new_no_location(format!(
+                    "internal: placeholder bound-call (generic #{g}) has no concrete \
+                     resolution at this splice site"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Splice candidate `cand` into `func` at `site`, removing the call. Returns the
 /// new top-level (reachable) blocks the splice added, for the driver to fold into
 /// its top-level set (straight adds none).
-fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<Block>> {
+fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand);
-            Vec::new()
+            splice_straight(func, site, cand)?;
+            Ok(Vec::new())
         }
         Kind::General => splice_general(func, site, cand),
     }
@@ -496,16 +660,23 @@ fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<Block>> 
 /// insts into the caller block in place of the call; no new blocks (the callee
 /// is lambda-free, so its insts reference no block). The caller block keeps its
 /// own terminator.
-fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) {
+fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<(), CompilerError> {
     let callee = &cand.func;
-    let (inst_map, cell_map) = clone_cells_insts(func, callee);
-
-    // Arg -> param-cell stores.
-    let mut arg_stores = Vec::new();
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
     };
-    for (param, arg) in callee.params.iter().zip(args.iter()) {
+    let site_tree = func.bound_trees.remove(&site.call_id());
+    let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
+    let (inst_map, cell_map) = clone_cells_insts(func, callee, &overrides);
+    resolve_cloned_bound_calls(func, callee, &inst_map, site_tree.as_ref())?;
+
+    // Arg -> param-cell stores (coalesced params are aliased to the caller cell,
+    // so they need no copy).
+    let mut arg_stores = Vec::new();
+    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+        if coalesced[i] {
+            continue;
+        }
         let pc = cell_map[param];
         arg_stores.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
     }
@@ -552,20 +723,23 @@ fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) {
             subst_all(func, *call_id, to);
         }
     }
+    Ok(())
 }
 
 /// General splice: the callee has internal control flow. Split the caller block
 /// at the call; the prefix arg-stores + `Goto` the cloned entry; a continuation
 /// block holds the post-call tail. Each cloned `Return` binds its values and
 /// `Goto`s the continuation.
-fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<Block>> {
+fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<Block>>, CompilerError> {
     let callee = &cand.func;
-    let (inst_map, cell_map, block_map) = clone_all(func, callee);
-    let entry_clone = block_map[&callee.entry];
-
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
     };
+    let site_tree = func.bound_trees.remove(&site.call_id());
+    let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
+    let (inst_map, cell_map, block_map) = clone_all(func, callee, &overrides);
+    resolve_cloned_bound_calls(func, callee, &inst_map, site_tree.as_ref())?;
+    let entry_clone = block_map[&callee.entry];
 
     // Split the caller block at the call.
     let old = std::mem::take(&mut func.blocks[bid].insts);
@@ -591,9 +765,13 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<
         Site::Multi { .. } => None,
     };
 
-    // Prefix: before | arg-stores; Goto the cloned entry.
+    // Prefix: before | arg-stores; Goto the cloned entry. Coalesced params are
+    // aliased to the caller cell (via `overrides`), so they need no copy.
     let mut prefix = before;
-    for (param, arg) in callee.params.iter().zip(args.iter()) {
+    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+        if coalesced[i] {
+            continue;
+        }
         let pc = cell_map[param];
         prefix.push(func.insts.alloc(Inst::Store { cell: pc, value: *arg }));
     }
@@ -637,7 +815,7 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Vec<Idx<
     // NOT enter the top-level set (the old full re-scan never visited them).
     let mut added: Vec<Idx<Block>> = cand.reachable.iter().map(|b| block_map[b]).collect();
     added.push(cont);
-    added
+    Ok(added)
 }
 
 /// Inline eligible direct calls in `func` (an ordinary, non-coroutine caller).
@@ -656,12 +834,12 @@ pub fn inline_functions(
     self_ref: FuncRef,
     func: &mut MirFunc,
     cache: &mut InlineCache,
-) -> (HashSet<FuncRef>, Vec<SpliceRecord>) {
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
     // Kill-switch for perf attribution / bisecting a suspected inline bug.
     if std::env::var("SKULL_INLINE_OFF").is_ok() {
-        return (spliced, records);
+        return Ok((spliced, records));
     }
     // The caller's top-level blocks (excludes closure sub-CFGs), maintained
     // incrementally so neither find_site nor the loop recomputes reachability.
@@ -689,13 +867,13 @@ pub fn inline_functions(
             forced: cand.forced,
             callee_insts: cand.insts,
         });
-        let added = splice(func, site, cand);
+        let added = splice(func, site, cand)?;
         top.extend(added);
         spliced.insert(fref);
         resume = Some(pos);
         budget -= 1;
     }
-    (spliced, records)
+    Ok((spliced, records))
 }
 
 #[cfg(test)]

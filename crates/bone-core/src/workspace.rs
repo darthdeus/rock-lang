@@ -260,6 +260,49 @@ impl Substitutions {
     }
 }
 
+/// How a bounded generic's `next` resolves at one instantiation site. Built at
+/// mono roots (a `for` over a concrete chain type, or a call of a bounded fn)
+/// during conformance checking; skull's inliner consumes it to substitute the
+/// placeholder bound-calls inside the spliced callee body.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundNext {
+    /// Concrete instantiation: the resolved `next` overload, plus the tree for
+    /// ITS bounded generics (chains nest: `next(MapIter<VecIter<..>, ..>)`
+    /// resolves to MapIter's `next`, whose inner bound resolves to VecIter's).
+    Concrete {
+        func: (ModuleId, Idx<Function>),
+        sub: BoundTree,
+    },
+    /// The instantiation was the ENCLOSING fn's own bounded generic (bound
+    /// propagation): resolves via the caller's placeholder for that generic
+    /// index when the caller is itself inlined at a concrete root.
+    CallerGeneric(usize),
+}
+
+/// Per bounded-generic index of a resolved callee: how its `next` bound-calls
+/// resolve. Empty for unbounded callees.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoundTree {
+    pub next: FxHashMap<usize, BoundNext>,
+}
+
+impl BoundTree {
+    pub fn is_empty(&self) -> bool {
+        self.next.is_empty()
+    }
+}
+
+/// `for x in coll` resolution through the iterator protocol: the optional
+/// `iter` fn (`None` = identity, the collection IS the iterator -- bare
+/// combinator chains and bounded generics iterate as themselves) and how
+/// `next` resolves (concrete fn + bound tree, or the enclosing fn's bounded
+/// generic).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForIterInfo {
+    pub iter_fn: Option<(ModuleId, Idx<Function>)>,
+    pub next: BoundNext,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BodyInference {
     /// Body.generation at inference time - trusted only while they match.
@@ -268,6 +311,24 @@ pub struct BodyInference {
     pub expr_types: ArenaMap<Idx<Expr>, TyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, TyId>,
     pub resolved_overload_calls: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
+    /// `for x in <coll>` over a user type: the resolved iter/next protocol for
+    /// the desugar, keyed by the For's iter `Idx<Expr>`. Separate from
+    /// `resolved_overload_calls` so it can't collide with the collection
+    /// expr's own call resolution (e.g. `for x in foo()`). skull's `lower_for`
+    /// reads it to emit the desugared loop.
+    pub for_iter_protocol: FxHashMap<Idx<Expr>, ForIterInfo>,
+    /// In a body with `I: Iterator<E>` bounds: `next(x)` calls where `x: I`.
+    /// Keyed by the call expr; value = the generic's index into the enclosing
+    /// fn's `generics`. skull lowers these as placeholder callees resolved at
+    /// inline time.
+    pub bound_calls: FxHashMap<Idx<Expr>, usize>,
+    /// Same, for `iter(x)` where `x: I` -- identity (types as `I`, lowers to
+    /// the argument itself, no call).
+    pub bound_identity_calls: FxHashSet<Idx<Expr>>,
+    /// Calls of bounded fns: the conformance-resolution tree built at the call
+    /// site, keyed by the call expr. Tells skull how to substitute the
+    /// placeholder bound-calls inside that callee when it is inlined here.
+    pub bound_call_trees: FxHashMap<Idx<Expr>, BoundTree>,
 
     pub ty_arena: Arena<TypeExpr>,
     pub ty_spans: ArenaMap<Idx<TypeExpr>, Span>,

@@ -51,7 +51,18 @@ fn build_cli() -> Command {
                 .arg(trace_flag()),
         )
         .subcommand(position_subcmd("hover", "Get hover information at a specific position"))
-        .subcommand(position_subcmd("completion", "Get completions at a specific position"))
+        .subcommand(
+            position_subcmd("completion", "Get completions at a specific position").arg(
+                Arg::new("explain")
+                    .long("explain")
+                    .action(ArgAction::SetTrue)
+                    .help(
+                        "Human-readable ranking breakdown: one line per item with the \
+                         decoded RankKey rungs (exact/type/band/case/kind/dist/score) \
+                         instead of JSON",
+                    ),
+            ),
+        )
         .subcommand(position_subcmd("definition", "Go to definition at a specific position"))
         .subcommand(position_subcmd("type-definition", "Go to the declaration of the type of the value at a specific position"))
         .subcommand(position_subcmd("references", "Find references at a specific position"))
@@ -146,7 +157,7 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
         }
         Some(("completion", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::completion(&file, line, col)
+            cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"))
         }
         Some(("definition", m)) => {
             let (file, line, col) = bone_position(m)?;

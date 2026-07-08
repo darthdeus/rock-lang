@@ -182,6 +182,29 @@ pub enum Inst {
         callee: Idx<Inst>,
         args: Vec<Idx<Inst>>,
     },
+    /// Indirect call whose result is a tuple returned via the multi-return ABI:
+    /// the fn-value returns N values bound positionally into `dests`
+    /// (`d0, d1, ... = callee(args)`). The `CallValue` analogue of [`Inst::CallMulti`]
+    /// -- a multi-assign so Lua doesn't truncate the multi-return. Leaves are read
+    /// back via [`Inst::Load`] of each dest cell.
+    CallValueMulti {
+        dests: Vec<Idx<Cell>>,
+        callee: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+    },
+    /// PLACEHOLDER `next(x)` on an `Iterator`-bounded generic (`generic_idx`
+    /// indexes the enclosing fn's generics). Has no callee: the concrete
+    /// `next` is only known per instantiation -- the inliner substitutes it
+    /// (via the site's `BoundTree`) into a [`Inst::CallMulti`] when this fn's
+    /// body is spliced at a concrete root. Emitting a body that still
+    /// contains one is a compile error (bounded fns exist only inlined).
+    /// `dests` is always 2 (`ok, elem` -- bound conformance requires exactly
+    /// `(bool, E)`).
+    CallBoundMulti {
+        dests: Vec<Idx<Cell>>,
+        generic_idx: u32,
+        args: Vec<Idx<Inst>>,
+    },
 
     /// A closure value (`x => expr` / `(a, b) => { .. }`). Its body is a sub-CFG
     /// rooted at `entry`, allocated in the SAME blocks/insts/cells arenas as the
@@ -330,6 +353,8 @@ impl Inst {
                 | Inst::StoreGlobal { .. }
                 | Inst::MapNext { .. }
                 | Inst::CallMulti { .. }
+                | Inst::CallBoundMulti { .. }
+                | Inst::CallValueMulti { .. }
                 | Inst::CoroSetInner { .. }
                 | Inst::CoroHook { .. }
                 | Inst::ArrayPush { .. }
@@ -432,6 +457,20 @@ pub struct MirFunc {
     /// normal scope-exit splice, so terminal cleanup (kill/error) runs exactly
     /// the still-pending defers.
     pub coro_defers: Vec<(Idx<Cell>, Idx<Block>)>,
+    /// Loop-head blocks emitted by `lower_for_user_iter` (the desugared
+    /// `for x in <user iter>` back-edge/continue target). The FORL-recovery
+    /// pass (`skull_transform::recover_counted_loops`) is gated on these tags:
+    /// only a desugared iterator loop may have its bound snapshot-hoisted
+    /// (iterator invalidation is recorded UB), never a user-written `while`.
+    /// The id survives inlining: `splice_general` keeps the call block's id.
+    pub for_iter_headers: Vec<Idx<Block>>,
+    /// Per call inst of an `Iterator`-bounded callee: the resolution tree that
+    /// substitutes the placeholder [`Inst::CallBoundMulti`]s inside that callee
+    /// when the inliner splices it here. Keys are remapped on splice; entries
+    /// whose tree leaves are `CallerGeneric` stay placeholders until THIS fn is
+    /// itself spliced at a concrete root.
+    pub bound_trees:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, bone_semantic::prelude::BoundTree>,
 }
 
 impl MirFunc {
@@ -448,6 +487,8 @@ impl MirFunc {
             is_coroutine: false,
             resume_arg: None,
             coro_defers: Vec::new(),
+            for_iter_headers: Vec::new(),
+            bound_trees: Default::default(),
         }
     }
 

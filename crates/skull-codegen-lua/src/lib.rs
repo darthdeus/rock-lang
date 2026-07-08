@@ -826,9 +826,9 @@ fn render_spliced_inline_lua(out: &mut String, body: &str, shape: InlineLuaShape
 }
 
 /// Is this (return-free) `inline(lua)` body a single bare expression (so it can
-/// be the RHS of `lv = …`), vs a statement / multi-statement unit body? Mirrors
-/// rock's `is_expr_body` (rock-codegen `anf/emit.rs`): any statement-keyword
-/// start, a top-level `=` assignment, `;`, or a second non-blank line => stmts.
+/// be the RHS of `lv = …`), vs a statement / multi-statement unit body? Any
+/// statement-keyword start, a top-level `=` assignment, `;`, or a second
+/// non-blank line => stmts.
 fn is_expr_inline_lua_body(s: &str) -> bool {
     let t = s.trim();
     let mut lines = t.lines().filter(|l| !l.trim().is_empty());
@@ -1639,9 +1639,16 @@ impl Emitter<'_> {
             | Inst::StoreGlobal { .. }
             | Inst::MapNext { .. }
             | Inst::CallMulti { .. }
+            | Inst::CallValueMulti { .. }
             | Inst::CoroSetInner { .. }
             | Inst::CoroHook { .. }
             | Inst::ArrayPush { .. } => unreachable!("effect has no value"),
+
+            // Substituted by the inliner (or rejected by mir_emit's residual
+            // check) long before codegen.
+            Inst::CallBoundMulti { .. } => {
+                unreachable!("placeholder bound-call must be substituted before emit")
+            }
         }
     }
 
@@ -1809,6 +1816,22 @@ impl Emitter<'_> {
                 }
                 let callee = mangle::mangle_fn(self.ws, func_of(self.ws, *func), &self.ctx.overloaded);
                 let _ = write!(out, " = {callee}(");
+                self.write_csv(out, args);
+                out.push_str(")\n");
+            }
+            // Indirect multi-return: `d0, d1, ... = callee(args)` -- a tuple
+            // returned through a fn-value. Multi-assign so Lua doesn't truncate.
+            Inst::CallValueMulti { dests, callee, args } => {
+                out.push_str("  ");
+                for (i, c) in dests.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write_cellname(out, self.frame, self.cell_colors, *c);
+                }
+                out.push_str(" = ");
+                self.write_opnd(out, *callee);
+                out.push('(');
                 self.write_csv(out, args);
                 out.push_str(")\n");
             }

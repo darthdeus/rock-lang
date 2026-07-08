@@ -415,6 +415,49 @@ mod tests {
     }
 
     #[test]
+    fn struct_spread_call_and_update() {
+        // (A) call-site spread `..expr` -- renders `..operand` in the arg list,
+        // may follow positional args and precede named overrides.
+        check("draw(img, ..props)", "(block (call draw img ..props))");
+        check(
+            "draw(img, ..props, color: c)",
+            "(block (call draw img ..props color: c))",
+        );
+        // Multiple disjoint spreads.
+        check("draw(..a, ..b)", "(block (call draw ..a ..b))");
+        // A spread after a named arg is legal (bone rejects only on collision).
+        check("draw(x: 1, ..props)", "(block (call draw x: 1 ..props))");
+
+        // (B) functional update -- bases render before fields.
+        check(
+            "let x = UiRect { ..r, z: 2 }",
+            "(block (let x () (struct UiRect (bases ..r) (data z 2))))",
+        );
+        // Multiple bases.
+        check(
+            "let x = P { ..a, ..b, c: 1 }",
+            "(block (let x () (struct P (bases ..a ..b) (data c 1))))",
+        );
+    }
+
+    #[test]
+    fn struct_spread_parse_errors() {
+        // A broken statement recovers to `recovery_errors` rather than a hard
+        // `Err`, so a parse "fails" if either surfaces.
+        let fails = |body: &str| {
+            let src = format!("fn f() {{ {body} }}");
+            match parse_module(&src, Ustr::from("test.rock")) {
+                Ok(ast) => !ast.recovery_errors.is_empty(),
+                Err(_) => true,
+            }
+        };
+        // Field before base in a functional-update literal.
+        assert!(fails("let x = P { a: 1, ..base }"), "field before base");
+        // Functional update on an enum variant is not supported.
+        assert!(fails("let x = E::V { ..base, a: 1 }"), "enum-variant base");
+    }
+
+    #[test]
     fn literals_and_arrays() {
         check("[1, 2, 3]", "(block [1 2 3])");
         check("![1, 2]", "(block ![1 2])");

@@ -34,6 +34,39 @@ fn emit(src: &str, fn_name: &str) -> String {
     emit_dump(vec![ast], fn_name)
 }
 
+/// Like [`emit_std`] but runs `skull_transform::cleanup` (copy-prop + DCE) before
+/// emitting -- the artifact the REAL pipeline ships (`mir_emit.rs`). Needed to
+/// assert allocation-shape claims (a dead `MakeTuple` left by the raw lowering is
+/// removed here, so `no table` assertions reflect what actually runs).
+fn emit_clean(src: &str, fn_name: &str) -> String {
+    use std::sync::LazyLock;
+    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    skull_transform::cleanup(&mut func);
+    let ctx = CodegenCtx::new(&ws);
+    emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func)
+}
+
 /// Emit EVERY lowerable function in the `<test>` module, run a Lua `driver`
 /// expression (e.g. `"sign(-5)"`) under luajit, and return its trimmed stdout.
 /// The deeper oracle: it proves the emitted Lua is valid AND computes correctly,
@@ -63,9 +96,17 @@ fn run(src: &str, driver: &str) -> String {
     let ctx = CodegenCtx::new(&ws);
     let scx = skull_mir::lower::ScalarCtx::new(&ws);
     let mut lua = String::from("local bit = require('bit')\n");
+    let mut cache = skull_transform::InlineCache::default();
     for (fid, _) in ws.module(mid).functions.iter() {
-        if let Ok(func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
-            lua.push_str(&emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func));
+        let fref = FuncRef { module: mid, func: fid };
+        if let Ok(mut func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
+            // The real pipeline: stdlib callees (VecIter's iter/next under a
+            // `for x in vec`) inline away, so the chunk stays self-contained.
+            skull_transform::inline_functions(&ws, &scx, fref, &mut func, &mut cache)
+                .expect("inline failed");
+            skull_transform::cleanup(&mut func);
+            skull_transform::recover_counted_loops(&ws, &mut func);
+            lua.push_str(&emit_function(&ws, &ctx, fref, &func));
         }
     }
     lua.push_str(&format!("print({})\n", driver));
@@ -219,8 +260,8 @@ fn exec_vec_index() {
 
 #[test]
 fn exec_for_over_array() {
-    // for-over-array lowers to the `Len` + `Index` insts (self-contained, no
-    // stdlib `len`/`get` call).
+    // `[T]` iterates via the stdlib VecIter protocol; the inline pass splices
+    // iter/next away so the emitted fn is still self-contained.
     let src = "
 fn total(xs: [int]) -> int {
     let s = 0;
@@ -411,6 +452,66 @@ fn emits_interpolation_as_flat_concat() {
 // execute a scalarized-enum match; per-function match shape is pinned by
 // skull-mir's `match_enum_*` lowering tests.
 
+// --- Slice 1: multi-return ABI for tuple-returning fns ---
+
+#[test]
+fn tuple_return_callee_splats_multi_value() {
+    // A fn whose return type is a tuple returns N values, NOT `return ({a, b})`
+    // (one table alloc per call). The MakeTuple in return position is elided.
+    let body = emit_clean("fn pair() -> (bool, int) { return (true, 42) }", "pair");
+    assert!(
+        !body.contains("{"),
+        "tuple return must splat to multi-value, not build a table:\n{body}"
+    );
+    assert!(
+        body.contains("do return (true), (42) end"),
+        "expected `do return (true), (42) end`:\n{body}"
+    );
+}
+
+#[test]
+fn tuple_return_tail_expr_splats() {
+    // Tail-position tuple (no explicit `return`) splats the same way.
+    let body = emit_clean("fn pair() -> (bool, int) { (true, 42) }", "pair");
+    assert!(!body.contains("{"), "tail tuple must not build a table:\n{body}");
+    assert!(
+        body.contains("do return (true), (42) end"),
+        "expected `do return (true), (42) end`:\n{body}"
+    );
+}
+
+#[test]
+fn tuple_destructure_caller_uses_multi_assign() {
+    // `let (a, b) = f()` where f returns a tuple emits a multi-assign
+    // `<a>, <b> = f(...)`, not a table build + `[1]`/`[2]` indexing. Zero alloc.
+    let src = "\
+fn pair() -> (bool, int) { (true, 42) }\n\
+fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
+    let body = emit_clean(src, "use_it");
+    assert!(
+        !body.contains("{"),
+        "destructure must be zero-alloc multi-assign, not a table build:\n{body}"
+    );
+    assert!(
+        body.lines().any(|l| l.contains(", ") && l.contains("= pair(")),
+        "expected a multi-assign call line `a, b = pair(...)`:\n{body}"
+    );
+}
+
+#[test]
+fn tuple_boxed_use_still_packs_table() {
+    // A tuple result stored whole (not destructured) still materializes a table
+    // so downstream `.0` indexing is unchanged. This pins the pack path.
+    let src = "\
+fn pair() -> (bool, int) { (true, 42) }\n\
+fn use_it() -> int { let t = pair(); t.1 }";
+    let body = emit_clean(src, "use_it");
+    assert!(
+        body.contains("[1]") || body.contains("[2]"),
+        "boxed tuple use must index a packed table:\n{body}"
+    );
+}
+
 #[test]
 fn if_as_value_branch_and_cell_join() {
     // The `if`-as-value joins through a cell (no block params). Cell coloring
@@ -437,5 +538,303 @@ function sign(c0)
   do return r0 end
 end
 "
+    );
+}
+
+/// Full pre-emit pipeline (mirrors `mir_emit.rs`): lower -> `inline_functions`
+/// -> `cleanup` -> emit. The honest artifact for zero-alloc claims: an `@inline`
+/// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
+/// inliner has run, which `emit_clean` does NOT do.
+fn emit_inlined(src: &str, fn_name: &str) -> String {
+    use std::sync::LazyLock;
+    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == fn_name)
+        .expect("function by name");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let self_ref = FuncRef { module: mid, func: fid };
+    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
+    let mut cache = skull_transform::InlineCache::default();
+    skull_transform::inline_functions(&ws, &scx, self_ref, &mut func, &mut cache)
+        .expect("inline failed");
+    skull_transform::cleanup(&mut func);
+    skull_transform::recover_counted_loops(&ws, &mut func);
+    let ctx = CodegenCtx::new(&ws);
+    emit_function(&ws, &ctx, self_ref, &func)
+}
+
+// --- Slice 4 acceptance gate: an @inline user iterator driven by `for`
+// scalarizes its cursor struct to per-field locals; the loop allocates nothing.
+const ZERO_ALLOC_ITER_SRC: &str = "
+struct IntRange { lo: int, hi: int }
+struct IntRangeIter { cur: int, hi: int }
+
+@inline
+fn iter(r: IntRange) -> IntRangeIter { return IntRangeIter { cur: r.lo, hi: r.hi } }
+
+@inline
+fn next(it: IntRangeIter) -> (bool, int) {
+    if it.cur >= it.hi { return (false, 0) }
+    let v = it.cur
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+fn sum_range(lo: int, hi: int) -> int {
+    let total = 0
+    for x in (IntRange { lo: lo, hi: hi }) { total += x }
+    return total
+}";
+
+#[test]
+fn for_user_iter_inline_is_zero_alloc() {
+    let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
+    assert!(
+        !lua.contains("__rock_create_struct"),
+        "cursor struct must scalarize away, no create_struct:\n{lua}"
+    );
+    assert!(
+        !lua.contains('{'),
+        "@inline iter/next over a `for` must leave no table constructor:\n{lua}"
+    );
+}
+
+// A cursor whose field is a Vec (not just scalars) also scalarizes: the Vec ref
+// is hoisted to one cell + the index to a loop-carried scalar; the per-element
+// read is `data[i+1]`, no cursor table. This is the shape slice 5's stdlib
+// `VecIter` swap activates for real `[T]` (proven here via a wrapper type so the
+// slice-3 desugar routing fires without the author's bone arm-removal).
+const ZERO_ALLOC_VEC_BACKED_SRC: &str = "
+struct MyVec { items: [int] }
+struct MyVecIter { items: [int], i: int }
+
+@inline
+fn iter(v: MyVec) -> MyVecIter { return MyVecIter { items: v.items, i: 0 } }
+
+@inline
+fn next(it: MyVecIter) -> (bool, int) {
+    if it.i >= it.items.len { return (false, 0) }
+    let v = it.items[it.i]
+    it.i = it.i + 1
+    return (true, v)
+}
+
+fn sum_myvec(v: MyVec) -> int {
+    let total = 0
+    for x in v { total += x }
+    return total
+}";
+
+#[test]
+fn for_vec_backed_iter_inline_is_zero_alloc() {
+    let lua = emit_inlined(ZERO_ALLOC_VEC_BACKED_SRC, "sum_myvec");
+    assert!(
+        !lua.contains("__rock_create_struct"),
+        "vec-backed cursor must scalarize away:\n{lua}"
+    );
+    assert!(
+        !lua.contains('{'),
+        "vec-backed @inline iterator loop must leave no table constructor:\n{lua}"
+    );
+}
+
+// --- Slice 4.5 acceptance gate: the desugared+inlined counted loop is rewritten
+// into the codegen CountedLoop shape and prints as a native numeric `for` (FORL
+// bytecode). The goto-LOOP form of the same loop measured 1.8x slower on a
+// type-stable 2M-element sum (docs/iterator-implementation-plan.md, slice 4.5).
+#[test]
+fn for_user_iter_inline_emits_forl() {
+    let lua = emit_inlined(ZERO_ALLOC_ITER_SRC, "sum_range");
+    assert!(
+        lua.contains("for "),
+        "desugared counted loop must print as a numeric `for`:\n{lua}"
+    );
+    assert!(
+        !lua.contains(">="),
+        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
+    );
+}
+
+#[test]
+fn for_vec_backed_iter_inline_emits_forl() {
+    let lua = emit_inlined(ZERO_ALLOC_VEC_BACKED_SRC, "sum_myvec");
+    assert!(
+        lua.contains("for "),
+        "vec-backed desugared loop must print as a numeric `for` (bound hoisted):\n{lua}"
+    );
+    assert!(
+        !lua.contains(">="),
+        "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
+    );
+}
+
+// --- Slice 5 acceptance gate: a REAL `[T]` for-loop routes through the stdlib
+// VecIter protocol (no skull template) and still compiles to the same
+// zero-alloc native `for` the deleted template emitted. Parity measured at
+// ~1.0x, 0 bytes/elem (benchmarks/iterator-zero-alloc/vec_parity.rock).
+#[test]
+fn for_real_vec_loop_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_vec(xs: [int]) -> int {
+            let total = 0
+            for x in xs { total += x }
+            return total
+        }",
+        "sum_vec",
+    );
+    assert!(
+        lua.contains("for "),
+        "real [T] loop must print as a numeric `for` via VecIter + FORL recovery:\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct"),
+        "real [T] loop must not allocate (VecIter cursor scalarizes):\n{lua}"
+    );
+    assert!(
+        !lua.contains("next"),
+        "iter/next must be fully inlined, no residual protocol call:\n{lua}"
+    );
+}
+
+// --- Slice 6 acceptance gate: combinator chains flatten. The bounded
+// `map`/`filter` `next` bodies inline via placeholder substitution (the
+// BoundTree), the cursors scalarize, and a map-only spine (counted structure
+// preserved) recovers FORL. filter keeps the goto skip loop -- its template
+// baseline anyway -- but still allocates nothing and leaves no protocol call.
+#[test]
+fn map_only_chain_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_mapped(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().map(x => x * 2) { total += x }
+            return total
+        }",
+        "sum_mapped",
+    );
+    assert!(
+        lua.contains("for "),
+        "map-only chain must recover a numeric `for` (FORL):\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct"),
+        "chain must not allocate (MapIter/VecIter cursors scalarize):\n{lua}"
+    );
+    assert!(
+        !lua.contains("next"),
+        "chain must fully inline, no residual `next` call:\n{lua}"
+    );
+}
+
+#[test]
+fn map_filter_chain_is_zero_alloc_no_residual_next() {
+    let lua = emit_inlined(
+        "fn sum_kept(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().map(x => x * 2).filter(x => x > 2) { total += x }
+            return total
+        }",
+        "sum_kept",
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct"),
+        "map+filter chain must not allocate (all cursors scalarize):\n{lua}"
+    );
+    assert!(
+        !lua.contains("next"),
+        "map+filter chain must fully inline, no residual `next` call:\n{lua}"
+    );
+}
+
+// --- Skip-loop FORL recovery: a filter/take_while layer's reject edge becomes
+// a `continue` (skip) or a jump to the loop exit (stop), so the whole chain
+// still rewrites into the codegen CountedLoop shape -- the doc-blessed flat
+// `for + skip-branch` (docs/iterator-desugaring-investigation.md C3). The goto
+// form of the same filter chain measured 1.82x a hand-fused loop
+// (benchmarks/iterator-zero-alloc/chain_parity.rock).
+#[test]
+fn filter_chain_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_kept(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().filter(x => x > 2) { total += x }
+            return total
+        }",
+        "sum_kept",
+    );
+    assert!(
+        lua.contains("for "),
+        "filter chain must recover a numeric `for` (skip edge -> continue):\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
+        "filter chain must stay zero-alloc, fully inlined:\n{lua}"
+    );
+}
+
+#[test]
+fn map_filter_chain_is_forl() {
+    let lua = emit_inlined(
+        "fn sum_kept(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().map(x => x * 2).filter(x => x > 2) { total += x }
+            return total
+        }",
+        "sum_kept",
+    );
+    assert!(
+        lua.contains("for "),
+        "map+filter chain must recover a numeric `for`:\n{lua}"
+    );
+}
+
+#[test]
+fn take_while_chain_is_forl_zero_alloc() {
+    let lua = emit_inlined(
+        "fn sum_prefix(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().take_while(x => x < 10) { total += x }
+            return total
+        }",
+        "sum_prefix",
+    );
+    assert!(
+        lua.contains("for "),
+        "take_while chain must recover a numeric `for` (stop edge -> exit):\n{lua}"
+    );
+    assert!(
+        !lua.contains('{') && !lua.contains("__rock_create_struct") && !lua.contains("next"),
+        "take_while chain must stay zero-alloc, fully inlined:\n{lua}"
+    );
+}
+
+#[test]
+fn filter_take_while_mixed_chain_is_forl() {
+    let lua = emit_inlined(
+        "fn sum_mixed(xs: [int]) -> int {
+            let total = 0
+            for x in xs.iter().filter(x => x % 2 == 0).take_while(x => x < 100) { total += x }
+            return total
+        }",
+        "sum_mixed",
+    );
+    assert!(
+        lua.contains("for "),
+        "filter+take_while chain must recover a numeric `for`:\n{lua}"
     );
 }

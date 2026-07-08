@@ -614,6 +614,9 @@ fn emit_body_chunk(
         let tc = Instant::now();
         skull_transform::cleanup(&mut mf);
         times.cleanup = tc.elapsed();
+        // Coroutines never inline, so a combinator chain here would leave a
+        // call to a bounded fn that has no standalone emission -- reject.
+        validate_no_residual_bound_calls(ws, f, &mf)?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let lua = skull_transform::emit_coroutine(ws, cg, self_ref, &mf);
@@ -629,11 +632,15 @@ fn emit_body_chunk(
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
-    let (spliced, _splices) = skull_transform::inline_functions(ws, scx, self_ref, &mut mf, inline_cache);
+    let (spliced, _splices) =
+        skull_transform::inline_functions(ws, scx, self_ref, &mut mf, inline_cache)
+            .map_err(|e| e.message)?;
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
     skull_transform::cleanup(&mut mf); // drop dead values + dead-cell stores
+    skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
     times.cleanup = tc.elapsed();
+    validate_no_residual_bound_calls(ws, f, &mf)?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, overloaded, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -645,9 +652,57 @@ fn emit_body_chunk(
 }
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
-/// regenerated inline (extern / `inline(lua)`).
+/// regenerated inline (extern / `inline(lua)`). An `Iterator`-bounded fn is
+/// NEITHER: it exists only monomorphized-by-inlining at its call sites (its
+/// body holds placeholder bound-calls that have no standalone emission).
 fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
-    !f.is_extern && f.lua_body.is_none()
+    !f.is_extern && f.lua_body.is_none() && !fn_has_bounds(f)
+}
+
+/// Whether the fn declares any `Iterator` bound on its generics.
+fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
+    f.generic_bounds.iter().any(Option::is_some)
+}
+
+/// Post-inline gate: a body about to be emitted must contain no placeholder
+/// bound-call and no residual call to a bounded fn. Either residue means the
+/// mono-by-inlining contract broke -- most commonly a combinator chain in a
+/// context the inliner does not enter (a `co fn` body, a recursive bounded
+/// fn). Reject with a real error instead of emitting broken Lua.
+fn validate_no_residual_bound_calls(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+    mf: &skull_mir::mir::MirFunc,
+) -> Result<(), String> {
+    // Walk block inst-lists, not the raw arena: a splice drops the consumed
+    // call inst from its block but the arena still holds it.
+    for (_, block) in mf.blocks.iter() {
+        for &iid in &block.insts {
+            match &mf.insts[iid] {
+                skull_mir::mir::Inst::CallBoundMulti { .. } => {
+                    return Err(format!(
+                        "`{}`: an `Iterator`-bounded call was not monomorphized (a bounded fn \
+                         only works inlined; is this a recursive bounded fn?)",
+                        f.name
+                    ));
+                }
+                skull_mir::mir::Inst::Call { func, .. }
+                | skull_mir::mir::Inst::CallMulti { func, .. } => {
+                    let callee = &ws.module(func.module).functions[func.func];
+                    if fn_has_bounds(callee) {
+                        return Err(format!(
+                            "`{}` calls `Iterator`-bounded `{}` in a context that cannot inline \
+                             it (bounded fns have no standalone emission -- iterator combinators \
+                             are not supported inside `co fn` bodies or recursive bounded fns)",
+                            f.name, callee.name
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Assemble the full Lua program: prelude + decorator defs + the function section
@@ -887,6 +942,11 @@ fn assemble(
                     }
                 }
                 let _ = writeln!(out, "function {name}({params})\n{prologue}{body}\nend");
+                continue;
+            }
+            // An `Iterator`-bounded fn has no standalone emission (it exists
+            // only inlined at its call sites) -- deliberately absent.
+            if fn_has_bounds(f) {
                 continue;
             }
             // Ordinary / coroutine: pull the cached chunk.

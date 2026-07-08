@@ -120,6 +120,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
                     is_coroutine: false,
                     is_synthetic: true,
                     macro_items: Vec::new(),
+                    receiver_surface: None,
                 }),
             });
         }
@@ -185,7 +186,11 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
         ExprKind::ArrayLiteral(xs) | ExprKind::NativeArrayLiteral(xs) | ExprKind::Tuple(xs) => {
             out.extend(xs.iter().copied());
         }
-        ExprKind::StructLiteral { fields, .. } | ExprKind::EnumVariantRecord { fields, .. } => {
+        ExprKind::StructLiteral { bases, fields, .. } => {
+            out.extend(bases.iter().copied());
+            out.extend(fields.iter().map(|(_, v)| *v));
+        }
+        ExprKind::EnumVariantRecord { fields, .. } => {
             out.extend(fields.iter().map(|(_, v)| *v));
         }
         ExprKind::ReturnExpr(o) | ExprKind::Yield(o) => out.extend(o.iter().copied()),

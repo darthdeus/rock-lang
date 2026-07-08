@@ -9,7 +9,8 @@
 //! in the munged and live buffers -- receiver spans from here feed `type_at`
 //! on the LIVE workspace directly.
 
-use skull_parser::ast::{CallSyntax, ExprData, ExprKind, IfLetClause, Pattern, StatementKind};
+use rock_tokenizer::TokenKind;
+use skull_parser::ast::{Binding, CallSyntax, ExprData, ExprKind, IfLetClause, Pattern, StatementKind};
 use skull_parser::Idx;
 use ustr::Ustr;
 
@@ -46,7 +47,7 @@ fn token_replacement_munge(src: &str, offset: usize) -> Option<(String, usize)> 
     out.push_str(&src[..s]);
     out.push_str("__rock_completion__");
     out.push_str(&src[e..]);
-    Some((crate::backend::balance_delimiters(out), s))
+    Some((crate::completion::classify::balance_delimiters(out), s))
 }
 
 /// Offset of the `}` matching the `{` at `open` (None when unbalanced).
@@ -85,6 +86,10 @@ pub(crate) struct NamedArgSlot {
     pub callee: String,
     pub positional: usize,
     pub named: Vec<String>,
+    /// Probe offsets inside each `..spread` operand supplied before the cursor.
+    /// The caller resolves each operand's struct type and treats its fields as
+    /// already-supplied params.
+    pub spread_probes: Vec<usize>,
 }
 
 enum RecordHead {
@@ -119,7 +124,7 @@ impl CursorAst {
     /// fallback there.
     pub(crate) fn at(src: &str, offset: usize) -> Option<CursorAst> {
         let file = Ustr::from("<cursor>");
-        let mut candidates: Vec<(String, usize)> = crate::backend::completion_munges(src, offset)
+        let mut candidates: Vec<(String, usize)> = crate::completion::classify::completion_munges(src, offset)
             .into_iter()
             .map(|m| (m, offset))
             .collect();
@@ -133,7 +138,7 @@ impl CursorAst {
             s.push_str(head);
             s.push_str("__rock_completion__,");
             s.push_str(tail);
-            candidates.push((crate::backend::balance_delimiters(s), offset));
+            candidates.push((crate::completion::classify::balance_delimiters(s), offset));
         }
         // Arm-completing sentinel: `E::<cursor>` in a FRESH match arm (no
         // `=>` typed yet) -- every plain munge leaves an incomplete arm that
@@ -145,7 +150,7 @@ impl CursorAst {
             s.push_str(head);
             s.push_str("__rock_completion__ => {}");
             s.push_str(tail);
-            candidates.push((crate::backend::balance_delimiters(s), offset));
+            candidates.push((crate::completion::classify::balance_delimiters(s), offset));
         }
         candidates.push((src.to_string(), offset));
         // A candidate can parse while recovery mangles the cursor region:
@@ -398,7 +403,7 @@ impl CursorAst {
     fn record_ctx(&self) -> Option<RecordCtx> {
         for &node in self.expr_chain().iter() {
             let (head, fields) = match &self.expr(node).kind {
-                ExprKind::StructLiteral { name, fields } => {
+                ExprKind::StructLiteral { name, fields, .. } => {
                     (RecordHead::Struct(name.name.to_string(), name.span.offset_range.1), fields)
                 }
                 ExprKind::EnumVariantRecord { enum_name, variant_name, fields } => (
@@ -476,6 +481,90 @@ impl CursorAst {
             // A struct DECL field's default expr type-directs the same way.
             None => self.decl_field_default(),
         }
+    }
+
+    /// Cursor in the RHS of an assignment `lhs = <cursor>` (or a compound
+    /// `lhs += <cursor>`): the last byte offset of the LHS place expression, so
+    /// `type_at` resolves the slot's expected type (an enum-typed field
+    /// surfaces its variants type-directed, `mob.ai_state = Com|`). The LHS ends
+    /// before the cursor, so its offset is live-buffer-valid.
+    pub(crate) fn assign_lhs(&self) -> Option<usize> {
+        for (_, e) in self.ast.exprs.iter() {
+            let ExprKind::Assign { target, value, .. } = &e.kind else {
+                continue;
+            };
+            let (vs, ve) = self.expr(*value).span.offset_range;
+            if vs <= self.probe && self.probe <= ve {
+                return self.expr(*target).span.offset_range.1.checked_sub(1);
+            }
+        }
+        None
+    }
+
+    /// Cursor in the RHS of a comparison or null-coalesce BinOp (`lhs ==
+    /// <cursor>`, `lhs ?? <cursor>`): the last byte offset of the LHS, so
+    /// `type_at` resolves the compared-against type as the slot's expected
+    /// type (`expects_nominal` strips the `?` for `??`). Arena order is
+    /// bottom-up, so the first hit is the innermost enclosing BinOp.
+    pub(crate) fn comparison_lhs(&self) -> Option<usize> {
+        for (_, e) in self.ast.exprs.iter() {
+            let ExprKind::BinOp { left, op, right } = &e.kind else {
+                continue;
+            };
+            if !matches!(op, TokenKind::Equals | TokenKind::NotEquals | TokenKind::DoubleQuestionMark)
+            {
+                continue;
+            }
+            let (vs, ve) = self.expr(*right).span.offset_range;
+            if vs <= self.probe && self.probe <= ve {
+                return self.expr(*left).span.offset_range.1.checked_sub(1);
+            }
+        }
+        None
+    }
+
+    /// Cursor in the INIT of an explicitly-typed `let name: T = <cursor>`:
+    /// the last byte offset of the binding ident, so `type_at` resolves the
+    /// declared type (the annotation types the binding even while the init
+    /// is broken).
+    pub(crate) fn typed_let_binding(&self) -> Option<usize> {
+        for (_, s) in self.ast.stmts.iter() {
+            let StatementKind::Let(l) = &s.kind else {
+                continue;
+            };
+            if l.ty.is_none() {
+                continue;
+            }
+            let Some(v) = l.value else {
+                continue;
+            };
+            let (vs, ve) = self.expr(v).span.offset_range;
+            if vs <= self.probe && self.probe <= ve {
+                let Binding::Ident(id) = &l.binding else {
+                    return None;
+                };
+                return id.span.offset_range.1.checked_sub(1);
+            }
+        }
+        None
+    }
+
+    /// Cursor in the VALUE of a `return` (statement or expression form): the
+    /// slot expects the enclosing fn's declared return type -- the caller
+    /// resolves it from the HIR owner at the cursor. False when a lambda
+    /// body encloses the cursor (its return retargets to the lambda).
+    pub(crate) fn in_return_value(&self) -> bool {
+        let in_span = |(vs, ve): (usize, usize)| vs <= self.probe && self.probe <= ve;
+        let hit = self.ast.stmts.iter().any(|(_, s)| {
+            matches!(&s.kind, StatementKind::Return { value: Some(v), .. }
+                if in_span(self.expr(*v).span.offset_range))
+        }) || self.ast.exprs.iter().any(|(_, e)| {
+            matches!(&e.kind, ExprKind::ReturnExpr(Some(v))
+                if in_span(self.expr(*v).span.offset_range))
+        });
+        hit && !self.ast.exprs.iter().any(|(_, e)| {
+            matches!(&e.kind, ExprKind::Lambda { .. }) && self.lambda_body_contains(e)
+        })
     }
 
     /// Enclosing call with the cursor in an ARGUMENT slot: `(callee,
@@ -583,6 +672,7 @@ impl CursorAst {
         };
         let mut positional = 0usize;
         let mut named: Vec<String> = Vec::new();
+        let mut spread_probes: Vec<usize> = Vec::new();
         for a in args.iter() {
             if cursor_arg == Some(a.value) {
                 continue; // the slot being typed, not a supplied arg
@@ -593,12 +683,18 @@ impl CursorAst {
             if cursor_arg.is_none() && self.expr(a.value).span.offset_range.1 > self.probe {
                 continue;
             }
+            if a.is_spread {
+                // Probe just inside the operand's end to resolve its struct type.
+                let (s, e) = self.expr(a.value).span.offset_range;
+                spread_probes.push(e.saturating_sub(1).max(s));
+                continue;
+            }
             match &a.name {
                 Some(n) => named.push(n.name.to_string()),
                 None => positional += 1,
             }
         }
-        Some(NamedArgSlot { callee, positional, named })
+        Some(NamedArgSlot { callee, positional, named, spread_probes })
     }
 
     /// TYPE-vs-expression slot: true when the innermost node containing the
@@ -712,6 +808,41 @@ impl CursorAst {
         }
         segs.reverse();
         Some(segs)
+    }
+
+    /// The END offset of a member receiver that ISN'T a plain name path -- a
+    /// call (`x.find_spell().|`), index, etc. `member_path` returns None for
+    /// these (a call has no name segment), but the receiver's TYPE still
+    /// resolves via inference at this offset. None when the cursor is in the
+    /// receiver, or the receiver IS a name path (the structural name-walk owns
+    /// that -- inference-free, so robust when a munge breaks inference).
+    pub(crate) fn member_receiver_end(&self) -> Option<usize> {
+        let chain = self.expr_chain();
+        let &node = chain.first()?;
+        let (ExprKind::FieldAccess(recv, member) | ExprKind::SafeNavigation(recv, member)) =
+            &self.expr(node).kind
+        else {
+            return None;
+        };
+        if self.probe < member.span.offset_range.0 {
+            return None; // cursor in the receiver, not the member slot
+        }
+        if self.is_name_path(*recv) {
+            return None; // name-walk handles it
+        }
+        Some(self.expr(*recv).span.offset_range.1)
+    }
+
+    /// A receiver expression reachable as `ident(.field)*` -- exactly what
+    /// `member_path` can encode as name segments.
+    fn is_name_path(&self, mut cur: Idx<ExprData>) -> bool {
+        loop {
+            match &self.expr(cur).kind {
+                ExprKind::Ident(_) => return true,
+                ExprKind::FieldAccess(r, _) | ExprKind::SafeNavigation(r, _) => cur = *r,
+                _ => return false,
+            }
+        }
     }
 
     /// The UFCS receiver of the call whose arg slot the cursor sits in, as a
