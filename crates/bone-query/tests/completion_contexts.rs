@@ -182,6 +182,28 @@ fn member_access_offers_fields_and_ufcs_methods() {
 }
 
 #[test]
+fn member_completion_on_a_vec_receiver() {
+    // `xs.<cursor>` where xs: [int]. `[T]` is bone's `Array` ctor, resolved as
+    // the stdlib `Vec` struct ({data, len}); its `.len` field + Vec UFCS methods
+    // must be offered. Regression: `struct_name_of_ty` returned None for `Array`
+    // (not a `Nominal` ctor), so member completion came up empty and fell
+    // through. Parked as the `.len` bug (`global POS_HIST: [Vec2]`).
+    //
+    // Also pins the quality gates: the internal `data` field is hidden, and UFCS
+    // is element-aware -- a `[int]` fn matches, a `[Foo]` fn does not.
+    let src = "struct Foo { a: int }\n\
+               fn takes_foos(fs: [Foo]) {}\n\
+               fn takes_ints(v: [int]) {}\n\
+               fn r(xs: [int]) {\n  xs.\n}\n";
+    let l = labels(src, 4, 5); // after `xs.`
+    assert!(l.contains(&"len: int".to_string()), "vec .len field: {l:?}");
+    assert!(l.contains(&"push".to_string()), "generic Vec UFCS: {l:?}");
+    assert!(l.contains(&"takes_ints".to_string()), "[int] UFCS matches element: {l:?}");
+    assert!(!l.iter().any(|s| s.starts_with("data")), "internal Vec `data` hidden: {l:?}");
+    assert!(!l.contains(&"takes_foos".to_string()), "[Foo] UFCS excluded by element: {l:?}");
+}
+
+#[test]
 fn member_completion_on_a_plain_call_receiver() {
     // `find_spell().<cursor>` must offer the RETURN struct's fields. Regression:
     // `member_path` walked only Ident/FieldAccess receivers, returning None on a

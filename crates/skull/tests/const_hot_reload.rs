@@ -6,12 +6,8 @@
 //! off `hir::GlobalDef.is_const` in `mir_emit::emit_global_unit`.
 //! Design: docs/skull-const-hot-reload-plan.md.
 
-use bone_semantic::inference::Workspace;
-
-fn ws_of(src: &str) -> Workspace {
-    let module = skull_parser::parse_module(src, ustr::Ustr::from("<t>")).expect("parse");
-    bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
-}
+mod common;
+use common::ws_of;
 
 /// Compile `src` to a full skull Lua program (no stdlib -- int/empty-main only).
 fn emit_program(src: &str) -> String {

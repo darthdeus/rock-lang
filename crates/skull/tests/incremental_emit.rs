@@ -10,10 +10,8 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use skull::mir_emit::{emit_full, emit_incremental};
 
-fn ws_of(src: &str) -> Workspace {
-    let module = skull_parser::parse_module(src, ustr::Ustr::from("<t>")).expect("parse");
-    bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
-}
+mod common;
+use common::ws_of;
 
 /// The `(ModuleId, BodyOwner)` reinferred-id for the named function in `ws`.
 fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {

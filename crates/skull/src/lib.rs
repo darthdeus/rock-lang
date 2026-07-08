@@ -917,6 +917,13 @@ mod tests {
         )
     }
 
+    /// Run `src` + `driver` under luajit and assert stdout == `expected`.
+    /// Skips (returns) when luajit is unavailable, mirroring `run`.
+    fn exec_eq(src: &str, driver: &str, expected: &str) {
+        let Some(out) = run(src, driver) else { return };
+        assert_eq!(out, expected);
+    }
+
     /// A global that depends on another global only THROUGH a struct
     /// default (`B = Foo {}` where Foo's default reads `A`) must still init
     /// after it. The read is inside `__skull_default_Foo_x`, invisible to
@@ -943,12 +950,8 @@ mod tests {
     /// latch). (No arithmetic: the stdlib-less test path has no `__op_add`.)
     #[test]
     fn exec_global_init_dep_through_call() {
-        let src = "global A: int = read_b()\nglobal B: int = 42\n\
-                   fn read_b() -> int { B }\nfn get_a() -> int { A }";
-        let Some(out) = run(src, "print(get_a())") else {
-            return;
-        };
-        assert_eq!(out, "42");
+        exec_eq("global A: int = read_b()\nglobal B: int = 42\n\
+                   fn read_b() -> int { B }\nfn get_a() -> int { A }", "print(get_a())", "42");
     }
 
 
@@ -975,137 +978,78 @@ mod tests {
 
     #[test]
     fn exec_if_and_identity() {
-        let src = "fn pick(c: bool) -> int { if c { 1 } else { 2 } }\nfn id(x: int) -> int { x }";
-        let Some(out) = run(src, "print(pick(true)); print(pick(false)); print(id(42))") else {
-            return;
-        };
-        assert_eq!(out, "1\n2\n42");
+        exec_eq("fn pick(c: bool) -> int { if c { 1 } else { 2 } }\nfn id(x: int) -> int { x }", "print(pick(true)); print(pick(false)); print(id(42))", "1\n2\n42");
     }
 
     #[test]
     fn exec_comparison() {
-        let src = "fn lt(a: int, b: int) -> bool { a < b }";
-        let Some(out) = run(src, "print(lt(1, 2)); print(lt(2, 1))") else {
-            return;
-        };
-        assert_eq!(out, "true\nfalse");
+        exec_eq("fn lt(a: int, b: int) -> bool { a < b }", "print(lt(1, 2)); print(lt(2, 1))", "true\nfalse");
     }
 
     #[test]
     fn exec_short_circuit_and_or() {
-        let src = "fn band(a: bool, b: bool) -> bool { a && b }\nfn bor(a: bool, b: bool) -> bool { a || b }";
-        let Some(out) = run(
-            src,
-            "print(band(true,false)); print(band(true,true)); print(bor(false,false)); print(bor(false,true))",
-        ) else {
-            return;
-        };
-        assert_eq!(out, "false\ntrue\nfalse\ntrue");
+        exec_eq("fn band(a: bool, b: bool) -> bool { a && b }\nfn bor(a: bool, b: bool) -> bool { a || b }", "print(band(true,false)); print(band(true,true)); print(bor(false,false)); print(bor(false,true))", "false\ntrue\nfalse\ntrue");
     }
 
     #[test]
     fn exec_let_then_compare() {
-        let src = "fn f(x: int) -> bool {\n    let lo = 0\n    lo < x\n}";
-        let Some(out) = run(src, "print(f(5)); print(f(-3))") else {
-            return;
-        };
-        assert_eq!(out, "true\nfalse");
+        exec_eq("fn f(x: int) -> bool {\n    let lo = 0\n    lo < x\n}", "print(f(5)); print(f(-3))", "true\nfalse");
     }
 
     #[test]
     fn exec_nested_if() {
-        let src = "fn sign(x: int) -> int { if x < 0 { 0 } else { if x == 0 { 1 } else { 2 } } }";
-        let Some(out) = run(src, "print(sign(-9)); print(sign(0)); print(sign(9))") else {
-            return;
-        };
-        assert_eq!(out, "0\n1\n2");
+        exec_eq("fn sign(x: int) -> int { if x < 0 { 0 } else { if x == 0 { 1 } else { 2 } } }", "print(sign(-9)); print(sign(0)); print(sign(9))", "0\n1\n2");
     }
 
     #[test]
     fn exec_unary_minus() {
-        let src = "fn neg(x: int) -> int { -x }\nfn negf(x: float) -> float { -x }";
-        let Some(out) = run(src, "print(neg(5)); print(neg(-3)); print(negf(2.5))") else {
-            return;
-        };
-        assert_eq!(out, "-5\n3\n-2.5");
+        exec_eq("fn neg(x: int) -> int { -x }\nfn negf(x: float) -> float { -x }", "print(neg(5)); print(neg(-3)); print(negf(2.5))", "-5\n3\n-2.5");
     }
 
     #[test]
     fn exec_for_range_with_assignment() {
         // `last` returns the final loop index (n-1), or 0 when the loop is empty.
-        let src = "fn last(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        r = i\n    }\n    r\n}";
-        let Some(out) = run(src, "print(last(5)); print(last(1)); print(last(0))") else {
-            return;
-        };
-        assert_eq!(out, "4\n0\n0");
+        exec_eq("fn last(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        r = i\n    }\n    r\n}", "print(last(5)); print(last(1)); print(last(0))", "4\n0\n0");
     }
 
     #[test]
     fn exec_while_with_assignment() {
         // Loops once: sets r, then flips the flag false.
-        let src = "fn once() -> int {\n    let flag = true\n    let r = 0\n    while flag {\n        r = 1\n        flag = false\n    }\n    r\n}";
-        let Some(out) = run(src, "print(once())") else {
-            return;
-        };
-        assert_eq!(out, "1");
+        exec_eq("fn once() -> int {\n    let flag = true\n    let r = 0\n    while flag {\n        r = 1\n        flag = false\n    }\n    r\n}", "print(once())", "1");
     }
 
     #[test]
     fn exec_lambda_return_and_call() {
         // bone can't call a function value yet, so call the returned closure
         // from the Lua driver.
-        let src = "fn make() -> (int) -> int {\n    (x: int) => x\n}";
-        let Some(out) = run(src, "print(make()(5))") else {
-            return;
-        };
-        assert_eq!(out, "5");
+        exec_eq("fn make() -> (int) -> int {\n    (x: int) => x\n}", "print(make()(5))", "5");
     }
 
     #[test]
     fn exec_lambda_captures_upvalue() {
         // The lambda captures `n` (outer slot) as a Lua upvalue and ignores x.
-        let src = "fn constfn(n: int) -> (int) -> int {\n    (x: int) => n\n}";
-        let Some(out) = run(src, "print(constfn(7)(99)); print(constfn(3)(0))") else {
-            return;
-        };
-        assert_eq!(out, "7\n3");
+        exec_eq("fn constfn(n: int) -> (int) -> int {\n    (x: int) => n\n}", "print(constfn(7)(99)); print(constfn(3)(0))", "7\n3");
     }
 
     #[test]
     fn exec_field_assignment() {
-        let src = "struct P { x: int, y: int }\nfn f() -> int {\n    let p = P { x: 1, y: 2 }\n    p.x = 10\n    p.x\n}";
-        let Some(out) = run(src, "print(f())") else {
-            return;
-        };
-        assert_eq!(out, "10");
+        exec_eq("struct P { x: int, y: int }\nfn f() -> int {\n    let p = P { x: 1, y: 2 }\n    p.x = 10\n    p.x\n}", "print(f())", "10");
     }
 
     #[test]
     fn exec_index_assignment() {
-        let src = "fn f() -> int {\n    let xs = [1, 2, 3]\n    xs[1] = 9\n    xs[1]\n}";
-        let Some(out) = run(src, "print(f())") else {
-            return;
-        };
-        assert_eq!(out, "9");
+        exec_eq("fn f() -> int {\n    let xs = [1, 2, 3]\n    xs[1] = 9\n    xs[1]\n}", "print(f())", "9");
     }
 
     #[test]
     fn exec_array_index() {
         // 0-indexed Rock -> 1-indexed Lua: xs[1] is the second element.
-        let src = "fn f() -> int {\n    let xs = [10, 20, 30]\n    xs[1]\n}";
-        let Some(out) = run(src, "print(f())") else {
-            return;
-        };
-        assert_eq!(out, "20");
+        exec_eq("fn f() -> int {\n    let xs = [10, 20, 30]\n    xs[1]\n}", "print(f())", "20");
     }
 
     #[test]
     fn exec_as_cast_identity() {
-        let src = "fn w(x: int) -> float { x as float }";
-        let Some(out) = run(src, "print(w(5))") else {
-            return;
-        };
-        assert_eq!(out, "5");
+        exec_eq("fn w(x: int) -> float { x as float }", "print(w(5))", "5");
     }
 
     #[test]
@@ -1142,18 +1086,11 @@ mod tests {
         // A `co fn` emits a stackless state machine; calling it returns a
         // Frame driven by the per-co-fn `__resume` stored as a literal field
         // (the ctor returns the frame; `__`-method fields take it explicitly).
-        let src = "co fn counter() -> Coroutine<int> {\n\
+        exec_eq("co fn counter() -> Coroutine<int> {\n\
                        yield 1\n\
                        yield 2\n\
                        yield 3\n\
-                   }";
-        let Some(out) = run(
-            src,
-            "local c = counter(); print(c.__resume(c)); print(c.__resume(c)); print(c.__resume(c))",
-        ) else {
-            return;
-        };
-        assert_eq!(out, "1\n2\n3");
+                   }", "local c = counter(); print(c.__resume(c)); print(c.__resume(c)); print(c.__resume(c))", "1\n2\n3");
     }
 
     #[test]
@@ -1206,7 +1143,7 @@ mod tests {
     #[test]
     fn exec_coroutine_yield_delegate() {
         // `yield* inner()` pumps the inner coroutine's values outward.
-        let src = "co fn inner() -> Coroutine<int> {\n\
+        exec_eq("co fn inner() -> Coroutine<int> {\n\
                        yield 1\n\
                        yield 2\n\
                    }\n\
@@ -1214,29 +1151,18 @@ mod tests {
                        yield 0\n\
                        yield* inner()\n\
                        yield 9\n\
-                   }";
-        let Some(out) = run(
-            src,
-            "local c = outer(); for i=1,4 do print(c.__resume(c)) end",
-        ) else {
-            return;
-        };
-        assert_eq!(out, "0\n1\n2\n9");
+                   }", "local c = outer(); for i=1,4 do print(c.__resume(c)) end", "0\n1\n2\n9");
     }
 
     #[test]
     fn exec_format_dynamic_width_precision() {
         // `{x:{w}.{p}f}` assembles the string.format conversion at runtime.
-        let src = "fn f() -> string {\n\
+        exec_eq("fn f() -> string {\n\
                        let x = 3.14159\n\
                        let w = 8\n\
                        let p = 2\n\
                        \"[{x:{w}.{p}f}]\"\n\
-                   }";
-        let Some(out) = run(src, "print(f())") else {
-            return;
-        };
-        assert_eq!(out, "[    3.14]");
+                   }", "print(f())", "[    3.14]");
     }
 
     #[test]
@@ -1266,13 +1192,9 @@ mod tests {
         // the resolved target's signature makes `pick(5)` reach the int
         // overload (5), not the bool one (1). `use_it` is uniquely named, so it
         // stays callable by its surface name from the driver.
-        let src = "fn pick(x: int) -> int { x }\n\
+        exec_eq("fn pick(x: int) -> int { x }\n\
                    fn pick(x: bool) -> int { 1 }\n\
-                   fn use_it() -> int { pick(5) }";
-        let Some(out) = run(src, "print(use_it())") else {
-            return;
-        };
-        assert_eq!(out, "5");
+                   fn use_it() -> int { pick(5) }", "print(use_it())", "5");
     }
 
     #[test]
@@ -1280,30 +1202,22 @@ mod tests {
         // bone now hands skull the verbatim `inline(lua)` body (it used to drop
         // it). skull emits it as a real function with the original param names,
         // and a Rock caller resolves to it.
-        let src = "@nomangle inline(lua) fn double(x: int) -> int = \"return x * 2\"\n\
-                   fn use_it(n: int) -> int { double(n) }";
-        let Some(out) = run(src, "print(use_it(21))") else {
-            return;
-        };
-        assert_eq!(out, "42");
+        exec_eq("@nomangle inline(lua) fn double(x: int) -> int = \"return x * 2\"\n\
+                   fn use_it(n: int) -> int { double(n) }", "print(use_it(21))", "42");
     }
 
     #[test]
     fn exec_bitwise() {
         // Bitwise binops lower to LuaJIT `bit.*` calls.
-        let src = "fn band(a: int, b: int) -> int { a & b }\n\
-                   fn shl(a: int, n: int) -> int { a << n }";
-        let Some(out) = run(src, "print(band(6, 3)); print(shl(1, 4))") else {
-            return;
-        };
-        assert_eq!(out, "2\n16");
+        exec_eq("fn band(a: int, b: int) -> int { a & b }\n\
+                   fn shl(a: int, n: int) -> int { a << n }", "print(band(6, 3)); print(shl(1, 4))", "2\n16");
     }
 
     #[test]
     fn exec_for_enumerate() {
         // `enumerate(coll)` yields (0-based index, element); bone special-cases
         // it in for-position, so skull detects it syntactically.
-        let src = "fn idx() -> int {\n\
+        exec_eq("fn idx() -> int {\n\
                        let r = 0\n\
                        for (i, v) in enumerate([10, 20, 30]) { r = i }\n\
                        r\n\
@@ -1312,32 +1226,24 @@ mod tests {
                        let r = 0\n\
                        for (i, v) in enumerate([10, 20, 30]) { r = v }\n\
                        r\n\
-                   }";
-        let Some(out) = run(src, "print(idx()); print(elem())") else {
-            return;
-        };
-        assert_eq!(out, "2\n30");
+                   }", "print(idx()); print(elem())", "2\n30");
     }
 
     #[test]
     fn exec_for_over_map() {
         // `next`-based iteration; single-entry map so order is unambiguous.
-        let src = "fn val(m: Map<string, int>) -> int {\n\
+        exec_eq("fn val(m: Map<string, int>) -> int {\n\
                        let n = 0\n\
                        for (k, v) in m { n = v }\n\
                        n\n\
-                   }";
-        let Some(out) = run(src, "print(val({a = 42}))") else {
-            return;
-        };
-        assert_eq!(out, "42");
+                   }", "print(val({a = 42}))", "42");
     }
 
     #[test]
     fn exec_enum_match() {
         // Tuple-payload variants -> tagged tables; match discriminates on
         // `__tag` and reads payload by position.
-        let src = "enum Shape { Circle(int), Square(int, int) }\n\
+        exec_eq("enum Shape { Circle(int), Square(int, int) }\n\
                    fn pick(s: Shape) -> int {\n\
                        match s {\n\
                            Circle(r) => r,\n\
@@ -1345,11 +1251,7 @@ mod tests {
                        }\n\
                    }\n\
                    fn mkc(r: int) -> Shape { Shape::Circle(r) }\n\
-                   fn mks(w: int, h: int) -> Shape { Shape::Square(w, h) }";
-        let Some(out) = run(src, "print(pick(mkc(7))); print(pick(mks(3, 4)))") else {
-            return;
-        };
-        assert_eq!(out, "7\n3");
+                   fn mks(w: int, h: int) -> Shape { Shape::Square(w, h) }", "print(pick(mkc(7))); print(pick(mks(3, 4)))", "7\n3");
     }
 
     #[test]
@@ -1357,7 +1259,7 @@ mod tests {
         // Nested binding patterns: enum payload is a tuple, struct field is a
         // struct. The inner reads materialize in the matched arm (guarded), so
         // the `None` case never faults reading a missing payload.
-        let src = "enum Opt { Some((int, int)), None }\n\
+        exec_eq("enum Opt { Some((int, int)), None }\n\
                    fn fst(o: Opt) -> int {\n\
                        match o {\n\
                            Some((x, y)) => x,\n\
@@ -1372,30 +1274,19 @@ mod tests {
                        }\n\
                    }\n\
                    fn mk(a: int, b: int) -> Opt { Opt::Some((a, b)) }\n\
-                   fn none() -> Opt { Opt::None }";
-        let Some(out) = run(
-            src,
-            "print(fst(mk(3, 4))); print(fst(none())); \
-             print(inner_x({inner = {x = 10, y = 20}, tag = 5}))",
-        ) else {
-            return;
-        };
-        assert_eq!(out, "3\n-1\n10");
+                   fn none() -> Opt { Opt::None }", "print(fst(mk(3, 4))); print(fst(none())); \
+             print(inner_x({inner = {x = 10, y = 20}, tag = 5}))", "3\n-1\n10");
     }
 
     #[test]
     fn exec_match_literal_arms() {
-        let src = "fn name(n: int) -> string {\n\
+        exec_eq("fn name(n: int) -> string {\n\
                        match n {\n\
                            0 => \"zero\",\n\
                            1 => \"one\",\n\
                            _ => \"many\",\n\
                        }\n\
-                   }";
-        let Some(out) = run(src, "print(name(0)); print(name(1)); print(name(9))") else {
-            return;
-        };
-        assert_eq!(out, "zero\none\nmany");
+                   }", "print(name(0)); print(name(1)); print(name(9))", "zero\none\nmany");
     }
 
     #[test]
@@ -1405,18 +1296,14 @@ mod tests {
         // `Opt` is now a cdata enum that multi-returns `(tag, _0)`, so calling
         // `opt_unwrap(mk(5), 0)` directly in Lua would TRUNCATE `mk`'s second return.
         // The Rock wrappers spill the multi-return correctly (skull's own ABI).
-        let src = "enum Opt { Some(int), None }\n\
+        exec_eq("enum Opt { Some(int), None }\n\
                    fn opt_unwrap(o: Opt, d: int) -> int {\n\
                        if let Some(x) = o { x } else { d }\n\
                    }\n\
                    fn mk(x: int) -> Opt { Opt::Some(x) }\n\
                    fn empty() -> Opt { Opt::None }\n\
                    fn check_some() -> int { return opt_unwrap(mk(5), 0) }\n\
-                   fn check_none() -> int { return opt_unwrap(empty(), 99) }";
-        let Some(out) = run(src, "print(check_some()); print(check_none())") else {
-            return;
-        };
-        assert_eq!(out, "5\n99");
+                   fn check_none() -> int { return opt_unwrap(empty(), 99) }", "print(check_some()); print(check_none())", "5\n99");
     }
 
     #[test]
@@ -1424,11 +1311,7 @@ mod tests {
         // Conditional assignment inside the loop: r tracks i only while i < 3.
         // (Uses no `break`/`continue` — bone's inference doesn't support those
         // yet, though skull's lowering for them is in place; see skull-plan.md.)
-        let src = "fn upto3(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        if i < 3 {\n            r = i\n        }\n    }\n    r\n}";
-        let Some(out) = run(src, "print(upto3(10)); print(upto3(2))") else {
-            return;
-        };
-        assert_eq!(out, "2\n1");
+        exec_eq("fn upto3(n: int) -> int {\n    let r = 0\n    for i in 0..n {\n        if i < 3 {\n            r = i\n        }\n    }\n    r\n}", "print(upto3(10)); print(upto3(2))", "2\n1");
     }
 
     /// `recv?.f(args)` on a fn-typed FIELD: nil-guarded `(recv.f)(args)`
@@ -1436,16 +1319,12 @@ mod tests {
     /// rock (legacy) rejects the shape — bone-only language rule.
     #[test]
     fn exec_safe_nav_field_call() {
-        let src = "struct S { f: fn() -> int, g: fn(int) -> int }\n\
+        exec_eq("struct S { f: fn() -> int, g: fn(int) -> int }\n\
                    fn mk() -> S? { S { f: () => 42, g: (x) => x } }\n\
                    fn none() -> S? { null }\n\
                    fn a() -> int { mk()?.f() ?? -1 }\n\
                    fn b() -> int { mk()?.g(7) ?? -1 }\n\
-                   fn c() -> int { none()?.f() ?? -1 }";
-        let Some(out) = run(src, "print(a()); print(b()); print(c())") else {
-            return;
-        };
-        assert_eq!(out, "42\n7\n-1");
+                   fn c() -> int { none()?.f() ?? -1 }", "print(a()); print(b()); print(c())", "42\n7\n-1");
     }
 
     /// Body slice of a single emitted function — from its `function NAME()`
@@ -1609,14 +1488,10 @@ mod tests {
     /// run here — the native lowering is what makes this executable at all.)
     #[test]
     fn exec_payloadless_enum_eq() {
-        let src = "enum E { Ground, Wall }\n\
+        exec_eq("enum E { Ground, Wall }\n\
                    fn check(t: E) -> int { if t == E::Wall { 1 } else { 0 } }\n\
                    fn a() -> int { check(E::Wall) }\n\
-                   fn b() -> int { check(E::Ground) }";
-        let Some(out) = run(src, "print(a()); print(b())") else {
-            return;
-        };
-        assert_eq!(out, "1\n0");
+                   fn b() -> int { check(E::Ground) }", "print(a()); print(b())", "1\n0");
     }
 
     /// Function inlining: a tiny single-block value-struct constructor called in
@@ -1647,10 +1522,7 @@ mod tests {
             "expected iv() inlined (no `= iv(` call), got:\n{lua}"
         );
         // Correctness holds regardless of inlining — last iteration c.y == 100.
-        let Some(out) = run(src, "print(run())") else {
-            return;
-        };
-        assert_eq!(out, "100");
+        exec_eq(src, "print(run())", "100");
     }
 
     /// Multi-block inlining: a callee with internal control flow (`pick` has an
@@ -1674,10 +1546,7 @@ mod tests {
             !lua.contains("= pick("),
             "expected pick() inlined (no `= pick(` call), got:\n{lua}"
         );
-        let Some(out) = run(src, "print(run(true)); print(run(false))") else {
-            return;
-        };
-        assert_eq!(out, "10\n20");
+        exec_eq(src, "print(run(true)); print(run(false))", "10\n20");
     }
 
     /// Transitive inlining: `a` calls `b` calls `c`; re-scanning the caller after
@@ -1694,10 +1563,7 @@ mod tests {
         let lua = emit(src);
         assert!(!lua.contains("= b("), "expected b() inlined into a(), got:\n{lua}");
         assert!(!lua.contains("= c("), "expected c() inlined transitively, got:\n{lua}");
-        let Some(out) = run(src, "print(a())") else {
-            return;
-        };
-        assert_eq!(out, "3");
+        exec_eq(src, "print(a())", "3");
     }
 
     /// A self-recursive callee is NOT a candidate (cloning it would never
@@ -1713,10 +1579,7 @@ mod tests {
             lua.contains("r("),
             "a self-recursive callee must stay a real call, got:\n{lua}"
         );
-        let Some(out) = run(src, "print(caller())") else {
-            return;
-        };
-        assert_eq!(out, "7");
+        exec_eq(src, "print(caller())", "7");
     }
 
     // --- Relooper: counted loops recovered as a real numeric `for` (FORL) ---
@@ -1774,10 +1637,7 @@ mod tests {
         assert!(lua.contains("for c"), "expected a numeric for-loop, got:\n{lua}");
         let driver = "__narr_get_checked = function(a, i) return a[i + 1] end \
                       print(last_of({3, 4, 5}))";
-        let Some(out) = run(src, driver) else {
-            return;
-        };
-        assert_eq!(out, "5");
+        exec_eq(src, driver, "5");
     }
 
     /// Guard: an array spread (`[...a, ...b]`) builds via a loop whose increment
@@ -1786,16 +1646,9 @@ mod tests {
     /// synthesized `for`). Execution proves the elements copy exactly once.
     #[test]
     fn array_spread_not_restructured_no_double_increment() {
-        let src = "fn cat(a: [int], b: [int]) -> [int] { [...a, ...b] }";
-        let Some(out) = run(
-            src,
-            "local r = cat({data={1,2},len=2}, {data={3,4},len=2})\n\
+        exec_eq("fn cat(a: [int], b: [int]) -> [int] { [...a, ...b] }", "local r = cat({data={1,2},len=2}, {data={3,4},len=2})\n\
              local s = {} for i=1,r.len do s[i]=tostring(r.data[i]) end\n\
-             print(r.len .. ':' .. table.concat(s, ','))",
-        ) else {
-            return;
-        };
-        assert_eq!(out, "4:1,2,3,4");
+             print(r.len .. ':' .. table.concat(s, ','))", "4:1,2,3,4");
     }
 
     /// Guard: a loop that reassigns its own counter in the body can't become a
