@@ -2029,6 +2029,19 @@ fn chained_member_through_generic_struct_field() {
 }
 
 #[test]
+fn chained_member_through_newtype_field_in_fallback() {
+    // `foo(w.0.na|` with `foo` undefined -- inference can't type the arg of an
+    // unknown call, so this hits the structural name-walk fallback. It must peel
+    // the newtype `.0` to its wrapped `Corpse` and offer its fields. (Direct
+    // `let n = w.0.na` already resolves via `type_at`; this pins the fallback.)
+    let src = "struct Corpse { items: int, name: string }\n\
+               newtype Wrap(Corpse)\n\
+               fn r(w: Wrap) {\n  foo(w.0.na\n}\n";
+    let l = labels(src, 3, 12);
+    assert!(l.contains(&"name: string".to_string()), "newtype .0 in fallback: {l:?}");
+}
+
+#[test]
 fn chained_member_through_tuple_projection() {
     // `t.0.na|` -- the receiver `t.0` is a tuple projection, which the old
     // structural name-walk couldn't encode as a name segment (it bailed to

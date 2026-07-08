@@ -2568,14 +2568,7 @@ pub fn struct_fields_for_path(
     };
 
     for seg in rest {
-        let Some(sdef) = struct_def_by_name(ws, cur) else {
-            return Vec::new();
-        };
-        let Some(field) = sdef.fields.iter().find(|f| f.name.as_str() == seg.as_str()) else {
-            return Vec::new();
-        };
-        // Struct field types are module-static -- no body needed.
-        let Some(next) = struct_name_of_ty(ws, None, field.ty) else {
+        let Some(next) = field_hop_struct(ws, cur, seg) else {
             return Vec::new();
         };
         cur = next;
@@ -3297,11 +3290,30 @@ pub fn struct_name_for_path(
     let (head, rest) = segments.split_first()?;
     let mut cur = receiver_head_struct(ws, mid, offset, head)?;
     for seg in rest {
-        let sdef = struct_def_by_name(ws, cur)?;
-        let field = sdef.fields.iter().find(|f| f.name.as_str() == seg.as_str())?;
-        cur = struct_name_of_ty(ws, None, field.ty)?;
+        cur = field_hop_struct(ws, cur, seg)?;
     }
     Some(cur)
+}
+
+/// One structural field hop `cur.seg` -> the next type's nominal name, for the
+/// name-walk fallback. A named field on a struct; a numeric `.N` peels a newtype
+/// to its wrapped type (`w.0` on `newtype Wrap(Corpse)` -> Corpse). None when the
+/// hop doesn't resolve structurally (caller falls back to no completion).
+fn field_hop_struct(ws: &Workspace, cur: Ustr, seg: &str) -> Option<Ustr> {
+    if let Some(nt) = newtype_def_by_name(ws, cur) {
+        // A single-wrapped newtype exposes its inner value as `.0`.
+        return (seg == "0").then_some(()).and_then(|_| struct_name_of_ty(ws, None, nt.wrapped));
+    }
+    let sdef = struct_def_by_name(ws, cur)?;
+    let field = sdef.fields.iter().find(|f| f.name.as_str() == seg)?;
+    struct_name_of_ty(ws, None, field.ty)
+}
+
+/// Look up a newtype definition by name across all modules.
+fn newtype_def_by_name(ws: &Workspace, name: Ustr) -> Option<&NewtypeDef> {
+    ws.modules
+        .iter()
+        .find_map(|m| m.newtypes_by_name.get(&name).map(|i| &m.newtypes[*i]))
 }
 
 /// The struct NAME of a single-binding receiver via its recovered INFERRED type
