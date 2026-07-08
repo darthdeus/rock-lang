@@ -120,6 +120,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
                     is_coroutine: false,
                     is_synthetic: true,
                     macro_items: Vec::new(),
+                    receiver_surface: None,
                 }),
             });
         }

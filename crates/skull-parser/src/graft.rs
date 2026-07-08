@@ -75,6 +75,7 @@ fn graft_fn(src: &Ast, dst: &mut Ast, f: &FunctionDef) -> FunctionDef {
         is_coroutine: f.is_coroutine,
         is_synthetic: f.is_synthetic,
         macro_items: f.macro_items.iter().map(|it| graft_item(src, dst, it)).collect(),
+        receiver_surface: f.receiver_surface.clone(),
     }
 }
 

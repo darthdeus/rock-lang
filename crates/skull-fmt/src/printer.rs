@@ -353,12 +353,23 @@ impl<'a> Printer<'a> {
 
         let keyword = if f.is_macro { "macro" } else { "fn" };
         let coroutine = if f.is_coroutine { "co " } else { "" };
-        let mut sig = vec![
-            Doc::text(format!("{coroutine}{keyword} ")),
-            Doc::text(kw(f.name.name)),
-            self.generics(&f.generics),
-            self.params(&f.params),
-        ];
+        let mut sig = vec![Doc::text(format!("{coroutine}{keyword} "))];
+        // D-form: reprint `Type<path_gen>.name<method_gen>(recv, ..)` from the
+        // surface split point; the receiver param prints bare (its type lives in
+        // the path). `generics` is the merged list; `k` splits path vs method.
+        if let Some((ty_ident, k)) = &f.receiver_surface {
+            let k = *k;
+            sig.push(Doc::text(kw(ty_ident.name)));
+            sig.push(self.generics(&f.generics[..k]));
+            sig.push(Doc::text("."));
+            sig.push(Doc::text(kw(f.name.name)));
+            sig.push(self.generics(&f.generics[k..]));
+            sig.push(self.params_impl(&f.params, true));
+        } else {
+            sig.push(Doc::text(kw(f.name.name)));
+            sig.push(self.generics(&f.generics));
+            sig.push(self.params(&f.params));
+        }
         if let Some(ret) = f.return_ty {
             sig.push(Doc::text(" -> "));
             sig.push(self.type_expr(ret));
@@ -579,19 +590,27 @@ impl<'a> Printer<'a> {
     }
 
     fn params(&self, params: &[Param]) -> Doc {
+        self.params_impl(params, false)
+    }
+
+    /// `bare_first` (D-form) prints param 0 as just its name -- the receiver's
+    /// type comes from the path in the signature, not the param annotation.
+    fn params_impl(&self, params: &[Param], bare_first: bool) -> Doc {
         if params.is_empty() {
             return Doc::text("()");
         }
-        let param_doc = |p: &Param| {
+        let param_doc = |p: &Param, bare: bool| {
             let mut parts = vec![Doc::text(kw(p.name.name))];
-            parts.push(Doc::text(": "));
-            parts.push(self.type_expr(p.ty));
-            if p.is_variadic {
-                parts.push(Doc::text("..."));
-            }
-            if let Some(d) = p.default {
-                parts.push(Doc::text(" = "));
-                parts.push(self.expr(d));
+            if !bare {
+                parts.push(Doc::text(": "));
+                parts.push(self.type_expr(p.ty));
+                if p.is_variadic {
+                    parts.push(Doc::text("..."));
+                }
+                if let Some(d) = p.default {
+                    parts.push(Doc::text(" = "));
+                    parts.push(self.expr(d));
+                }
             }
             Doc::concat(parts)
         };
@@ -603,11 +622,15 @@ impl<'a> Printer<'a> {
         {
             let entries = params
                 .iter()
-                .map(|p| (param_doc(p), p.span.line_range.0, p.span))
+                .enumerate()
+                .map(|(i, p)| (param_doc(p, bare_first && i == 0), p.span.line_range.0, p.span))
                 .collect();
             return self.comma_block(entries, None, "(", ")");
         }
-        let items = params.iter().map(param_doc);
+        let items = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| param_doc(p, bare_first && i == 0));
         // Params wrap one-per-line when too wide, but take NO trailing comma.
         Doc::group(Doc::concat([
             Doc::text("("),
