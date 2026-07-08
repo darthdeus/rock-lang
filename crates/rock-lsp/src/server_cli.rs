@@ -39,6 +39,7 @@ fn build_cli() -> Command {
                 .arg(trace_flag()),
         )
         .subcommand(file_subcmd("diagnostics", "Get diagnostics for a Rock file"))
+        .subcommand(file_subcmd("lint", "Run lints (unused_var, unused_fn) over a Rock file or directory"))
         .subcommand(
             Command::new("semantic-tokens")
                 .about("Get semantic tokens for a Rock file")
@@ -150,6 +151,7 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
     match matches.subcommand() {
         None | Some(("serve", _)) => crate::run_lsp_server(),
         Some(("diagnostics", m)) => cli::bone_lsp::diagnostics(arg_str(m, "file")),
+        Some(("lint", m)) => cli::bone_lsp::lint(arg_str(m, "file")),
         Some(("semantic-tokens", m)) => cli::bone_lsp::semantic_tokens(arg_str(m, "file")),
         Some(("hover", m)) => {
             let (file, line, col) = bone_position(m)?;

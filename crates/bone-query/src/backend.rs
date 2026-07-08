@@ -771,7 +771,21 @@ impl BoneWorkspace {
             .map(|e| compiler_error_to_diagnostic(&e))
             .collect();
         diags.extend(hole_diagnostics_for(proj, path).unwrap_or_default());
-        diags.extend(lint_diagnostics_for(proj, path));
+        diags.extend(self.lint_diagnostics(path));
+        diags
+    }
+
+    /// Only the bone LINT findings for a single file (warnings) -- `unused_var`,
+    /// plus `unused_fn` for a `bin` project. The lint-only counterpart to
+    /// `diagnostics_for`, for the `rock lsp lint` command; excludes typecheck
+    /// errors and holes.
+    pub fn lint_diagnostics(&self, path: &str) -> Vec<Diagnostic> {
+        let path_c = self.canon(path);
+        let path = path_c.as_str();
+        let Some(proj) = self.project(path) else {
+            return Vec::new();
+        };
+        let mut diags = lint_diagnostics_for(proj, path);
         if proj.is_bin {
             diags.extend(fn_lint_diagnostics_for(proj, path));
         }

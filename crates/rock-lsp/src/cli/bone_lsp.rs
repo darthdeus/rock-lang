@@ -66,6 +66,10 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
+/// A `BoneWorkspace` method that returns the diagnostics for one loaded file --
+/// either all of them (`diagnostics_for`) or lints only (`lint_diagnostics`).
+type DiagFn = fn(&BoneWorkspace, &str) -> Vec<lsp_types::Diagnostic>;
+
 /// `rock-lsp diagnostics <path> --backend bone`. `path` may be a single file or
 /// a directory (whole-project diagnostics -- see [`diagnostics_report`]).
 pub fn diagnostics(path: &str) -> Result<()> {
@@ -73,13 +77,32 @@ pub fn diagnostics(path: &str) -> Result<()> {
     Ok(())
 }
 
-/// Diagnostics JSON for a file or a directory. A directory walks every `.rock`
-/// under it, loads each one's project once (whole-compilation-unit, so
-/// cross-file symbols and the whole-project `unused_fn` lint resolve), and
-/// reports the files that have diagnostics. Shared by the CLI handler and tests.
+/// `rock-lsp lint <path> --backend bone`. Lint findings only (`unused_var`,
+/// `unused_fn`) -- no typecheck errors or holes. File or directory, like
+/// `diagnostics`.
+pub fn lint(path: &str) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&lint_report(path)?)?);
+    Ok(())
+}
+
+/// All diagnostics JSON for a file or directory. Shared by the CLI handler and
+/// tests. See [`report_with`] for the file/dir walk.
 pub fn diagnostics_report(path: &str) -> Result<serde_json::Value> {
+    report_with(path, BoneWorkspace::diagnostics_for)
+}
+
+/// Lint-only diagnostics JSON for a file or directory.
+pub fn lint_report(path: &str) -> Result<serde_json::Value> {
+    report_with(path, BoneWorkspace::lint_diagnostics)
+}
+
+/// Diagnostics JSON for a file or a directory, using `diag_fn` to select which
+/// diagnostics to report. A directory walks every `.rock` under it, loads each
+/// one's project once (whole-compilation-unit, so cross-file symbols and the
+/// whole-project `unused_fn` lint resolve), and reports the files that have any.
+fn report_with(path: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
     if fs_err::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
-        return diagnostics_dir_report(path);
+        return dir_report(path, diag_fn);
     }
     let file_path = canonical(path);
     let src = fs_err::read_to_string(&file_path)?;
@@ -88,11 +111,11 @@ pub fn diagnostics_report(path: &str) -> Result<serde_json::Value> {
     Ok(json!({
         "file": file_path,
         "backend": "bone",
-        "diagnostics": diags_to_json(bone.diagnostics_for(&file_path)),
+        "diagnostics": diags_to_json(diag_fn(&bone, &file_path)),
     }))
 }
 
-fn diagnostics_dir_report(dir: &str) -> Result<serde_json::Value> {
+fn dir_report(dir: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
     let mut files = rock_host::project::find_rock_files_at_path(dir)?;
     files.sort();
 
@@ -115,7 +138,7 @@ fn diagnostics_dir_report(dir: &str) -> Result<serde_json::Value> {
     let mut file_reports = Vec::new();
     let mut total = 0usize;
     for f in &files {
-        let diags = bone.diagnostics_for(f);
+        let diags = diag_fn(&bone, f);
         if diags.is_empty() {
             continue;
         }
