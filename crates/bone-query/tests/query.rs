@@ -8,7 +8,7 @@
 //! HIR; queries that need new bone internals get proposed as a bone hint.
 
 use bone_semantic::prelude::*;
-use bone_query::query::{definition_at, references};
+use bone_query::query::{definition_at, references, FnRefScope};
 use bone_semantic::semantic_passes::semantic_pass;
 
 /// Build a checked workspace from a single source string and return it plus the
@@ -120,7 +120,7 @@ fn definition_of_global() {
 fn assert_refs(src: &str, cursor_off: usize, expected: &[usize]) {
     let (ws, mid) = ws_of(src);
     let inf = ws.inference(mid).expect("user module inferred");
-    let spans = references(&ws, mid, inf, cursor_off, &|_| Some(src));
+    let spans = references(&ws, mid, inf, cursor_off, &|_| Some(src), FnRefScope::AllOverloads);
     assert_eq!(
         spans.len(),
         expected.len(),
@@ -161,7 +161,7 @@ fn references_of_parameter() {
 fn refs_at(src: &str, cursor_off: usize) -> Vec<(usize, usize)> {
     let (ws, mid) = ws_of(src);
     let inf = ws.inference(mid).expect("user module inferred");
-    references(&ws, mid, inf, cursor_off, &|_| Some(src))
+    references(&ws, mid, inf, cursor_off, &|_| Some(src), FnRefScope::AllOverloads)
         .iter()
         .map(|s| s.span.offset_range)
         .collect()

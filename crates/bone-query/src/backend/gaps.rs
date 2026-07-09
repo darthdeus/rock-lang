@@ -82,8 +82,9 @@ pub fn references<'t>(
     inf: &InferenceResult,
     offset: usize,
     text_of: crate::query::TextOf<'_, 't>,
+    fn_scope: crate::query::FnRefScope,
 ) -> Vec<crate::query::RefSite> {
-    crate::query::references(ws, mid, inf, offset, text_of)
+    crate::query::references(ws, mid, inf, offset, text_of, fn_scope)
 }
 
 // ---------------------------------------------------------------------------

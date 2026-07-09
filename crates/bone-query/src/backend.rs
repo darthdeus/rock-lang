@@ -208,6 +208,50 @@ pub struct GenerateFunctionEdit {
     pub fn_name: String,
 }
 
+/// Whether the initializer SOURCE has a binary/unary operator at bracket depth 0
+/// (outside strings) -- e.g. a constant-folded `1 + 2`. Postfix `.`/`::`/`?.` and
+/// operators inside a call/index/literal don't count, so `g(v)` / `a.b` / `S{..}`
+/// stay unparenthesized while `a + b` / `-x` / `a as int` get wrapped.
+fn text_has_top_level_operator(s: &str) -> bool {
+    let b = s.trim().as_bytes();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_str = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'^'
+                if depth == 0 =>
+            {
+                return true
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The "inline local" edit set: replace every use of a `let` binding with its
+/// initializer and delete the `let`. `var` names the binding (for the action
+/// title); `edits` are non-overlapping `TextEdit`s (uses + the `let` deletion).
+pub struct InlineLocalEdits {
+    pub var: String,
+    pub edits: Vec<TextEdit>,
+}
+
 /// Canonicalize `path` WITHOUT Windows' `\\?\` extended-length prefix, falling
 /// back to the input verbatim if it doesn't resolve (an unsaved buffer).
 ///
@@ -846,7 +890,8 @@ impl BoneWorkspace {
         };
         let offset = offset_at_line_col(src, pos.line, pos.character);
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
-        self.all_reference_spans(proj, path, offset)
+        // Find-usages scopes to the specific overload under the cursor.
+        self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::ThisOverload)
             .into_iter()
             .filter_map(|s| self.location_from_span_indexed(proj, &s.span, &mut idx_cache))
             .collect()
@@ -1007,6 +1052,56 @@ impl BoneWorkspace {
         })
     }
 
+    /// The "inline local" edit set when the cursor is on a `let x = <init>`
+    /// binding or one of its uses: replace every use with the initializer (parens
+    /// added when it isn't atomic) and delete the `let` line. None otherwise.
+    /// See `query::inline_local`.
+    pub fn inline_local(&self, path: &str, pos: Position) -> Option<InlineLocalEdits> {
+        let path_c = self.canon(path);
+        let path = path_c.as_str();
+        let proj = self.project(path)?;
+        let src = proj.texts.get(path)?;
+        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let ws = proj.session.workspace();
+        let mid = user_module_for_path(ws, path)?;
+        let sites = crate::query::inline_local(ws, mid, offset)?;
+
+        let (istart, iend) = sites.init_span.offset_range;
+        let init_text = src.get(istart..iend)?;
+        // The HIR flag catches structural non-primaries (if/match/lambda/cast/
+        // range). A constant-folded literal (`1 + 2` -> `Int(3)`) reports atomic
+        // but its SOURCE still has a top-level operator, so back it with a text
+        // scan; either signal means splicing needs parens to keep precedence.
+        let parenthesize = sites.parenthesize || text_has_top_level_operator(init_text);
+        let replacement =
+            if parenthesize { format!("({init_text})") } else { init_text.to_string() };
+
+        let mut edits = Vec::with_capacity(sites.uses.len() + 1);
+        for u in &sites.uses {
+            let (s, e) = u.offset_range;
+            edits.push(TextEdit {
+                range: Range {
+                    start: offset_to_position(src, s),
+                    end: offset_to_position(src, e),
+                },
+                new_text: replacement.clone(),
+            });
+        }
+        // Delete the whole `let` line: leading indent through the trailing newline.
+        let (ls, le) = sites.let_span.offset_range;
+        let line_start = src.get(..ls)?.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = src.get(le..)?.find('\n').map(|i| le + i + 1).unwrap_or(src.len());
+        edits.push(TextEdit {
+            range: Range {
+                start: offset_to_position(src, line_start),
+                end: offset_to_position(src, line_end),
+            },
+            new_text: String::new(),
+        });
+
+        Some(InlineLocalEdits { var: sites.var.to_string(), edits })
+    }
+
     /// A "Generate function" edit when the cursor is on a call to an undeclared
     /// function: inserts a stub `fn name(params) [-> ret] { ? }` after the
     /// enclosing function. Param types come from the argument types (`any` when
@@ -1048,6 +1143,7 @@ impl BoneWorkspace {
         proj: &BoneProject,
         path: &str,
         offset: usize,
+        fn_scope: crate::query::FnRefScope,
     ) -> Vec<crate::query::RefSite> {
         if let Some(uf) = proj.session.files.get(path) {
             if let Some(ast) = reparse_user_file(uf, path) {
@@ -1072,9 +1168,14 @@ impl BoneWorkspace {
         };
         // Text lookup for the walks whose HIR carries no token span (named-arg
         // labels, `?.method` names) -- `proj.texts` holds every tracked file.
-        gaps::references(ws, mid, inf, offset, &|f| {
-            proj.texts.get(f).map(|s| s.as_str())
-        })
+        gaps::references(
+            ws,
+            mid,
+            inf,
+            offset,
+            &|f| proj.texts.get(f).map(|s| s.as_str()),
+            fn_scope,
+        )
     }
 
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
@@ -1405,6 +1506,18 @@ impl BoneWorkspace {
         let expected_types: Vec<String> =
             expected.as_ref().map_or_else(Vec::new, |exp| exp.rendered.clone());
         let has_expected = expected.is_some();
+        // The fn whose body holds the cursor. Inside its own body it must not be
+        // PROMOTED as a way to produce a value -- a call-through autofill, a reach
+        // path, or a fn-returning-the-slot-type -- because that is a recursive
+        // self-call, which buries the direct constructor the user is naming
+        // (mag blood.rock:16:39). It stays offered (plain candidate) for genuine
+        // recursion, just not lifted above type-directed candidates.
+        let enclosing_fn: Option<Ustr> = ws.modules.get(mid.index()).and_then(|m| {
+            match m.body_at(offset) {
+                Some(bone_semantic::hir::BodyOwner::Function(fid)) => Some(m.functions[fid].name),
+                _ => None,
+            }
+        });
         let t_build = std::time::Instant::now();
         // The signature cache (rebuilt only on non-`BodyOnly` edits) supplies fn
         // `detail` for the survivors below. The one-shot CLI path has no cached
@@ -1527,7 +1640,12 @@ impl BoneWorkspace {
                         {
                             0
                         }
-                        SymCat::Function if exp.accepts_fn_returning(ws, c.name.as_str()) => 1,
+                        SymCat::Function
+                            if enclosing_fn.as_deref() != Some(c.name.as_str())
+                                && exp.accepts_fn_returning(ws, c.name.as_str()) =>
+                        {
+                            1
+                        }
                         _ => 2,
                     }
                 } else {
@@ -1770,6 +1888,12 @@ impl BoneWorkspace {
                     eprintln!("[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}");
                 }
                 for p in res.paths {
+                    // A path that CALLS the enclosing fn (`k.partition_style()`
+                    // inside `partition_style`) is a recursive self-reference --
+                    // skip it, same reason the fn is not promoted as a candidate.
+                    if enclosing_fn.is_some_and(|f| reach_suffix_calls(&p.suffix, &f)) {
+                        continue;
+                    }
                     // Dedup / fuzzy-match / sort on the bare access form; the
                     // final hop's parens/snippet are rendered from the flags.
                     let key = format!("{vname}.{}", p.suffix);
@@ -1844,6 +1968,7 @@ impl BoneWorkspace {
                 reach,
                 score_leads,
                 expected.as_mut(),
+                enclosing_fn.as_deref(),
                 &mut sink,
             );
         }
@@ -1902,7 +2027,7 @@ impl BoneWorkspace {
         // at a declaration name ("nothing to rename" on `fn foo`), and the whole
         // enclosing `Call` span at a callee (prefilling `foo(args)`, not `foo`).
         let here = self
-            .all_reference_spans(proj, path, offset)
+            .all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads)
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
@@ -1919,7 +2044,8 @@ impl BoneWorkspace {
         let proj = self.project(path)?;
         let src = proj.texts.get(path)?;
         let offset = offset_at_line_col(src, pos.line, pos.character);
-        let sites = self.all_reference_spans(proj, path, offset);
+        // Rename rewrites the whole (shared) overloaded name, not one overload.
+        let sites = self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads);
         if sites.is_empty() {
             return None;
         }
@@ -2632,6 +2758,16 @@ fn classify_token(
         // Contextual `co` keyword — only highlighted when it precedes `fn`
         // (`co fn ...`); a bare `co` identifier falls through to the Ident arm.
         T::Ident(n) if n.as_str() == "co" && matches!(next_kind, Some(T::Fn)) => (TT_KEYWORD, 0),
+        // Contextual `static` keyword — lexed as an ident, recognized before the
+        // binding name (`static n = ..`). Only a `static <ident>` in non-member
+        // position is the keyword; a value named `static` (`static + 1`) is not.
+        T::Ident(n)
+            if !is_member
+                && n.as_str() == "static"
+                && matches!(next_kind, Some(T::Ident(_))) =>
+        {
+            (TT_KEYWORD, 0)
+        }
         // A macro invocation (`get_speed()`): the call-site ident is a bare token
         // whose name resolves to a MACRO in the name map. Macro expansion retags
         // the expanded template body onto the whole invocation span, so the HIR
@@ -3678,6 +3814,14 @@ fn reparse_with_project_inner(
     // doesn't line up with the session's module ids. Keeps single-file behavior.
     let mut single = vec![skull_parser::parse_module(munged, Ustr::from(path)).ok()?];
     bone_semantic::semantic_passes::semantic_pass(&mut single).ok()
+}
+
+/// Whether a reach-path suffix (`a().b().c`, UFCS-chained) has a CALL hop to
+/// `fname` -- i.e. the path produces its value by calling that fn. Each `.`-
+/// separated hop's identifier is the text before its `(`; compared exactly, so
+/// `my_style()` does not match `style`.
+pub(crate) fn reach_suffix_calls(suffix: &str, fname: &str) -> bool {
+    suffix.split('.').any(|hop| hop.split('(').next().unwrap_or(hop) == fname)
 }
 
 /// Resolve a `SlotAnchor` to a typed expected-slot session against `ws` --

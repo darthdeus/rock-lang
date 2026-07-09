@@ -2127,3 +2127,24 @@ fn unspaced_less_than_comparison_is_expression_position() {
         "expression position: the qualified variant must be offered after an unspaced `<` comparison: {l:?}"
     );
 }
+
+#[test]
+fn member_completion_recovers_a_missing_comma_in_a_struct_literal() {
+    // `z: st.<cursor>` above the next field with no trailing comma used to return
+    // NOTHING -- the unterminated value ran into `vel:` and collapsed the literal
+    // parse. Struct-field comma recovery (skull-parser) keeps the literal, so
+    // `st.` still offers its members. (mag blood.rock:111:19.)
+    let src = "struct St { hp: float, mp: float }\n\
+               struct Drop { kind: int, z: float, vel: float }\n\
+               fn f(st: St) {\n\
+               \x20   let d = Drop {\n\
+               \x20       kind: 0,\n\
+               \x20       z: st.\n\
+               \x20       vel: 1.0,\n\
+               \x20   }\n\
+               }\n";
+    // line 5 (0-indexed) = `        z: st.`, cursor right after the `.` (char 14).
+    let l = labels(src, 5, 14);
+    assert!(l.iter().any(|x| x.starts_with("hp")), "St.hp must be offered: {l:?}");
+    assert!(l.iter().any(|x| x.starts_with("mp")), "St.mp must be offered: {l:?}");
+}

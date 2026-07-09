@@ -10,7 +10,10 @@
 //! on the LIVE workspace directly.
 
 use rock_tokenizer::TokenKind;
-use skull_parser::ast::{Binding, CallSyntax, ExprData, ExprKind, IfLetClause, Pattern, StatementKind};
+use skull_parser::ast::{
+    Binding, BlockData, CallSyntax, ExprData, ExprKind, IfLetClause, ItemKind, Pattern,
+    StatementKind,
+};
 use skull_parser::Idx;
 use ustr::Ustr;
 
@@ -565,6 +568,60 @@ impl CursorAst {
         hit && !self.ast.exprs.iter().any(|(_, e)| {
             matches!(&e.kind, ExprKind::Lambda { .. }) && self.lambda_body_contains(e)
         })
+    }
+
+    /// Cursor in the IMPLICIT tail value of the enclosing fn body -- the block's
+    /// last expression, propagating through match-arm bodies, if/else branches,
+    /// and nested blocks (`fn f() -> T { match k { P => <cursor> } }`). The slot
+    /// is the fn's declared return type, same anchor as `in_return_value` (which
+    /// covers only the explicit `return X`). Lambda bodies retarget, so excluded.
+    pub(crate) fn in_tail_return(&self) -> bool {
+        if self.ast.exprs.iter().any(|(_, e)| {
+            matches!(&e.kind, ExprKind::Lambda { .. }) && self.lambda_body_contains(e)
+        }) {
+            return false;
+        }
+        let body = self.ast.items.iter().find_map(|it| {
+            let ItemKind::Function(f) = &it.kind else { return None };
+            let b = f.body.rock_block()?;
+            let (s, e) = self.ast.blocks[b].span.offset_range;
+            (s <= self.probe && self.probe < e).then_some(b)
+        });
+        body.is_some_and(|b| self.block_tail_has_cursor(b))
+    }
+
+    /// The cursor sits in `block`'s tail value expression (its last statement,
+    /// when that is a bare expression), descending through tail-propagating
+    /// constructs. Non-expr / `return` / earlier statements are not the tail.
+    fn block_tail_has_cursor(&self, block: skull_parser::Idx<BlockData>) -> bool {
+        let Some(&last) = self.ast.blocks[block].statements.last() else {
+            return false;
+        };
+        let StatementKind::Expression(e) = &self.ast.stmts[last].kind else {
+            return false;
+        };
+        self.expr_tail_has_cursor(*e)
+    }
+
+    fn expr_tail_has_cursor(&self, e: skull_parser::Idx<ExprData>) -> bool {
+        let (s, t) = self.expr(e).span.offset_range;
+        if !(s <= self.probe && self.probe < t) {
+            return false;
+        }
+        match &self.expr(e).kind {
+            // Arm bodies / branch tails inherit the match/if slot; the scrutinee
+            // and conditions do not (their spans hold no arm/branch block).
+            ExprKind::Match { arms, .. } => arms.iter().any(|a| self.block_tail_has_cursor(a.body)),
+            ExprKind::If { branches, else_branch } => {
+                branches.iter().any(|(_, b)| self.block_tail_has_cursor(*b))
+                    || else_branch.is_some_and(|b| self.block_tail_has_cursor(b))
+            }
+            ExprKind::Block(b) => self.block_tail_has_cursor(*b),
+            // A leaf tail expr containing the cursor IS the return slot. A cursor
+            // nested in an arg / field of it is handled with higher precedence in
+            // `expected` (arg_call / field_value short-circuit before the anchor).
+            _ => true,
+        }
     }
 
     /// Enclosing call with the cursor in an ARGUMENT slot: `(callee,

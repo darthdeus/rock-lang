@@ -2844,6 +2844,17 @@ impl Parser {
             fields.push((names, value));
             self.skip_comments();
             if !self.eat(TokenKind::Comma) {
+                // Recover a missing `,`: if another field plausibly follows (an
+                // ident or a `..` spread, not `}`/EOF), record the error and keep
+                // parsing the literal instead of bailing. Lets completion inside
+                // an unterminated value above the next field (`z: st.<cursor>`,
+                // mag blood.rock:111) still see the whole literal.
+                if matches!(self.kind(), TokenKind::Ident(_) | TokenKind::DoubleDot) {
+                    self.ast
+                        .recovery_errors
+                        .push(self.err("expected `,` between struct fields"));
+                    continue;
+                }
                 break;
             }
         }
@@ -2890,7 +2901,10 @@ impl Parser {
                         self.parse_statement()?
                     }
                     _ => {
-                        let e = self.with_allow_literals(false, |p| p.parse_expr(0))?;
+                        // A bare arm body allows struct literals (`=> S { .. }`,
+                        // Rust parity): the `{` can't open a block here (the block
+                        // form is the `OpenCurly` branch above), so it is a literal.
+                        let e = self.with_allow_literals(true, |p| p.parse_expr(0))?;
                         let s = self.span_from(stmt_span);
                         self.ast.stmt(s, StatementKind::Expression(e))
                     }

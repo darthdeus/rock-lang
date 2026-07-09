@@ -118,8 +118,13 @@ fn main() {
 
 #[test]
 fn no_action_when_not_in_a_match() {
-    // cursor on `let c = ...` (line 3) -- not inside a match
-    assert!(run(EMPTY, 3, 8).is_empty());
+    // cursor on `let c = ...` (line 3) -- not inside a match, so no match-arms
+    // action. (An inline-local action IS offered on the `let`; that's unrelated.)
+    let actions = run(EMPTY, 3, 8);
+    assert!(
+        !actions.iter().any(|a| a.title.contains("match arm")),
+        "no match-arms action outside a match: {actions:?}"
+    );
 }
 
 // Regression: the match is in VALUE position and the body mistypes (`()` vs the

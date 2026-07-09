@@ -57,6 +57,24 @@ pub fn apply(src: &str, action: &CodeAction) -> String {
     format!("{}{}{}", &src[..s], te.new_text, &src[e..])
 }
 
+/// Apply ALL of a code action's single-file edits (descending by start, so
+/// earlier offsets stay valid) and return the result. For multi-edit actions.
+pub fn apply_all(src: &str, action: &CodeAction) -> String {
+    let edit = action.edit.as_ref().expect("action carries an edit");
+    let changes = edit.changes.as_ref().expect("edit has changes");
+    let edits = changes.values().next().expect("one file's edits");
+    let mut spans: Vec<(usize, usize, &str)> = edits
+        .iter()
+        .map(|te| (pos_to_offset(src, te.range.start), pos_to_offset(src, te.range.end), te.new_text.as_str()))
+        .collect();
+    spans.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut s = src.to_string();
+    for (start, end, text) in spans {
+        s.replace_range(start..end, text);
+    }
+    s
+}
+
 /// Byte offset in `src` of an LSP `(line, character)` position.
 pub fn pos_to_offset(src: &str, pos: Position) -> usize {
     let mut off = 0usize;

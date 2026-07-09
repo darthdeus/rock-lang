@@ -779,12 +779,23 @@ impl RefSite {
 /// mis-spanned.
 pub type TextOf<'a, 't> = &'a dyn Fn(&str) -> Option<&'t str>;
 
+/// How a function/method reference walk scopes overloads. rock overloads share
+/// one name (`fn foo(a: A)` / `fn foo(b: B)` and D-form `fn A.foo` are all `foo`),
+/// but find-usages wants only the overload under the cursor while RENAME must
+/// rewrite the whole shared name -- so the two callers pass different scopes.
+#[derive(Clone, Copy, PartialEq)]
+pub enum FnRefScope {
+    ThisOverload,
+    AllOverloads,
+}
+
 pub fn references<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
     text_of: TextOf<'_, 't>,
+    fn_scope: FnRefScope,
 ) -> Vec<RefSite> {
     let plain = |spans: Vec<Span>| spans.into_iter().map(RefSite::plain).collect();
 
@@ -835,7 +846,12 @@ pub fn references<'t>(
     if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
         let name = ws.modules.get(fmid.index()).map(|m| m.functions[fid].name);
         if let Some(name) = name {
-            return plain(function_references_by_name(ws, name, text_of));
+            // Find-usages scopes to this overload; rename keeps the shared name.
+            let target = match fn_scope {
+                FnRefScope::ThisOverload => Some((fmid, fid)),
+                FnRefScope::AllOverloads => None,
+            };
+            return plain(function_references_by_name(ws, name, target, text_of));
         }
     }
 
@@ -2223,17 +2239,25 @@ fn function_target(
 /// Name-based (not a single `(mid, fid)`) so renaming touches **all overloads**
 /// sharing the name and **every** call that resolves to any of them -- rename
 /// of an overloaded or cross-file function is then complete.
+/// Reference spans for a function `name`. `target = None` walks EVERY overload's
+/// decl + all calls resolving to any overload of the name (rename: the shared
+/// name renames together). `target = Some((mid, fid))` restricts to that one
+/// overload's decl + the calls that resolve to exactly it (find-usages).
 fn function_references_by_name<'t>(
     ws: &Workspace,
     name: Ustr,
+    target: Option<(ModuleId, Idx<hir::Function>)>,
     text_of: TextOf<'_, 't>,
 ) -> Vec<Span> {
     let mut out = Vec::new();
 
-    // Every overload's declaration name.
+    // Each matching overload's declaration name (only the target, if scoped).
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
             for (fmid, fid) in fns.iter() {
+                if target.is_some_and(|t| t != (*fmid, *fid)) {
+                    continue;
+                }
                 if let Some(fm) = ws.modules.get(fmid.index()) {
                     out.push(fm.functions[*fid].name_span);
                 }
@@ -2241,7 +2265,7 @@ fn function_references_by_name<'t>(
         }
     }
 
-    // Every call resolving to a function with this name (any overload).
+    // Every call resolving to this name (any overload), or to the target overload.
     for (m, inf) in ws.inferences_iter() {
         let Some(module) = ws.modules.get(m.index()) else {
             continue;
@@ -2253,11 +2277,14 @@ fn function_references_by_name<'t>(
             };
 
             for (call_idx, (cmid, cfid)) in bi.resolved_overload_calls.iter() {
-                let resolves_to_name = ws
-                    .modules
-                    .get(cmid.index())
-                    .is_some_and(|cm| cm.functions[*cfid].name == name);
-                if resolves_to_name {
+                let matches = match target {
+                    Some(t) => (*cmid, *cfid) == t,
+                    None => ws
+                        .modules
+                        .get(cmid.index())
+                        .is_some_and(|cm| cm.functions[*cfid].name == name),
+                };
+                if matches {
                     match &body.expr_arena[*call_idx] {
                         hir::Expr::Call {
                             callee: hir::Callee::Unresolved { name_span, .. },
@@ -3749,6 +3776,84 @@ pub fn struct_fields_fill(
         return None;
     }
     Some((*body.expr_spans.get(e)?, missing))
+}
+
+/// What an "inline local" action needs: the `let` statement to delete, the
+/// initializer to splice, and every use site to replace. `parenthesize` is set
+/// when the initializer is not an atomic primary (a binop/cast/unary/lambda/
+/// control-flow expr), so splicing it into a use keeps the original precedence.
+pub struct InlineLocalSites {
+    pub var: Ustr,
+    pub let_span: Span,
+    pub init_span: Span,
+    pub uses: Vec<Span>,
+    pub parenthesize: bool,
+}
+
+/// When `offset` is on a `let x = <init>` binding or any of its uses, the data
+/// to inline it. None for params / `for` vars / tuple- and newtype-lets (only a
+/// plain single-binding `let` is inlineable) or when the cursor is elsewhere.
+pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<InlineLocalSites> {
+    let module = ws.modules.get(mid.index())?;
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let b = binding_at(body, offset)?;
+
+    // The binding must come from a plain `let x = init` (not a param, `for` var,
+    // tuple/newtype let); those have no single `Statement::Let` naming `b`.
+    let (let_idx, value) = body.statement_arena.iter().find_map(|(i, s)| match s {
+        hir::Statement::Let { name, value } if *name == b => Some((i, *value)),
+        _ => None,
+    })?;
+    let let_span = *body.statement_spans.get(let_idx)?;
+    let init_span = *body.expr_spans.get(value)?;
+    let parenthesize = init_needs_parens(&body.expr_arena[value]);
+
+    let mut uses = Vec::new();
+    for (e, expr) in body.expr_arena.iter() {
+        if matches!(expr, hir::Expr::Var(x) if *x == b) {
+            if let Some(s) = body.expr_spans.get(e) {
+                uses.push(*s);
+            }
+        }
+    }
+
+    Some(InlineLocalSites {
+        var: body.binding_arena[b].name,
+        let_span,
+        init_span,
+        uses,
+        parenthesize,
+    })
+}
+
+/// Whether an initializer expression must be wrapped in `(..)` when spliced into
+/// a use site. Atomic primaries (literals, vars, calls, indexing, field/member
+/// access, struct/enum literals, tuples, interpolated strings) bind tighter than
+/// any surrounding operator and need none; everything else (binops, casts,
+/// unary, ranges, lambdas, assignments, control-flow exprs) does.
+fn init_needs_parens(e: &hir::Expr) -> bool {
+    !matches!(
+        e,
+        hir::Expr::Unit
+            | hir::Expr::Null
+            | hir::Expr::Hole(_)
+            | hir::Expr::Int(_)
+            | hir::Expr::Float(_)
+            | hir::Expr::Bool(_)
+            | hir::Expr::String(_)
+            | hir::Expr::Var(_)
+            | hir::Expr::Tuple(_)
+            | hir::Expr::InterpolatedString(_)
+            | hir::Expr::Index { .. }
+            | hir::Expr::Call { .. }
+            | hir::Expr::StructLiteral { .. }
+            | hir::Expr::FieldAccess { .. }
+            | hir::Expr::SafeNav { .. }
+            | hir::Expr::SafeNavCall { .. }
+            | hir::Expr::TupleIndex { .. }
+            | hir::Expr::EnumVariant { .. }
+    )
 }
 
 /// What a "Generate function" action needs: the missing call's name, its
