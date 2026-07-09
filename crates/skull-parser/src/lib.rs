@@ -251,6 +251,20 @@ mod tests {
     }
 
     #[test]
+    fn struct_literal_recovers_a_missing_comma_between_fields() {
+        // A field value not followed by `,` but by another `field:` is a
+        // missing-comma typo, not the end of the literal -- recover (record the
+        // error, keep parsing) so the whole literal survives. This is what lets
+        // completion inside an unterminated value above the next field see the
+        // literal at all (mag blood.rock:111 `z: st.<cursor>`).
+        let s = body_sexp("fn f() { let p = P { a: 1 b: 2 } }");
+        assert!(
+            s.contains("(struct P") && s.contains("a 1") && s.contains("b 2"),
+            "both fields must survive a missing comma: {s}"
+        );
+    }
+
+    #[test]
     fn parse_static_local_inferred() {
         // `static count = 0` -> `(static <name> <ty-or-()> <value>)`, mirroring
         // the `(let ...)` shape. Name is a plain ident (no destructuring); the

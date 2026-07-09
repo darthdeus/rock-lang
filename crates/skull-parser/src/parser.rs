@@ -2843,6 +2843,17 @@ impl Parser {
             fields.push((names, value));
             self.skip_comments();
             if !self.eat(TokenKind::Comma) {
+                // Recover a missing `,`: if another field plausibly follows (an
+                // ident or a `..` spread, not `}`/EOF), record the error and keep
+                // parsing the literal instead of bailing. Lets completion inside
+                // an unterminated value above the next field (`z: st.<cursor>`,
+                // mag blood.rock:111) still see the whole literal.
+                if matches!(self.kind(), TokenKind::Ident(_) | TokenKind::DoubleDot) {
+                    self.ast
+                        .recovery_errors
+                        .push(self.err("expected `,` between struct fields"));
+                    continue;
+                }
                 break;
             }
         }
