@@ -1066,6 +1066,19 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     return { data = {}, len = 0, __ty = "Vec" }
 """
 
+// Bridges for inline(lua) callers that must work with the raw 1-indexed
+// backing array (handing it to a C/Lua API, or wrapping one built in raw
+// Lua). Keeps the `data` field name confined to stdlib.
+@nomangle inline(lua) fn __rock_vec_to_lua_array<T>(vec: [T]) -> any = """
+    local out = {}
+    for i = 1, vec.len do out[i] = vec.data[i] end
+    return out
+"""
+
+@nomangle inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
+    return { data = arr, len = len, __ty = "Vec" }
+"""
+
 // Hot enough that the call frame matters — mag's outline-overlay loop
 // calls this 3-6x per iteration over OUTLINE_MAX_ENTRIES. Body
 // translated from the Rock equivalent
