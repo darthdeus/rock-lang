@@ -627,3 +627,16 @@ fn macro_def_name_and_call_site_color_macro() {
         type_at(&toks, Position::new(4, 9))
     );
 }
+
+#[test]
+fn static_keyword_colors_as_keyword_not_variable() {
+    // `static` is a contextual keyword (lexed as an ident, recognized before the
+    // binding name). It must color as KEYWORD, not VARIABLE like the binding.
+    let src = "fn counter() -> int {\n    static n = 0\n    return n\n}\n";
+    let toks = decode(src);
+    assert_eq!(
+        type_at(&toks, Position::new(1, 4)),
+        Some(SemanticTokenType::KEYWORD),
+        "the `static` keyword must color as keyword: {toks:?}"
+    );
+}

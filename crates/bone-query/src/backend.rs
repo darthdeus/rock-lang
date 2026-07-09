@@ -2758,6 +2758,16 @@ fn classify_token(
         // Contextual `co` keyword — only highlighted when it precedes `fn`
         // (`co fn ...`); a bare `co` identifier falls through to the Ident arm.
         T::Ident(n) if n.as_str() == "co" && matches!(next_kind, Some(T::Fn)) => (TT_KEYWORD, 0),
+        // Contextual `static` keyword — lexed as an ident, recognized before the
+        // binding name (`static n = ..`). Only a `static <ident>` in non-member
+        // position is the keyword; a value named `static` (`static + 1`) is not.
+        T::Ident(n)
+            if !is_member
+                && n.as_str() == "static"
+                && matches!(next_kind, Some(T::Ident(_))) =>
+        {
+            (TT_KEYWORD, 0)
+        }
         // A macro invocation (`get_speed()`): the call-site ident is a bare token
         // whose name resolves to a MACRO in the name map. Macro expansion retags
         // the expanded template body onto the whole invocation span, so the HIR
