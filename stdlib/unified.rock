@@ -16,7 +16,7 @@ struct __DecoTarget {
 }
 
 struct ArenaEntry<T> {
-    data: T,
+    _data: T,
     index: int,
     generation: int,
     is_occupied: bool,
@@ -680,13 +680,13 @@ deco init on_reload {
 // (e.g. `let r = 0..10; for x in r {}`). In the in-place case
 // `for x in 0..10 {}`, loops.rs strips the `__range(a,b)` marker and emits a
 // native numeric for — this function body is unreachable there. Returns a
-// Vec-shaped `{data, len}` so the result iterates and indexes like a Vec.
+// Vec-shaped `{_data, len}` so the result iterates and indexes like a Vec.
 @nomangle inline(lua) fn __range(start_val: int, end_val: int) -> any = """
     local t = {}
     for i = start_val, end_val - 1 do
         table.insert(t, i)
     end
-    return { data = t, len = end_val - start_val }
+    return { _data = t, len = end_val - start_val }
 """
 
 // Comparison operators
@@ -1063,24 +1063,37 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
 // UFCS). See docs/skull-vec-representation-divergence.md.
 @nomangle inline(lua) fn vec_new<T>() -> [T] = """
-    return { data = {}, len = 0, __ty = "Vec" }
+    return { _data = {}, len = 0, __ty = "Vec" }
+"""
+
+// Bridges for inline(lua) callers that must work with the raw 1-indexed
+// backing array (handing it to a C/Lua API, or wrapping one built in raw
+// Lua). Keeps the `data` field name confined to stdlib.
+@nomangle inline(lua) fn __rock_vec_to_lua_array<T>(vec: [T]) -> any = """
+    local out = {}
+    for i = 1, vec.len do out[i] = vec._data[i] end
+    return out
+"""
+
+@nomangle inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
+    return { _data = arr, len = len, __ty = "Vec" }
 """
 
 // Hot enough that the call frame matters — mag's outline-overlay loop
 // calls this 3-6x per iteration over OUTLINE_MAX_ENTRIES. Body
 // translated from the Rock equivalent
-// `{ vec.len = vec.len + 1; table_set(vec.data, vec.len, item) }`.
+// `{ vec.len = vec.len + 1; table_set(vec._data, vec.len, item) }`.
 // See docs/jit-fnew-codegen-investigation.md §"Fourth pass".
 @nomangle @inline inline(lua) fn vec_push<T>(vec: [T], item: T) = """
     vec.len = vec.len + 1
-    vec.data[vec.len] = item
+    vec._data[vec.len] = item
 """
 
 @nomangle @inline fn vec_get<T>(vec: [T], index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
-    return cast(table_get(vec.data, index + 1))
+    return cast(table_get(vec._data, index + 1))
 }
 
 // Safe accessor matching the unified `.get(i) -> T?` surface across all
@@ -1091,7 +1104,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 
 @nomangle fn vec_set<T>(vec: [T], index: int, value: T) {
     if index >= 0 && index < vec.len {
-        table_set(vec.data, index + 1, value)
+        table_set(vec._data, index + 1, value)
     }
 }
 
@@ -1114,8 +1127,8 @@ fn pop<T>(vec: [T]) -> T? {
     if vec.len == 0 {
         return null
     }
-    let value: T? = cast(table_get(vec.data, vec.len))
-    table_unset(vec.data, vec.len)
+    let value: T? = cast(table_get(vec._data, vec.len))
+    table_unset(vec._data, vec.len)
     vec.len = vec.len - 1
     return value
 }
@@ -1126,7 +1139,7 @@ fn is_empty<T>(vec: [T]) -> bool {
 
 fn clear<T>(vec: [T]) {
     for i in 0..vec.len {
-        table_unset(vec.data, i + 1)
+        table_unset(vec._data, i + 1)
     }
     vec.len = 0
 }
@@ -1135,11 +1148,11 @@ fn remove_at<T>(vec: [T], index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
-    let value: T? = cast(table_get(vec.data, index + 1))
+    let value: T? = cast(table_get(vec._data, index + 1))
     for i in index..(vec.len - 1) {
-        table_set(vec.data, i + 1, table_get(vec.data, i + 2))
+        table_set(vec._data, i + 1, table_get(vec._data, i + 2))
     }
-    table_unset(vec.data, vec.len)
+    table_unset(vec._data, vec.len)
     vec.len = vec.len - 1
     return value
 }
@@ -1148,11 +1161,11 @@ fn swap_remove<T>(vec: [T], index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
-    let value: T? = cast(table_get(vec.data, index + 1))
+    let value: T? = cast(table_get(vec._data, index + 1))
     if index + 1 < vec.len {
-        table_set(vec.data, index + 1, table_get(vec.data, vec.len))
+        table_set(vec._data, index + 1, table_get(vec._data, vec.len))
     }
-    table_unset(vec.data, vec.len)
+    table_unset(vec._data, vec.len)
     vec.len = vec.len - 1
     return value
 }
@@ -1201,7 +1214,7 @@ inline(lua) fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] = """
     local ptr = collection.ptr
     for i = 0, n - 1 do
         out.len = out.len + 1
-        out.data[out.len] = { i, ptr[i] }
+        out._data[out.len] = { i, ptr[i] }
     end
     return out
 """
@@ -1213,27 +1226,27 @@ inline(lua) fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] = """
 // phantom variant.
 inline(lua) fn enumerate(collection: NativeBufferU8) -> [(int, int)] = """
     local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
     return out
 """
 inline(lua) fn enumerate(collection: NativeBufferI8) -> [(int, int)] = """
     local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
     return out
 """
 inline(lua) fn enumerate(collection: NativeBufferU16) -> [(int, int)] = """
     local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
     return out
 """
 inline(lua) fn enumerate(collection: NativeBufferI16) -> [(int, int)] = """
     local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
     return out
 """
 inline(lua) fn enumerate(collection: NativeBufferU32) -> [(int, int)] = """
     local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out.data[out.len] = { i, ptr[i] } end
+    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
     return out
 """
 
@@ -1573,10 +1586,10 @@ global PI: float = 3.141592653589793
     local type_name = __rock_get_type(t)
 
     -- Vec type
-    if type_name == "Vec" and t.data and t.len then
+    if type_name == "Vec" and t._data and t.len then
         local parts = {}
         for i = 1, t.len do
-            parts[i] = __rock_inspect_value(t.data[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
+            parts[i] = __rock_inspect_value(t._data[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
         end
         if visited then visited[t] = nil end
         if #parts == 0 then return "Vec { }" end
@@ -2012,7 +2025,7 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
 // `data` (1-indexed) plus an explicit `len` so vec_* functions don't
 // rely on `#t` which is unreliable for tables with holes.
 struct Vec<T> {
-    data: any,
+    _data: any,
     len: int,
 }
 
@@ -2195,22 +2208,22 @@ fn fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
 }
 
 fn vec_new_with_capacity<T>(capacity: int) -> [T] {
-    return Vec { data: table_new_with_size(capacity), len: 0 }
+    return Vec { _data: table_new_with_size(capacity), len: 0 }
 }
 
-fn capacity<T>(vec: [T]) -> int { return table_len(vec.data) }
+fn capacity<T>(vec: [T]) -> int { return table_len(vec._data) }
 
 fn insert_at<T>(vec: [T], index: int, value: T) {
     if index < 0 || index > vec.len { error("Error: Index out of bounds") }
 
     // Convert 0-based to 1-based for Lua
     let lua_index = index + 1
-    table_insert_at(vec.data, lua_index, value)
+    table_insert_at(vec._data, lua_index, value)
     vec.len += 1
 }
 
 fn clone<T>(vec: [T]) -> [T] {
-    return Vec { data: table_copy_array(vec.data), len: vec.len }
+    return Vec { _data: table_copy_array(vec._data), len: vec.len }
 }
 
 fn find<T>(vec: [T], predicate: fn(T) -> bool) -> T? {
@@ -2235,7 +2248,7 @@ fn all<T>(vec: [T], predicate: fn(T) -> bool) -> bool {
 }
 
 inline(lua) fn sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
-    table.sort(vec.data, function(a, b)
+    table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
 """
@@ -2379,7 +2392,7 @@ fn equals<T>(a: Entity<T>, b: Entity<T>) -> bool {
 
 fn arena_entry_new<T>(data: T, index: int, generation: int) -> ArenaEntry<T> {
     return ArenaEntry {
-        data: data,
+        _data: data,
         index: index,
         generation: generation,
         is_occupied: true,
@@ -2433,7 +2446,7 @@ fn get<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
         if !occupied {
             return null
         } else {
-            if e.generation != entity._generation { return null } else { return e.data }
+            if e.generation != entity._generation { return null } else { return e._data }
         }
     }
 }
@@ -2463,7 +2476,7 @@ fn remove<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
             e.is_occupied = false
             vec_push(arena.free_indices, index)
             arena.occupied_count = arena.occupied_count - 1
-            return e.data
+            return e._data
         } else {
             return null
         }
@@ -2497,7 +2510,7 @@ fn random<T>(arena: Arena<T>) -> (Entity<T>, T)? {
             if current_count == random_index {
                 let unwrapped_entry = entry.unwrap()
                 let entity = Entity { _arena: arena, _index: unwrapped_entry.index, _generation: unwrapped_entry.generation }
-                return (entity, unwrapped_entry.data)
+                return (entity, unwrapped_entry._data)
             }
             current_count += 1
         }
@@ -2537,7 +2550,7 @@ fn next<T>(it: ArenaIter<T>) -> (bool, Entity<T>, T) {
     }
     let e = slot.unwrap()
     it.i = i + 1
-    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e.data)
+    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e._data)
 }
 
 // Arena functional methods
@@ -2596,7 +2609,7 @@ inline(lua) fn split(s: string, delimiter: string) -> [string] = """
     local pattern = delimiter:gsub("([^%w])", "%%%1")  -- escape special characters
     for match in (s..delimiter):gmatch("(.-)"..pattern) do
         result.len = result.len + 1
-        result.data[result.len] = match
+        result._data[result.len] = match
     end
     return result
 """
@@ -2757,7 +2770,7 @@ inline(lua) fn gsub(s: string, pattern: string, replacement: string) -> string =
 // namespace off the first parameter's type, so `strings.join(", ")`
 // should dispatch through `vec_*` to match what LSP completion offers.
 inline(lua) fn join(parts: [string], separator: string) -> string = """
-    return table.concat(parts.data, separator, 1, parts.len)
+    return table.concat(parts._data, separator, 1, parts.len)
 """
 
 // Split a string into lines

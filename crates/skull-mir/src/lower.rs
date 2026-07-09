@@ -4480,7 +4480,7 @@ impl Builder<'_> {
                 (Ustr::from("_generation"), e_gen),
             ],
         });
-        let data = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("data") });
+        let data = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("_data") });
         match &pat {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
                 self.bind_for_pattern(&subs[0], entity);

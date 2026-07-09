@@ -1,11 +1,11 @@
-//! `[T]` is syntactic sugar for `struct Vec<T> { data: any, len: int }` -- they
+//! `[T]` is syntactic sugar for `struct Vec<T> { _data: any, len: int }` -- they
 //! are the same type. bone represents `[T]` as `App{Array}`, so field access on
-//! a `[T]` must route through the Vec struct: `.len` -> int, `.data` -> any,
+//! a `[T]` must route through the Vec struct: `.len` -> int, `._data` -> any,
 //! with the Vec generic T bound to the element type. (Needs a `Vec` struct in
 //! scope; the stdlib provides it -- fixtures declare it inline.)
 
 //- vec_len_field
-struct Vec<T> { data: any, len: int }
+struct Vec<T> { _data: any, len: int }
 fn f(v: [int]) -> int {
     let n = v.len
       //^ int
@@ -13,15 +13,15 @@ fn f(v: [int]) -> int {
 }
 
 //- vec_data_field
-struct Vec<T> { data: any, len: int }
+struct Vec<T> { _data: any, len: int }
 fn f(v: [int]) -> any {
-    let d = v.data
+    let d = v._data
       //^ any
     d
 }
 
 //- vec_unknown_field_fail @fail
-struct Vec<T> { data: any, len: int }
+struct Vec<T> { _data: any, len: int }
 fn f(v: [int]) -> int {
     v.nope
 }

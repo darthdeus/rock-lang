@@ -2245,7 +2245,7 @@ mod overlay_runtime_tests {
              }}\n\
              @nomangle\n\
              inline(lua) fn __rock_rebind_system(name: string, f: any) = \"\"\"\n\
-                for i = 1, UPDATE_SYSTEMS.len do if UPDATE_SYSTEMS.data[i].name == name then UPDATE_SYSTEMS.data[i].func = f end end\n\
+                for i = 1, UPDATE_SYSTEMS.len do if UPDATE_SYSTEMS._data[i].name == name then UPDATE_SYSTEMS._data[i].func = f end end\n\
                 return nil\n\
              \"\"\"\n\
              global TICK_OUT: int = 0\n\
