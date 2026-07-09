@@ -16,7 +16,7 @@ struct __DecoTarget {
 }
 
 struct ArenaEntry<T> {
-    data: T,
+    _data: T,
     index: int,
     generation: int,
     is_occupied: bool,
@@ -2392,7 +2392,7 @@ fn equals<T>(a: Entity<T>, b: Entity<T>) -> bool {
 
 fn arena_entry_new<T>(data: T, index: int, generation: int) -> ArenaEntry<T> {
     return ArenaEntry {
-        data: data,
+        _data: data,
         index: index,
         generation: generation,
         is_occupied: true,
@@ -2446,7 +2446,7 @@ fn get<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
         if !occupied {
             return null
         } else {
-            if e.generation != entity._generation { return null } else { return e.data }
+            if e.generation != entity._generation { return null } else { return e._data }
         }
     }
 }
@@ -2476,7 +2476,7 @@ fn remove<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
             e.is_occupied = false
             vec_push(arena.free_indices, index)
             arena.occupied_count = arena.occupied_count - 1
-            return e.data
+            return e._data
         } else {
             return null
         }
@@ -2510,7 +2510,7 @@ fn random<T>(arena: Arena<T>) -> (Entity<T>, T)? {
             if current_count == random_index {
                 let unwrapped_entry = entry.unwrap()
                 let entity = Entity { _arena: arena, _index: unwrapped_entry.index, _generation: unwrapped_entry.generation }
-                return (entity, unwrapped_entry.data)
+                return (entity, unwrapped_entry._data)
             }
             current_count += 1
         }
@@ -2550,7 +2550,7 @@ fn next<T>(it: ArenaIter<T>) -> (bool, Entity<T>, T) {
     }
     let e = slot.unwrap()
     it.i = i + 1
-    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e.data)
+    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e._data)
 }
 
 // Arena functional methods
