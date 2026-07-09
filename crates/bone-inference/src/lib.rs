@@ -4411,26 +4411,60 @@ fn check_expr(
 
     let aty = infer_expr(c, gamma, e)?;
 
-    // `/` is float division; its `float` result cannot fill an int-shaped
-    // hole. Point at `./` (integer floor division) rather than the bare
-    // unify error (docs/float-division-plan.md).
-    let exp_r = resolve(gamma, expected, span);
-    let aty_r = resolve(gamma, aty, span);
-    if matches!(gamma.get(exp_r), TypeExpr::Builtin(BuiltinTy::Int))
-        && matches!(gamma.get(aty_r), TypeExpr::Builtin(BuiltinTy::Float))
-        && matches!(
-            c.body.expr_arena[e],
-            Expr::Call { callee: Callee::Unresolved { name, .. }, .. } if name == "__op_div"
-        )
-    {
-        return Err(CompilerError::new_with_label(
-            span,
-            "`/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division"
-                .to_string(),
-        ));
+    // `/` is float division; its `float` result cannot fill an int-shaped hole.
+    // When coercion actually rejects a `float` against an `int` (NOT a
+    // re-bindable numeric var that coerce would widen, e.g. `min(1, x)`), and
+    // the expression is (or contains, through arithmetic operators / unary
+    // minus) a `/`, replace the bare unify error with a pointer at that `/`
+    // suggesting `./` (integer floor division) (docs/float-division-plan.md).
+    if let Err(coerce_err) = coerce(gamma, aty, expected, span) {
+        let exp_r = resolve(gamma, expected, span);
+        let aty_r = resolve(gamma, aty, span);
+        if matches!(gamma.get(exp_r), TypeExpr::Builtin(BuiltinTy::Int))
+            && matches!(gamma.get(aty_r), TypeExpr::Builtin(BuiltinTy::Float))
+        {
+            if let Some(div_span) = find_float_div_span(c, e) {
+                return Err(CompilerError::new_with_label(
+                    div_span,
+                    "`/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division"
+                        .to_string(),
+                ));
+            }
+        }
+        return Err(coerce_err);
     }
 
-    coerce(gamma, aty, expected, span)
+    Ok(())
+}
+
+// Find the `/` (float division) responsible for a `float` value flowing into an
+// `int` hole. Float-ness only propagates into that hole through arithmetic
+// operators (`__op_*`) and unary minus, so the walk descends only those; a
+// `float` from anywhere else (a call's return type, a field) is not a misplaced
+// `/` and yields None. Returns the offending `/`'s span for the diagnostic.
+fn find_float_div_span(c: BodyCtx, e: Idx<Expr>) -> Option<Span> {
+    match &c.body.expr_arena[e] {
+        Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            args,
+        } => {
+            let name = *name;
+            let args = *args;
+            if name == "__op_div" {
+                return Some(c.body.expr_spans[e]);
+            }
+            if name.as_str().starts_with("__op_") {
+                for a in args {
+                    if let Some(s) = find_float_div_span(c, a) {
+                        return Some(s);
+                    }
+                }
+            }
+            None
+        }
+        Expr::UnaryMinus(x) => find_float_div_span(c, *x),
+        _ => None,
+    }
 }
 
 fn coroutine_yrn(

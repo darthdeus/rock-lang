@@ -64,16 +64,86 @@ fn check_add_mismatch_returns_error() {
     assert!(is_err);
 }
 
+// The per-body error messages recorded for `fn main` in a self-contained
+// source (semantic_pass returns Ok; type errors live per-body).
+fn main_body_error_messages(src: &str) -> Vec<String> {
+    let ws = check(src).expect("semantic_pass");
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let (main_idx, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "main")
+        .expect("fn main exists");
+    let inf = ws.inference(mid).expect("user module inferred");
+    inf.errors
+        .get(&BodyOwner::Function(main_idx))
+        .map(|errs| errs.iter().map(|e| e.message.clone()).collect())
+        .unwrap_or_default()
+}
+
 // `/` is float division (docs/float-division-plan.md); its `float` result in
 // an int-shaped hole is rejected with a hint to use `./`. Self-contained (the
-// float `/` operator is declared inline) so it needs no stdlib. The error is
-// recorded per-body (semantic_pass returns Ok), so read `main`'s errors.
+// float operators are declared inline) so it needs no stdlib.
 #[test]
 fn float_div_into_int_hole_hints_idiv() {
     let src = r#"
 @pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
 fn foo(x: int) {}
 fn main() { foo(3 / 4) }
+"#;
+    let msgs = main_body_error_messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("./")),
+        "expected a `./` hint, got: {msgs:?}"
+    );
+}
+
+// The `./` hint also fires when the `/` is buried in the mismatched expression,
+// reached through arithmetic operators (`__op_mul`) rather than being the
+// top-level node (docs/float-division-plan.md Phase 4).
+#[test]
+fn float_div_deep_in_mul_subtree_hints_idiv() {
+    let src = r#"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
+fn main() { let x: int = 2.0 * (3 / 4) }
+"#;
+    let msgs = main_body_error_messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("./")),
+        "expected a `./` hint for a `/` nested under `*`, got: {msgs:?}"
+    );
+}
+
+// ...and through unary minus (`-(a / b)`), the other float-propagating shape.
+#[test]
+fn float_div_under_unary_minus_hints_idiv() {
+    let src = r#"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+fn main() { let x: int = -(3 / 4) }
+"#;
+    let msgs = main_body_error_messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("./")),
+        "expected a `./` hint for a `/` under unary minus, got: {msgs:?}"
+    );
+}
+
+// The hint's label points at the offending `/` subexpression, not the whole
+// mismatched expression, so the caret lands on `(3 / 4)` rather than the outer
+// `2.0 * (3 / 4)` (docs/float-division-plan.md Phase 4).
+#[test]
+fn float_div_hint_span_points_at_the_division() {
+    let src = r#"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
+fn main() { let x: int = 2.0 * (3 / 4) }
 "#;
     let ws = check(src).expect("semantic_pass");
     let mid = ws
@@ -89,15 +159,35 @@ fn main() { foo(3 / 4) }
         .find(|(_, f)| f.name.as_str() == "main")
         .expect("fn main exists");
     let inf = ws.inference(mid).expect("user module inferred");
-    let errs = inf
+    let err = inf
         .errors
         .get(&BodyOwner::Function(main_idx))
-        .expect("main has a recorded error for `foo(3 / 4)`");
-    assert!(
-        errs.iter().any(|e| e.message.contains("./")),
-        "expected a `./` hint, got: {:?}",
-        errs.iter().map(|e| e.message.as_str()).collect::<Vec<_>>()
-    );
+        .and_then(|errs| errs.iter().find(|e| e.message.contains("./")))
+        .expect("a `./` hint error");
+    let (lo, hi) = err
+        .labels
+        .first()
+        .expect("hint carries a label span")
+        .span
+        .offset_range;
+    assert_eq!(&src[lo..hi], "(3 / 4)", "label should cover just the division");
+}
+
+// A `/` flowing into a re-bindable numeric var (`min(1, ...)`, where `1`
+// provisionally fixes `T=int` and the float arg widens `T` back to float) is
+// NOT a mismatch -- coerce widens it. The hint must defer to that: no error at
+// all. Regression for mag/particles.rock `min(1, (a/b)*1.6)` (a first cut fired
+// the hint before coerce got to widen). docs/float-division-plan.md Phase 4.
+#[test]
+fn float_div_into_widening_numeric_var_is_not_an_error() {
+    let src = r#"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
+fn min<T>(a: T, b: T) -> T { return a }
+fn main() { let env = min(1, (3.0 / 4.0) * 1.6) }
+"#;
+    let msgs = main_body_error_messages(src);
+    assert!(msgs.is_empty(), "expected no error (coerce widens), got: {msgs:?}");
 }
 
 // Hand-builds tuple nodes in a module arena (lowering doesn't emit them yet)
