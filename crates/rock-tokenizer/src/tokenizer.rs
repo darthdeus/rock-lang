@@ -753,6 +753,7 @@ impl<'a> Tokenizer<'a> {
                 let numeric = self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) || (self.peek_n(1) == Some('.') && self.peek_n(2).is_some_and(|c| c.is_ascii_digit()));
                 numeric && self.minus_can_start_number()
             },
+            Some('.') if self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) => { self.minus_can_start_number() },
             _ => false,
         }
     }
@@ -950,11 +951,12 @@ impl<'a> Tokenizer<'a> {
             None => return Ok(None),
             Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => self.read_keyword_or_ident()?,
 
-            // `lookahead_number` only ever returns true for a digit or `-`
-            // (`.` and everything else are false), so gate the call to those
-            // two chars instead of paying it on every operator/punctuation.
+            // `lookahead_number` only ever returns true for a digit, `-`, or a
+            // prefix-position `.` (leading-dot float), so gate the call to those
+            // chars instead of paying it on every operator/punctuation.
             Some(ch) if ch.is_ascii_digit() => self.read_number()?,
             Some('-') if self.lookahead_number() => self.read_number()?,
+            Some('.') if self.lookahead_number() => self.read_number()?,
 
             Some('\r') => {
                 self.advance();
@@ -1383,6 +1385,67 @@ mod test {
         assert_eq!(
             Tokenizer::from_code("t.rock", "2.5").tokenize_kinds().unwrap(),
             vec![TokenKind::Float(OrderedFloat(2.5))]
+        );
+    }
+
+    #[test]
+    fn test_leading_dot_is_a_float() {
+        // A bare `.5` in expression-start position is a float literal (`0.5`).
+        assert_eq!(
+            Tokenizer::from_code("t.rock", ".35").tokenize_kinds().unwrap(),
+            vec![TokenKind::Float(OrderedFloat(0.35))]
+        );
+        // Every prefix position where a unary minus is allowed also admits a
+        // leading-dot float.
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "restitution: .35").tokenize_kinds().unwrap(),
+            vec![
+                TokenKind::Ident("restitution".into()),
+                TokenKind::Colon,
+                TokenKind::Float(OrderedFloat(0.35)),
+            ]
+        );
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "[.5, .25]").tokenize_kinds().unwrap(),
+            vec![
+                TokenKind::OpenSquare,
+                TokenKind::Float(OrderedFloat(0.5)),
+                TokenKind::Comma,
+                TokenKind::Float(OrderedFloat(0.25)),
+                TokenKind::CloseSquare,
+            ]
+        );
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "2 + .5").tokenize_kinds().unwrap(),
+            vec![
+                TokenKind::Int(2, "2".into()),
+                TokenKind::Plus,
+                TokenKind::Float(OrderedFloat(0.5)),
+            ]
+        );
+        // `-.5` stays a negative float (unchanged).
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "-.5").tokenize_kinds().unwrap(),
+            vec![TokenKind::Float(OrderedFloat(-0.5))]
+        );
+        // Tuple/field index `.0` after a value stays Dot + Int, NOT a float.
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "w.0").tokenize_kinds().unwrap(),
+            vec![
+                TokenKind::Ident("w".into()),
+                TokenKind::Dot,
+                TokenKind::Int(0, "0".into()),
+            ]
+        );
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "w.0.0").tokenize_kinds().unwrap(),
+            vec![
+                TokenKind::Ident("w".into()),
+                TokenKind::Dot,
+                TokenKind::Int(0, "0".into()),
+                TokenKind::Dot,
+                TokenKind::Int(0, "0".into()),
+            ]
         );
     }
 
