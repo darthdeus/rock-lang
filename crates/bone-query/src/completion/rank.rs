@@ -13,7 +13,7 @@ use crate::rank_key::RankKey;
 pub(crate) const FZ_MISS: i32 = -1_000_000;
 pub(crate) const FZ_BASE: i32 = 1;
 pub(crate) const FZ_BOUNDARY: i32 = 10; // matched char at a word start
-pub(crate) const FZ_CONSEC: i32 = 8; // matched char right after the previous match (run)
+pub(crate) const FZ_CONSEC: i32 = 10; // matched char right after the previous match (run); == FZ_BOUNDARY so a contiguous run is never worth less than a one-char boundary hop
 pub(crate) const FZ_FIRST: i32 = 10; // extra for matching at absolute position 0
 
 

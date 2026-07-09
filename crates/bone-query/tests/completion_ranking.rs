@@ -111,6 +111,27 @@ fn contiguous_prefix_run_beats_scattered_all_boundary_match() {
     assert!(loot < later, "LOOT_PANEL (contiguous prefix run) must outrank the scattered match: {labels:?}");
 }
 
+#[test]
+fn contiguous_run_beats_interior_word_boundary_hop() {
+    // `pixelreadnew` matches BOTH `pixel_readback_new` and the longer
+    // `pixel_readback_depth_new`. The only difference is the query `d` (end of
+    // "read"): it can continue the run inside `rea<d>back` or jump to the `d`
+    // that STARTS `<d>epth`. A boundary hit worth more than a contiguous
+    // continuation made the DP break the run for that stray boundary, so the
+    // longer name -- which the query never mentions `depth` in -- scored +2 and
+    // ranked first. A run must never be worth LESS than a one-char boundary hop.
+    // (mag: `HOVERED_EID_SLOT = pixelreadnew` surfaced `_depth_new` on top.)
+    let labels = labels_at(
+        "fn pixel_readback_new() -> int { 0 }\n\
+         fn pixel_readback_depth_new() -> int { 0 }\n\
+         fn r() {\n  let x = pixelreadnew$0\n}\n",
+    );
+    let plain = rank_of(&labels, "pixel_readback_new");
+    let depth = rank_of(&labels, "pixel_readback_depth_new");
+    assert!(plain.is_some(), "pixel_readback_new must appear for `pixelreadnew`: {labels:?}");
+    assert!(plain < depth, "pixel_readback_new (shorter, no interior-word hop) must outrank pixel_readback_depth_new: {labels:?}");
+}
+
 // -- Type-directed arg completion: UFCS receiver is param 0, so the arg index
 //    into the callee's params is comma_count + 1. ----------------------------
 
