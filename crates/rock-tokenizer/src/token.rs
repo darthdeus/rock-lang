@@ -101,6 +101,7 @@ pub enum TokenKind {
 
     Mul,
     Div,
+    IntDiv,
     Mod,
 
     BitAnd,
@@ -155,6 +156,7 @@ impl TokenKind {
                 | MinusMinus
                 | Mul
                 | Div
+                | IntDiv
                 | Mod
                 | And
                 | Or
@@ -253,7 +255,7 @@ impl TokenKind {
             BitOr => left(29),
 
             Plus | Minus => left(31),
-            Mul | Div => left(35),
+            Mul | Div | IntDiv => left(35),
 
             Dot | Colon => left(51),
 
@@ -278,6 +280,7 @@ impl TokenKind {
             TokenKind::Minus => "__op_sub",
             TokenKind::Mul => "__op_mul",
             TokenKind::Div => "__op_div",
+            TokenKind::IntDiv => "__op_idiv",
             TokenKind::Mod => "__op_mod",
             _ => return None,
         })
@@ -439,6 +442,7 @@ impl TokenKind {
             TokenKind::MinusMinus => "--",
             TokenKind::Mul => "*",
             TokenKind::Div => "/",
+            TokenKind::IntDiv => "./",
             TokenKind::Mod => "%",
             TokenKind::BitAnd => "&",
             TokenKind::BitOr => "|",

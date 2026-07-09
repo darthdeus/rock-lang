@@ -759,10 +759,11 @@ fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) 
         "__op_sub" => Inst::IntSub(lv, rv),
         "__op_mul" if float => Inst::FloatMul(lv, rv),
         "__op_mul" => Inst::IntMul(lv, rv),
-        // int/int `/` is floor-division; the typed `IntDiv` carries that —
-        // codegen renders it `math.floor(a / b)`, `FloatDiv` renders `a / b`.
-        "__op_div" if float => Inst::FloatDiv(lv, rv),
-        "__op_div" => Inst::IntDiv(lv, rv),
+        // `/` is always float division (Lua `/` promotes int operands);
+        // integer floor division is the separate `./` -> `__op_idiv`, which
+        // codegen renders `math.floor(a / b)`.
+        "__op_div" => Inst::FloatDiv(lv, rv),
+        "__op_idiv" => Inst::IntDiv(lv, rv),
         "__op_mod" if float => Inst::FloatMod(lv, rv),
         "__op_mod" => Inst::IntMod(lv, rv),
         _ => return Err(gap(format!("native arith op {op}"))),
@@ -5989,6 +5990,7 @@ impl Builder<'_> {
     fn arith_ty(&self, e: Idx<Expr>) -> Option<ArithTy> {
         self.arith_ty_of(self.expr_ty(e)?)
     }
+
 
     /// The scalar class of a resolved type, seeing through a TRANSPARENT newtype
     /// to its wrapped type (a `newtype Score(int)` is the raw int at runtime, so

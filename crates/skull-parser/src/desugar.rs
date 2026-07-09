@@ -47,7 +47,10 @@ fn synth_newtype_operators(ast: &mut Ast) {
         ("__op_add", "a + b", true),
         ("__op_sub", "a - b", true),
         ("__op_mul", "a * b", true),
-        ("__op_div", "math.floor(a / b)", true),
+        // int newtypes get `./` (floor) and NOT `/` (consistent with core
+        // ints post-float-div-migration; a newtype wanting float `/` unwraps
+        // first). Float newtypes keep `/` in float_specs below.
+        ("__op_idiv", "math.floor(a / b)", true),
         ("__op_mod", "a % b", true),
         ("__op_lt", "a < b", false),
         ("__op_le", "a <= b", false),

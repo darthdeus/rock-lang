@@ -64,6 +64,42 @@ fn check_add_mismatch_returns_error() {
     assert!(is_err);
 }
 
+// `/` is float division (docs/float-division-plan.md); its `float` result in
+// an int-shaped hole is rejected with a hint to use `./`. Self-contained (the
+// float `/` operator is declared inline) so it needs no stdlib. The error is
+// recorded per-body (semantic_pass returns Ok), so read `main`'s errors.
+#[test]
+fn float_div_into_int_hole_hints_idiv() {
+    let src = r#"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+fn foo(x: int) {}
+fn main() { foo(3 / 4) }
+"#;
+    let ws = check(src).expect("semantic_pass");
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let (main_idx, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "main")
+        .expect("fn main exists");
+    let inf = ws.inference(mid).expect("user module inferred");
+    let errs = inf
+        .errors
+        .get(&BodyOwner::Function(main_idx))
+        .expect("main has a recorded error for `foo(3 / 4)`");
+    assert!(
+        errs.iter().any(|e| e.message.contains("./")),
+        "expected a `./` hint, got: {:?}",
+        errs.iter().map(|e| e.message.as_str()).collect::<Vec<_>>()
+    );
+}
+
 // Hand-builds tuple nodes in a module arena (lowering doesn't emit them yet)
 // to pin `render`'s Tuple arm. Elements live in the tuple's own arena, so
 // `render` reattaches each child to the tuple's module id.

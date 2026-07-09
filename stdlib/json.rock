@@ -272,9 +272,9 @@ fn encode_string(s: string) -> string {
 
 fn hex4(n: int) -> string {
     let digits = "0123456789abcdef"
-    let d0 = char_at(digits, (n / 4096) % 16)
-    let d1 = char_at(digits, (n / 256) % 16)
-    let d2 = char_at(digits, (n / 16) % 16)
+    let d0 = char_at(digits, (n ./ 4096) % 16)
+    let d1 = char_at(digits, (n ./ 256) % 16)
+    let d2 = char_at(digits, (n ./ 16) % 16)
     let d3 = char_at(digits, n % 16)
     return "{d0}{d1}{d2}{d3}"
 }
@@ -453,12 +453,12 @@ fn codepoint_to_utf8(cp: int) -> string {
         return string_char(cp)
     }
     if cp < 0x800 {
-        let b1 = 0xC0 + (cp / 64)
+        let b1 = 0xC0 + (cp ./ 64)
         let b2 = 0x80 + (cp % 64)
         return "{string_char(b1)}{string_char(b2)}"
     }
-    let b1 = 0xE0 + (cp / 4096)
-    let b2 = 0x80 + ((cp / 64) % 64)
+    let b1 = 0xE0 + (cp ./ 4096)
+    let b2 = 0x80 + ((cp ./ 64) % 64)
     let b3 = 0x80 + (cp % 64)
     return "{string_char(b1)}{string_char(b2)}{string_char(b3)}"
 }
