@@ -575,6 +575,22 @@ pub struct SkullEmitCache {
     /// guard preserves the live value, and their value edits stay interface-tier).
     /// Reset to empty by `emit_full`. `docs/skull-const-hot-reload-plan.md`.
     changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
+    /// Baseline `static` cell keys (`type@init_hash`) from the last full build,
+    /// keyed by cell name. `assemble_overlay` compares each changed fn's current
+    /// cell key against this and emits an UNGUARDED reset (nil cell + clear
+    /// done-flag) for any cell whose key changed, so an initializer edit re-inits
+    /// on the next reach; an unchanged key is left alone (an unrelated body edit
+    /// preserves the live value). Rebuilt by `emit_full`.
+    /// `docs/static-hot-reload-overlay-bug.md`.
+    static_key_baseline: FxHashMap<Ustr, String>,
+}
+
+/// A `static` cell's reload key: rendered type + initializer content hash. Equal
+/// keys mean "same meaning, preserve the live cell"; a changed key triggers a
+/// reset + re-init. Shared by `assemble` (the `__rock_known_globals` preamble),
+/// the `emit_full` baseline, and `assemble_overlay` so all three compare identically.
+fn static_cell_key(sc: &skull_mir::mir::StaticCell) -> String {
+    format!("{}@{:x}", sc.type_str, sc.init_hash)
 }
 
 /// The statically-resolved callees referenced by a (post-inline) MIR function —
@@ -651,31 +667,37 @@ fn emit_body_chunk(
     let te = Instant::now();
     let mut lua = emit_function(ws, cg, self_ref, &mf);
     // Nested `fn`s are hoisted to sibling top-level Lua fns in the same chunk
-    // (their `__local_*` names are already final -- emit_named, no mangling).
-    emit_nested_fns(ws, cg, &mut mf.nested_fns, &mut deps, &mut lua);
+    // (their `__local_*` names are already final -- emit_named, no mangling). Their
+    // `static` cells fold into THIS chunk's `statics` so the hot-reload preamble +
+    // overlay reset see them -- a nested-fn static is otherwise invisible to both.
+    let mut statics = mf.statics.clone();
+    emit_nested_fns(ws, cg, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics: mf.statics.clone() })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
 /// top-level Lua function appended to the enclosing chunk. Runs the standard
-/// cleanup pipeline per fn and folds their callee refs into the chunk's deps so
-/// an edit to a callee still invalidates the enclosing chunk.
+/// cleanup pipeline per fn, folds their callee refs into the chunk's deps (so an
+/// edit to a callee still invalidates the enclosing chunk) and their `static`
+/// cells into the chunk's `statics` (so hot-reload can reset them).
 fn emit_nested_fns(
     ws: &Workspace,
     cg: &CodegenCtx,
     nested: &mut [MirFunc],
     deps: &mut FxHashSet<FuncRef>,
+    statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
 ) {
     for nf in nested.iter_mut() {
         skull_transform::cleanup(nf);
         skull_transform::recover_counted_loops(ws, nf);
         collect_callee_frefs(nf, deps);
+        statics.extend(nf.statics.iter().cloned());
         out.push_str(&emit_named(ws, cg, nf.name.as_str(), nf));
         let mut children = std::mem::take(&mut nf.nested_fns);
-        emit_nested_fns(ws, cg, &mut children, deps, out);
+        emit_nested_fns(ws, cg, &mut children, deps, statics, out);
     }
 }
 
@@ -1037,7 +1059,7 @@ fn assemble(
         if !seen_static.insert(sc.cell) {
             continue;
         }
-        let key = format!("{}@{:x}", sc.type_str, sc.init_hash);
+        let key = static_cell_key(sc);
         let _ = write!(
             static_resets,
             "if _G.HOT_RELOAD and _G.__rock_old_globals and _G.__rock_old_globals[{:?}] ~= {:?} then {} = nil; {} = false end\n",
@@ -1161,6 +1183,14 @@ pub fn emit_full(ws: &Workspace, _user_mid: ModuleId) -> Result<(MirEmit, SkullE
             }
         }
     }
+    // Baseline every `static` cell's reload key so the overlay can detect an
+    // initializer edit (changed key) vs an unrelated body edit (unchanged key).
+    let mut static_key_baseline: FxHashMap<Ustr, String> = FxHashMap::default();
+    for chunk in chunks.values().flatten() {
+        for sc in &chunk.statics {
+            static_key_baseline.insert(sc.cell, static_cell_key(sc));
+        }
+    }
     let cache = SkullEmitCache {
         chunks,
         changed_since_full: FxHashSet::default(),
@@ -1169,6 +1199,7 @@ pub fn emit_full(ws: &Workspace, _user_mid: ModuleId) -> Result<(MirEmit, SkullE
         inline_cache: skull_transform::InlineCache::default(),
         dependents,
         changed_consts_since_full: FxHashSet::default(),
+        static_key_baseline,
     };
     let emit = assemble(ws, &cache.cg, &cache.scx, cache.cg.overloaded(), &cache)?;
     Ok((emit, cache))
@@ -1341,6 +1372,32 @@ fn assemble_overlay(
             }
             // extern / inline(lua) edits are interface-tier -> full rebuild path.
             None => {}
+        }
+    }
+
+    // Reset `static` cells whose initializer MEANING changed since the last full
+    // build (`type@init_hash` key differs from the baseline). A static is
+    // name-keyed and lazy, so redefining its fn above leaves the warmed cell +
+    // set done-flag intact -- the redefined fn would re-read the stale value. Nil
+    // the cell + clear its done-flag UNGUARDED so the next reach re-inits with the
+    // edited initializer; an unchanged key is skipped (an unrelated body edit
+    // preserves the live cell). Symmetric with the const re-emit below. Only the
+    // changed fns' statics are considered -- a static's key can't change without
+    // its enclosing fn being re-lowered into `changed_since_full`.
+    let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
+    for fref in &order {
+        let Some(Ok(chunk)) = cache.chunks.get(fref) else { continue };
+        for sc in &chunk.statics {
+            if !seen_static.insert(sc.cell) {
+                continue;
+            }
+            let changed = cache
+                .static_key_baseline
+                .get(&sc.cell)
+                .is_none_or(|base| *base != static_cell_key(sc));
+            if changed {
+                let _ = write!(out, "{} = nil; {} = false\n", sc.cell, sc.done_flag);
+            }
         }
     }
 
@@ -1517,6 +1574,21 @@ pub fn emit_overlay(
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
     let mut emit = assemble_overlay(ws, cache.cg.overloaded(), cache);
+    // Advance the static baseline to the keys now in effect. A reset line fires on
+    // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
+    // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
+    // an unrelated follow-up edit would re-run the initializer and wipe accumulated
+    // state. Bring each changed fn's cells up to their current key so the next
+    // overlay only resets cells whose key changes AGAIN.
+    let advanced: Vec<(Ustr, String)> = cache
+        .changed_since_full
+        .iter()
+        .filter_map(|fref| cache.chunks.get(fref).and_then(|c| c.as_ref().ok()))
+        .flat_map(|chunk| chunk.statics.iter().map(|sc| (sc.cell, static_cell_key(sc))))
+        .collect();
+    for (cell, key) in advanced {
+        cache.static_key_baseline.insert(cell, key);
+    }
     let t_asm = t3.elapsed();
     emit.phases = vec![
         ("CodegenCtx::new", t_cg),

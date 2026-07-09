@@ -1847,6 +1847,176 @@ mod overlay_runtime_tests {
         assert_runtime_eq(&stale_main, &overlay.lua, &fresh.lua, "const FOO 5->10");
     }
 
+    /// A `static` local's INITIALIZER edit hot-reloads through the overlay -- the
+    /// static analog of `concrete_const_value_edit_runtime_eq` and the direct
+    /// regression for `docs/static-hot-reload-overlay-bug.md`. Unlike a const, a
+    /// static is lazy (inits on first reach) and name-keyed (its cell persists
+    /// across reloads BY DESIGN), so the overlay must emit an UNGUARDED reset (nil
+    /// the cell + clear its done-flag) for a static whose init key changed, or the
+    /// redefined fn re-reads the stale warmed cell and the edit is silently ignored.
+    ///
+    /// Models the LIVE game: the baseline runs once (warming the static to 5), THEN
+    /// the overlay loads and it runs again. Without the reset the second call still
+    /// prints 5; with it, 10. (`assert_runtime_eq`'s compose order never warms the
+    /// static before the overlay, so it can't see this -- hence the bespoke run.)
+    #[test]
+    fn concrete_static_init_edit_runtime_eq() {
+        let v0 = "fn probe() -> int { static x = 5\n x }\nfn main() { print(\"{probe()}\") }\n";
+        let v1 = "fn probe() -> int { static x = 10\n x }\nfn main() { print(\"{probe()}\") }\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let stale_main = full0.lua;
+
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "static initializer edit should be BodyOnly, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // Warm the static in the frozen baseline (first main() -> inits x=5, sets
+        // the done-flag), THEN load the overlay + call again. The bug is observable
+        // precisely because the cell is already warm: without the overlay's reset
+        // the redefined `probe` skips re-init and re-reads the stale 5.
+        let composed = run_parts(&[&stale_main, SYS_STUB, "main()", &overlay.lua, "main()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "5\n10",
+                "warm baseline prints 5; after the overlay reload the static re-inits to 10",
+            ),
+            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+        }
+    }
+
+    /// A `static` inside a NESTED `fn` must hot-reload too. Nested fns are hoisted
+    /// to sibling chunks, so their statics have to be folded into the enclosing
+    /// chunk's `statics` (both the full-reload preamble and the overlay read
+    /// `chunk.statics`); if they aren't, the cell is invisible to the reset logic
+    /// and an initializer edit is silently ignored on every reload.
+    #[test]
+    fn nested_fn_static_init_edit_runtime_eq() {
+        let v0 = "fn probe() -> int { fn inner() -> int { static x = 5\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
+        let v1 = "fn probe() -> int { fn inner() -> int { static x = 10\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let stale_main = full0.lua;
+
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "nested static init edit should be BodyOnly, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        let composed = run_parts(&[&stale_main, SYS_STUB, "main()", &overlay.lua, "main()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "5\n10",
+                "nested-fn static must re-init on initializer edit through the overlay",
+            ),
+            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+        }
+    }
+
+    /// Accumulation across TWO overlays (the analog of the const "edit A then B"
+    /// oracle, point 2 in this module's doc). A reset line fires only on the reload
+    /// that dofiles the overlay carrying it, so it must appear ONLY in the overlay
+    /// of the reload where the init key changed -- NOT in later overlays, or an
+    /// unrelated follow-up edit would re-reset and wipe accumulated static state.
+    /// Requires advancing the per-cell baseline as overlays apply; a baseline only
+    /// rebuilt on full builds would re-emit the reset here and lose the accumulation.
+    #[test]
+    fn static_init_edit_then_unrelated_edit_preserves_reinit_overlay() {
+        // `probe` accumulates into a static counter each call; DO_RESET (unused
+        // here) keeps the fn shape stable. v1 edits the initializer (0 -> 100); v2
+        // is an UNRELATED edit (dead `let`), initializer still 100.
+        let v0 = "fn probe() -> int { static n = 0\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
+        let v1 = "fn probe() -> int { static n = 100\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
+        let v2 = "fn probe() -> int { static n = 100\n let unused = 0\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let stale_main = full0.lua;
+
+        let r1 = session.update_file("main.rock", v1).expect("update v1");
+        let overlay1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+        let r2 = session.update_file("main.rock", v2).expect("update v2");
+        let overlay2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred);
+
+        // Models the live game: main.lua(v0) loaded once; each overlay dofile'd in
+        // turn; probe reached (accumulating) between reloads. n: inits 0 -> 1,2 ->
+        // reload1 re-inits to 100 -> 101,102 -> reload2 UNRELATED must PRESERVE ->
+        // 103,104. A re-reset at reload2 would drop back to 101.
+        let composed = run_parts(&[
+            &stale_main, SYS_STUB,
+            "main()", "main()",            // 1, 2   (init 0)
+            &overlay1.lua,
+            "main()", "main()",            // 101, 102  (re-init 100)
+            &overlay2.lua,
+            "main()", "main()",            // 103, 104  (preserve)
+        ]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "1\n2\n101\n102\n103\n104",
+                "reload1 re-inits to 100; reload2 (unrelated) must preserve, not re-reset",
+            ),
+            ExecOutcome::Errored => panic!("composed baseline+overlays run errored"),
+        }
+    }
+
+    /// The §A narrowing on the overlay path: an UNRELATED edit in a fn that owns a
+    /// static must NOT reset the static -- the overlay reconsiders the fn's cells
+    /// (it's in `changed_since_full`) but the key is unchanged, so the warm value
+    /// is preserved. Mirror of `static_hot_reload.rs::static_preserved_when_unrelated_body_edited`
+    /// but through the overlay. Without the key check (reset every changed fn's
+    /// statics) this would wrongly re-init the static and diverge.
+    #[test]
+    fn static_preserved_under_unrelated_overlay_edit() {
+        // `DO_SET` distinguishes PRESERVE (n still 99) from RESET (n re-inits 42).
+        let v0 = "global DO_SET: bool = false\n\
+                  fn probe() -> int { static n = 42\n if DO_SET { n = 99 }\n n }\n\
+                  fn main() { print(\"{probe()}\") }\n";
+        // Unrelated body edit (dead `let`), initializer `42` untouched.
+        let v1 = "global DO_SET: bool = false\n\
+                  fn probe() -> int { static n = 42\n let unused = 0\n if DO_SET { n = 99 }\n n }\n\
+                  fn main() { print(\"{probe()}\") }\n";
+
+        let mut session = bone_session(files(v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let stale_main = full0.lua;
+
+        let result = session.update_file("main.rock", v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "unrelated body edit should be BodyOnly, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+
+        // Warm the static to 99 (DO_SET=true, one call), load the overlay, then call
+        // again with DO_SET=false: an unrelated edit must PRESERVE n -> still 99.
+        let composed = run_parts(&[&stale_main, SYS_STUB, "DO_SET = true", "main()", &overlay.lua, "DO_SET = false", "main()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "99\n99",
+                "unrelated edit must not reset the static: warmed 99 survives the reload",
+            ),
+            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+        }
+    }
+
     /// const-on-const: editing an UPSTREAM const must update a DOWNSTREAM const
     /// that reads it, in dependency order -- even with reversed source order (B
     /// declared before A). v0: B = A + 1, A = 5 -> B = 6. Edit A to 10: the overlay
