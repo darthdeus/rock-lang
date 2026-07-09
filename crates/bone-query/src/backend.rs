@@ -208,6 +208,50 @@ pub struct GenerateFunctionEdit {
     pub fn_name: String,
 }
 
+/// Whether the initializer SOURCE has a binary/unary operator at bracket depth 0
+/// (outside strings) -- e.g. a constant-folded `1 + 2`. Postfix `.`/`::`/`?.` and
+/// operators inside a call/index/literal don't count, so `g(v)` / `a.b` / `S{..}`
+/// stay unparenthesized while `a + b` / `-x` / `a as int` get wrapped.
+fn text_has_top_level_operator(s: &str) -> bool {
+    let b = s.trim().as_bytes();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            match c {
+                b'\\' => i += 1,
+                b'"' => in_str = false,
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|' | b'^'
+                if depth == 0 =>
+            {
+                return true
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The "inline local" edit set: replace every use of a `let` binding with its
+/// initializer and delete the `let`. `var` names the binding (for the action
+/// title); `edits` are non-overlapping `TextEdit`s (uses + the `let` deletion).
+pub struct InlineLocalEdits {
+    pub var: String,
+    pub edits: Vec<TextEdit>,
+}
+
 /// Canonicalize `path` WITHOUT Windows' `\\?\` extended-length prefix, falling
 /// back to the input verbatim if it doesn't resolve (an unsaved buffer).
 ///
@@ -1005,6 +1049,56 @@ impl BoneWorkspace {
             new_text,
             missing: missing.len(),
         })
+    }
+
+    /// The "inline local" edit set when the cursor is on a `let x = <init>`
+    /// binding or one of its uses: replace every use with the initializer (parens
+    /// added when it isn't atomic) and delete the `let` line. None otherwise.
+    /// See `query::inline_local`.
+    pub fn inline_local(&self, path: &str, pos: Position) -> Option<InlineLocalEdits> {
+        let path_c = self.canon(path);
+        let path = path_c.as_str();
+        let proj = self.project(path)?;
+        let src = proj.texts.get(path)?;
+        let offset = offset_at_line_col(src, pos.line, pos.character);
+        let ws = proj.session.workspace();
+        let mid = user_module_for_path(ws, path)?;
+        let sites = crate::query::inline_local(ws, mid, offset)?;
+
+        let (istart, iend) = sites.init_span.offset_range;
+        let init_text = src.get(istart..iend)?;
+        // The HIR flag catches structural non-primaries (if/match/lambda/cast/
+        // range). A constant-folded literal (`1 + 2` -> `Int(3)`) reports atomic
+        // but its SOURCE still has a top-level operator, so back it with a text
+        // scan; either signal means splicing needs parens to keep precedence.
+        let parenthesize = sites.parenthesize || text_has_top_level_operator(init_text);
+        let replacement =
+            if parenthesize { format!("({init_text})") } else { init_text.to_string() };
+
+        let mut edits = Vec::with_capacity(sites.uses.len() + 1);
+        for u in &sites.uses {
+            let (s, e) = u.offset_range;
+            edits.push(TextEdit {
+                range: Range {
+                    start: offset_to_position(src, s),
+                    end: offset_to_position(src, e),
+                },
+                new_text: replacement.clone(),
+            });
+        }
+        // Delete the whole `let` line: leading indent through the trailing newline.
+        let (ls, le) = sites.let_span.offset_range;
+        let line_start = src.get(..ls)?.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end = src.get(le..)?.find('\n').map(|i| le + i + 1).unwrap_or(src.len());
+        edits.push(TextEdit {
+            range: Range {
+                start: offset_to_position(src, line_start),
+                end: offset_to_position(src, line_end),
+            },
+            new_text: String::new(),
+        });
+
+        Some(InlineLocalEdits { var: sites.var.to_string(), edits })
     }
 
     /// A "Generate function" edit when the cursor is on a call to an undeclared

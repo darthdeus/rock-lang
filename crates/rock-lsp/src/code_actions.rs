@@ -47,6 +47,16 @@ pub fn compute_code_actions_workspace(
         ));
     }
 
+    // Inline a local: replace its uses with its initializer and delete the `let`.
+    if let Some(inline) = workspace.bone.inline_local(path, params.range.start) {
+        actions.push(bone_multi_edit_action(
+            format!("Inline local `{}`", inline.var),
+            uri,
+            inline.edits,
+            CodeActionKind::REFACTOR_INLINE,
+        ));
+    }
+
     // Generate a stub for a call to an undeclared function.
     if let Some(stub) = workspace.bone.generate_function(path, params.range.start) {
         actions.push(bone_edit_action(
@@ -90,11 +100,21 @@ fn bone_edit_action(
     range: lsp_types::Range,
     new_text: String,
 ) -> CodeAction {
-    let edits = vec![TextEdit { range, new_text }];
+    bone_multi_edit_action(title, uri, vec![TextEdit { range, new_text }], CodeActionKind::QUICKFIX)
+}
+
+/// Build a multi-edit `CodeAction` of `kind` for the bone backend: several
+/// `TextEdit`s on one `uri`, wrapped in a `WorkspaceEdit`.
+fn bone_multi_edit_action(
+    title: String,
+    uri: &lsp_types::Uri,
+    edits: Vec<TextEdit>,
+    kind: CodeActionKind,
+) -> CodeAction {
     let changes = [(uri.clone(), edits)].into_iter().collect::<HashMap<_, _>>();
     CodeAction {
         title,
-        kind: Some(CodeActionKind::QUICKFIX),
+        kind: Some(kind),
         diagnostics: None,
         edit: Some(WorkspaceEdit::new(changes)),
         command: None,
