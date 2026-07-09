@@ -173,6 +173,27 @@ fn main() { let x: int = 2.0 * (3 / 4) }
     assert_eq!(&src[lo..hi], "(3 / 4)", "label should cover just the division");
 }
 
+// The walk follows a local binding back to its `let` initializer: a `float`
+// that entered via `let h = a / b` and only mismatches an `int` later
+// (`2 * h`) still points at the `/`. Regression for mag/projectiles.rock
+// `let frame_h = dims.y / N ... p.dir * frame_h` into an int field.
+#[test]
+fn float_div_traced_through_let_binding_hints_idiv() {
+    let src = r#"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
+fn main() {
+    let h = 8 / 3
+    let x: int = 2 * h
+}
+"#;
+    let msgs = main_body_error_messages(src);
+    assert!(
+        msgs.iter().any(|m| m.contains("./")),
+        "expected a `./` hint traced through the `let` binding, got: {msgs:?}"
+    );
+}
+
 // A `/` flowing into a re-bindable numeric var (`min(1, ...)`, where `1`
 // provisionally fixes `T=int` and the float arg widens `T` back to float) is
 // NOT a mismatch -- coerce widens it. The hint must defer to that: no error at
