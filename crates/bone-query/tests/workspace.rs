@@ -663,6 +663,26 @@ fn references_finds_local_decl_and_uses() {
 }
 
 #[test]
+fn references_on_an_overload_are_specific_to_that_overload() {
+    // find-references resolves to the ONE overload under the cursor: only its
+    // decl + the calls that resolve to it, NOT other same-named overloads.
+    // (Rename stays name-global -- see rename_overloaded_*.) mag: `Corpse.in_reach`
+    // refs wrongly pulled in `Npc`'s unrelated `in_reach`.
+    let src = "struct A {}\nstruct B {}\nfn foo(a: A) -> int { 1 }\nfn foo(b: B) -> int { 2 }\nfn main() {\n  let x = A {}\n  let y = B {}\n  let r = foo(x) + foo(y)\n}\n";
+    let bone = fresh(src);
+    // cursor on the FIRST overload's decl name `foo` (line 2, char 3).
+    let starts: Vec<(u32, u32)> = bone
+        .references(PATH, Position::new(2, 3))
+        .iter()
+        .map(|l| (l.range.start.line, l.range.start.character))
+        .collect();
+    assert!(starts.contains(&(2, 3)), "overload-1 decl: {starts:?}");
+    assert!(starts.contains(&(7, 10)), "foo(x) resolves to overload 1: {starts:?}");
+    assert!(!starts.contains(&(3, 3)), "must NOT include overload-2 decl: {starts:?}");
+    assert!(!starts.contains(&(7, 19)), "must NOT include foo(y) (overload 2): {starts:?}");
+}
+
+#[test]
 fn rename_rewrites_local_decl_and_uses_precisely() {
     let src = "fn f() -> int {\n  let count = 1\n  let total = count + count\n  total\n}\n";
     let bone = fresh(src);

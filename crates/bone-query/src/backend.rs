@@ -890,7 +890,8 @@ impl BoneWorkspace {
         };
         let offset = offset_at_line_col(src, pos.line, pos.character);
         let mut idx_cache: HashMap<String, LineIndex> = HashMap::new();
-        self.all_reference_spans(proj, path, offset)
+        // Find-usages scopes to the specific overload under the cursor.
+        self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::ThisOverload)
             .into_iter()
             .filter_map(|s| self.location_from_span_indexed(proj, &s.span, &mut idx_cache))
             .collect()
@@ -1142,6 +1143,7 @@ impl BoneWorkspace {
         proj: &BoneProject,
         path: &str,
         offset: usize,
+        fn_scope: crate::query::FnRefScope,
     ) -> Vec<crate::query::RefSite> {
         if let Some(uf) = proj.session.files.get(path) {
             if let Some(ast) = reparse_user_file(uf, path) {
@@ -1166,9 +1168,14 @@ impl BoneWorkspace {
         };
         // Text lookup for the walks whose HIR carries no token span (named-arg
         // labels, `?.method` names) -- `proj.texts` holds every tracked file.
-        gaps::references(ws, mid, inf, offset, &|f| {
-            proj.texts.get(f).map(|s| s.as_str())
-        })
+        gaps::references(
+            ws,
+            mid,
+            inf,
+            offset,
+            &|f| proj.texts.get(f).map(|s| s.as_str()),
+            fn_scope,
+        )
     }
 
     // -- Feature: completion (stubbed: crate::query::completion) ---------------------
@@ -2020,7 +2027,7 @@ impl BoneWorkspace {
         // at a declaration name ("nothing to rename" on `fn foo`), and the whole
         // enclosing `Call` span at a callee (prefilling `foo(args)`, not `foo`).
         let here = self
-            .all_reference_spans(proj, path, offset)
+            .all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads)
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
@@ -2037,7 +2044,8 @@ impl BoneWorkspace {
         let proj = self.project(path)?;
         let src = proj.texts.get(path)?;
         let offset = offset_at_line_col(src, pos.line, pos.character);
-        let sites = self.all_reference_spans(proj, path, offset);
+        // Rename rewrites the whole (shared) overloaded name, not one overload.
+        let sites = self.all_reference_spans(proj, path, offset, crate::query::FnRefScope::AllOverloads);
         if sites.is_empty() {
             return None;
         }

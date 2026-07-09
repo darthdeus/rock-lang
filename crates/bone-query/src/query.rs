@@ -779,12 +779,23 @@ impl RefSite {
 /// mis-spanned.
 pub type TextOf<'a, 't> = &'a dyn Fn(&str) -> Option<&'t str>;
 
+/// How a function/method reference walk scopes overloads. rock overloads share
+/// one name (`fn foo(a: A)` / `fn foo(b: B)` and D-form `fn A.foo` are all `foo`),
+/// but find-usages wants only the overload under the cursor while RENAME must
+/// rewrite the whole shared name -- so the two callers pass different scopes.
+#[derive(Clone, Copy, PartialEq)]
+pub enum FnRefScope {
+    ThisOverload,
+    AllOverloads,
+}
+
 pub fn references<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
     text_of: TextOf<'_, 't>,
+    fn_scope: FnRefScope,
 ) -> Vec<RefSite> {
     let plain = |spans: Vec<Span>| spans.into_iter().map(RefSite::plain).collect();
 
@@ -835,7 +846,12 @@ pub fn references<'t>(
     if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
         let name = ws.modules.get(fmid.index()).map(|m| m.functions[fid].name);
         if let Some(name) = name {
-            return plain(function_references_by_name(ws, name, text_of));
+            // Find-usages scopes to this overload; rename keeps the shared name.
+            let target = match fn_scope {
+                FnRefScope::ThisOverload => Some((fmid, fid)),
+                FnRefScope::AllOverloads => None,
+            };
+            return plain(function_references_by_name(ws, name, target, text_of));
         }
     }
 
@@ -2223,17 +2239,25 @@ fn function_target(
 /// Name-based (not a single `(mid, fid)`) so renaming touches **all overloads**
 /// sharing the name and **every** call that resolves to any of them -- rename
 /// of an overloaded or cross-file function is then complete.
+/// Reference spans for a function `name`. `target = None` walks EVERY overload's
+/// decl + all calls resolving to any overload of the name (rename: the shared
+/// name renames together). `target = Some((mid, fid))` restricts to that one
+/// overload's decl + the calls that resolve to exactly it (find-usages).
 fn function_references_by_name<'t>(
     ws: &Workspace,
     name: Ustr,
+    target: Option<(ModuleId, Idx<hir::Function>)>,
     text_of: TextOf<'_, 't>,
 ) -> Vec<Span> {
     let mut out = Vec::new();
 
-    // Every overload's declaration name.
+    // Each matching overload's declaration name (only the target, if scoped).
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
             for (fmid, fid) in fns.iter() {
+                if target.is_some_and(|t| t != (*fmid, *fid)) {
+                    continue;
+                }
                 if let Some(fm) = ws.modules.get(fmid.index()) {
                     out.push(fm.functions[*fid].name_span);
                 }
@@ -2241,7 +2265,7 @@ fn function_references_by_name<'t>(
         }
     }
 
-    // Every call resolving to a function with this name (any overload).
+    // Every call resolving to this name (any overload), or to the target overload.
     for (m, inf) in ws.inferences_iter() {
         let Some(module) = ws.modules.get(m.index()) else {
             continue;
@@ -2253,11 +2277,14 @@ fn function_references_by_name<'t>(
             };
 
             for (call_idx, (cmid, cfid)) in bi.resolved_overload_calls.iter() {
-                let resolves_to_name = ws
-                    .modules
-                    .get(cmid.index())
-                    .is_some_and(|cm| cm.functions[*cfid].name == name);
-                if resolves_to_name {
+                let matches = match target {
+                    Some(t) => (*cmid, *cfid) == t,
+                    None => ws
+                        .modules
+                        .get(cmid.index())
+                        .is_some_and(|cm| cm.functions[*cfid].name == name),
+                };
+                if matches {
                     match &body.expr_arena[*call_idx] {
                         hir::Expr::Call {
                             callee: hir::Callee::Unresolved { name_span, .. },
