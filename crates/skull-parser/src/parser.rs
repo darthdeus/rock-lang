@@ -750,6 +750,7 @@ impl Parser {
             TokenKind::Minus => "__op_sub",
             TokenKind::Mul => "__op_mul",
             TokenKind::Div => "__op_div",
+            TokenKind::IntDiv => "__op_idiv",
             TokenKind::Mod => "__op_mod",
             TokenKind::Equals => "__op_eq",
             TokenKind::NotEquals => "__op_ne",
@@ -3329,6 +3330,7 @@ fn no_parens_breaks_on_op(op: TokenKind) -> bool {
             | TokenKind::Minus
             | TokenKind::Mul
             | TokenKind::Div
+            | TokenKind::IntDiv
             | TokenKind::Equals
             | TokenKind::NotEquals
             | TokenKind::LessThan

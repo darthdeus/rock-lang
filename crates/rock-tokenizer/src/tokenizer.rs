@@ -870,7 +870,7 @@ impl<'a> Tokenizer<'a> {
             match next {
                 '0'..='9' => {},
                 '.' => {
-                    if dotted || self.peek_n(1) == Some('.') || self.peek_n(1).is_some_and(|c| c.is_alphabetic() || c == '_') || matches!(&self.last_token_kind, Some(TokenKind::Dot)) { break; }
+                    if dotted || self.peek_n(1) == Some('.') || !self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) || matches!(&self.last_token_kind, Some(TokenKind::Dot)) { break; }
                     dotted = true;
                     floaty = true;
                 },
@@ -1090,15 +1090,17 @@ impl<'a> Tokenizer<'a> {
             }
 
             Some('.') => {
-                let mut width = 0;
-                while width < 3 && self.current == Some('.') {
-                    self.advance();
-                    width += 1;
-                }
-                match width {
-                    1 => TokenKind::Dot,
-                    2 => TokenKind::DoubleDot,
-                    _ => TokenKind::TripleDot,
+                self.advance();
+                if self.eat('.') {
+                    if self.eat('.') {
+                        TokenKind::TripleDot
+                    } else {
+                        TokenKind::DoubleDot
+                    }
+                } else if self.eat('/') {
+                    TokenKind::IntDiv
+                } else {
+                    TokenKind::Dot
                 }
             }
 
@@ -1338,7 +1340,7 @@ mod test {
 
     #[test]
     fn test_number_tokenization() {
-        let tokens = Tokenizer::from_code("test.rock", "1 23 456. 0.4")
+        let tokens = Tokenizer::from_code("test.rock", "1 23 456 0.4")
             .tokenize_kinds()
             .unwrap();
 
@@ -1347,9 +1349,40 @@ mod test {
             vec![
                 TokenKind::Int(1, "1".into()),
                 TokenKind::Int(23, "23".into()),
-                TokenKind::Float(OrderedFloat(456.)),
+                TokenKind::Int(456, "456".into()),
                 TokenKind::Float(OrderedFloat(0.4)),
             ]
+        );
+    }
+
+    #[test]
+    fn test_trailing_dot_is_not_a_float() {
+        // A `.` is a decimal point only when a digit follows. Trailing-dot
+        // floats (`456.`) are removed so `2./4` lexes as `2 ./ 4`.
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "456.").tokenize_kinds().unwrap(),
+            vec![TokenKind::Int(456, "456".into()), TokenKind::Dot]
+        );
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "2./4").tokenize_kinds().unwrap(),
+            vec![
+                TokenKind::Int(2, "2".into()),
+                TokenKind::IntDiv,
+                TokenKind::Int(4, "4".into()),
+            ]
+        );
+        // Spaced form and decimal points are unaffected.
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "7 ./ 2").tokenize_kinds().unwrap(),
+            vec![
+                TokenKind::Int(7, "7".into()),
+                TokenKind::IntDiv,
+                TokenKind::Int(2, "2".into()),
+            ]
+        );
+        assert_eq!(
+            Tokenizer::from_code("t.rock", "2.5").tokenize_kinds().unwrap(),
+            vec![TokenKind::Float(OrderedFloat(2.5))]
         );
     }
 
@@ -1466,7 +1499,7 @@ mod test {
 
     #[test]
     pub fn test_numbers() {
-        let tokens = Tokenizer::from_code("test.rock", "-1 2.3 -7. -7 -.3")
+        let tokens = Tokenizer::from_code("test.rock", "-1 2.3 -7 -.3")
             .tokenize_kinds()
             .unwrap();
 
@@ -1475,7 +1508,6 @@ mod test {
             vec![
                 TokenKind::Int(-1, "-1".into()),
                 TokenKind::Float(OrderedFloat(2.3)),
-                TokenKind::Float(OrderedFloat(-7.0)),
                 TokenKind::Int(-7, "-7".into()),
                 TokenKind::Float(OrderedFloat(-0.3)),
             ]

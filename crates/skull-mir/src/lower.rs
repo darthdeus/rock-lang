@@ -763,6 +763,7 @@ fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) 
         // codegen renders it `math.floor(a / b)`, `FloatDiv` renders `a / b`.
         "__op_div" if float => Inst::FloatDiv(lv, rv),
         "__op_div" => Inst::IntDiv(lv, rv),
+        "__op_idiv" => Inst::IntDiv(lv, rv),
         "__op_mod" if float => Inst::FloatMod(lv, rv),
         "__op_mod" => Inst::IntMod(lv, rv),
         _ => return Err(gap(format!("native arith op {op}"))),

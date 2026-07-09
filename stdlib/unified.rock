@@ -720,6 +720,7 @@ deco init on_reload {
 @pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
 @pure @inline operator(lua) /(a: int, b: int) -> int = "return math.floor(a / b)"
 @pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+@pure @inline operator(lua) ./(a: int, b: int) -> int = "return math.floor(a / b)"
 @pure @inline operator(lua) %(a: int, b: int) -> int = "return a % b"
 @pure @inline operator(lua) %(a: float, b: float) -> float = "return a % b"
 
