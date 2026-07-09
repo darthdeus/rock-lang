@@ -204,8 +204,8 @@ fn exec_sign_branch() {
 
 #[test]
 fn exec_arith_and_floor_div() {
-    // int `/` is floor division; -7/2 = -4 (floor), not -3 (trunc).
-    assert_eq!(run("fn f(a: int, b: int) -> int { a / b }", "f(-7, 2)"), "-4");
+    // int `./` is floor division; -7 ./ 2 = -4 (floor), not -3 (trunc).
+    assert_eq!(run("fn f(a: int, b: int) -> int { a ./ b }", "f(-7, 2)"), "-4");
     assert_eq!(run("fn f(a: int, b: int) -> int { a * b + 1 }", "f(6, 7)"), "43");
 }
 

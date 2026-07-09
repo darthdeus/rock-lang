@@ -2268,6 +2268,9 @@ impl Builder<'_> {
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let scalar = self.arith_ty(target).zip(self.arith_ty(value));
+        if let Some((lt, rt)) = scalar {
+            self.temp_reject_int_div(op_fn.as_str(), lt, rt, e)?;
+        }
         // Non-scalar: resolve the operator overload once (overload target on the
         // expr, else the named op fn).
         let overload = if scalar.is_none() {
@@ -2674,6 +2677,7 @@ impl Builder<'_> {
             ) {
                 if let [a, b] = arg_idxs[..] {
                     if let (Some(lt), Some(rt)) = (self.arith_ty(a), self.arith_ty(b)) {
+                        self.temp_reject_int_div(n, lt, rt, e)?;
                         return Ok(ValueRepr::Scalar(self.lower_native_arith(n, lt, rt, a, b)?));
                     }
                 }
@@ -5989,6 +5993,21 @@ impl Builder<'_> {
 
     fn arith_ty(&self, e: Idx<Expr>) -> Option<ArithTy> {
         self.arith_ty_of(self.expr_ty(e)?)
+    }
+
+    // TEMP(float-div-migration): Phase 2 of docs/float-division-plan.md.
+    // Reject int `/` (both operands non-float) so every currently-int-division
+    // site is enumerated and rewritten to `./` before Phase 3 flips `/` to
+    // float division. Removed in Phase 3.
+    fn temp_reject_int_div(&self, op: &str, lt: ArithTy, rt: ArithTy, e: Idx<Expr>) -> Result<(), CompilerError> {
+        if op == "__op_div" && lt != ArithTy::Float && rt != ArithTy::Float {
+            let span = self.body.expr_spans[e];
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("int `/` is being migrated to `./` at {} (float-div-migration); write `./`", span.format_site()),
+            ));
+        }
+        Ok(())
     }
 
     /// The scalar class of a resolved type, seeing through a TRANSPARENT newtype
