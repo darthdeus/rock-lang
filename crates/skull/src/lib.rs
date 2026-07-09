@@ -1173,12 +1173,12 @@ mod tests {
                    fn tup() -> [int] { [0, ...(1, 2), 3] }\n\
                    fn strct(p: Vec2) -> [int] { [...p, 9] }\n\
                    fn vecs(a: [int], b: [int]) -> [int] { [...a, ...b, 99] }";
-        // Returns/params typed `[T]` are the Vec shape `{data, len}`; `show`
+        // Returns/params typed `[T]` are the Vec shape `{_data, len}`; `show`
         // reads it, `v` builds it.
         let driver = "local function show(t) local s = {} \
-                      for i=1,t.len do s[i] = tostring(t.data[i]) end \
+                      for i=1,t.len do s[i] = tostring(t._data[i]) end \
                       print(table.concat(s, \",\")) end \
-                      local function v(t) return {data = t, len = #t} end \
+                      local function v(t) return {_data = t, len = #t} end \
                       show(tup()); show(strct({x=10, y=20})); show(vecs(v{1,2}, v{3,4}))";
         let Some(out) = run(src, driver) else {
             return;
@@ -1646,8 +1646,8 @@ mod tests {
     /// synthesized `for`). Execution proves the elements copy exactly once.
     #[test]
     fn array_spread_not_restructured_no_double_increment() {
-        exec_eq("fn cat(a: [int], b: [int]) -> [int] { [...a, ...b] }", "local r = cat({data={1,2},len=2}, {data={3,4},len=2})\n\
-             local s = {} for i=1,r.len do s[i]=tostring(r.data[i]) end\n\
+        exec_eq("fn cat(a: [int], b: [int]) -> [int] { [...a, ...b] }", "local r = cat({_data={1,2},len=2}, {_data={3,4},len=2})\n\
+             local s = {} for i=1,r.len do s[i]=tostring(r._data[i]) end\n\
              print(r.len .. ':' .. table.concat(s, ','))", "4:1,2,3,4");
     }
 

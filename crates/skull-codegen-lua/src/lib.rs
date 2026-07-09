@@ -1534,7 +1534,7 @@ impl Emitter<'_> {
                 out.push('}');
             }
             Inst::MakeVec(vs) => {
-                out.push_str("{data = {");
+                out.push_str("{_data = {");
                 self.write_csv(out, vs);
                 let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", vs.len());
             }
@@ -1679,7 +1679,7 @@ impl Emitter<'_> {
         match kind {
             ContainerKind::Vec => {
                 self.write_opnd(out, base);
-                out.push_str(".data[");
+                out.push_str("._data[");
                 self.write_opnd(out, index);
                 out.push_str(" + 1]");
             }
@@ -1742,7 +1742,7 @@ impl Emitter<'_> {
                     ContainerKind::Vec => {
                         out.push_str("  ");
                         self.write_opnd(out, *base);
-                        out.push_str(".data[");
+                        out.push_str("._data[");
                         self.write_opnd(out, *index);
                         out.push_str(" + 1] = ");
                         self.write_opnd(out, *value);
@@ -1780,7 +1780,7 @@ impl Emitter<'_> {
                     ContainerKind::Vec => {
                         // increment len BEFORE assign (1-indexed data table).
                         let _ = writeln!(out, "  {a}.len = {a}.len + 1");
-                        let _ = write!(out, "  {a}.data[{a}.len] = ");
+                        let _ = write!(out, "  {a}._data[{a}.len] = ");
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }

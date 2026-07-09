@@ -189,8 +189,9 @@ fn member_completion_on_a_vec_receiver() {
     // (not a `Nominal` ctor), so member completion came up empty and fell
     // through. Parked as the `.len` bug (`global POS_HIST: [Vec2]`).
     //
-    // Also pins the quality gates: the internal `data` field is hidden, and UFCS
-    // is element-aware -- a `[int]` fn matches, a `[Foo]` fn does not.
+    // Also pins the quality gates: the internal `_data` field is hidden (soft-
+    // private via the `_` prefix -- no Vec special-case), and UFCS is
+    // element-aware -- a `[int]` fn matches, a `[Foo]` fn does not.
     let src = "struct Foo { a: int }\n\
                fn takes_foos(fs: [Foo]) {}\n\
                fn takes_ints(v: [int]) {}\n\
@@ -199,7 +200,7 @@ fn member_completion_on_a_vec_receiver() {
     assert!(l.contains(&"len: int".to_string()), "vec .len field: {l:?}");
     assert!(l.contains(&"push".to_string()), "generic Vec UFCS: {l:?}");
     assert!(l.contains(&"takes_ints".to_string()), "[int] UFCS matches element: {l:?}");
-    assert!(!l.iter().any(|s| s.starts_with("data")), "internal Vec `data` hidden: {l:?}");
+    assert!(!l.iter().any(|s| s.starts_with("_data")), "internal Vec `_data` hidden: {l:?}");
     assert!(!l.contains(&"takes_foos".to_string()), "[Foo] UFCS excluded by element: {l:?}");
 }
 

@@ -1171,15 +1171,8 @@ fn build_member_items(
         // unless the user is explicitly typing an `_` prefix. Fields stay public
         // (no type-check change) -- this is purely a display convention.
         let show_private = prefix.starts_with('_');
-        // `Vec.data` is the internal 1-indexed Lua storage -- soft-private like a
-        // `_`-field (surface code uses `.len` / indexing, never `.data`). Hidden
-        // here pending the stdlib rename to `_data`.
-        let hide_vec_data = recv_struct.map(|s| s.as_str() == "Vec").unwrap_or(false);
         let field_items = fields.into_iter().zip(field_match).filter_map(|((name, ty, _), tmatch)| {
             if name.starts_with('_') && !show_private {
-                return None;
-            }
-            if hide_vec_data && name == "data" {
                 return None;
             }
             (prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {

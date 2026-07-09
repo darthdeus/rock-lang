@@ -268,7 +268,7 @@ fn total(xs: [int]) -> int {
     for x in xs { s = s + x; }
     s
 }";
-    assert_eq!(run(src, "total({data = {4, 5, 6}, len = 3, __ty = \"Vec\"})"), "15");
+    assert_eq!(run(src, "total({_data = {4, 5, 6}, len = 3, __ty = \"Vec\"})"), "15");
 }
 
 #[test]
