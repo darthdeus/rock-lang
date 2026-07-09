@@ -1462,7 +1462,7 @@ impl BoneWorkspace {
                 // beats a right-type global); with no expected type it is the
                 // primary kind bucket. Structs sit in bucket 2 (NOT below
                 // functions): on an EMPTY prefix the cap keeps the best
-                // MAX_COMPLETION_ITEMS, and burying types under every stdlib
+                // `max_items`, and burying types under every stdlib
                 // fn would truncate them away entirely; within bucket 2 the
                 // `method` tiebreak already orders non-fns ahead of functions.
                 let kind = match c.kind {
@@ -1589,16 +1589,17 @@ impl BoneWorkspace {
                 Cand::new(key, CandName::Sym(c.name), CandShape::Entry(c))
             })
             .collect();
-        // We only need the BEST `MAX_COMPLETION_ITEMS`, not a full ordering --
+        // We only need the BEST `max_items`, not a full ordering --
         // the final sort below re-orders the kept set anyway. So select the
         // top-N in O(n) (`select_nth_unstable_by`) rather than sort all in
         // O(n log n); at empty prefix that is ~2500 candidates. `cand_cmp` IS
         // the sort_text encoding order, so the select agrees with the final
         // sort by construction.
         let score_leads = !has_expected;
-        if general.len() > MAX_COMPLETION_ITEMS {
-            general.select_nth_unstable_by(MAX_COMPLETION_ITEMS, cand_cmp);
-            general.truncate(MAX_COMPLETION_ITEMS);
+        let max_items = max_completion_items();
+        if general.len() > max_items {
+            general.select_nth_unstable_by(max_items, cand_cmp);
+            general.truncate(max_items);
         }
         let mut sink = Sink::new();
         sink.cands = general;
@@ -1813,7 +1814,7 @@ impl BoneWorkspace {
         // cap but is skipped here at a >=MAX short prefix; acceptable under the
         // `isIncomplete` contract (the user narrows and it reappears).
         // Suppressed in a pattern head like reach: `f(arg)` is not a pattern.
-        if expr_position && !pattern_pos && sink.len() < MAX_COMPLETION_ITEMS {
+        if expr_position && !pattern_pos && sink.len() < max_items {
             // reach (for local-arg expansion) + the precomputed call-through
             // index, both cached on the project and rebuilt only on non-BodyOnly
             // edits. The one-shot CLI path has neither cached -> build throwaways.
@@ -1872,14 +1873,14 @@ impl BoneWorkspace {
         // re-scores, so returning the whole workspace (2539 items at empty
         // prefix) is pure wasted serialization -- the dominant end-to-end
         // completion cost.
-        if sink.cands.len() > MAX_COMPLETION_ITEMS && lsp_profile_enabled() {
+        if sink.cands.len() > max_items && lsp_profile_enabled() {
             eprintln!(
-                "[bone completion] completion truncated {} -> {MAX_COMPLETION_ITEMS}",
+                "[bone completion] completion truncated {} -> {max_items}",
                 sink.cands.len()
             );
         }
         sink.cands.sort_by(cand_cmp);
-        sink.cands.truncate(MAX_COMPLETION_ITEMS);
+        sink.cands.truncate(max_items);
         sink.cands
             .into_iter()
             .map(|c| materialize_cand(c, fn_sigs, next_is_open_paren, pattern_pos))

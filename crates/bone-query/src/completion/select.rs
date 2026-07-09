@@ -36,12 +36,30 @@ pub(crate) fn strip_call_template(items: &mut [CompletionItem]) {
 // score weights (FZ_*) live next to the DP above; the RankKey field order is
 // the ladder itself (rank_key.rs).
 
-/// Max items returned by general (non-member) completion. Generous headroom over
-/// a screenful -- the client narrows within a keystroke and re-requests (every
-/// completion response is `isIncomplete`), so this exists only to stop
-/// serializing the whole workspace (2539 items / ~518 KB on mag at empty prefix)
-/// when the client will throw nearly all of it away and ask again.
-pub(crate) const MAX_COMPLETION_ITEMS: usize = 200;
+/// Default cap on items returned by general (non-member) completion. Generous
+/// headroom over a screenful -- the client narrows within a keystroke and
+/// re-requests (every completion response is `isIncomplete`), so this exists
+/// only to stop serializing the whole workspace (2539 items / ~518 KB on mag at
+/// empty prefix) when the client will throw nearly all of it away and ask again.
+/// Override at runtime with `ROCK_LSP_MAX_COMPLETIONS` (see `max_completion_items`).
+pub(crate) const DEFAULT_MAX_COMPLETION_ITEMS: usize = 200;
+
+/// The effective general-completion cap: `ROCK_LSP_MAX_COMPLETIONS` if it parses
+/// to a positive integer, else `DEFAULT_MAX_COMPLETION_ITEMS`. Read once (the env
+/// is process-stable), mirroring `lsp_profile_enabled`.
+pub(crate) fn max_completion_items() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| parse_max_completions(std::env::var("ROCK_LSP_MAX_COMPLETIONS").ok().as_deref()))
+}
+
+/// Parse the `ROCK_LSP_MAX_COMPLETIONS` value: a positive integer wins, anything
+/// else (unset, empty, non-numeric, 0) falls back to the default. Pure so the
+/// override policy is testable without touching process env.
+fn parse_max_completions(v: Option<&str>) -> usize {
+    v.and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_COMPLETION_ITEMS)
+}
 
 /// Max reach paths expanded per ROOT toward the expected type -- a principled
 /// "k shortest ways" (ranked by distance), not a depth limit. Shared by the
@@ -426,5 +444,23 @@ pub(crate) fn completion_kind(k: SymCat) -> CompletionItemKind {
         SymCat::Local | SymCat::Param => CompletionItemKind::VARIABLE,
         SymCat::Field => CompletionItemKind::FIELD,
         SymCat::Keyword => CompletionItemKind::KEYWORD,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_max_completions, DEFAULT_MAX_COMPLETION_ITEMS};
+
+    #[test]
+    fn max_completions_override_policy() {
+        // A positive integer overrides.
+        assert_eq!(parse_max_completions(Some("25")), 25);
+        assert_eq!(parse_max_completions(Some("  10 ")), 10);
+        // Everything else falls back to the default.
+        assert_eq!(parse_max_completions(None), DEFAULT_MAX_COMPLETION_ITEMS);
+        assert_eq!(parse_max_completions(Some("")), DEFAULT_MAX_COMPLETION_ITEMS);
+        assert_eq!(parse_max_completions(Some("lots")), DEFAULT_MAX_COMPLETION_ITEMS);
+        assert_eq!(parse_max_completions(Some("0")), DEFAULT_MAX_COMPLETION_ITEMS);
+        assert_eq!(parse_max_completions(Some("-5")), DEFAULT_MAX_COMPLETION_ITEMS);
     }
 }
