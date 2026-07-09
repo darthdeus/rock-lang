@@ -2889,7 +2889,10 @@ impl Parser {
                         self.parse_statement()?
                     }
                     _ => {
-                        let e = self.with_allow_literals(false, |p| p.parse_expr(0))?;
+                        // A bare arm body allows struct literals (`=> S { .. }`,
+                        // Rust parity): the `{` can't open a block here (the block
+                        // form is the `OpenCurly` branch above), so it is a literal.
+                        let e = self.with_allow_literals(true, |p| p.parse_expr(0))?;
                         let s = self.span_from(stmt_span);
                         self.ast.stmt(s, StatementKind::Expression(e))
                     }

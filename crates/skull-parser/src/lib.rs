@@ -238,6 +238,19 @@ mod tests {
     }
 
     #[test]
+    fn match_arm_body_allows_a_struct_literal() {
+        // `=> S { .. }` in a match arm is a struct literal (Rust parity), not the
+        // ident `S` then a block. Pre-fix `with_allow_literals(false)` on the arm
+        // body stopped the expr at `S`, leaving `{ x: 1.0 }` to mis-parse as a new
+        // arm pattern ("unsupported pattern: OpenCurly"). (mag blood.rock arm.)
+        let s = body_sexp("fn f(k: K) -> S { match k { K::A => S { x: 1.0 } K::B => S { x: 2.0 } } }");
+        assert!(
+            s.contains("(arm K::A (block (struct S"),
+            "arm body must parse as a struct literal, not stop at the ident: {s}"
+        );
+    }
+
+    #[test]
     fn parse_static_local_inferred() {
         // `static count = 0` -> `(static <name> <ty-or-()> <value>)`, mirroring
         // the `(let ...)` shape. Name is a plain ident (no destructuring); the
