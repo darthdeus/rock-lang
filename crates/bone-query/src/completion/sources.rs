@@ -344,6 +344,7 @@ pub(crate) fn call_through_param_completions(
     reach: &crate::reachability::ReachabilityIndex,
     score_leads: bool,
     mut expected: Option<&mut ExpectedArg>,
+    enclosing_fn: Option<&str>,
     sink: &mut Sink,
 ) -> CtCounts {
     let mut counts = CtCounts::default();
@@ -407,6 +408,11 @@ pub(crate) fn call_through_param_completions(
 
     for &fi in bucket {
         let cf = &index.fns[fi as usize];
+        // Never autofill a call to the fn being defined -- a recursive self-call
+        // is not what completing its own body means (mag blood.rock:16:39).
+        if enclosing_fn == Some(cf.name.as_str()) {
+            continue;
+        }
         let k = prefix_subseq_len(q, &cf.name_lc);
         if !clean_match(cf.name_lc.as_bytes(), &q[..k.min(q.len())]) {
             continue;

@@ -1405,6 +1405,18 @@ impl BoneWorkspace {
         let expected_types: Vec<String> =
             expected.as_ref().map_or_else(Vec::new, |exp| exp.rendered.clone());
         let has_expected = expected.is_some();
+        // The fn whose body holds the cursor. Inside its own body it must not be
+        // PROMOTED as a way to produce a value -- a call-through autofill, a reach
+        // path, or a fn-returning-the-slot-type -- because that is a recursive
+        // self-call, which buries the direct constructor the user is naming
+        // (mag blood.rock:16:39). It stays offered (plain candidate) for genuine
+        // recursion, just not lifted above type-directed candidates.
+        let enclosing_fn: Option<Ustr> = ws.modules.get(mid.index()).and_then(|m| {
+            match m.body_at(offset) {
+                Some(bone_semantic::hir::BodyOwner::Function(fid)) => Some(m.functions[fid].name),
+                _ => None,
+            }
+        });
         let t_build = std::time::Instant::now();
         // The signature cache (rebuilt only on non-`BodyOnly` edits) supplies fn
         // `detail` for the survivors below. The one-shot CLI path has no cached
@@ -1527,7 +1539,12 @@ impl BoneWorkspace {
                         {
                             0
                         }
-                        SymCat::Function if exp.accepts_fn_returning(ws, c.name.as_str()) => 1,
+                        SymCat::Function
+                            if enclosing_fn.as_deref() != Some(c.name.as_str())
+                                && exp.accepts_fn_returning(ws, c.name.as_str()) =>
+                        {
+                            1
+                        }
                         _ => 2,
                     }
                 } else {
@@ -1770,6 +1787,12 @@ impl BoneWorkspace {
                     eprintln!("[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}");
                 }
                 for p in res.paths {
+                    // A path that CALLS the enclosing fn (`k.partition_style()`
+                    // inside `partition_style`) is a recursive self-reference --
+                    // skip it, same reason the fn is not promoted as a candidate.
+                    if enclosing_fn.is_some_and(|f| reach_suffix_calls(&p.suffix, &f)) {
+                        continue;
+                    }
                     // Dedup / fuzzy-match / sort on the bare access form; the
                     // final hop's parens/snippet are rendered from the flags.
                     let key = format!("{vname}.{}", p.suffix);
@@ -1844,6 +1867,7 @@ impl BoneWorkspace {
                 reach,
                 score_leads,
                 expected.as_mut(),
+                enclosing_fn.as_deref(),
                 &mut sink,
             );
         }
@@ -3678,6 +3702,14 @@ fn reparse_with_project_inner(
     // doesn't line up with the session's module ids. Keeps single-file behavior.
     let mut single = vec![skull_parser::parse_module(munged, Ustr::from(path)).ok()?];
     bone_semantic::semantic_passes::semantic_pass(&mut single).ok()
+}
+
+/// Whether a reach-path suffix (`a().b().c`, UFCS-chained) has a CALL hop to
+/// `fname` -- i.e. the path produces its value by calling that fn. Each `.`-
+/// separated hop's identifier is the text before its `(`; compared exactly, so
+/// `my_style()` does not match `style`.
+pub(crate) fn reach_suffix_calls(suffix: &str, fname: &str) -> bool {
+    suffix.split('.').any(|hop| hop.split('(').next().unwrap_or(hop) == fname)
 }
 
 /// Resolve a `SlotAnchor` to a typed expected-slot session against `ws` --

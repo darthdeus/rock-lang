@@ -132,6 +132,60 @@ fn contiguous_run_beats_interior_word_boundary_hop() {
     assert!(plain < depth, "pixel_readback_new (shorter, no interior-word hop) must outrank pixel_readback_depth_new: {labels:?}");
 }
 
+#[test]
+fn match_arm_return_ranks_constructor_over_recursive_self_call() {
+    // A match arm whose fn returns PartitionStyle: typing `PartSty` must surface
+    // the PartitionStyle CONSTRUCTOR, not `partition_style(k)` -- a recursive call
+    // to the fn being defined, promoted by the +5000 confident-autofill firing on
+    // the fn's own param `k`. Two coupled bugs: the enclosing fn was promoted
+    // inside its own body, and the match-arm body was not recognized as return
+    // position (so wrong-type synths never demoted). (mag blood.rock:16:39.)
+    let labels = labels_at(
+        "enum PxKind { Blood, Dust }\n\
+         value PartitionStyle { gravity: float, damp: float }\n\
+         fn partition_style(k: PxKind) -> PartitionStyle {\n\
+         \x20 match k {\n\
+         \x20   PxKind::Blood => PartSty$0\n\
+         \x20   PxKind::Dust => PartSty\n\
+         \x20 }\n\
+         }\n",
+    );
+    let ps = rank_of(&labels, "PartitionStyle");
+    let call = rank_of(&labels, "partition_style(k)");
+    assert!(ps.is_some(), "PartitionStyle must appear for `PartSty`: {labels:?}");
+    assert!(
+        ps < call || call.is_none(),
+        "PartitionStyle (constructor) must outrank the recursive partition_style(k): {labels:?}"
+    );
+}
+
+#[test]
+fn match_arm_body_sees_the_expected_return_type() {
+    // A match-arm body in a fn returning `Sty` is a return slot -- the expected
+    // type must be known there (as it is for `return X` / `let x: Sty = X`), so a
+    // value OF `Sty` outranks a same-prefix fn whose call produces the WRONG type.
+    // Pre-fix the arm body had no expected type, so `sty_maker(x)` (a confident
+    // autofill returning int) sat at the top instead of demoting. Isolates the
+    // tail/match-arm expected-type detection from the enclosing-fn exclusion.
+    let labels = labels_at(
+        "value Sty { a: float }\n\
+         global sty_val: Sty = Sty { a: 0.0 }\n\
+         fn sty_maker(x: int) -> int { 0 }\n\
+         fn use_it(x: int) -> Sty {\n\
+         \x20 match x {\n\
+         \x20   _ => sty$0\n\
+         \x20 }\n\
+         }\n",
+    );
+    let val = rank_of(&labels, "sty_val");
+    let maker = rank_of(&labels, "sty_maker(x)");
+    assert!(val.is_some(), "sty_val must appear for `sty`: {labels:?}");
+    assert!(
+        val < maker || maker.is_none(),
+        "the Sty value must outrank the wrong-type sty_maker(x) autofill: {labels:?}"
+    );
+}
+
 // -- Type-directed arg completion: UFCS receiver is param 0, so the arg index
 //    into the callee's params is comma_count + 1. ----------------------------
 

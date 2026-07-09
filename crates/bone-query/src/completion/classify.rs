@@ -607,5 +607,7 @@ pub(crate) fn slot_anchor(cx: &crate::cursor_context::CursorAst) -> Option<SlotA
         .or_else(|| cx.assign_lhs())
         .or_else(|| cx.typed_let_binding())
         .map(SlotAnchor::TypeAt)
-        .or_else(|| cx.in_return_value().then_some(SlotAnchor::EnclosingFnReturn))
+        .or_else(|| {
+            (cx.in_return_value() || cx.in_tail_return()).then_some(SlotAnchor::EnclosingFnReturn)
+        })
 }
