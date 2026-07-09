@@ -572,17 +572,18 @@ impl BoneWorkspace {
         }
 
         for e in proj.session.diagnostics() {
-            let file = e.location.file.as_str();
-            // Errors with no/synthetic location are attributed to the edited file.
-            let key = if file.is_empty() || !proj.texts.contains_key(file) {
-                path.to_string()
-            } else {
-                file.to_string()
-            };
-            by_file
-                .entry(key)
-                .or_default()
-                .push(compiler_error_to_diagnostic(&e));
+            // One squiggle per underlined label, each filed under its own label's
+            // file (labels may be cross-file).
+            for (file, diag) in compiler_error_to_diagnostics(&e) {
+                let file = file.as_str();
+                // Errors with no/synthetic location are attributed to the edited file.
+                let key = if file.is_empty() || !proj.texts.contains_key(file) {
+                    path.to_string()
+                } else {
+                    file.to_string()
+                };
+                by_file.entry(key).or_default().push(diag);
+            }
         }
 
         if let Some(e) = &this_file_parse_err {
@@ -807,12 +808,15 @@ impl BoneWorkspace {
         let Some(proj) = self.project(path) else {
             return Vec::new();
         };
+        // Expand to one diagnostic per label, then keep those whose label lands
+        // in this file (a multi-label error's labels may span files).
         let mut diags: Vec<Diagnostic> = proj
             .session
             .diagnostics()
             .into_iter()
-            .filter(|e| e.location.file.as_str() == path || e.location.file.as_str().is_empty())
-            .map(|e| compiler_error_to_diagnostic(&e))
+            .flat_map(|e| compiler_error_to_diagnostics(&e))
+            .filter(|(file, _)| file.as_str() == path || file.as_str().is_empty())
+            .map(|(_, d)| d)
             .collect();
         diags.extend(hole_diagnostics_for(proj, path).unwrap_or_default());
         diags.extend(self.lint_diagnostics(path));
@@ -3859,6 +3863,16 @@ fn severity_from_level(level: rock_core::errors::CompilerErrorLevel) -> Diagnost
     }
 }
 
+fn bone_diagnostic(range: Range, message: String, level: rock_core::errors::CompilerErrorLevel) -> Diagnostic {
+    Diagnostic {
+        range,
+        severity: Some(severity_from_level(level)),
+        source: Some("bone".to_string()),
+        message,
+        ..Default::default()
+    }
+}
+
 pub fn compiler_error_to_diagnostic(e: &CompilerError) -> Diagnostic {
     // Use the label's span (whole token) when there is one; `col_range` is
     // 0-based/end-exclusive, same as LSP. Fall back to a 1-char range at the
@@ -3876,13 +3890,38 @@ pub fn compiler_error_to_diagnostic(e: &CompilerError) -> Diagnostic {
             )
         }
     };
-    Diagnostic {
-        range: Range::new(start, end),
-        severity: Some(severity_from_level(e.level)),
-        source: Some("bone".to_string()),
-        message: e.message.clone(),
-        ..Default::default()
+    bone_diagnostic(Range::new(start, end), e.message.clone(), e.level)
+}
+
+/// One `(file, Diagnostic)` per label the compiler underlined, so every flagged
+/// location becomes its own squiggle carrying that label's note (a multi-label
+/// error like the `./` hint -- the `/` cause plus the use site -- surfaces at
+/// both). Labels can live in different files (returned per-label so the caller
+/// files each correctly). A label-less error falls back to the error location.
+pub fn compiler_error_to_diagnostics(e: &CompilerError) -> Vec<(Ustr, Diagnostic)> {
+    let labelled: Vec<_> = e.labels.iter().filter(|l| !l.span.is_empty()).collect();
+    if labelled.is_empty() {
+        let loc = &e.location;
+        let range = Range::new(
+            Position::new(loc.line as u32, loc.col as u32),
+            Position::new(loc.line as u32, loc.col as u32 + 1),
+        );
+        return vec![(loc.file, bone_diagnostic(range, e.message.clone(), e.level))];
     }
+    labelled
+        .iter()
+        .map(|l| {
+            let s = &l.span;
+            let range = Range::new(
+                Position::new(s.line_range.0 as u32, s.col_range.0 as u32),
+                Position::new(s.line_range.1 as u32, s.col_range.1 as u32),
+            );
+            // label[0].message == the error message (new_with_label); a stray
+            // empty label message falls back to it too.
+            let msg = if l.message.is_empty() { e.message.clone() } else { l.message.clone() };
+            (s.file, bone_diagnostic(range, msg, e.level))
+        })
+        .collect()
 }
 
 /// `unused_var` lint diagnostics (warnings) for one file: run the lint over the
@@ -4150,6 +4189,48 @@ mod tests {
         let d = compiler_error_to_diagnostic(&e);
         assert_eq!((d.range.start.line, d.range.start.character), (10, 7));
         assert_eq!((d.range.end.line, d.range.end.character), (10, 15));
+    }
+
+    // A two-label error (the `./` hint: the `/` cause + the use site) expands to
+    // one diagnostic per label, each at its label's span with its label's note,
+    // so nvim paints a squiggle on both lines.
+    #[test]
+    fn multi_label_error_expands_to_one_diagnostic_per_label() {
+        let mut cause = Span::unknown();
+        cause.file = Ustr::from("a.rock");
+        cause.line_range = (118, 118);
+        cause.col_range = (18, 50);
+        cause.offset_range = (200, 232);
+        let mut use_site = Span::unknown();
+        use_site.file = Ustr::from("a.rock");
+        use_site.line_range = (123, 123);
+        use_site.col_range = (35, 50);
+        use_site.offset_range = (400, 415);
+
+        let e = CompilerError::new_with_label(cause, "use `./`".to_string())
+            .with_label(use_site, "this `float` is used where `int` is required".to_string());
+        let diags = compiler_error_to_diagnostics(&e);
+
+        assert_eq!(diags.len(), 2, "one diagnostic per label");
+        assert_eq!(diags[0].1.range.start.line, 118);
+        assert_eq!(diags[0].1.message, "use `./`");
+        assert_eq!(diags[1].1.range.start.line, 123);
+        assert_eq!(diags[1].1.message, "this `float` is used where `int` is required");
+        assert!(diags.iter().all(|(f, _)| f.as_str() == "a.rock"));
+    }
+
+    // A plain single-label error is unchanged: exactly one diagnostic.
+    #[test]
+    fn single_label_error_stays_one_diagnostic() {
+        let mut span = Span::unknown();
+        span.file = Ustr::from("a.rock");
+        span.line_range = (10, 10);
+        span.col_range = (7, 15);
+        span.offset_range = (100, 108);
+        let e = CompilerError::new_with_label(span, "Undefined global `ris_shot`".to_string());
+        let diags = compiler_error_to_diagnostics(&e);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].1.message, "Undefined global `ris_shot`");
     }
 
     #[test]
