@@ -4411,13 +4411,13 @@ fn check_expr(
 
     let aty = infer_expr(c, gamma, e)?;
 
-    // int division (`/` returning int) implicitly coerced to float silently
-    // truncates: `5 / 2` is `2`, not `2.5`, then promoted to `2.0`. rock rejects
-    // this footgun; require float operands or an explicit cast.
+    // `/` is float division; its `float` result cannot fill an int-shaped
+    // hole. Point at `./` (integer floor division) rather than the bare
+    // unify error (docs/float-division-plan.md).
     let exp_r = resolve(gamma, expected, span);
     let aty_r = resolve(gamma, aty, span);
-    if matches!(gamma.get(exp_r), TypeExpr::Builtin(BuiltinTy::Float))
-        && matches!(gamma.get(aty_r), TypeExpr::Builtin(BuiltinTy::Int))
+    if matches!(gamma.get(exp_r), TypeExpr::Builtin(BuiltinTy::Int))
+        && matches!(gamma.get(aty_r), TypeExpr::Builtin(BuiltinTy::Float))
         && matches!(
             c.body.expr_arena[e],
             Expr::Call { callee: Callee::Unresolved { name, .. }, .. } if name == "__op_div"
@@ -4425,7 +4425,7 @@ fn check_expr(
     {
         return Err(CompilerError::new_with_label(
             span,
-            "int division (`/` on ints) truncates; assigning the result to `float` is not allowed -- use float operands or cast explicitly"
+            "`/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division"
                 .to_string(),
         ));
     }
