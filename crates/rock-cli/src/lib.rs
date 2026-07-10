@@ -420,6 +420,13 @@ pub struct Args {
     pub dump_state: bool,
     pub update_snapshots: bool,
 
+    /// For `rock frame`: record per-tick input + dt to this replay log
+    /// (docs/replay-scrub-plan.md). Mutually exclusive with `--replay`.
+    pub record: Option<String>,
+    /// For `rock frame`: drive the run from this replay log instead of live
+    /// input/wall-clock. Mutually exclusive with `--record`.
+    pub replay: Option<String>,
+
     /// For `rock completion-sweep`: keep every Nth derived probe position
     /// (1 = exhaustive). Controls corpus size vs coverage.
     pub stride: usize,
@@ -530,6 +537,10 @@ impl Args {
                 .help("Dump all global state as JSON after the last frame (for AI/human diagnostics)"))
             .arg(Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
+            .arg(Arg::new("record").long("record").value_name("FILE")
+                .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
+            .arg(Arg::new("replay").long("replay").value_name("FILE")
+                .help("For `rock frame`: drive the run from replay log FILE instead of live input/wall-clock."))
             .arg(Arg::new("stride").long("stride").default_value("10")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
@@ -581,6 +592,8 @@ impl Args {
             no_timeout: m.get_flag("no-timeout"),
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
+            record: m.get_one::<String>("record").cloned(),
+            replay: m.get_one::<String>("replay").cloned(),
             stride: *m.get_one::<usize>("stride").unwrap(),
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),

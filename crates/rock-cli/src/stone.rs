@@ -797,6 +797,8 @@ pub fn do_one_frame(
     frames: usize,
     _headless: bool,
     dump_state: bool,
+    record: Option<&str>,
+    replay: Option<&str>,
     app_args: &[String],
 ) -> Result<()> {
     use crate::common::ProcessManager;
@@ -814,6 +816,15 @@ pub fn do_one_frame(
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1");  // No visible window for frame runs
+    // Replay record/playback (docs/replay-scrub-plan.md). The game process
+    // reads these env vars in stone/engine/replay.rock, same pattern as
+    // DUMP_STATE / SIM_DT.
+    if let Some(f) = record {
+        cmd.env("STONE_RECORD", f);
+    }
+    if let Some(f) = replay {
+        cmd.env("STONE_REPLAY", f);
+    }
     if dump_state {
         // Capture stdout to parse the DUMP_STATE JSON out of it.
         cmd.env("DUMP_STATE", "1")
