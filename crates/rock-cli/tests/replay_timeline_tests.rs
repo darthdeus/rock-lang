@@ -17,21 +17,30 @@ fn workspace_root() -> &'static Path {
         .expect("workspace root")
 }
 
-/// `rock frame <game> -n N --dump-state` with extra env; returns parsed JSON.
-fn run_frame_env(game: &str, frames: u32, env: &[(&str, &str)]) -> serde_json::Value {
+/// `rock frame <game> -n N --dump-state [extra…]` with extra env; parsed JSON.
+fn run_frame_env(
+    game: &str,
+    frames: u32,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> serde_json::Value {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
     let scratch = tempfile::tempdir().expect("scratch dir");
     let scratch_path = scratch.path().to_string_lossy().into_owned();
     let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec![
+        "frame", game, "-n", &frames_s, "--dump-state", "--output", &scratch_path,
+    ];
+    args.extend_from_slice(extra);
     let out = Command::new(rock_bin)
-        .args(["frame", game, "-n", &frames_s, "--dump-state", "--output", &scratch_path])
+        .args(&args)
         .envs(env.iter().copied())
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame");
     assert!(
         out.status.success(),
-        "rock frame {game} env={env:?} exited {:?}\nstderr:\n{}",
+        "rock frame {game} {extra:?} env={env:?} exited {:?}\nstderr:\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
@@ -51,7 +60,7 @@ fn current_tick(state: &serde_json::Value) -> i64 {
 /// frames render.
 #[test]
 fn start_paused_freezes_tick_and_time() {
-    let s = run_frame_env("bitgun", 30, &[("STONE_START_PAUSED", "1")]);
+    let s = run_frame_env("bitgun", 30, &[], &[("STONE_START_PAUSED", "1")]);
     assert_eq!(current_tick(&s), 0, "paused run must not advance the tick counter");
     assert_eq!(
         s["stone"]["time"].as_f64(),
@@ -67,6 +76,7 @@ fn step_frames_advance_exactly_n_ticks() {
     let s = run_frame_env(
         "bitgun",
         30,
+        &[],
         &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "3")],
     );
     assert_eq!(
@@ -79,10 +89,61 @@ fn step_frames_advance_exactly_n_ticks() {
 /// Run-to-tick fast-forwards to the target tick, then pauses there.
 #[test]
 fn run_to_tick_stops_at_target() {
-    let s = run_frame_env("bitgun", 40, &[("STONE_RUN_TO_TICK", "10")]);
+    let s = run_frame_env("bitgun", 40, &[], &[("STONE_RUN_TO_TICK", "10")]);
     assert_eq!(
         current_tick(&s),
         10,
         "run-to-tick must advance to the target then pause"
+    );
+}
+
+/// Piece 4 of P3: fast-forward (run-to-tick) skips the render pass on the
+/// intermediate ticks, but must reach the SAME simulation state as stepping
+/// there with rendering. Record a log, then replay it two ways to tick 8 --
+/// seek (render-skipped) vs step (rendered).
+///
+/// Scope: compare the game package (`gameproject`) + the deterministic engine
+/// clock (`stone.time`/`dt`). Render OUTPUT legitimately differs -- skipping
+/// render leaves the batch pools / shadow scratch / graphics-stats counters
+/// (`RENDER_BATCHES`, `SHADOW_*`, `stats_history_*`, `screenshot_*`, `world`,
+/// `gizmo`) unbuilt, which is the whole point of skipping. Those are rebuilt
+/// the moment rendering resumes; they are not simulation state. This is the
+/// same carve-out principle as PROFILER, extended to rendered-vs-unrendered.
+#[test]
+fn seek_reaches_same_state_as_stepping() {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("seek.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().expect("rec scratch");
+
+    // Record a log to replay.
+    let rec = Command::new(rock_bin)
+        .args([
+            "frame", "bitgun", "-n", "30", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    // Seek (render-skipped) to tick 8 vs step (rendered) to tick 8.
+    let seek = run_frame_env("bitgun", 30, &["--replay", &log_s], &[("STONE_RUN_TO_TICK", "8")]);
+    let step = run_frame_env(
+        "bitgun",
+        30,
+        &["--replay", &log_s],
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "8")],
+    );
+    assert_eq!(current_tick(&seek), 8, "seek must reach tick 8");
+    assert_eq!(current_tick(&step), 8, "step must reach tick 8");
+    assert_eq!(
+        seek["gameproject"], step["gameproject"],
+        "render-skipped seek must reach identical GAME state to a rendered step"
+    );
+    assert_eq!(
+        seek["stone"]["time"], step["stone"]["time"],
+        "the deterministic clock must match too"
     );
 }
