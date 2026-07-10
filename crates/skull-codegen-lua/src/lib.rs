@@ -379,7 +379,11 @@ pub fn emit_named_framed(
     // to P2.6 -- left as by-reference upvalues here (inert; today's correct shape).
     // P3: capture-free lambdas hoist to top-level named fns (plan below); the
     // scope analysis also drives box classification. Both need the same tree, so
-    // build it once; skipped for the common lambda-free fn and under a frame.
+    // build it once. Skipped for the common lambda-free fn, and CARVED OUT under
+    // a frame: a co-fn lambda's cells are state-table fields (`c<s>.c<N>`), not
+    // plain locals, so the home/declaration split can't apply -- such a lambda
+    // stays an inline closure (correct, just not zero-alloc). P2.6's frame
+    // handling subsumes this. (Same gate that disables boxing.)
     let (boxed, plan) = if frame.is_some() || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
         (HashSet::default(), None)
     } else {
