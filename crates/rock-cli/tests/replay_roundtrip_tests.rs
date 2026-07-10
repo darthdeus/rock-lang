@@ -58,6 +58,22 @@ fn run_frame(game: &str, frames: u32, extra: &[&str]) -> serde_json::Value {
     })
 }
 
+/// Like `run_frame` but returns the raw Output without asserting success —
+/// for tests that expect the run to be rejected.
+fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Output {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
+    args.extend_from_slice(extra);
+    Command::new(rock_bin)
+        .args(&args)
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock frame")
+}
+
 /// Remove the wall-clock diagnostics carve-out (see module docs).
 fn strip_diagnostics(v: &mut serde_json::Value) {
     if let Some(stone) = v.get_mut("stone").and_then(|s| s.as_object_mut()) {
@@ -138,5 +154,57 @@ fn replay_applies_recorded_keys_and_buttons() {
         state["stone"]["mouse_down"],
         serde_json::json!([true]),
         "replay must apply a recorded held mouse button to mouse_down"
+    );
+}
+
+/// `--replay` with an unopenable log must abort the run, not silently fall
+/// back to a live (non-replayed) run whose output looks plausible.
+#[test]
+fn replay_rejects_missing_log() {
+    let out = run_frame_raw("bitgun", 5, &["--replay", "/nonexistent/no.replay"]);
+    assert!(
+        !out.status.success(),
+        "a missing replay log must abort the run, got success\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("failed to open replay log"),
+        "stderr should name the failure\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A file that isn't a replay log (bad magic) and a log with malformed tick
+/// lines must both be rejected — a truncated/corrupt log silently replaying
+/// short reads as a shorter, wrong repro.
+#[test]
+fn replay_rejects_corrupt_log() {
+    let dir = tempfile::tempdir().expect("dir");
+
+    let not_a_log = dir.path().join("not_a_log.replay");
+    std::fs::write(&not_a_log, "hello world\n").expect("write");
+    let out = run_frame_raw("bitgun", 5, &["--replay", &not_a_log.to_string_lossy()]);
+    assert!(
+        !out.status.success(),
+        "a non-replay file must abort the run\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let corrupt = dir.path().join("corrupt.replay");
+    std::fs::write(
+        &corrupt,
+        "STONE_REPLAY 1\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\nt garbage line\n",
+    )
+    .expect("write");
+    let out = run_frame_raw("bitgun", 5, &["--replay", &corrupt.to_string_lossy()]);
+    assert!(
+        !out.status.success(),
+        "malformed tick lines must abort the run\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("malformed"),
+        "stderr should report the malformed tick count\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
