@@ -64,9 +64,9 @@ fn check_add_mismatch_returns_error() {
     assert!(is_err);
 }
 
-// The per-body error messages recorded for `fn main` in a self-contained
-// source (semantic_pass returns Ok; type errors live per-body).
-fn main_body_error_messages(src: &str) -> Vec<String> {
+// The per-body errors recorded for `fn main` in a self-contained source
+// (semantic_pass returns Ok; type errors live per-body).
+fn main_body_errors(src: &str) -> Vec<CompilerError> {
     let ws = check(src).expect("semantic_pass");
     let mid = ws
         .modules
@@ -83,8 +83,46 @@ fn main_body_error_messages(src: &str) -> Vec<String> {
     let inf = ws.inference(mid).expect("user module inferred");
     inf.errors
         .get(&BodyOwner::Function(main_idx))
-        .map(|errs| errs.iter().map(|e| e.message.clone()).collect())
+        .cloned()
         .unwrap_or_default()
+}
+
+fn main_body_error_messages(src: &str) -> Vec<String> {
+    main_body_errors(src).iter().map(|e| e.message.clone()).collect()
+}
+
+// P1a: a leaf type mismatch reads "expected `X`, found `Y`", not the bare
+// jargon "Failed to unify Y and X" (docs/error-quality-plan.md).
+#[test]
+fn leaf_type_mismatch_says_expected_found() {
+    let msgs = main_body_error_messages(r#"fn main() { let a: int = "hello" }"#);
+    assert!(
+        msgs.iter().any(|m| m.contains("expected `int`, found `string`")),
+        "expected an expected/found message, got: {msgs:?}"
+    );
+}
+
+// P1b: the mismatch carries a second label at the expected type's origin (the
+// `: Foo` annotation), so the reader sees WHERE the expectation came from.
+// Works for span-carrying types (nominal/compound); builtins (`int`) lower to a
+// shared interned TyId with no per-site span -- documented gap in
+// docs/error-quality-plan.md.
+#[test]
+fn type_mismatch_labels_the_expected_type_origin() {
+    let src = "struct Foo { x: int }\nfn main() { let a: Foo = \"hello\" }";
+    let err = main_body_errors(src)
+        .into_iter()
+        .find(|e| e.message.contains("expected `Foo`"))
+        .expect("a type-mismatch error");
+    let has_origin = err.labels.iter().any(|l| {
+        let (lo, hi) = l.span.offset_range;
+        src.get(lo..hi) == Some("Foo")
+    });
+    assert!(
+        has_origin,
+        "expected a label at the `Foo` annotation; labels: {:?}",
+        err.labels.iter().map(|l| (l.span.offset_range, l.message.clone())).collect::<Vec<_>>()
+    );
 }
 
 // `/` is float division (docs/float-division-plan.md); its `float` result in
@@ -349,7 +387,7 @@ fn broken_two() -> bool { return 42 }";
 // A fn whose body doesn't satisfy the declared return type must NOT underline
 // the whole `fn { .. }` span. When the body has a tail expression, blame the
 // tail; when it ends in a statement (no value at all), say so plainly instead
-// of leaking the internal `()` type into "Failed to unify () and string".
+// of leaking the internal `()` type into "type mismatch: expected `string`, found `()`".
 
 /// The source slice a byte-offset span covers.
 fn text<'a>(src: &'a str, span: &Span) -> &'a str {

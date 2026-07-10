@@ -2815,13 +2815,14 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             unify(gamma, a.with_idx(ra), b.with_idx(rb), span)?;
         }
 
-        _ => unify_fail!(
-            gamma,
-            span,
-            "Failed to unify {} and {}",
-            gamma.workspace.render(Some(&gamma.out), a),
-            gamma.workspace.render(Some(&gamma.out), b)
-        ),
+        // `unify(actual, expected)` by convention (coerce passes
+        // `from`/`to` in that order), so `b` is the expected type and `a` the
+        // found one -- matching the nominal-mismatch arm above.
+        _ => {
+            let a_str = gamma.workspace.render(Some(&gamma.out), a);
+            let b_str = gamma.workspace.render(Some(&gamma.out), b);
+            unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+        }
     }
 
     Ok(())
@@ -4435,6 +4436,19 @@ fn check_expr(
                     err = err.with_label(span, "this `float` is used where `int` is required".to_string());
                 }
                 return Err(err);
+            }
+        }
+        // Point a secondary label at where the expected type came from (the
+        // `: T` annotation, `-> T` return, or param decl) so the reader sees
+        // WHY this slot is `T`. Adds a label; keeps coerce's own message (its
+        // specific ones, e.g. the null->`any` note, survive). Skip when the
+        // origin is unknown or coincides with the mismatch site itself
+        // (docs/error-quality-plan.md P1b).
+        if let Some(origin) = gamma.span_of(expected).or_else(|| gamma.span_of(exp_r)) {
+            if origin != span && !origin.is_empty() {
+                let exp_str = gamma.workspace.render(Some(&gamma.out), exp_r);
+                return Err(coerce_err
+                    .with_label(origin, format!("expected `{exp_str}` because of this")));
             }
         }
         return Err(coerce_err);
