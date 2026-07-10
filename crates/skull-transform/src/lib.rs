@@ -992,8 +992,9 @@ struct CoroLowered {
     params: Vec<Idx<Cell>>,
     num_states: usize,
     /// `on_killed`/`on_resume`/`on_hot_reload` hooks peeled to the constructor:
-    /// `(kind, lambda inst)`. The lambda still lives in `step`'s arenas (rendered
-    /// by the ctor via `emit_lambda`), just removed from every block's inst list.
+    /// `(kind, lambda inst)`. The lambda still lives in `step`'s arenas (its body
+    /// hoists to a top-level `<name>__on_<hook>` fn in `emit_coroutine`; the ctor
+    /// stores that fn by name), just removed from every block's inst list.
     hooks: Vec<(CoroHookKind, Idx<Inst>)>,
     /// Frame layout stamp: the ctor writes it (`__layout`), the step's entry
     /// checks it. See `layout_stamp_canon` for what it hashes.
@@ -1525,8 +1526,13 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     // ctor stores each as a plain fn-value field; zero closures per creation.
     let mut hook_luas = String::new();
     for (kind, lambda) in &lowered.hooks {
-        let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else { continue };
-        debug_assert!(params.is_empty(), "co-fn lifecycle hooks are nullary");
+        // Reject, don't fall back: the ctor unconditionally emits
+        // `__on_<hook> = <name>__on_<hook>`, so silently skipping here would
+        // leave that global undefined and the hook nil at fire time.
+        let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else {
+            panic!("co-fn hook {} of `{name}` must be an Inst::Lambda", kind.slot())
+        };
+        assert!(params.is_empty(), "co-fn lifecycle hooks are nullary (`{name}`)");
         let mut hfn = lowered.step.clone();
         hfn.entry = *entry;
         hfn.params = vec![lowered.s_cell];

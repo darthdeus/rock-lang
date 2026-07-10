@@ -287,14 +287,15 @@ pub fn emit_named_framed(
     // re-running the def on reload is a harmless no-op (no preservation guard).
     // Mutable env-record captures lowered to a box `{ v = .. }` (P2 of
     // docs/closure-env-records-plan.md). Disabled under a frame (coroutine cells
-    // are state-table fields, never boxed). Boxed lambda-params are deferred to
-    // P2.6 -- left as by-reference upvalues here (inert; today's correct shape).
-    let boxed = if frame.is_some() {
+    // are state-table fields, never boxed) and skipped entirely for the common
+    // lambda-free fn (captures need a lambda). Boxed lambda-params are deferred
+    // to P2.6 -- left as by-reference upvalues here (inert; today's correct shape).
+    let boxed = if frame.is_some() || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
         HashSet::default()
     } else {
         let tree = scope::ScopeTree::build(func);
         let own = tree.analyze(func);
-        let mut b = tree.boxed_cells(func, &own);
+        let mut b = tree.boxed_cells(&own);
         b.retain(|c| !lambda_params.contains(c));
         b
     };
@@ -377,6 +378,13 @@ fn single_assignment_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
                     multi.insert(*key_cell);
                     multi.insert(*val_cell);
                 }
+                // A dest write is invisible to the Store count; a cell it hits
+                // must never snapshot by value (raw lowering only dest-writes
+                // fresh temps, but the inliner rebinds dests onto surviving
+                // cells).
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => multi.extend(dests.iter().copied()),
                 _ => {}
             }
         }

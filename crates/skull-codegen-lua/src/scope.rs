@@ -48,18 +48,16 @@ pub struct ScopeTree {
 /// Cell ownership + per-scope captures. `owner[c]` is the lowest scope that must
 /// declare `c` (the LCA of every scope accessing it); `captures[s]` are the cells
 /// scope `s` must receive from an enclosing scope (owned strictly above `s`,
-/// accessed at or below `s`).
+/// accessed at or below `s`). `writes`/`writing_scopes` are the static write
+/// counts (`Store`, multi-return call `dests`, `MapNext` dests — the last count
+/// double: one inst re-writes per iteration) feeding [`ScopeTree::boxed_cells`].
 pub struct Ownership {
     pub owner: HashMap<Idx<Cell>, ScopeId>,
     /// Indexed by [`ScopeId`]; `captures[ROOT]` is always empty (root captures
     /// nothing).
     pub captures: Vec<HashSet<Idx<Cell>>>,
-}
-
-/// The block whose inst-list contains `iid` (a value-producing inst lives in
-/// exactly one block). `None` if the inst was DCE'd out of every block.
-fn block_of_inst(func: &MirFunc, iid: Idx<Inst>) -> Option<Idx<Block>> {
-    func.blocks.iter().find(|(_, b)| b.insts.contains(&iid)).map(|(bid, _)| bid)
+    pub writes: HashMap<Idx<Cell>, u32>,
+    pub writing_scopes: HashMap<Idx<Cell>, HashSet<ScopeId>>,
 }
 
 impl ScopeTree {
@@ -73,11 +71,21 @@ impl ScopeTree {
         }];
         // A scope per LIVE lambda -- one whose creating inst is still in a block.
         // A DCE'd `Inst::Lambda` lingers in the arena but is never emitted, so it
-        // gets no scope (and its `entry`'s blocks are unreachable anyway).
+        // gets no scope (and its `entry`'s blocks are unreachable anyway). One
+        // pass over block inst-lists finds each live lambda WITH its creating
+        // block (an inst lives in exactly one block).
+        let mut lambda_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
+        for (bid, b) in func.blocks.iter() {
+            for &iid in &b.insts {
+                if matches!(func.insts[iid], Inst::Lambda { .. }) {
+                    lambda_block.insert(iid, bid);
+                }
+            }
+        }
         let mut creating_block: Vec<Idx<Block>> = vec![func.entry()]; // root placeholder
         for (lid, inst) in func.insts.iter() {
             if let Inst::Lambda { params, entry } = inst {
-                let Some(b) = block_of_inst(func, lid) else { continue };
+                let Some(&b) = lambda_block.get(&lid) else { continue };
                 scopes.push(Scope {
                     entry: *entry,
                     region: reachable_blocks_from(func, *entry).into_iter().collect(),
@@ -139,39 +147,64 @@ impl ScopeTree {
         a
     }
 
-    /// For each cell, the scopes that touch it: a `Load`/`Store`/`MapNext` dest in
-    /// the scope's region, or a param of the scope. (Terminators reference value
-    /// insts, never cells, so inst-lists + params are complete.)
-    fn accessing_scopes(&self, func: &MirFunc) -> HashMap<Idx<Cell>, HashSet<ScopeId>> {
+    /// For each cell: the scopes that touch it (any read or write, or a param of
+    /// the scope), the static write count, and the writing scopes. Writes are
+    /// `Store`, multi-return call `dests` (`CallMulti`/`CallValueMulti`/
+    /// `CallBoundMulti` — raw lowering only dest-writes fresh temps, but the
+    /// inliner rebinds dests onto surviving cells, so post-transform MIR can
+    /// dest-write a captured cell), and `MapNext` dests (counted 2: one inst
+    /// re-writes every iteration). (Terminators reference value insts, never
+    /// cells, so inst-lists + params are complete.)
+    #[allow(clippy::type_complexity)]
+    fn accesses(
+        &self,
+        func: &MirFunc,
+    ) -> (
+        HashMap<Idx<Cell>, HashSet<ScopeId>>,
+        HashMap<Idx<Cell>, u32>,
+        HashMap<Idx<Cell>, HashSet<ScopeId>>,
+    ) {
         let mut acc: HashMap<Idx<Cell>, HashSet<ScopeId>> = HashMap::default();
+        let mut writes: HashMap<Idx<Cell>, u32> = HashMap::default();
+        let mut writing: HashMap<Idx<Cell>, HashSet<ScopeId>> = HashMap::default();
         for (sid, s) in self.scopes.iter().enumerate() {
             for &c in &s.params {
                 acc.entry(c).or_default().insert(sid);
             }
+            let mut write = |c: Idx<Cell>, n: u32, acc: &mut HashMap<Idx<Cell>, HashSet<ScopeId>>| {
+                acc.entry(c).or_default().insert(sid);
+                *writes.entry(c).or_insert(0) += n;
+                writing.entry(c).or_default().insert(sid);
+            };
             for &b in &s.region {
                 for &iid in &func.blocks[b].insts {
                     match &func.insts[iid] {
                         Inst::Load(c) => {
                             acc.entry(*c).or_default().insert(sid);
                         }
-                        Inst::Store { cell, .. } => {
-                            acc.entry(*cell).or_default().insert(sid);
-                        }
+                        Inst::Store { cell, .. } => write(*cell, 1, &mut acc),
                         Inst::MapNext { key_cell, val_cell, .. } => {
-                            acc.entry(*key_cell).or_default().insert(sid);
-                            acc.entry(*val_cell).or_default().insert(sid);
+                            write(*key_cell, 2, &mut acc);
+                            write(*val_cell, 2, &mut acc);
+                        }
+                        Inst::CallMulti { dests, .. }
+                        | Inst::CallValueMulti { dests, .. }
+                        | Inst::CallBoundMulti { dests, .. } => {
+                            for &d in dests {
+                                write(d, 1, &mut acc);
+                            }
                         }
                         _ => {}
                     }
                 }
             }
         }
-        acc
+        (acc, writes, writing)
     }
 
     /// Owner (LCA of accessors) + transitive captures for every cell.
     pub fn analyze(&self, func: &MirFunc) -> Ownership {
-        let acc = self.accessing_scopes(func);
+        let (acc, writes, writing_scopes) = self.accesses(func);
         let mut owner: HashMap<Idx<Cell>, ScopeId> = HashMap::default();
         for (c, scopes) in &acc {
             let mut it = scopes.iter().copied();
@@ -194,23 +227,28 @@ impl ScopeTree {
                 }
             }
         }
-        Ownership { owner, captures }
+        Ownership { owner, captures, writes, writing_scopes }
     }
 
     /// The set of captured cells that must be BOXED (`{ v = ... }`, by-reference)
     /// rather than captured by value. A captured cell boxes iff it can observe a
-    /// write after the capture: it has >= 2 effective stores (an explicit
-    /// `Inst::Store` count plus 1 for a param's implicit entry store) OR it is
-    /// stored in a scope other than its owner (mutation from inside a lambda).
-    /// A single-assignment captured cell (one effective store, never mutated from
-    /// a non-owner) stays by-value -- boxing it would wrongly make a per-iteration
-    /// capture see the final value.
+    /// write after the capture: it has >= 2 effective writes (the static write
+    /// count from [`Ownership::writes`] plus 1 for a param's implicit entry
+    /// store) OR it is written in a scope other than its owner (mutation from
+    /// inside a lambda). A single-assignment captured cell (one effective write,
+    /// never mutated from a non-owner) stays by-value -- boxing it would wrongly
+    /// make a per-iteration capture see the final value.
     ///
     /// Loop-binding cells (FORL slots / `MapNext` dests) are never captured (the
     /// user binding is copied to a fresh single-assignment cell, and capturing a
     /// range counter defeats FORL recognition into a goto counter), so they never
     /// reach this set.
-    pub fn boxed_cells(&self, func: &MirFunc, own: &Ownership) -> HashSet<Idx<Cell>> {
+    ///
+    /// The UNBOXED complement is not yet a validated by-value set: P2.6 (which
+    /// snapshots it into record fields) must add the plan's dominance rail --
+    /// the single write's block dominates the capturing `Inst::Lambda`'s block,
+    /// else box.
+    pub fn boxed_cells(&self, own: &Ownership) -> HashSet<Idx<Cell>> {
         let mut captured: HashSet<Idx<Cell>> = HashSet::default();
         for caps in &own.captures {
             captured.extend(caps.iter().copied());
@@ -218,28 +256,15 @@ impl ScopeTree {
         let is_param: HashSet<Idx<Cell>> =
             self.scopes.iter().flat_map(|s| s.params.iter().copied()).collect();
 
-        // Per-cell explicit store count + the set of scopes that store it.
-        let mut stores: HashMap<Idx<Cell>, u32> = HashMap::default();
-        let mut storing_scopes: HashMap<Idx<Cell>, HashSet<ScopeId>> = HashMap::default();
-        for (sid, s) in self.scopes.iter().enumerate() {
-            for &b in &s.region {
-                for &iid in &func.blocks[b].insts {
-                    if let Inst::Store { cell, .. } = &func.insts[iid] {
-                        *stores.entry(*cell).or_insert(0) += 1;
-                        storing_scopes.entry(*cell).or_default().insert(sid);
-                    }
-                }
-            }
-        }
-
         captured
             .into_iter()
             .filter(|c| {
-                let effective = stores.get(c).copied().unwrap_or(0) + is_param.contains(c) as u32;
-                let stored_non_owner = storing_scopes
+                let effective = own.writes.get(c).copied().unwrap_or(0) + is_param.contains(c) as u32;
+                let written_non_owner = own
+                    .writing_scopes
                     .get(c)
                     .is_some_and(|ss| ss.iter().any(|&s| s != own.owner[c]));
-                effective >= 2 || stored_non_owner
+                effective >= 2 || written_non_owner
             })
             .collect()
     }

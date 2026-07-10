@@ -124,7 +124,7 @@ fn mutated_capture_boxes() {
     let func = lower("fn f() -> fn() { let n = 0 return () => { n = 5 } }", "f");
     let tree = ScopeTree::build(&func);
     let own = tree.analyze(&func);
-    let boxed = tree.boxed_cells(&func, &own);
+    let boxed = tree.boxed_cells(&own);
     let lam = lambda_scope_ids(&tree)[0];
     let n = *own.captures[lam].iter().next().unwrap();
     assert!(boxed.contains(&n), "a cell mutated from the lambda must box; boxed={boxed:?}");
@@ -138,10 +138,90 @@ fn multistore_capture_boxes() {
     let func = lower("fn f() -> fn() -> int { let n = 0 let g = () => { return n } n = 5 return g }", "f");
     let tree = ScopeTree::build(&func);
     let own = tree.analyze(&func);
-    let boxed = tree.boxed_cells(&func, &own);
+    let boxed = tree.boxed_cells(&own);
     let lam = lambda_scope_ids(&tree)[0];
     let n = *own.captures[lam].iter().next().unwrap();
     assert!(boxed.contains(&n), "a multi-store captured cell must box; boxed={boxed:?}");
+}
+
+/// Rewrite `func` so the LAST `Inst::Store` of `cell` becomes a `CallMulti`
+/// dest write instead: drop that Store from its block and re-point dests[0] of
+/// the arena-latest `CallMulti` at `cell`. Raw lowering always materializes
+/// call results into fresh temps + a copy Store, so a dest-written USER cell
+/// only exists post-transform (the inliner rebinds dests) -- this builds that
+/// shape directly.
+fn rewrite_last_store_to_dest_write(func: &mut MirFunc, cell: comfy_la_arena::Idx<skull_mir::mir::Cell>) {
+    let last_store = func
+        .insts
+        .iter()
+        .filter(|(_, i)| matches!(i, Inst::Store { cell: c, .. } if *c == cell))
+        .map(|(id, _)| id)
+        .last()
+        .expect("a Store of the cell");
+    for (_, b) in func.blocks.iter_mut() {
+        b.insts.retain(|&i| i != last_store);
+    }
+    let call = func
+        .insts
+        .iter()
+        .filter(|(_, i)| matches!(i, Inst::CallMulti { .. }))
+        .map(|(id, _)| id)
+        .last()
+        .expect("a CallMulti");
+    let Inst::CallMulti { dests, .. } = &mut func.insts[call] else { unreachable!() };
+    dests[0] = cell;
+}
+
+/// A captured cell whose reassignment is a `CallMulti` DEST write (no second
+/// `Inst::Store`): write counting must see dests or the cell wrongly
+/// classifies single-assignment by-value.
+#[test]
+fn dest_written_capture_boxes() {
+    let mut func = lower(
+        "value V { a: int, b: int }\n\
+         fn g() -> V { return V { 1, 2 } }\n\
+         fn f() -> fn() -> int { let v = g() let h = () => v.a v = g() return h }",
+        "f",
+    );
+    let tree = ScopeTree::build(&func);
+    let own = tree.analyze(&func);
+    let lam = lambda_scope_ids(&tree)[0];
+    assert_eq!(own.captures[lam].len(), 1, "the lambda captures `v.a`'s scalar cell");
+    let va = *own.captures[lam].iter().next().unwrap();
+
+    rewrite_last_store_to_dest_write(&mut func, va);
+    let tree = ScopeTree::build(&func);
+    let own = tree.analyze(&func);
+    let boxed = tree.boxed_cells(&own);
+    assert!(own.captures[lam].contains(&va), "still captured (the lambda Load is untouched)");
+    assert!(boxed.contains(&va), "a dest-reassigned captured cell must box; boxed={boxed:?}");
+}
+
+/// A captured cell dest-written from INSIDE the lambda: the writing scope must
+/// be visible through dests (a non-owner write is the box trigger even at one
+/// effective store).
+#[test]
+fn dest_written_inside_lambda_boxes() {
+    let mut func = lower(
+        "value V { a: int, b: int }\n\
+         fn g() -> V { return V { 1, 2 } }\n\
+         fn f() -> fn() -> int { let v = g() let h = () => { v = g() return v.a } return h }",
+        "f",
+    );
+    let tree = ScopeTree::build(&func);
+    let own = tree.analyze(&func);
+    let lam = lambda_scope_ids(&tree)[0];
+    let va = *own.captures[lam].iter().next().expect("captured scalar cell");
+
+    // The lambda's `v = g()` is the LAST Store of va in program order (arena
+    // order tracks lowering order); rewriting it moves the write into the
+    // lambda's CallMulti dests.
+    rewrite_last_store_to_dest_write(&mut func, va);
+    let tree = ScopeTree::build(&func);
+    let own = tree.analyze(&func);
+    let boxed = tree.boxed_cells(&own);
+    assert!(own.captures[lam].contains(&va), "still captured (the lambda Load is untouched)");
+    assert!(boxed.contains(&va), "a cell dest-written from a non-owner scope must box; boxed={boxed:?}");
 }
 
 /// A single-assignment captured cell (bound once, never mutated) stays BY-VALUE
@@ -152,7 +232,7 @@ fn single_assignment_capture_does_not_box() {
     let func = lower("fn f(x: int) -> fn() -> int { return () => x }", "f");
     let tree = ScopeTree::build(&func);
     let own = tree.analyze(&func);
-    let boxed = tree.boxed_cells(&func, &own);
+    let boxed = tree.boxed_cells(&own);
     let x = func.params[0]; // a 0-store param -> effective 1 store -> by value
     assert!(!boxed.contains(&x), "a single-assignment (0-store) param capture must not box");
 }

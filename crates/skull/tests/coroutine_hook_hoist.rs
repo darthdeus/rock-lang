@@ -73,11 +73,13 @@ fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
     );
 }
 
-/// SNAPSHOT-SHAPE: two constructions of the same co fn share ONE hook fn value
-/// (a top-level fn, not a fresh per-construction closure) -- the property a
-/// deep-copy/snapshot needs. And firing still observes the right frame value
-/// (guards the premise: hoisting drops no capture). RED (today: `false`) until
-/// P1; the `105` is a regression guard passing both before and after.
+/// SNAPSHOT-SHAPE: EVERY function-typed field on a handle is shared between two
+/// constructions (a top-level fn value, not a fresh per-construction closure)
+/// -- the property a deep-copy/snapshot needs, asserted over the whole table so
+/// a regression adding a per-construction closure to ANY field (a wrapped
+/// defer, a future channel helper) goes red, not just the hook fields. And
+/// firing still observes the right frame value (guards the premise: hoisting
+/// drops no capture).
 #[test]
 fn hook_fn_shared_across_constructions_and_still_fires() {
     let lua = emit_module(ON_KILLED);
@@ -85,13 +87,18 @@ fn hook_fn_shared_across_constructions_and_still_fires() {
         local h1 = worker(5)\n\
         local h2 = worker(6)\n\
         worker__resume(h1, nil)\n\
-        print(h1.__on_killed == h2.__on_killed)\n\
+        local fresh = {}\n\
+        for k, v in pairs(h1) do\n\
+        \x20 if type(v) == \"function\" and not rawequal(v, h2[k]) then fresh[#fresh + 1] = k end\n\
+        end\n\
+        table.sort(fresh)\n\
+        print(#fresh == 0 and \"shared\" or table.concat(fresh, \",\"))\n\
         __rock_coroutine_kill(h1)\n\
         print(LOG)\n";
     let out = run_luajit(&format!("{lua}{driver}"), "shared");
     assert_eq!(
-        out, "true\n105",
-        "two constructions must share the hoisted hook fn (true) and firing must \
-         still read the frame (105); got:\n{out}"
+        out, "shared\n105",
+        "every fn-typed handle field must be shared across constructions and \
+         firing must still read the frame (105); got:\n{out}"
     );
 }
