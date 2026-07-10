@@ -147,3 +147,48 @@ fn seek_reaches_same_state_as_stepping() {
         "the deterministic clock must match too"
     );
 }
+
+/// Piece 5 of P3: the auto-record "save repro" action snapshots the live
+/// from-boot log to a permanent file that replays cleanly. (Record-from-boot
+/// is the always-on ring buffer that ships now; a bounded "last N seconds"
+/// window needs P4 keyframes -- see stone/engine/replay.rock.) Records while
+/// saving a repro at frame 10, then replays the saved repro.
+#[test]
+fn save_repro_writes_a_replayable_from_boot_log() {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("live.replay");
+    let repro = dir.path().join("saved.replay");
+    let scratch = tempfile::tempdir().expect("scratch");
+
+    let rec = Command::new(rock_bin)
+        .args([
+            "frame", "bitgun", "-n", "30", "--record", &log.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("STONE_SAVE_REPRO_AT_FRAME", "10")
+        .env("STONE_SAVE_REPRO_PATH", repro.to_string_lossy().as_ref())
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record+save");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    let text = std::fs::read_to_string(&repro).expect("saved repro must exist");
+    assert!(text.starts_with("STONE_REPLAY"), "repro must have the header\n{text}");
+    let ticks = text.lines().filter(|l| l.starts_with("t ")).count();
+    assert!(ticks >= 5, "repro must contain the from-boot ticks; got {ticks}");
+
+    let rep = Command::new(rock_bin)
+        .args([
+            "frame", "bitgun", "-n", "1000", "--replay", &repro.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn replay");
+    assert!(
+        rep.status.success(),
+        "the saved repro must replay cleanly\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
+}
