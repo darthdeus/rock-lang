@@ -255,6 +255,65 @@ pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) 
     emit_named_framed(ws, ctx, name, func, None)
 }
 
+/// P3 (docs/closure-env-records-plan.md): the plan for hoisting capture-free
+/// lambdas. A lambda whose scope captures nothing (`Ownership::captures[scope]`
+/// is empty) emits as `function <name>__lambda<k>(<params>) ... end` and is
+/// referenced by that global name at its creation site — a raw Lua function
+/// value (no record, no `__call`). A capturing lambda is absent here and still
+/// renders inline.
+struct HoistPlan {
+    /// Capture-free `Inst::Lambda` -> its hoisted global name.
+    hoisted_name: HashMap<Idx<Inst>, String>,
+    /// Cell -> the scope whose Lua function declares it: `ROOT` (the enclosing
+    /// fn) or a hoisted lambda scope. A cell owned by an inline (capturing)
+    /// lambda maps to the hoisted/root function that owns that inline closure.
+    home: HashMap<Idx<Cell>, scope::ScopeId>,
+    /// (`Inst::Lambda`, scope) per hoisted lambda in inst-arena order — the
+    /// append pass renders each body as a sibling top-level fn.
+    order: Vec<(Idx<Inst>, scope::ScopeId)>,
+}
+
+/// The scope whose Lua function declares cells owned by `s`: walk up through
+/// inline (non-hoisted) lambda parents to the nearest `ROOT` or hoisted scope.
+fn home_scope(tree: &scope::ScopeTree, hoisted: &HashSet<scope::ScopeId>, mut s: scope::ScopeId) -> scope::ScopeId {
+    loop {
+        if s == scope::ROOT || hoisted.contains(&s) {
+            return s;
+        }
+        s = tree.scopes[s].parent.expect("a non-root scope has a parent");
+    }
+}
+
+/// Build the [`HoistPlan`]: `k` is the `Inst::Lambda`'s inst-arena index order
+/// (every lambda consumes a `k`, so a DCE'd one doesn't shift the live ones).
+fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Ownership, name: &str) -> HoistPlan {
+    let mut lambda_scope: HashMap<Idx<Inst>, scope::ScopeId> = HashMap::default();
+    for (sid, s) in tree.scopes.iter().enumerate() {
+        if let Some(lid) = s.lambda {
+            lambda_scope.insert(lid, sid);
+        }
+    }
+    let mut hoisted_name: HashMap<Idx<Inst>, String> = HashMap::default();
+    let mut order = Vec::new();
+    let mut k = 0usize;
+    for (lid, inst) in func.insts.iter() {
+        let Inst::Lambda { .. } = inst else { continue };
+        let this_k = k;
+        k += 1;
+        let Some(&sid) = lambda_scope.get(&lid) else { continue }; // DCE'd lambda: no scope
+        if own.captures[sid].is_empty() {
+            hoisted_name.insert(lid, format!("{name}__lambda{this_k}"));
+            order.push((lid, sid));
+        }
+    }
+    let hoisted_scopes: HashSet<scope::ScopeId> = order.iter().map(|(_, s)| *s).collect();
+    let mut home: HashMap<Idx<Cell>, scope::ScopeId> = HashMap::default();
+    for (&c, &owner) in &own.owner {
+        home.insert(c, home_scope(tree, &hoisted_scopes, owner));
+    }
+    HoistPlan { hoisted_name, home, order }
+}
+
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
 /// frame cells as fields of the state table `s` (the first param cell). A frame
 /// cell renders `<s>.c<raw>` instead of a bare local and is NOT declared.
@@ -290,21 +349,39 @@ pub fn emit_named_framed(
     // are state-table fields, never boxed) and skipped entirely for the common
     // lambda-free fn (captures need a lambda). Boxed lambda-params are deferred
     // to P2.6 -- left as by-reference upvalues here (inert; today's correct shape).
-    let boxed = if frame.is_some() || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
-        HashSet::default()
+    // P3: capture-free lambdas hoist to top-level named fns (plan below); the
+    // scope analysis also drives box classification. Both need the same tree, so
+    // build it once; skipped for the common lambda-free fn and under a frame.
+    let (boxed, plan) = if frame.is_some() || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
+        (HashSet::default(), None)
     } else {
         let tree = scope::ScopeTree::build(func);
         let own = tree.analyze(func);
         let mut b = tree.boxed_cells(&own);
         b.retain(|c| !lambda_params.contains(c));
-        b
+        let plan = build_hoist_plan(func, &tree, &own, name);
+        (b, Some(plan))
     };
+    let plan_ref = plan.as_ref();
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(func, name);
     let mut out = String::new();
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, func, func.entry(), &func.params, &lambda_params, true, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
+    render_scope(ws, ctx, func, func.entry(), &func.params, &lambda_params, true, scope::ROOT, plan_ref, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
     out.push('\n');
+    // Append each capture-free lambda body as a sibling top-level fn in THIS
+    // chunk (the const-hoist precedent -- an overlay body-edit carries them).
+    // Referenced by global name at the creation site, so forward refs resolve at
+    // call time. Each renders for its OWN home scope: it declares its own cells,
+    // the enclosing fn no longer does.
+    if let Some(plan) = plan_ref {
+        for &(lid, sid) in &plan.order {
+            let Inst::Lambda { params, entry } = &func.insts[lid] else { continue };
+            let _ = write!(out, "function {}", plan.hoisted_name[&lid]);
+            render_scope(ws, ctx, func, *entry, params, &lambda_params, true, sid, plan_ref, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
+            out.push('\n');
+        }
+    }
     out
 }
 
@@ -958,6 +1035,8 @@ fn render_scope(
     params: &[Idx<Cell>],
     lambda_params: &HashSet<Idx<Cell>>,
     is_top: bool,
+    home: scope::ScopeId,
+    plan: Option<&HoistPlan>,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
     boxed: &HashSet<Idx<Cell>>,
@@ -1008,6 +1087,12 @@ fn render_scope(
         out.push('r');
         push_uint(out, c);
     }
+    // A cell is declared in the function whose `home` scope owns it (P3): the
+    // enclosing fn (ROOT) or a hoisted lambda. With no plan (lambda-free / frame),
+    // every cell homes to ROOT so this is a no-op and the top fn declares all.
+    let declares_here = |cid: Idx<Cell>| -> bool {
+        plan.map_or(true, |p| p.home.get(&cid).copied().unwrap_or(scope::ROOT) == home)
+    };
     if is_top {
         let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
         let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
@@ -1022,7 +1107,7 @@ fn render_scope(
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
             // Boxed cells get a separate `= {}` init line below, not the comma list.
-            if param_cells.contains(&cid) || lambda_params.contains(&cid) || is_frame(&cid) || boxed.contains(&cid) {
+            if param_cells.contains(&cid) || lambda_params.contains(&cid) || is_frame(&cid) || boxed.contains(&cid) || !declares_here(cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
@@ -1058,7 +1143,7 @@ fn render_scope(
     if is_top {
         let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
         for (cid, _) in func.cells.iter() {
-            if !boxed.contains(&cid) {
+            if !boxed.contains(&cid) || !declares_here(cid) {
                 continue;
             }
             out.push_str("  local ");
@@ -1089,6 +1174,8 @@ fn render_scope(
         hoist_names,
         snap_cells: &snap_cells,
         boxed,
+        plan,
+        home,
     };
     for &bb in &rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -1155,6 +1242,13 @@ struct Emitter<'a> {
     /// Cells lowered to a box `{ v = ... }` (mutable env-record captures); every
     /// read/write of one renders through `.v`. Empty under a frame.
     boxed: &'a HashSet<Idx<Cell>>,
+    /// P3 hoist plan: a capture-free `Inst::Lambda` in `hoisted_name` renders as
+    /// a bare global-name reference instead of an inline closure. `None` for
+    /// lambda-free fns and frames.
+    plan: Option<&'a HoistPlan>,
+    /// The scope this function renders for (ROOT or a hoisted lambda) — threaded
+    /// into inline-lambda renders (unused there: they declare nothing).
+    home: scope::ScopeId,
 }
 
 impl Emitter<'_> {
@@ -1248,7 +1342,7 @@ impl Emitter<'_> {
         let lname = format!("__nbslot{}", raw(slot));
         out.push_str("  do\n");
         let _ = write!(out, "    local {lname} = ");
-        self.write_value(out, &self.func.insts[slot]);
+        self.write_value(out, slot, &self.func.insts[slot]);
         out.push('\n');
         for &fi in &following[..n] {
             if let Inst::StoreField { field, value, .. } = &self.func.insts[fi] {
@@ -1323,7 +1417,7 @@ impl Emitter<'_> {
             out.push_str("  ");
             write_vname(out, &self.colors, id);
             out.push_str(" = ");
-            self.write_value(out, inst);
+            self.write_value(out, id, inst);
             out.push('\n');
         } else {
             self.write_effect(out, inst);
@@ -1402,7 +1496,7 @@ impl Emitter<'_> {
             // bare negative literal under unary `-` would form `--` — a Lua
             // comment — without the wrap.)
             out.push('(');
-            self.write_value(out, &self.func.insts[id]);
+            self.write_value(out, id, &self.func.insts[id]);
             out.push(')');
         } else {
             write_vname(out, &self.colors, id);
@@ -1433,7 +1527,7 @@ impl Emitter<'_> {
     }
 
     /// The RHS expression for a value-producing instruction.
-    fn write_value(&self, out: &mut String, inst: &Inst) {
+    fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => out.push_str(g.as_str()),
@@ -1535,6 +1629,13 @@ impl Emitter<'_> {
                 out.push(')');
             }
             Inst::Lambda { params, entry } => {
+                // P3: a capture-free lambda is a hoisted top-level fn -- reference
+                // it by global name (a raw Lua function value, zero alloc). Its
+                // body is appended as a sibling def by `emit_named_framed`.
+                if let Some(name) = self.plan.and_then(|p| p.hoisted_name.get(&id)) {
+                    out.push_str(name);
+                    return;
+                }
                 // Inline `function(<params>) <body> end`. The body is rendered as
                 // its own scope (independent value coloring); captured cells are
                 // upvalues declared in the enclosing function.
@@ -1553,11 +1654,11 @@ impl Emitter<'_> {
                 snap.sort_by_key(|c| raw(*c));
                 if snap.is_empty() {
                     out.push_str("function");
-                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
+                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.home, self.plan, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
                 } else {
                     let argl = snap.iter().map(|c| cell_local(self.cell_colors, *c)).collect::<Vec<_>>().join(", ");
                     let _ = write!(out, "(function({argl}) return function");
-                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
+                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.home, self.plan, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
                     let _ = write!(out, " end)({argl})");
                 }
             }
