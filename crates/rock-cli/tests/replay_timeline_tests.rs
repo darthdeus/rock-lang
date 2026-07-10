@@ -345,6 +345,32 @@ fn cursor_ghost_marks_recorded_pointer_when_frozen() {
     );
 }
 
+/// P3.5 item 5 (regression): the ghost must not draw before any tick has
+/// applied a recorded pointer -- a start-paused windowed replay is frozen at
+/// tick 0 with an unset stash, and the old `or 0.0` fallback pinned a crosshair
+/// at top-left. With the fix the ghost skips entirely (0 draws).
+#[test]
+fn cursor_ghost_skips_before_first_tick() {
+    let (_dir, log) = record_short_log("bitgun", 20);
+    let s = run_frame_env(
+        "bitgun",
+        20,
+        &["--replay", &log],
+        &[
+            ("STONE_REPLAY_WINDOW", "1"),
+            ("STONE_HEADLESS", "1"),
+            ("STONE_START_PAUSED", "1"),
+        ],
+    );
+    let draws = s["stone"]["REPLAY_GHOST_DRAWS"]
+        .as_i64()
+        .expect("REPLAY_GHOST_DRAWS present in dump");
+    assert_eq!(
+        draws, 0,
+        "ghost must not draw before the first tick applies a recorded pointer (drew {draws})"
+    );
+}
+
 /// Record a short log for the keyboard-shortcut tests. Returns the temp dir
 /// (keeps the file alive) + the log path.
 fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
