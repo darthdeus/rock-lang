@@ -78,6 +78,12 @@ pub enum CliCommand {
     Fmt,
     Frame,
     Stone,
+    /// `rock replay <game> <file>` — windowed replay playback of a recorded
+    /// log (docs/replay-scrub-plan.md P3.5). Unlike `rock frame --replay`
+    /// (batch headless, exits at log end), this opens a window, plays the log,
+    /// and freezes at the last tick with the timeline bar live so the developer
+    /// can scrub. Do NOT overload `rock frame` -- its contract is batch headless.
+    Replay,
     /// `rock stone-test <root>` — long-lived headless watch process driven
     /// over JSON-line stdio. Test infrastructure for incremental
     /// compilation / hot-reload assertions. See
@@ -220,7 +226,7 @@ impl clap::ValueEnum for CliCommand {
         &[
             Self::Compile, Self::CompileSingle, Self::Test,
             Self::TestCompile, Self::Run, Self::Watch, Self::Fmt, Self::Frame,
-            Self::Stone, Self::Perf,
+            Self::Stone, Self::Replay, Self::Perf,
             Self::Sim,
             Self::Completions,
             Self::StoneTest,
@@ -263,6 +269,7 @@ impl CliCommand {
             Self::Fmt => "fmt",
             Self::Frame => "frame",
             Self::Stone => "stone",
+            Self::Replay => "replay",
             Self::StoneTest => "stone-test",
             Self::Perf => "perf",
             Self::Sim => "sim",
@@ -349,7 +356,7 @@ impl Backend {
                 Test, Compile, CompileSingle, TestCompile, Run, Watch,
             ],
             Self::Skull => &[
-                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim,
+                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, Perf, Sim,
             ],
         }
     }

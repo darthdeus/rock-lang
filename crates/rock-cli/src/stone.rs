@@ -918,6 +918,40 @@ pub fn do_one_frame(
     Ok(())
 }
 
+/// `rock replay <game> <file>` — windowed replay playback
+/// (docs/replay-scrub-plan.md P3.5). Compiles the game and runs it in a real
+/// window (NOT headless, NOT frame-capped), driven from the replay log; the
+/// runner freezes at the last recorded tick and keeps the window open with the
+/// timeline bar live (STONE_REPLAY_WINDOW=1). Interactive: waits until the
+/// developer closes the window. Unlike `rock frame --replay`, there is no
+/// screenshot, no FRAME_COUNT, and no wall-clock watchdog.
+pub fn do_replay_window(
+    backend: crate::Backend,
+    game: &str,
+    output: String,
+    replay_file: &str,
+    app_args: &[String],
+) -> Result<()> {
+    let lua_file = compile_game_for_run(backend, game, &output)?;
+
+    info!("Replaying {} in a window (close the window to exit)", replay_file);
+
+    let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
+    cmd.env("STONE_REPLAY", replay_file)
+        .env("STONE_REPLAY_WINDOW", "1")
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    // Interactive: no timeout watchdog. Block until the game process exits
+    // (window closed / esc / quit). A test can bound the run by setting
+    // FRAME_COUNT (and STONE_HEADLESS) in the child env -- both are inherited.
+    let status = cmd.spawn()?.wait()?;
+    if !status.success() {
+        anyhow::bail!("replay exited with code: {:?}", status.code());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_compiler_source;
