@@ -885,8 +885,17 @@ pub fn do_perf(
 
     // Give the game enough headroom to finish + dump summary. Base of
     // 30s covers the default frame-count run; extend by seconds limit.
-    let wall_budget = seconds.unwrap_or(0.0).max(15.0) + 15.0;
-    let timeout_duration = Duration::from_secs_f64(wall_budget.max(30.0));
+    // ROCK_FRAME_TIMEOUT_SECS overrides it (same escape hatch as `rock frame`)
+    // for genuinely long benches -- and keeps frame_exit_result's message honest.
+    let timeout_duration = if let Some(secs) = std::env::var("ROCK_FRAME_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        Duration::from_secs(secs)
+    } else {
+        let wall_budget = seconds.unwrap_or(0.0).max(15.0) + 15.0;
+        Duration::from_secs_f64(wall_budget.max(30.0))
+    };
 
     let mut child = cmd.spawn()?;
     let process_result = ProcessManager::wait_with_timeout(&mut child, timeout_duration)?;
@@ -924,12 +933,15 @@ pub fn do_perf(
         }
     }
 
-    if process_result.timed_out {
-        warn!("Process timed out after {}s", timeout_duration.as_secs());
-    } else if !process_result.output.status.success() {
-        log::error!(target: "STONE",
-            "stone exited with code: {:?}", process_result.output.status.code());
-    }
+    // A perf run that timed out or the child failed did NOT produce a valid
+    // summary -- error out (nonzero exit) instead of the old warn-and-Ok(0),
+    // which let a corrupt/partial benchmark JSON sail past the gate recipes
+    // (justfile render-bench). Same classifier as `rock frame`.
+    frame_exit_result(
+        process_result.timed_out,
+        &process_result.output.status,
+        timeout_duration.as_secs(),
+    )?;
 
     Ok(())
 }
