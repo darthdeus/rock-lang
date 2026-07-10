@@ -347,30 +347,6 @@ fn collect_const_hoists(
     (hoist, names, defs)
 }
 
-/// Render a single closure (an `Inst::Lambda`'s `entry`/`params`) as
-/// `function(<params>) <body> end` in the given frame context. The coroutine
-/// constructor uses this to render relocated `on_killed`/`on_resume` hook
-/// lambdas inline (`c<s>.__on_killed = function() .. end`), so a hook body that
-/// reads a frame cell renders it as `c<s>.c<field>` — matching the step's
-/// `FrameCtx` provided the ctor names its state table `c<raw(s_cell)>`.
-pub fn emit_lambda(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
-    func: &MirFunc,
-    entry: Idx<Block>,
-    params: &[Idx<Cell>],
-    frame: Option<&FrameCtx>,
-) -> String {
-    let lambda_params = collect_lambda_params(func);
-    let cell_colors = if frame.is_some() { vec![u32::MAX; func.cells.len()] } else { color_cells_timed(func) };
-    let mut out = String::from("function");
-    // A standalone lambda emit owns no module-scope const defs (the enclosing
-    // top-level function emits them over the whole arena); render with no hoisting.
-    let no_hoist = HashMap::default();
-    render_scope(ws, ctx, func, entry, params, &lambda_params, false, frame, &cell_colors, &no_hoist, &[], &mut out);
-    out
-}
-
 /// Cells assigned by exactly one static `Store` and never by a loop `MapNext` —
 /// an immutable binding. A closure may snapshot such a cell BY VALUE at creation
 /// (the IIFE in the `Lambda` arm) so a closure made INSIDE a loop captures THIS

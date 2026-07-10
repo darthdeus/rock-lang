@@ -1443,7 +1443,7 @@ inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
     c.__state = -1
     if c.__inner then __rock_coroutine_kill(c.__inner) end
     __rock_coroutine_run_defers(c)
-    if c.__on_killed then c.__on_killed() end
+    if c.__on_killed then c.__on_killed(c) end
 """
 
 inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
@@ -1456,7 +1456,7 @@ inline(lua) fn kill<Y, R, N>(c: Coroutine<Y, R, N>) = """
 // handle — dead or hook-less coroutines no-op.
 inline(lua) fn fire_hot_reload<Y, R, N>(c: Coroutine<Y, R, N>) = """
     if c.__state >= 0 and c.__on_hot_reload then
-        c.__on_hot_reload()
+        c.__on_hot_reload(c)
     end
 """
 

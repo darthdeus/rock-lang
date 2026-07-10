@@ -1287,7 +1287,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     // kill before the first resume still fires (the body would otherwise run the
     // registration only on first resume). Both the `CoroHook` effect and its
     // lambda `Inst` are removed from every block's inst list; the lambda stays in
-    // the arena (the ctor renders it via `emit_lambda`).
+    // the arena (its body is hoisted to a top-level `<name>__on_<hook>` fn).
     let mut hooks: Vec<(CoroHookKind, Idx<Inst>)> = Vec::new();
     let mut hook_lambdas: HashSet<Idx<Inst>> = HashSet::default();
     for &bid in &orig_blocks {
@@ -1518,9 +1518,24 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         let dname = format!("{name}__defer{k}");
         defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&frame)));
     }
-    let ctor = emit_constructor(ws, ctx, &name, &step_name, &lowered, &frame, channel.as_ref());
+    // Lifecycle-hook lambdas (`on_killed`/`on_resume`/`on_hot_reload`) hoist to
+    // per-co-fn top-level fns taking the frame `s` -- SAME shape as a defer (a
+    // hook's only upvalue is the frame table, so `emit_named_framed` with
+    // `params = [s_cell]` reaches every captured cell as `c<s>.c<field>`). The
+    // ctor stores each as a plain fn-value field; zero closures per creation.
+    let mut hook_luas = String::new();
+    for (kind, lambda) in &lowered.hooks {
+        let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else { continue };
+        debug_assert!(params.is_empty(), "co-fn lifecycle hooks are nullary");
+        let mut hfn = lowered.step.clone();
+        hfn.entry = *entry;
+        hfn.params = vec![lowered.s_cell];
+        let hname = format!("{name}{}", kind.slot());
+        hook_luas.push_str(&emit_named_framed(ws, ctx, &hname, &hfn, Some(&frame)));
+    }
+    let ctor = emit_constructor(&name, &step_name, &lowered, channel.as_ref());
     let _ = lowered.num_states;
-    format!("{step_lua}{defer_luas}{ctor}")
+    format!("{step_lua}{defer_luas}{hook_luas}{ctor}")
 }
 
 /// The constructor: build the state table (seed param fields + relocated
@@ -1533,12 +1548,9 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
 /// referencing a frame cell renders `c<s>.c<field>` — the same name the
 /// step's `FrameCtx` produces.
 fn emit_constructor(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
     name: &str,
     step_name: &str,
     lowered: &CoroLowered,
-    frame: &FrameCtx,
     channel: Option<&skull_mir::lower::YieldChannel>,
 ) -> String {
     use std::fmt::Write as _;
@@ -1561,15 +1573,13 @@ fn emit_constructor(
         init.push(format!("__defers = {{ {} }}", list.join(", ")));
     }
 
-    // Hook prologue: `c<s>.__on_killed = function() .. end`. The lambda lives in
-    // the step's arenas (peeled from the body); render it inline with the frame.
-    let mut prologue = String::new();
-    for (kind, lambda) in &lowered.hooks {
+    // Lifecycle hooks are fn-value fields pointing at the per-co-fn top-level
+    // hoisted bodies (`__on_killed = <name>__on_killed`, emitted by
+    // `emit_coroutine`) -- a plain reference, no per-construction closure. The
+    // `if s.__on_killed then s.__on_killed(s) end` call sites pass the frame.
+    for (kind, _) in &lowered.hooks {
         let field = kind.slot();
-        if let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] {
-            let lam = skull_codegen_lua::emit_lambda(ws, ctx, &lowered.step, *entry, params, Some(frame));
-            let _ = writeln!(prologue, "  {svar}.{field} = {lam}");
-        }
+        init.push(format!("{field} = {name}{field}"));
     }
 
     // The pure readers (result/status/last_error/kill/fire_hot_reload) are NOT
@@ -1609,9 +1619,9 @@ fn emit_constructor(
         return format!(
             "function {name}__advance(s, arg)\n\
              \x20 if s.{STATE} < 0 then return true end\n\
-             \x20 if s.__on_resume then s.__on_resume() end\n\
+             \x20 if s.__on_resume then s.__on_resume(s) end\n\
              \x20 local ok, err = pcall({step_name}, s, arg)\n\
-             \x20 if not ok then s.{STATE} = -2; s.__error = err; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed() end; return true end\n\
+             \x20 if not ok then s.{STATE} = -2; s.__error = err; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed(s) end; return true end\n\
              \x20 return s.{STATE} < 0\n\
              end\n\
              function {name}__resume(s, arg)\n\
@@ -1620,7 +1630,6 @@ fn emit_constructor(
              end\n\
              function {name}({paramlist})\n\
              \x20 local {svar} = {{ {fields}, __advance = {name}__advance, __resume = {name}__resume }}\n\
-             {prologue}\
              \x20 return {svar}\n\
              end\n",
             paramlist = param_fields.join(", "),
@@ -1631,14 +1640,13 @@ fn emit_constructor(
     format!(
         "function {name}__resume(s, arg)\n\
          \x20 if s.{STATE} < 0 then return nil end\n\
-         \x20 if s.__on_resume then s.__on_resume() end\n\
+         \x20 if s.__on_resume then s.__on_resume(s) end\n\
          \x20 local ok, val = pcall({step_name}, s, arg)\n\
-         \x20 if not ok then s.{STATE} = -2; s.__error = val; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed() end; return nil end\n\
+         \x20 if not ok then s.{STATE} = -2; s.__error = val; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed(s) end; return nil end\n\
          \x20 return val\n\
          end\n\
          function {name}({paramlist})\n\
          \x20 local {svar} = {{ {fields}, __resume = {name}__resume }}\n\
-         {prologue}\
          \x20 return {svar}\n\
          end\n",
         paramlist = param_fields.join(", "),
