@@ -1734,6 +1734,24 @@ pub fn infer_expr_used(
                     }
                 }
 
+                // Fn values carry no meaningful identity: a capture-free lambda
+                // is ONE shared hoisted fn, a capturing lambda a per-creation
+                // env record (docs/closure-env-records-plan.md), so `==` would
+                // compare representation artifacts. Null checks (`f != null`)
+                // are refinement, not identity -- exempt via `non_null_ty`
+                // being the literal-null case above.
+                if non_null_ty.is_none() {
+                    for ty in [lhs_ty, rhs_ty] {
+                        let peeled = peel_nullable(gamma, ty, expr_span);
+                        if matches!(*gamma.get(peeled), TypeExpr::Function { .. }) {
+                            comp_error!(
+                                expr_span,
+                                "Cannot compare fn values: fn identity is not meaningful (a capture-free lambda is one shared fn; a capturing lambda is a fresh record per creation). Compare via `!= null` or restructure around explicit keys"
+                            );
+                        }
+                    }
+                }
+
                 join(gamma, lhs_ty, rhs_ty, expr_span)?;
                 gamma.workspace.builtins.bool()
             }
