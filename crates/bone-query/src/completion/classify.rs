@@ -581,6 +581,19 @@ impl CompletionCx {
             }?;
             return ExpectedArg::for_slot(ws, mid, inf, offset, slot);
         }
+        // A bare-identifier assign target (`dest = |`) is typed `()` in place
+        // position, so the byte anchor yields no type; resolve the slot from the
+        // binding by name. Guarded by the same precedence `slot_anchor` uses --
+        // a nested `==` RHS is the more specific slot and wins.
+        if let Some(cx) = self.ast.as_ref() {
+            if cx.comparison_lhs().is_none() {
+                if let Some(name) = cx.assign_target_ident() {
+                    if let Some(ty) = crate::query::binding_ty_by_name(ws, mid, inf, offset, &name) {
+                        return ExpectedArg::for_slot(ws, mid, inf, offset, ty);
+                    }
+                }
+            }
+        }
         self.anchor.and_then(|a| expected_for_anchor(ws, mid, inf, offset, a))
     }
 }

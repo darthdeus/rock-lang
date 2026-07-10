@@ -377,7 +377,14 @@ pub fn hover_at(
                             }
                             _ => {}
                         }
-                        let ty = *bi.expr_types.get(e)?;
+                        let mut ty = *bi.expr_types.get(e)?;
+                        // A variable in place position (an assign target) is
+                        // typed `()`; show its binding's real type instead.
+                        if ty_is_unit(ws, Some(bi), ty) {
+                            if let Some(bt) = var_binding_ty_at(ws, mid, inf, offset) {
+                                ty = bt;
+                            }
+                        }
                         return Some((format!("Type: {}", render_hover_type(ws, Some(bi), ty)), span));
                     }
                     NodeRef::Binding(b) => {
@@ -2793,6 +2800,70 @@ fn deref_ty<'a>(
         TyId::Static(m, idx) => Some(&ws.modules.get(m.index())?.ty_arena[idx]),
         TyId::Local(idx) => Some(&bi?.ty_arena[idx]),
     }
+}
+
+/// True if `ty` is the unit type `()`. A variable in place position (an assign
+/// target) is typed `()` by inference, so the completion type-anchor and hover
+/// recover the real type from the binding when they see it -- see
+/// `var_binding_ty_at`.
+pub(crate) fn ty_is_unit(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> bool {
+    matches!(deref_ty(ws, bi, ty), Some(hir::TypeExpr::Builtin(hir::BuiltinTy::Unit)))
+}
+
+/// The declared type of a place variable at `offset`, read from its binding. A
+/// Var in place position (an assign target `x = ..`) is typed `()` by inference
+/// and isn't separately indexed -- the node at the offset is the enclosing
+/// `Assign`, so we peel its target. Also handles a bare `Var` node directly.
+/// `None` when `offset` isn't on a variable place.
+pub(crate) fn var_binding_ty_at(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+) -> Option<TyId> {
+    let module = ws.modules.get(mid.index())?;
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let bi = inf.per_fn.get(&owner)?;
+    for iv in body.node_index().find(offset, offset + 1) {
+        let NodeRef::Expr(e) = iv.val else { continue };
+        let target = match &body.expr_arena[e] {
+            hir::Expr::Var(_) => e,
+            hir::Expr::Assign { target, .. } | hir::Expr::CompoundAssign { target, .. } => {
+                // Only the target place, not the value -- the cursor's anchor is
+                // in the LHS, but the whole Assign covers both.
+                let ts = body.expr_spans.get(*target)?.offset_range;
+                if !(ts.0 <= offset && offset < ts.1) {
+                    continue;
+                }
+                *target
+            }
+            _ => continue,
+        };
+        if let hir::Expr::Var(b) = &body.expr_arena[target] {
+            return bi.binding_types.get(*b).copied();
+        }
+    }
+    None
+}
+
+/// The declared type of the in-scope binding named `name` at `offset`. Resolves
+/// by NAME (not node position), so it works even when the surrounding statement
+/// doesn't type-check -- e.g. an assign target `dest = |` whose RHS is being
+/// typed, where `dest`'s place expr yields no typed node.
+pub(crate) fn binding_ty_by_name(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+    name: &str,
+) -> Option<TyId> {
+    let module = ws.modules.get(mid.index())?;
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let bi = inf.per_fn.get(&owner)?;
+    let b = find_binding_by_name(body, name, offset)?;
+    bi.binding_types.get(b).copied()
 }
 
 /// The element `TyId` of a `[T]` (bone's `Array` ctor), in the same arena as
