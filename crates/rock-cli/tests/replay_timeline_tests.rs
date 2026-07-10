@@ -56,6 +56,39 @@ fn current_tick(state: &serde_json::Value) -> i64 {
     state["stone"]["current_tick"].as_i64().expect("current_tick")
 }
 
+/// The engine-owned simulation-state predicate's OUTPUT: record `game` with a
+/// per-tick checkpoint so every `c <tick> <name> <hash>` line names exactly the
+/// globals the engine hashes as simulation state, and collect that name set.
+/// Consuming this (rather than duplicating the exclusion list in Rust) is the
+/// P3.5 unification -- the Lua `__replay_is_sim_state` predicate is the single
+/// source of truth.
+fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String> {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("simnames.replay");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let out = Command::new(rock_bin)
+        .args([
+            "frame", game, "-n", &frames.to_string(),
+            "--record", &log.to_string_lossy(),
+            "--checkpoint-interval", "1",
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let names: std::collections::HashSet<String> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("c "))
+        .filter_map(|rest| rest.split(' ').nth(1))
+        .map(|s| s.to_string())
+        .collect();
+    assert!(!names.is_empty(), "record must emit checkpoint lines naming sim-state globals");
+    names
+}
+
 /// A run started paused advances no game tick and no game time, however many
 /// frames render.
 #[test]
@@ -99,16 +132,17 @@ fn run_to_tick_stops_at_target() {
 
 /// Piece 4 of P3: fast-forward (run-to-tick) skips the render pass on the
 /// intermediate ticks, but must reach the SAME simulation state as stepping
-/// there with rendering. Record a log, then replay it two ways to tick 8 --
+/// there with rendering. Record a log, then replay it two ways to tick 25 --
 /// seek (render-skipped) vs step (rendered).
 ///
-/// Scope: compare the game package (`gameproject`) + the deterministic engine
-/// clock (`stone.time`/`dt`). Render OUTPUT legitimately differs -- skipping
-/// render leaves the batch pools / shadow scratch / graphics-stats counters
-/// (`RENDER_BATCHES`, `SHADOW_*`, `stats_history_*`, `screenshot_*`, `world`,
-/// `gizmo`) unbuilt, which is the whole point of skipping. Those are rebuilt
-/// the moment rendering resumes; they are not simulation state. This is the
-/// same carve-out principle as PROFILER, extended to rendered-vs-unrendered.
+/// Scope is the engine's simulation-state predicate (P3.5): compare every
+/// global the engine hashes as sim state (from `sim_state_names`), across all
+/// packages. Render OUTPUT legitimately differs -- skipping render leaves the
+/// batch pools / shadow scratch / graphics-stats counters and game Materials'
+/// `cached_batch` unbuilt (`RENDER_BATCHES`, `SHADOW_*`, `stats_history_*`,
+/// `tileset_mat`, ...); those are excluded by the predicate, not compared here.
+/// Tick 25 is far enough that the render-only material batches have grown, so
+/// this would catch a predicate that failed to exclude them.
 #[test]
 fn seek_reaches_same_state_as_stepping() {
     let rock_bin = env!("CARGO_BIN_EXE_rock");
@@ -128,24 +162,35 @@ fn seek_reaches_same_state_as_stepping() {
         .expect("spawn record");
     assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
-    // Seek (render-skipped) to tick 8 vs step (rendered) to tick 8.
-    let seek = run_frame_env("bitgun", 30, &["--replay", &log_s], &[("STONE_RUN_TO_TICK", "8")]);
+    // Seek (render-skipped) to tick 25 vs step (rendered) to tick 25.
+    let seek = run_frame_env("bitgun", 30, &["--replay", &log_s], &[("STONE_RUN_TO_TICK", "25")]);
     let step = run_frame_env(
         "bitgun",
         30,
         &["--replay", &log_s],
-        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "8")],
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "25")],
     );
-    assert_eq!(current_tick(&seek), 8, "seek must reach tick 8");
-    assert_eq!(current_tick(&step), 8, "step must reach tick 8");
-    assert_eq!(
-        seek["gameproject"], step["gameproject"],
-        "render-skipped seek must reach identical GAME state to a rendered step"
-    );
-    assert_eq!(
-        seek["stone"]["time"], step["stone"]["time"],
-        "the deterministic clock must match too"
-    );
+    assert_eq!(current_tick(&seek), 25, "seek must reach tick 25");
+    assert_eq!(current_tick(&step), 25, "step must reach tick 25");
+
+    // Compare every simulation-state global (the predicate's output), across
+    // packages, restricted to the names the engine hashes.
+    let sim = sim_state_names("bitgun", 30);
+    let mut compared = 0;
+    for (pkg, globals) in seek.as_object().expect("dump is an object") {
+        let step_pkg = &step[pkg];
+        for (name, sv) in globals.as_object().expect("package is an object") {
+            if !sim.contains(name) {
+                continue;
+            }
+            assert_eq!(
+                sv, &step_pkg[name],
+                "sim-state global {pkg}.{name} must match between render-skipped seek and rendered step"
+            );
+            compared += 1;
+        }
+    }
+    assert!(compared > 0, "must have compared at least one sim-state global");
 }
 
 /// Piece 5 of P3: the auto-record "save repro" action snapshots the live

@@ -95,7 +95,12 @@ fn run_frame_raw_env(
         .expect("failed to spawn rock frame")
 }
 
-/// Remove the wall-clock diagnostics carve-out (see module docs).
+/// Remove the wall-clock diagnostics carve-out (see module docs). This is the
+/// BYTE-IDENTITY contract: record vs a RENDERED replay must match on everything
+/// except non-reproducible wall-clock diagnostics (PROFILER), INCLUDING all
+/// render state -- so this is deliberately NOT the sim-state predicate (which
+/// the render-skipped seek test uses). Both runs render here, so render state
+/// is identical and must be compared.
 fn strip_diagnostics(v: &mut serde_json::Value) {
     if let Some(stone) = v.get_mut("stone").and_then(|s| s.as_object_mut()) {
         stone.remove("PROFILER");
