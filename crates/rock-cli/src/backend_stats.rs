@@ -96,11 +96,11 @@ fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
     for i in 0..(warmup + iters) {
         let (res, times) = bone_backend::bone_workspace_timed(sources);
         // `Ok(ws)` only means lowered-and-checked; the verdict must include
-        // per-body type errors (`bone_backend::workspace_verdict`), else a
+        // per-body type errors (`bone_backend::body_errors`), else a
         // project with broken bodies reports as passing.
         stats.ok = res
             .as_ref()
-            .is_ok_and(|ws| bone_backend::workspace_verdict(ws).is_ok());
+            .is_ok_and(|ws| bone_backend::body_errors(ws).is_empty());
         if i < warmup {
             continue; // untimed warmup
         }

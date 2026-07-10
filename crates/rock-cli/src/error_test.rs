@@ -215,7 +215,7 @@ fn bone_accepts_case(files: &[(String, String)]) -> bool {
     }
     // Total parse: a recoverable syntax error returns Ok with `recovery_errors`,
     // so the rejection is the downstream gate in `check_with_stdlib`
-    // (`first_syntax_error`), not the parse `match` above.
+    // (`syntax_errors`), not the parse `match` above.
     crate::bone_backend::check_with_stdlib(user).is_ok()
 }
 

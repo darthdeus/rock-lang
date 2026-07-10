@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 /// Lua for the user module via skull. The stdlib module isn't emitted — its
 /// symbols are referenced by name (resolved at runtime by a real stdlib
 /// prelude, or simply not called under the load-only validity gate).
-fn skull_emit(file: &str, src: &str) -> std::result::Result<String, CompilerError> {
+fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<CompilerError>> {
     Ok(skull_emit_full(file, src)?.0)
 }
 
@@ -35,12 +35,12 @@ fn skull_emit(file: &str, src: &str) -> std::result::Result<String, CompilerErro
 fn skull_emit_full(
     file: &str,
     src: &str,
-) -> std::result::Result<(String, Vec<skull::SkullTest>), CompilerError> {
-    let user = skull_parser::parse_module(src, ustr::Ustr::from(file))?;
+) -> std::result::Result<(String, Vec<skull::SkullTest>), Vec<CompilerError>> {
+    let user = skull_parser::parse_module(src, ustr::Ustr::from(file)).map_err(|e| vec![e])?;
     let user_file = user.file;
     let ws = crate::bone_backend::check_with_stdlib([user])?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)?;
+    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid).map_err(|e| vec![e])?;
     let (lua, skipped) = (emit.lua, emit.skipped);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
         eprintln!("skull: {} stdlib fns skipped", skipped.len());
@@ -96,7 +96,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
         }
     };
     times.semantic = t.elapsed();
-    if crate::bone_backend::workspace_verdict(&ws).is_err() {
+    if !crate::bone_backend::body_errors(&ws).is_empty() {
         return (false, times);
     }
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
@@ -132,15 +132,15 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
     // can't accept the project (skull emits only what bone lowers).
     let (mut modules, entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
@@ -188,15 +188,15 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
     let (mut modules, _entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
@@ -240,8 +240,8 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 
     let (raw, _entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
@@ -315,7 +315,7 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 /// `discover_sources` — bone supplies its own via `bone_stdlib_modules()`.
 fn skull_assemble_project(
     sources: &SourceFiles,
-) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), CompilerError> {
+) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
     Ok((crate::bone_backend::with_stdlib(user_modules), entry_file))
 }
@@ -386,14 +386,18 @@ end
     h
 }
 
-fn render_err(src: &str, e: &CompilerError) -> String {
+/// Render single-file errors against `src`. `skull_emit_full` parses with the
+/// real `file` path as the span file id, so the source must be registered under
+/// that same id -- registering under a placeholder makes every span lookup fail
+/// ("Unable to fetch source") and silently drops the snippet + labels.
+fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     sf.add_or_update_file(source_file_from_path_and_contents(
-        "<parse_rock>".to_string(),
-        "<parse_rock>".to_string(),
+        file.to_string(),
+        file.to_string(),
         src.to_string(),
     ));
-    e.render(&sf)
+    crate::bone_backend::render_errs(&sf, errs)
 }
 
 /// `map_err` for the `skull::user_module_id` lookup — the same message at every
@@ -431,7 +435,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
     // skull codegen gap; both carry a `CompilerError`.
     let (lua, tests) = match skull_emit_full(file, src) {
         Ok(v) => v,
-        Err(e) => {
+        Err(errs) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
@@ -448,8 +452,8 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
                 return Ok(SkullOutcome::Pass { tests: test_fns.len() });
             }
             return Err(SkullFailure {
-                reason: categorize(&e.message),
-                rendered: render_err(src, &e),
+                reason: categorize(&errs[0].message),
+                rendered: render_file_errs(file, src, &errs),
             });
         }
     };
@@ -550,8 +554,8 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
             }
             Ok(())
         }
-        Err(e) => {
-            eprintln!("{}", render_err(&src, &e));
+        Err(errs) => {
+            eprintln!("{}", render_file_errs(path, &src, &errs));
             std::process::exit(1);
         }
     }
@@ -746,8 +750,8 @@ pub fn skull_run(path: &str) -> Result<()> {
     };
     let lua = match skull_emit(path, &src) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("{}", render_err(&src, &e));
+        Err(errs) => {
+            eprintln!("{}", render_file_errs(path, &src, &errs));
             std::process::exit(1);
         }
     };
@@ -772,6 +776,12 @@ pub fn skull_run(path: &str) -> Result<()> {
 /// resolve to the right file. Every discovered source is registered under its
 /// id-path (the same id used when parsing into a module).
 fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
+    render_project_errs(sources, std::slice::from_ref(e))
+}
+
+/// [`render_project_err`] over every collected diagnostic, joined into one
+/// report — the CLI prints ALL of them, matching the LSP.
+fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     for file in &sources.files {
         let f = file.borrow();
@@ -782,7 +792,7 @@ fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
             f.contents.clone(),
         ));
     }
-    e.render(&sf)
+    crate::bone_backend::render_errs(&sf, errs)
 }
 
 /// `rock run <project-dir> --backend skull` — assemble the whole project (all
@@ -822,16 +832,16 @@ fn skull_emit_project(dir: &str) -> String {
     let t = Instant::now();
     let (mut modules, entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
 
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             log::error!(target: "SKULL", "bone type-check failed for project {}", dir);
             std::process::exit(1);
         }
@@ -3963,7 +3973,7 @@ pub struct SkullStone {
 /// The Session emit gate. `bone_session` lowering is TOTAL -- it always
 /// produces HIR and reports type errors as collected diagnostics rather than
 /// failing (unlike the compile path's `check_modules`, which runs
-/// `workspace_verdict` and returns `Err`). Every Session-based emit
+/// `body_errors` and returns `Err`). Every Session-based emit
 /// (`init`/`recompile`/`force_full`) must call this before `emit_full`/
 /// `emit_overlay`: otherwise emit drops an un-checkable body but keeps its
 /// `__deco_init` registration, leaving the registered `func` a nil global -> a
