@@ -20,6 +20,7 @@
 
 mod mangle;
 mod regalloc;
+pub mod scope;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt::Write as _;
