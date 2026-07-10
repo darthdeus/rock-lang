@@ -74,11 +74,75 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
         .expect("failed to spawn rock frame")
 }
 
+/// Like `run_frame_raw` but with extra environment variables set on the child.
+fn run_frame_raw_env(
+    game: &str,
+    frames: u32,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
+    args.extend_from_slice(extra);
+    Command::new(rock_bin)
+        .args(&args)
+        .envs(env.iter().copied())
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock frame")
+}
+
 /// Remove the wall-clock diagnostics carve-out (see module docs).
 fn strip_diagnostics(v: &mut serde_json::Value) {
     if let Some(stone) = v.get_mut("stone").and_then(|s| s.as_object_mut()) {
         stone.remove("PROFILER");
     }
+}
+
+/// Piece 1 of P3: the record log is streamed to disk as ticks are captured,
+/// so a crash before shutdown still leaves a valid, replayable partial log.
+/// `STONE_CRASH_AT_FRAME` hard-exits the game with no shutdown flush — the
+/// exact scenario incremental flush protects. Before streaming (buffer +
+/// write-at-shutdown), the crash left an empty/absent log.
+#[test]
+fn record_log_survives_a_crash_via_incremental_flush() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("crash.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let out = run_frame_raw_env(
+        "bitgun",
+        1000,
+        &["--record", &log_s],
+        &[("STONE_CRASH_AT_FRAME", "10")],
+    );
+    assert!(
+        !out.status.success(),
+        "the crash hook should exit nonzero\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = std::fs::read_to_string(&log).expect("partial log must exist after a crash");
+    assert!(
+        text.starts_with("STONE_REPLAY"),
+        "partial log must still start with the header\n{text}"
+    );
+    let ticks = text.lines().filter(|l| l.starts_with("t ")).count();
+    assert!(
+        ticks >= 5,
+        "crash-surviving log must contain streamed tick lines; got {ticks}\n{text}"
+    );
+
+    // The partial log is a valid prefix and replays cleanly.
+    let rep = run_frame_raw("bitgun", 1000, &["--replay", &log_s]);
+    assert!(
+        rep.status.success(),
+        "partial crash log must replay cleanly\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
 }
 
 #[test]
