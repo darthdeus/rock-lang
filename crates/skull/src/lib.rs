@@ -310,6 +310,10 @@ if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
   local __rock_rng_state = _G.ffi.new("uint64_t", 0)
   _G.__rock_rng_seed = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
+  -- Whole RNG state is this one counter; get/set serialize it for replay
+  -- keyframe restore (docs/replay-scrub-plan.md). Returns the uint64 cdata.
+  _G.__rock_rng_state_get = function() return __rock_rng_state end
+  _G.__rock_rng_state_set = function(s) __rock_rng_state = _G.ffi.new("uint64_t", s) end
   _G.__rock_rng_next = function()
     __rock_rng_state = __rock_rng_state + 0x9E3779B97F4A7C15ULL
     local z = __rock_rng_state
@@ -319,7 +323,7 @@ if not _G.__rock_rng_next then
     return z
   end
   local __seed = tonumber(os.getenv("ROCK_TEST_SEED"))
-  if __seed then math.randomseed(__seed); _G.__rock_rng_seed(__seed)
+  if __seed then _G.__rock_rng_seed(__seed)
   else _G.__rock_rng_seed(os.time()) end
 end
 "#

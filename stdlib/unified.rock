@@ -1738,12 +1738,18 @@ global PI: float = 3.141592653589793
 
 
 // Math functions
-// random / random_range / random_int / random_seed read and mutate
-// Lua's RNG state — NotPure, intentionally no @pure.
-@inline inline(lua) fn random() -> float = "math.random()"
+// random / random_range / random_int / random_seed read and mutate the
+// splitmix64 RNG state (`__rock_rng_next`, seeded in skull's prelude) —
+// NotPure, intentionally no @pure. One stream: the state is a single
+// serializable uint64 counter, so replay/keyframe restore can round-trip it
+// (docs/replay-scrub-plan.md).
+// 53-bit mantissa draw: top 53 bits of the next splitmix64 word / 2^53 gives
+// a uniform [0, 1) double (bit-identical across architectures — math.random
+// is not).
+inline(lua) fn random() -> float = """
+    return tonumber(__rock_rng_next() / 2048ULL) * (1.0 / 9007199254740992.0)
+"""
 fn random_range(min: float, max: float) -> float { return random() * (max - min) + min }
-// Uses SplitMix64 (see runtime bootstrap in rock/src/backend/lua/assembler.rs)
-// so the stream is bit-identical across architectures — `math.random` is not.
 inline(lua) fn random_int(min: int, max: int) -> int = """
     local r = max - min
     if r <= 0 then return min end
@@ -1751,7 +1757,6 @@ inline(lua) fn random_int(min: int, max: int) -> int = """
     return tonumber(z % ffi.cast("uint64_t", r)) + min
 """
 inline(lua) fn random_seed(seed: int) = """
-    math.randomseed(seed)
     __rock_rng_seed(seed)
 """
 @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
