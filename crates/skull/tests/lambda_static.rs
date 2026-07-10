@@ -7,7 +7,7 @@
 //! this test goes red if it ever does.
 
 mod common;
-use common::emit_module;
+use common::{emit_module, run_luajit};
 
 /// A lambda (stored in a global so it escapes) whose body holds a `static n`.
 /// Each call increments; the reload test distinguishes RESET (back to the
@@ -32,21 +32,6 @@ fn call() -> int {
 
 fn main() { setup() RESULT = call() }
 "#;
-
-fn run_luajit(prog: &str, tag: &str) -> String {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_lambda_static_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    stdout.trim().to_string()
-}
 
 /// The static cell lives in the ENCLOSING fn's statics (named after `setup`,
 /// carried in the reload reset preamble) even though it is declared inside the

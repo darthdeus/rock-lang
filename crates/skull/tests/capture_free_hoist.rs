@@ -6,22 +6,7 @@
 //! order (shared with the future P2.6 record naming).
 
 mod common;
-use common::{emit_module, function_body};
-
-fn run_luajit(prog: &str, tag: &str) -> String {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_capture_free_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    stdout.trim().to_string()
-}
+use common::{emit_module, function_body, run_luajit};
 
 // `free_loop` creates a capture-free lambda (`() => { sink(42) }` closes over
 // nothing) in a loop; `capturing_loop` creates one that captures the loop
@@ -122,4 +107,75 @@ fn main() {
     let lua = emit_module(src);
     let out = run_luajit(&format!("{lua}\nmain()\n"), "percall");
     assert_eq!(out, "6\n6", "a hoisted lambda's local must be per-call (not shared); got: {out}");
+}
+
+/// A user fn whose name equals a hoisted lambda's `<enclosing>__lambda<k>` name
+/// must be REJECTED, not silently clobbered (last-write-wins). `foo`'s
+/// capture-free lambda hoists to `foo__lambda0`; a user `fn foo__lambda0`
+/// collides.
+#[test]
+#[should_panic(expected = "collides with a real function")]
+fn hoist_name_collision_with_user_fn_rejected() {
+    let src = r#"
+@nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
+fn foo__lambda0() -> int { return 99 }
+fn foo() -> fn() { return () => { sink(1) } }
+fn main() {}
+"#;
+    let _ = emit_module(src);
+}
+
+/// TRANSITIVE capture: an outer lambda that is locally-capture-free but whose
+/// INNER lambda reads an enclosing-FN cell captures that cell transitively, so
+/// NEITHER hoists (the outer must thread the cell to the inner as an upvalue).
+/// Contrast `hoisted_lambda_locals_stay_per_call`, where the inner reads the
+/// OUTER's own local -> the outer IS capture-free and hoists.
+#[test]
+fn transitive_root_capture_does_not_hoist() {
+    let src = r#"
+fn transitive(x: int) -> fn() -> int {
+    let outer = () => { return () => x }
+    return outer()
+}
+fn main() { let g = transitive(7) print("{g()}") }
+"#;
+    let lua = emit_module(src);
+    assert!(
+        !lua.contains("transitive__lambda"),
+        "neither lambda may hoist -- both capture the root param `x` transitively:\n{lua}"
+    );
+    // and it still behaves (the inner reads x through the outer's upvalue chain).
+    let out = run_luajit(&format!("{lua}\nmain()\n"), "transitive");
+    assert_eq!(out, "7", "transitive capture must still read the enclosing param; got: {out}");
+}
+
+/// DECLARATION SPLIT: a hoisted body's own cells are declared as `local`s in the
+/// hoisted fn (not the enclosing one, not NEITHER). A cell declared in neither
+/// function becomes an implicit Lua GLOBAL on first write (`c<N> = ..`), which
+/// this pins by asserting no `c<N>` global exists after running -- a vacuous
+/// green otherwise (write-then-read within one call reads back its own global).
+#[test]
+fn hoisted_body_declares_own_cells_no_global_leak() {
+    let src = r#"
+fn split_probe() -> fn() -> int {
+    return () => {
+        let a = 1
+        let b = 2
+        let c = a + b
+        return c
+    }
+}
+fn main() { let f = split_probe() print("{f()}") }
+"#;
+    let lua = emit_module(src);
+    let driver = "\nmain()\n\
+        local leaked = {}\n\
+        for k in pairs(_G) do if type(k) == \"string\" and k:match(\"^c%d+$\") then leaked[#leaked + 1] = k end end\n\
+        table.sort(leaked)\n\
+        print(#leaked == 0 and \"no-leak\" or table.concat(leaked, \",\"))\n";
+    let out = run_luajit(&format!("{lua}{driver}"), "split");
+    assert_eq!(
+        out, "3\nno-leak",
+        "the hoisted body must declare its own cells as locals (no c<N> leaked to _G); got:\n{out}"
+    );
 }

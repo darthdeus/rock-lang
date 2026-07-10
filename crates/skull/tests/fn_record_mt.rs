@@ -11,22 +11,7 @@
 //! the design's `setmetatable({..}, __rock_fn_mt)` reference needs.)
 
 mod common;
-use common::emit_module;
-
-fn run_luajit(prog: &str, tag: &str) -> String {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_fn_record_mt_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    stdout.trim().to_string()
-}
+use common::{emit_module, run_luajit};
 
 /// Any emitted program carries the prelude, so `__rock_fn_mt` is present.
 #[test]

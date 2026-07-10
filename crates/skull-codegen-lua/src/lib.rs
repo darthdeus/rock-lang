@@ -90,16 +90,39 @@ fn push_uint(out: &mut String, mut n: u32) {
 }
 
 /// Whole-workspace codegen inputs not derivable from a single [`MirFunc`]: the
-/// set of overloaded names (drives mangling). Computed once per emit.
+/// set of overloaded names (drives mangling) and the set of every real function's
+/// final Lua name (guards synthetic P3 `<name>__lambda<k>` names against clobber).
+/// Computed once per emit.
 pub struct CodegenCtx {
     overloaded: HashSet<Ustr>,
+    /// Every real function's emitted Lua name — a hoisted lambda name colliding
+    /// with one would silently clobber (last-write-wins). See `assert_no_collision`.
+    fn_names: HashSet<String>,
 }
 
 impl CodegenCtx {
     pub fn new(ws: &Workspace) -> Self {
-        CodegenCtx {
-            overloaded: compute_overloaded_names(ws),
-        }
+        let overloaded = compute_overloaded_names(ws);
+        let fn_names = ws
+            .modules
+            .iter()
+            .flat_map(|m| m.functions.iter())
+            .map(|(_, f)| mangle_fn(ws, f, &overloaded))
+            .collect();
+        CodegenCtx { overloaded, fn_names }
+    }
+
+    /// Reject a hoisted-lambda name that collides with a real function's Lua name
+    /// (`fn foo__lambda0` next to a `foo` whose capture-free lambda also hoists to
+    /// `foo__lambda0`): the two top-level defs clobber last-write-wins. The
+    /// naming scheme owns `<enclosing>__lambda<k>`; a user fn there is rejected,
+    /// not silently mis-emitted. Cheap: a hash lookup per hoisted lambda.
+    fn assert_no_collision(&self, hoisted_name: &str) {
+        assert!(
+            !self.fn_names.contains(hoisted_name),
+            "hoisted lambda name `{hoisted_name}` collides with a real function of \
+             the same name; rename that function (the `__lambda<k>` suffix is reserved)"
+        );
     }
 
     /// The workspace overload set (drives mangling). Computed once in [`new`];
@@ -284,9 +307,11 @@ fn home_scope(tree: &scope::ScopeTree, hoisted: &HashSet<scope::ScopeId>, mut s:
     }
 }
 
-/// Build the [`HoistPlan`]: `k` is the `Inst::Lambda`'s inst-arena index order
-/// (every lambda consumes a `k`, so a DCE'd one doesn't shift the live ones).
-fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Ownership, name: &str) -> HoistPlan {
+/// Build the [`HoistPlan`], or `None` when no lambda hoists (so `render_scope`'s
+/// declaration walk skips the per-cell home probe entirely — the common case).
+/// `k` is the `Inst::Lambda`'s inst-arena index order (every lambda consumes a
+/// `k`, so a DCE'd one doesn't shift the live ones).
+fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Ownership, name: &str) -> Option<HoistPlan> {
     let mut lambda_scope: HashMap<Idx<Inst>, scope::ScopeId> = HashMap::default();
     for (sid, s) in tree.scopes.iter().enumerate() {
         if let Some(lid) = s.lambda {
@@ -306,12 +331,15 @@ fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Owners
             order.push((lid, sid));
         }
     }
+    if order.is_empty() {
+        return None; // only capturing lambdas -> nothing hoists, no home split needed
+    }
     let hoisted_scopes: HashSet<scope::ScopeId> = order.iter().map(|(_, s)| *s).collect();
     let mut home: HashMap<Idx<Cell>, scope::ScopeId> = HashMap::default();
     for (&c, &owner) in &own.owner {
         home.insert(c, home_scope(tree, &hoisted_scopes, owner));
     }
-    HoistPlan { hoisted_name, home, order }
+    Some(HoistPlan { hoisted_name, home, order })
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -360,9 +388,14 @@ pub fn emit_named_framed(
         let mut b = tree.boxed_cells(&own);
         b.retain(|c| !lambda_params.contains(c));
         let plan = build_hoist_plan(func, &tree, &own, name);
-        (b, Some(plan))
+        (b, plan)
     };
     let plan_ref = plan.as_ref();
+    if let Some(p) = plan_ref {
+        for hoisted in p.hoisted_name.values() {
+            ctx.assert_no_collision(hoisted);
+        }
+    }
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(func, name);
     let mut out = String::new();
     out.push_str(&hoist_defs);

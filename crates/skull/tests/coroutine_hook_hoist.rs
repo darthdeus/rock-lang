@@ -11,7 +11,7 @@
 //! dropped capture would go red.
 
 mod common;
-use common::emit_module;
+use common::{emit_module, run_luajit};
 
 /// A co fn whose `on_killed` hook reads a frame local (`base`), derived from the
 /// ctor param `seed`. `main` exercises worker/resume/kill so all four fns
@@ -38,20 +38,6 @@ fn main() {
 /// non-zero exit). Temp file keyed by pid + a caller tag so parallel tests
 /// (nextest is process-per-test, but be safe under `cargo test` threads too)
 /// never collide.
-fn run_luajit(prog: &str, tag: &str) -> String {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_hook_hoist_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    stdout.trim().to_string()
-}
 
 /// SHAPE: the `on_killed` hook hoists to a shared top-level `worker__on_killed`
 /// and the ctor stores it as a fn-value field -- no inline `function() .. end`
