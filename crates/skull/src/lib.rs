@@ -305,6 +305,10 @@ if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
+-- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
+-- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
+-- Preserved across reload so pre- and post-reload records share metatable identity.
+if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end
 if _G.__ROCK_RELEASE == nil then _G.__ROCK_RELEASE = false end
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
