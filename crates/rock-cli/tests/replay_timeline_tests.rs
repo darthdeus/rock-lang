@@ -224,6 +224,31 @@ fn audio_muted_only_while_seeking() {
     );
 }
 
+/// P3.5 item 5: the recorded-cursor ghost draws during replay (the OS cursor is
+/// wherever the developer's real mouse is, so replay marks the recorded mouse
+/// position). `REPLAY_GHOST_DRAWS` counts the ghost-draw path; it fires while
+/// replaying and never during a normal (non-replay) run.
+#[test]
+fn cursor_ghost_draws_only_during_replay() {
+    let (_dir, log) = record_short_log("bitgun", 20);
+    let replayed = run_frame_env("bitgun", 20, &["--replay", &log], &[]);
+    let normal = run_frame_env("bitgun", 20, &[], &[]);
+    let ghost_replay = replayed["stone"]["REPLAY_GHOST_DRAWS"]
+        .as_i64()
+        .expect("REPLAY_GHOST_DRAWS present in dump");
+    let ghost_normal = normal["stone"]["REPLAY_GHOST_DRAWS"]
+        .as_i64()
+        .expect("REPLAY_GHOST_DRAWS present in dump");
+    assert!(
+        ghost_replay > 0,
+        "recorded-cursor ghost must draw during replay (drew {ghost_replay})"
+    );
+    assert_eq!(
+        ghost_normal, 0,
+        "cursor ghost must not draw outside replay (drew {ghost_normal})"
+    );
+}
+
 /// Record a short log for the keyboard-shortcut tests. Returns the temp dir
 /// (keeps the file alive) + the log path.
 fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
