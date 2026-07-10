@@ -72,7 +72,6 @@ fn current_tick(s: &serde_json::Value) -> i64 {
 }
 
 #[test]
-#[ignore = "P4 RED oracle: restore path (STONE_SNAPSHOT_AT_TICK/STONE_RESTORE_AT_TICK) not built yet; Phase B turns this green"]
 fn restore_returns_to_snapshot_tick_state() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
