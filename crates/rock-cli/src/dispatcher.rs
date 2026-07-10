@@ -215,6 +215,9 @@ impl CommandContext {
     fn handle_frame(&self) -> Result<()> {
         let file = self.get_game_file();
         let output = self.get_output_or_default("tmp")?;
+        if self.args.record.is_some() && self.args.replay.is_some() {
+            anyhow::bail!("--record and --replay are mutually exclusive");
+        }
         do_one_frame(
             self.args.backend,
             &file,
@@ -222,6 +225,8 @@ impl CommandContext {
             self.args.frames,
             self.args.headless,
             self.args.dump_state,
+            self.args.record.as_deref(),
+            self.args.replay.as_deref(),
             &self.args.app_args,
         )
     }
