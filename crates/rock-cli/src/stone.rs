@@ -237,7 +237,7 @@ pub fn do_stone_watch(
 
     // Start the game process only if initial compilation succeeded
     let mut game_process = if initial_compilation_success {
-        Some(start_game_process(app_args, flight.as_ref())?)
+        Some(start_game_process(app_args, flight.as_ref(), None)?)
     } else {
         None
     };
@@ -448,7 +448,7 @@ pub fn do_stone_watch(
                 error!("fold before start failed: {} (start may load a stale main.lua)", e);
             }
             info!("First successful compilation! Starting game...");
-            game_process = Some(start_game_process(app_args, flight.as_ref())?);
+            game_process = Some(start_game_process(app_args, flight.as_ref(), None)?);
             info!("Game started successfully");
         }
         // Restart the game process if a rebuild actually produced new
@@ -468,7 +468,14 @@ pub fn do_stone_watch(
                 if let Err(e) = compiler.canonicalize_for_restart() {
                     error!("fold before restart failed: {} (restart may load a stale main.lua)", e);
                 }
-                game_process = Some(start_game_process(app_args, flight.as_ref())?);
+                // In-session load: if the F7 picker requested a replay, relaunch
+                // into windowed playback of it (read-once) instead of the live game.
+                let replay_request = consume_replay_request();
+                if let Some(ref p) = replay_request {
+                    info!("Loading replay {p} (F7 picker); flight recorder off for this run");
+                }
+                game_process =
+                    Some(start_game_process(app_args, flight.as_ref(), replay_request.as_deref())?);
                 info!("Game process restarted");
             }
         } else if has_game_changes && game_process.is_some() {
@@ -612,8 +619,52 @@ fn apply_flight_env(cmd: &mut Command, flight: Option<&FlightRecorder>) {
     }
 }
 
-/// Start the game process with the correct library path and robust process management
-fn start_game_process(app_args: &[String], flight: Option<&FlightRecorder>) -> Result<Child> {
+/// Env for a game-process spawn: a windowed replay of `replay` (in-session load
+/// from the F7 picker) OR the always-on flight recorder. Replaying and recording
+/// are mutually exclusive, so a load request suppresses the recorder for that
+/// run. Build-id (reused from the flight config -- same compiled lua) lets
+/// replay_init warn on a mismatch.
+fn apply_run_env(cmd: &mut Command, flight: Option<&FlightRecorder>, replay: Option<&str>) {
+    match replay {
+        Some(path) => {
+            cmd.env("STONE_REPLAY", path).env("STONE_REPLAY_WINDOW", "1");
+            if let Some(f) = flight {
+                cmd.env("STONE_BUILD_ID", &f.build_id);
+            }
+        }
+        None => apply_flight_env(cmd, flight),
+    }
+}
+
+/// Consume a pending in-session load request (the F7 picker's Play button writes
+/// the selected replay path to `tmp/replay_request.txt` and touches
+/// `tmp/restart.txt`). Read-once: the file is removed so a later plain restart
+/// (code edit) does not re-enter replay mode.
+fn consume_replay_request() -> Option<String> {
+    consume_request_file(std::path::Path::new("tmp/replay_request.txt"))
+}
+
+/// Read-once request consumer: returns the trimmed contents and removes the
+/// file, or None if absent/empty. Split out so it is testable without the
+/// fixed `tmp/` path.
+fn consume_request_file(path: &std::path::Path) -> Option<String> {
+    let requested = std::fs::read_to_string(path).ok()?;
+    let _ = std::fs::remove_file(path);
+    let trimmed = requested.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Start the game process with the correct library path and robust process
+/// management. `replay` Some => relaunch as a windowed replay (in-session load)
+/// instead of the flight-recorded live game.
+fn start_game_process(
+    app_args: &[String],
+    flight: Option<&FlightRecorder>,
+    replay: Option<&str>,
+) -> Result<Child> {
     let lua_file = rock_host::project::default_main_lua_path();
 
     // Platform-specific process management for orphan prevention
@@ -625,8 +676,8 @@ fn start_game_process(app_args: &[String], flight: Option<&FlightRecorder>) -> R
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         // Only the stone watch loop enables the in-game hot-reload watcher.
         cmd.env("STONE_HOT_RELOAD", "1");
-        // Flight recorder: always-on record-from-boot (P3.5).
-        apply_flight_env(&mut cmd, flight);
+        // Flight recorder (or in-session replay load; P3.5).
+        apply_run_env(&mut cmd, flight, replay);
 
         // 1) Linux: Ensure the child gets PDEATHSIG (SIGTERM) if parent dies
         #[cfg(target_os = "linux")]
@@ -709,8 +760,8 @@ fn start_game_process(app_args: &[String], flight: Option<&FlightRecorder>) -> R
             cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
             // Only the stone watch loop enables the in-game hot-reload watcher.
             cmd.env("STONE_HOT_RELOAD", "1");
-            // Flight recorder: always-on record-from-boot (P3.5).
-            apply_flight_env(&mut cmd, flight);
+            // Flight recorder (or in-session replay load; P3.5).
+            apply_run_env(&mut cmd, flight, replay);
 
             let child = cmd.spawn()?;
 
@@ -1046,7 +1097,54 @@ pub fn do_replay_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_id_for_lua, ensure_flight_dir, is_compiler_source};
+    use super::{
+        apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
+        is_compiler_source, FlightRecorder,
+    };
+
+    /// In-session load: the picker's request file is read once, returns the
+    /// path, and is removed so a later plain restart doesn't re-enter replay.
+    #[test]
+    fn consume_request_file_is_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let req = dir.path().join("replay_request.txt");
+        std::fs::write(&req, "  bitgun/replays/repro-42.replay\n").unwrap();
+        assert_eq!(
+            consume_request_file(&req).as_deref(),
+            Some("bitgun/replays/repro-42.replay"),
+            "trimmed path returned"
+        );
+        assert!(!req.exists(), "request file must be removed after consuming");
+        assert_eq!(consume_request_file(&req), None, "second read is empty");
+        // Empty/whitespace request is ignored (not a spurious replay mode).
+        std::fs::write(&req, "   \n").unwrap();
+        assert_eq!(consume_request_file(&req), None, "blank request -> None");
+    }
+
+    /// A load request spawns in windowed-replay mode (and suppresses the
+    /// recorder); no request keeps the flight recorder on.
+    #[test]
+    fn apply_run_env_picks_replay_over_flight() {
+        let flight = FlightRecorder {
+            record_path: "bitgun/replays/last.replay".into(),
+            build_id: "abc123".into(),
+            checkpoint_interval: 0,
+        };
+        let env_of = |replay: Option<&str>| -> std::collections::HashMap<String, String> {
+            let mut cmd = std::process::Command::new("true");
+            apply_run_env(&mut cmd, Some(&flight), replay);
+            cmd.get_envs()
+                .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
+                .collect()
+        };
+        let replaying = env_of(Some("bitgun/replays/repro-7.replay"));
+        assert_eq!(replaying.get("STONE_REPLAY").map(String::as_str), Some("bitgun/replays/repro-7.replay"));
+        assert_eq!(replaying.get("STONE_REPLAY_WINDOW").map(String::as_str), Some("1"));
+        assert!(!replaying.contains_key("STONE_RECORD"), "replay run must not also record");
+        let recording = env_of(None);
+        assert_eq!(recording.get("STONE_RECORD").map(String::as_str), Some("bitgun/replays/last.replay"));
+        assert!(!recording.contains_key("STONE_REPLAY"), "live run must not be in replay mode");
+    }
 
     #[test]
     fn build_id_is_deterministic_and_content_sensitive() {
