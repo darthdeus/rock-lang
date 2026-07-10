@@ -208,12 +208,11 @@ fn audio_muted_only_while_seeking() {
         &[("STONE_AUDIO_PROBE", "1"), ("STONE_RUN_TO_TICK", "25")],
     );
     let normal = run_frame_env("bitgun", 25, &[], &[("STONE_AUDIO_PROBE", "1")]);
-    let seek_mutes = seek["stone"]["AUDIO_SEEK_MUTES"]
+    let seek_mutes = seek["__stone_diag"]["AUDIO_SEEK_MUTES"]
         .as_i64()
         .expect("AUDIO_SEEK_MUTES present in dump");
-    let normal_mutes = normal["stone"]["AUDIO_SEEK_MUTES"]
-        .as_i64()
-        .expect("AUDIO_SEEK_MUTES present in dump");
+    // A normal run never fires the seek mute, so the diag counter is absent -> 0.
+    let normal_mutes = normal["__stone_diag"]["AUDIO_SEEK_MUTES"].as_i64().unwrap_or(0);
     assert!(
         seek_mutes > 0,
         "seek must suppress the per-tick SFX probe (muted {seek_mutes})"
@@ -240,12 +239,11 @@ fn cursor_ghost_draws_only_during_windowed_replay() {
     );
     // Plain headless replay (no window): the ghost must stay off.
     let headless = run_frame_env("bitgun", 20, &["--replay", &log], &[]);
-    let ghost_windowed = windowed["stone"]["REPLAY_GHOST_DRAWS"]
+    let ghost_windowed = windowed["__stone_diag"]["REPLAY_GHOST_DRAWS"]
         .as_i64()
         .expect("REPLAY_GHOST_DRAWS present in dump");
-    let ghost_headless = headless["stone"]["REPLAY_GHOST_DRAWS"]
-        .as_i64()
-        .expect("REPLAY_GHOST_DRAWS present in dump");
+    // Headless replay never draws the ghost, so the diag counter is absent -> 0.
+    let ghost_headless = headless["__stone_diag"]["REPLAY_GHOST_DRAWS"].as_i64().unwrap_or(0);
     assert!(
         ghost_windowed > 0,
         "recorded-cursor ghost must draw during windowed replay (drew {ghost_windowed})"
@@ -282,10 +280,10 @@ fn replay_picker_lists_and_parses_headers() {
         &[],
         &[("STONE_REPLAY_PICKER_DIR", &dir.path().to_string_lossy())],
     );
-    let count = s["stone"]["REPLAY_PICKER_COUNT"]
+    let count = s["__stone_diag"]["REPLAY_PICKER_COUNT"]
         .as_i64()
         .expect("REPLAY_PICKER_COUNT present");
-    let summary = s["stone"]["REPLAY_PICKER_SUMMARY"]
+    let summary = s["__stone_diag"]["REPLAY_PICKER_SUMMARY"]
         .as_str()
         .expect("REPLAY_PICKER_SUMMARY present");
     assert_eq!(count, 2, "must list exactly the two .replay files (got {count}, summary {summary:?})");
@@ -336,7 +334,7 @@ fn cursor_ghost_marks_recorded_pointer_when_frozen() {
         &["--replay", &log],
         &[("STONE_REPLAY_WINDOW", "1"), ("STONE_HEADLESS", "1")],
     );
-    let gx = s["stone"]["REPLAY_GHOST_POS_X"]
+    let gx = s["__stone_diag"]["REPLAY_GHOST_POS_X"]
         .as_f64()
         .expect("REPLAY_GHOST_POS_X present in dump");
     assert_eq!(
@@ -362,9 +360,8 @@ fn cursor_ghost_skips_before_first_tick() {
             ("STONE_START_PAUSED", "1"),
         ],
     );
-    let draws = s["stone"]["REPLAY_GHOST_DRAWS"]
-        .as_i64()
-        .expect("REPLAY_GHOST_DRAWS present in dump");
+    // Ghost never draws before the first tick, so the diag counter is absent -> 0.
+    let draws = s["__stone_diag"]["REPLAY_GHOST_DRAWS"].as_i64().unwrap_or(0);
     assert_eq!(
         draws, 0,
         "ghost must not draw before the first tick applies a recorded pointer (drew {draws})"
