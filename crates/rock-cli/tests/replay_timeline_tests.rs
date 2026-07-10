@@ -299,6 +299,52 @@ fn replay_picker_lists_and_parses_headers() {
     );
 }
 
+/// P3.5 item 5 (regression): the cursor ghost must mark the RECORDED pointer,
+/// not the developer's live OS mouse, on a frozen frame. `sim_mouse_override`
+/// is cleared every frame end and set only on ticking frames, so a paused /
+/// frozen replay would leave `mouse_screen()` falling back to the live mouse --
+/// exactly when you'd be inspecting the frame. We rewrite a recorded log's
+/// mouse to a distinctive (123,456) (headless capture leaves it at 0,0, which
+/// is indistinguishable from the live-mouse fallback), freeze a windowed replay
+/// past log-end, and assert the ghost drew at the recorded position.
+#[test]
+fn cursor_ghost_marks_recorded_pointer_when_frozen() {
+    let (_dir, log) = record_short_log("bitgun", 10);
+    let text = std::fs::read_to_string(&log).unwrap();
+    let patched = text
+        .lines()
+        .map(|l| match l.strip_prefix("t ") {
+            Some(rest) => {
+                let mut f: Vec<String> = rest.split(' ').map(str::to_string).collect();
+                if f.len() >= 3 {
+                    f[1] = "123".into();
+                    f[2] = "456".into();
+                }
+                format!("t {}", f.join(" "))
+            }
+            None => l.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&log, patched).unwrap();
+
+    // 40 frames over a 10-tick log: replay applies 10 ticks then freezes for the
+    // rest. The dump is captured on a frozen frame.
+    let s = run_frame_env(
+        "bitgun",
+        40,
+        &["--replay", &log],
+        &[("STONE_REPLAY_WINDOW", "1"), ("STONE_HEADLESS", "1")],
+    );
+    let gx = s["stone"]["REPLAY_GHOST_POS_X"]
+        .as_f64()
+        .expect("REPLAY_GHOST_POS_X present in dump");
+    assert_eq!(
+        gx, 123.0,
+        "frozen ghost must mark the recorded pointer (123), not the live mouse (drew at x={gx})"
+    );
+}
+
 /// Record a short log for the keyboard-shortcut tests. Returns the temp dir
 /// (keeps the file alive) + the log path.
 fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
