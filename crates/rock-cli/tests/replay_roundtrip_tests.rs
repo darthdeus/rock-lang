@@ -102,6 +102,39 @@ fn strip_diagnostics(v: &mut serde_json::Value) {
     }
 }
 
+/// Piece 2 of P3: a window resize during recording is captured as an `r`
+/// line and re-applied at the matching tick on replay (so screen_to_world
+/// reproduces). Headless never resizes, so we inject a resize line into a
+/// recorded log and assert replay adopts it. `tonumber` parses the decimal
+/// coords fine (records write %a hex; both round-trip).
+#[test]
+fn replay_applies_recorded_window_resize() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("resize.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let _ = run_frame("bitgun", 30, &["--record", &log_s]);
+
+    // Insert a resize to 800x600 at tick 5, after the 5 header lines.
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    lines.insert(5, "r 5 800 600".to_string());
+    std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite log");
+
+    let state = run_frame("bitgun", 30, &["--replay", &log_s]);
+    let ws = &state["stone"]["WINDOW_SIZE"];
+    assert_eq!(
+        ws["x"].as_f64(),
+        Some(800.0),
+        "replay must adopt the recorded resize width\nWINDOW_SIZE={ws}"
+    );
+    assert_eq!(
+        ws["y"].as_f64(),
+        Some(600.0),
+        "replay must adopt the recorded resize height\nWINDOW_SIZE={ws}"
+    );
+}
+
 /// Piece 1 of P3: the record log is streamed to disk as ticks are captured,
 /// so a crash before shutdown still leaves a valid, replayable partial log.
 /// `STONE_CRASH_AT_FRAME` hard-exits the game with no shutdown flush — the
