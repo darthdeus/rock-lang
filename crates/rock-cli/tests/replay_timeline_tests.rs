@@ -224,28 +224,78 @@ fn audio_muted_only_while_seeking() {
     );
 }
 
-/// P3.5 item 5: the recorded-cursor ghost draws during replay (the OS cursor is
-/// wherever the developer's real mouse is, so replay marks the recorded mouse
-/// position). `REPLAY_GHOST_DRAWS` counts the ghost-draw path; it fires while
-/// replaying and never during a normal (non-replay) run.
+/// P3.5 item 5: the recorded-cursor ghost draws during WINDOWED replay (the OS
+/// cursor is wherever the developer's real mouse is, so replay marks the
+/// recorded mouse position). It is a viewer overlay -- only windowed playback
+/// draws it; headless batch reproduction (`rock frame --replay`) does not, so
+/// the extra draw call never perturbs the byte-identity guard.
 #[test]
-fn cursor_ghost_draws_only_during_replay() {
+fn cursor_ghost_draws_only_during_windowed_replay() {
     let (_dir, log) = record_short_log("bitgun", 20);
-    let replayed = run_frame_env("bitgun", 20, &["--replay", &log], &[]);
-    let normal = run_frame_env("bitgun", 20, &[], &[]);
-    let ghost_replay = replayed["stone"]["REPLAY_GHOST_DRAWS"]
+    let windowed = run_frame_env(
+        "bitgun",
+        20,
+        &["--replay", &log],
+        &[("STONE_REPLAY_WINDOW", "1"), ("STONE_HEADLESS", "1")],
+    );
+    // Plain headless replay (no window): the ghost must stay off.
+    let headless = run_frame_env("bitgun", 20, &["--replay", &log], &[]);
+    let ghost_windowed = windowed["stone"]["REPLAY_GHOST_DRAWS"]
         .as_i64()
         .expect("REPLAY_GHOST_DRAWS present in dump");
-    let ghost_normal = normal["stone"]["REPLAY_GHOST_DRAWS"]
+    let ghost_headless = headless["stone"]["REPLAY_GHOST_DRAWS"]
         .as_i64()
         .expect("REPLAY_GHOST_DRAWS present in dump");
     assert!(
-        ghost_replay > 0,
-        "recorded-cursor ghost must draw during replay (drew {ghost_replay})"
+        ghost_windowed > 0,
+        "recorded-cursor ghost must draw during windowed replay (drew {ghost_windowed})"
     );
     assert_eq!(
-        ghost_normal, 0,
-        "cursor ghost must not draw outside replay (drew {ghost_normal})"
+        ghost_headless, 0,
+        "cursor ghost must not draw in headless batch replay (drew {ghost_headless})"
+    );
+}
+
+/// P3.5 item 5: the replay picker's listing + header parse. `list_replays(dir)`
+/// enumerates `*.replay`, counts `t ` lines as the tick count, and reads the v4
+/// `build <id>` header. Drive it headless via STONE_REPLAY_PICKER_DIR and read
+/// the observable globals; non-`.replay` files are ignored.
+#[test]
+fn replay_picker_lists_and_parses_headers() {
+    let dir = tempfile::tempdir().expect("dir");
+    std::fs::write(
+        dir.path().join("a.replay"),
+        "STONE_REPLAY 4\nseed 1\nbuild aaa111\nt 0 0 0 0 0  \nt 0 0 0 0 0  \nt 0 0 0 0 0  \n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("b.replay"),
+        "STONE_REPLAY 4\nseed 2\nt 0 0 0 0 0  \nt 0 0 0 0 0  \n",
+    )
+    .unwrap();
+    // A non-replay file must be ignored by the listing.
+    std::fs::write(dir.path().join("notes.txt"), "ignore me").unwrap();
+
+    let s = run_frame_env(
+        "bitgun",
+        2,
+        &[],
+        &[("STONE_REPLAY_PICKER_DIR", &dir.path().to_string_lossy())],
+    );
+    let count = s["stone"]["REPLAY_PICKER_COUNT"]
+        .as_i64()
+        .expect("REPLAY_PICKER_COUNT present");
+    let summary = s["stone"]["REPLAY_PICKER_SUMMARY"]
+        .as_str()
+        .expect("REPLAY_PICKER_SUMMARY present");
+    assert_eq!(count, 2, "must list exactly the two .replay files (got {count}, summary {summary:?})");
+    assert!(
+        summary.contains("a.replay:3:aaa111"),
+        "a.replay: 3 ticks + build aaa111; summary was {summary:?}"
+    );
+    assert!(
+        summary.contains("b.replay:2:"),
+        "b.replay: 2 ticks + no build; summary was {summary:?}"
     );
 }
 
