@@ -649,7 +649,15 @@ fn consume_replay_request() -> Option<String> {
 /// fixed `tmp/` path.
 fn consume_request_file(path: &std::path::Path) -> Option<String> {
     let requested = std::fs::read_to_string(path).ok()?;
-    let _ = std::fs::remove_file(path);
+    // Removal failure is load-bearing: if the file survives, every later restart
+    // (a plain code edit) silently re-enters replay mode. Surface it.
+    if let Err(e) = std::fs::remove_file(path) {
+        log::warn!(
+            target: "STONE",
+            "could not remove replay request {} ({e}); later restarts may re-enter replay mode",
+            path.display()
+        );
+    }
     let trimmed = requested.trim();
     if trimmed.is_empty() {
         return None;
@@ -1037,24 +1045,44 @@ pub fn do_one_frame(
         eprint!("{}", String::from_utf8_lossy(&process_result.output.stderr));
     }
 
-    if process_result.timed_out {
-        warn!("Stone process timed out after {} seconds", timeout_duration.as_secs());
-        warn!("This usually indicates a runtime error or infinite loop in the game code");
-    } else if process_result.output.status.success() {
-        if frames == 1 {
-            info!("One frame executed successfully");
-        } else {
-            info!("{} frames executed successfully", frames);
-        }
+    // A watchdog timeout means the run did NOT complete -- treat it as a failure
+    // (nonzero exit), not a warning-and-exit-0. Exiting 0 on timeout is precisely
+    // how a load-starved run once masqueraded as a clean-but-empty log
+    // (docs/replay-scrub-plan.md note 6).
+    frame_exit_result(
+        process_result.timed_out,
+        &process_result.output.status,
+        timeout_duration.as_secs(),
+    )?;
+    if frames == 1 {
+        info!("One frame executed successfully");
     } else {
-        // Propagate the child's failure (e.g. the runner's GL-error exit 3)
-        // so `rock frame` exits nonzero and test-games actually fails.
-        anyhow::bail!(
-            "Stone exited with code: {:?}",
-            process_result.output.status.code()
-        );
+        info!("{} frames executed successfully", frames);
     }
 
+    Ok(())
+}
+
+/// Classify a finished `rock frame` run: Ok only on a clean zero-exit. A
+/// watchdog timeout or a nonzero child exit is an error, so the CLI exits
+/// nonzero (test-games / callers actually fail). Split out to be unit-testable
+/// without spawning a real hang.
+fn frame_exit_result(
+    timed_out: bool,
+    status: &std::process::ExitStatus,
+    timeout_secs: u64,
+) -> Result<()> {
+    if timed_out {
+        anyhow::bail!(
+            "Stone process timed out after {timeout_secs}s -- no clean exit (a hang, \
+             an infinite loop, or a run starved past the watchdog). For a legitimately \
+             long run, raise ROCK_FRAME_TIMEOUT_SECS."
+        );
+    }
+    if !status.success() {
+        // Propagate the child's failure (e.g. the runner's GL-error exit 3).
+        anyhow::bail!("Stone exited with code: {:?}", status.code());
+    }
     Ok(())
 }
 
@@ -1099,8 +1127,30 @@ pub fn do_replay_window(
 mod tests {
     use super::{
         apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        is_compiler_source, FlightRecorder,
+        frame_exit_result, is_compiler_source, FlightRecorder,
     };
+
+    /// A `rock frame` run exits nonzero on a watchdog timeout (the run did not
+    /// complete) and on a nonzero child exit; only a clean zero-exit is Ok. The
+    /// Err propagates through do_one_frame -> main -> a nonzero process exit.
+    /// (A timed-out run's killed status can even read "success" -- the timeout
+    /// flag must win.)
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_frame_run_is_an_error() {
+        use std::os::unix::process::ExitStatusExt;
+        let ok = std::process::ExitStatus::from_raw(0);
+        let failed = std::process::ExitStatus::from_raw(3 << 8); // exit code 3
+        assert!(frame_exit_result(false, &ok, 3).is_ok(), "clean zero-exit is Ok");
+        assert!(
+            frame_exit_result(true, &ok, 3).is_err(),
+            "a timeout must be an error even if the killed status looks like success"
+        );
+        assert!(
+            frame_exit_result(false, &failed, 3).is_err(),
+            "a nonzero child exit must propagate"
+        );
+    }
 
     /// In-session load: the picker's request file is read once, returns the
     /// path, and is removed so a later plain restart doesn't re-enter replay.
