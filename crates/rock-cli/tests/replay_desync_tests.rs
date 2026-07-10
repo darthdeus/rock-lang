@@ -28,6 +28,13 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
     args.extend_from_slice(extra);
     Command::new(rock_bin)
         .args(&args)
+        // The default 3s Stone watchdog is too tight for a HEAVY game (mag)
+        // under nextest's parallel process load: init + cargo-lock waits can
+        // eat >3s before a single frame runs, so the watchdog kills the record
+        // with a header-only log and no `c ` lines (a false failure, not a
+        // divergence). This was the note-6 flake; the game records fine given
+        // wall-clock. 60s absorbs the contention without hiding a real hang.
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame")
@@ -127,9 +134,13 @@ fn assert_seek_across_checkpoints_clean(game: &str) {
     let rec = run_frame_raw(game, 30, &["--record", &log_s, "--checkpoint-interval", "5"]);
     assert_ok(&rec, "record");
     let text = std::fs::read_to_string(&log).expect("read log");
+    let t_lines = text.lines().filter(|l| l.starts_with("t ")).count();
     assert!(
         text.lines().any(|l| l.starts_with("c ")),
-        "record must emit checkpoint lines at K=5 over 30 frames"
+        "[{game}] record must emit checkpoint lines at K=5 over 30 frames \
+         (got {t_lines} tick lines). A header-only log means the Stone \
+         watchdog killed the run before any frame -- bump ROCK_FRAME_TIMEOUT_SECS.\
+         \nlog:\n{text}"
     );
 
     // Fast-forward across several checkpoint ticks (5, 10, 15, 20, 25). The
@@ -140,6 +151,7 @@ fn assert_seek_across_checkpoints_clean(game: &str) {
         .args(["frame", game, "-n", "30", "--replay", &log_s,
                "--output", &scratch.path().to_string_lossy()])
         .env("STONE_RUN_TO_TICK", "25")
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn seek replay");
