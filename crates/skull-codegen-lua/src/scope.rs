@@ -58,6 +58,10 @@ pub struct Ownership {
     pub captures: Vec<HashSet<Idx<Cell>>>,
     pub writes: HashMap<Idx<Cell>, u32>,
     pub writing_scopes: HashMap<Idx<Cell>, HashSet<ScopeId>>,
+    /// Loop-binding cells (counted-loop counter slots + `MapNext` key/val dests):
+    /// capturing one is per-iteration BY VALUE, so it is excluded from
+    /// [`ScopeTree::boxed_cells`] even though it is multi-store.
+    pub loop_bindings: HashSet<Idx<Cell>>,
 }
 
 impl ScopeTree {
@@ -227,7 +231,7 @@ impl ScopeTree {
                 }
             }
         }
-        Ownership { owner, captures, writes, writing_scopes }
+        Ownership { owner, captures, writes, writing_scopes, loop_bindings: loop_binding_cells(func) }
     }
 
     /// The set of captured cells that must be BOXED (`{ v = ... }`, by-reference)
@@ -259,6 +263,12 @@ impl ScopeTree {
         captured
             .into_iter()
             .filter(|c| {
+                // A loop-binding cell captures per-iteration BY VALUE (each record
+                // snapshots that iteration's value); it must not box even though it
+                // is multi-store. See `loop_binding_cells`.
+                if own.loop_bindings.contains(c) {
+                    return false;
+                }
                 let effective = own.writes.get(c).copied().unwrap_or(0) + is_param.contains(c) as u32;
                 let written_non_owner = own
                     .writing_scopes
@@ -268,4 +278,53 @@ impl ScopeTree {
             })
             .collect()
     }
+}
+
+/// Loop-binding cells: a counted-loop counter SLOT (target of a pure
+/// `load slot; 1; slot+1; store slot` increment latch whose goto target is a
+/// HEADER that tests `slot`) or a `MapNext` key/val dest. Capturing such a cell is
+/// per-iteration by value -- in a goto-shaped loop the slot is a shared local
+/// re-assigned each iteration, so a record built inside the loop snapshots THIS
+/// iteration's value. (When the slot is NOT captured the emitter recognizes a real
+/// Lua `for`; a direct capture defeats that recognition into a goto loop, which
+/// this classifies.) The header-tests-slot guard is load-bearing: a plain
+/// `x = x + 1` alone in a goto block matches the latch SHAPE but is a mutable var,
+/// not a loop counter -- boxing it (not per-iteration) is required. Mirrors the
+/// emitter's `latch_slot`/`match_header` pairing, scanned over MIR (pre-codegen).
+fn loop_binding_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
+    let mut out: HashSet<Idx<Cell>> = HashSet::default();
+    for (_, inst) in func.insts.iter() {
+        if let Inst::MapNext { key_cell, val_cell, .. } = inst {
+            out.insert(*key_cell);
+            out.insert(*val_cell);
+        }
+    }
+    for (_, b) in func.blocks.iter() {
+        let Term::Goto(header) = b.term else { continue };
+        if b.insts.len() != 4 {
+            continue;
+        }
+        let (Inst::Load(slot), Inst::Const(Lit::Int(1)), Inst::IntAdd(a, bb), Inst::Store { cell, value }) =
+            (&func.insts[b.insts[0]], &func.insts[b.insts[1]], &func.insts[b.insts[2]], &func.insts[b.insts[3]])
+        else {
+            continue;
+        };
+        if *a == b.insts[0] && *bb == b.insts[1] && *cell == *slot && *value == b.insts[2] && header_tests_slot(func, header, *slot) {
+            out.insert(*slot);
+        }
+    }
+    out
+}
+
+/// Does block `h` branch on a `slot < HI` / `slot <= HI` compare (a counted-loop
+/// header whose counter is `slot`)? Mirrors the emitter's `match_header`.
+fn header_tests_slot(func: &MirFunc, h: Idx<Block>, slot: Idx<Cell>) -> bool {
+    let Term::Branch { cond, .. } = func.blocks[h].term else { return false };
+    let (lhs, rhs) = match &func.insts[cond] {
+        Inst::IntLt(a, b) | Inst::IntLeq(a, b) => (*a, *b),
+        _ => return false,
+    };
+    let insts = &func.blocks[h].insts;
+    let is_slot_load = |i: Idx<Inst>| matches!(&func.insts[i], Inst::Load(s) if *s == slot) && insts.contains(&i);
+    is_slot_load(lhs) || is_slot_load(rhs)
 }

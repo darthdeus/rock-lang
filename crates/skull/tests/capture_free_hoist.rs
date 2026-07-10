@@ -58,19 +58,24 @@ fn capture_free_lambda_hoists_to_named_toplevel() {
     );
 }
 
-/// SHAPE (regression guard): a CAPTURING lambda is untouched -- still an inline
-/// closure in the enclosing body, not hoisted.
+/// SHAPE (P2.6): a CAPTURING lambda also hoists -- to a `(e, ..)` body -- and its
+/// creation site builds an env record instead of an inline closure. (Pre-P2.6 it
+/// stayed inline; env_record_hoist.rs covers the record mechanics in depth.)
 #[test]
-fn capturing_lambda_stays_inline() {
+fn capturing_lambda_hoists_as_record() {
     let lua = emit_module(FIXTURE);
     let body = function_body(&lua, "capturing_loop");
     assert!(
-        body.contains("function("),
-        "a capturing lambda must still render an inline closure (unchanged this phase):\n{body}"
+        !body.contains("function("),
+        "a capturing lambda no longer renders an inline closure at the creation site:\n{body}"
     );
     assert!(
-        !lua.contains("function capturing_loop__lambda"),
-        "a capturing lambda must NOT hoist to a named top-level fn:\n{lua}"
+        body.contains("setmetatable({ __fn = capturing_loop__lambda"),
+        "the capturing lambda's creation site builds an env record:\n{body}"
+    );
+    assert!(
+        lua.contains("function capturing_loop__lambda"),
+        "the capturing lambda's body hoists to a named top-level fn:\n{lua}"
     );
 }
 
@@ -125,13 +130,13 @@ fn main() {}
     let _ = emit_module(src);
 }
 
-/// TRANSITIVE capture: an outer lambda that is locally-capture-free but whose
-/// INNER lambda reads an enclosing-FN cell captures that cell transitively, so
-/// NEITHER hoists (the outer must thread the cell to the inner as an upvalue).
-/// Contrast `hoisted_lambda_locals_stay_per_call`, where the inner reads the
-/// OUTER's own local -> the outer IS capture-free and hoists.
+/// TRANSITIVE capture (P2.6): an outer lambda that is locally-capture-free but
+/// whose INNER lambda reads an enclosing-FN cell captures that cell transitively.
+/// Both now hoist -- the outer as an env record threading the cell inward, the
+/// inner as an env record reading it from the outer's `e`. (Pre-P2.6 neither
+/// hoisted; the outer threaded the cell as an inline-closure upvalue.)
 #[test]
-fn transitive_root_capture_does_not_hoist() {
+fn transitive_root_capture_hoists_both() {
     let src = r#"
 fn transitive(x: int) -> fn() -> int {
     let outer = () => { return () => x }
@@ -141,10 +146,10 @@ fn main() { let g = transitive(7) print("{g()}") }
 "#;
     let lua = emit_module(src);
     assert!(
-        !lua.contains("transitive__lambda"),
-        "neither lambda may hoist -- both capture the root param `x` transitively:\n{lua}"
+        lua.contains("function transitive__lambda0(e") && lua.contains("function transitive__lambda1(e"),
+        "both lambdas hoist to env bodies (both capture the root param `x`):\n{lua}"
     );
-    // and it still behaves (the inner reads x through the outer's upvalue chain).
+    // and it still behaves (the inner reads x threaded through both envs).
     let out = run_luajit(&format!("{lua}\nmain()\n"), "transitive");
     assert_eq!(out, "7", "transitive capture must still read the enclosing param; got: {out}");
 }

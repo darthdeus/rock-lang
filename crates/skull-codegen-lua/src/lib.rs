@@ -186,65 +186,6 @@ pub(crate) fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Id
     order
 }
 
-/// Blocks that lie inside a loop (a CFG cycle): a block that can reach ITSELF via
-/// successor edges. A single-assignment cell whose store is in such a block is
-/// re-assigned every iteration; one stored only in non-looped blocks is assigned
-/// once and never changes -- so a closure capturing it needs no by-value snapshot.
-fn looped_blocks(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Block>> {
-    let reach = reachable_blocks_from(func, entry);
-    let mut looped: HashSet<Idx<Block>> = HashSet::default();
-    for &b in &reach {
-        let mut seen: HashSet<Idx<Block>> = HashSet::default();
-        let mut stack: Vec<Idx<Block>> = Vec::new();
-        successors(&func.blocks[b].term, |s| stack.push(s));
-        while let Some(x) = stack.pop() {
-            if x == b {
-                looped.insert(b);
-                break;
-            }
-            if seen.insert(x) {
-                successors(&func.blocks[x].term, |s| stack.push(s));
-            }
-        }
-    }
-    looped
-}
-
-/// Cells eligible for a by-value snapshot when captured by a closure: a
-/// single-assignment cell whose (one) store is inside a loop, so a closure
-/// created in that loop must capture THIS iteration's value, not the shared
-/// cell's final value. A cell stored only outside loops never changes after its
-/// single assignment, so capturing it by reference is correct -- and skips the
-/// snapshot IIFE entirely (the hot deferred-draw closures live here:
-/// `sprite_mesh_submit`, the `DrawList` methods, `render_batches`, none in a
-/// loop). Empty inside a coroutine frame (captured cells are state-table fields a
-/// param can't shadow) and for funcs with no closures.
-fn snapshot_eligible_cells(func: &MirFunc, entry: Idx<Block>, frame: Option<&FrameCtx>) -> HashSet<Idx<Cell>> {
-    if frame.is_some() || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
-        return HashSet::default();
-    }
-    let looped = looped_blocks(func, entry);
-    let mut stored_in_loop: HashSet<Idx<Cell>> = HashSet::default();
-    for &bb in &looped {
-        for &i in &func.blocks[bb].insts {
-            match &func.insts[i] {
-                Inst::Store { cell, .. } => {
-                    stored_in_loop.insert(*cell);
-                }
-                Inst::MapNext { key_cell, val_cell, .. } => {
-                    stored_in_loop.insert(*key_cell);
-                    stored_in_loop.insert(*val_cell);
-                }
-                _ => {}
-            }
-        }
-    }
-    single_assignment_cells(func)
-        .into_iter()
-        .filter(|c| stored_in_loop.contains(c))
-        .collect()
-}
-
 /// Every closure parameter cell in `func` (across all `Lambda` insts). The
 /// enclosing function must NOT declare these as locals — they are each closure's
 /// Lua `function(...)` argument list.
@@ -278,18 +219,23 @@ pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) 
     emit_named_framed(ws, ctx, name, func, None)
 }
 
-/// P3 (docs/closure-env-records-plan.md): the plan for hoisting capture-free
-/// lambdas. A lambda whose scope captures nothing (`Ownership::captures[scope]`
-/// is empty) emits as `function <name>__lambda<k>(<params>) ... end` and is
-/// referenced by that global name at its creation site — a raw Lua function
-/// value (no record, no `__call`). A capturing lambda is absent here and still
-/// renders inline.
+/// P2.6/P3 (docs/closure-env-records-plan.md): the plan for hoisting lambda
+/// bodies to sibling top-level fns. EVERY live lambda (except under a coroutine
+/// frame, which is carved out) hoists to `function <name>__lambda<k>(...) ... end`:
+///   - **capture-free** (`captures[c]` empty): body `(<params>)`, referenced by
+///     bare global name at the creation site — a raw fn value, no record.
+///   - **capturing**: body `(e, <params>)` reading captures as `e.c<A>`; the
+///     creation site builds an env record
+///     `setmetatable({ __fn = <name>__lambda<k>, c<A> = .. }, __rock_fn_mt)`.
 struct HoistPlan {
-    /// Capture-free `Inst::Lambda` -> its hoisted global name.
+    /// Every hoisted `Inst::Lambda` -> its hoisted global name.
     hoisted_name: HashMap<Idx<Inst>, String>,
+    /// Hoisted `Inst::Lambda` -> its captured cells (sorted by raw id). Empty for
+    /// a capture-free lambda (bare-name ref); the record field + EnvCtx field list
+    /// for a capturing one.
+    captures: HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
     /// Cell -> the scope whose Lua function declares it: `ROOT` (the enclosing
-    /// fn) or a hoisted lambda scope. A cell owned by an inline (capturing)
-    /// lambda maps to the hoisted/root function that owns that inline closure.
+    /// fn) or a hoisted lambda scope.
     home: HashMap<Idx<Cell>, scope::ScopeId>,
     /// (`Inst::Lambda`, scope) per hoisted lambda in inst-arena order — the
     /// append pass renders each body as a sibling top-level fn.
@@ -319,6 +265,7 @@ fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Owners
         }
     }
     let mut hoisted_name: HashMap<Idx<Inst>, String> = HashMap::default();
+    let mut captures: HashMap<Idx<Inst>, Vec<Idx<Cell>>> = HashMap::default();
     let mut order = Vec::new();
     let mut k = 0usize;
     for (lid, inst) in func.insts.iter() {
@@ -326,20 +273,166 @@ fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Owners
         let this_k = k;
         k += 1;
         let Some(&sid) = lambda_scope.get(&lid) else { continue }; // DCE'd lambda: no scope
-        if own.captures[sid].is_empty() {
-            hoisted_name.insert(lid, format!("{name}__lambda{this_k}"));
-            order.push((lid, sid));
-        }
+        hoisted_name.insert(lid, format!("{name}__lambda{this_k}"));
+        let mut caps: Vec<Idx<Cell>> = own.captures[sid].iter().copied().collect();
+        caps.sort_by_key(|c| raw(*c));
+        captures.insert(lid, caps);
+        order.push((lid, sid));
     }
     if order.is_empty() {
-        return None; // only capturing lambdas -> nothing hoists, no home split needed
+        return None; // no live lambda -> nothing hoists, no home split needed
     }
     let hoisted_scopes: HashSet<scope::ScopeId> = order.iter().map(|(_, s)| *s).collect();
     let mut home: HashMap<Idx<Cell>, scope::ScopeId> = HashMap::default();
     for (&c, &owner) in &own.owner {
         home.insert(c, home_scope(tree, &hoisted_scopes, owner));
     }
-    Some(HoistPlan { hoisted_name, home, order })
+    Some(HoistPlan { hoisted_name, captures, home, order })
+}
+
+/// Dominance rail (docs/closure-env-records-plan.md, "Capture classification"):
+/// a by-value capture snapshots the cell's value at the record's creation block,
+/// which is only sound if the cell's single write is guaranteed to have run by
+/// then. For a capture owned by the creating lambda's PARENT scope (a fresh local
+/// read directly at the creation site — transitive captures arrive as a
+/// parent-env field and are always available), require the write's block to
+/// dominate the creation block; a non-dominating shape (a transform artifact,
+/// never seen for well-formed lowering) falls back to a box. Returns the extra
+/// cells to box.
+fn non_dominating_by_value_captures(
+    func: &MirFunc,
+    tree: &scope::ScopeTree,
+    own: &scope::Ownership,
+    boxed: &HashSet<Idx<Cell>>,
+) -> HashSet<Idx<Cell>> {
+    let mut extra: HashSet<Idx<Cell>> = HashSet::default();
+    // block -> the `Inst::Lambda` creating a scope (its creation block).
+    let mut create_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
+    for (bid, b) in func.blocks.iter() {
+        for &iid in &b.insts {
+            if matches!(func.insts[iid], Inst::Lambda { .. }) {
+                create_block.insert(iid, bid);
+            }
+        }
+    }
+    // Cache idoms per parent-scope entry (small regions; recomputed at most once
+    // per distinct parent).
+    let mut idoms: HashMap<Idx<Block>, HashMap<Idx<Block>, Idx<Block>>> = HashMap::default();
+    for s in &tree.scopes {
+        let Some(lid) = s.lambda else { continue };
+        let parent = s.parent.expect("a lambda scope has a parent");
+        let Some(&cblock) = create_block.get(&lid) else { continue };
+        let sid = tree.scope_of_block(cblock); // sanity: create block is in the parent region
+        debug_assert_eq!(sid, Some(parent), "a lambda's creation block lies in its parent scope");
+        let parent_entry = tree.scopes[parent].entry;
+        let idom = idoms.entry(parent_entry).or_insert_with(|| dominators(func, parent_entry));
+        // captures of THIS scope owned by the parent: read directly at cblock.
+        let scope_id = (0..tree.scopes.len()).find(|&i| tree.scopes[i].lambda == Some(lid)).unwrap();
+        for &c in &own.captures[scope_id] {
+            if boxed.contains(&c) || own.loop_bindings.contains(&c) || extra.contains(&c) {
+                continue;
+            }
+            if own.owner[&c] != parent {
+                continue; // transitive -> arrives via the parent env, always available
+            }
+            let Some(&wblock) = single_store_block(func, c).as_ref() else {
+                continue; // multi-store (already handled by boxed_cells) — skip
+            };
+            if !dominates(idom, wblock, cblock) {
+                debug_assert!(false, "by-value capture write must dominate its creation site (dominance rail)");
+                extra.insert(c);
+            }
+        }
+    }
+    extra
+}
+
+/// The block of `c`'s single `Inst::Store`, or `None` if it is stored other than
+/// exactly once (a multi-store cell is not a by-value candidate).
+fn single_store_block(func: &MirFunc, c: Idx<Cell>) -> Option<Idx<Block>> {
+    let mut found = None;
+    for (bid, b) in func.blocks.iter() {
+        for &iid in &b.insts {
+            if matches!(&func.insts[iid], Inst::Store { cell, .. } if *cell == c) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(bid);
+            }
+        }
+    }
+    found
+}
+
+/// Immediate-dominator map over the blocks reachable from `entry` (classic
+/// Cooper-Harvey-Kennedy iterative fixpoint over reverse-postorder). The entry
+/// maps to itself.
+fn dominators(func: &MirFunc, entry: Idx<Block>) -> HashMap<Idx<Block>, Idx<Block>> {
+    let rpo = reverse_postorder(func, entry);
+    let mut order: HashMap<Idx<Block>, usize> = HashMap::default();
+    for (i, &b) in rpo.iter().enumerate() {
+        order.insert(b, i);
+    }
+    let (all_preds, _) = predecessors(func, &rpo);
+    let mut idom: HashMap<Idx<Block>, Idx<Block>> = HashMap::default();
+    idom.insert(entry, entry);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in rpo.iter().skip(1) {
+            let mut new_idom: Option<Idx<Block>> = None;
+            for &p in all_preds.get(&b).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if !idom.contains_key(&p) {
+                    continue; // not yet processed
+                }
+                new_idom = Some(match new_idom {
+                    None => p,
+                    Some(cur) => intersect(&idom, &order, p, cur),
+                });
+            }
+            if let Some(ni) = new_idom {
+                if idom.get(&b) != Some(&ni) {
+                    idom.insert(b, ni);
+                    changed = true;
+                }
+            }
+        }
+    }
+    idom
+}
+
+/// The CHK "intersect" walk: climb the two dominator chains (by RPO number) until
+/// they meet.
+fn intersect(
+    idom: &HashMap<Idx<Block>, Idx<Block>>,
+    order: &HashMap<Idx<Block>, usize>,
+    mut a: Idx<Block>,
+    mut b: Idx<Block>,
+) -> Idx<Block> {
+    while a != b {
+        while order[&a] > order[&b] {
+            a = idom[&a];
+        }
+        while order[&b] > order[&a] {
+            b = idom[&b];
+        }
+    }
+    a
+}
+
+/// Does block `a` dominate block `b` (walk `b`'s idom chain to the entry)?
+fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<Block>) -> bool {
+    let mut x = b;
+    loop {
+        if x == a {
+            return true;
+        }
+        let Some(&p) = idom.get(&x) else { return false };
+        if p == x {
+            return false; // reached the entry without hitting `a`
+        }
+        x = p;
+    }
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -348,6 +441,16 @@ fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Owners
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
+}
+
+/// The env-record context of a hoisted CAPTURING lambda body (P2.6): its captured
+/// cells arrive as fields of the record `e` (the body's first param). A captured
+/// cell renders `e.c<color>` (+ `.v` when boxed) instead of a plain local and is
+/// NOT declared here (it lives in `e`). The generalization of [`FrameCtx`];
+/// UNLIKE a frame, the lambda's own cells stay colored locals. Mutually exclusive
+/// with `FrameCtx` — hoisting is carved out under a coroutine frame.
+struct EnvCtx {
+    fields: HashSet<Idx<Cell>>,
 }
 
 /// [`emit_named`] with an optional coroutine frame context (the `__step` fn).
@@ -375,13 +478,13 @@ pub fn emit_named_framed(
     // Mutable env-record captures lowered to a box `{ v = .. }` (P2 of
     // docs/closure-env-records-plan.md). Disabled under a frame (coroutine cells
     // are state-table fields, never boxed) and skipped entirely for the common
-    // lambda-free fn (captures need a lambda). Boxed lambda-params are deferred
-    // to P2.6 -- left as by-reference upvalues here (inert; today's correct shape).
-    // P3: capture-free lambdas hoist to top-level named fns (plan below); the
-    // scope analysis also drives box classification. Both need the same tree, so
-    // build it once. Skipped for the common lambda-free fn, and CARVED OUT under
-    // a frame: a co-fn lambda's cells are state-table fields (`c<s>.c<N>`), not
-    // plain locals, so the home/declaration split can't apply -- such a lambda
+    // lambda-free fn (captures need a lambda).
+    // P2.6/P3: EVERY live lambda hoists to a top-level named fn -- capture-free
+    // ones by bare name, capturing ones as an env record (`build_hoist_plan`).
+    // The scope analysis also drives box classification. All need the same tree,
+    // so build it once. Skipped for the common lambda-free fn, and CARVED OUT
+    // under a frame: a co-fn lambda's cells are state-table fields (`c<s>.c<N>`),
+    // not plain locals, so the home/declaration split can't apply -- such a lambda
     // stays an inline closure (correct, just not zero-alloc). P2.6's frame
     // handling subsumes this. (Same gate that disables boxing.)
     let (boxed, plan) = if frame.is_some() || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
@@ -390,7 +493,9 @@ pub fn emit_named_framed(
         let tree = scope::ScopeTree::build(func);
         let own = tree.analyze(func);
         let mut b = tree.boxed_cells(&own);
-        b.retain(|c| !lambda_params.contains(c));
+        // Dominance rail: a by-value capture whose single write does not dominate
+        // its creation block falls back to a box (never seen for well-formed MIR).
+        b.extend(non_dominating_by_value_captures(func, &tree, &own, &b));
         let plan = build_hoist_plan(func, &tree, &own, name);
         (b, plan)
     };
@@ -404,18 +509,21 @@ pub fn emit_named_framed(
     let mut out = String::new();
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, func, func.entry(), &func.params, &lambda_params, true, scope::ROOT, plan_ref, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
+    render_scope(ws, ctx, func, func.entry(), &func.params, &lambda_params, true, scope::ROOT, plan_ref, None, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
     out.push('\n');
-    // Append each capture-free lambda body as a sibling top-level fn in THIS
-    // chunk (the const-hoist precedent -- an overlay body-edit carries them).
-    // Referenced by global name at the creation site, so forward refs resolve at
-    // call time. Each renders for its OWN home scope: it declares its own cells,
-    // the enclosing fn no longer does.
+    // Append each lambda body as a sibling top-level fn in THIS chunk (the
+    // const-hoist precedent -- an overlay body-edit carries them). Referenced by
+    // global name at the creation site, so forward refs resolve at call time. Each
+    // renders for its OWN scope: it declares its own cells, the enclosing fn no
+    // longer does. A CAPTURING lambda takes an env record `e` first and reads its
+    // captures as `e.c<A>` (EnvCtx); a capture-free one is a plain named fn.
     if let Some(plan) = plan_ref {
         for &(lid, sid) in &plan.order {
             let Inst::Lambda { params, entry } = &func.insts[lid] else { continue };
+            let caps = &plan.captures[&lid];
+            let env = (!caps.is_empty()).then(|| EnvCtx { fields: caps.iter().copied().collect() });
             let _ = write!(out, "function {}", plan.hoisted_name[&lid]);
-            render_scope(ws, ctx, func, *entry, params, &lambda_params, true, sid, plan_ref, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
+            render_scope(ws, ctx, func, *entry, params, &lambda_params, true, sid, plan_ref, env.as_ref(), frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
             out.push('\n');
         }
     }
@@ -476,79 +584,22 @@ fn collect_const_hoists(
     (hoist, names, defs)
 }
 
-/// Cells assigned by exactly one static `Store` and never by a loop `MapNext` —
-/// an immutable binding. A closure may snapshot such a cell BY VALUE at creation
-/// (the IIFE in the `Lambda` arm) so a closure made INSIDE a loop captures THIS
-/// iteration's value rather than the shared function-level local. A cell with
-/// multiple stores (e.g. a loop counter, a `var`) stays by-reference.
-fn single_assignment_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
-    let mut counts: HashMap<Idx<Cell>, u32> = HashMap::default();
-    let mut multi: HashSet<Idx<Cell>> = HashSet::default();
-    for (_, b) in func.blocks.iter() {
-        for &id in &b.insts {
-            match &func.insts[id] {
-                Inst::Store { cell, .. } => *counts.entry(*cell).or_insert(0) += 1,
-                Inst::MapNext { key_cell, val_cell, .. } => {
-                    multi.insert(*key_cell);
-                    multi.insert(*val_cell);
-                }
-                // A dest write is invisible to the Store count; a cell it hits
-                // must never snapshot by value (raw lowering only dest-writes
-                // fresh temps, but the inliner rebinds dests onto surviving
-                // cells).
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => multi.extend(dests.iter().copied()),
-                _ => {}
-            }
-        }
-    }
-    counts
-        .into_iter()
-        .filter(|(c, n)| *n == 1 && !multi.contains(c))
-        .map(|(c, _)| c)
-        .collect()
-}
-
-/// The cells a closure body (rooted at `entry`, with `params`) reads as upvalues:
-/// `Load`ed in its OWN CFG but neither a param nor a body-local `Store` target.
-/// Does NOT descend into nested closures (their captures resolve when THEY are
-/// emitted) — `reachable_blocks_from` follows terminators, not `Lambda` operands.
-fn lambda_captured_cells(func: &MirFunc, entry: Idx<Block>, params: &[Idx<Cell>]) -> HashSet<Idx<Cell>> {
-    let mut loaded: HashSet<Idx<Cell>> = HashSet::default();
-    let mut owned: HashSet<Idx<Cell>> = params.iter().copied().collect();
-    for bb in reachable_blocks_from(func, entry) {
-        for &id in &func.blocks[bb].insts {
-            match &func.insts[id] {
-                Inst::Load(c) => {
-                    loaded.insert(*c);
-                }
-                Inst::Store { cell, .. } => {
-                    owned.insert(*cell);
-                }
-                _ => {}
-            }
-        }
-    }
-    loaded.retain(|c| !owned.contains(c));
-    loaded
-}
-
 /// The Lua name for a cell read/write: a coroutine frame cell renders as the
 /// state-table field `<s>.c<raw>`; everything else is its colored local
 /// (`c<color>`) or — when uncolored (a coroutine `__step`, passed an empty
 /// color map) — the raw `c<raw>`.
-fn cellname(frame: Option<&FrameCtx>, colors: &[u32], boxed: &HashSet<Idx<Cell>>, c: Idx<Cell>) -> String {
+fn cellname(frame: Option<&FrameCtx>, env: Option<&EnvCtx>, colors: &[u32], boxed: &HashSet<Idx<Cell>>, c: Idx<Cell>) -> String {
     let mut s = String::new();
-    write_cellname(&mut s, frame, colors, boxed, c);
+    write_cellname(&mut s, frame, env, colors, boxed, c);
     s
 }
 
-/// Append a cell reference (frame field `c<s>.c<field>` or plain local) directly
-/// into `out` — the per-operand-allocation-free primitive `cellname` wraps. A
-/// boxed cell (`boxed` set, env-record capture) reads/writes through its box's
-/// `.v` field. Frame cells are never boxed (`boxed` is empty under a frame).
-fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], boxed: &HashSet<Idx<Cell>>, c: Idx<Cell>) {
+/// Append a cell reference (frame field `c<s>.c<field>`, env-record capture field
+/// `e.c<color>`, or plain local) directly into `out` — the per-operand-
+/// allocation-free primitive `cellname` wraps. A boxed cell (`boxed` set) reads/
+/// writes through its box's `.v` field. Frame and env are mutually exclusive
+/// (hoisting is carved out under a frame); frame cells are never boxed.
+fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, env: Option<&EnvCtx>, colors: &[u32], boxed: &HashSet<Idx<Cell>>, c: Idx<Cell>) {
     if let Some(f) = frame {
         if f.fields.contains(&c) {
             out.push('c');
@@ -558,20 +609,20 @@ fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], bo
             return;
         }
     }
+    if let Some(e) = env {
+        if e.fields.contains(&c) {
+            out.push_str("e.");
+            write_cell_local(out, colors, c);
+            if boxed.contains(&c) {
+                out.push_str(".v");
+            }
+            return;
+        }
+    }
     write_cell_local(out, colors, c);
     if boxed.contains(&c) {
         out.push_str(".v");
     }
-}
-
-/// The Lua local name for a cell in a non-frame context (declaration, param
-/// list, closure snapshot, body reference): its color `c<color>` when colored,
-/// else the raw `c<raw>`. An ordinary function colors ALL its cells (one `c`
-/// namespace, no raw/colored collision); a coroutine `__step` colors none.
-fn cell_local(colors: &[u32], c: Idx<Cell>) -> String {
-    let mut s = String::new();
-    write_cell_local(&mut s, colors, c);
-    s
 }
 
 fn write_cell_local(out: &mut String, colors: &[u32], c: Idx<Cell>) {
@@ -1074,6 +1125,7 @@ fn render_scope(
     is_top: bool,
     home: scope::ScopeId,
     plan: Option<&HoistPlan>,
+    env: Option<&EnvCtx>,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
     boxed: &HashSet<Idx<Cell>>,
@@ -1085,23 +1137,25 @@ fn render_scope(
     // and the reachable set the regalloc colors over.
     let rpo = reverse_postorder(func, entry);
     let loops = recognize_counted_loops(func, &rpo, frame);
-    // Cells a captured closure must snapshot by value (loop-stored single
-    // assignments); everything else captures by reference -- no snapshot IIFE.
-    // A boxed cell is by-reference through its box, never by-value snapshotted.
-    let mut snap_cells = snapshot_eligible_cells(func, entry, frame);
-    snap_cells.retain(|c| !boxed.contains(c));
     // Tree-folded values get no register; the colorer sees through them.
     let inlinable = compute_inlinable(func, &rpo);
     let t_ra = std::time::Instant::now();
     let colors = regalloc::color_values(func, &rpo, &inlinable);
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
-    // Param list `(a, b, c)` — written straight into the buffer (no Vec<String>).
+    // Param list `(e, a, b, c)` — written straight into the buffer (no
+    // Vec<String>). A hoisted CAPTURING lambda takes its env record `e` first.
     out.push('(');
-    for (i, &c) in params.iter().enumerate() {
-        if i > 0 {
+    let mut wrote_param = false;
+    if env.is_some() {
+        out.push('e');
+        wrote_param = true;
+    }
+    for &c in params.iter() {
+        if wrote_param {
             out.push_str(", ");
         }
+        wrote_param = true;
         write_cell_local(out, cell_colors, c);
     }
     out.push_str(")\n");
@@ -1209,9 +1263,9 @@ fn render_scope(
         emitted: vec![false; func.blocks.len()],
         hoist,
         hoist_names,
-        snap_cells: &snap_cells,
         boxed,
         plan,
+        env,
         home,
     };
     for &bb in &rpo {
@@ -1273,16 +1327,18 @@ struct Emitter<'a> {
     hoist: &'a HashMap<Idx<Inst>, u32>,
     /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
-    /// Captured cells that need a by-value snapshot (loop-stored single
-    /// assignments); a captured cell NOT in here is taken by reference (no IIFE).
-    snap_cells: &'a HashSet<Idx<Cell>>,
     /// Cells lowered to a box `{ v = ... }` (mutable env-record captures); every
     /// read/write of one renders through `.v`. Empty under a frame.
     boxed: &'a HashSet<Idx<Cell>>,
-    /// P3 hoist plan: a capture-free `Inst::Lambda` in `hoisted_name` renders as
-    /// a bare global-name reference instead of an inline closure. `None` for
-    /// lambda-free fns and frames.
+    /// Hoist plan (P2.6/P3): a hoisted `Inst::Lambda` in `hoisted_name` renders as
+    /// a bare global-name reference (capture-free) or a `setmetatable` env record
+    /// (capturing) instead of an inline closure. `None` for lambda-free fns and
+    /// frames (a co-fn lambda stays an inline closure).
     plan: Option<&'a HoistPlan>,
+    /// The env-record context when THIS scope is a hoisted capturing lambda body:
+    /// its captures render `e.c<color>`. `None` for the enclosing fn, capture-free
+    /// bodies, and frame inline closures.
+    env: Option<&'a EnvCtx>,
     /// The scope this function renders for (ROOT or a hoisted lambda) — threaded
     /// into inline-lambda renders (unused there: they declare nothing).
     home: scope::ScopeId,
@@ -1403,10 +1459,10 @@ impl Emitter<'_> {
         let (slot, inclusive, body_entry, latch, exit) =
             (cl.slot, cl.inclusive, cl.body_entry, cl.latch, cl.exit);
         let region: HashSet<Idx<Block>> = cl.region.iter().copied().collect();
-        let slot_name = cellname(self.frame, self.cell_colors, self.boxed, slot);
+        let slot_name = cellname(self.frame, self.env, self.cell_colors, self.boxed, slot);
         let hi = match &cl.hi {
             HiLimit::Value(v) => self.opnd_str(*v),
-            HiLimit::Cell(c) => cellname(self.frame, self.cell_colors, self.boxed, *c),
+            HiLimit::Cell(c) => cellname(self.frame, self.env, self.cell_colors, self.boxed, *c),
         };
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
@@ -1568,7 +1624,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => out.push_str(g.as_str()),
-            Inst::Load(c) => write_cellname(out, self.frame, self.cell_colors, self.boxed, *c),
+            Inst::Load(c) => write_cellname(out, self.frame, self.env, self.cell_colors, self.boxed, *c),
 
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.write_bin(out, "-", a, b),
@@ -1666,38 +1722,38 @@ impl Emitter<'_> {
                 out.push(')');
             }
             Inst::Lambda { params, entry } => {
-                // P3: a capture-free lambda is a hoisted top-level fn -- reference
-                // it by global name (a raw Lua function value, zero alloc). Its
-                // body is appended as a sibling def by `emit_named_framed`.
+                // P2.6/P3: a hoisted lambda's body is a sibling top-level fn
+                // (appended by `emit_named_framed`); the creation site references
+                // it. Capture-free -> the bare global name (a raw fn value, zero
+                // alloc). Capturing -> an env record
+                // `setmetatable({ __fn = <name>, c<A> = .., .. }, __rock_fn_mt)`:
+                // a boxed capture field threads the box TABLE (shared reference), a
+                // by-value one snapshots the value -- both rendered WITHOUT `.v`,
+                // redirected through this scope's own env for a transitive (nested)
+                // capture. The record is callable via `__call`.
                 if let Some(name) = self.plan.and_then(|p| p.hoisted_name.get(&id)) {
-                    out.push_str(name);
+                    let caps = &self.plan.unwrap().captures[&id];
+                    if caps.is_empty() {
+                        out.push_str(name);
+                    } else {
+                        out.push_str("setmetatable({ __fn = ");
+                        out.push_str(name);
+                        for &c in caps {
+                            out.push_str(", ");
+                            write_cell_local(out, self.cell_colors, c);
+                            out.push_str(" = ");
+                            self.write_capture_field_value(out, c);
+                        }
+                        out.push_str(" }, __rock_fn_mt)");
+                    }
                     return;
                 }
-                // Inline `function(<params>) <body> end`. The body is rendered as
-                // its own scope (independent value coloring); captured cells are
-                // upvalues declared in the enclosing function.
-                //
-                // Snapshot captured cells by value (an IIFE whose params shadow
-                // them) ONLY when they need it -- a loop-stored single assignment,
-                // so a closure created in the loop captures THIS iteration's value.
-                // A cell stored once outside every loop never changes after its
-                // assignment, so it captures by reference with no IIFE (the hot
-                // deferred-draw closures). `snap_cells` is precomputed per scope
-                // (empty in a coroutine frame). See `snapshot_eligible_cells`.
-                let mut snap: Vec<Idx<Cell>> = lambda_captured_cells(self.func, *entry, params)
-                    .into_iter()
-                    .filter(|c| self.snap_cells.contains(c))
-                    .collect();
-                snap.sort_by_key(|c| raw(*c));
-                if snap.is_empty() {
-                    out.push_str("function");
-                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.home, self.plan, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
-                } else {
-                    let argl = snap.iter().map(|c| cell_local(self.cell_colors, *c)).collect::<Vec<_>>().join(", ");
-                    let _ = write!(out, "(function({argl}) return function");
-                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.home, self.plan, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
-                    let _ = write!(out, " end)({argl})");
-                }
+                // Inline `function(<params>) <body> end` -- ONLY under a coroutine
+                // frame (every non-frame lambda hoists). Captured cells are frame
+                // fields (`c<s>.c<N>`) handled by `FrameCtx`; the body declares
+                // nothing (`is_top = false`), so no env/snapshot is needed.
+                out.push_str("function");
+                render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.home, self.plan, None, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
             }
 
             Inst::MakeTuple(vs) | Inst::MakeArray(vs) => {
@@ -1882,7 +1938,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
-                write_cellname(out, self.frame, self.cell_colors, self.boxed, *cell);
+                write_cellname(out, self.frame, self.env, self.cell_colors, self.boxed, *cell);
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
@@ -1969,9 +2025,9 @@ impl Emitter<'_> {
                 table,
             } => {
                 // `key_cell` is referenced twice; render it once.
-                let k = cellname(self.frame, self.cell_colors, self.boxed, *key_cell);
+                let k = cellname(self.frame, self.env, self.cell_colors, self.boxed, *key_cell);
                 let _ = write!(out, "  {k}, ");
-                write_cellname(out, self.frame, self.cell_colors, self.boxed, *val_cell);
+                write_cellname(out, self.frame, self.env, self.cell_colors, self.boxed, *val_cell);
                 let _ = write!(out, " = next(");
                 self.write_opnd(out, *table);
                 let _ = writeln!(out, ", {k})");
@@ -1984,7 +2040,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, self.boxed, *c);
+                    write_cellname(out, self.frame, self.env, self.cell_colors, self.boxed, *c);
                 }
                 let callee = mangle::mangle_fn(self.ws, func_of(self.ws, *func), &self.ctx.overloaded);
                 let _ = write!(out, " = {callee}(");
@@ -1999,7 +2055,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, self.boxed, *c);
+                    write_cellname(out, self.frame, self.env, self.cell_colors, self.boxed, *c);
                 }
                 out.push_str(" = ");
                 self.write_opnd(out, *callee);
@@ -2086,6 +2142,20 @@ impl Emitter<'_> {
             }
             self.write_opnd(out, *id);
         }
+    }
+
+    /// The value placed into a record field for capture `c` at the creation site.
+    /// A boxed capture threads the box TABLE (shared reference) and a by-value one
+    /// snapshots the value -- both are the cell's name WITHOUT `.v`. When `c` is
+    /// itself a capture of THIS (enclosing) scope, it is read from this scope's own
+    /// env (`e.c<color>`) -- the nested-lambda case, where the box/value already
+    /// arrived through the parent env. Never a frame cell (records are carved out
+    /// under a frame).
+    fn write_capture_field_value(&self, out: &mut String, c: Idx<Cell>) {
+        if self.env.is_some_and(|e| e.fields.contains(&c)) {
+            out.push_str("e.");
+        }
+        write_cell_local(out, self.cell_colors, c);
     }
 }
 
