@@ -193,6 +193,37 @@ fn seek_reaches_same_state_as_stepping() {
     assert!(compared > 0, "must have compared at least one sim-state global");
 }
 
+/// P3.5 item 5: audio is suppressed while fast-forward-seeking. A render-skipped
+/// seek still runs every update system per intermediate tick, so their per-tick
+/// SFX triggers would machine-gun. `STONE_AUDIO_PROBE=1` fires one probe through
+/// the real `play_random_sound` gate each ticking frame; `AUDIO_SEEK_MUTES`
+/// counts the ones the gate silenced *because of the seek*. During a run-to-tick
+/// seek every probe is muted; a normal run mutes none.
+#[test]
+fn audio_muted_only_while_seeking() {
+    let seek = run_frame_env(
+        "bitgun",
+        40,
+        &[],
+        &[("STONE_AUDIO_PROBE", "1"), ("STONE_RUN_TO_TICK", "25")],
+    );
+    let normal = run_frame_env("bitgun", 25, &[], &[("STONE_AUDIO_PROBE", "1")]);
+    let seek_mutes = seek["stone"]["AUDIO_SEEK_MUTES"]
+        .as_i64()
+        .expect("AUDIO_SEEK_MUTES present in dump");
+    let normal_mutes = normal["stone"]["AUDIO_SEEK_MUTES"]
+        .as_i64()
+        .expect("AUDIO_SEEK_MUTES present in dump");
+    assert!(
+        seek_mutes > 0,
+        "seek must suppress the per-tick SFX probe (muted {seek_mutes})"
+    );
+    assert_eq!(
+        normal_mutes, 0,
+        "normal (non-seek) play must not suppress audio (muted {normal_mutes})"
+    );
+}
+
 /// Record a short log for the keyboard-shortcut tests. Returns the temp dir
 /// (keeps the file alive) + the log path.
 fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
