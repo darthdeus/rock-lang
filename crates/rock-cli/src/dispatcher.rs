@@ -227,6 +227,7 @@ impl CommandContext {
             self.args.dump_state,
             self.args.record.as_deref(),
             self.args.replay.as_deref(),
+            self.args.checkpoint_interval,
             &self.args.app_args,
         )
     }

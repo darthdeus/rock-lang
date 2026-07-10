@@ -799,6 +799,7 @@ pub fn do_one_frame(
     dump_state: bool,
     record: Option<&str>,
     replay: Option<&str>,
+    checkpoint_interval: Option<usize>,
     app_args: &[String],
 ) -> Result<()> {
     use crate::common::ProcessManager;
@@ -824,6 +825,9 @@ pub fn do_one_frame(
     }
     if let Some(f) = replay {
         cmd.env("STONE_REPLAY", f);
+    }
+    if let Some(n) = checkpoint_interval {
+        cmd.env("STONE_CHECKPOINT_INTERVAL", n.to_string());
     }
     if dump_state {
         // Capture stdout to parse the DUMP_STATE JSON out of it.

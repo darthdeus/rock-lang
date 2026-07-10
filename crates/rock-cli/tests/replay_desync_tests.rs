@@ -1,0 +1,130 @@
+//! P2 of docs/replay-scrub-plan.md: the desync detector. While recording,
+//! every K ticks the engine hashes each registered global (canonical %a
+//! serialization) and writes per-global `c <tick> <name> <hash>` checkpoint
+//! lines into the replay log. On replay it recomputes and compares; the FIRST
+//! divergent tick + which global diverged is reported and the run exits
+//! nonzero (reject-don't-fall-back, same policy as the log-load errors).
+//!
+//! Heavy: spawns `rock frame` against a compiled game. Excluded from the
+//! default nextest profile (see `.config/nextest.toml`); runs under `-P full`.
+
+use std::path::Path;
+use std::process::Command;
+
+fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+}
+
+/// Run `rock frame <game> -n N [extra…]` without asserting success; returns
+/// the raw Output so tests can inspect exit status + stderr.
+fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Output {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
+    args.extend_from_slice(extra);
+    Command::new(rock_bin)
+        .args(&args)
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock frame")
+}
+
+fn assert_ok(out: &std::process::Output, ctx: &str) {
+    assert!(
+        out.status.success(),
+        "{ctx}: expected success, got {:?}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Clean roundtrip with checkpoints enabled: record bitgun with a checkpoint
+/// cadence that actually fires within the run, replay, expect no divergence
+/// and a clean exit.
+#[test]
+fn clean_roundtrip_with_checkpoints_reports_no_divergence() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("ck.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let rec = run_frame_raw("bitgun", 30, &["--record", &log_s, "--checkpoint-interval", "10"]);
+    assert_ok(&rec, "record");
+
+    // The log must actually contain checkpoint lines, else this proves nothing.
+    let text = std::fs::read_to_string(&log).expect("read log");
+    assert!(
+        text.lines().any(|l| l.starts_with("c ")),
+        "record must emit checkpoint lines at K=10 over 30 frames; log:\n{text}"
+    );
+
+    let rep = run_frame_raw("bitgun", 30, &["--replay", &log_s]);
+    assert_ok(&rep, "replay");
+    assert!(
+        !String::from_utf8_lossy(&rep.stderr).contains("desync"),
+        "clean replay must report no desync\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
+}
+
+/// Injected divergence: record, flip one recorded checkpoint hash in the log,
+/// replay. The recomputed hash won't match the tampered one, so replay must
+/// exit nonzero and name the tick + global.
+#[test]
+fn injected_checkpoint_divergence_is_detected_and_named() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("inj.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let rec = run_frame_raw("bitgun", 30, &["--record", &log_s, "--checkpoint-interval", "10"]);
+    assert_ok(&rec, "record");
+
+    // Corrupt the first checkpoint line's hash. Line: `c <tick> <name> <hash>`.
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    let ci = lines
+        .iter()
+        .position(|l| l.starts_with("c "))
+        .expect("a checkpoint line");
+    let fields: Vec<&str> = lines[ci].split(' ').collect();
+    let (tick, name) = (fields[1].to_string(), fields[2].to_string());
+    lines[ci] = format!("c {tick} {name} deadbeefdeadbeef");
+    std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite log");
+
+    let rep = run_frame_raw("bitgun", 30, &["--replay", &log_s]);
+    assert!(
+        !rep.status.success(),
+        "an injected checkpoint mismatch must abort the replay\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&rep.stderr);
+    assert!(
+        stderr.contains("desync") && stderr.contains(&name) && stderr.contains(&format!("tick={tick}")),
+        "desync report must name the tick ({tick}) and global ({name})\nstderr:\n{stderr}"
+    );
+}
+
+/// False-positive guard: hash EVERY tick (K=1) over 30 frames and replay
+/// clean. Proves the hashed state has no per-tick nondeterministic input —
+/// if any hashed global reads the wall clock or depends on Map iteration
+/// order, this fails and names it.
+#[test]
+fn per_tick_checkpoints_have_no_false_positives() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("k1.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let rec = run_frame_raw("bitgun", 30, &["--record", &log_s, "--checkpoint-interval", "1"]);
+    assert_ok(&rec, "record");
+
+    let rep = run_frame_raw("bitgun", 30, &["--replay", &log_s]);
+    assert_ok(&rep, "replay (K=1 clean)");
+    assert!(
+        !String::from_utf8_lossy(&rep.stderr).contains("desync"),
+        "per-tick replay must be divergence-free\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
+}

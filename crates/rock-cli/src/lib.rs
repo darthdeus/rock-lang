@@ -427,6 +427,11 @@ pub struct Args {
     /// input/wall-clock. Mutually exclusive with `--record`.
     pub replay: Option<String>,
 
+    /// For `rock frame --record`: hash + checkpoint game state every N ticks
+    /// for desync detection (docs/replay-scrub-plan.md P2). Default 60; 0
+    /// disables checkpointing.
+    pub checkpoint_interval: Option<usize>,
+
     /// For `rock completion-sweep`: keep every Nth derived probe position
     /// (1 = exhaustive). Controls corpus size vs coverage.
     pub stride: usize,
@@ -541,6 +546,9 @@ impl Args {
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")
                 .help("For `rock frame`: drive the run from replay log FILE instead of live input/wall-clock."))
+            .arg(Arg::new("checkpoint-interval").long("checkpoint-interval").value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock frame --record`: hash game state every N ticks for desync detection (default 60; 0 disables)."))
             .arg(Arg::new("stride").long("stride").default_value("10")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
@@ -594,6 +602,7 @@ impl Args {
             update_snapshots: m.get_flag("update-snapshots"),
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
+            checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),
             stride: *m.get_one::<usize>("stride").unwrap(),
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
