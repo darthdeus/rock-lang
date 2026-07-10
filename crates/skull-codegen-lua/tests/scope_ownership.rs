@@ -114,3 +114,45 @@ fn cell_mutated_from_lambda_owned_above_captured_below() {
     });
     assert!(stored_in_lambda, "`n` must be Stored inside the lambda (mutation from a non-owner scope)");
 }
+
+// --- box classification (step 5) --------------------------------------------
+
+/// A captured cell mutated from inside a lambda BOXES (it must observe the write
+/// by reference).
+#[test]
+fn mutated_capture_boxes() {
+    let func = lower("fn f() -> fn() { let n = 0 return () => { n = 5 } }", "f");
+    let tree = ScopeTree::build(&func);
+    let own = tree.analyze(&func);
+    let boxed = tree.boxed_cells(&func, &own);
+    let lam = lambda_scope_ids(&tree)[0];
+    let n = *own.captures[lam].iter().next().unwrap();
+    assert!(boxed.contains(&n), "a cell mutated from the lambda must box; boxed={boxed:?}");
+}
+
+/// A captured cell that the ENCLOSING code mutates after capture (multi-store)
+/// BOXES so the closure observes later writes.
+#[test]
+fn multistore_capture_boxes() {
+    // n stored twice in root (let n = 0; n = 5), read by the lambda.
+    let func = lower("fn f() -> fn() -> int { let n = 0 let g = () => { return n } n = 5 return g }", "f");
+    let tree = ScopeTree::build(&func);
+    let own = tree.analyze(&func);
+    let boxed = tree.boxed_cells(&func, &own);
+    let lam = lambda_scope_ids(&tree)[0];
+    let n = *own.captures[lam].iter().next().unwrap();
+    assert!(boxed.contains(&n), "a multi-store captured cell must box; boxed={boxed:?}");
+}
+
+/// A single-assignment captured cell (bound once, never mutated) stays BY-VALUE
+/// -- it must NOT box, else a per-iteration capture would collapse to the final
+/// value.
+#[test]
+fn single_assignment_capture_does_not_box() {
+    let func = lower("fn f(x: int) -> fn() -> int { return () => x }", "f");
+    let tree = ScopeTree::build(&func);
+    let own = tree.analyze(&func);
+    let boxed = tree.boxed_cells(&func, &own);
+    let x = func.params[0]; // a 0-store param -> effective 1 store -> by value
+    assert!(!boxed.contains(&x), "a single-assignment (0-store) param capture must not box");
+}

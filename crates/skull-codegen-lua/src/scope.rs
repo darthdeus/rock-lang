@@ -196,4 +196,51 @@ impl ScopeTree {
         }
         Ownership { owner, captures }
     }
+
+    /// The set of captured cells that must be BOXED (`{ v = ... }`, by-reference)
+    /// rather than captured by value. A captured cell boxes iff it can observe a
+    /// write after the capture: it has >= 2 effective stores (an explicit
+    /// `Inst::Store` count plus 1 for a param's implicit entry store) OR it is
+    /// stored in a scope other than its owner (mutation from inside a lambda).
+    /// A single-assignment captured cell (one effective store, never mutated from
+    /// a non-owner) stays by-value -- boxing it would wrongly make a per-iteration
+    /// capture see the final value.
+    ///
+    /// Loop-binding cells (FORL slots / `MapNext` dests) are never captured (the
+    /// user binding is copied to a fresh single-assignment cell, and capturing a
+    /// range counter defeats FORL recognition into a goto counter), so they never
+    /// reach this set.
+    pub fn boxed_cells(&self, func: &MirFunc, own: &Ownership) -> HashSet<Idx<Cell>> {
+        let mut captured: HashSet<Idx<Cell>> = HashSet::default();
+        for caps in &own.captures {
+            captured.extend(caps.iter().copied());
+        }
+        let is_param: HashSet<Idx<Cell>> =
+            self.scopes.iter().flat_map(|s| s.params.iter().copied()).collect();
+
+        // Per-cell explicit store count + the set of scopes that store it.
+        let mut stores: HashMap<Idx<Cell>, u32> = HashMap::default();
+        let mut storing_scopes: HashMap<Idx<Cell>, HashSet<ScopeId>> = HashMap::default();
+        for (sid, s) in self.scopes.iter().enumerate() {
+            for &b in &s.region {
+                for &iid in &func.blocks[b].insts {
+                    if let Inst::Store { cell, .. } = &func.insts[iid] {
+                        *stores.entry(*cell).or_insert(0) += 1;
+                        storing_scopes.entry(*cell).or_default().insert(sid);
+                    }
+                }
+            }
+        }
+
+        captured
+            .into_iter()
+            .filter(|c| {
+                let effective = stores.get(c).copied().unwrap_or(0) + is_param.contains(c) as u32;
+                let stored_non_owner = storing_scopes
+                    .get(c)
+                    .is_some_and(|ss| ss.iter().any(|&s| s != own.owner[c]));
+                effective >= 2 || stored_non_owner
+            })
+            .collect()
+    }
 }

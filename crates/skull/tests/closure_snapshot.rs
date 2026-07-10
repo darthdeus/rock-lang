@@ -69,3 +69,34 @@ fn loop_closure_keeps_snapshot_iife() {
         "a loop-created closure must keep the by-value snapshot IIFE:\n{body}"
     );
 }
+
+// A captured cell mutated after capture (multi-store) lowers to a BOX (P2 step 5
+// of docs/closure-env-records-plan.md): `local c<N> = {}`, every store/load
+// through `.v`. The closure captures the box table by reference, so it observes
+// the later write -- and it is NOT snapshotted by value (a box is excluded from
+// the IIFE set). Semantically identical to today's by-reference upvalue; the box
+// is the representation P2.6 threads into a record field.
+const MUTATED_CAPTURE: &str = r#"
+@nomangle inline(lua) fn use_one(a: int) = "_G.__sink = (a or 0)"
+
+fn capture_box() -> fn() {
+    let n = 0
+    let g = () => { use_one(n) }
+    n = 5
+    return g
+}
+
+fn main() { let h = capture_box() h() }
+"#;
+
+#[test]
+fn mutated_capture_lowers_to_box_not_iife() {
+    let lua = emit_module(MUTATED_CAPTURE);
+    let body = function_body(&lua, "capture_box");
+    assert!(body.contains("= {}"), "a boxed capture must declare `local c<N> = {{}}`:\n{body}");
+    assert!(body.contains(".v = "), "a boxed capture must store through `.v`:\n{body}");
+    assert!(
+        !body.contains("return function"),
+        "a boxed (by-reference) capture must NOT get a by-value snapshot IIFE:\n{body}"
+    );
+}

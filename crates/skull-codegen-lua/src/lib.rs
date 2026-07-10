@@ -285,11 +285,24 @@ pub fn emit_named_framed(
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
+    // Mutable env-record captures lowered to a box `{ v = .. }` (P2 of
+    // docs/closure-env-records-plan.md). Disabled under a frame (coroutine cells
+    // are state-table fields, never boxed). Boxed lambda-params are deferred to
+    // P2.6 -- left as by-reference upvalues here (inert; today's correct shape).
+    let boxed = if frame.is_some() {
+        HashSet::default()
+    } else {
+        let tree = scope::ScopeTree::build(func);
+        let own = tree.analyze(func);
+        let mut b = tree.boxed_cells(func, &own);
+        b.retain(|c| !lambda_params.contains(c));
+        b
+    };
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(func, name);
     let mut out = String::new();
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, func, func.entry(), &func.params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
+    render_scope(ws, ctx, func, func.entry(), &func.params, &lambda_params, true, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
     out.push('\n');
     out
 }
@@ -403,15 +416,17 @@ fn lambda_captured_cells(func: &MirFunc, entry: Idx<Block>, params: &[Idx<Cell>]
 /// state-table field `<s>.c<raw>`; everything else is its colored local
 /// (`c<color>`) or — when uncolored (a coroutine `__step`, passed an empty
 /// color map) — the raw `c<raw>`.
-fn cellname(frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) -> String {
+fn cellname(frame: Option<&FrameCtx>, colors: &[u32], boxed: &HashSet<Idx<Cell>>, c: Idx<Cell>) -> String {
     let mut s = String::new();
-    write_cellname(&mut s, frame, colors, c);
+    write_cellname(&mut s, frame, colors, boxed, c);
     s
 }
 
 /// Append a cell reference (frame field `c<s>.c<field>` or plain local) directly
-/// into `out` — the per-operand-allocation-free primitive `cellname` wraps.
-fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], c: Idx<Cell>) {
+/// into `out` — the per-operand-allocation-free primitive `cellname` wraps. A
+/// boxed cell (`boxed` set, env-record capture) reads/writes through its box's
+/// `.v` field. Frame cells are never boxed (`boxed` is empty under a frame).
+fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], boxed: &HashSet<Idx<Cell>>, c: Idx<Cell>) {
     if let Some(f) = frame {
         if f.fields.contains(&c) {
             out.push('c');
@@ -422,6 +437,9 @@ fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, colors: &[u32], c:
         }
     }
     write_cell_local(out, colors, c);
+    if boxed.contains(&c) {
+        out.push_str(".v");
+    }
 }
 
 /// The Lua local name for a cell in a non-frame context (declaration, param
@@ -934,6 +952,7 @@ fn render_scope(
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
+    boxed: &HashSet<Idx<Cell>>,
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
     out: &mut String,
@@ -944,7 +963,9 @@ fn render_scope(
     let loops = recognize_counted_loops(func, &rpo, frame);
     // Cells a captured closure must snapshot by value (loop-stored single
     // assignments); everything else captures by reference -- no snapshot IIFE.
-    let snap_cells = snapshot_eligible_cells(func, entry, frame);
+    // A boxed cell is by-reference through its box, never by-value snapshotted.
+    let mut snap_cells = snapshot_eligible_cells(func, entry, frame);
+    snap_cells.retain(|c| !boxed.contains(c));
     // Tree-folded values get no register; the colorer sees through them.
     let inlinable = compute_inlinable(func, &rpo);
     let t_ra = std::time::Instant::now();
@@ -992,7 +1013,8 @@ fn render_scope(
             .collect();
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
-            if param_cells.contains(&cid) || lambda_params.contains(&cid) || is_frame(&cid) {
+            // Boxed cells get a separate `= {}` init line below, not the comma list.
+            if param_cells.contains(&cid) || lambda_params.contains(&cid) || is_frame(&cid) || boxed.contains(&cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
@@ -1020,6 +1042,29 @@ fn render_scope(
         out.truncate(decl_start); // no locals -> drop the stamped `  local `
     }
 
+    // Boxed cells: a dedicated `local c<col> = {}` (an env-record capture cell,
+    // stored/loaded through `.v`), or `local c<col> = { v = c<col> }` for a
+    // captured param (seed from the param value, shadowing it). Boxed cells are
+    // force-unique (regalloc) so each owns a distinct color -> no dedup needed.
+    // Only the top scope declares (an inline lambda shares the top fn's cells).
+    if is_top {
+        let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
+        for (cid, _) in func.cells.iter() {
+            if !boxed.contains(&cid) {
+                continue;
+            }
+            out.push_str("  local ");
+            write_cell_local(out, cell_colors, cid);
+            if param_cells.contains(&cid) {
+                out.push_str(" = { v = ");
+                write_cell_local(out, cell_colors, cid);
+                out.push_str(" }\n");
+            } else {
+                out.push_str(" = {}\n");
+            }
+        }
+    }
+
     let mut em = Emitter {
         ws,
         ctx,
@@ -1035,6 +1080,7 @@ fn render_scope(
         hoist,
         hoist_names,
         snap_cells: &snap_cells,
+        boxed,
     };
     for &bb in &rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
@@ -1098,6 +1144,9 @@ struct Emitter<'a> {
     /// Captured cells that need a by-value snapshot (loop-stored single
     /// assignments); a captured cell NOT in here is taken by reference (no IIFE).
     snap_cells: &'a HashSet<Idx<Cell>>,
+    /// Cells lowered to a box `{ v = ... }` (mutable env-record captures); every
+    /// read/write of one renders through `.v`. Empty under a frame.
+    boxed: &'a HashSet<Idx<Cell>>,
 }
 
 impl Emitter<'_> {
@@ -1215,10 +1264,10 @@ impl Emitter<'_> {
         let (slot, inclusive, body_entry, latch, exit) =
             (cl.slot, cl.inclusive, cl.body_entry, cl.latch, cl.exit);
         let region: HashSet<Idx<Block>> = cl.region.iter().copied().collect();
-        let slot_name = cellname(self.frame, self.cell_colors, slot);
+        let slot_name = cellname(self.frame, self.cell_colors, self.boxed, slot);
         let hi = match &cl.hi {
             HiLimit::Value(v) => self.opnd_str(*v),
-            HiLimit::Cell(c) => cellname(self.frame, self.cell_colors, *c),
+            HiLimit::Cell(c) => cellname(self.frame, self.cell_colors, self.boxed, *c),
         };
         let limit = if inclusive { hi } else { format!("{hi} - 1") };
 
@@ -1380,7 +1429,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => out.push_str(g.as_str()),
-            Inst::Load(c) => write_cellname(out, self.frame, self.cell_colors, *c),
+            Inst::Load(c) => write_cellname(out, self.frame, self.cell_colors, self.boxed, *c),
 
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.write_bin(out, "-", a, b),
@@ -1496,11 +1545,11 @@ impl Emitter<'_> {
                 snap.sort_by_key(|c| raw(*c));
                 if snap.is_empty() {
                     out.push_str("function");
-                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
+                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
                 } else {
                     let argl = snap.iter().map(|c| cell_local(self.cell_colors, *c)).collect::<Vec<_>>().join(", ");
                     let _ = write!(out, "(function({argl}) return function");
-                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
+                    render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
                     let _ = write!(out, " end)({argl})");
                 }
             }
@@ -1687,7 +1736,7 @@ impl Emitter<'_> {
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
-                write_cellname(out, self.frame, self.cell_colors, *cell);
+                write_cellname(out, self.frame, self.cell_colors, self.boxed, *cell);
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
@@ -1774,9 +1823,9 @@ impl Emitter<'_> {
                 table,
             } => {
                 // `key_cell` is referenced twice; render it once.
-                let k = cellname(self.frame, self.cell_colors, *key_cell);
+                let k = cellname(self.frame, self.cell_colors, self.boxed, *key_cell);
                 let _ = write!(out, "  {k}, ");
-                write_cellname(out, self.frame, self.cell_colors, *val_cell);
+                write_cellname(out, self.frame, self.cell_colors, self.boxed, *val_cell);
                 let _ = write!(out, " = next(");
                 self.write_opnd(out, *table);
                 let _ = writeln!(out, ", {k})");
@@ -1789,7 +1838,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.frame, self.cell_colors, self.boxed, *c);
                 }
                 let callee = mangle::mangle_fn(self.ws, func_of(self.ws, *func), &self.ctx.overloaded);
                 let _ = write!(out, " = {callee}(");
@@ -1804,7 +1853,7 @@ impl Emitter<'_> {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_cellname(out, self.frame, self.cell_colors, *c);
+                    write_cellname(out, self.frame, self.cell_colors, self.boxed, *c);
                 }
                 out.push_str(" = ");
                 self.write_opnd(out, *callee);
