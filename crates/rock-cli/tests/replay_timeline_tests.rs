@@ -223,6 +223,40 @@ fn audio_muted_only_while_seeking() {
     );
 }
 
+/// P4 item 5: a BACKWARD scrub mutes audio through the SAME single gate as a
+/// forward seek (no second gate). The scrub's resim (from the restored keyframe
+/// forward to the target) runs render-skipped with `timeline_seeking()` true, so
+/// `audio_gate_muted()` suppresses the per-tick SFX probe during it. Replay to
+/// tick 40, scrub back to 25 (interval 10 -> restore tick-20 keyframe, resim
+/// 20->25) and assert the probe was muted; break-verify by flipping the gate.
+#[test]
+fn backward_scrub_mutes_audio_through_the_same_gate() {
+    let (_dir, log) = record_short_log("bitgun", 60);
+    let scrubbed = run_frame_env(
+        "bitgun",
+        60,
+        &["--replay", &log],
+        &[
+            ("STONE_AUDIO_PROBE", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_SCRUB_AT_TICK", "40"),
+            ("STONE_SCRUB_TO_TICK", "25"),
+            // 60-tick replay under -P full parallelism can be starved past the
+            // 3s watchdog (the note-6 flake class); raise it like the other
+            // heavy-spawn tests.
+            ("ROCK_FRAME_TIMEOUT_SECS", "60"),
+        ],
+    );
+    assert_eq!(current_tick(&scrubbed), 25, "scrub must land at tick 25");
+    let mutes = scrubbed["__stone_diag"]["AUDIO_SEEK_MUTES"]
+        .as_i64()
+        .expect("AUDIO_SEEK_MUTES present in dump");
+    assert!(
+        mutes > 0,
+        "the backward-scrub resim must suppress the per-tick SFX probe (muted {mutes})"
+    );
+}
+
 /// P3.5 item 5: the recorded-cursor ghost draws during WINDOWED replay (the OS
 /// cursor is wherever the developer's real mouse is, so replay marks the
 /// recorded mouse position). It is a viewer overlay -- only windowed playback
