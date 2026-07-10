@@ -193,6 +193,76 @@ fn seek_reaches_same_state_as_stepping() {
     assert!(compared > 0, "must have compared at least one sim-state global");
 }
 
+/// Record a short log for the keyboard-shortcut tests. Returns the temp dir
+/// (keeps the file alive) + the log path.
+fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("kb.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().expect("scratch");
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", &frames.to_string(), "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
+    (dir, log_s)
+}
+
+/// P3.5: the replay timeline SPACE shortcut toggles play/pause by reading ImGui
+/// key state, NOT the replayed `keys_down` (the log owns that during replay).
+/// We inject a Space key event into ImGui at frame 3 of a windowed replay (the
+/// recorded log has no keys down, so keys_down never carries Space) and assert
+/// the run freezes: current_tick stops advancing well before the ~20-tick log
+/// end. Only the ImGui-IO path could cause that.
+#[test]
+fn space_toggles_pause_via_imgui_not_replayed_input() {
+    let (_dir, log) = record_short_log("bitgun", 20);
+    let frozen = run_frame_env(
+        "bitgun",
+        40,
+        &["--replay", &log],
+        &[
+            ("STONE_REPLAY_WINDOW", "1"),
+            ("STONE_HEADLESS", "1"),
+            ("STONE_TIMELINE_KEY_AT", "3"),
+            ("STONE_TIMELINE_KEY", "space"),
+        ],
+    );
+    let ct = current_tick(&frozen);
+    assert!(
+        ct < 10,
+        "Space must pause the replay via ImGui IO (froze at tick {ct}, expected < 10, log is ~20)"
+    );
+}
+
+/// P3.5: the RIGHT shortcut steps exactly one tick, again via ImGui IO. Start
+/// paused (tick frozen at 0), inject Right at frame 3, and assert the timeline
+/// advanced exactly one tick.
+#[test]
+fn right_steps_one_tick_via_imgui_not_replayed_input() {
+    let (_dir, log) = record_short_log("bitgun", 20);
+    let stepped = run_frame_env(
+        "bitgun",
+        40,
+        &["--replay", &log],
+        &[
+            ("STONE_REPLAY_WINDOW", "1"),
+            ("STONE_HEADLESS", "1"),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_TIMELINE_KEY_AT", "3"),
+            ("STONE_TIMELINE_KEY", "right"),
+        ],
+    );
+    assert_eq!(
+        current_tick(&stepped), 1,
+        "Right must step exactly one tick from a paused start"
+    );
+}
+
 /// Piece 5 of P3: the auto-record "save repro" action snapshots the live
 /// from-boot log to a permanent file that replays cleanly. (Record-from-boot
 /// is the always-on ring buffer that ships now; a bounded "last N seconds"
