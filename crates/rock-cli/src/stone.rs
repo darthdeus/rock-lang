@@ -226,9 +226,18 @@ pub fn do_stone_watch(
         }
     };
 
+    // Always-on flight recorder (P3.5): record every `rock stone` session from
+    // boot to a gitignored <game>/replays/last.replay so any bug is already a
+    // file. Computed once (build id = the initial compile); a restart re-spawns
+    // with the same config.
+    let flight = flight_recorder_for(path, &output_path);
+    if let Some(f) = &flight {
+        info!("Flight recorder: {} (build {})", f.record_path, f.build_id);
+    }
+
     // Start the game process only if initial compilation succeeded
     let mut game_process = if initial_compilation_success {
-        Some(start_game_process(app_args)?)
+        Some(start_game_process(app_args, flight.as_ref())?)
     } else {
         None
     };
@@ -439,7 +448,7 @@ pub fn do_stone_watch(
                 error!("fold before start failed: {} (start may load a stale main.lua)", e);
             }
             info!("First successful compilation! Starting game...");
-            game_process = Some(start_game_process(app_args)?);
+            game_process = Some(start_game_process(app_args, flight.as_ref())?);
             info!("Game started successfully");
         }
         // Restart the game process if a rebuild actually produced new
@@ -459,7 +468,7 @@ pub fn do_stone_watch(
                 if let Err(e) = compiler.canonicalize_for_restart() {
                     error!("fold before restart failed: {} (restart may load a stale main.lua)", e);
                 }
-                game_process = Some(start_game_process(app_args)?);
+                game_process = Some(start_game_process(app_args, flight.as_ref())?);
                 info!("Game process restarted");
             }
         } else if has_game_changes && game_process.is_some() {
@@ -527,8 +536,84 @@ fn build_compiler() -> Result<()> {
     rock_host::engine_build::run_cargo(&["build", "--bin", "rock"], "Failed to build compiler")
 }
 
+/// Flight recorder config: always-on record-from-boot for `rock stone`
+/// (docs/replay-scrub-plan.md P3.5). The recording streams to a gitignored
+/// `<game>/replays/last.replay`; a crash / the F9 "save repro" key promote it
+/// to a permanent file. Checkpoints default OFF for the flight recorder --
+/// playback doesn't need them and each one serializes the whole state; the
+/// K=1..60 desync cadence stays a `rock frame --checkpoint-interval` setting.
+struct FlightRecorder {
+    record_path: String,
+    build_id: String,
+    checkpoint_interval: usize,
+}
+
+/// Content hash of the compiled game (FNV-1a-64, hex) -- the replay-header build
+/// id. Changes whenever codegen output changes, so a log replayed against a
+/// different build warns. Falls back to "dev" if the file can't be read.
+fn build_id_for_lua(lua_file: &std::path::Path) -> String {
+    match std::fs::read(lua_file) {
+        Ok(bytes) => {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in &bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            format!("{h:016x}")
+        }
+        Err(_) => "dev".to_string(),
+    }
+}
+
+/// Ensure `<game>/replays/` exists and is gitignored (a `.gitignore` of `*`
+/// keeps flight logs -- and itself -- out of version control). Returns the dir.
+fn ensure_flight_dir(game_path: &str) -> Result<std::path::PathBuf> {
+    let dir = std::path::Path::new(game_path).join("replays");
+    std::fs::create_dir_all(&dir)?;
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        // `*` ignores every entry in this dir including .gitignore itself, so
+        // flight recordings never show up as untracked/committed.
+        std::fs::write(&gitignore, "*\n")?;
+    }
+    Ok(dir)
+}
+
+/// Build the flight-recorder config for `rock stone`, or None when disabled.
+/// Opt-out via STONE_NO_FLIGHT_RECORDER=1; a user-set STONE_RECORD in the
+/// environment wins (explicit recording elsewhere is respected).
+fn flight_recorder_for(game_path: &str, lua_file: &std::path::Path) -> Option<FlightRecorder> {
+    if std::env::var("STONE_NO_FLIGHT_RECORDER").as_deref() == Ok("1") {
+        return None;
+    }
+    if std::env::var("STONE_RECORD").is_ok() {
+        return None;
+    }
+    let dir = match ensure_flight_dir(game_path) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!(target: "STONE", "flight recorder disabled: could not create replays dir: {e}");
+            return None;
+        }
+    };
+    Some(FlightRecorder {
+        record_path: dir.join("last.replay").to_string_lossy().into_owned(),
+        build_id: build_id_for_lua(lua_file),
+        checkpoint_interval: 0,
+    })
+}
+
+/// Apply the flight-recorder env to a game-process command (both spawn branches).
+fn apply_flight_env(cmd: &mut Command, flight: Option<&FlightRecorder>) {
+    if let Some(f) = flight {
+        cmd.env("STONE_RECORD", &f.record_path)
+            .env("STONE_BUILD_ID", &f.build_id)
+            .env("STONE_CHECKPOINT_INTERVAL", f.checkpoint_interval.to_string());
+    }
+}
+
 /// Start the game process with the correct library path and robust process management
-fn start_game_process(app_args: &[String]) -> Result<Child> {
+fn start_game_process(app_args: &[String], flight: Option<&FlightRecorder>) -> Result<Child> {
     let lua_file = rock_host::project::default_main_lua_path();
 
     // Platform-specific process management for orphan prevention
@@ -540,6 +625,8 @@ fn start_game_process(app_args: &[String]) -> Result<Child> {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         // Only the stone watch loop enables the in-game hot-reload watcher.
         cmd.env("STONE_HOT_RELOAD", "1");
+        // Flight recorder: always-on record-from-boot (P3.5).
+        apply_flight_env(&mut cmd, flight);
 
         // 1) Linux: Ensure the child gets PDEATHSIG (SIGTERM) if parent dies
         #[cfg(target_os = "linux")]
@@ -622,6 +709,8 @@ fn start_game_process(app_args: &[String]) -> Result<Child> {
             cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
             // Only the stone watch loop enables the in-game hot-reload watcher.
             cmd.env("STONE_HOT_RELOAD", "1");
+            // Flight recorder: always-on record-from-boot (P3.5).
+            apply_flight_env(&mut cmd, flight);
 
             let child = cmd.spawn()?;
 
@@ -939,6 +1028,9 @@ pub fn do_replay_window(
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
     cmd.env("STONE_REPLAY", replay_file)
         .env("STONE_REPLAY_WINDOW", "1")
+        // Stamp the CURRENT build so replay_init can warn when the log was
+        // recorded against different code (build-id mismatch).
+        .env("STONE_BUILD_ID", build_id_for_lua(std::path::Path::new(&lua_file)))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
@@ -954,7 +1046,39 @@ pub fn do_replay_window(
 
 #[cfg(test)]
 mod tests {
-    use super::is_compiler_source;
+    use super::{build_id_for_lua, ensure_flight_dir, is_compiler_source};
+
+    #[test]
+    fn build_id_is_deterministic_and_content_sensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.lua");
+        let b = dir.path().join("b.lua");
+        std::fs::write(&a, b"print('hello')").unwrap();
+        std::fs::write(&b, b"print('world')").unwrap();
+        // Deterministic: same bytes -> same id across calls (no per-process seed).
+        assert_eq!(build_id_for_lua(&a), build_id_for_lua(&a));
+        // Content-sensitive: a codegen change changes the id (mismatch warning).
+        assert_ne!(build_id_for_lua(&a), build_id_for_lua(&b));
+        // Missing file -> "dev" fallback, never a panic.
+        assert_eq!(build_id_for_lua(&dir.path().join("missing.lua")), "dev");
+    }
+
+    #[test]
+    fn ensure_flight_dir_creates_gitignored_dir() {
+        let game = tempfile::tempdir().unwrap();
+        let game_s = game.path().to_string_lossy().into_owned();
+        let dir = ensure_flight_dir(&game_s).unwrap();
+        assert!(dir.is_dir(), "replays/ must be created");
+        assert_eq!(dir.file_name().unwrap(), "replays");
+        let gitignore = dir.join(".gitignore");
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).unwrap(),
+            "*\n",
+            "replays/ must be self-gitignoring"
+        );
+        // Idempotent: a second call must not error or clobber.
+        assert!(ensure_flight_dir(&game_s).is_ok());
+    }
 
     #[test]
     fn compiler_source_classification() {
