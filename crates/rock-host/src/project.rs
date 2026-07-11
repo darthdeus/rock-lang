@@ -571,6 +571,31 @@ mod tests {
     }
 
     #[test]
+    fn resolve_project_dir_dot_stays_current() {
+        // The no-arg default (`.`) is a literal directory that always wins,
+        // so it means "current directory" and is never bare-name-expanded --
+        // even when a `games/.` would technically exist.
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("games")).unwrap();
+
+        let got = resolve_project_dir_in(root, &["games"], ".").unwrap();
+        assert_eq!(got, root.join("."));
+    }
+
+    #[test]
+    fn resolve_project_dir_explicit_subpath_passthrough() {
+        // A literal path a caller typed (with a separator) passes through
+        // unchanged -- the resolver only expands BARE names.
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("games/match3")).unwrap();
+
+        let got = resolve_project_dir_in(root, &["games"], "games/match3").unwrap();
+        assert_eq!(got, root.join("games/match3"));
+    }
+
+    #[test]
     fn resolve_project_dir_missing_rejects() {
         let temp = TempDir::new().unwrap();
         let err = resolve_project_dir_in(temp.path(), &["games"], "nope")

@@ -82,19 +82,44 @@ impl CommandContext {
         Ok(output)
     }
 
-    pub fn get_game_file(&self) -> String {
-        let path = self.args
-            .files
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "game".to_string());
+    pub fn get_game_file(&self) -> Result<String> {
+        let Some(arg) = self.args.files.first() else {
+            // No project arg: default to `game/`, with a directory
+            // suggestion (then exit) if it's absent -- unchanged behavior.
+            let path = "game".to_string();
+            if !std::path::Path::new(&path).exists() {
+                self.suggest_available_directories(&path);
+            }
+            return Ok(path);
+        };
+        // Explicit project arg: bare-name resolution, same as `rock sim`
+        // (`match3` -> `games/match3`; a literal path wins; unknown rejects
+        // listing the searched parents).
+        self.resolve_project_arg(arg)
+    }
 
-        // If using default and it doesn't exist, provide helpful error
-        if self.args.files.is_empty() && !std::path::Path::new(&path).exists() {
-            self.suggest_available_directories(&path);
-        }
+    /// Route a project-directory argument through the shared bare-name
+    /// resolver (`rock sim`'s `resolve_project_dir`): a literal path wins
+    /// as-is, a bare name expands against `games/` (`match3` ->
+    /// `games/match3`), and an unknown name rejects listing the searched
+    /// parents. Runs `ensure_workspace_root` first so resolution is
+    /// workspace-root-relative (idempotent -- the backend entry re-runs it).
+    fn resolve_project_arg(&self, arg: &str) -> Result<String> {
+        rock_host::project::ensure_workspace_root()?;
+        Ok(rock_host::project::resolve_project_dir(arg)?
+            .to_string_lossy()
+            .into_owned())
+    }
 
-        path
+    /// `get_path_or_current` (default `.`, special device files rejected)
+    /// followed by project-dir resolution via `resolve_project_arg`. For
+    /// commands that take a PROJECT directory (`stone`, `watch`) so a bare
+    /// `match3` resolves exactly like `rock sim`. The `.` default is a
+    /// literal directory that always wins, so it stays "current directory"
+    /// and is never bare-name-expanded.
+    fn get_project_dir_or_current(&self) -> Result<String> {
+        let arg = self.get_path_or_current()?;
+        self.resolve_project_arg(&arg)
     }
 
     fn suggest_available_directories(&self, missing_dir: &str) {
@@ -213,7 +238,7 @@ impl CommandContext {
 
     /// `rock frame` on the skull backend (do_one_frame is backend-parameterized).
     fn handle_frame(&self) -> Result<()> {
-        let file = self.get_game_file();
+        let file = self.get_game_file()?;
         let output = self.get_output_or_default("tmp")?;
         if self.args.record.is_some() && self.args.replay.is_some() {
             anyhow::bail!("--record and --replay are mutually exclusive");
@@ -233,7 +258,7 @@ impl CommandContext {
 
     /// `rock perf` on the skull backend.
     fn handle_perf(&self) -> Result<()> {
-        let file = self.get_game_file();
+        let file = self.get_game_file()?;
         let output = self.get_output_or_default("tmp")?;
         // Default perf run: 12 wall-clock seconds. Overridable via --seconds or
         // --frames. (300 frames / ~5s was too short for stable distribution stats.)
@@ -334,7 +359,7 @@ impl CommandContext {
                 bone_backend::bone_check_single(file, "run", self.args.iters)
             }
             CliCommand::Watch => {
-                let path = self.get_path_or_current()?;
+                let path = self.get_project_dir_or_current()?;
                 bone_backend::bone_watch(&path)
             }
             // `require_backend_support` (called before this dispatch) has
@@ -368,13 +393,13 @@ impl CommandContext {
                 skull_backend::skull_run(file)
             }
             CliCommand::Watch => {
-                let path = self.get_path_or_current()?;
+                let path = self.get_project_dir_or_current()?;
                 skull_backend::skull_watch(&path, self.args.output.clone())
             }
             CliCommand::Stone => {
                 // Hot-reload game dev loop on skull: the watch/libstone/game-process
                 // machinery is shared; only the compile step re-emits via skull.
-                let path = self.get_path_or_current()?;
+                let path = self.get_project_dir_or_current()?;
                 crate::stone::do_stone_watch(
                     &path,
                     self.args.quiet,
