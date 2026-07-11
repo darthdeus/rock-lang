@@ -472,10 +472,19 @@ pub fn do_stone_watch(
                 // into windowed playback of it (read-once) instead of the live game.
                 let replay_request = consume_replay_request();
                 if let Some(ref p) = replay_request {
-                    info!("Loading replay {p} (F7 picker); flight recorder off for this run");
+                    match p.loop_ab {
+                        Some((a, b)) => info!(
+                            "Loading replay {} with A-B loop [{a},{b}] (shape-edit restart); flight recorder off",
+                            p.path
+                        ),
+                        None => info!(
+                            "Loading replay {} (F7 picker); flight recorder off for this run",
+                            p.path
+                        ),
+                    }
                 }
                 game_process =
-                    Some(start_game_process(app_args, flight.as_ref(), replay_request.as_deref())?);
+                    Some(start_game_process(app_args, flight.as_ref(), replay_request.as_ref())?);
                 info!("Game process restarted");
             }
         } else if has_game_changes && game_process.is_some() {
@@ -624,10 +633,37 @@ fn apply_flight_env(cmd: &mut Command, flight: Option<&FlightRecorder>) {
 /// are mutually exclusive, so a load request suppresses the recorder for that
 /// run. Build-id (reused from the flight config -- same compiled lua) lets
 /// replay_init warn on a mismatch.
-fn apply_run_env(cmd: &mut Command, flight: Option<&FlightRecorder>, replay: Option<&str>) {
+/// A consumed in-session load request: a replay path, plus optional A-B loop
+/// markers (P6 shape-edit survival -- a full reload during a loop restarts the
+/// process and resumes the loop at A).
+#[derive(Debug, PartialEq)]
+struct ReplayRequest {
+    path: String,
+    loop_ab: Option<(i64, i64)>,
+}
+
+/// Parse a request line: `path` or `path\tloop\t<A>\t<B>`. A malformed loop
+/// suffix degrades to a plain replay (path only) rather than being dropped.
+fn parse_replay_request(raw: &str) -> ReplayRequest {
+    let mut parts = raw.split('\t');
+    let path = parts.next().unwrap_or("").to_string();
+    let loop_ab = match (parts.next(), parts.next(), parts.next()) {
+        (Some("loop"), Some(a), Some(b)) => match (a.parse::<i64>(), b.parse::<i64>()) {
+            (Ok(a), Ok(b)) => Some((a, b)),
+            _ => None,
+        },
+        _ => None,
+    };
+    ReplayRequest { path, loop_ab }
+}
+
+fn apply_run_env(cmd: &mut Command, flight: Option<&FlightRecorder>, replay: Option<&ReplayRequest>) {
     match replay {
-        Some(path) => {
-            cmd.env("STONE_REPLAY", path).env("STONE_REPLAY_WINDOW", "1");
+        Some(req) => {
+            cmd.env("STONE_REPLAY", &req.path).env("STONE_REPLAY_WINDOW", "1");
+            if let Some((a, b)) = req.loop_ab {
+                cmd.env("STONE_LOOP_A", a.to_string()).env("STONE_LOOP_B", b.to_string());
+            }
             if let Some(f) = flight {
                 cmd.env("STONE_BUILD_ID", &f.build_id);
             }
@@ -636,12 +672,13 @@ fn apply_run_env(cmd: &mut Command, flight: Option<&FlightRecorder>, replay: Opt
     }
 }
 
-/// Consume a pending in-session load request (the F7 picker's Play button writes
-/// the selected replay path to `tmp/replay_request.txt` and touches
+/// Consume a pending in-session load request (the F7 picker's Play button, or a
+/// P6 loop shape-edit restart, writes `tmp/replay_request.txt` and touches
 /// `tmp/restart.txt`). Read-once: the file is removed so a later plain restart
 /// (code edit) does not re-enter replay mode.
-fn consume_replay_request() -> Option<String> {
+fn consume_replay_request() -> Option<ReplayRequest> {
     consume_request_file(std::path::Path::new("tmp/replay_request.txt"))
+        .map(|raw| parse_replay_request(&raw))
 }
 
 /// Read-once request consumer: returns the trimmed contents and removes the
@@ -671,7 +708,7 @@ fn consume_request_file(path: &std::path::Path) -> Option<String> {
 fn start_game_process(
     app_args: &[String],
     flight: Option<&FlightRecorder>,
-    replay: Option<&str>,
+    replay: Option<&ReplayRequest>,
 ) -> Result<Child> {
     let lua_file = rock_host::project::default_main_lua_path();
 
@@ -1192,20 +1229,51 @@ mod tests {
             build_id: "abc123".into(),
             checkpoint_interval: 0,
         };
-        let env_of = |replay: Option<&str>| -> std::collections::HashMap<String, String> {
+        let env_of = |replay: Option<&super::ReplayRequest>| -> std::collections::HashMap<String, String> {
             let mut cmd = std::process::Command::new("true");
             apply_run_env(&mut cmd, Some(&flight), replay);
             cmd.get_envs()
                 .filter_map(|(k, v)| Some((k.to_str()?.to_string(), v?.to_str()?.to_string())))
                 .collect()
         };
-        let replaying = env_of(Some("bitgun/replays/repro-7.replay"));
+        let plain = super::ReplayRequest { path: "bitgun/replays/repro-7.replay".into(), loop_ab: None };
+        let replaying = env_of(Some(&plain));
         assert_eq!(replaying.get("STONE_REPLAY").map(String::as_str), Some("bitgun/replays/repro-7.replay"));
         assert_eq!(replaying.get("STONE_REPLAY_WINDOW").map(String::as_str), Some("1"));
         assert!(!replaying.contains_key("STONE_RECORD"), "replay run must not also record");
+        assert!(!replaying.contains_key("STONE_LOOP_A"), "a plain load carries no loop markers");
         let recording = env_of(None);
         assert_eq!(recording.get("STONE_RECORD").map(String::as_str), Some("bitgun/replays/last.replay"));
         assert!(!recording.contains_key("STONE_REPLAY"), "live run must not be in replay mode");
+
+        // P6 shape-edit restart: a loop-carrying request sets STONE_LOOP_A/B so
+        // the relaunched process resumes the loop.
+        let looped = super::ReplayRequest {
+            path: "mag/replays/last.replay".into(),
+            loop_ab: Some((30, 90)),
+        };
+        let env = env_of(Some(&looped));
+        assert_eq!(env.get("STONE_LOOP_A").map(String::as_str), Some("30"));
+        assert_eq!(env.get("STONE_LOOP_B").map(String::as_str), Some("90"));
+    }
+
+    /// The request line parses `path` and the optional `\tloop\tA\tB` suffix; a
+    /// malformed loop suffix degrades to a plain replay rather than being dropped.
+    #[test]
+    fn parse_replay_request_reads_loop_markers() {
+        use super::{parse_replay_request, ReplayRequest};
+        assert_eq!(
+            parse_replay_request("mag/replays/last.replay"),
+            ReplayRequest { path: "mag/replays/last.replay".into(), loop_ab: None }
+        );
+        assert_eq!(
+            parse_replay_request("mag/replays/last.replay\tloop\t30\t90"),
+            ReplayRequest { path: "mag/replays/last.replay".into(), loop_ab: Some((30, 90)) }
+        );
+        assert_eq!(
+            parse_replay_request("p\tloop\tNaN\t90").loop_ab, None,
+            "malformed loop suffix -> plain replay"
+        );
     }
 
     #[test]
