@@ -3949,9 +3949,9 @@ impl Builder<'_> {
                 if !scalar {
                     // Non-scalar equality is STRUCTURAL, not Lua reference
                     // equality: route through the stdlib `__op_eq`/`__op_ne`,
-                    // which dispatch to a monomorphized `__op_eq_<Type>` or fall
-                    // back to a structural `pairs()` walk (cdata value structs
-                    // hit the `==` primitive fast path = byte-value compare).
+                    // which walk fields structurally via `pairs()` (cdata value
+                    // structs hit the `==` primitive fast path = byte-value
+                    // compare).
                     let name = if matches!(op, BinOp::Eq) { "__op_eq" } else { "__op_ne" };
                     let func = self.resolve_op_helper(name)?;
                     return Ok(self.emit_cur(Inst::Call { func, args: vec![lv, rv] }));
