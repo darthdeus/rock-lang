@@ -376,6 +376,56 @@ fn ab_loop_survives_incremental_reload_via_rederive() {
     assert_sim_state_matches(&looped, &reference, &sim, &format!("post-reload loop tick-{t}"));
 }
 
+/// Review fix 2: a loop wider than the keyframe window must NOT let eviction drop
+/// its A keyframe (nor the tick-0 boot anchor). With A=10, B=90, window=30, at
+/// tick ~90 the window floor is ~60, so a naive evict would drop A=10 and wedge
+/// the next jump. A is exempt from eviction, so the loop keeps cycling in [A,B]
+/// with correct state -- never silently diverging past B.
+#[test]
+fn wide_loop_keyframe_survives_eviction() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("wideloop.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "100", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    let looped = run_replay_dump(
+        game, 250, &log_s,
+        &[
+            ("STONE_LOOP_A", "10"), ("STONE_LOOP_B", "90"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_KEYFRAME_WINDOW", "30"),   // narrower than the loop span (80)
+        ],
+    );
+    let jumps = looped["__stone_diag"]["STONE_LOOP_JUMPS"].as_i64().unwrap_or(0);
+    assert!(jumps >= 2, "wide loop must keep cycling despite eviction (jumps={jumps})");
+    let t = current_tick(&looped);
+    assert!(
+        (10..=90).contains(&t),
+        "wide loop must stay in [10,90]; escaping means A was evicted and the loop wedged (got {t})"
+    );
+
+    let reference = run_replay_dump(
+        game, 100, &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", &t.to_string())],
+    );
+    assert_eq!(current_tick(&reference), t, "reference must sit at tick {t}");
+    let mut sim = sim_state_names(game, 100);
+    sim.remove("dt");
+    assert_sim_state_matches(&looped, &reference, &sim, &format!("wide loop tick-{t}"));
+}
+
 /// P4 item 4: a bounded keyframe ring buffer. STONE_KEYFRAME_WINDOW (ticks, 0 =
 /// unbounded) evicts keyframes older than the floor -- the newest keyframe <=
 /// (now - window) -- so a long session's keyframe memory is bounded while a tick

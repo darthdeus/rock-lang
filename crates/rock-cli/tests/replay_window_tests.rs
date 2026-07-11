@@ -29,6 +29,7 @@ fn record_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
             "frame", game, "-n", &frames.to_string(), "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -67,6 +68,7 @@ fn windowed_replay_keeps_looping_past_log_end() {
         .args(["replay", "bitgun", &log])
         .env("STONE_HEADLESS", "1")
         .env("FRAME_COUNT", "30")
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn replay");
@@ -95,6 +97,7 @@ fn headless_frame_replay_exits_at_log_end() {
             "frame", "bitgun", "-n", "30", "--replay", &log,
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn frame replay");

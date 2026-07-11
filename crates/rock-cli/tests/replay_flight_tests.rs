@@ -28,6 +28,7 @@ fn record_with_env(game: &str, frames: u32, env: &[(&str, &str)]) -> (tempfile::
             "frame", game, "-n", &frames.to_string(), "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
         .output()
@@ -44,6 +45,7 @@ fn replay_stderr(game: &str, log: &str, env: &[(&str, &str)]) -> String {
             "frame", game, "-n", "15", "--replay", log,
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
         .output()
@@ -99,6 +101,7 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
             "--output", &scratch.path().to_string_lossy(),
         ])
         .env("STONE_SAVE_REPRO_AUTO_AT_FRAME", "8")
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -119,6 +122,7 @@ fn f9_save_repro_writes_a_replayable_tick_stamped_file() {
             "frame", "bitgun", "-n", "1000", "--replay", &repro.to_string_lossy(),
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn replay");

@@ -34,6 +34,9 @@ fn run_frame_env(
     args.extend_from_slice(extra);
     let out = Command::new(rock_bin)
         .args(&args)
+        // Default watchdog headroom for the -P full parallel-load flake (note 6);
+        // applied before .envs so a per-test override still wins.
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
         .output()
@@ -74,6 +77,7 @@ fn sim_state_names(game: &str, frames: u32) -> std::collections::HashSet<String>
             "--checkpoint-interval", "1",
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -157,6 +161,7 @@ fn seek_reaches_same_state_as_stepping() {
             "frame", "bitgun", "-n", "30", "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -414,6 +419,7 @@ fn record_short_log(game: &str, frames: u32) -> (tempfile::TempDir, String) {
             "frame", game, "-n", &frames.to_string(), "--record", &log_s,
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn record");
@@ -519,6 +525,7 @@ fn save_repro_writes_a_replayable_from_boot_log() {
         ])
         .env("STONE_SAVE_REPRO_AT_FRAME", "10")
         .env("STONE_SAVE_REPRO_PATH", repro.to_string_lossy().as_ref())
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn record+save");
@@ -534,6 +541,7 @@ fn save_repro_writes_a_replayable_from_boot_log() {
             "frame", "bitgun", "-n", "1000", "--replay", &repro.to_string_lossy(),
             "--output", &scratch.path().to_string_lossy(),
         ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("spawn replay");

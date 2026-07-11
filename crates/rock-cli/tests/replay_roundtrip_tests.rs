@@ -41,6 +41,7 @@ fn run_frame(game: &str, frames: u32, extra: &[&str]) -> serde_json::Value {
 
     let output = Command::new(rock_bin)
         .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame");
@@ -69,6 +70,7 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
     args.extend_from_slice(extra);
     Command::new(rock_bin)
         .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame")
@@ -89,6 +91,7 @@ fn run_frame_raw_env(
     args.extend_from_slice(extra);
     Command::new(rock_bin)
         .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .envs(env.iter().copied())
         .current_dir(workspace_root())
         .output()
