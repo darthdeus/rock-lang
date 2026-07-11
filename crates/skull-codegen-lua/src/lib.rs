@@ -443,7 +443,11 @@ fn non_dominating_by_value_captures(
         }
     }
     // Cache idoms per parent-scope entry (small regions; recomputed at most once
-    // per distinct parent).
+    // per distinct parent). Built LAZILY at the first cross-block dominance query:
+    // most lambda scopes filter out every capture below (boxed / loop-binding /
+    // frame / transitive / multi-write) or resolve same-block by inst position,
+    // so the classic fixpoint is never needed for them -- computing it up front
+    // per parent was pure waste.
     let mut idoms: HashMap<Idx<Block>, HashMap<Idx<Block>, Idx<Block>>> = HashMap::default();
     for s in &tree.scopes {
         let Some(lid) = s.lambda else { continue };
@@ -452,7 +456,6 @@ fn non_dominating_by_value_captures(
         let sid = tree.scope_of_block(cblock); // sanity: create block is in the parent region
         debug_assert_eq!(sid, Some(parent), "a lambda's creation block lies in its parent scope");
         let parent_entry = tree.scopes[parent].entry;
-        let idom = idoms.entry(parent_entry).or_insert_with(|| dominators(func, parent_entry));
         // captures of THIS scope owned by the parent: read directly at cblock.
         let scope_id = (0..tree.scopes.len()).find(|&i| tree.scopes[i].lambda == Some(lid)).unwrap();
         for &c in &own.captures[scope_id] {
@@ -481,6 +484,9 @@ fn non_dominating_by_value_captures(
                     .expect("the creating Inst::Lambda lives in its creation block");
                 wpos < cpos
             } else {
+                let idom = idoms
+                    .entry(parent_entry)
+                    .or_insert_with(|| dominators(func, parent_entry));
                 dominates(idom, wblock, cblock)
             };
             if !write_dominates {
