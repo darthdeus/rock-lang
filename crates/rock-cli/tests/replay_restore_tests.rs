@@ -267,6 +267,55 @@ fn reload_during_replay_invalidates_keyframes() {
     );
 }
 
+/// P6: the A-B loop. Enabling with A=10,B=20 keyframes A, plays A->B rendered,
+/// and at B restores(A) and repeats -- each jump is a snapshot restore, not a
+/// resim. Over 120 frames the loop must fire several times, current_tick must
+/// stay inside [A,B], and -- the correctness point -- the landing state must be
+/// byte-identical to a plain run-to that tick (the loop re-derives A->T
+/// deterministically from the restored keyframe). The restore-ms timer must also
+/// be populated (the A-jump seam measurement).
+#[test]
+fn ab_loop_cycles_and_restores_correct_state() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("loop.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "60", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    let looped = run_replay_dump(
+        game, 120, &log_s,
+        &[("STONE_LOOP_A", "10"), ("STONE_LOOP_B", "20"), ("STONE_KEYFRAME_INTERVAL", "10")],
+    );
+    let jumps = looped["__stone_diag"]["STONE_LOOP_JUMPS"].as_i64().unwrap_or(0);
+    assert!(jumps >= 3, "the A-B loop must cycle several times over 120 frames (jumps={jumps})");
+    let t = current_tick(&looped);
+    assert!((10..=20).contains(&t), "loop must keep current_tick in [10,20] (got {t})");
+    assert!(
+        looped["__stone_diag"]["STONE_RESTORE_MS"].as_f64().unwrap_or(0.0) > 0.0,
+        "the A-jump restore-ms timer must be populated"
+    );
+
+    // Correctness: the loop's landing state must match a plain run-to that tick.
+    let reference = run_replay_dump(
+        game, 60, &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", &t.to_string())],
+    );
+    assert_eq!(current_tick(&reference), t, "reference must sit at the loop's tick {t}");
+    let sim = sim_state_names(game, 60);
+    assert_sim_state_matches(&looped, &reference, &sim, &format!("loop tick-{t}"));
+}
+
 /// P4 item 4: a bounded keyframe ring buffer. STONE_KEYFRAME_WINDOW (ticks, 0 =
 /// unbounded) evicts keyframes older than the floor -- the newest keyframe <=
 /// (now - window) -- so a long session's keyframe memory is bounded while a tick
