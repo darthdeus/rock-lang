@@ -878,7 +878,32 @@ pub fn inline_functions(
 
 #[cfg(test)]
 mod tests {
-    use super::annotation_gate;
+    use super::*;
+    use ustr::Ustr;
+
+    // The `loop_binding` provenance tag lives ON the cell (unfuck #37), so a
+    // transform that clones cells carries it for free -- no side-table to remap.
+    // This is what will keep a spliced loop counter per-iteration once the
+    // lambda-callee refusal (`classify`, `Inst::Lambda -> None`) is lifted.
+    #[test]
+    fn loop_binding_tag_survives_cell_clone_through_splice() {
+        let mut callee = MirFunc::new(Ustr::from("callee"));
+        let counter = callee.new_cell(Some(Ustr::from("i")));
+        callee.mark_loop_binding(counter);
+        let plain = callee.new_cell(Some(Ustr::from("x")));
+
+        let mut caller = MirFunc::new(Ustr::from("caller"));
+        let (_, cell_map) = clone_cells_insts(&mut caller, &callee, &HashMap::default());
+
+        assert!(
+            caller.cells[cell_map[&counter]].loop_binding,
+            "cloned loop-binding cell must keep its tag"
+        );
+        assert!(
+            !caller.cells[cell_map[&plain]].loop_binding,
+            "an ordinary cloned cell must not gain the tag"
+        );
+    }
 
     #[test]
     fn annotation_gate_default_annotated_only() {

@@ -322,21 +322,17 @@ impl ScopeTree {
     }
 }
 
-/// Loop-binding cells: the `for` desugarings' counter cells (recorded on
-/// `MirFunc::loop_binding_cells` by `skull-mir`'s lowering -- DESUGAR PROVENANCE,
-/// not a structural guess) plus `MapNext` key/val dests (provable directly from
-/// the inst). Capturing such a cell is per-iteration by value -- the slot is a
-/// shared local re-assigned each iteration, so a record built inside the loop
-/// snapshots THIS iteration's value. A user `while` counter or a non-loop if-join
-/// `x = x + 1` (which the old structural latch detector misfired on) has no
-/// provenance tag, so it boxes -- the decided shared-binding semantics.
+/// Loop-binding cells: the `for` desugarings' counter cells and `MapNext`
+/// key/val dests, tagged `Cell::loop_binding` at lowering -- DESUGAR PROVENANCE,
+/// not a structural guess. Capturing such a cell is per-iteration by value -- the
+/// slot is a shared local re-assigned each iteration, so a record built inside
+/// the loop snapshots THIS iteration's value. A user `while` counter or a
+/// non-loop if-join `x = x + 1` (which the old structural latch detector misfired
+/// on) has no tag, so it boxes -- the decided shared-binding semantics.
 fn loop_binding_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
-    let mut out: HashSet<Idx<Cell>> = func.loop_binding_cells.iter().copied().collect();
-    for (_, inst) in func.insts.iter() {
-        if let Inst::MapNext { key_cell, val_cell, .. } = inst {
-            out.insert(*key_cell);
-            out.insert(*val_cell);
-        }
-    }
-    out
+    func.cells
+        .iter()
+        .filter(|(_, cell)| cell.loop_binding)
+        .map(|(id, _)| id)
+        .collect()
 }
