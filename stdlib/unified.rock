@@ -1339,7 +1339,14 @@ inline(lua) fn float_to_int(value: float) -> int = """
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
 
-@nomangle inline(lua) fn deepcopy<T>(obj: T) -> T = """
+// Aliasing-preserving, cycle-safe deep copy. `seen` maps each already-copied
+// source table to its copy; recording `seen[obj] = copy` BEFORE recursing
+// children makes two references to one table (or one shared capture box) copy
+// to ONE table, and lets a cyclic table copy without recursing forever. One
+// seen table per top-level `deepcopy` call. Hoisted (like __rock_inspect_value)
+// so the wrapper doesn't allocate a fresh closure per copy; @nomangle because
+// it recurses by name and is called from deepcopy's body.
+@nomangle inline(lua) fn __rock_deepcopy_value(obj: any, seen: any) -> any = """
     if type(obj) == "cdata" and _G.__ROCK_C_STRUCT then
         for _, info in pairs(_G.__ROCK_C_STRUCT) do
             if ffi.istype(info.name, obj) then
@@ -1351,11 +1358,15 @@ inline(lua) fn float_to_int(value: float) -> int = """
     if type(obj) ~= "table" then
         return obj
     end
+    if seen[obj] then
+        return seen[obj]
+    end
 
     local copy = {}
+    seen[obj] = copy
     for k, v in pairs(obj) do
         -- copy *both* key and value, in case either is a table.
-        copy[deepcopy(k)] = deepcopy(v)
+        copy[__rock_deepcopy_value(k, seen)] = __rock_deepcopy_value(v, seen)
     end
     -- Preserve the metatable: a capturing lambda is an env record carrying
     -- `__rock_fn_mt` (its `__call` is what makes it invokable) -- a copy that
@@ -1363,6 +1374,10 @@ inline(lua) fn float_to_int(value: float) -> int = """
     setmetatable(copy, getmetatable(obj))
 
     return copy
+"""
+
+@nomangle inline(lua) fn deepcopy<T>(obj: T) -> T = """
+    return __rock_deepcopy_value(obj, {})
 """
 
 // Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
