@@ -1269,14 +1269,6 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     let params = func.params.clone();
     let s_cell = step.new_cell(Some(ustr::Ustr::from("s")));
 
-    // Frame = all cells except the two step params (s, __resume_arg).
-    let frame_cells: HashSet<Idx<Cell>> = step
-        .cells
-        .iter()
-        .map(|(id, _)| id)
-        .filter(|&c| c != s_cell && c != resume_arg)
-        .collect();
-
     // Only the co-fn's TOP-LEVEL blocks are transformed — NOT closure sub-blocks
     // (which share the arena but are their own CFGs, reached via `Inst::Lambda`,
     // not terminator successors). A closure body must keep its own `return`s and
@@ -1306,6 +1298,24 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
                 .retain(|&id| !matches!(step.insts[id], Inst::CoroHook { .. }) && !hook_lambdas.contains(&id));
         }
     }
+
+    // 0b. Frame membership is OWNERSHIP-based (P1 of
+    // docs/coroutine-frame-lambda-plan.md): a cell owned by a live lambda scope
+    // is that lambda's plain local in its hoisted body, NOT a frame field.
+    // Everything else (ROOT-owned, or accessed only from dead/peeled/detached
+    // blocks -- hook bodies, defer copies -- which have no owner) stays in the
+    // frame. Built post-peel so hook lambdas are dead, pre-rewrite so `Yield`
+    // resume edges still link the CFG (`successors` follows them).
+    let frame_cells: HashSet<Idx<Cell>> = {
+        let tree = skull_codegen_lua::scope::ScopeTree::build(&step);
+        let own = tree.analyze(&step);
+        step.cells
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|&c| c != s_cell && c != resume_arg)
+            .filter(|c| own.owner.get(c).is_none_or(|&o| o == skull_codegen_lua::scope::ROOT))
+            .collect()
+    };
 
     // 1. Rewrite `CoroSetInner(x)` -> `s.__inner = x` (rebuild affected blocks).
     for &bid in &orig_blocks {
@@ -1503,7 +1513,29 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         .return_ty
         .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
     let lowered = transform_coroutine(func, channel.as_ref());
-    let frame = FrameCtx { s_cell: lowered.s_cell, fields: lowered.frame_cells.iter().copied().collect() };
+    let frame = FrameCtx {
+        s_cell: lowered.s_cell,
+        fields: lowered.frame_cells.iter().copied().collect(),
+        hoist_lambdas: true,
+    };
+    // Hooks/defers keep the pre-P1 shape (D5 of docs/coroutine-frame-lambda-plan.md):
+    // an ALL-cells frame and no hoisting. Their clones carry the step's whole cell
+    // arena, so the shrunk ownership-based field set would declare every
+    // lambda-owned cell as an unused local in each clone; treating everything as a
+    // frame field keeps the emission identical to what their bodies (which only
+    // touch co-fn-level state) have always produced.
+    let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
+    let aux_frame = FrameCtx {
+        s_cell: lowered.s_cell,
+        fields: lowered
+            .step
+            .cells
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|&c| c != lowered.s_cell && c != resume_arg)
+            .collect(),
+        hoist_lambdas: false,
+    };
     // `__resume`/`__advance` are minted by `emit_constructor` from `name` -- check
     // them here (the only place with `ctx`) for their collision side-effect; the
     // constructor emits them unconditionally (`__advance` only with a channel).
@@ -1524,7 +1556,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         dfn.entry = *entry;
         dfn.params = vec![lowered.s_cell];
         let dname = ctx.mint_synthetic(format!("{name}__defer{k}"));
-        defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&frame)));
+        defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&aux_frame)));
     }
     // Lifecycle-hook lambdas (`on_killed`/`on_resume`/`on_hot_reload`) hoist to
     // per-co-fn top-level fns taking the frame `s` -- SAME shape as a defer (a
@@ -1544,7 +1576,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         hfn.entry = *entry;
         hfn.params = vec![lowered.s_cell];
         let hname = ctx.mint_synthetic(format!("{name}{}", kind.slot()));
-        hook_luas.push_str(&emit_named_framed(ws, ctx, &hname, &hfn, Some(&frame)));
+        hook_luas.push_str(&emit_named_framed(ws, ctx, &hname, &hfn, Some(&aux_frame)));
     }
     let ctor = emit_constructor(&name, &step_name, &lowered, channel.as_ref());
     let _ = lowered.num_states;

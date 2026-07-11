@@ -316,8 +316,11 @@ pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) 
 }
 
 /// P2.6/P3 (docs/closure-env-records-plan.md): the plan for hoisting lambda
-/// bodies to sibling top-level fns. EVERY live lambda (except under a coroutine
-/// frame, which is carved out) hoists to `function <name>__lambda<k>(...) ... end`:
+/// bodies to sibling top-level fns. EVERY live lambda hoists to
+/// `function <name>__lambda<k>(...) ... end` — including under a coroutine
+/// frame (the step emission), where frame captures collapse to `s`
+/// (docs/coroutine-frame-lambda-plan.md); only hook/defer clone emissions
+/// (`FrameCtx::hoist_lambdas == false`) keep the inline-closure path:
 ///   - **capture-free** (`captures[c]` empty): body `(<params>)`, referenced by
 ///     bare global name at the creation site — a raw fn value, no record.
 ///   - **capturing**: body `(__rock_env, <params>)` reading captures as `__rock_env.c<A>`; the
@@ -353,7 +356,7 @@ fn home_scope(tree: &scope::ScopeTree, hoisted: &HashSet<scope::ScopeId>, mut s:
 /// declaration walk skips the per-cell home probe entirely — the common case).
 /// `k` is the `Inst::Lambda`'s inst-arena index order (every lambda consumes a
 /// `k`, so a DCE'd one doesn't shift the live ones).
-fn build_hoist_plan(ctx: &CodegenCtx, func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Ownership, name: &str) -> Option<HoistPlan> {
+fn build_hoist_plan(ctx: &CodegenCtx, func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Ownership, name: &str, frame: Option<&FrameCtx>) -> Option<HoistPlan> {
     let mut lambda_scope: HashMap<Idx<Inst>, scope::ScopeId> = HashMap::default();
     for (sid, s) in tree.scopes.iter().enumerate() {
         if let Some(lid) = s.lambda {
@@ -371,6 +374,33 @@ fn build_hoist_plan(ctx: &CodegenCtx, func: &MirFunc, tree: &scope::ScopeTree, o
         let Some(&sid) = lambda_scope.get(&lid) else { continue }; // DCE'd lambda: no scope
         hoisted_name.insert(lid, ctx.mint_synthetic(format!("{name}__lambda{this_k}")));
         let mut caps: Vec<Idx<Cell>> = own.captures[sid].iter().copied().collect();
+        // Frame capture partition (D2 + D4(b), docs/coroutine-frame-lambda-plan.md):
+        // a captured FRAME cell either snapshots by value at record creation (a
+        // provenance-tagged loop binding no lambda writes -- per-iteration, the
+        // non-frame rule) or collapses to a capture of `s` itself (shared through
+        // the frame table -- reads/writes compose `__rock_env.c<S>.c<N>`).
+        // Lambda-owned cells (nested captures) keep the standard classification.
+        if let Some(f) = frame {
+            let mut via_s = false;
+            caps.retain(|c| {
+                if !f.fields.contains(c) {
+                    return true;
+                }
+                let lambda_written = own
+                    .writing_scopes
+                    .get(c)
+                    .is_some_and(|ss| ss.iter().any(|&s| s != scope::ROOT));
+                if own.loop_bindings.contains(c) && !lambda_written {
+                    true
+                } else {
+                    via_s = true;
+                    false
+                }
+            });
+            if via_s {
+                caps.push(f.s_cell);
+            }
+        }
         caps.sort_by_key(|c| raw(*c));
         captures.insert(lid, caps);
         order.push((lid, sid));
@@ -400,6 +430,7 @@ fn non_dominating_by_value_captures(
     tree: &scope::ScopeTree,
     own: &scope::Ownership,
     boxed: &HashSet<Idx<Cell>>,
+    frame: Option<&FrameCtx>,
 ) -> HashSet<Idx<Cell>> {
     let mut extra: HashSet<Idx<Cell>> = HashSet::default();
     // block -> the `Inst::Lambda` creating a scope (its creation block).
@@ -426,6 +457,11 @@ fn non_dominating_by_value_captures(
         let scope_id = (0..tree.scopes.len()).find(|&i| tree.scopes[i].lambda == Some(lid)).unwrap();
         for &c in &own.captures[scope_id] {
             if boxed.contains(&c) || own.loop_bindings.contains(&c) || extra.contains(&c) {
+                continue;
+            }
+            // Frame cells are table-mediated (via `s` or a loop-binding
+            // snapshot of a frame field) -- never box candidates.
+            if frame.is_some_and(|f| f.fields.contains(&c)) {
                 continue;
             }
             if own.owner[&c] != parent {
@@ -565,17 +601,23 @@ fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<Block
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
 /// frame cells as fields of the state table `s` (the first param cell). A frame
 /// cell renders `<s>.c<raw>` instead of a bare local and is NOT declared.
+/// `hoist_lambdas` is true only for the step emission: lambdas hoist like
+/// non-frame ones, with frame captures collapsing to `s` (P1 of
+/// docs/coroutine-frame-lambda-plan.md); the hook/defer clone emissions keep it
+/// false (mechanism 3, an all-cells frame with no plan).
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
+    pub hoist_lambdas: bool,
 }
 
 /// The env-record context of a hoisted CAPTURING lambda body (P2.6): its captured
 /// cells arrive as fields of the record `__rock_env` (the body's first param). A captured
 /// cell renders `e.c<color>` (+ `.v` when boxed) instead of a plain local and is
-/// NOT declared here (it lives in `__rock_env`). The generalization of [`FrameCtx`];
-/// UNLIKE a frame, the lambda's own cells stay colored locals. Mutually exclusive
-/// with `FrameCtx` — hoisting is carved out under a coroutine frame.
+/// NOT declared here (it lives in `__rock_env`). The generalization of [`FrameCtx`],
+/// and composable with it: under a frame the env holds `s` (plus by-value
+/// loop-binding snapshots and enclosing-lambda captures), and a frame-cell read
+/// inside the hoisted body renders `__rock_env.c<S>.c<N>`.
 struct EnvCtx {
     fields: HashSet<Idx<Cell>>,
 }
@@ -603,27 +645,29 @@ pub fn emit_named_framed(
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
     // Mutable env-record captures lowered to a box `{ v = .. }` (P2 of
-    // docs/closure-env-records-plan.md). Disabled under a frame (coroutine cells
-    // are state-table fields, never boxed) and skipped entirely for the common
+    // docs/closure-env-records-plan.md). Skipped entirely for the common
     // lambda-free fn (captures need a lambda).
     // P2.6/P3: EVERY live lambda hoists to a top-level named fn -- capture-free
     // ones by bare name, capturing ones as an env record (`build_hoist_plan`).
     // The scope analysis also drives box classification. All need the same tree,
-    // so build it once. Skipped for the common lambda-free fn, and CARVED OUT
-    // under a frame: a co-fn lambda's cells are state-table fields (`c<s>.c<N>`),
-    // not plain locals, so the home/declaration split can't apply -- such a lambda
-    // stays an inline closure (correct, just not zero-alloc). P2.6's frame
-    // handling subsumes this. (Same gate that disables boxing.)
-    let (boxed, plan) = if frame.is_some() || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
+    // so build it once. Under a frame (`hoist_lambdas`, the step emission) the
+    // same plan applies with frame captures collapsing to `s` and frame cells
+    // never boxing (the frame table IS the box); hook/defer clone emissions
+    // (`!hoist_lambdas`) keep the pre-P1 inline path.
+    let hoist_ok = frame.is_none_or(|f| f.hoist_lambdas);
+    let (boxed, plan) = if !hoist_ok || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
         (HashSet::default(), None)
     } else {
         let tree = scope::ScopeTree::build(func);
         let own = tree.analyze(func);
         let mut b = tree.boxed_cells(&own);
+        if let Some(f) = frame {
+            b.retain(|c| !f.fields.contains(c));
+        }
         // Dominance rail: a by-value capture whose single write does not dominate
         // its creation block falls back to a box (never seen for well-formed MIR).
-        b.extend(non_dominating_by_value_captures(func, &tree, &own, &b));
-        let plan = build_hoist_plan(ctx, func, &tree, &own, name);
+        b.extend(non_dominating_by_value_captures(func, &tree, &own, &b, frame));
+        let plan = build_hoist_plan(ctx, func, &tree, &own, name, frame);
         (b, plan)
     };
     let plan_ref = plan.as_ref();
@@ -716,21 +760,16 @@ fn cellname(frame: Option<&FrameCtx>, env: Option<&EnvCtx>, colors: &[u32], boxe
     s
 }
 
-/// Append a cell reference (frame field `c<s>.c<field>`, env-record capture field
-/// `e.c<color>`, or plain local) directly into `out` — the per-operand-
+/// Append a cell reference (env-record capture field `e.c<color>`, frame field
+/// `c<s>.c<field>`, or plain local) directly into `out` — the per-operand-
 /// allocation-free primitive `cellname` wraps. A boxed cell (`boxed` set) reads/
-/// writes through its box's `.v` field. Frame and env are mutually exclusive
-/// (hoisting is carved out under a frame); frame cells are never boxed.
+/// writes through its box's `.v` field. Env is checked FIRST: under a frame a
+/// by-value loop-binding snapshot lives in the record even though the cell is
+/// also a frame field. The frame branch renders the `s` reference recursively
+/// through the env check, so a frame-cell read composes `c<S>.c<N>` in the step
+/// body and `__rock_env.c<S>.c<N>` inside a hoisted lambda body (D3 of
+/// docs/coroutine-frame-lambda-plan.md). Frame cells are never boxed.
 fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, env: Option<&EnvCtx>, colors: &[u32], boxed: &HashSet<Idx<Cell>>, c: Idx<Cell>) {
-    if let Some(f) = frame {
-        if f.fields.contains(&c) {
-            out.push('c');
-            push_uint(out, raw(f.s_cell));
-            out.push_str(".c");
-            push_uint(out, raw(c));
-            return;
-        }
-    }
     if let Some(e) = env {
         if e.fields.contains(&c) {
             out.push_str(ENV_PARAM);
@@ -739,6 +778,14 @@ fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, env: Option<&EnvCt
             if boxed.contains(&c) {
                 out.push_str(".v");
             }
+            return;
+        }
+    }
+    if let Some(f) = frame {
+        if f.fields.contains(&c) {
+            write_cellname(out, None, env, colors, boxed, f.s_cell);
+            out.push_str(".c");
+            push_uint(out, raw(c));
             return;
         }
     }
@@ -1451,12 +1498,13 @@ struct Emitter<'a> {
     /// `group -> global name` for [`Self::hoist`].
     hoist_names: &'a [String],
     /// Cells lowered to a box `{ v = ... }` (mutable env-record captures); every
-    /// read/write of one renders through `.v`. Empty under a frame.
+    /// read/write of one renders through `.v`. Under a frame, only lambda-owned
+    /// cells captured by nested lambdas box (frame cells share through `s`).
     boxed: &'a HashSet<Idx<Cell>>,
     /// Hoist plan (P2.6/P3): a hoisted `Inst::Lambda` in `hoisted_name` renders as
     /// a bare global-name reference (capture-free) or a `setmetatable` env record
     /// (capturing) instead of an inline closure. `None` for lambda-free fns and
-    /// frames (a co-fn lambda stays an inline closure).
+    /// hook/defer clone emissions (whose lambdas stay inline closures).
     plan: Option<&'a HoistPlan>,
     /// The env-record context when THIS scope is a hoisted capturing lambda body:
     /// its captures render `e.c<color>`. `None` for the enclosing fn, capture-free
@@ -1871,9 +1919,10 @@ impl Emitter<'_> {
                     }
                     return;
                 }
-                // Inline `function(<params>) <body> end` -- ONLY under a coroutine
-                // frame (every non-frame lambda hoists). Captured cells are frame
-                // fields (`c<s>.c<N>`) handled by `FrameCtx`; the body declares
+                // Inline `function(<params>) <body> end` -- ONLY in a hook/defer
+                // clone emission (`hoist_lambdas == false`; every other live
+                // lambda hoists). Captured cells are frame fields (`c<s>.c<N>`)
+                // handled by the all-cells aux FrameCtx; the body declares
                 // nothing (`is_top = false`), so no env/snapshot is needed.
                 out.push_str("function");
                 render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.home, self.plan, None, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
@@ -2269,17 +2318,14 @@ impl Emitter<'_> {
 
     /// The value placed into a record field for capture `c` at the creation site.
     /// A boxed capture threads the box TABLE (shared reference) and a by-value one
-    /// snapshots the value -- both are the cell's name WITHOUT `.v`. When `c` is
-    /// itself a capture of THIS (enclosing) scope, it is read from this scope's own
-    /// env (`e.c<color>`) -- the nested-lambda case, where the box/value already
-    /// arrived through the parent env. Never a frame cell (records are carved out
-    /// under a frame).
+    /// snapshots the value -- both are the cell's name WITHOUT `.v`: exactly
+    /// [`write_cellname`] with an empty boxed set. That covers the nested case (a
+    /// capture of THIS scope reads `e.c<color>` from its own env), the frame `s`
+    /// capture (the step's `c<S>` local, or `__rock_env.c<S>` one level down), and
+    /// a by-value loop-binding snapshot (the frame-field read `c<S>.c<N>`).
     fn write_capture_field_value(&self, out: &mut String, c: Idx<Cell>) {
-        if self.env.is_some_and(|e| e.fields.contains(&c)) {
-            out.push_str(ENV_PARAM);
-            out.push('.');
-        }
-        write_cell_local(out, self.cell_colors, c);
+        let no_v: HashSet<Idx<Cell>> = HashSet::default();
+        write_cellname(out, self.frame, self.env, self.cell_colors, &no_v, c);
     }
 }
 
