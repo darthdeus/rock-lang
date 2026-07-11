@@ -2683,33 +2683,41 @@ mod overlay_runtime_tests {
     }
 
     /// Layout drift, cell shift: a live coroutine suspended across a BodyOnly
-    /// overlay that INSERTS a `let` between two frame-resident locals. Frame
-    /// fields are cell-index-named (`c<N>`), so the new step would read the
-    /// second local at a shifted index the old frame never wrote -- the frame
-    /// layout stamp kills the coroutine cleanly instead.
+    /// overlay that INSERTS a frame-resident local before an existing one,
+    /// shifting its dense slot. The new step would read the shifted local at a
+    /// slot the old frame never wrote -- the frame layout stamp kills the
+    /// coroutine cleanly instead. The inserted `z` is a GENUINE frame cell
+    /// (read after the first yield, so it must survive suspension); a dead local
+    /// -- `let z = 999` never read -- is now a ghost dropped from the frame and
+    /// does NOT shift the layout (the P2-finding fix; that path has its own
+    /// structural test in skull/tests/frame_slot_naming.rs).
     /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
     #[test]
     fn live_coroutine_cell_layout_shift_overlay_stamp_kills() {
         // `Act(() -> ())` forces Ev flat (frame-slot channel); `mk()` keeps the
         // locals as real calls so copy-prop/DCE can't erase the frame cells.
-        let prog = |extra: &str| {
-            format!(
-                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
-            )
-        };
-        let (v0, v1) = (prog(""), prog("  let z = mk(999)\n"));
+        // v1 inserts `z` AND reads it after yield 1 (`a = a + z`), so `z` is a
+        // real frame cell that shifts `b`'s slot -- a genuine layout change.
+        let v0 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
+                  global GEN: Coroutine<Ev>? = null\n\
+                  fn mk(n: int) -> int { return n }\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  fn start() { GEN = gen() }\n\
+                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
+        let v1 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
+                  global GEN: Coroutine<Ev>? = null\n\
+                  fn mk(n: int) -> int { return n }\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let z = mk(999)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  a = a + z\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  fn start() { GEN = gen() }\n\
+                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
             matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
             "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
@@ -2719,11 +2727,11 @@ mod overlay_runtime_tests {
 
         // start() + pump() under v0 (Tick(7)=7, suspended at state 1), overlay,
         // then pump() again on the SAME live coroutine. The frame layout stamp
-        // rejects the v0 frame in the v1 step (the `let z` shifted `b`'s cell
-        // index): the check errors INSIDE the pcall, the coroutine dies cleanly
-        // (state -2, on_killed, last_error explains) and pump reads null -> -1.
-        // Pre-stamp this CRASHED the consumer (arithmetic on the nil read from
-        // the shifted slot) -- the flipped sentinel guards the clean kill.
+        // rejects the v0 frame in the v1 step (the genuine `z` frame cell shifted
+        // `b`'s slot): the check errors INSIDE the pcall, the coroutine dies
+        // cleanly (state -2, on_killed, last_error explains) and pump reads null
+        // -> -1. Pre-stamp this CRASHED the consumer (arithmetic on the nil read
+        // from the shifted slot).
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
@@ -2889,20 +2897,23 @@ mod overlay_runtime_tests {
     /// cleanup code against old-layout cells.
     #[test]
     fn stamp_kill_runs_creation_time_defers() {
-        let prog = |extra: &str| {
+        // v1 inserts `z` and reads it after the first yield (`a = a + z`), so `z`
+        // is a genuine frame cell shifting `b`'s slot -- a real layout change.
+        // (A dead `let z = 999` is now a ghost that does NOT shift the frame.)
+        let prog = |extra: &str, cross: &str| {
             format!(
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  global BUSY: int = 0\n\
                  fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Tick(b)\n}}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n{cross}  yield Ev::Tick(b)\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
                  fn start() {{ GEN = gen() }}\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
                  fn report() {{ print(\"busy:{{BUSY}}\") }}\n"
             )
         };
-        let (v0, v1) = (prog(""), prog("  let z = mk(999)\n"));
+        let (v0, v1) = (prog("", ""), prog("  let z = mk(999)\n", "  a = a + z\n"));
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
@@ -2999,14 +3010,16 @@ mod overlay_runtime_tests {
                   fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
                   fn start() { GEN = gen() }\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
-        // Widen Tick + yield the new payload: the enum edit is Interface tier, and
-        // the body gains a local (`z`) -> cell shift for `b`, exactly like the
-        // BodyOnly repro but delivered via a FULL rebuild.
-        let v1 = "enum Ev { Tick(int, int), Pair(int, int), Done, Act(() -> ()) }\n\
+        // Widen Tick BEYOND the current max payload width (Pair's 2 -> Tick's 3),
+        // so the frame-slot yield channel genuinely grows -- the shape edit shifts
+        // the layout stamp (a within-width widen would be absorbed by the union
+        // channel and, post-P2-fix, is correctly layout-stable). The enum edit is
+        // Interface tier, delivered via a FULL rebuild.
+        let v1 = "enum Ev { Tick(int, int, int), Pair(int, int), Done, Act(() -> ()) }\n\
                   global GEN: Coroutine<Ev>? = null\n\
                   fn mk(n: int) -> int { return n }\n\
-                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let z = mk(999)\n  let b = mk(35)\n  yield Ev::Tick(a, z)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
-                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x, y) => x + y\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a, b, a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x, y, z) => x + y + z\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
                   fn start() { GEN = gen() }\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
@@ -3046,11 +3059,11 @@ mod overlay_runtime_tests {
             ExecOutcome::Errored => panic!("full-reload survival fixture failed to run"),
         }
 
-        // Resuming the survivor: the v1 step's layout stamp (cells shifted by
-        // `let z`, channel widened by the Tick payload) rejects the v0 frame --
-        // the coroutine dies cleanly through the pcall path and pump prints -1.
-        // Pre-stamp this CRASHED the consumer on the shifted frame read, through
-        // the very tier the hot-reload contract once claimed was safe.
+        // Resuming the survivor: the v1 step's layout stamp (yield channel
+        // widened by the Tick payload growing past the union width) rejects the
+        // v0 frame -- the coroutine dies cleanly through the pcall path and pump
+        // prints -1. Pre-stamp this CRASHED the consumer on the shifted frame
+        // read, through the very tier the hot-reload contract once claimed was safe.
         let composed = run_parts(&[
             &full0.lua,
             stub_for(&full0.lua),
@@ -3548,24 +3561,23 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// SENTINEL (flip when the frame-lambda-plan P2 layout-stability finding is
-    /// fixed -- docs/coroutine-frame-lambda-plan.md "P2 finding"). The plan
-    /// CLAIMS a lambda-local-only edit must NOT change the layout stamp (so a
-    /// live coroutine survives it). It DOES change, for two independent reasons:
-    ///   (A) the layout canon hashes frame cells by their RAW cell-arena id, and
-    ///       lowering allocates a lambda's internal cells BEFORE the enclosing
-    ///       `let`'s own cell -- so adding `let y` inside the lambda shifts the
-    ///       raw id of every frame cell declared after it (here the record `f`:
-    ///       c3 -> c4), changing the stamp even though `y` correctly homes to
-    ///       the lambda body as a plain local.
-    ///   (B) an UNUSED lambda-local is dead, has no owner scope, and falls back
-    ///       to ROOT ownership -> it becomes a frame cell outright.
-    /// Either way the live coroutine is stamp-killed on pump #2 ("7\n-1\n-1"),
-    /// NOT kept alive ("7\n11\n-1"). When P1's canon is made robust to lambda
-    /// cell-count changes, flip the two assertions below (assert_ne -> assert_eq,
-    /// "7\n-1\n-1" -> "7\n11\n-1") and rename to `..._live_survives`.
+    /// A lambda-local-only edit is layout-stable: dense per-frame slot naming
+    /// (docs/coroutine-frame-lambda-plan.md "P2 finding", now FIXED) keys both
+    /// the emitted `s.c<slot>` field names AND the layout stamp on a dense
+    /// ordinal that lambda-internal cell allocation cannot perturb, so a live
+    /// coroutine SURVIVES the edit instead of stamp-killing. Was a sentinel
+    /// (`assert_ne`, "7\n-1\n-1") pinning the two raw-id-perturbation causes it
+    /// fixes:
+    ///   (A) the canon hashed frame cells by RAW cell-arena id; lowering
+    ///       allocates a lambda's internal cells BEFORE the enclosing `let`'s
+    ///       cell, so adding `let y` inside the lambda shifted the raw id of
+    ///       every frame cell after it (record `f`: c3 -> c4). Slots absorb it.
+    ///   (B) an UNUSED lambda-local fell back to ROOT ownership and became a
+    ///       frame cell outright. The ghost-cell drop (referenced-nowhere ->
+    ///       out of the frame) removes it. (This test uses a USED local, so it
+    ///       exercises (A); the ghost drop has its own structural test.)
     #[test]
-    fn cofn_lambda_local_edit_shifts_layout_sentinel() {
+    fn cofn_lambda_local_edit_shifts_layout_live_survives() {
         // v0 body: `x + base`; v1 body: `{ let y = base + base; x + y }` (used
         // local -- reason (A): raw-id shift, not the dead-cell fallback (B)).
         let prog = |body: &str| {
@@ -3594,25 +3606,24 @@ mod overlay_runtime_tests {
         let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
-        // SENTINEL: today the stamp shifts (raw-id perturbation) -- flip to
-        // assert_eq when the canon becomes lambda-cell-count-robust.
-        assert_ne!(
+        // Dense slots leave the stamp fixed under a lambda-internal cell edit.
+        assert_eq!(
             layout_stamp(&full0.lua, "gen"),
             layout_stamp(&fresh.lua, "gen"),
-            "SENTINEL: a lambda-local edit currently shifts the layout stamp (see finding); \
-             flip to assert_eq when P1 layout stability is real"
+            "a lambda-local edit must be layout-stable (dense slots absorb the raw-id shift)"
         );
 
         // pump #1 under v0: f(3)=7. Overlay. pump #2 on the live coroutine: the
-        // shifted stamp mismatches -> stamp-kill -> -1 (should survive -> 11).
+        // stamp still matches -> survives -> f is unchanged (x+base=7) so 3+4+4=11
+        // via the new body path; pump #3 done -> -1.
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
-                "7\n-1\n-1",
-                "SENTINEL: a lambda-local edit stamp-kills the live coroutine (should survive -> \"7\\n11\\n-1\")"
+                "7\n11\n-1",
+                "a layout-stable lambda-local edit keeps the live coroutine running (7 then 11)"
             ),
-            ExecOutcome::Errored => panic!("lambda-local edit scenario crashed instead of clean kill"),
+            ExecOutcome::Errored => panic!("lambda-local edit scenario crashed instead of surviving"),
         }
     }
 

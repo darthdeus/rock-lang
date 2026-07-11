@@ -600,14 +600,20 @@ fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<Block
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
 /// frame cells as fields of the state table `s` (the first param cell). A frame
-/// cell renders `<s>.c<raw>` instead of a bare local and is NOT declared.
-/// `hoist_lambdas` is true only for the step emission: lambdas hoist like
-/// non-frame ones, with frame captures collapsing to `s` (P1 of
-/// docs/coroutine-frame-lambda-plan.md); the hook/defer clone emissions keep it
-/// false (mechanism 3, an all-cells frame with no plan).
+/// cell renders `<s>.c<slot>` instead of a bare local and is NOT declared. The
+/// slot is a DENSE per-frame ordinal (`slots`), NOT the raw cell-arena id:
+/// lambda-cell allocation bumps raw ids but never reorders the frame cells, so
+/// a slot -- and the layout stamp keyed on it -- is invariant under
+/// lambda-internal cell-count edits (the P2 finding in
+/// docs/coroutine-frame-lambda-plan.md). `hoist_lambdas` is true only for the
+/// step emission: lambdas hoist like non-frame ones, with frame captures
+/// collapsing to `s` (P1); the hook/defer clone emissions keep it false
+/// (mechanism 3, an all-cells frame with no plan).
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
+    /// Frame cell -> dense slot (`c<slot>` field name). Total over `fields`.
+    pub slots: HashMap<Idx<Cell>, u32>,
     pub hoist_lambdas: bool,
 }
 
@@ -785,7 +791,8 @@ fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, env: Option<&EnvCt
         if f.fields.contains(&c) {
             write_cellname(out, None, env, colors, boxed, f.s_cell);
             out.push_str(".c");
-            push_uint(out, raw(c));
+            let slot = *f.slots.get(&c).expect("frame field cell must carry a dense slot");
+            push_uint(out, slot);
             return;
         }
     }

@@ -988,6 +988,11 @@ struct CoroLowered {
     step: MirFunc,
     s_cell: Idx<Cell>,
     frame_cells: HashSet<Idx<Cell>>,
+    /// Frame cell -> dense slot: frame cells numbered 0.. by raw-id order.
+    /// Lambda-cell allocation shifts raw ids but never reorders existing frame
+    /// cells, so a slot is stable under a lambda-internal edit -- the naming and
+    /// stamp basis the P2 finding needs (docs/coroutine-frame-lambda-plan.md).
+    frame_slots: HashMap<Idx<Cell>, u32>,
     /// Declared param cells (constructor seeds a state-table field for each).
     params: Vec<Idx<Cell>>,
     num_states: usize,
@@ -1309,13 +1314,29 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     let frame_cells: HashSet<Idx<Cell>> = {
         let tree = skull_codegen_lua::scope::ScopeTree::build(&step);
         let own = tree.analyze(&step);
+        // Ghost cells (cause B of the P2 finding): a cell referenced in NO block
+        // anywhere -- scanned over ALL blocks incl. detached defer copies and
+        // peeled hook bodies, deliberately broader than `scope::accesses` (which
+        // only walks live-scope regions) -- is dropped. A dead lambda-local has
+        // no owner so it would fall to ROOT/frame, but it is read/written
+        // nowhere; a hook-only cell IS referenced in its detached block, so it
+        // stays. Params always stay (the ctor seeds a field for each, used or
+        // not) regardless of references.
+        let referenced = referenced_cells(&step);
+        let is_param: HashSet<Idx<Cell>> = params.iter().copied().collect();
         step.cells
             .iter()
             .map(|(id, _)| id)
             .filter(|&c| c != s_cell && c != resume_arg)
+            .filter(|c| is_param.contains(c) || referenced.contains(c))
             .filter(|c| own.owner.get(c).is_none_or(|&o| o == skull_codegen_lua::scope::ROOT))
             .collect()
     };
+    // Dense per-frame slots: frame cells numbered 0.. in raw-id order. Both the
+    // emitted `s.c<slot>` field names and the layout canon key on the slot, so a
+    // lambda-internal cell-count edit (which perturbs raw ids after the lambda)
+    // leaves every frame slot fixed -- the P2 finding fix.
+    let frame_slots = dense_slots(frame_cells.iter().copied());
 
     // 1. Rewrite `CoroSetInner(x)` -> `s.__inner = x` (rebuild affected blocks).
     for &bid in &orig_blocks {
@@ -1420,9 +1441,12 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     let mut canon = String::new();
     {
         use std::fmt::Write as _;
+        // Slot order == raw-id order (dense_slots numbers by raw id, cells.iter()
+        // yields by raw id), so hashing `c<slot>:<name>` here matches both the
+        // emitted field names and the slot ordinals.
         for (id, cell) in step.cells.iter() {
-            if frame_cells.contains(&id) {
-                let _ = write!(canon, "c{}:{};", raw(id), cell.name.map(|n| n.as_str().to_string()).unwrap_or_default());
+            if let Some(&slot) = frame_slots.get(&id) {
+                let _ = write!(canon, "c{}:{};", slot, cell.name.map(|n| n.as_str().to_string()).unwrap_or_default());
             }
         }
         for f in &spill_fields {
@@ -1499,7 +1523,47 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     step.is_coroutine = false;
     step.resume_arg = None;
 
-    CoroLowered { step, s_cell, frame_cells, params, num_states, hooks, layout_hash }
+    CoroLowered { step, s_cell, frame_cells, frame_slots, params, num_states, hooks, layout_hash }
+}
+
+/// Cells referenced (read or written) anywhere in `func`'s block inst-lists --
+/// over ALL blocks in the arena, including detached defer/hook bodies not
+/// reachable from the entry. Matches `scope::accesses`'s reference set (`Load`,
+/// `Store`, `MapNext` dests, multi-call dests) but is deliberately broader in
+/// block coverage. Used to distinguish a genuinely-dead ghost cell (referenced
+/// nowhere) from a hook-only cell (referenced in a detached block).
+fn referenced_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
+    let mut set: HashSet<Idx<Cell>> = HashSet::default();
+    for (_, blk) in func.blocks.iter() {
+        for &iid in &blk.insts {
+            match &func.insts[iid] {
+                Inst::Load(c) => {
+                    set.insert(*c);
+                }
+                Inst::Store { cell, .. } => {
+                    set.insert(*cell);
+                }
+                Inst::MapNext { key_cell, val_cell, .. } => {
+                    set.insert(*key_cell);
+                    set.insert(*val_cell);
+                }
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => {
+                    set.extend(dests.iter().copied());
+                }
+                _ => {}
+            }
+        }
+    }
+    set
+}
+
+/// Dense per-frame slot map: the given cells numbered 0.. by raw-id order.
+fn dense_slots(cells: impl Iterator<Item = Idx<Cell>>) -> HashMap<Idx<Cell>, u32> {
+    let mut v: Vec<Idx<Cell>> = cells.collect();
+    v.sort_by_key(|c| raw(*c));
+    v.into_iter().enumerate().map(|(i, c)| (c, i as u32)).collect()
 }
 
 /// Emit a `co fn` as its stackless `__step` (via the dumb printer, with a frame
@@ -1516,6 +1580,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: lowered.frame_cells.iter().copied().collect(),
+        slots: lowered.frame_slots.clone(),
         hoist_lambdas: true,
     };
     // Hooks/defers keep the pre-P1 shape (D5 of docs/coroutine-frame-lambda-plan.md):
@@ -1525,15 +1590,35 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     // frame field keeps the emission identical to what their bodies (which only
     // touch co-fn-level state) have always produced.
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
+    let aux_fields: HashSet<Idx<Cell>> = lowered
+        .step
+        .cells
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|&c| c != lowered.s_cell && c != resume_arg)
+        .collect();
+    // Aux slots: SHARED frame cells (co-fn state a hook body reads) MUST reuse
+    // the step's slots -- the hook reads the same field the ctor wrote. Aux-only
+    // cells (lambda-owned, carried only so their clone declares no dead locals)
+    // are never referenced across the ctor boundary but the map must be total
+    // over `fields`, so they get deterministic slots appended after the step's
+    // range (raw-id order, past every step slot -- no collision with a shared
+    // slot).
+    let aux_slots = {
+        let mut s = lowered.frame_slots.clone();
+        let base = lowered.frame_slots.len() as u32;
+        let mut extra: Vec<Idx<Cell>> =
+            aux_fields.iter().copied().filter(|c| !s.contains_key(c)).collect();
+        extra.sort_by_key(|c| raw(*c));
+        for (i, c) in extra.into_iter().enumerate() {
+            s.insert(c, base + i as u32);
+        }
+        s
+    };
     let aux_frame = FrameCtx {
         s_cell: lowered.s_cell,
-        fields: lowered
-            .step
-            .cells
-            .iter()
-            .map(|(id, _)| id)
-            .filter(|&c| c != lowered.s_cell && c != resume_arg)
-            .collect(),
+        fields: aux_fields,
+        slots: aux_slots,
         hoist_lambdas: false,
     };
     // `__resume`/`__advance` are minted by `emit_constructor` from `name` -- check
@@ -1590,8 +1675,11 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
 /// the frame-slot channel) driving the shared `<name>__step`. Method fields
 /// can't collide with user state: frame cells render as `c<N>`/`v<N>`. The
 /// state table is named `c<raw(s_cell)>` (NOT `s`) so a hook lambda
-/// referencing a frame cell renders `c<s>.c<field>` — the same name the
-/// step's `FrameCtx` produces.
+/// referencing a frame cell renders `c<s>.c<slot>` — the same name the
+/// step's `FrameCtx` produces. A param's seeded field is `c<slot>` (its dense
+/// frame slot), which is BOTH the ctor's Lua param name and the table field
+/// name; the state-table local `c<raw(s_cell)>` keeps the raw id (a plain
+/// local, `s` has no slot).
 fn emit_constructor(
     name: &str,
     step_name: &str,
@@ -1600,7 +1688,11 @@ fn emit_constructor(
 ) -> String {
     use std::fmt::Write as _;
     let svar = format!("c{}", raw(lowered.s_cell));
-    let param_fields: Vec<String> = lowered.params.iter().map(|p| format!("c{}", raw(*p))).collect();
+    let param_fields: Vec<String> = lowered
+        .params
+        .iter()
+        .map(|p| format!("c{}", lowered.frame_slots.get(p).expect("co-fn param must be a frame cell with a slot")))
+        .collect();
     let mut init = vec![
         "__ty = \"Coroutine\"".to_string(),
         format!("{STATE} = 0"),
