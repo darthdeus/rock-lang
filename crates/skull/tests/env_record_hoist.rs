@@ -153,3 +153,39 @@ fn main() { let _ = mk_snap(1) }
         "two records share one hoisted __fn and hold no other function-typed field; got:\n{out}"
     );
 }
+
+/// SENTINEL (docs/test-sentinels.md): `deepcopy` of a struct holding a capturing
+/// lambda produces an UNCALLABLE copy today -- the stdlib deepcopy copies tables
+/// without reattaching metatables (its "Rock values carry no metatables" premise
+/// predates env records), so the copied record loses `__rock_fn_mt` and calling
+/// it raises "attempt to call a table value". Correct behavior: the copy calls
+/// fine and returns 42 (and diverges independently from the original -- P4 owns
+/// the full divergence test). The pcall result is inverted to today's failure.
+///
+/// WHEN THIS FAILS: the deepcopy metatable fix landed. Flip the expectation to
+/// "true\t42", drop the "buggy" framing, and check the plan doc P2.6-R box --
+/// same commit.
+#[test]
+fn deepcopy_record_callback_uncallable_sentinel() {
+    let src = r#"
+struct Holder { cb: fn() -> int }
+@nomangle inline(lua) fn stash(h: Holder) = "_G.__H2 = h"
+fn main() {
+    let n = 41
+    let h = Holder { cb: () => n + 1 }
+    stash(deepcopy(h))
+}
+"#;
+    let lua = emit_module(src);
+    let driver = "\n\
+        main()\n\
+        local ok, res = pcall(function() return __H2.cb() end)\n\
+        print(tostring(ok) .. \"\\t\" .. tostring(res):gsub(\":.*\", \"\"))\n";
+    let out = run_luajit(&format!("{lua}{driver}"), "deepcopy_sentinel");
+    assert!(
+        out.starts_with("false\t"),
+        "SENTINEL: deepcopy'd record callback is expected to be UNCALLABLE today \
+         (metatable lost); a `true` here means the fix landed -- flip this to \
+         assert `true\\t42`; got:\n{out}"
+    );
+}
