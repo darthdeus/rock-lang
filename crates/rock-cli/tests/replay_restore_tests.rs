@@ -197,6 +197,98 @@ fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
 
+/// The bitgun probe's lambda-driven counter, found by name across packages (the
+/// dump groups by package; we don't hardcode the game package key). Panics if
+/// absent -- the gate must be set for this global to be driven.
+fn lambda_counter(s: &serde_json::Value) -> i64 {
+    for (_pkg, globals) in s.as_object().expect("dump object") {
+        if let Some(v) = globals.as_object().and_then(|o| o.get("lambda_state_counter")) {
+            return v.as_i64().expect("lambda_state_counter must be an int");
+        }
+    }
+    panic!("lambda_state_counter not present in dump-state");
+}
+
+/// docs/lambda-in-state-snapshot-plan.md T1: the engine keyframe walk (`dc` in
+/// stone/engine/snapshot.rock) must deep-copy a CAPTURING lambda held in a
+/// registered global -- an env record, `setmetatable({__fn=.., c<N>=..},
+/// __rock_fn_mt)` -- and keep it callable AND capture-isolated across a restore.
+/// The bitgun probe (`lambda_snapshot_probe.rock`, gated by BITGUN_LAMBDA_STATE)
+/// plants such a lambda plus a plain int counter it drives each tick.
+///
+/// Oracle is the COUNTER, never the serialized lambda: dump-state renders env
+/// records as "<function>" (capture-blind), so a state-comparison on the lambda
+/// itself passes even when the fix is absent. The counter's post-restore
+/// trajectory observes the lambda's behavior instead.
+///
+/// Vehicle is SCRUB, not plain RESTORE_AT: a backward scrub restores the nearest
+/// keyframe AND resims forward, invoking the restored lambda each resim tick;
+/// RESTORE_AT pauses immediately, so an uncallable copy (T2(a) without the
+/// setmetatable re-attach) would never be called and the break-verify in the
+/// plan's verification section could not fail. RED progression:
+///   - today: snapshot_take errors on the metatable reject -> record/replay exit
+///     nonzero -> run_replay_dump's success assert fails.
+///   - after T2(a) alone: the resim calls an uncallable table -> @update aborts
+///     mid-frame -> the counter stalls != reference.
+///   - green: only once T2(b) re-attaches __rock_fn_mt on the copy.
+#[test]
+fn lambda_in_state_survives_keyframe_scrub() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("lambda.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "60", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    // Reference: the true tick-25 state with the lambda driving the counter from
+    // boot. (Cadence keyframe at tick 0 walks the record here too -- so today
+    // this run ALSO errors on the reject, which is fine: RED is RED.)
+    let reference = run_replay_dump(
+        game, 60, &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "25"),
+        ],
+    );
+    assert_eq!(current_tick(&reference), 25, "reference must sit at tick 25");
+
+    // Scrub run: play to 40, scrub back to 25 -> restore keyframe 20 and resim
+    // 20..25 THROUGH the restored lambda record.
+    let scrubbed = run_replay_dump(
+        game, 60, &log_s,
+        &[
+            ("BITGUN_LAMBDA_STATE", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_SCRUB_AT_TICK", "40"),
+            ("STONE_SCRUB_TO_TICK", "25"),
+        ],
+    );
+    assert_eq!(current_tick(&scrubbed), 25, "after scrubbing back to 25, current_tick must be 25");
+
+    // The oracle: the lambda-driven counter must be non-trivial (the lambda
+    // actually ran) and match the plain run-to-25 exactly -- the restored lambda
+    // was callable and its capture isolated. NOT a comparison of the serialized
+    // lambda global (dump-state renders it "<function>" either way).
+    let ref_counter = lambda_counter(&reference);
+    let scrub_counter = lambda_counter(&scrubbed);
+    assert!(ref_counter > 0, "reference lambda must have driven the counter (got {ref_counter})");
+    assert_eq!(
+        scrub_counter, ref_counter,
+        "post-scrub counter must match the plain run-to-25 (got {scrub_counter} vs {ref_counter}); \
+         a stalled counter means the restored lambda was uncallable (lost __rock_fn_mt)"
+    );
+}
+
 /// Loaded audio resources (MultiSound/Sound handles) are NOT simulation state:
 /// the plan excludes audio from keyframes ("never rewinds; mute during scrub,
 /// resume live"), the same carve-out render resources already get. bitgun's
