@@ -126,19 +126,64 @@ pub struct CodegenCtx {
     collisions: Mutex<Vec<(String, CompilerError)>>,
 }
 
+/// True if `name` is an identifier skull emits as a bare LOCAL inside function
+/// bodies -- a value temp (`r<N>`, or the uncolored `v<N>` fallback), a cell
+/// local (`c<N>`), or the closure env param ([`ENV_PARAM`]). `Inst::Global`
+/// reads/writes a user global by its bare name, so a top-level def with one of
+/// these names is shadowed by the local inside any body that uses one (the
+/// env-param-`e` miscompile `5c378c810`; `global r1` crashing at runtime with
+/// "arithmetic on local 'r1' (a nil value)").
+///
+/// This is the reserved *local* namespace only. The `__rock_*` prefix at large
+/// is a shared reserved namespace the stdlib AND stone engine legitimately
+/// extend with top-level `@nomangle` fns (`__rock_create_struct`,
+/// `__rock_install_serialize_value`, ...) -- those are top-level globals, never
+/// body locals, so they don't collide and must not be rejected. Only the exact
+/// emitted param name (`__rock_env`) is a body local.
+fn is_reserved_lexical(name: &str) -> bool {
+    if name == ENV_PARAM {
+        return true;
+    }
+    let digits = match name.as_bytes().first() {
+        Some(b'r' | b'c' | b'v') => &name[1..],
+        _ => return false,
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Record a spanned rejection if `name` (a user def's emitted Lua name) lands in
+/// the reserved lexical namespace. Same sink as [`CodegenCtx::mint_synthetic`],
+/// drained at the same emit boundaries.
+fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, CompilerError)>) {
+    if !is_reserved_lexical(name) {
+        return;
+    }
+    let msg = format!(
+        "`{name}` collides with a reserved codegen identifier: skull emits `r<N>`/`v<N>` \
+         value temps, `c<N>` cell locals, and the `{ENV_PARAM}` closure-env param as bare \
+         locals inside function bodies, which would shadow this top-level definition at \
+         runtime -- rename it"
+    );
+    sink.push((name.to_string(), CompilerError::new_with_label(span, msg)));
+}
+
 impl CodegenCtx {
     pub fn new(ws: &Workspace) -> Self {
         let overloaded = compute_overloaded_names(ws);
         let mut reserved: HashMap<String, Span> = HashMap::default();
+        let mut collisions: Vec<(String, CompilerError)> = Vec::new();
         for m in ws.modules.iter() {
             for (_, f) in m.functions.iter() {
-                reserved.insert(mangle_fn(ws, f, &overloaded), f.name_span);
+                let name = mangle_fn(ws, f, &overloaded);
+                reserved_namespace_collision(&name, f.name_span, &mut collisions);
+                reserved.insert(name, f.name_span);
             }
             for (_, g) in m.globals.iter() {
+                reserved_namespace_collision(g.name.as_str(), g.name_span, &mut collisions);
                 reserved.insert(g.name.as_str().to_string(), g.name_span);
             }
         }
-        CodegenCtx { overloaded, reserved, collisions: Mutex::new(Vec::new()) }
+        CodegenCtx { overloaded, reserved, collisions: Mutex::new(collisions) }
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
