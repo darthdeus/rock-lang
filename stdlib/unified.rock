@@ -1346,10 +1346,12 @@ inline(lua) fn float_to_int(value: float) -> int = """
     local copy = {}
     for k, v in pairs(obj) do
         -- copy *both* key and value, in case either is a table.
-        -- The `__ty` tag is a regular field, so it's copied here too --
-        -- no metatable to reattach (Rock values carry no metatables).
         copy[deepcopy(k)] = deepcopy(v)
     end
+    -- Preserve the metatable: a capturing lambda is an env record carrying
+    -- `__rock_fn_mt` (its `__call` is what makes it invokable) -- a copy that
+    -- drops it is an uncallable table. General, not fn-record-special-cased.
+    setmetatable(copy, getmetatable(obj))
 
     return copy
 """

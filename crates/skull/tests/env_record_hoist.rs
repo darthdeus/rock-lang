@@ -154,19 +154,13 @@ fn main() { let _ = mk_snap(1) }
     );
 }
 
-/// SENTINEL (docs/test-sentinels.md): `deepcopy` of a struct holding a capturing
-/// lambda produces an UNCALLABLE copy today -- the stdlib deepcopy copies tables
-/// without reattaching metatables (its "Rock values carry no metatables" premise
-/// predates env records), so the copied record loses `__rock_fn_mt` and calling
-/// it raises "attempt to call a table value". Correct behavior: the copy calls
-/// fine and returns 42 (and diverges independently from the original -- P4 owns
-/// the full divergence test). The pcall result is inverted to today's failure.
-///
-/// WHEN THIS FAILS: the deepcopy metatable fix landed. Flip the expectation to
-/// "true\t42", drop the "buggy" framing, and check the plan doc P2.6-R box --
-/// same commit.
+/// `deepcopy` of a struct holding a capturing lambda produces a CALLABLE copy:
+/// the stdlib deepcopy reattaches the source's metatable (R3), so the copied env
+/// record keeps `__rock_fn_mt` and its `__call` still routes. Regression for the
+/// P2.6-R deepcopy-drops-metatable bug (the copy used to raise "attempt to call a
+/// table value").
 #[test]
-fn deepcopy_record_callback_uncallable_sentinel() {
+fn deepcopy_record_callback_stays_callable() {
     let src = r#"
 struct Holder { cb: fn() -> int }
 @nomangle inline(lua) fn stash(h: Holder) = "_G.__H2 = h"
@@ -181,11 +175,45 @@ fn main() {
         main()\n\
         local ok, res = pcall(function() return __H2.cb() end)\n\
         print(tostring(ok) .. \"\\t\" .. tostring(res):gsub(\":.*\", \"\"))\n";
-    let out = run_luajit(&format!("{lua}{driver}"), "deepcopy_sentinel");
-    assert!(
-        out.starts_with("false\t"),
-        "SENTINEL: deepcopy'd record callback is expected to be UNCALLABLE today \
-         (metatable lost); a `true` here means the fix landed -- flip this to \
-         assert `true\\t42`; got:\n{out}"
+    let out = run_luajit(&format!("{lua}{driver}"), "deepcopy_callable");
+    assert_eq!(
+        out, "true\t42",
+        "a deepcopy'd env record keeps `__rock_fn_mt` and calls fine; got:\n{out}"
+    );
+}
+
+/// `deepcopy` of a struct holding a lambda with a BOXED (mutable, shared) capture
+/// gives an INDEPENDENT copy: mutating the original's box does not touch the copy's
+/// (the deepcopy clones the box table, not just aliases it). Fronts P4's snapshot
+/// divergence tests. Uses a getter+setter pair over one boxed `n` so the box is
+/// shared within a Holder but distinct across the copy.
+#[test]
+fn deepcopy_record_boxed_capture_diverges_from_original() {
+    let src = r#"
+struct Pair { get: fn() -> int, bump: fn() -> int }
+@nomangle inline(lua) fn stash_pair(p: Pair) = "_G.__P = p"
+fn make_pair() -> Pair {
+    let n = 10
+    return Pair { get: () => n, bump: () => { n = n + 1 return n } }
+}
+fn main() {
+    let orig = make_pair()
+    stash_pair(deepcopy(orig))
+    let _ = orig.bump()
+    let _ = orig.bump()
+    stash_orig(orig)
+}
+@nomangle inline(lua) fn stash_orig(p: Pair) = "_G.__O = p"
+"#;
+    let lua = emit_module(src);
+    // orig bumped twice (10 -> 12); the copy was taken before either bump (still
+    // 10) and must not observe the original's writes.
+    let driver = "\n\
+        main()\n\
+        print(tostring(__O.get()) .. \"\\t\" .. tostring(__P.get()))\n";
+    let out = run_luajit(&format!("{lua}{driver}"), "deepcopy_diverge");
+    assert_eq!(
+        out, "12\t10",
+        "the copy's boxed capture is independent of the original's after mutation; got:\n{out}"
     );
 }
