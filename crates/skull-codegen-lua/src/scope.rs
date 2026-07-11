@@ -73,11 +73,15 @@ impl ScopeTree {
             lambda: None,
             params: func.params.clone(),
         }];
-        // A scope per LIVE lambda -- one whose creating inst is still in a block.
-        // A DCE'd `Inst::Lambda` lingers in the arena but is never emitted, so it
-        // gets no scope (and its `entry`'s blocks are unreachable anyway). One
-        // pass over block inst-lists finds each live lambda WITH its creating
-        // block (an inst lives in exactly one block).
+        // block -> owning scope; regions are pairwise disjoint. Seeded with the
+        // root region, then grown one live lambda at a time (below).
+        let mut block_scope: HashMap<Idx<Block>, ScopeId> = HashMap::default();
+        for &b in &scopes[ROOT].region {
+            block_scope.insert(b, ROOT);
+        }
+        // Candidate lambdas: every `Inst::Lambda` still present in a block, WITH
+        // its creating block (an inst lives in exactly one block). Inst-arena
+        // order (deterministic ids).
         let mut lambda_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
         for (bid, b) in func.blocks.iter() {
             for &iid in &b.insts {
@@ -86,32 +90,59 @@ impl ScopeTree {
                 }
             }
         }
+        let mut pending: Vec<(Idx<Inst>, Idx<Block>)> = func
+            .insts
+            .iter()
+            .filter_map(|(lid, inst)| match inst {
+                Inst::Lambda { .. } => lambda_block.get(&lid).map(|&b| (lid, b)),
+                _ => None,
+            })
+            .collect();
+        // A lambda is LIVE only if its creation site is REACHABLE -- its creating
+        // block is owned by an already-live scope (root, or a live lambda).
+        // fold_const_branches can drop the block holding an OUTER lambda's
+        // creation while the outer's body blocks -- which create an INNER lambda
+        // -- linger in the arena; the inner is then transitively dead (its parent
+        // scope never exists). A fixpoint over the pending set adds a lambda once
+        // its creating block enters `block_scope`, so a lambda whose parent chain
+        // never becomes live is simply never added (no scope, no panic).
         let mut creating_block: Vec<Idx<Block>> = vec![func.entry()]; // root placeholder
-        for (lid, inst) in func.insts.iter() {
-            if let Inst::Lambda { params, entry } = inst {
-                let Some(&b) = lambda_block.get(&lid) else { continue };
-                scopes.push(Scope {
-                    entry: *entry,
-                    region: reachable_blocks_from(func, *entry).into_iter().collect(),
-                    parent: None, // filled below
-                    lambda: Some(lid),
-                    params: params.clone(),
-                });
-                creating_block.push(b);
+        let mut grew = true;
+        while grew {
+            grew = false;
+            let mut i = 0;
+            while i < pending.len() {
+                let (lid, cblock) = pending[i];
+                if block_scope.contains_key(&cblock) {
+                    let Inst::Lambda { params, entry } = &func.insts[lid] else { unreachable!() };
+                    let sid = scopes.len();
+                    let region: HashSet<Idx<Block>> = reachable_blocks_from(func, *entry).into_iter().collect();
+                    for &b in &region {
+                        let prev = block_scope.insert(b, sid);
+                        debug_assert!(
+                            prev.is_none(),
+                            "scope regions must be pairwise disjoint (block in two scopes)"
+                        );
+                    }
+                    scopes.push(Scope {
+                        entry: *entry,
+                        region,
+                        parent: None, // filled below
+                        lambda: Some(lid),
+                        params: params.clone(),
+                    });
+                    creating_block.push(cblock);
+                    pending.remove(i);
+                    grew = true;
+                } else {
+                    i += 1;
+                }
             }
         }
-        // block -> owning scope; regions are pairwise disjoint.
-        let mut block_scope: HashMap<Idx<Block>, ScopeId> = HashMap::default();
-        for (sid, s) in scopes.iter().enumerate() {
-            for &b in &s.region {
-                let prev = block_scope.insert(b, sid);
-                debug_assert!(
-                    prev.is_none(),
-                    "scope regions must be pairwise disjoint (block in two scopes)"
-                );
-            }
-        }
-        // parent = the scope holding the block that creates this lambda.
+        // parent = the scope holding the block that creates this lambda. A live
+        // scope's creating block entered `block_scope` before the scope was added,
+        // so this indexing never fails (a lookup miss would be a hard error, not a
+        // silent fallback -- the whole point of the reachability fixpoint above).
         for sid in 1..scopes.len() {
             let b = creating_block[sid];
             scopes[sid].parent = Some(block_scope[&b]);
