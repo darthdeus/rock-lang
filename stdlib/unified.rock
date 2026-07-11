@@ -485,6 +485,16 @@ struct Entity<T> {
     return obj.__ty
 """
 
+// A capturing-lambda env record (`setmetatable({__fn=..,..}, __rock_fn_mt)`) is
+// the one metatable-carrying value in skull output. Every generic table-walker
+// (__op_eq, inspect, serialize) must treat it as an opaque callable LEAF, not a
+// data table -- this is the shared probe (mirrors __rock_get_type sharing). The
+// global is guarded for a bare test harness with no runtime prelude; on a
+// non-table `v`, getmetatable returns nil so the compare is false.
+@nomangle inline(lua) fn __rock_is_fn_record(v: any) -> bool = """
+    return _G.__rock_fn_mt ~= nil and getmetatable(v) == _G.__rock_fn_mt
+"""
+
 // Register a callback to fire after each hot reload. Two forms:
 //   - `on_hot_reload(f)` stores a function VALUE — for closures / anonymous
 //     callbacks. The value is captured once, so an EDITED body does not
@@ -614,17 +624,18 @@ deco init on_reload {
     -- Same reference
     if a == b then return true end
 
+    local type_a = __rock_get_type(a)
+    local type_b = __rock_get_type(b)
+
     -- A capturing-lambda env record is a callable value, not a data table: it
     -- compares as an opaque LEAF by IDENTITY, never by walking its capture
     -- fields (mirrors the inspect/serialize record rule). Two distinct closure
     -- instances with equal captures are NOT equal; the same instance already
-    -- returned true above. Guard the global for a bare harness with no prelude.
-    if _G.__rock_fn_mt and getmetatable(a) == _G.__rock_fn_mt then
+    -- returned true above. A record carries no `__ty`, so gate on `not type_a`:
+    -- a tagged struct/enum compare skips the getmetatable probe entirely.
+    if not type_a and __rock_is_fn_record(a) then
         return rawequal(a, b)
     end
-
-    local type_a = __rock_get_type(a)
-    local type_b = __rock_get_type(b)
 
     -- Different Rock types are never equal
     if type_a and type_b and type_a ~= type_b then
@@ -1575,9 +1586,8 @@ global PI: float = 3.141592653589793
     local t = v
     -- A capturing-lambda env record is a callable value, not a data table --
     -- render it as its function (the hoisted `__fn`), matching a capture-free
-    -- lambda (a raw Lua function), never by walking its capture fields. Guard the
-    -- global for a bare harness with no runtime prelude.
-    if _G.__rock_fn_mt and getmetatable(t) == _G.__rock_fn_mt then
+    -- lambda (a raw Lua function), never by walking its capture fields.
+    if __rock_is_fn_record(t) then
         return tostring(t.__fn)
     end
     if visited then
