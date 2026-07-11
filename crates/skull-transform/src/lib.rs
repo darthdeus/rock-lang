@@ -1606,12 +1606,21 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         slots: lowered.frame_slots.clone(),
         hoist_lambdas: true,
     };
-    // Hooks/defers keep the pre-P1 shape (D5 of docs/coroutine-frame-lambda-plan.md):
-    // an ALL-cells frame and no hoisting. Their clones carry the step's whole cell
-    // arena, so the shrunk ownership-based field set would declare every
-    // lambda-owned cell as an unused local in each clone; treating everything as a
-    // frame field keeps the emission identical to what their bodies (which only
-    // touch co-fn-level state) have always produced.
+    // Hooks/defers keep the pre-P1 emission (D5 of
+    // docs/coroutine-frame-lambda-plan.md): an ALL-cells aux frame with
+    // `hoist_lambdas: false`. THE INVARIANT: with hoisting off no cell is ever
+    // hoisted to a lambda body, so a cell that is NOT a frame field would render
+    // as a bare `write_cell_local` (`c<raw>`) -- an undeclared local (these bodies
+    // never bind locals: they are flat detached regions of the step). Making EVERY
+    // step cell (minus `s`/`resume_arg`, which a nullary terminal/pre-step body
+    // never references) a frame field is what keeps every reference resolving to
+    // `s.c<slot>`. This is why ROOT-forcing the hook/defer-owned cells (D5's
+    // alternative) is unnecessary AND would be wrong here: no ownership pass runs
+    // for the aux frame (the no-hoist path skips ScopeTree/Ownership entirely), and
+    // the ownership-based field set the STEP uses would shrink `fields` to co-fn
+    // state -- declaring every lambda-owned cell as a dead local in each body
+    // (LuaJIT 200-local risk). All-cells-framed keeps zero locals and is
+    // byte-identical to what these bodies have always produced.
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
     let aux_fields: HashSet<Idx<Cell>> = lowered
         .step
@@ -1622,11 +1631,10 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         .collect();
     // Aux slots: SHARED frame cells (co-fn state a hook body reads) MUST reuse
     // the step's slots -- the hook reads the same field the ctor wrote. Aux-only
-    // cells (lambda-owned, carried only so their clone declares no dead locals)
-    // are never referenced across the ctor boundary but the map must be total
-    // over `fields`, so they get deterministic slots appended after the step's
-    // range (raw-id order, past every step slot -- no collision with a shared
-    // slot).
+    // cells (lambda-owned, framed only so their body declares no dead local) are
+    // never referenced across the ctor boundary but the map must be total over
+    // `fields`, so they get deterministic slots appended after the step's range
+    // (raw-id order, past every step slot -- no collision with a shared slot).
     let aux_slots = {
         let mut s = lowered.frame_slots.clone();
         let base = lowered.frame_slots.len() as u32;
@@ -1659,25 +1667,29 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         &lowered.step,
         Some(&frame),
         Some((&lowered.step_tree, &lowered.step_own)),
+        None,
     );
-    // Terminal-cleanup defers: each detached copy (`if flag { flag = false;
-    // <body> }`) emits as a standalone `<name>__defer<k>(s)` over the SAME
-    // frame naming (shared cell arena + FrameCtx). The ctor stores them by
-    // value (`__defers` table) so a stale coroutine runs its own layout's
-    // cleanup; `__rock_coroutine_run_defers` iterates LIFO with per-body pcall.
+    // Terminal-cleanup defers and lifecycle-hook lambdas
+    // (`on_killed`/`on_resume`/`on_hot_reload`) share one emission shape: a
+    // detached region of the step (`if flag { flag = false; <body> }` for a
+    // defer, the hook lambda's body for a hook) rendered as a standalone
+    // `<name>...(s)` fn over the step's OWN inst/cell/block arena + the all-cells
+    // aux FrameCtx. The entry override enters the shared step at the region's
+    // block with `params = [s]` -- no per-body `step.clone()` (which deep-copied
+    // the whole arena just to swap entry/params). A hook's only upvalue is the
+    // frame `s`, so every captured cell reaches as `c<s>.c<slot>`; the ctor stores
+    // both kinds by value (`__defers` table / `__on_*` fields) so a stale
+    // coroutine runs its own layout's cleanup, zero closures per creation.
+    // `__rock_coroutine_run_defers` iterates the defers LIFO with per-body pcall.
+    let s_params = [lowered.s_cell];
+    let emit_aux = |aux_name: &str, entry: Idx<Block>| {
+        emit_named_framed(ws, ctx, aux_name, &lowered.step, Some(&aux_frame), None, Some((entry, &s_params)))
+    };
     let mut defer_luas = String::new();
     for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {
-        let mut dfn = lowered.step.clone();
-        dfn.entry = *entry;
-        dfn.params = vec![lowered.s_cell];
         let dname = ctx.mint_synthetic(format!("{name}__defer{k}"));
-        defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&aux_frame), None));
+        defer_luas.push_str(&emit_aux(&dname, *entry));
     }
-    // Lifecycle-hook lambdas (`on_killed`/`on_resume`/`on_hot_reload`) hoist to
-    // per-co-fn top-level fns taking the frame `s` -- SAME shape as a defer (a
-    // hook's only upvalue is the frame table, so `emit_named_framed` with
-    // `params = [s_cell]` reaches every captured cell as `c<s>.c<field>`). The
-    // ctor stores each as a plain fn-value field; zero closures per creation.
     let mut hook_luas = String::new();
     for (kind, lambda) in &lowered.hooks {
         // Reject, don't fall back: the ctor unconditionally emits
@@ -1687,11 +1699,8 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
             panic!("co-fn hook {} of `{name}` must be an Inst::Lambda", kind.slot())
         };
         assert!(params.is_empty(), "co-fn lifecycle hooks are nullary (`{name}`)");
-        let mut hfn = lowered.step.clone();
-        hfn.entry = *entry;
-        hfn.params = vec![lowered.s_cell];
         let hname = ctx.mint_synthetic(format!("{name}{}", kind.slot()));
-        hook_luas.push_str(&emit_named_framed(ws, ctx, &hname, &hfn, Some(&aux_frame), None));
+        hook_luas.push_str(&emit_aux(&hname, *entry));
     }
     let ctor = emit_constructor(&name, &step_name, &lowered, channel.as_ref());
     let _ = lowered.num_states;
