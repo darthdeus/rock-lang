@@ -1103,6 +1103,15 @@ fn assemble(
         ("scaffold+callgraph+order", t_scaffold),
     ];
 
+    // A synthetic top-level name (`<fn>__lambda<k>`, `<co>__step`/`__on_*`/...)
+    // that collides with a user fn/global was recorded during chunk emit (above,
+    // and in `emit_incremental`'s re-emit). Reject with a spanned diagnostic
+    // rather than emit two clobbering top-level defs. Covers `emit_full` +
+    // `emit_incremental` (both funnel through here); the overlay fast path drains
+    // in `emit_overlay` (can't return Err, so it warns).
+    if let Some(err) = cg.take_collision() {
+        return Err(err);
+    }
     Ok(MirEmit { lua: out, skipped, phases })
 }
 
@@ -1590,6 +1599,13 @@ pub fn emit_overlay(
         cache.static_key_baseline.insert(cell, key);
     }
     let t_asm = t3.elapsed();
+    // Overlay can't return Err (its `MirEmit` return is baked into the watch
+    // fast-path callers), but a body edit that mints a newly-colliding synthetic
+    // name must not be swallowed. Warn (never-swallow); the next full/incremental
+    // rebuild rejects it authoritatively through `assemble`.
+    if let Some(err) = cache.cg.take_collision() {
+        eprintln!("skull overlay emit: reserved-name collision -- {}", err.message);
+    }
     emit.phases = vec![
         ("CodegenCtx::new", t_cg),
         ("ScalarCtx::new", t_scx),

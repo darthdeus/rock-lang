@@ -115,11 +115,10 @@ fn main() {
 }
 
 /// A user fn whose name equals a hoisted lambda's `<enclosing>__lambda<k>` name
-/// must be REJECTED, not silently clobbered (last-write-wins). `foo`'s
-/// capture-free lambda hoists to `foo__lambda0`; a user `fn foo__lambda0`
-/// collides.
+/// must be REJECTED (a spanned `CompilerError`, not a panic / silent clobber).
+/// `foo`'s capture-free lambda hoists to `foo__lambda0`; a user `fn foo__lambda0`
+/// collides. Full family + coroutine synthetic names: `synthetic_name_collision.rs`.
 #[test]
-#[should_panic(expected = "collides with a real function")]
 fn hoist_name_collision_with_user_fn_rejected() {
     let src = r#"
 @nomangle inline(lua) fn sink(a: int) = "_G.__sink = a"
@@ -127,7 +126,12 @@ fn foo__lambda0() -> int { return 99 }
 fn foo() -> fn() { return () => { sink(1) } }
 fn main() {}
 "#;
-    let _ = emit_module(src);
+    let err = common::try_emit_module(src).err().expect("the collision must be rejected");
+    assert!(
+        err.message.contains("foo__lambda0") && err.message.contains("compiler-reserved synthetic name"),
+        "rejection names the colliding synthetic name; got: {}",
+        err.message
+    );
 }
 
 /// TRANSITIVE capture (P2.6): an outer lambda that is locally-capture-free but

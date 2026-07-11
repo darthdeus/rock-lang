@@ -1504,7 +1504,14 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
     let lowered = transform_coroutine(func, channel.as_ref());
     let frame = FrameCtx { s_cell: lowered.s_cell, fields: lowered.frame_cells.iter().copied().collect() };
-    let step_name = format!("{name}__step");
+    // `__resume`/`__advance` are minted by `emit_constructor` from `name` -- check
+    // them here (the only place with `ctx`) for their collision side-effect; the
+    // constructor emits them unconditionally (`__advance` only with a channel).
+    ctx.mint_synthetic(format!("{name}__resume"));
+    if channel.is_some() {
+        ctx.mint_synthetic(format!("{name}__advance"));
+    }
+    let step_name = ctx.mint_synthetic(format!("{name}__step"));
     let step_lua = emit_named_framed(ws, ctx, &step_name, &lowered.step, Some(&frame));
     // Terminal-cleanup defers: each detached copy (`if flag { flag = false;
     // <body> }`) emits as a standalone `<name>__defer<k>(s)` over the SAME
@@ -1516,7 +1523,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         let mut dfn = lowered.step.clone();
         dfn.entry = *entry;
         dfn.params = vec![lowered.s_cell];
-        let dname = format!("{name}__defer{k}");
+        let dname = ctx.mint_synthetic(format!("{name}__defer{k}"));
         defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&frame)));
     }
     // Lifecycle-hook lambdas (`on_killed`/`on_resume`/`on_hot_reload`) hoist to
@@ -1536,7 +1543,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         let mut hfn = lowered.step.clone();
         hfn.entry = *entry;
         hfn.params = vec![lowered.s_cell];
-        let hname = format!("{name}{}", kind.slot());
+        let hname = ctx.mint_synthetic(format!("{name}{}", kind.slot()));
         hook_luas.push_str(&emit_named_framed(ws, ctx, &hname, &hfn, Some(&frame)));
     }
     let ctor = emit_constructor(&name, &step_name, &lowered, channel.as_ref());

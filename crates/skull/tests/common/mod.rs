@@ -36,6 +36,17 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
+/// Like [`emit_mir`] but surfaces the codegen `Result` (a rejection such as a
+/// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
+/// errors still panic (a malformed test, not what these cases probe).
+pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// The body of `function <name>(...) ... end` in emitted module Lua. `name` is
 /// the rock identifier; the emitted definition is mangled
 /// (`hot__int_int_int_ret_float`), so match the `function <name>` prefix. The

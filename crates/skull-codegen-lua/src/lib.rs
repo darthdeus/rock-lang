@@ -24,9 +24,11 @@ pub mod scope;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::fmt::Write as _;
+use std::sync::Mutex;
 
 use bone_semantic::hir::Function;
 use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::{CompilerError, Span};
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 use skull_mir::mir::*;
@@ -107,39 +109,71 @@ fn push_uint(out: &mut String, mut n: u32) {
 }
 
 /// Whole-workspace codegen inputs not derivable from a single [`MirFunc`]: the
-/// set of overloaded names (drives mangling) and the set of every real function's
-/// final Lua name (guards synthetic P3 `<name>__lambda<k>` names against clobber).
+/// set of overloaded names (drives mangling) and the map of every real top-level
+/// Lua name (function names + globals) to its source span (guards every synthetic
+/// `<name>__lambda<k>` / `<co>__step` / `__on_*` / ... name against clobber).
 /// Computed once per emit.
 pub struct CodegenCtx {
     overloaded: HashSet<Ustr>,
-    /// Every real function's emitted Lua name — a hoisted lambda name colliding
-    /// with one would silently clobber (last-write-wins). See `assert_no_collision`.
-    fn_names: HashSet<String>,
+    /// Every REAL top-level Lua name (a function's mangled name or a global's
+    /// name) -> the span of its source definition. A synthetic name minted
+    /// through [`mint_synthetic`] that lands here would clobber the user's def
+    /// last-write-wins, so it is rejected (span points at the user's def).
+    reserved: HashMap<String, Span>,
+    /// Collisions recorded during (parallel) emit; drained by [`take_collision`]
+    /// at each public emit boundary. `Mutex` because `&CodegenCtx` is shared
+    /// across rayon workers; contention is nil (a few mints per fn).
+    collisions: Mutex<Vec<(String, CompilerError)>>,
 }
 
 impl CodegenCtx {
     pub fn new(ws: &Workspace) -> Self {
         let overloaded = compute_overloaded_names(ws);
-        let fn_names = ws
-            .modules
-            .iter()
-            .flat_map(|m| m.functions.iter())
-            .map(|(_, f)| mangle_fn(ws, f, &overloaded))
-            .collect();
-        CodegenCtx { overloaded, fn_names }
+        let mut reserved: HashMap<String, Span> = HashMap::default();
+        for m in ws.modules.iter() {
+            for (_, f) in m.functions.iter() {
+                reserved.insert(mangle_fn(ws, f, &overloaded), f.name_span);
+            }
+            for (_, g) in m.globals.iter() {
+                reserved.insert(g.name.as_str().to_string(), g.name_span);
+            }
+        }
+        CodegenCtx { overloaded, reserved, collisions: Mutex::new(Vec::new()) }
     }
 
-    /// Reject a hoisted-lambda name that collides with a real function's Lua name
-    /// (`fn foo__lambda0` next to a `foo` whose capture-free lambda also hoists to
-    /// `foo__lambda0`): the two top-level defs clobber last-write-wins. The
-    /// naming scheme owns `<enclosing>__lambda<k>`; a user fn there is rejected,
-    /// not silently mis-emitted. Cheap: a hash lookup per hoisted lambda.
-    fn assert_no_collision(&self, hoisted_name: &str) {
-        assert!(
-            !self.fn_names.contains(hoisted_name),
-            "hoisted lambda name `{hoisted_name}` collides with a real function of \
-             the same name; rename that function (the `__lambda<k>` suffix is reserved)"
-        );
+    /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
+    /// (`<fn>__lambda<k>`) or coroutine machinery (`<co>__step`/`__resume`/
+    /// `__advance`/`__defer<k>`/`__on_killed`/`__on_resume`/`__on_hot_reload`).
+    /// Returns `name` unchanged. If it collides with a REAL top-level name (a
+    /// user fn's Lua name or a global), records a spanned rejection pointing at
+    /// that user definition -- drained after emit by [`take_collision`]. This is
+    /// reject-not-panic: a collision is illegal user code, not a compiler bug, so
+    /// it surfaces as a diagnostic and keeps `rock stone` / `lsp serve` alive.
+    /// THE single choke point for every synthetic top-level name across skull.
+    pub fn mint_synthetic(&self, name: String) -> String {
+        if let Some(&span) = self.reserved.get(&name) {
+            let msg = format!(
+                "`{name}` collides with a compiler-reserved synthetic name emitted by \
+                 codegen; rename this definition (the `__lambda<k>`, `__step`, `__resume`, \
+                 `__advance`, `__defer<k>`, and `__on_killed`/`__on_resume`/`__on_hot_reload` \
+                 forms are reserved)"
+            );
+            self.collisions
+                .lock()
+                .expect("collision sink")
+                .push((name.clone(), CompilerError::new_with_label(span, msg)));
+        }
+        name
+    }
+
+    /// Drain the recorded synthetic-name collisions and return the first (by
+    /// synthetic name, for determinism across rayon scheduling), or `None`.
+    /// Called at each public emit boundary; draining clears the sink so a later
+    /// emit on the same (cached) ctx starts fresh.
+    pub fn take_collision(&self) -> Option<CompilerError> {
+        let mut sink = self.collisions.lock().expect("collision sink");
+        sink.sort_by(|a, b| a.0.cmp(&b.0));
+        sink.drain(..).next().map(|(_, e)| e)
     }
 
     /// The workspace overload set (drives mangling). Computed once in [`new`];
@@ -274,7 +308,7 @@ fn home_scope(tree: &scope::ScopeTree, hoisted: &HashSet<scope::ScopeId>, mut s:
 /// declaration walk skips the per-cell home probe entirely — the common case).
 /// `k` is the `Inst::Lambda`'s inst-arena index order (every lambda consumes a
 /// `k`, so a DCE'd one doesn't shift the live ones).
-fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Ownership, name: &str) -> Option<HoistPlan> {
+fn build_hoist_plan(ctx: &CodegenCtx, func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Ownership, name: &str) -> Option<HoistPlan> {
     let mut lambda_scope: HashMap<Idx<Inst>, scope::ScopeId> = HashMap::default();
     for (sid, s) in tree.scopes.iter().enumerate() {
         if let Some(lid) = s.lambda {
@@ -290,7 +324,7 @@ fn build_hoist_plan(func: &MirFunc, tree: &scope::ScopeTree, own: &scope::Owners
         let this_k = k;
         k += 1;
         let Some(&sid) = lambda_scope.get(&lid) else { continue }; // DCE'd lambda: no scope
-        hoisted_name.insert(lid, format!("{name}__lambda{this_k}"));
+        hoisted_name.insert(lid, ctx.mint_synthetic(format!("{name}__lambda{this_k}")));
         let mut caps: Vec<Idx<Cell>> = own.captures[sid].iter().copied().collect();
         caps.sort_by_key(|c| raw(*c));
         captures.insert(lid, caps);
@@ -544,15 +578,10 @@ pub fn emit_named_framed(
         // Dominance rail: a by-value capture whose single write does not dominate
         // its creation block falls back to a box (never seen for well-formed MIR).
         b.extend(non_dominating_by_value_captures(func, &tree, &own, &b));
-        let plan = build_hoist_plan(func, &tree, &own, name);
+        let plan = build_hoist_plan(ctx, func, &tree, &own, name);
         (b, plan)
     };
     let plan_ref = plan.as_ref();
-    if let Some(p) = plan_ref {
-        for hoisted in p.hoisted_name.values() {
-            ctx.assert_no_collision(hoisted);
-        }
-    }
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(func, name);
     let mut out = String::new();
     out.push_str(&hoist_defs);
