@@ -2067,6 +2067,20 @@ impl Builder<'_> {
                 // called through a boxed fn-value). Save/restore around the body.
                 let saved_ret_tuple = self.ret_tuple;
                 let saved_ret_shape = self.ret_shape.take();
+                // Isolate the defer state, like `lower_nested_fn`. A lambda body
+                // is its OWN fn scope: bone desugars `() => e` to a block with
+                // `return e`, so the body's return runs `run_all_defers` -- which
+                // must see only the lambda's own pending defers, never the
+                // enclosing fn's. Leaving the stack shared spliced every pending
+                // enclosing defer into the lambda body (it then ran on every call)
+                // and, when the defer body was what created the lambda, recursed
+                // forever (run_all_defers re-splices the still-pending defer ->
+                // re-lowers the lambda). `in_defer_body` resets to false: the
+                // lambda body is not the defer body's code (a `yield`/`yield*`
+                // there is already rejected by bone as yield-in-plain-lambda, so
+                // the reset unmasks no diagnostic -- it just makes the flag honest).
+                let saved_defers = std::mem::take(&mut self.defers);
+                let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
                 self.ret_tuple = self.lambda_ret_tuple_arity(e);
                 let v = self.lower_expr(body)?;
                 if self.is_open() {
@@ -2076,6 +2090,8 @@ impl Builder<'_> {
                     };
                     self.f.set_term(self.cur, Term::Return(leaves));
                 }
+                self.defers = saved_defers;
+                self.in_defer_body = saved_in_defer;
                 self.ret_tuple = saved_ret_tuple;
                 self.ret_shape = saved_ret_shape;
                 self.cur = saved;
