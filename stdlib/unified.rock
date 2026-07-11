@@ -2409,6 +2409,13 @@ fn equals<T>(a: Entity<T>, b: Entity<T>) -> bool {
     return a._index == b._index && a._generation == b._generation
 }
 
+// Stable identity string for a live entity (slot + generation), unique
+// across slot reuse -- the public form of the `_`-prefixed fields for
+// keying UI ids, maps, debug labels.
+fn entity_key<T>(entity: Entity<T>) -> string {
+    return "{entity._index}:{entity._generation}"
+}
+
 fn arena_entry_new<T>(data: T, index: int, generation: int) -> ArenaEntry<T> {
     return ArenaEntry {
         _data: data,
