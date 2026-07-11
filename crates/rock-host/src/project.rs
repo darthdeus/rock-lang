@@ -427,6 +427,57 @@ pub fn is_game_project(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
+/// Parents a bare project name expands against (relative to the workspace
+/// root), beyond the literal path. `games/` holds the match3-class games;
+/// top-level projects (bitgun, mag, anvil) are picked up by the literal-path
+/// check, so they need no entry here.
+pub const PROJECT_PARENTS: &[&str] = &["games"];
+
+/// Resolve a project argument (`rock sim`/`--list`) to a directory, relative to
+/// the current directory -- callers run `ensure_workspace_root` first, so cwd is
+/// the workspace root. An existing path wins as-is; otherwise the bare name is
+/// expanded against `PROJECT_PARENTS`. Zero or more-than-one matches reject with
+/// the candidates listed -- never guess.
+pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
+    resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg)
+}
+
+/// Core of `resolve_project_dir`, parameterized on the search base and parent
+/// list so it can be exercised without touching the process cwd. An empty
+/// `base` yields clean cwd-relative paths (`Path::new("").join("x")` == `"x"`).
+pub fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -> Result<PathBuf> {
+    let literal = base.join(arg);
+    if literal.is_dir() {
+        return Ok(literal);
+    }
+
+    let candidates: Vec<PathBuf> = parents
+        .iter()
+        .map(|p| base.join(p).join(arg))
+        .filter(|c| c.is_dir())
+        .collect();
+
+    match candidates.len() {
+        0 => Err(anyhow::anyhow!(
+            "no project `{arg}`: not a directory, and no match for {}",
+            parents
+                .iter()
+                .map(|p| format!("`{p}/{arg}`"))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )),
+        1 => Ok(candidates.into_iter().next().unwrap()),
+        _ => Err(anyhow::anyhow!(
+            "ambiguous project `{arg}`: matches {} -- pass an explicit path",
+            candidates
+                .iter()
+                .map(|c| format!("`{}`", c.display()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,12 +538,60 @@ mod tests {
     fn test_project_id_deterministic() {
         let temp = TempDir::new().unwrap();
         let project_dir = temp.path();
-        
+
         let id1 = get_project_id(project_dir).unwrap();
         let id2 = get_project_id(project_dir).unwrap();
-        
+
         // Should generate the same ID for the same path
         assert_eq!(id1, id2);
         assert_eq!(id1.len(), 8);
+    }
+
+    #[test]
+    fn resolve_project_dir_literal_path_wins() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        // a top-level project dir (bitgun/mag/anvil-shaped) AND a games/ dir of
+        // the same name -- the literal path must win over expansion.
+        fs::create_dir_all(root.join("bitgun")).unwrap();
+        fs::create_dir_all(root.join("games/bitgun")).unwrap();
+
+        let got = resolve_project_dir_in(root, &["games"], "bitgun").unwrap();
+        assert_eq!(got, root.join("bitgun"));
+    }
+
+    #[test]
+    fn resolve_project_dir_bare_name_expands_to_games() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("games/match3")).unwrap();
+
+        let got = resolve_project_dir_in(root, &["games"], "match3").unwrap();
+        assert_eq!(got, root.join("games/match3"));
+    }
+
+    #[test]
+    fn resolve_project_dir_missing_rejects() {
+        let temp = TempDir::new().unwrap();
+        let err = resolve_project_dir_in(temp.path(), &["games"], "nope")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no project `nope`"), "unexpected: {err}");
+        assert!(err.contains("games/nope"), "should name the searched parent: {err}");
+    }
+
+    #[test]
+    fn resolve_project_dir_ambiguous_rejects_with_candidates() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("games/dup")).unwrap();
+        fs::create_dir_all(root.join("demos/dup")).unwrap();
+
+        let err = resolve_project_dir_in(root, &["games", "demos"], "dup")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ambiguous project `dup`"), "unexpected: {err}");
+        assert!(err.contains("games/dup") && err.contains("demos/dup"),
+            "should list both candidates: {err}");
     }
 }

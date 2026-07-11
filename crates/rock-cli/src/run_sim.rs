@@ -70,10 +70,7 @@ fn compile_sims(
 pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
-    let project_path = PathBuf::from(project);
-    if !project_path.is_dir() {
-        return Err(anyhow!("sim --list expects a project directory, got: {project}"));
-    }
+    let project_path = rock_host::project::resolve_project_dir(project)?;
 
     let (wire_names, _, _) = compile_sims(backend, project_path, PathBuf::from("tmp"))?;
     for name in wire_names {
@@ -88,14 +85,12 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
 pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, quiet: bool, update_snapshots: bool) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
-    rock_host::engine_build::build_engine_libs(project)?;
-
-    let project_path = PathBuf::from(project);
-    if !project_path.is_dir() {
-        return Err(anyhow!(
-            "sim expects a project directory, got: {project}"
-        ));
-    }
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    // Thread the RESOLVED path everywhere the raw arg used to flow (engine libs,
+    // sim-source lookup for snapshot baselines) so a bare name behaves exactly
+    // like its expanded path.
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
 
     let output = "tmp".to_string();
     let output_path = PathBuf::from(&output);
@@ -107,7 +102,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
     let (_, env_by_wire, mut stone) = compile_sims(backend, project_path, output_path)?;
 
     let (display_name, summary) = run_named_entry(
-        project,
+        &project,
         sim_name,
         quiet,
         update_snapshots,
@@ -244,12 +239,9 @@ pub fn do_run_named_sims(
     }
 
     rock_host::project::ensure_workspace_root()?;
-    rock_host::engine_build::build_engine_libs(project)?;
-
-    let project_path = PathBuf::from(project);
-    if !project_path.is_dir() {
-        return Err(anyhow!("sim expects a project directory, got: {project}"));
-    }
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
 
     let output = "tmp".to_string();
     let (_, env_by_wire, mut stone) =
@@ -262,7 +254,7 @@ pub fn do_run_named_sims(
         // the on-failure game-log dump. The concise `print` below still lists
         // each sim's failing assertions so a failure isn't opaque.
         let (display_name, summary) = run_named_entry(
-            project,
+            &project,
             name,
             true,
             update_snapshots,
@@ -307,12 +299,9 @@ pub fn do_run_named_sims(
 pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, update_snapshots: bool) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
-    rock_host::engine_build::build_engine_libs(project)?;
-
-    let project_path = PathBuf::from(project);
-    if !project_path.is_dir() {
-        return Err(anyhow!("sim expects a project directory, got: {project}"));
-    }
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
 
     let output = "tmp".to_string();
     let (wire_names, env_by_wire, mut stone) =
@@ -331,7 +320,7 @@ pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, upda
         let env_pairs = env_by_wire.get(name).cloned().unwrap_or_default();
 
         let mut summary = run_one_sim(
-            project,
+            &project,
             name,
             quiet,
             update_snapshots,
