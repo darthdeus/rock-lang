@@ -270,15 +270,13 @@ impl ScopeTree {
                     .is_some_and(|ss| ss.iter().any(|&s| s != own.owner[c]));
                 // A cell WRITTEN from inside a lambda boxes unconditionally -- the
                 // mutation must be shared by reference. This precedes the
-                // loop-binding exemption (R2): with exact desugar provenance a
-                // genuine `for` counter is never lambda-written, so the two can
-                // never collide (debug-assert), but were they ever to, correctness
-                // (box) must win over the per-iteration optimization.
+                // loop-binding exemption (R2): a lambda-written `for` binding is
+                // LEGAL Rock (`for i in 0..3 { let f = () => { i = i + 10 } }`) --
+                // the write steers the live counter, same as a plain in-loop write
+                // and same as pre-arc inline closures -- so it boxes (shared), and
+                // the per-iteration by-value exemption below applies only while NO
+                // lambda writes the binding.
                 if written_non_owner {
-                    debug_assert!(
-                        !own.loop_bindings.contains(c),
-                        "a desugared loop-binding counter must never be written from a lambda scope"
-                    );
                     return true;
                 }
                 // A loop-binding cell captured (never lambda-written) is
