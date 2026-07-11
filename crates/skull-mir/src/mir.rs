@@ -368,9 +368,16 @@ impl Inst {
 /// shared for free by the target's closures), and a cell live across a coroutine
 /// suspend becomes a frame field — but that is *computed by the coroutine
 /// transform*, not stored here.
+///
+/// `loop_binding` is DESUGAR PROVENANCE set by the `for` lowerings (`lower_for_*`
+/// counter cells + `MapNext` key/val dests): a direct capture of such a cell is
+/// per-iteration BY VALUE, so the ownership analysis excludes it from boxing.
+/// Living on the cell (not a `MirFunc` side-table) means every transform that
+/// clones a cell carries the tag for free.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
     pub name: Option<Ustr>,
+    pub loop_binding: bool,
 }
 
 /// How a block ends. Control flow lives ONLY here.
@@ -523,7 +530,13 @@ impl MirFunc {
 
     /// Allocate a fresh variable cell.
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name })
+        self.cells.alloc(Cell { name, loop_binding: false })
+    }
+
+    /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
+    /// [`Cell::loop_binding`]).
+    pub fn mark_loop_binding(&mut self, cell: Idx<Cell>) {
+        self.cells[cell].loop_binding = true;
     }
 
     /// Allocate a fresh (empty, `Unreachable`-terminated) block.

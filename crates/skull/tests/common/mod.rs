@@ -36,6 +36,17 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
+/// Like [`emit_mir`] but surfaces the codegen `Result` (a rejection such as a
+/// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
+/// errors still panic (a malformed test, not what these cases probe).
+pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// The body of `function <name>(...) ... end` in emitted module Lua. `name` is
 /// the rock identifier; the emitted definition is mangled
 /// (`hot__int_int_int_ret_float`), so match the `function <name>` prefix. The
@@ -53,4 +64,22 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
 pub fn ws_of(src: &str) -> Workspace {
     let module = skull_parser::parse_module(src, Ustr::from("<t>")).expect("parse");
     bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
+}
+
+/// Run `prog` under luajit, returning trimmed stdout (panicking with stderr on a
+/// non-zero exit). `tag` disambiguates the temp file so parallel tests never
+/// collide (nextest is process-per-test, but be safe under `cargo test` threads).
+pub fn run_luajit(prog: &str, tag: &str) -> String {
+    use std::process::Command;
+    let path = std::env::temp_dir().join(format!("skull_test_{}_{tag}.lua", std::process::id()));
+    std::fs::write(&path, prog).expect("write program");
+    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let _ = std::fs::remove_file(&path);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    stdout.trim().to_string()
 }

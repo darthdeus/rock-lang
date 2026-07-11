@@ -158,3 +158,37 @@ fn dependent_hole_message_refreshes_after_interface_edit() {
         "editing give()'s return type must refresh a.rock's dependent hole message, not serve stale"
     );
 }
+
+/// The `./` hint is a two-label error (the `/` cause + the use site). The live
+/// publish path (`update`) must surface BOTH as diagnostics so nvim paints a
+/// squiggle on each line -- not just the primary. Regression for the LSP
+/// dropping every label but the first.
+#[test]
+fn multi_label_hint_publishes_a_diagnostic_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"xp\"\n").unwrap();
+    // `frame_h` is float (via `/`); using it in an int hole one line later is
+    // the mismatch. The hint points at the `/` (line 1) and the use (line 2).
+    let src = "fn main() {\n  let h = 8 / 3\n  let x: int = 2 * h\n}\n";
+    std::fs::write(dir.path().join("a.rock"), src).unwrap();
+    let a = bone_query::canonicalize_lenient(&dir.path().join("a.rock").to_string_lossy());
+
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(&a, src.to_string());
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .find(|(p, _)| p == &a)
+        .map(|(_, d)| d)
+        .unwrap_or_default();
+
+    let hint_lines: Vec<u32> = diags
+        .iter()
+        .filter(|d| d.message.contains("./") || d.message.contains("used where `int`"))
+        .map(|d| d.range.start.line)
+        .collect();
+    assert!(
+        hint_lines.contains(&1) && hint_lines.contains(&2),
+        "expected a squiggle on both the `/` line (1) and the use line (2), got: {:?}",
+        diags.iter().map(|d| (d.range.start.line, d.message.as_str())).collect::<Vec<_>>()
+    );
+}

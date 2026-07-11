@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 /// Lua for the user module via skull. The stdlib module isn't emitted — its
 /// symbols are referenced by name (resolved at runtime by a real stdlib
 /// prelude, or simply not called under the load-only validity gate).
-fn skull_emit(file: &str, src: &str) -> std::result::Result<String, CompilerError> {
+fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<CompilerError>> {
     Ok(skull_emit_full(file, src)?.0)
 }
 
@@ -35,12 +35,12 @@ fn skull_emit(file: &str, src: &str) -> std::result::Result<String, CompilerErro
 fn skull_emit_full(
     file: &str,
     src: &str,
-) -> std::result::Result<(String, Vec<skull::SkullTest>), CompilerError> {
-    let user = skull_parser::parse_module(src, ustr::Ustr::from(file))?;
+) -> std::result::Result<(String, Vec<skull::SkullTest>), Vec<CompilerError>> {
+    let user = skull_parser::parse_module(src, ustr::Ustr::from(file)).map_err(|e| vec![e])?;
     let user_file = user.file;
     let ws = crate::bone_backend::check_with_stdlib([user])?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)?;
+    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid).map_err(|e| vec![e])?;
     let (lua, skipped) = (emit.lua, emit.skipped);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
         eprintln!("skull: {} stdlib fns skipped", skipped.len());
@@ -96,7 +96,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
         }
     };
     times.semantic = t.elapsed();
-    if crate::bone_backend::workspace_verdict(&ws).is_err() {
+    if !crate::bone_backend::body_errors(&ws).is_empty() {
         return (false, times);
     }
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
@@ -132,15 +132,15 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
     // can't accept the project (skull emits only what bone lowers).
     let (mut modules, entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
@@ -188,15 +188,15 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
     let (mut modules, _entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
@@ -240,8 +240,8 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 
     let (raw, _entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
@@ -315,7 +315,7 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 /// `discover_sources` — bone supplies its own via `bone_stdlib_modules()`.
 fn skull_assemble_project(
     sources: &SourceFiles,
-) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), CompilerError> {
+) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
     Ok((crate::bone_backend::with_stdlib(user_modules), entry_file))
 }
@@ -386,14 +386,18 @@ end
     h
 }
 
-fn render_err(src: &str, e: &CompilerError) -> String {
+/// Render single-file errors against `src`. `skull_emit_full` parses with the
+/// real `file` path as the span file id, so the source must be registered under
+/// that same id -- registering under a placeholder makes every span lookup fail
+/// ("Unable to fetch source") and silently drops the snippet + labels.
+fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     sf.add_or_update_file(source_file_from_path_and_contents(
-        "<parse_rock>".to_string(),
-        "<parse_rock>".to_string(),
+        file.to_string(),
+        file.to_string(),
         src.to_string(),
     ));
-    e.render(&sf)
+    crate::bone_backend::render_errs(&sf, errs)
 }
 
 /// `map_err` for the `skull::user_module_id` lookup — the same message at every
@@ -431,7 +435,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
     // skull codegen gap; both carry a `CompilerError`.
     let (lua, tests) = match skull_emit_full(file, src) {
         Ok(v) => v,
-        Err(e) => {
+        Err(errs) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
@@ -448,8 +452,8 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
                 return Ok(SkullOutcome::Pass { tests: test_fns.len() });
             }
             return Err(SkullFailure {
-                reason: categorize(&e.message),
-                rendered: render_err(src, &e),
+                reason: categorize(&errs[0].message),
+                rendered: render_file_errs(file, src, &errs),
             });
         }
     };
@@ -550,8 +554,8 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
             }
             Ok(())
         }
-        Err(e) => {
-            eprintln!("{}", render_err(&src, &e));
+        Err(errs) => {
+            eprintln!("{}", render_file_errs(path, &src, &errs));
             std::process::exit(1);
         }
     }
@@ -746,8 +750,8 @@ pub fn skull_run(path: &str) -> Result<()> {
     };
     let lua = match skull_emit(path, &src) {
         Ok(l) => l,
-        Err(e) => {
-            eprintln!("{}", render_err(&src, &e));
+        Err(errs) => {
+            eprintln!("{}", render_file_errs(path, &src, &errs));
             std::process::exit(1);
         }
     };
@@ -772,6 +776,12 @@ pub fn skull_run(path: &str) -> Result<()> {
 /// resolve to the right file. Every discovered source is registered under its
 /// id-path (the same id used when parsing into a module).
 fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
+    render_project_errs(sources, std::slice::from_ref(e))
+}
+
+/// [`render_project_err`] over every collected diagnostic, joined into one
+/// report — the CLI prints ALL of them, matching the LSP.
+fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     for file in &sources.files {
         let f = file.borrow();
@@ -782,7 +792,7 @@ fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
             f.contents.clone(),
         ));
     }
-    e.render(&sf)
+    crate::bone_backend::render_errs(&sf, errs)
 }
 
 /// `rock run <project-dir> --backend skull` — assemble the whole project (all
@@ -822,16 +832,16 @@ fn skull_emit_project(dir: &str) -> String {
     let t = Instant::now();
     let (mut modules, entry_file) = match skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             std::process::exit(1);
         }
     };
 
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("{}", render_project_err(&sources, &e));
+        Err(errs) => {
+            eprintln!("{}", render_project_errs(&sources, &errs));
             log::error!(target: "SKULL", "bone type-check failed for project {}", dir);
             std::process::exit(1);
         }
@@ -2673,33 +2683,41 @@ mod overlay_runtime_tests {
     }
 
     /// Layout drift, cell shift: a live coroutine suspended across a BodyOnly
-    /// overlay that INSERTS a `let` between two frame-resident locals. Frame
-    /// fields are cell-index-named (`c<N>`), so the new step would read the
-    /// second local at a shifted index the old frame never wrote -- the frame
-    /// layout stamp kills the coroutine cleanly instead.
+    /// overlay that INSERTS a frame-resident local before an existing one,
+    /// shifting its dense slot. The new step would read the shifted local at a
+    /// slot the old frame never wrote -- the frame layout stamp kills the
+    /// coroutine cleanly instead. The inserted `z` is a GENUINE frame cell
+    /// (read after the first yield, so it must survive suspension); a dead local
+    /// -- `let z = 999` never read -- is now a ghost dropped from the frame and
+    /// does NOT shift the layout (the P2-finding fix; that path has its own
+    /// structural test in skull/tests/frame_slot_naming.rs).
     /// docs/coroutine-allocation-plan.md "Layout drift across reloads".
     #[test]
     fn live_coroutine_cell_layout_shift_overlay_stamp_kills() {
         // `Act(() -> ())` forces Ev flat (frame-slot channel); `mk()` keeps the
         // locals as real calls so copy-prop/DCE can't erase the frame cells.
-        let prog = |extra: &str| {
-            format!(
-                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
-            )
-        };
-        let (v0, v1) = (prog(""), prog("  let z = mk(999)\n"));
+        // v1 inserts `z` AND reads it after yield 1 (`a = a + z`), so `z` is a
+        // real frame cell that shifts `b`'s slot -- a genuine layout change.
+        let v0 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
+                  global GEN: Coroutine<Ev>? = null\n\
+                  fn mk(n: int) -> int { return n }\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  fn start() { GEN = gen() }\n\
+                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
+        let v1 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
+                  global GEN: Coroutine<Ev>? = null\n\
+                  fn mk(n: int) -> int { return n }\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let z = mk(999)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  a = a + z\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  fn start() { GEN = gen() }\n\
+                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mut session = bone_session(files(v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let result = session.update_file("main.rock", v1).expect("update v1");
         assert!(
             matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
             "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
@@ -2709,11 +2727,11 @@ mod overlay_runtime_tests {
 
         // start() + pump() under v0 (Tick(7)=7, suspended at state 1), overlay,
         // then pump() again on the SAME live coroutine. The frame layout stamp
-        // rejects the v0 frame in the v1 step (the `let z` shifted `b`'s cell
-        // index): the check errors INSIDE the pcall, the coroutine dies cleanly
-        // (state -2, on_killed, last_error explains) and pump reads null -> -1.
-        // Pre-stamp this CRASHED the consumer (arithmetic on the nil read from
-        // the shifted slot) -- the flipped sentinel guards the clean kill.
+        // rejects the v0 frame in the v1 step (the genuine `z` frame cell shifted
+        // `b`'s slot): the check errors INSIDE the pcall, the coroutine dies
+        // cleanly (state -2, on_killed, last_error explains) and pump reads null
+        // -> -1. Pre-stamp this CRASHED the consumer (arithmetic on the nil read
+        // from the shifted slot).
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
@@ -2879,20 +2897,23 @@ mod overlay_runtime_tests {
     /// cleanup code against old-layout cells.
     #[test]
     fn stamp_kill_runs_creation_time_defers() {
-        let prog = |extra: &str| {
+        // v1 inserts `z` and reads it after the first yield (`a = a + z`), so `z`
+        // is a genuine frame cell shifting `b`'s slot -- a real layout change.
+        // (A dead `let z = 999` is now a ghost that does NOT shift the frame.)
+        let prog = |extra: &str, cross: &str| {
             format!(
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  global BUSY: int = 0\n\
                  fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Tick(b)\n}}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n{cross}  yield Ev::Tick(b)\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
                  fn start() {{ GEN = gen() }}\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
                  fn report() {{ print(\"busy:{{BUSY}}\") }}\n"
             )
         };
-        let (v0, v1) = (prog(""), prog("  let z = mk(999)\n"));
+        let (v0, v1) = (prog("", ""), prog("  let z = mk(999)\n", "  a = a + z\n"));
 
         let mut session = bone_session(files(&v0)).expect("session v0");
         let mid = skull::user_module_id(session.workspace()).unwrap();
@@ -2989,14 +3010,16 @@ mod overlay_runtime_tests {
                   fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
                   fn start() { GEN = gen() }\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
-        // Widen Tick + yield the new payload: the enum edit is Interface tier, and
-        // the body gains a local (`z`) -> cell shift for `b`, exactly like the
-        // BodyOnly repro but delivered via a FULL rebuild.
-        let v1 = "enum Ev { Tick(int, int), Pair(int, int), Done, Act(() -> ()) }\n\
+        // Widen Tick BEYOND the current max payload width (Pair's 2 -> Tick's 3),
+        // so the frame-slot yield channel genuinely grows -- the shape edit shifts
+        // the layout stamp (a within-width widen would be absorbed by the union
+        // channel and, post-P2-fix, is correctly layout-stable). The enum edit is
+        // Interface tier, delivered via a FULL rebuild.
+        let v1 = "enum Ev { Tick(int, int, int), Pair(int, int), Done, Act(() -> ()) }\n\
                   global GEN: Coroutine<Ev>? = null\n\
                   fn mk(n: int) -> int { return n }\n\
-                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let z = mk(999)\n  let b = mk(35)\n  yield Ev::Tick(a, z)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
-                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x, y) => x + y\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a, b, a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
+                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x, y, z) => x + y + z\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
                   fn start() { GEN = gen() }\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
@@ -3036,11 +3059,11 @@ mod overlay_runtime_tests {
             ExecOutcome::Errored => panic!("full-reload survival fixture failed to run"),
         }
 
-        // Resuming the survivor: the v1 step's layout stamp (cells shifted by
-        // `let z`, channel widened by the Tick payload) rejects the v0 frame --
-        // the coroutine dies cleanly through the pcall path and pump prints -1.
-        // Pre-stamp this CRASHED the consumer on the shifted frame read, through
-        // the very tier the hot-reload contract once claimed was safe.
+        // Resuming the survivor: the v1 step's layout stamp (yield channel
+        // widened by the Tick payload growing past the union width) rejects the
+        // v0 frame -- the coroutine dies cleanly through the pcall path and pump
+        // prints -1. Pre-stamp this CRASHED the consumer on the shifted frame
+        // read, through the very tier the hot-reload contract once claimed was safe.
         let composed = run_parts(&[
             &full0.lua,
             stub_for(&full0.lua),
@@ -3405,6 +3428,257 @@ mod overlay_runtime_tests {
             t.divergences.len(),
             t.divergences.iter().map(|(f, ts, d)| format!("  {f}::{ts}: {d}")).collect::<Vec<_>>().join("\n")
         );
+    }
+
+    // -- frame-lambda hoist (docs/coroutine-frame-lambda-plan.md P2) ----------
+    // These pin the reload/layout contract of P1's co-fn lambda hoist: a
+    // capturing co-fn lambda is an env record whose `__fn` names a hoisted
+    // top-level body emitted IN THE SAME CHUNK as the step (const-hoist
+    // precedent), so a BodyOnly overlay carries it. A test that would also pass
+    // against pre-P1 emission (inline `function(...)` closures, no
+    // `gen__step__lambda<k>` global) is not evidence -- each asserts the
+    // hoisted body is present in the overlay.
+
+    /// The frame layout stamp for a coroutine ctor `function <ctor>()`: the
+    /// `__layout = <N>` literal the ctor writes. Two builds whose only diff is a
+    /// lambda-local must produce the SAME stamp (P1: lambda locals left the
+    /// layout canon); a co-fn-level local shifts it.
+    fn layout_stamp(lua: &str, ctor: &str) -> i64 {
+        let marker = format!("function {ctor}()");
+        let start = lua.find(&marker).unwrap_or_else(|| panic!("no ctor `{ctor}` in emitted lua"));
+        let tail = &lua[start..];
+        let key = "__layout = ";
+        let lpos = tail.find(key).expect("ctor has no __layout stamp");
+        let after = &tail[lpos + key.len()..];
+        let end = after.find(|c: char| !c.is_ascii_digit() && c != '-').unwrap_or(after.len());
+        after[..end].parse().expect("parse __layout stamp")
+    }
+
+    /// A capturing co-fn lambda whose BODY is edited (operator `+` -> `*`): the
+    /// overlay must carry the hoisted `gen__step__lambda0` body, and a
+    /// coroutine created AFTER the reload runs the new lambda behavior. Equals a
+    /// fresh full build of v1. The `overlay.lua.contains("gen__step__lambda0")`
+    /// assertion is what discriminates P1 from pre-P1 (which had no hoisted
+    /// global -- the lambda was an inline closure inside the step).
+    #[test]
+    fn cofn_capturing_lambda_body_edit_overlay_created_after_reload() {
+        let prog = |op: char| {
+            format!(
+                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  let base = 3\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(4))\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog('+'), prog('*'));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "editing a lambda operator is a body edit, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        assert!(
+            overlay.lua.contains("gen__step__lambda0"),
+            "the overlay must carry the hoisted lambda body (const-hoist precedent); \
+             absence means pre-P1 inline-closure emission"
+        );
+        // Created AFTER the overlay -> the v1 lambda (4*3=12), then done -> -1.
+        // "12\n-1" IS a fresh v1 full build's output, so this doubles as the
+        // fresh-equivalence check (the program has no `main`, so the generic
+        // `assert_runtime_eq` driver doesn't apply -- start/pump is the driver).
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), &overlay.lua, "start()", "pump()", "pump()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "12\n-1",
+                "a coroutine created after the reload runs the new hoisted lambda body (4*3=12)"
+            ),
+            ExecOutcome::Errored => panic!("post-reload coroutine with hoisted lambda failed to run"),
+        }
+    }
+
+    /// The snapshot-at-creation contract (Risks / watch-outs: "Record staleness
+    /// across hot reload is the same contract as the old inline closure"). A
+    /// LIVE coroutine created BEFORE the reload survives a layout-stable body
+    /// edit. A record created before the reload holds a STALE `__fn` value (the
+    /// global was read into the table at creation); a record created after
+    /// resume-post-reload reads the NEW global. This deliberately diverges from
+    /// a fresh full build (which is uniformly v1), so it is a raw assertion.
+    #[test]
+    fn cofn_lambda_record_snapshot_stale_across_reload_new_record_fresh() {
+        let prog = |op: char| {
+            format!(
+                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  let base = 5\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n  let g = (x: int) => x {op} base\n  yield Ev::Tick(g(3))\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog('+'), prog('*'));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        // Layout-stable premise: an operator edit doesn't touch the frame canon.
+        assert_eq!(
+            layout_stamp(&full0.lua, "gen"),
+            {
+                let mut s = bone_session(files(&v1)).expect("session v1 probe");
+                let m = skull::user_module_id(s.workspace()).unwrap();
+                let f = skull::mir_emit::emit_full(s.workspace(), m).expect("emit v1 probe").0;
+                let _ = &mut s;
+                layout_stamp(&f.lua, "gen")
+            },
+            "an operator-only edit must be layout-stable (no frame-cell change)"
+        );
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        assert!(overlay.lua.contains("gen__step__lambda1"), "overlay must carry the hoisted g body");
+
+        // start() + pump() under v0: f = record snapshotting the OLD lambda0
+        // (x+5), f(3)=8. Overlay (op *). pump #2 on the SAME live coroutine:
+        // the stored record f is STALE (still x+5) -> 8. pump #3 creates a fresh
+        // record g reading the NEW lambda1 (x*5) -> 15. pump #4 done -> -1.
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "8\n8\n15\n-1",
+                "a pre-reload record is a stale fn snapshot (8), a post-reload record is fresh (15)"
+            ),
+            ExecOutcome::Errored => panic!("live coroutine with stale lambda record failed to run"),
+        }
+    }
+
+    /// A lambda-local-only edit is layout-stable: dense per-frame slot naming
+    /// (docs/coroutine-frame-lambda-plan.md "P2 finding", now FIXED) keys both
+    /// the emitted `s.c<slot>` field names AND the layout stamp on a dense
+    /// ordinal that lambda-internal cell allocation cannot perturb, so a live
+    /// coroutine SURVIVES the edit instead of stamp-killing. Was a sentinel
+    /// (`assert_ne`, "7\n-1\n-1") pinning the two raw-id-perturbation causes it
+    /// fixes:
+    ///   (A) the canon hashed frame cells by RAW cell-arena id; lowering
+    ///       allocates a lambda's internal cells BEFORE the enclosing `let`'s
+    ///       cell, so adding `let y` inside the lambda shifted the raw id of
+    ///       every frame cell after it (record `f`: c3 -> c4). Slots absorb it.
+    ///   (B) an UNUSED lambda-local fell back to ROOT ownership and became a
+    ///       frame cell outright. The ghost-cell drop (referenced-nowhere ->
+    ///       out of the frame) removes it. (This test uses a USED local, so it
+    ///       exercises (A); the ghost drop has its own structural test.)
+    #[test]
+    fn cofn_lambda_local_edit_shifts_layout_live_survives() {
+        // v0 body: `x + base`; v1 body: `{ let y = base + base; x + y }` (used
+        // local -- reason (A): raw-id shift, not the dead-cell fallback (B)).
+        let prog = |body: &str| {
+            format!(
+                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  let base = 4\n  let f = (x: int) => {body}\n  yield Ev::Tick(f(3))\n  let g = (x: int) => {body}\n  yield Ev::Tick(g(3))\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let v0 = prog("x + base");
+        let v1 = prog("{ let y = base + base; x + y }");
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "adding a lambda-local is a body edit, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+
+        // Dense slots leave the stamp fixed under a lambda-internal cell edit.
+        assert_eq!(
+            layout_stamp(&full0.lua, "gen"),
+            layout_stamp(&fresh.lua, "gen"),
+            "a lambda-local edit must be layout-stable (dense slots absorb the raw-id shift)"
+        );
+
+        // pump #1 under v0: f(3)=7. Overlay. pump #2 on the live coroutine: the
+        // stamp still matches -> survives -> f is unchanged (x+base=7) so 3+4+4=11
+        // via the new body path; pump #3 done -> -1.
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "7\n11\n-1",
+                "a layout-stable lambda-local edit keeps the live coroutine running (7 then 11)"
+            ),
+            ExecOutcome::Errored => panic!("lambda-local edit scenario crashed instead of surviving"),
+        }
+    }
+
+    /// The converse: adding a co-fn-LEVEL local DOES shift the frame layout, so
+    /// a live coroutine across that overlay is stamp-killed cleanly. Pairs with
+    /// the lambda-local test to pin that P1 moved ONLY lambda-owned cells out of
+    /// the canon, not co-fn-level ones.
+    #[test]
+    fn cofn_toplevel_local_edit_shifts_layout_live_killed() {
+        // `mk()` keeps the inserted co-fn local as a real call so DCE can't
+        // erase its frame cell (same guard as the cell-shift stamp test).
+        let prog = |extra: &str| {
+            format!(
+                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 fn mk(n: int) -> int {{ return n }}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  let base = mk(4)\n{extra}  let f = (x: int) => x + base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 fn start() {{ GEN = gen() }}\n\
+                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+            )
+        };
+        let (v0, v1) = (prog(""), prog("  let z = mk(9)\n  yield Ev::Tick(z)\n"));
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        assert!(
+            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
+            "adding a co-fn local is a body edit, got {:?}",
+            result.tier
+        );
+        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+
+        assert_ne!(
+            layout_stamp(&full0.lua, "gen"),
+            layout_stamp(&fresh.lua, "gen"),
+            "a co-fn-level local must shift the frame layout stamp"
+        );
+
+        // pump #1 under v0: f(3)=7. Overlay (z shifts the frame). pump #2 on the
+        // live coroutine: the stamp mismatch errors inside the pcall -> clean
+        // kill -> -1; subsequent pumps stay -1 (dead).
+        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
+        match composed {
+            ExecOutcome::Output(o) => assert_eq!(
+                normalize_stdout(&o).trim(),
+                "7\n-1\n-1",
+                "a co-fn-level local shift must stamp-kill the live coroutine cleanly"
+            ),
+            ExecOutcome::Errored => panic!("co-fn local shift + live resume crashed instead of clean kill"),
+        }
     }
 }
 
@@ -3963,7 +4237,7 @@ pub struct SkullStone {
 /// The Session emit gate. `bone_session` lowering is TOTAL -- it always
 /// produces HIR and reports type errors as collected diagnostics rather than
 /// failing (unlike the compile path's `check_modules`, which runs
-/// `workspace_verdict` and returns `Err`). Every Session-based emit
+/// `body_errors` and returns `Err`). Every Session-based emit
 /// (`init`/`recompile`/`force_full`) must call this before `emit_full`/
 /// `emit_overlay`: otherwise emit drops an un-checkable body but keeps its
 /// `__deco_init` registration, leaving the registered `func` a nil global -> a

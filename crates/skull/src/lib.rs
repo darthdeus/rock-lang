@@ -300,11 +300,26 @@ fn runtime_prelude() -> &'static str {
     //   2. splitmix64 RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
+    // The `{FN_MT}` placeholder is filled once from the canonical
+    // `skull_codegen_lua::FN_MT_PRELUDE` constant (one definition, shared with the
+    // codegen test harness) -- the record metatable is where the emitter's
+    // `setmetatable({..}, __rock_fn_mt)` output lands.
+    static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        PRELUDE_TEMPLATE.replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+    });
+    &PRELUDE
+}
+
+const PRELUDE_TEMPLATE: &str =
     r#"if jit and jit.opt then jit.opt.start("maxmcode=8192", "sizemcode=512", "maxtrace=4000", "maxrecord=32000", "maxsnap=4000") end
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
+-- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
+-- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
+-- Preserved across reload so pre- and post-reload records share metatable identity.
+{FN_MT}
 if _G.__ROCK_RELEASE == nil then _G.__ROCK_RELEASE = false end
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
@@ -326,8 +341,7 @@ if not _G.__rock_rng_next then
   if __seed then _G.__rock_rng_seed(__seed)
   else _G.__rock_rng_seed(os.time()) end
 end
-"#
-}
+"#;
 
 /// Map a value-struct field type to a C type for `ffi.cdef`. Mirrors rock's
 /// `rock_type_to_c_type` (int/float/bool); a field that is itself a value

@@ -2067,6 +2067,20 @@ impl Builder<'_> {
                 // called through a boxed fn-value). Save/restore around the body.
                 let saved_ret_tuple = self.ret_tuple;
                 let saved_ret_shape = self.ret_shape.take();
+                // Isolate the defer state, like `lower_nested_fn`. A lambda body
+                // is its OWN fn scope: bone desugars `() => e` to a block with
+                // `return e`, so the body's return runs `run_all_defers` -- which
+                // must see only the lambda's own pending defers, never the
+                // enclosing fn's. Leaving the stack shared spliced every pending
+                // enclosing defer into the lambda body (it then ran on every call)
+                // and, when the defer body was what created the lambda, recursed
+                // forever (run_all_defers re-splices the still-pending defer ->
+                // re-lowers the lambda). `in_defer_body` resets to false: the
+                // lambda body is not the defer body's code (a `yield`/`yield*`
+                // there is already rejected by bone as yield-in-plain-lambda, so
+                // the reset unmasks no diagnostic -- it just makes the flag honest).
+                let saved_defers = std::mem::take(&mut self.defers);
+                let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
                 self.ret_tuple = self.lambda_ret_tuple_arity(e);
                 let v = self.lower_expr(body)?;
                 if self.is_open() {
@@ -2076,6 +2090,8 @@ impl Builder<'_> {
                     };
                     self.f.set_term(self.cur, Term::Return(leaves));
                 }
+                self.defers = saved_defers;
+                self.in_defer_body = saved_in_defer;
                 self.ret_tuple = saved_ret_tuple;
                 self.ret_shape = saved_ret_shape;
                 self.cur = saved;
@@ -3949,9 +3965,9 @@ impl Builder<'_> {
                 if !scalar {
                     // Non-scalar equality is STRUCTURAL, not Lua reference
                     // equality: route through the stdlib `__op_eq`/`__op_ne`,
-                    // which dispatch to a monomorphized `__op_eq_<Type>` or fall
-                    // back to a structural `pairs()` walk (cdata value structs
-                    // hit the `==` primitive fast path = byte-value compare).
+                    // which walk fields structurally via `pairs()` (cdata value
+                    // structs hit the `==` primitive fast path = byte-value
+                    // compare).
                     let name = if matches!(op, BinOp::Eq) { "__op_eq" } else { "__op_ne" };
                     let func = self.resolve_op_helper(name)?;
                     return Ok(self.emit_cur(Inst::Call { func, args: vec![lv, rv] }));
@@ -4430,6 +4446,7 @@ impl Builder<'_> {
         let entries = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("entries") });
         let n = self.emit_cur(Inst::Len { base: entries, kind: ContainerKind::Vec });
         let i_cell = self.f.new_cell(None);
+        self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store { cell: i_cell, value: zero });
         let enum_cell = enum_var.map(|_| {
@@ -4532,6 +4549,8 @@ impl Builder<'_> {
         let m = self.lower_expr(iter)?;
         let key_cell = self.f.new_cell(None);
         let val_cell = self.f.new_cell(None);
+        self.f.mark_loop_binding(key_cell);
+        self.f.mark_loop_binding(val_cell);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::Store {
             cell: key_cell,
@@ -4587,10 +4606,13 @@ impl Builder<'_> {
         let m = self.lower_expr(iter)?;
         let key_cell = self.f.new_cell(None);
         let val_cell = self.f.new_cell(None);
+        self.f.mark_loop_binding(key_cell);
+        self.f.mark_loop_binding(val_cell);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         self.emit_cur(Inst::Store { cell: key_cell, value: nil });
         let i_cell = self.f.new_cell(Some(self.body.binding_arena[ib].name));
         self.binds.insert(raw(ib), i_cell);
+        self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store { cell: i_cell, value: zero });
 
@@ -4686,6 +4708,7 @@ impl Builder<'_> {
             }
             None => self.f.new_cell(None),
         };
+        self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store {
             cell: i_cell,
@@ -4760,6 +4783,7 @@ impl Builder<'_> {
         let arr_v = self.lower_expr(iter)?;
         let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
         let i_cell = self.f.new_cell(None);
+        self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store {
             cell: i_cell,
@@ -5362,6 +5386,7 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         let i_cell = self.f.new_cell(Some(self.body.binding_arena[var_b].name));
         self.binds.insert(raw(var_b), i_cell);
+        self.f.mark_loop_binding(i_cell);
         let lo_v = self.lower_expr(low)?;
         self.emit_cur(Inst::Store {
             cell: i_cell,

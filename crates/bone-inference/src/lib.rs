@@ -1734,6 +1734,24 @@ pub fn infer_expr_used(
                     }
                 }
 
+                // Fn values carry no meaningful identity: a capture-free lambda
+                // is ONE shared hoisted fn, a capturing lambda a per-creation
+                // env record (docs/closure-env-records-plan.md), so `==` would
+                // compare representation artifacts. Null checks (`f != null`)
+                // are refinement, not identity -- exempt via `non_null_ty`
+                // being the literal-null case above.
+                if non_null_ty.is_none() {
+                    for ty in [lhs_ty, rhs_ty] {
+                        let peeled = peel_nullable(gamma, ty, expr_span);
+                        if matches!(*gamma.get(peeled), TypeExpr::Function { .. }) {
+                            comp_error!(
+                                expr_span,
+                                "Cannot compare fn values: fn identity is not meaningful (a capture-free lambda is one shared fn; a capturing lambda is a fresh record per creation). Compare via `!= null` or restructure around explicit keys"
+                            );
+                        }
+                    }
+                }
+
                 join(gamma, lhs_ty, rhs_ty, expr_span)?;
                 gamma.workspace.builtins.bool()
             }
@@ -2815,13 +2833,14 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
             unify(gamma, a.with_idx(ra), b.with_idx(rb), span)?;
         }
 
-        _ => unify_fail!(
-            gamma,
-            span,
-            "Failed to unify {} and {}",
-            gamma.workspace.render(Some(&gamma.out), a),
-            gamma.workspace.render(Some(&gamma.out), b)
-        ),
+        // `unify(actual, expected)` by convention (coerce passes
+        // `from`/`to` in that order), so `b` is the expected type and `a` the
+        // found one -- matching the nominal-mismatch arm above.
+        _ => {
+            let a_str = gamma.workspace.render(Some(&gamma.out), a);
+            let b_str = gamma.workspace.render(Some(&gamma.out), b);
+            unify_fail!(gamma, span, "type mismatch: expected `{b_str}`, found `{a_str}`")
+        }
     }
 
     Ok(())
@@ -4424,11 +4443,30 @@ fn check_expr(
             && matches!(gamma.get(aty_r), TypeExpr::Builtin(BuiltinTy::Float))
         {
             if let Some(div_span) = find_float_div_span(c, e) {
-                return Err(CompilerError::new_with_label(
+                let mut err = CompilerError::new_with_label(
                     div_span,
                     "`/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division"
                         .to_string(),
-                ));
+                );
+                // When the `/` reached the hole through a local binding, keep a
+                // breadcrumb at the actual mismatch site.
+                if div_span != span {
+                    err = err.with_label(span, "this `float` is used where `int` is required".to_string());
+                }
+                return Err(err);
+            }
+        }
+        // Point a secondary label at where the expected type came from (the
+        // `: T` annotation, `-> T` return, or param decl) so the reader sees
+        // WHY this slot is `T`. Adds a label; keeps coerce's own message (its
+        // specific ones, e.g. the null->`any` note, survive). Skip when the
+        // origin is unknown or coincides with the mismatch site itself
+        // (docs/error-quality-plan.md P1b).
+        if let Some(origin) = gamma.span_of(expected).or_else(|| gamma.span_of(exp_r)) {
+            if origin != span && !origin.is_empty() {
+                let exp_str = gamma.workspace.render(Some(&gamma.out), exp_r);
+                return Err(coerce_err
+                    .with_label(origin, format!("expected `{exp_str}` because of this")));
             }
         }
         return Err(coerce_err);
@@ -4438,11 +4476,21 @@ fn check_expr(
 }
 
 // Find the `/` (float division) responsible for a `float` value flowing into an
-// `int` hole. Float-ness only propagates into that hole through arithmetic
-// operators (`__op_*`) and unary minus, so the walk descends only those; a
-// `float` from anywhere else (a call's return type, a field) is not a misplaced
+// `int` hole. Float-ness reaches that hole through arithmetic operators
+// (`__op_*`), unary minus, and local `let` bindings, so the walk descends those
+// and follows a `Var` back to its initializer; a `float` from anywhere else (a
+// call's return type, a field, a reassignment) is not a syntactically-traceable
 // `/` and yields None. Returns the offending `/`'s span for the diagnostic.
 fn find_float_div_span(c: BodyCtx, e: Idx<Expr>) -> Option<Span> {
+    find_float_div_span_rec(c, e, 0)
+}
+
+fn find_float_div_span_rec(c: BodyCtx, e: Idx<Expr>, depth: usize) -> Option<Span> {
+    // Guard against a pathological binding chain; well-formed HIR terminates
+    // (an initializer only references earlier bindings) but recovery may not.
+    if depth > 32 {
+        return None;
+    }
     match &c.body.expr_arena[e] {
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
@@ -4455,16 +4503,37 @@ fn find_float_div_span(c: BodyCtx, e: Idx<Expr>) -> Option<Span> {
             }
             if name.as_str().starts_with("__op_") {
                 for a in args {
-                    if let Some(s) = find_float_div_span(c, a) {
+                    if let Some(s) = find_float_div_span_rec(c, a, depth + 1) {
                         return Some(s);
                     }
                 }
             }
             None
         }
-        Expr::UnaryMinus(x) => find_float_div_span(c, *x),
+        Expr::UnaryMinus(x) => find_float_div_span_rec(c, *x, depth + 1),
+        Expr::Var(b) => {
+            let init = binding_initializer(c, *b)?;
+            find_float_div_span_rec(c, init, depth + 1)
+        }
         _ => None,
     }
+}
+
+// The `let`/`static` initializer expression for a simple single-name binding,
+// so the float-div walk can follow a local variable back to the `/` that made
+// it float. Params, tuple/loop/pattern bindings have no single initializer here
+// and yield None.
+fn binding_initializer(c: BodyCtx, b: Idx<BindingInfo>) -> Option<Idx<Expr>> {
+    c.body.statement_arena.iter().find_map(|(_, stmt)| match stmt {
+        Statement::Let { name, value }
+        | Statement::Static { name, value }
+        | Statement::LetNewtype { var: name, value, .. }
+            if *name == b =>
+        {
+            Some(*value)
+        }
+        _ => None,
+    })
 }
 
 fn coroutine_yrn(

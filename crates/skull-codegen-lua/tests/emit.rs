@@ -95,7 +95,11 @@ fn run(src: &str, driver: &str) -> String {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
     let ctx = CodegenCtx::new(&ws);
     let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    let mut lua = String::from("local bit = require('bit')\n");
+    // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
+    // (docs/closure-env-records-plan.md); the record metatable lives in skull's
+    // runtime prelude, which this bare harness does not emit -- pull in the
+    // canonical definition (one copy, shared with `skull::runtime_prelude`).
+    let mut lua = format!("local bit = require('bit')\n{}\n", skull_codegen_lua::FN_MT_PRELUDE);
     let mut cache = skull_transform::InlineCache::default();
     for (fid, _) in ws.module(mid).functions.iter() {
         let fref = FuncRef { module: mid, func: fid };

@@ -62,8 +62,7 @@ impl BonePhaseTimes {
 /// (`(file, offset)` — bone stores them per `BodyOwner` in hash maps, so map
 /// iteration alone is nondeterministic). `semantic_pass` returning `Ok` means
 /// "lowered and checked", NOT "no type errors"; every verdict-shaped consumer
-/// must go through here (or `workspace_verdict`) or it will count broken
-/// bodies as passing.
+/// must go through here or it will count broken bodies as passing.
 pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<CompilerError> {
     // Per-body type errors PLUS lowering errors (which live on the module, not
     // the inference — e.g. `_` placeholder inside an explicit lambda/block) PLUS
@@ -87,16 +86,12 @@ pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<Compi
     errs
 }
 
-/// Collapse per-body errors into the single-error verdict the one-shot CLI
-/// commands report: `Ok` iff every body type-checked, else the first error in
-/// source order.
-pub(crate) fn workspace_verdict(
-    ws: &bone_semantic::inference::Workspace,
-) -> std::result::Result<(), CompilerError> {
-    match body_errors(ws).into_iter().next() {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+/// Render every error in `errs` against `sources` and join into one report.
+/// The one-shot CLI commands print ALL diagnostics (matching the LSP), not just
+/// the first — a project with 5 type errors must not force a
+/// fix-one-recompile-repeat loop.
+pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
+    errs.iter().map(|e| e.render(sources)).collect::<Vec<_>>().join("\n")
 }
 
 /// The bone stdlib with `user` modules appended — the checkable module set every
@@ -113,28 +108,33 @@ pub(crate) fn with_stdlib(
 }
 
 /// Run bone's front half over an already-assembled `modules` set and gate on the
-/// load-verdict: the one "modules -> verified Workspace" step. Callers stop
-/// re-spelling `semantic_pass(&mut ...).and_then(workspace_verdict)` — and a
-/// front-end signature change now touches HERE, not every call site.
+/// load-verdict: the one "modules -> verified Workspace" step. `Err` carries
+/// EVERY diagnostic (all syntax errors, else all type errors) so the CLI reports
+/// the same set the LSP shows. A front-end signature change touches HERE, not
+/// every call site.
 pub(crate) fn check_modules(
     modules: &mut [skull_parser::Ast],
-) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
-    if let Some(e) = first_syntax_error(modules) {
-        return Err(e);
+) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
+    let syntax = syntax_errors(modules);
+    if !syntax.is_empty() {
+        return Err(syntax);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(modules)?;
-    workspace_verdict(&ws)?;
+    let ws = bone_semantic::semantic_passes::semantic_pass(modules).map_err(|e| vec![e])?;
+    let errs = body_errors(&ws);
+    if !errs.is_empty() {
+        return Err(errs);
+    }
     Ok(ws)
 }
 
-/// The first recovered syntax error across `modules`, or None. The compile-path
-/// gate: parsing is TOTAL (returns the best-effort tree + `recovery_errors`), so
-/// the CLI compile/test paths refuse a program with any syntax error HERE rather
-/// than at the parse boundary. This keeps the strict compile verdict while the
-/// interactive `Session`/LSP -- which never run this gate -- keep the partial
-/// tree and surface the same errors as diagnostics.
-fn first_syntax_error(modules: &[skull_parser::Ast]) -> Option<CompilerError> {
-    modules.iter().find_map(|m| m.recovery_errors.first().cloned())
+/// Every recovered syntax error across `modules`, in module order. The
+/// compile-path gate: parsing is TOTAL (returns the best-effort tree +
+/// `recovery_errors`), so the CLI compile/test paths refuse a program with any
+/// syntax error HERE rather than at the parse boundary. This keeps the strict
+/// compile verdict while the interactive `Session`/LSP -- which never run this
+/// gate -- keep the partial tree and surface the same errors as diagnostics.
+fn syntax_errors(modules: &[skull_parser::Ast]) -> Vec<CompilerError> {
+    modules.iter().flat_map(|m| m.recovery_errors.iter().cloned()).collect()
 }
 
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
@@ -142,7 +142,7 @@ fn first_syntax_error(modules: &[skull_parser::Ast]) -> Option<CompilerError> {
 /// iter benches).
 pub(crate) fn check_with_stdlib(
     user: impl IntoIterator<Item = skull_parser::Ast>,
-) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
+) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
     check_modules(&mut with_stdlib(user))
 }
 
@@ -160,7 +160,7 @@ pub(crate) fn bone_session(
 /// `backend-stats`) layers on top so the timing split is consistent. Timed with
 /// plain `Instant`s at the call boundaries — no coupling to bone, which stays
 /// uninstrumented.
-pub fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), CompilerError>, BonePhaseTimes) {
+pub fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
     let mut times = BonePhaseTimes::default();
 
     let t = Instant::now();
@@ -168,7 +168,7 @@ pub fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), CompilerError>
         Ok(m) => m,
         Err(e) => {
             times.parse = t.elapsed();
-            return (Err(e), times);
+            return (Err(vec![e]), times);
         }
     };
     times.parse = t.elapsed();
@@ -191,7 +191,7 @@ pub fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), CompilerError>
 /// rejected here rather than producing wrong results downstream.
 pub(crate) fn parse_user_modules(
     sources: &SourceFiles,
-) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr, Duration), CompilerError> {
+) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr, Duration), Vec<CompilerError>> {
     use rayon::prelude::*;
     let t = Instant::now();
     // Parse every module in parallel — each parse is independent (own arenas; the
@@ -204,10 +204,10 @@ pub(crate) fn parse_user_modules(
         .map(|file| {
             let f = file.borrow();
             let id = ustr::Ustr::from(f.file.to_id_path().as_str());
-            let module = skull_parser::parse_module(&f.contents, id)?;
+            let module = skull_parser::parse_module(&f.contents, id).map_err(|e| vec![e])?;
             Ok((module, id))
         })
-        .collect::<std::result::Result<Vec<_>, CompilerError>>()?;
+        .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;
 
     // Sequential post-pass: reject duplicate module ids and pick the entry file.
     let mut modules = Vec::with_capacity(parsed.len());
@@ -220,10 +220,10 @@ pub(crate) fn parse_user_modules(
         // from `ws.module_ids` once the workspace exists (see `entry_module_id`).
         let mfile = module.file;
         if let Some(prev) = seen.insert(mfile, id) {
-            return Err(CompilerError::new_no_location(format!(
+            return Err(vec![CompilerError::new_no_location(format!(
                 "bone: duplicate module id `{}` in project assembly (also `{}`)",
                 mfile, prev
-            )));
+            ))]);
         }
         if first_file.is_none() {
             first_file = Some(mfile);
@@ -238,13 +238,14 @@ pub(crate) fn parse_user_modules(
     // Compile gate: parsing is total, so a project with any syntax error is
     // refused here (the whole-project bone/skull compile funnel) -- the
     // interactive Session keeps the partial tree instead.
-    if let Some(e) = first_syntax_error(&modules) {
-        return Err(e);
+    let syntax = syntax_errors(&modules);
+    if !syntax.is_empty() {
+        return Err(syntax);
     }
 
     let entry = user_file
         .or(first_file)
-        .ok_or_else(|| CompilerError::new_no_location("bone: project has no .rock files"))?;
+        .ok_or_else(|| vec![CompilerError::new_no_location("bone: project has no .rock files")])?;
     Ok((modules, entry, t.elapsed()))
 }
 
@@ -268,7 +269,7 @@ pub(crate) fn entry_module_id(
 pub(crate) fn bone_workspace_timed(
     sources: &SourceFiles,
 ) -> (
-    std::result::Result<bone_semantic::inference::Workspace, CompilerError>,
+    std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>>,
     BonePhaseTimes,
 ) {
     let mut times = BonePhaseTimes::default();
@@ -296,8 +297,8 @@ pub(crate) fn bone_workspace_timed(
     // for backend-stats and the symbol/loc counts for the [COMPILE] stats line.
     // `Ok(ws)` here means "lowered and checked", NOT "no type errors" -- body
     // errors live per-`BodyOwner` on the workspace, so every verdict-shaped
-    // consumer must run `workspace_verdict`/`body_errors` on `ws`.
-    (res, times)
+    // consumer must run `body_errors` on `ws`.
+    (res.map_err(|e| vec![e]), times)
 }
 
 /// The parsed stdlib modules, so test files can resolve stdlib symbols (`print`,
@@ -325,27 +326,20 @@ pub(crate) fn bone_stdlib_modules() -> Vec<skull_parser::Ast> {
     STDLIB.clone()
 }
 
-/// Render a bone `CompilerError` through rock's ariadne pipeline.
+/// Render bone `CompilerError`s through rock's ariadne pipeline.
 ///
 /// `parse_rock` always stamps spans with the file id `<parse_rock>` (it takes no
 /// path), so the rendered `SourceFiles` must register the contents under that
 /// same id for the span lookup to resolve — the real on-disk `path` is only used
 /// in the human-facing header line we print separately.
-fn render_err(src: &str, e: &CompilerError) -> String {
+fn render_source_errs(src: &str, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     sf.add_or_update_file(source_file_from_path_and_contents(
         "<parse_rock>".to_string(),
         "<parse_rock>".to_string(),
         src.to_string(),
     ));
-    e.render(&sf)
-}
-
-/// Run a single source string through bone's full pipeline:
-/// `parse_rock` -> `passes::semantic_pass`. Returns `Ok(())` when the source
-/// type-checks, or the first `CompilerError` from any stage.
-pub fn bone_check_source(src: &str) -> std::result::Result<(), CompilerError> {
-    bone_pipeline_timed(src).0
+    render_errs(&sf, errs)
 }
 
 /// Collapse a bone error message into a short, groupable bucket. A 489-file run
@@ -435,13 +429,13 @@ pub fn bone_parse(path: &str) -> Result<()> {
         let module = match skull_parser::parse_module(&src, ustr::Ustr::from("<parse_rock>")) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("{}", render_err(&src, &e));
+                eprintln!("{}", render_source_errs(&src, &[e]));
                 std::process::exit(1);
             }
         };
         // No stdlib here (this path checks a single module in isolation).
-        if let Err(e) = check_modules(&mut [module]) {
-            eprintln!("{}", render_err(&src, &e));
+        if let Err(errs) = check_modules(&mut [module]) {
+            eprintln!("{}", render_source_errs(&src, &errs));
             std::process::exit(1);
         }
     }
@@ -477,19 +471,19 @@ pub fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> 
 
     let iters = iters.max(1);
     let mut agg = BonePhaseTimes::default();
-    let mut first_err: Option<CompilerError> = None;
+    let mut first_err: Option<Vec<CompilerError>> = None;
     for _ in 0..iters {
         let (res, times) = bone_pipeline_timed(&src);
         agg.add(&times);
         if first_err.is_none() {
-            if let Err(e) = res {
-                first_err = Some(e);
+            if let Err(errs) = res {
+                first_err = Some(errs);
             }
         }
     }
 
-    if let Some(e) = first_err {
-        eprintln!("{}", render_err(&src, &e));
+    if let Some(errs) = first_err {
+        eprintln!("{}", render_source_errs(&src, &errs));
         std::process::exit(1);
     }
 
@@ -513,32 +507,33 @@ fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
     let iters = iters.max(1);
     let mut agg = BonePhaseTimes::default();
     let mut last_ws: Option<bone_semantic::inference::Workspace> = None;
-    let mut first_err: Option<CompilerError> = None;
+    let mut first_err: Option<Vec<CompilerError>> = None;
     for _ in 0..iters {
         let (res, times) = bone_workspace_timed(&sources);
         agg.add(&times);
         match res {
             // `Ok(ws)` only means the workspace lowered and checked; body type
-            // errors live per-`BodyOwner` on `ws`, so surface the first via the
-            // verdict helper before treating the run as a pass.
+            // errors live per-`BodyOwner` on `ws`, so collect them before
+            // treating the run as a pass.
             Ok(ws) => {
                 if first_err.is_none() {
-                    if let Err(e) = workspace_verdict(&ws) {
-                        first_err = Some(e);
+                    let errs = body_errors(&ws);
+                    if !errs.is_empty() {
+                        first_err = Some(errs);
                     }
                 }
                 last_ws = Some(ws);
             }
-            Err(e) => {
+            Err(errs) => {
                 if first_err.is_none() {
-                    first_err = Some(e);
+                    first_err = Some(errs);
                 }
             }
         }
     }
 
-    if let Some(e) = first_err {
-        eprintln!("{}", e.render(&sources));
+    if let Some(errs) = first_err {
+        eprintln!("{}", render_errs(&sources, &errs));
         std::process::exit(1);
     }
 
@@ -639,8 +634,8 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
     let ws = {
         let (user_modules, _mid, _parse) = match parse_user_modules(&sources) {
             Ok(v) => v,
-            Err(e) => {
-                eprintln!("{}", e.render(&sources));
+            Err(errs) => {
+                eprintln!("{}", render_errs(&sources, &errs));
                 std::process::exit(1);
             }
         };
@@ -1139,15 +1134,12 @@ pub(crate) fn short_path(path: &str) -> String {
 mod tests {
     use super::*;
 
-    // A program is REJECTED if the check fails outright OR the verdict finds an
-    // error in the (total-lowering) Ok workspace.
+    // A program is REJECTED if the check fails (syntax, semantic-pass, or any
+    // collected body/interface error).
     fn rejected(src: &str) -> bool {
         let module = skull_parser::parse_module(src, ustr::Ustr::from("<verdict_test>"))
             .expect("parse");
-        match check_with_stdlib([module]) {
-            Ok(ws) => workspace_verdict(&ws).is_err(),
-            Err(_) => true,
-        }
+        check_with_stdlib([module]).is_err()
     }
 
     // An unknown type in INTERFACE position (signature / global / field) lowers to
