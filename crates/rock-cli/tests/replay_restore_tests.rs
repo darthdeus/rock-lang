@@ -197,6 +197,26 @@ fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
 
+/// Loaded audio resources (MultiSound/Sound handles) are NOT simulation state:
+/// the plan excludes audio from keyframes ("never rewinds; mute during scrub,
+/// resume live"), the same carve-out render resources already get. bitgun's
+/// `sfx_shotgun` is a `Sound` handle -- it must be absent from the sim-state
+/// predicate's output (so it is neither snapshotted nor desync-hashed), while a
+/// real gameplay global (`MOBS`) stays present.
+#[test]
+fn audio_resources_excluded_from_sim_state() {
+    let sim = sim_state_names("bitgun", 3);
+    assert!(
+        sim.contains("MOBS"),
+        "control: gameplay global MOBS must be sim state (got {} names)",
+        sim.len()
+    );
+    assert!(
+        !sim.contains("sfx_shotgun"),
+        "audio Sound handle sfx_shotgun must be excluded from sim state"
+    );
+}
+
 /// P4 item 4: a bounded keyframe ring buffer. STONE_KEYFRAME_WINDOW (ticks, 0 =
 /// unbounded) evicts keyframes older than the floor -- the newest keyframe <=
 /// (now - window) -- so a long session's keyframe memory is bounded while a tick
