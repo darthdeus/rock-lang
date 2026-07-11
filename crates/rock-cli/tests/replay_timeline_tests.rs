@@ -472,6 +472,33 @@ fn right_steps_one_tick_via_imgui_not_replayed_input() {
     );
 }
 
+/// P6: the loop-marker keys go through ImGui IO like the other timeline keys, NOT
+/// the replayed keys_down. Start paused, step to a non-zero tick, inject `b`, and
+/// assert loop marker B was set to that tick (via the non-dumped diag). The
+/// recorded log never carries `b` in keys_down, so only the ImGui-IO path sets it.
+#[test]
+fn loop_marker_b_set_via_imgui_not_replayed_input() {
+    let (_dir, log) = record_short_log("bitgun", 20);
+    let marked = run_frame_env(
+        "bitgun",
+        40,
+        &["--replay", &log],
+        &[
+            ("STONE_REPLAY_WINDOW", "1"),
+            ("STONE_HEADLESS", "1"),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", "5"),
+            ("STONE_TIMELINE_KEY_AT", "9"),
+            ("STONE_TIMELINE_KEY", "b"),
+        ],
+    );
+    assert_eq!(
+        marked["__stone_diag"]["STONE_LOOP_MARK_B"].as_i64().unwrap_or(-1),
+        5,
+        "`b` while paused at tick 5 must set loop marker B = 5 via ImGui IO"
+    );
+}
+
 /// Piece 5 of P3: the auto-record "save repro" action snapshots the live
 /// from-boot log to a permanent file that replays cleanly. (Record-from-boot
 /// is the always-on ring buffer that ships now; a bounded "last N seconds"
