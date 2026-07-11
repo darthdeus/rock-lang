@@ -1004,6 +1004,11 @@ struct CoroLowered {
     /// Frame layout stamp: the ctor writes it (`__layout`), the step's entry
     /// checks it. See `layout_stamp_canon` for what it hashes.
     layout_hash: i64,
+    /// The scope tree + ownership built (once) for frame membership, threaded to
+    /// `emit_named_framed` so the step's hoist plan reuses them instead of
+    /// rebuilding on the post-rewrite CFG (they are stable across the rewrite).
+    step_tree: skull_codegen_lua::scope::ScopeTree,
+    step_own: skull_codegen_lua::scope::Ownership,
 }
 
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
@@ -1311,9 +1316,16 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     // blocks -- hook bodies, defer copies -- which have no owner) stays in the
     // frame. Built post-peel so hook lambdas are dead, pre-rewrite so `Yield`
     // resume edges still link the CFG (`successors` follows them).
+    // The tree + ownership are built ONCE here (post-hook-peel, pre-yield-rewrite)
+    // and threaded to emission through `CoroLowered` -- emission reuses them for
+    // the step's hoist plan instead of rebuilding on the post-rewrite CFG. The
+    // facts are stable across the yield rewrite: lambda sub-CFGs (which own every
+    // hoisted cell) are untouched, and the rewrite only ADDS ROOT-region blocks +
+    // `s`-field accesses, which the frame collapses to `s` anyway. Byte-identity
+    // of emitted Lua is the standing oracle for that stability.
+    let tree = skull_codegen_lua::scope::ScopeTree::build(&step);
+    let own = tree.analyze(&step);
     let frame_cells: HashSet<Idx<Cell>> = {
-        let tree = skull_codegen_lua::scope::ScopeTree::build(&step);
-        let own = tree.analyze(&step);
         // Ghost cells (cause B of the P2 finding): a cell referenced in NO block
         // anywhere -- scanned over ALL blocks incl. detached defer copies and
         // peeled hook bodies, deliberately broader than `scope::accesses` (which
@@ -1523,7 +1535,18 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     step.is_coroutine = false;
     step.resume_arg = None;
 
-    CoroLowered { step, s_cell, frame_cells, frame_slots, params, num_states, hooks, layout_hash }
+    CoroLowered {
+        step,
+        s_cell,
+        frame_cells,
+        frame_slots,
+        params,
+        num_states,
+        hooks,
+        layout_hash,
+        step_tree: tree,
+        step_own: own,
+    }
 }
 
 /// Cells referenced (read or written) anywhere in `func`'s block inst-lists --
@@ -1629,7 +1652,14 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         ctx.mint_synthetic(format!("{name}__advance"));
     }
     let step_name = ctx.mint_synthetic(format!("{name}__step"));
-    let step_lua = emit_named_framed(ws, ctx, &step_name, &lowered.step, Some(&frame));
+    let step_lua = emit_named_framed(
+        ws,
+        ctx,
+        &step_name,
+        &lowered.step,
+        Some(&frame),
+        Some((&lowered.step_tree, &lowered.step_own)),
+    );
     // Terminal-cleanup defers: each detached copy (`if flag { flag = false;
     // <body> }`) emits as a standalone `<name>__defer<k>(s)` over the SAME
     // frame naming (shared cell arena + FrameCtx). The ctor stores them by
@@ -1641,7 +1671,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         dfn.entry = *entry;
         dfn.params = vec![lowered.s_cell];
         let dname = ctx.mint_synthetic(format!("{name}__defer{k}"));
-        defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&aux_frame)));
+        defer_luas.push_str(&emit_named_framed(ws, ctx, &dname, &dfn, Some(&aux_frame), None));
     }
     // Lifecycle-hook lambdas (`on_killed`/`on_resume`/`on_hot_reload`) hoist to
     // per-co-fn top-level fns taking the frame `s` -- SAME shape as a defer (a
@@ -1661,7 +1691,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         hfn.entry = *entry;
         hfn.params = vec![lowered.s_cell];
         let hname = ctx.mint_synthetic(format!("{name}{}", kind.slot()));
-        hook_luas.push_str(&emit_named_framed(ws, ctx, &hname, &hfn, Some(&aux_frame)));
+        hook_luas.push_str(&emit_named_framed(ws, ctx, &hname, &hfn, Some(&aux_frame), None));
     }
     let ctor = emit_constructor(&name, &step_name, &lowered, channel.as_ref());
     let _ = lowered.num_states;

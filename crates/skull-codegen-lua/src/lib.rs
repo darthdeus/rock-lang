@@ -312,7 +312,7 @@ pub fn emit_function(
 /// synthetic functions with an already-final name (a global-initializer fn).
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
 pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) -> String {
-    emit_named_framed(ws, ctx, name, func, None)
+    emit_named_framed(ws, ctx, name, func, None, None)
 }
 
 /// P2.6/P3 (docs/closure-env-records-plan.md): the plan for hoisting lambda
@@ -609,6 +609,11 @@ pub fn emit_named_framed(
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
+    // The coroutine transform already built the scope tree + ownership (once, for
+    // frame membership) and threads them here so the step's hoist plan reuses them
+    // instead of rebuilding on the post-rewrite CFG. `None` for ordinary fns and
+    // hook/defer clones (which rebuild, or take the no-hoist path).
+    precomputed: Option<(&scope::ScopeTree, &scope::Ownership)>,
 ) -> String {
     let lambda_params = collect_lambda_params(func);
     // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
@@ -635,19 +640,29 @@ pub fn emit_named_framed(
     // never boxing (the frame table IS the box); hook/defer clone emissions
     // (`!hoist_lambdas`) keep the pre-P1 inline path.
     let hoist_ok = frame.is_none_or(|f| f.hoist_lambdas);
+    // Built here for an ordinary fn; reused from the coroutine transform for the
+    // step (`precomputed`) so the tree is not rebuilt on the post-rewrite CFG.
+    let owned_tree;
+    let owned_own;
     let (boxed, plan) = if !hoist_ok || !func.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
         (HashSet::default(), None)
     } else {
-        let tree = scope::ScopeTree::build(func);
-        let own = tree.analyze(func);
-        let mut b = tree.boxed_cells(&own);
+        let (tree, own) = match precomputed {
+            Some((t, o)) => (t, o),
+            None => {
+                owned_tree = scope::ScopeTree::build(func);
+                owned_own = owned_tree.analyze(func);
+                (&owned_tree, &owned_own)
+            }
+        };
+        let mut b = tree.boxed_cells(own);
         if let Some(f) = frame {
             b.retain(|c| !f.fields.contains(c));
         }
         // Dominance rail: a by-value capture whose single write does not dominate
         // its creation block falls back to a box (never seen for well-formed MIR).
-        b.extend(non_dominating_by_value_captures(func, &tree, &own, &b, frame));
-        let plan = build_hoist_plan(ctx, func, &tree, &own, name, frame);
+        b.extend(non_dominating_by_value_captures(func, tree, own, &b, frame));
+        let plan = build_hoist_plan(ctx, func, tree, own, name, frame);
         (b, plan)
     };
     let plan_ref = plan.as_ref();
