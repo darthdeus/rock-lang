@@ -192,3 +192,74 @@ fn scrub_to_earlier_tick_matches_plain_run() {
     let sim = sim_state_names(game, 60);
     assert_sim_state_matches(&scrubbed, &reference, &sim, "tick-25");
 }
+
+fn keyframe_count(s: &serde_json::Value) -> i64 {
+    s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
+}
+
+/// P4 item 4: a bounded keyframe ring buffer. STONE_KEYFRAME_WINDOW (ticks, 0 =
+/// unbounded) evicts keyframes older than the floor -- the newest keyframe <=
+/// (now - window) -- so a long session's keyframe memory is bounded while a tick
+/// at (or just below) the window start stays restorable, because the ONE
+/// keyframe below the window start is retained. With interval 10 + window 30, the
+/// scrub fires at tick 90 where the last eviction floor was the tick-50 keyframe
+/// (nearest <= 89-30); scrubbing to 55 restores exactly that floor keyframe
+/// (nearest <= 55 == 50). Landing at 55 proves the floor was RETAINED --
+/// over-eviction that dropped it would leave no keyframe <= 55, so the scrub
+/// would not fire and current_tick would stay at 90.
+#[test]
+fn bounded_keyframe_window_evicts_but_keeps_window_restorable() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("win.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "100", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    let reference = run_replay_dump(
+        game, 100, &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "55")],
+    );
+    assert_eq!(current_tick(&reference), 55, "reference must sit at tick 55");
+
+    // Unbounded control: normal forward play (NOT a seek -- seeking skips cadence
+    // capture) over the 100-tick log -> keyframes at 0,10,..,100 (~11).
+    let unbounded = run_replay_dump(
+        game, 100, &log_s,
+        &[("STONE_KEYFRAME_INTERVAL", "10")],
+    );
+    let unbounded_kf = keyframe_count(&unbounded);
+    assert!(unbounded_kf >= 8, "unbounded control should retain ~10 keyframes (got {unbounded_kf})");
+
+    // Bounded + scrub: window 30, play to 90 then scrub back to 75.
+    let bounded = run_replay_dump(
+        game, 100, &log_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_KEYFRAME_WINDOW", "30"),
+            ("STONE_SCRUB_AT_TICK", "90"),
+            ("STONE_SCRUB_TO_TICK", "55"),
+        ],
+    );
+    assert_eq!(
+        current_tick(&bounded), 55,
+        "bounded scrub must land at tick 55 (the floor keyframe at 50 must survive eviction)"
+    );
+    let bounded_kf = keyframe_count(&bounded);
+    assert!(
+        bounded_kf <= 5,
+        "window 30 must bound the keyframe buffer well below the unbounded {unbounded_kf} (got {bounded_kf})"
+    );
+    let sim = sim_state_names(game, 100);
+    assert_sim_state_matches(&bounded, &reference, &sim, "tick-55");
+}
