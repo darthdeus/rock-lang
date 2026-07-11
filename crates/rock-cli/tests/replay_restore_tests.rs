@@ -312,8 +312,68 @@ fn ab_loop_cycles_and_restores_correct_state() {
         &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", &t.to_string())],
     );
     assert_eq!(current_tick(&reference), t, "reference must sit at the loop's tick {t}");
-    let sim = sim_state_names(game, 60);
+    // `dt` is the instantaneous frame delta -- 0 on the paused reference, the
+    // replayed value on the mid-play loop; a phase artifact, not divergence
+    // (accumulated `time` still matches). Exclude it, like the PROFILER carve-out.
+    let mut sim = sim_state_names(game, 60);
+    sim.remove("dt");
     assert_sim_state_matches(&looped, &reference, &sim, &format!("loop tick-{t}"));
+}
+
+/// P6: the loop-boundary reload gate. A body-edit reload during an active loop
+/// invalidates all keyframes EXCEPT the boot anchor (tick 0), so the plain
+/// restore(A) at the next boundary would fail; the loop instead re-derives A
+/// (restore boot -> resim boot->A -> re-snapshot) and keeps cycling. We inject a
+/// reload at frame 45 (well into the loop) and assert the loop keeps jumping and
+/// stays in [A,B] with correct state -- without the re-derive it would wedge the
+/// moment A's keyframe is gone.
+#[test]
+fn ab_loop_survives_incremental_reload_via_rederive() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("loopreload.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "80", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    let looped = run_replay_dump(
+        game, 150, &log_s,
+        &[
+            ("STONE_LOOP_A", "10"), ("STONE_LOOP_B", "20"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_RELOAD_AT_FRAME", "45"),   // incremental (STONE_RELOAD_FULL unset)
+        ],
+    );
+    assert_eq!(
+        looped["__stone_diag"]["STONE_REPLAY_RELOADS"].as_i64().unwrap_or(0), 1,
+        "the injected reload must have fired once"
+    );
+    let jumps = looped["__stone_diag"]["STONE_LOOP_JUMPS"].as_i64().unwrap_or(0);
+    // ~3-4 jumps happen before the frame-45 reload; requiring >= 6 proves the
+    // loop kept cycling AFTER it (via the re-derive), not just before.
+    assert!(jumps >= 6, "loop must keep cycling across the reload (jumps={jumps})");
+    let t = current_tick(&looped);
+    assert!((10..=20).contains(&t), "loop must stay in [10,20] after a reload (got {t})");
+
+    let reference = run_replay_dump(
+        game, 80, &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", &t.to_string())],
+    );
+    assert_eq!(current_tick(&reference), t, "reference must sit at tick {t}");
+    // Exclude `dt` (phase artifact: paused reference 0 vs mid-play loop) as above.
+    let mut sim = sim_state_names(game, 80);
+    sim.remove("dt");
+    assert_sim_state_matches(&looped, &reference, &sim, &format!("post-reload loop tick-{t}"));
 }
 
 /// P4 item 4: a bounded keyframe ring buffer. STONE_KEYFRAME_WINDOW (ticks, 0 =
