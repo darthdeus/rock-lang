@@ -614,6 +614,15 @@ deco init on_reload {
     -- Same reference
     if a == b then return true end
 
+    -- A capturing-lambda env record is a callable value, not a data table: it
+    -- compares as an opaque LEAF by IDENTITY, never by walking its capture
+    -- fields (mirrors the inspect/serialize record rule). Two distinct closure
+    -- instances with equal captures are NOT equal; the same instance already
+    -- returned true above. Guard the global for a bare harness with no prelude.
+    if _G.__rock_fn_mt and getmetatable(a) == _G.__rock_fn_mt then
+        return rawequal(a, b)
+    end
+
     local type_a = __rock_get_type(a)
     local type_b = __rock_get_type(b)
 
