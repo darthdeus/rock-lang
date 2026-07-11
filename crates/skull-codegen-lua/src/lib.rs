@@ -467,7 +467,7 @@ fn non_dominating_by_value_captures(
             if own.owner[&c] != parent {
                 continue; // transitive -> arrives via the parent env, always available
             }
-            let Some((wblock, wpos)) = single_write_site(func, c) else {
+            let Some((wblock, wpos)) = own.single_write_site(c) else {
                 continue; // multi-write (already handled by boxed_cells) — skip
             };
             // Block granularity says a block dominates itself, but a same-block
@@ -499,32 +499,6 @@ fn non_dominating_by_value_captures(
         }
     }
     extra
-}
-
-/// The block and within-block position of `c`'s single WRITE (a `Store`, or a
-/// multi-return call dest — the inliner can rebind a `CallMulti`/`CallValueMulti`/
-/// `CallBoundMulti` dest onto a surviving cell), or `None` if it is written other
-/// than exactly once (a multi-write cell is not a by-value candidate).
-fn single_write_site(func: &MirFunc, c: Idx<Cell>) -> Option<(Idx<Block>, usize)> {
-    let mut found = None;
-    for (bid, b) in func.blocks.iter() {
-        for (pos, &iid) in b.insts.iter().enumerate() {
-            let writes_c = match &func.insts[iid] {
-                Inst::Store { cell, .. } => *cell == c,
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => dests.contains(&c),
-                _ => false,
-            };
-            if writes_c {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some((bid, pos));
-            }
-        }
-    }
-    found
 }
 
 /// Immediate-dominator map over the blocks reachable from `entry` (classic

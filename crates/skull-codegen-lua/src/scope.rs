@@ -45,6 +45,16 @@ pub struct ScopeTree {
     block_scope: HashMap<Idx<Block>, ScopeId>,
 }
 
+/// A cell's write location, collapsed to what the dominance rail needs: the
+/// single writing inst's (block, within-block pos), or `Many` once a second write
+/// is seen (a multi-write cell is never a by-value snapshot candidate). Absent
+/// from [`Ownership::write_sites`] means zero writes.
+#[derive(Clone, Copy, Debug)]
+enum WriteSite {
+    Once(Idx<Block>, usize),
+    Many,
+}
+
 /// Cell ownership + per-scope captures. `owner[c]` is the lowest scope that must
 /// declare `c` (the LCA of every scope accessing it); `captures[s]` are the cells
 /// scope `s` must receive from an enclosing scope (owned strictly above `s`,
@@ -62,6 +72,25 @@ pub struct Ownership {
     /// capturing one is per-iteration BY VALUE, so it is excluded from
     /// [`ScopeTree::boxed_cells`] even though it is multi-store.
     pub loop_bindings: HashSet<Idx<Cell>>,
+    /// Per-cell single-write site for the dominance rail, recorded in the SAME
+    /// `accesses` walk that builds `writes` (no second arena rescan). Records all
+    /// three write kinds the count walk sees (`Store`, `MapNext` dests, multi-
+    /// return dests); [`Ownership::single_write_site`] queries it only for by-value
+    /// capture candidates, which are never `MapNext` dests (those are loop bindings
+    /// filtered before the rail).
+    write_sites: HashMap<Idx<Cell>, WriteSite>,
+}
+
+impl Ownership {
+    /// The block and within-block position of `c`'s single WRITE, or `None` if it
+    /// is written other than exactly once (a multi-write cell is not a by-value
+    /// candidate). A lookup into the site map recorded by [`ScopeTree::accesses`].
+    pub fn single_write_site(&self, c: Idx<Cell>) -> Option<(Idx<Block>, usize)> {
+        match self.write_sites.get(&c) {
+            Some(WriteSite::Once(b, pos)) => Some((*b, *pos)),
+            Some(WriteSite::Many) | None => None,
+        }
+    }
 }
 
 impl ScopeTree {
@@ -198,35 +227,42 @@ impl ScopeTree {
         HashMap<Idx<Cell>, HashSet<ScopeId>>,
         HashMap<Idx<Cell>, u32>,
         HashMap<Idx<Cell>, HashSet<ScopeId>>,
+        HashMap<Idx<Cell>, WriteSite>,
     ) {
         let mut acc: HashMap<Idx<Cell>, HashSet<ScopeId>> = HashMap::default();
         let mut writes: HashMap<Idx<Cell>, u32> = HashMap::default();
         let mut writing: HashMap<Idx<Cell>, HashSet<ScopeId>> = HashMap::default();
+        let mut sites: HashMap<Idx<Cell>, WriteSite> = HashMap::default();
         for (sid, s) in self.scopes.iter().enumerate() {
             for &c in &s.params {
                 acc.entry(c).or_default().insert(sid);
             }
-            let mut write = |c: Idx<Cell>, n: u32, acc: &mut HashMap<Idx<Cell>, HashSet<ScopeId>>| {
-                acc.entry(c).or_default().insert(sid);
-                *writes.entry(c).or_insert(0) += n;
-                writing.entry(c).or_default().insert(sid);
-            };
+            let mut write =
+                |c: Idx<Cell>, n: u32, b: Idx<Block>, pos: usize, acc: &mut HashMap<Idx<Cell>, HashSet<ScopeId>>| {
+                    acc.entry(c).or_default().insert(sid);
+                    *writes.entry(c).or_insert(0) += n;
+                    writing.entry(c).or_default().insert(sid);
+                    sites
+                        .entry(c)
+                        .and_modify(|w| *w = WriteSite::Many)
+                        .or_insert(WriteSite::Once(b, pos));
+                };
             for &b in &s.region {
-                for &iid in &func.blocks[b].insts {
+                for (pos, &iid) in func.blocks[b].insts.iter().enumerate() {
                     match &func.insts[iid] {
                         Inst::Load(c) => {
                             acc.entry(*c).or_default().insert(sid);
                         }
-                        Inst::Store { cell, .. } => write(*cell, 1, &mut acc),
+                        Inst::Store { cell, .. } => write(*cell, 1, b, pos, &mut acc),
                         Inst::MapNext { key_cell, val_cell, .. } => {
-                            write(*key_cell, 2, &mut acc);
-                            write(*val_cell, 2, &mut acc);
+                            write(*key_cell, 2, b, pos, &mut acc);
+                            write(*val_cell, 2, b, pos, &mut acc);
                         }
                         Inst::CallMulti { dests, .. }
                         | Inst::CallValueMulti { dests, .. }
                         | Inst::CallBoundMulti { dests, .. } => {
                             for &d in dests {
-                                write(d, 1, &mut acc);
+                                write(d, 1, b, pos, &mut acc);
                             }
                         }
                         _ => {}
@@ -234,12 +270,12 @@ impl ScopeTree {
                 }
             }
         }
-        (acc, writes, writing)
+        (acc, writes, writing, sites)
     }
 
     /// Owner (LCA of accessors) + transitive captures for every cell.
     pub fn analyze(&self, func: &MirFunc) -> Ownership {
-        let (acc, writes, writing_scopes) = self.accesses(func);
+        let (acc, writes, writing_scopes, write_sites) = self.accesses(func);
         let mut owner: HashMap<Idx<Cell>, ScopeId> = HashMap::default();
         for (c, scopes) in &acc {
             let mut it = scopes.iter().copied();
@@ -262,7 +298,14 @@ impl ScopeTree {
                 }
             }
         }
-        Ownership { owner, captures, writes, writing_scopes, loop_bindings: loop_binding_cells(func) }
+        Ownership {
+            owner,
+            captures,
+            writes,
+            writing_scopes,
+            loop_bindings: loop_binding_cells(func),
+            write_sites,
+        }
     }
 
     /// The set of captured cells that must be BOXED (`{ v = ... }`, by-reference)
