@@ -42,6 +42,14 @@ pub use mangle::{compute_overloaded_names, mangle_fn};
 pub const FN_MT_PRELUDE: &str =
     "if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end";
 
+/// The env-record parameter name of a hoisted capturing lambda body
+/// (`function <name>__lambda<k>(<ENV_PARAM>, <params>)`). A reserved
+/// double-underscore rock name so a user global/fn read inside the body
+/// (`Inst::Global` emits the bare name) can never collide with it -- user
+/// identifiers can't legally start with `__rock`. (The `e` local in
+/// `FN_MT_PRELUDE`'s `__call` is a private Lua closure param, unaffected.)
+const ENV_PARAM: &str = "__rock_env";
+
 thread_local! {
     /// Cumulative time spent in register allocation (`regalloc::color_values`
     /// AND `regalloc::color_cells`) across every `render_scope`/`emit_*` call on
@@ -233,7 +241,7 @@ pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) 
 /// frame, which is carved out) hoists to `function <name>__lambda<k>(...) ... end`:
 ///   - **capture-free** (`captures[c]` empty): body `(<params>)`, referenced by
 ///     bare global name at the creation site — a raw fn value, no record.
-///   - **capturing**: body `(e, <params>)` reading captures as `e.c<A>`; the
+///   - **capturing**: body `(__rock_env, <params>)` reading captures as `__rock_env.c<A>`; the
 ///     creation site builds an env record
 ///     `setmetatable({ __fn = <name>__lambda<k>, c<A> = .. }, __rock_fn_mt)`.
 struct HoistPlan {
@@ -484,9 +492,9 @@ pub struct FrameCtx {
 }
 
 /// The env-record context of a hoisted CAPTURING lambda body (P2.6): its captured
-/// cells arrive as fields of the record `e` (the body's first param). A captured
+/// cells arrive as fields of the record `__rock_env` (the body's first param). A captured
 /// cell renders `e.c<color>` (+ `.v` when boxed) instead of a plain local and is
-/// NOT declared here (it lives in `e`). The generalization of [`FrameCtx`];
+/// NOT declared here (it lives in `__rock_env`). The generalization of [`FrameCtx`];
 /// UNLIKE a frame, the lambda's own cells stay colored locals. Mutually exclusive
 /// with `FrameCtx` — hoisting is carved out under a coroutine frame.
 struct EnvCtx {
@@ -555,8 +563,8 @@ pub fn emit_named_framed(
     // const-hoist precedent -- an overlay body-edit carries them). Referenced by
     // global name at the creation site, so forward refs resolve at call time. Each
     // renders for its OWN scope: it declares its own cells, the enclosing fn no
-    // longer does. A CAPTURING lambda takes an env record `e` first and reads its
-    // captures as `e.c<A>` (EnvCtx); a capture-free one is a plain named fn.
+    // longer does. A CAPTURING lambda takes an env record (`__rock_env`) first and reads its
+    // captures as `__rock_env.c<A>` (EnvCtx); a capture-free one is a plain named fn.
     if let Some(plan) = plan_ref {
         for &(lid, sid) in &plan.order {
             let Inst::Lambda { params, entry } = &func.insts[lid] else { continue };
@@ -651,7 +659,8 @@ fn write_cellname(out: &mut String, frame: Option<&FrameCtx>, env: Option<&EnvCt
     }
     if let Some(e) = env {
         if e.fields.contains(&c) {
-            out.push_str("e.");
+            out.push_str(ENV_PARAM);
+            out.push('.');
             write_cell_local(out, colors, c);
             if boxed.contains(&c) {
                 out.push_str(".v");
@@ -1184,11 +1193,11 @@ fn render_scope(
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
     // Param list `(e, a, b, c)` — written straight into the buffer (no
-    // Vec<String>). A hoisted CAPTURING lambda takes its env record `e` first.
+    // Vec<String>). A hoisted CAPTURING lambda takes its env record (`__rock_env`) first.
     out.push('(');
     let mut wrote_param = false;
     if env.is_some() {
-        out.push('e');
+        out.push_str(ENV_PARAM);
         wrote_param = true;
     }
     for &c in params.iter() {
@@ -2193,7 +2202,8 @@ impl Emitter<'_> {
     /// under a frame).
     fn write_capture_field_value(&self, out: &mut String, c: Idx<Cell>) {
         if self.env.is_some_and(|e| e.fields.contains(&c)) {
-            out.push_str("e.");
+            out.push_str(ENV_PARAM);
+            out.push('.');
         }
         write_cell_local(out, self.cell_colors, c);
     }

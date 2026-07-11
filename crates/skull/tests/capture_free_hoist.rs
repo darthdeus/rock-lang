@@ -58,7 +58,7 @@ fn capture_free_lambda_hoists_to_named_toplevel() {
     );
 }
 
-/// SHAPE (P2.6): a CAPTURING lambda also hoists -- to a `(e, ..)` body -- and its
+/// SHAPE (P2.6): a CAPTURING lambda also hoists -- to a `(__rock_env, ..)` body -- and its
 /// creation site builds an env record instead of an inline closure. (Pre-P2.6 it
 /// stayed inline; env_record_hoist.rs covers the record mechanics in depth.)
 #[test]
@@ -133,7 +133,7 @@ fn main() {}
 /// TRANSITIVE capture (P2.6): an outer lambda that is locally-capture-free but
 /// whose INNER lambda reads an enclosing-FN cell captures that cell transitively.
 /// Both now hoist -- the outer as an env record threading the cell inward, the
-/// inner as an env record reading it from the outer's `e`. (Pre-P2.6 neither
+/// inner as an env record reading it from the outer's `__rock_env`. (Pre-P2.6 neither
 /// hoisted; the outer threaded the cell as an inline-closure upvalue.)
 #[test]
 fn transitive_root_capture_hoists_both() {
@@ -146,7 +146,7 @@ fn main() { let g = transitive(7) print("{g()}") }
 "#;
     let lua = emit_module(src);
     assert!(
-        lua.contains("function transitive__lambda0(e") && lua.contains("function transitive__lambda1(e"),
+        lua.contains("function transitive__lambda0(__rock_env") && lua.contains("function transitive__lambda1(__rock_env"),
         "both lambdas hoist to env bodies (both capture the root param `x`):\n{lua}"
     );
     // and it still behaves (the inner reads x threaded through both envs).

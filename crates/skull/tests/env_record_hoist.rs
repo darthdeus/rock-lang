@@ -1,11 +1,11 @@
 //! P2 step 6 of docs/closure-env-records-plan.md: a CAPTURING lambda hoists to a
-//! top-level `function <enclosing>__lambda<k>(e, <params>) ... end` whose captures
-//! arrive as fields of the env record `e`, and the creation site builds a plain
+//! top-level `function <enclosing>__lambda<k>(__rock_env, <params>) ... end` whose captures
+//! arrive as fields of the env record (`__rock_env`), and the creation site builds a plain
 //! data record `setmetatable({ __fn = <enclosing>__lambda<k>, c<A> = .. }, __rock_fn_mt)`
 //! instead of an inline Lua closure. A by-value capture snapshots the value into
 //! the field; a boxed (mutable) capture threads the shared box TABLE, so two
 //! records that capture it observe one another's writes. A nested capturing lambda
-//! reads its outer's captures through the outer's `e`.
+//! reads its outer's captures through the outer's `__rock_env`.
 //!
 //! Contrast `capture_free_hoist.rs`: a lambda that captures NOTHING stays a bare
 //! hoisted global name (no record, no `__call`).
@@ -13,7 +13,7 @@
 mod common;
 use common::{emit_module, function_body, run_luajit};
 
-/// A lambda capturing a single-assignment fn param: the record + `(e, ..)` body
+/// A lambda capturing a single-assignment fn param: the record + `(__rock_env, ..)` body
 /// shape, and no inline closure at the creation site.
 #[test]
 fn capturing_lambda_emits_record_and_env_body() {
@@ -23,8 +23,8 @@ fn main() { let f = mk_cap(5) print("{f()}") }
 "#;
     let lua = emit_module(src);
     assert!(
-        lua.contains("function mk_cap__lambda0(e"),
-        "the capturing lambda hoists to an `(e, ..)` body:\n{lua}"
+        lua.contains("function mk_cap__lambda0(__rock_env"),
+        "the capturing lambda hoists to an `(__rock_env, ..)` body:\n{lua}"
     );
     let body = function_body(&lua, "mk_cap");
     assert!(
@@ -67,7 +67,7 @@ fn main() {
         "both captures hoist to env records:\n{body}"
     );
     // A boxed capture field passes the box TABLE (no `.v`); each hoisted body
-    // reads/writes it through `e.c<N>.v`.
+    // reads/writes it through `__rock_env.c<N>.v`.
     assert!(lua.contains(".v"), "the hoisted bodies read/write the box through `.v`:\n{lua}");
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_box");
     assert_eq!(
@@ -78,7 +78,7 @@ fn main() {
 
 /// A nested capturing lambda: the outer (which itself captures the fn param
 /// transitively) constructs the inner record inside its hoisted body, reading the
-/// capture from its OWN `e`.
+/// capture from its OWN `__rock_env`.
 #[test]
 fn nested_capturing_lambda_reads_outer_env() {
     let src = r#"
@@ -92,13 +92,13 @@ fn main() {
     let lua = emit_module(src);
     // Both lambdas hoist (the outer captures `x` transitively, threading it in);
     // inst-arena order fixes which k is inner vs outer, so assert order-agnostically.
-    assert!(lua.contains("function outer_cap__lambda0(e"), "one nested lambda hoists to an env body:\n{lua}");
-    assert!(lua.contains("function outer_cap__lambda1(e"), "the other nested lambda hoists to an env body:\n{lua}");
+    assert!(lua.contains("function outer_cap__lambda0(__rock_env"), "one nested lambda hoists to an env body:\n{lua}");
+    assert!(lua.contains("function outer_cap__lambda1(__rock_env"), "the other nested lambda hoists to an env body:\n{lua}");
     // The OUTER hoisted body constructs the INNER record, seeding a field from its
-    // OWN `e` (the transitive capture threaded inward): `<field> = e.c<N>`.
+    // OWN env (the transitive capture threaded inward): `<field> = __rock_env.c<N>`.
     let outer_builds_inner = (0..2).any(|k| {
         let body = function_body(&lua, &format!("outer_cap__lambda{k}"));
-        body.contains("setmetatable({ __fn = outer_cap__lambda") && body.contains("= e.")
+        body.contains("setmetatable({ __fn = outer_cap__lambda") && body.contains("= __rock_env.")
     });
     assert!(outer_builds_inner, "the outer hoisted body must build the inner record from its own env:\n{lua}");
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_nested");
