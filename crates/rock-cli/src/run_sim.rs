@@ -1,5 +1,5 @@
 //! `rock sim <project> <name>` — runner for Rock-native `@sim`
-//! coroutines. See `docs/rock-as-sim-plan.md` for design history.
+//! coroutines. See `docs/parked/sim-rock.md` for design history.
 //!
 //! Orchestrates: compile project + spawn the game with
 //! `ROCK_RUN_SIM=<name>` set, demux `__SIM__`-prefixed JSON lines from
@@ -106,63 +106,19 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
     // influence env-var-driven game config like `ANVIL_VIDEO`.
     let (_, env_by_wire, mut stone) = compile_sims(backend, project_path, output_path)?;
 
-    // Per-run tempdir, exposed to the spawned process as the `OUT` env
-    // var. Multi-start sims (`a,b`) share the same dir, so a fixture
-    // saved by part 1 is readable by part 2. Cleaned up when this
-    // function returns; on test failure the path is logged so the
-    // user can re-run with `keep_temp` for postmortem.
-    let tempdir = TempDir::new().context("creating sim tempdir")?;
-    let out_path = tempdir.path().to_path_buf();
-
-    // Comma-separated names = chained multi-start. Each name is
-    // executed as a fresh luajit child process; the runner aggregates
-    // expects/snapshots/video-assertions across all parts into one
-    // pass/fail decision. Single-name (no commas) is the common case.
-    let parts = parse_sim_chain(sim_name);
-    if parts.is_empty() {
-        return Err(anyhow!("sim got an empty sim name"));
-    }
-
-    let mut combined = SimSummary::default();
-    let display_name = if parts.len() == 1 {
-        parts[0].to_string()
-    } else {
-        sim_name.to_string()
-    };
-
-    for part in &parts {
-        let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
-        let part_summary = run_one_sim(
-            project,
-            part,
-            quiet,
-            update_snapshots,
-            &out_path,
-            &output,
-            &env_pairs,
-            &mut stone,
-        )?;
-        combined.merge(part_summary);
-    }
-
-    // Post-process video assertions (need ffprobe / ffmpeg subprocesses).
-    // Done after all parts run so multi-start sims (like
-    // session_env_resume + part2) can run their video assertions in
-    // either part transparently.
-    process_video_assertions(&mut combined);
-
-    // Deferred cleanup. Runs after assertions so sims using
-    // `cleanup_path` can both verify a file's metadata and tidy up
-    // afterward without racing post-process ffprobe calls.
-    for p in std::mem::take(&mut combined.cleanup_paths) {
-        let _ = std::fs::remove_file(&p);
-    }
-
-    let summary = combined;
+    let (display_name, summary) = run_named_entry(
+        project,
+        sim_name,
+        quiet,
+        update_snapshots,
+        &output,
+        &env_by_wire,
+        &mut stone,
+    )?;
     let sim_name = display_name.as_str();
 
     if !quiet {
-        summary.print(sim_name);
+        summary.print(sim_name, true);
     }
 
     if summary.timed_out {
@@ -175,8 +131,6 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
             "sim `{sim_name}` process exited with non-zero status: {code:?}"
         ));
     }
-    // Tempdir is dropped here; explicit drop documents intent.
-    drop(tempdir);
     if summary.has_failures() {
         // Caller decides exit code. The standalone `rock sim` CLI maps
         // this to a non-zero process exit in `dispatcher.rs`; the
@@ -195,6 +149,150 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
     if !summary.saw_stop {
         return Err(anyhow!(
             "sim `{sim_name}` aborted before stop_sim() -- incomplete run (likely a swallowed runtime error)"
+        ));
+    }
+    Ok(())
+}
+
+/// Run one named entry (possibly a comma-chain) into a fresh tempdir,
+/// returning its display name and merged summary. Shared by the single-run
+/// path (`do_run_sim_opts`) and the multi-run path (`do_run_named_sims`) so
+/// the tempdir / chain / video / cleanup handling can't drift between them.
+///
+/// The tempdir is exposed to the child as `OUT`; comma-chained parts (`a,b`)
+/// share it so a fixture saved by part 1 is readable by part 2. Distinct
+/// named entries each get their own via separate calls.
+fn run_named_entry(
+    project: &str,
+    chain_spec: &str,
+    quiet: bool,
+    update_snapshots: bool,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    stone: &mut crate::skull_backend::SkullStone,
+) -> Result<(String, SimSummary)> {
+    let tempdir = TempDir::new().context("creating sim tempdir")?;
+    let out_path = tempdir.path().to_path_buf();
+
+    // Comma-separated names = chained multi-start. Each part spawns a fresh
+    // luajit child; expects/snapshots/video-assertions aggregate into one
+    // pass/fail. Single-name (no commas) is the common case.
+    let parts = parse_sim_chain(chain_spec);
+    if parts.is_empty() {
+        return Err(anyhow!("sim got an empty sim name"));
+    }
+    let display_name = if parts.len() == 1 {
+        parts[0].to_string()
+    } else {
+        chain_spec.to_string()
+    };
+
+    let mut combined = SimSummary::default();
+    for part in &parts {
+        let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
+        let part_summary = run_one_sim(
+            project,
+            part,
+            quiet,
+            update_snapshots,
+            &out_path,
+            output,
+            &env_pairs,
+            stone,
+        )?;
+        combined.merge(part_summary);
+    }
+
+    // Video assertions after all parts run (they need ffprobe/ffmpeg
+    // subprocesses, and a multi-start chain may assert in either part).
+    process_video_assertions(&mut combined);
+    // Deferred cleanup after assertions so `cleanup_path` sims can verify a
+    // file's metadata and tidy up without racing the post-process ffprobe.
+    for p in std::mem::take(&mut combined.cleanup_paths) {
+        let _ = std::fs::remove_file(&p);
+    }
+
+    drop(tempdir);
+    Ok((display_name, combined))
+}
+
+/// Whether an entry's summary is a clean pass (no fail, no timeout, no
+/// process error, reached `stop_sim()`).
+fn entry_passed(summary: &SimSummary) -> bool {
+    !summary.timed_out
+        && summary.process_failure_code.is_none()
+        && summary.saw_stop
+        && !summary.has_failures()
+}
+
+/// Run a specific list of named sims (the `rock sim <project> a b c` form).
+/// A single name delegates to `do_run_sim_opts` and streams full per-expect
+/// detail. Multiple names run concise: no live log, just each sim's verdict
+/// (with its failing assertions) plus a final tally. Compiles once; each
+/// named entry gets its own tempdir. Returns Err (non-zero exit) if any
+/// named entry failed.
+pub fn do_run_named_sims(
+    backend: crate::Backend,
+    project: &str,
+    names: &[String],
+    quiet: bool,
+    update_snapshots: bool,
+) -> Result<()> {
+    // One name: identical to the classic single-run path (full detail).
+    if names.len() == 1 {
+        return do_run_sim_opts(backend, project, &names[0], quiet, update_snapshots);
+    }
+
+    rock_host::project::ensure_workspace_root()?;
+    rock_host::engine_build::build_engine_libs(project)?;
+
+    let project_path = PathBuf::from(project);
+    if !project_path.is_dir() {
+        return Err(anyhow!("sim expects a project directory, got: {project}"));
+    }
+
+    let output = "tmp".to_string();
+    let (_, env_by_wire, mut stone) =
+        compile_sims(backend, project_path, PathBuf::from(&output))?;
+
+    let mut passed = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for name in names {
+        // quiet=true into the runner: suppress the live per-expect stream and
+        // the on-failure game-log dump. The concise `print` below still lists
+        // each sim's failing assertions so a failure isn't opaque.
+        let (display_name, summary) = run_named_entry(
+            project,
+            name,
+            true,
+            update_snapshots,
+            &output,
+            &env_by_wire,
+            &mut stone,
+        )?;
+        if !quiet {
+            summary.print(&display_name, false);
+        }
+        if entry_passed(&summary) {
+            passed += 1;
+        } else {
+            failed.push(display_name);
+        }
+    }
+
+    // Result output, NOT logging: the multi-run verdict, consumed by you/CI.
+    let suffix = if failed.is_empty() {
+        String::new()
+    } else {
+        format!(" -- FAILED: {}", failed.join(", "))
+    };
+    println!("[sim] {passed}/{} sims passed{suffix}", names.len());
+
+    if !failed.is_empty() {
+        return Err(anyhow!(
+            "{} of {} named sims failed in `{project}`",
+            failed.len(),
+            names.len()
         ));
     }
     Ok(())
@@ -248,13 +346,10 @@ pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, upda
         }
 
         if !quiet {
-            summary.print(name);
+            summary.print(name, true);
         }
 
-        let ok = !summary.timed_out
-            && summary.process_failure_code.is_none()
-            && summary.saw_stop  // aborted-before-stop_sim == incomplete == fail
-            && !summary.has_failures();
+        let ok = entry_passed(&summary);
         if ok {
             passed += 1;
         } else {
@@ -403,6 +498,17 @@ fn run_one_sim(
         .env("FPS_LOG", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    // Concise (quiet) runs: quiet the child's own logger to warn+ so the
+    // `[sim]` verdict lines aren't buried under [STONE]/[MAG]/[ENV] INFO
+    // noise. The `__SIM__` side channel is emitted directly, not through the
+    // logger, so results are unaffected; warn/error still pass through on a
+    // real failure. Respect an explicit STONE_LOG from the env or a sim's
+    // `@sim_env` so a debugging run can still turn logs back up.
+    let stone_log_preset = preset_env.iter().any(|(k, _)| k == "STONE_LOG");
+    if quiet && !stone_log_preset && std::env::var_os("STONE_LOG").is_none() {
+        cmd.env("STONE_LOG", "warn");
+    }
 
     let mut child = cmd.spawn()?;
     let stderr_handle = child.stderr.take().expect("piped");
@@ -1113,13 +1219,16 @@ impl SimSummary {
         !self.expects_fail.is_empty() || !self.errors.is_empty()
     }
 
-    fn print(&self, sim_name: &str) {
-        // Per-fail lines: only re-print failures that DIDN'T come through
-        // the live stream. Stream-emitted ops (sim_expect, error from
-        // sim.rock) carry a non-empty site and were already printed by
-        // `print_progress` -- duplicating them here is just noise.
-        // Empty-site failures come from post-run synthesis (snapshot
-        // diff, video assertion, runner errors) and only surface here.
+    /// `streamed` = the live per-op stream already printed sited
+    /// failures/errors (the normal single-run path). When false (concise
+    /// multi-run), nothing was streamed, so sited entries must be reprinted
+    /// here -- with their `[site]` -- or a failing sim would show only a
+    /// count and no clue what broke.
+    fn print(&self, sim_name: &str, streamed: bool) {
+        // Per-fail lines: when streamed, only re-print failures that DIDN'T
+        // come through the live stream (empty-site, post-run synthesis:
+        // snapshot diff, video assertion, runner errors) -- reprinting sited
+        // ones would just duplicate the stream. When not streamed, print all.
         // Carve-out (logging-architecture.md decision 2): the
         // `[sim] error:` / `[sim] FAIL:` / final PASS|FAIL summary
         // lines are the command's result, consumed by you/CI — they
@@ -1127,11 +1236,15 @@ impl SimSummary {
         for e in &self.errors {
             if e.site.is_empty() {
                 eprintln!("[sim] error: {}", e.message);
+            } else if !streamed {
+                eprintln!("[sim] error [{}]: {}", e.site, e.message);
             }
         }
         for f in &self.expects_fail {
             if f.site.is_empty() {
                 eprintln!("[sim] FAIL: {}", f.message);
+            } else if !streamed {
+                eprintln!("[sim] FAIL [{}]: {}", f.site, f.message);
             }
         }
         let total = self.expects_ok + self.expects_fail.len();
@@ -1278,6 +1391,18 @@ mod tests {
             extract_raw_field(line, "value"),
             Some(r#"{"msg":"abc}def"}"#.to_string())
         );
+    }
+
+    #[test]
+    fn entry_passed_requires_stop_and_no_failures() {
+        // Shared pass-predicate for both multi-run paths. Default (no
+        // stop_sim observed) is a fail even with zero expects.
+        let mut s = SimSummary::default();
+        assert!(!entry_passed(&s));
+        s.saw_stop = true;
+        assert!(entry_passed(&s));
+        s.expects_fail.push(SiteMessage { message: "x".into(), site: "f:1".into() });
+        assert!(!entry_passed(&s));
     }
 
     #[test]

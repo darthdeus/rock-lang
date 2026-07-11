@@ -279,12 +279,15 @@ impl CommandContext {
                 self.args.update_snapshots,
             )
         } else {
+            // files[0] = project, files[1..] = one or more sim names. One name
+            // streams full detail; several run concise (per-sim verdict +
+            // final tally). Each name may itself be a `a,b` multi-start chain.
             let project = &self.args.files[0];
-            let name = &self.args.files[1];
-            crate::run_sim::do_run_sim_opts(
+            let names = self.args.files[1..].to_vec();
+            crate::run_sim::do_run_named_sims(
                 backend,
                 project,
-                name,
+                &names,
                 self.args.quiet,
                 self.args.update_snapshots,
             )
