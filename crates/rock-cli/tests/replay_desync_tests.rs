@@ -114,6 +114,53 @@ fn injected_checkpoint_divergence_is_detected_and_named() {
     );
 }
 
+/// P5: past the first hot reload of a replay session, divergence from the
+/// recorded checkpoints is EXPECTED (new code), so the desync compare is latched
+/// off. Same injected mismatch as above, but a reload injected BEFORE the
+/// corrupted checkpoint's tick must SUPPRESS the report -- the replay exits clean
+/// and says nothing about desync.
+#[test]
+fn desync_compare_is_off_past_a_reload() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("reload_ck.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let rec = run_frame_raw("bitgun", 30, &["--record", &log_s, "--checkpoint-interval", "10"]);
+    assert_ok(&rec, "record");
+
+    // Corrupt the first checkpoint (tick 10) exactly as the detection test does.
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    let ci = lines.iter().position(|l| l.starts_with("c ")).expect("a checkpoint line");
+    let fields: Vec<&str> = lines[ci].split(' ').collect();
+    let (tick, name) = (fields[1].to_string(), fields[2].to_string());
+    lines[ci] = format!("c {tick} {name} deadbeefdeadbeef");
+    std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite log");
+
+    // Reload at frame 5, BEFORE the tick-10 checkpoint: compare is latched off.
+    // The runner reads STONE_RELOAD_AT_FRAME; during replay it routes to the P5
+    // reload handler.
+    let scratch = tempfile::tempdir().unwrap();
+    let rep = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args(["frame", "bitgun", "-n", "30", "--replay", &log_s,
+               "--output", &scratch.path().to_string_lossy()])
+        .env("STONE_RELOAD_AT_FRAME", "5")
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn replay");
+    assert!(
+        rep.status.success(),
+        "a reload must latch the desync compare off, so the injected mismatch is not an error\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&rep.stderr).contains("desync"),
+        "no desync must be reported past a reload\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
+}
+
 /// Regression (P3.5): checkpoints x fast-forward must NOT false-positive. A
 /// seek (`STONE_RUN_TO_TICK`) skips the render pass on the intermediate ticks,
 /// so render-derived globals differ from a rendered run. Two categories, two

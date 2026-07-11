@@ -217,6 +217,56 @@ fn audio_resources_excluded_from_sim_state() {
     );
 }
 
+/// P5: a hot reload during replay invalidates keyframes (new code may have
+/// changed state shapes, so old-code keyframes are unusable). We inject a reload
+/// mid-replay (STONE_RELOAD_AT_FRAME, which during replay routes to the P5
+/// handler) and assert the keyframe buffer is smaller than an identical run
+/// without the reload, and that the reload was counted.
+#[test]
+fn reload_during_replay_invalidates_keyframes() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("reload.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "50", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    // Control: normal replay, cadence 10 -> keyframes accumulate to ~6.
+    let control = run_replay_dump(game, 50, &log_s, &[("STONE_KEYFRAME_INTERVAL", "10")]);
+    let control_kf = keyframe_count(&control);
+    assert!(control_kf >= 5, "control should accumulate keyframes (got {control_kf})");
+    assert_eq!(
+        control["__stone_diag"]["STONE_REPLAY_RELOADS"].as_i64().unwrap_or(0), 0,
+        "control run must not report a reload"
+    );
+
+    // Reloaded: same, but inject a reload at frame 48 -> keyframes invalidated,
+    // so only the few captured after the reload remain.
+    let reloaded = run_replay_dump(
+        game, 50, &log_s,
+        &[("STONE_KEYFRAME_INTERVAL", "10"), ("STONE_RELOAD_AT_FRAME", "48")],
+    );
+    assert!(
+        reloaded["__stone_diag"]["STONE_REPLAY_RELOADS"].as_i64().unwrap_or(0) >= 1,
+        "a reload during replay must be counted"
+    );
+    let reloaded_kf = keyframe_count(&reloaded);
+    assert!(
+        reloaded_kf < control_kf,
+        "reload must invalidate keyframes: reloaded {reloaded_kf} should be < control {control_kf}"
+    );
+}
+
 /// P4 item 4: a bounded keyframe ring buffer. STONE_KEYFRAME_WINDOW (ticks, 0 =
 /// unbounded) evicts keyframes older than the floor -- the newest keyframe <=
 /// (now - window) -- so a long session's keyframe memory is bounded while a tick
