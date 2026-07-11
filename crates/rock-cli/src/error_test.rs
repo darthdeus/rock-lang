@@ -203,20 +203,39 @@ fn split_body_into_files(body_lines: &[&str]) -> Vec<(String, String)> {
 // runs each `.rock.err` case through bone's shared front end; the `test`
 // command for either backend folds it in (like the LSP suite).
 
-/// Does bone ACCEPT this (multi-file) case? `false` means bone rejected it (a
-/// parse error or a type error) -- the expected outcome for an error-test.
-fn bone_accepts_case(files: &[(String, String)]) -> bool {
+/// Bone's verdict on a (multi-file) case. `None` == bone rejected it (a parse or
+/// type error), the expected outcome for a front-end error-test. `Some(ws)` ==
+/// bone ACCEPTED; the workspace is returned so skull emission can run on it
+/// (below) WITHOUT a second semantic pass.
+fn bone_check_case(files: &[(String, String)]) -> Option<bone_semantic::inference::Workspace> {
     let mut user = Vec::with_capacity(files.len());
     for (name, code) in files {
         match skull_parser::parse_module(code, ustr::Ustr::from(name.as_str())) {
             Ok(m) => user.push(m),
-            Err(_) => return false, // hard tokenizer failure
+            Err(_) => return None, // hard tokenizer failure
         }
     }
     // Total parse: a recoverable syntax error returns Ok with `recovery_errors`,
     // so the rejection is the downstream gate in `check_with_stdlib`
     // (`syntax_errors`), not the parse `match` above.
-    crate::bone_backend::check_with_stdlib(user).is_ok()
+    crate::bone_backend::check_with_stdlib(user).ok()
+}
+
+/// Full-pipeline extension: does skull EMISSION reject this bone-accepted case?
+/// Emit-time rejections (a reserved body-local name `r<N>`/`c<N>`/`__rock_env`,
+/// or a compiler-minted synthetic-name collision) never reach the bone front
+/// end, so a `.rock.err` for them is invisible to `bone_check_case`. Running
+/// skull's MIR emit on each user module and treating a codegen `CompilerError`
+/// as the case's rejection makes the suite STAGE-AGNOSTIC: a `.rock.err` says
+/// "this must be rejected", and either bone or skull-emit may be the stage that
+/// raises it. Only reached when bone already accepted, so it reuses `ws`.
+fn skull_emit_rejects(ws: &bone_semantic::inference::Workspace, files: &[(String, String)]) -> bool {
+    files.iter().any(|(name, _)| {
+        match ws.module_ids.get(&ustr::Ustr::from(name.as_str())) {
+            Some(&mid) => skull::mir_emit::emit_workspace_mir(ws, mid).is_err(),
+            None => false,
+        }
+    })
 }
 
 /// Error-test cases the skull/bone successor DELIBERATELY accepts -- documented
@@ -298,15 +317,23 @@ pub fn run_error_suite(
             total += 1;
             let result = if error_test.is_todo {
                 ErrorTestResult::Todo("TODO".to_string())
-            } else if !bone_accepts_case(&tc.files) {
-                ErrorTestResult::Pass // bone rejected -- expected
-            } else if BONE_ERROR_DIVERGENCES.iter().any(|d| tc.name.contains(d)) {
-                ErrorTestResult::Todo(format!("divergence (successor accepts by design): {}", tc.name))
             } else {
-                ErrorTestResult::Fail(format!(
-                    "expected bone to reject ({}), but it accepted",
-                    tc.expected_error_kind
-                ))
+                match bone_check_case(&tc.files) {
+                    None => ErrorTestResult::Pass, // bone rejected -- expected
+                    Some(ws) if skull_emit_rejects(&ws, &tc.files) => {
+                        ErrorTestResult::Pass // skull emission rejected -- expected
+                    }
+                    Some(_) if BONE_ERROR_DIVERGENCES.iter().any(|d| tc.name.contains(d)) => {
+                        ErrorTestResult::Todo(format!(
+                            "divergence (successor accepts by design): {}",
+                            tc.name
+                        ))
+                    }
+                    Some(_) => ErrorTestResult::Fail(format!(
+                        "expected bone or skull-emit to reject ({}), but both accepted",
+                        tc.expected_error_kind
+                    )),
+                }
             };
 
             match result {

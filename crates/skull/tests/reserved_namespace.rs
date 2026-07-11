@@ -3,84 +3,22 @@
 //! while `Inst::Global` reads/writes user globals by their bare name. So a
 //! top-level def whose emitted name matches one of those forms is silently
 //! shadowed by the local inside any body that also uses temps -- the
-//! env-param-`e` class (`5c378c810`). Live symptom (pre-fix): `global r1` +
-//! a fn reading it crashed at runtime ("arithmetic on local 'r1' (a nil value)").
+//! env-param-`e` class (`5c378c810`).
 //!
-//! These names are legal bone identifiers -- only skull's codegen makes them
-//! collide -- so the rejection is emit-time, tested here (bone's `tests/errors`
-//! never runs skull emit). The reserved set is the *body-local* namespace only
-//! (`r<N>`/`v<N>` temps, `c<N>` cells, the `__rock_env` env param). The `__rock_`
-//! prefix at large is NOT reserved: the stdlib AND stone engine legitimately
-//! define top-level `@nomangle __rock_*` fns (`__rock_create_struct`,
-//! `__rock_install_serialize_value`, ...), which are globals, never body locals,
-//! so a `__rock_foo` def compiles -- only the exact `__rock_env` name collides.
+//! The REJECTION cases (a `global r1` / `c0` / `__rock_env` / `@nomangle fn r2`
+//! that must be refused at emit time) now live in
+//! `tests/errors/reserved_namespace.rock.err`, run through the error-test
+//! harness's skull-emit extension. What stays HERE is what a rejection suite
+//! can't express: the POSITIVE CONTROLS -- a name that only LOOKS reserved still
+//! compiles, AND the exact emitted-Lua substring proves the user name survived
+//! codegen. The reserved set is the *body-local* namespace only (`r<N>`/`v<N>`
+//! temps, `c<N>` cells, the `__rock_env` env param). The `__rock_` prefix at
+//! large is NOT reserved: the stdlib AND stone engine define top-level
+//! `@nomangle __rock_*` fns (`__rock_create_struct`, ...), which are globals,
+//! never body locals, so a `__rock_foo` def compiles.
 
 mod common;
-use common::{emit_module, try_emit_module};
-
-fn reject_msg(src: &str) -> String {
-    let err = try_emit_module(src).err().expect("emit must reject the reserved-name def");
-    assert!(
-        err.message.contains("reserved codegen identifier"),
-        "the rejection must name the reserved-identifier class; got: {}",
-        err.message
-    );
-    err.message
-}
-
-/// The live-crash case: `global r1` shadowed by a body's `local r1` temp.
-#[test]
-fn global_r1_rejected() {
-    let msg = reject_msg(
-        r#"
-global r1: int = 100
-fn use_it(a: int) -> int { return a + r1 }
-fn main() { print("{use_it(7)}") }
-"#,
-    );
-    assert!(msg.contains("r1"), "names the colliding global; got: {msg}");
-}
-
-/// A `c<N>` cell-local collision.
-#[test]
-fn global_c0_rejected() {
-    let msg = reject_msg(
-        r#"
-global c0: int = 5
-fn use_it(a: int) -> int { return a + c0 }
-fn main() { print("{use_it(1)}") }
-"#,
-    );
-    assert!(msg.contains("c0"), "names the colliding global; got: {msg}");
-}
-
-/// The `__rock_env` closure-env param -- the sole `__rock_*` name emitted as a
-/// body local. A user global by that name is shadowed inside every lambda body
-/// (the env-param-`e` class, `5c378c810`).
-#[test]
-fn global_rock_env_rejected() {
-    let msg = reject_msg(
-        r#"
-global __rock_env: int = 9
-fn use_it(a: int) -> int { return a + __rock_env }
-fn main() { print("{use_it(1)}") }
-"#,
-    );
-    assert!(msg.contains("__rock_env"), "names the colliding global; got: {msg}");
-}
-
-/// A `@nomangle` fn whose EMITTED name is `r2` (mangling would otherwise make it
-/// `r2__ret_int`, which can't collide). The check runs against the emitted name.
-#[test]
-fn nomangle_fn_r2_rejected() {
-    let msg = reject_msg(
-        r#"
-@nomangle fn r2() -> int { return 3 }
-fn main() { print("{r2()}") }
-"#,
-    );
-    assert!(msg.contains("r2"), "names the colliding fn; got: {msg}");
-}
+use common::emit_module;
 
 /// POSITIVE CONTROL: `r` alone (no digits) is not a temp form.
 #[test]
