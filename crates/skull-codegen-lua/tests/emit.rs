@@ -97,11 +97,9 @@ fn run(src: &str, driver: &str) -> String {
     let scx = skull_mir::lower::ScalarCtx::new(&ws);
     // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
-    // runtime prelude, which this bare harness does not emit -- define it inline.
-    let mut lua = String::from(
-        "local bit = require('bit')\n\
-         if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end\n",
-    );
+    // runtime prelude, which this bare harness does not emit -- pull in the
+    // canonical definition (one copy, shared with `skull::runtime_prelude`).
+    let mut lua = format!("local bit = require('bit')\n{}\n", skull_codegen_lua::FN_MT_PRELUDE);
     let mut cache = skull_transform::InlineCache::default();
     for (fid, _) in ws.module(mid).functions.iter() {
         let fref = FuncRef { module: mid, func: fid };

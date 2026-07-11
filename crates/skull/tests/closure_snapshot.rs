@@ -9,6 +9,18 @@
 mod common;
 use common::{emit_module, function_body, run_luajit};
 
+/// True if `body` declares a box cell -- a `local c<N> = {}` line (the box-init
+/// shape). Matched precisely rather than via the bare `= {}` substring, which an
+/// empty vec/map literal or a prelude table also produces.
+fn declares_box(body: &str) -> bool {
+    body.lines().any(|l| {
+        l.trim()
+            .strip_prefix("local c")
+            .and_then(|r| r.strip_suffix(" = {}"))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
 // A closure created ONCE (no loop), capturing single-assignment cells a, b --
 // the `sprite_mesh_submit` shape: `let a = ..; let b = ..; defer(() => use(a,b))`.
 // `defer` STORES the closure in a global so it escapes (can't be inlined away),
@@ -41,8 +53,8 @@ fn nonloop_capture_hoists_to_by_value_record() {
         !body.contains("return function"),
         "no by-value snapshot IIFE (deleted in P2.6):\n{body}"
     );
-    // The single-assignment captures are by-value fields -- no box `{}` init.
-    assert!(!body.contains("= {}"), "single-assignment captures are by value, not boxed:\n{body}");
+    // The single-assignment captures are by-value fields -- no box declared.
+    assert!(!declares_box(&body), "single-assignment captures are by value, not boxed:\n{body}");
 }
 
 // A closure created INSIDE a loop, capturing a cell assigned inside the loop --
@@ -100,7 +112,7 @@ fn main() { let h = capture_box() h() }
 fn mutated_capture_lowers_to_box_threaded_into_record() {
     let lua = emit_module(MUTATED_CAPTURE);
     let body = function_body(&lua, "capture_box");
-    assert!(body.contains("= {}"), "a mutable capture must declare a box `local c<N> = {{}}`:\n{body}");
+    assert!(declares_box(&body), "a mutable capture must declare a box `local c<N> = {{}}`:\n{body}");
     assert!(body.contains(".v = "), "a mutable capture stores through `.v`:\n{body}");
     assert!(
         body.contains("setmetatable({ __fn = capture_box__lambda"),

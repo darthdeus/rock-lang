@@ -33,6 +33,15 @@ use skull_mir::mir::*;
 
 pub use mangle::{compute_overloaded_names, mangle_fn};
 
+/// The shared metatable of capturing-lambda env records
+/// (`docs/closure-env-records-plan.md`): a record `{ __fn = <top-level fn>,
+/// <captures> }` is callable as `f(...)` via `__call`. Reload-guarded so pre- and
+/// post-reload records share metatable identity. THE canonical definition -- both
+/// `skull::runtime_prelude` (the load-time scaffolding) and the codegen test
+/// harness reference this one constant, not a copy.
+pub const FN_MT_PRELUDE: &str =
+    "if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end";
+
 thread_local! {
     /// Cumulative time spent in register allocation (`regalloc::color_values`
     /// AND `regalloc::color_cells`) across every `render_scope`/`emit_*` call on
@@ -335,29 +344,60 @@ fn non_dominating_by_value_captures(
             if own.owner[&c] != parent {
                 continue; // transitive -> arrives via the parent env, always available
             }
-            let Some(&wblock) = single_store_block(func, c).as_ref() else {
-                continue; // multi-store (already handled by boxed_cells) — skip
+            let Some((wblock, wpos)) = single_write_site(func, c) else {
+                continue; // multi-write (already handled by boxed_cells) — skip
             };
-            if !dominates(idom, wblock, cblock) {
-                debug_assert!(false, "by-value capture write must dominate its creation site (dominance rail)");
+            // Block granularity says a block dominates itself, but a same-block
+            // write must still PRECEDE the lambda creation inst for the snapshot to
+            // see it; compare inst positions when wblock == cblock.
+            let write_dominates = if wblock == cblock {
+                let cpos = func.blocks[cblock]
+                    .insts
+                    .iter()
+                    .position(|&i| i == lid)
+                    .expect("the creating Inst::Lambda lives in its creation block");
+                wpos < cpos
+            } else {
+                dominates(idom, wblock, cblock)
+            };
+            if !write_dominates {
+                // Box fallback FIRST so correctness never depends on the assert
+                // being compiled in (dead in release) -- keeps the fallback live in
+                // dev instead of dead code after an abort.
                 extra.insert(c);
+                debug_assert!(false, "by-value capture write must dominate its creation site (dominance rail)");
+                // Release: assert is compiled out, so surface the fallback (never
+                // swallow) -- a non-dominating shape is a transform artifact worth
+                // seeing.
+                log::warn!(
+                    "dominance rail: by-value capture cell {c:?} write does not dominate its creation site; boxing as fallback"
+                );
             }
         }
     }
     extra
 }
 
-/// The block of `c`'s single `Inst::Store`, or `None` if it is stored other than
-/// exactly once (a multi-store cell is not a by-value candidate).
-fn single_store_block(func: &MirFunc, c: Idx<Cell>) -> Option<Idx<Block>> {
+/// The block and within-block position of `c`'s single WRITE (a `Store`, or a
+/// multi-return call dest — the inliner can rebind a `CallMulti`/`CallValueMulti`/
+/// `CallBoundMulti` dest onto a surviving cell), or `None` if it is written other
+/// than exactly once (a multi-write cell is not a by-value candidate).
+fn single_write_site(func: &MirFunc, c: Idx<Cell>) -> Option<(Idx<Block>, usize)> {
     let mut found = None;
     for (bid, b) in func.blocks.iter() {
-        for &iid in &b.insts {
-            if matches!(&func.insts[iid], Inst::Store { cell, .. } if *cell == c) {
+        for (pos, &iid) in b.insts.iter().enumerate() {
+            let writes_c = match &func.insts[iid] {
+                Inst::Store { cell, .. } => *cell == c,
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => dests.contains(&c),
+                _ => false,
+            };
+            if writes_c {
                 if found.is_some() {
                     return None;
                 }
-                found = Some(bid);
+                found = Some((bid, pos));
             }
         }
     }
