@@ -1578,6 +1578,13 @@ global PI: float = 3.141592653589793
 
     -- table case
     local t = v
+    -- A capturing-lambda env record is a callable value, not a data table --
+    -- render it as its function (the hoisted `__fn`), matching a capture-free
+    -- lambda (a raw Lua function), never by walking its capture fields. Guard the
+    -- global for a bare harness with no runtime prelude.
+    if _G.__rock_fn_mt and getmetatable(t) == _G.__rock_fn_mt then
+        return tostring(t.__fn)
+    end
     if visited then
         if visited[t] then
             return "<CYCLE: " .. visited[t] .. ">"
