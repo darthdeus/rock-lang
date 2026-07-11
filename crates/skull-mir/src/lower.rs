@@ -4430,6 +4430,7 @@ impl Builder<'_> {
         let entries = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("entries") });
         let n = self.emit_cur(Inst::Len { base: entries, kind: ContainerKind::Vec });
         let i_cell = self.f.new_cell(None);
+        self.f.loop_binding_cells.push(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store { cell: i_cell, value: zero });
         let enum_cell = enum_var.map(|_| {
@@ -4591,6 +4592,7 @@ impl Builder<'_> {
         self.emit_cur(Inst::Store { cell: key_cell, value: nil });
         let i_cell = self.f.new_cell(Some(self.body.binding_arena[ib].name));
         self.binds.insert(raw(ib), i_cell);
+        self.f.loop_binding_cells.push(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store { cell: i_cell, value: zero });
 
@@ -4686,6 +4688,7 @@ impl Builder<'_> {
             }
             None => self.f.new_cell(None),
         };
+        self.f.loop_binding_cells.push(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store {
             cell: i_cell,
@@ -4760,6 +4763,7 @@ impl Builder<'_> {
         let arr_v = self.lower_expr(iter)?;
         let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
         let i_cell = self.f.new_cell(None);
+        self.f.loop_binding_cells.push(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         self.emit_cur(Inst::Store {
             cell: i_cell,
@@ -5362,6 +5366,7 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         let i_cell = self.f.new_cell(Some(self.body.binding_arena[var_b].name));
         self.binds.insert(raw(var_b), i_cell);
+        self.f.loop_binding_cells.push(i_cell);
         let lo_v = self.lower_expr(low)?;
         self.emit_cur(Inst::Store {
             cell: i_cell,

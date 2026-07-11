@@ -494,6 +494,16 @@ pub struct MirFunc {
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
     pub nested_fns: Vec<MirFunc>,
+    /// Loop-counter cells created by the `for` desugarings (`lower_for_range`,
+    /// `lower_for_array`, the enumerate index, ...) -- the multi-store control
+    /// variable re-assigned each iteration. A DIRECT capture of one is
+    /// per-iteration BY VALUE (each record snapshots that iteration's value), so
+    /// `skull-codegen-lua`'s ownership analysis excludes them from boxing. This
+    /// is DESUGAR PROVENANCE: the earlier structural latch detector misfired on
+    /// user `while` counters and non-loop if-join shapes. Not remapped through
+    /// inlining (`inline.rs` refuses lambda-containing callees, so a spliced
+    /// counter is never lambda-captured); a dropped tag boxes, which is safe.
+    pub loop_binding_cells: Vec<Idx<Cell>>,
 }
 
 impl MirFunc {
@@ -514,6 +524,7 @@ impl MirFunc {
             for_iter_headers: Vec::new(),
             bound_trees: Default::default(),
             nested_fns: Vec::new(),
+            loop_binding_cells: Vec::new(),
         }
     }
 
