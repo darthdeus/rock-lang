@@ -183,6 +183,7 @@ pub fn do_stone_watch(
     quiet: bool,
     app_args: &[String],
     backend: crate::Backend,
+    no_record: bool,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
@@ -230,7 +231,7 @@ pub fn do_stone_watch(
     // boot to a gitignored <game>/replays/last.replay so any bug is already a
     // file. Computed once (build id = the initial compile); a restart re-spawns
     // with the same config.
-    let flight = flight_recorder_for(path, &output_path);
+    let flight = flight_recorder_for(path, &output_path, no_record);
     if let Some(f) = &flight {
         info!("Flight recorder: {} (build {})", f.record_path, f.build_id);
     }
@@ -596,9 +597,17 @@ fn ensure_flight_dir(game_path: &str) -> Result<std::path::PathBuf> {
 }
 
 /// Build the flight-recorder config for `rock stone`, or None when disabled.
-/// Opt-out via STONE_NO_FLIGHT_RECORDER=1; a user-set STONE_RECORD in the
-/// environment wins (explicit recording elsewhere is respected).
-fn flight_recorder_for(game_path: &str, lua_file: &std::path::Path) -> Option<FlightRecorder> {
+/// Opt-out via `--no-record` or STONE_NO_FLIGHT_RECORDER=1; a user-set
+/// STONE_RECORD in the environment wins (explicit recording elsewhere is
+/// respected).
+fn flight_recorder_for(
+    game_path: &str,
+    lua_file: &std::path::Path,
+    no_record: bool,
+) -> Option<FlightRecorder> {
+    if no_record {
+        return None;
+    }
     if std::env::var("STONE_NO_FLIGHT_RECORDER").as_deref() == Ok("1") {
         return None;
     }
@@ -1176,8 +1185,24 @@ pub fn do_replay_window(
 mod tests {
     use super::{
         apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        frame_exit_result, is_compiler_source, FlightRecorder,
+        flight_recorder_for, frame_exit_result, is_compiler_source, FlightRecorder,
     };
+
+    /// `--no-record` disables the flight recorder outright: no config, and no
+    /// side effects either -- the replays dir must not be created (the check
+    /// runs before ensure_flight_dir).
+    #[test]
+    fn no_record_flag_disables_flight_recorder() {
+        let game = std::env::temp_dir().join("rock_no_record_flag_test_game");
+        let _ = std::fs::remove_dir_all(&game);
+        let flight =
+            flight_recorder_for(game.to_str().unwrap(), std::path::Path::new("tmp/main.lua"), true);
+        assert!(flight.is_none(), "--no-record must disable the flight recorder");
+        assert!(
+            !game.join("replays").exists(),
+            "--no-record must not create the replays dir"
+        );
+    }
 
     /// A `rock frame` run exits nonzero on a watchdog timeout (the run did not
     /// complete) and on a nonzero child exit; only a clean zero-exit is Ok. The

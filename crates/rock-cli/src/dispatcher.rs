@@ -397,6 +397,7 @@ impl CommandContext {
                     self.args.quiet,
                     &self.args.app_args,
                     crate::Backend::Skull,
+                    self.args.no_record,
                 )
             }
             // frame/perf/sim are backend-parameterized: the compile + @sim

@@ -439,6 +439,10 @@ pub struct Args {
     /// disables checkpointing.
     pub checkpoint_interval: Option<usize>,
 
+    /// For `rock stone`: disable the always-on flight recorder for this
+    /// session. Equivalent to STONE_NO_FLIGHT_RECORDER=1.
+    pub no_record: bool,
+
     /// For `rock completion-sweep`: keep every Nth derived probe position
     /// (1 = exhaustive). Controls corpus size vs coverage.
     pub stride: usize,
@@ -556,6 +560,8 @@ impl Args {
             .arg(Arg::new("checkpoint-interval").long("checkpoint-interval").value_name("N")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock frame --record`: hash game state every N ticks for desync detection (default 60; 0 disables)."))
+            .arg(Arg::new("no-record").long("no-record").action(ArgAction::SetTrue)
+                .help("For `rock stone`: disable the always-on flight recorder for this session (same as STONE_NO_FLIGHT_RECORDER=1)."))
             .arg(Arg::new("stride").long("stride").default_value("10")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
@@ -610,6 +616,7 @@ impl Args {
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
             checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),
+            no_record: m.get_flag("no-record"),
             stride: *m.get_one::<usize>("stride").unwrap(),
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
@@ -637,6 +644,20 @@ impl Args {
     }
 }
 
+
+#[cfg(test)]
+mod arg_tests {
+    use super::Args;
+
+    #[test]
+    fn no_record_flag_parses_and_defaults_off() {
+        let parse = |argv: &[&str]| {
+            Args::from_matches(Args::command().try_get_matches_from(argv).expect("parse"))
+        };
+        assert!(parse(&["rock", "stone", "bitgun", "--no-record"]).no_record);
+        assert!(!parse(&["rock", "stone", "bitgun"]).no_record);
+    }
+}
 
 #[cfg(test)]
 mod caps_tests {
