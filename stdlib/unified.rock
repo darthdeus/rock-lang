@@ -2063,7 +2063,7 @@ fn iter<T>(v: [T]) -> VecIter<T> {
 }
 
 @inline
-fn next<T>(it: VecIter<T>) -> (bool, T) {
+fn VecIter<T>.next(it) -> (bool, T) {
     if it.i >= it.vec.len { return (false, phantom()) }
     let v = it.vec[it.i]
     it.i = it.i + 1
@@ -2095,7 +2095,7 @@ fn map<I: Iterator<T>, T, U>(it: I, f: fn(T) -> U) -> MapIter<I, T, U> {
 }
 
 @inline
-fn next<I: Iterator<T>, T, U>(it: MapIter<I, T, U>) -> (bool, U) {
+fn MapIter<I: Iterator<T>, T, U>.next(it) -> (bool, U) {
     let (ok, x) = next(it.__inner)
     if !ok { return (false, phantom()) }
     return (true, (it.__f)(x))
@@ -2112,7 +2112,7 @@ fn filter<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> FilterIter<I, T> {
 }
 
 @inline
-fn next<I: Iterator<T>, T>(it: FilterIter<I, T>) -> (bool, T) {
+fn FilterIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     loop {
         let (ok, x) = next(it.__inner)
         if !ok { return (false, phantom()) }
@@ -2132,7 +2132,7 @@ fn enumerate<I: Iterator<T>, T>(it: I) -> EnumIter<I, T> {
 }
 
 @inline
-fn next<I: Iterator<T>, T>(it: EnumIter<I, T>) -> (bool, int, T) {
+fn EnumIter<I: Iterator<T>, T>.next(it) -> (bool, int, T) {
     let (ok, x) = next(it.__inner)
     if !ok { return (false, 0, phantom()) }
     it.__i = it.__i + 1
@@ -2150,7 +2150,7 @@ fn zip<I1: Iterator<A>, I2: Iterator<B>, A, B>(a: I1, b: I2) -> ZipIter<I1, I2, 
 }
 
 @inline
-fn next<I1: Iterator<A>, I2: Iterator<B>, A, B>(it: ZipIter<I1, I2, A, B>) -> (bool, A, B) {
+fn ZipIter<I1: Iterator<A>, I2: Iterator<B>, A, B>.next(it) -> (bool, A, B) {
     let (ok_a, x) = next(it.__a)
     if !ok_a { return (false, phantom(), phantom()) }
     let (ok_b, y) = next(it.__b)
@@ -2170,7 +2170,7 @@ fn take_while<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> TakeWhileIter<I,
 }
 
 @inline
-fn next<I: Iterator<T>, T>(it: TakeWhileIter<I, T>) -> (bool, T) {
+fn TakeWhileIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     if it.__done { return (false, phantom()) }
     let (ok, x) = next(it.__inner)
     if !ok {
@@ -2565,7 +2565,7 @@ fn iter<T>(a: Arena<T>) -> ArenaIter<T> {
 }
 
 @inline
-fn next<T>(it: ArenaIter<T>) -> (bool, Entity<T>, T) {
+fn ArenaIter<T>.next(it) -> (bool, Entity<T>, T) {
     let i = it.i
     if i >= it.n { return (false, phantom(), phantom()) }
     let slot = it.entries.get(i)
