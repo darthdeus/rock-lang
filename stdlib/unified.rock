@@ -945,7 +945,7 @@ fn to_string(value: int) -> string { return tostring(value) }
 fn to_string(value: float) -> string {
     let str_value = tostring(value)
     // Ensure floats always show decimal point for Lua compatibility
-    if find(str_value, ".") == -1 { return str_value + ".0" }
+    if str_value.find(".") == -1 { return str_value + ".0" }
     return str_value
 }
 
@@ -2521,7 +2521,7 @@ fn Arena<T>.clear(arena) {
 }
 
 fn Arena<T>.random(arena) -> (Entity<T>, T)? {
-    let len = len(arena)
+    let len = arena.len()
     if len == 0 { return null }
 
     // random_int is half-open [min, max), so use `len` not `len - 1`
@@ -2800,12 +2800,12 @@ inline(lua) fn join(parts: [string], separator: string) -> string = """
 
 // Split a string into lines
 fn string.lines(s) -> [string] {
-    return split(s, "\n")
+    return s.split("\n")
 }
 
 // Parse a decimal integer from a string. Returns null if the string is not a valid integer.
 fn string.parse_int(s) -> int? {
-    let f = parse_float(s)
+    let f = s.parse_float()
     if f == null { return null }
     return int(floor(f.unwrap()))
 }
@@ -2820,14 +2820,14 @@ fn string.parse_int(s) -> int? {
 fn get_env_int(var: string, default_val: int) -> int {
     let v = env_var(var)
     if v == null { return default_val }
-    return parse_int(v.unwrap()) ?? default_val
+    return v.unwrap().parse_int() ?? default_val
 }
 
 // Read an env var as float. Returns `default_val` if unset or unparseable.
 fn get_env_float(var: string, default_val: float) -> float {
     let v = env_var(var)
     if v == null { return default_val }
-    return parse_float(v.unwrap()) ?? default_val
+    return v.unwrap().parse_float() ?? default_val
 }
 
 // TODO: format_lua is an escape hatch for printf-style formatting.
