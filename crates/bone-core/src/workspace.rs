@@ -329,6 +329,11 @@ pub struct BodyInference {
     /// site, keyed by the call expr. Tells skull how to substitute the
     /// placeholder bound-calls inside that callee when it is inlined here.
     pub bound_call_trees: FxHashMap<Idx<Expr>, BoundTree>,
+    /// Args (incl. UFCS receivers) implicitly coerced iterable->iterator at an
+    /// `Iterator`-bounded param: arg expr -> the resolved `iter` fn. skull
+    /// wraps the lowered arg value in this call (the call-argument analog of
+    /// `for_iter_protocol`'s `iter_fn`).
+    pub implicit_iter_args: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
 
     pub ty_arena: Arena<TypeExpr>,
     pub ty_spans: ArenaMap<Idx<TypeExpr>, Span>,

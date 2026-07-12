@@ -3770,6 +3770,8 @@ fn score_candidate(
         pnames.push(p.name);
     }
 
+    let bounded_vars = bounded_generic_vars(gamma, f);
+
     let subs = match gamma.instantiate_generics(&f.generics, span) {
         Ok((s, _)) => s,
         Err(_) => {
@@ -3807,7 +3809,8 @@ fn score_candidate(
             }
         };
 
-        match fit_cost(gamma, r, pty, span) {
+        let db = declared_is_bounded_generic(gamma, declared[0], &bounded_vars);
+        match fit_cost_with_iter_coercion(c, gamma, r, pty, db, span) {
             Some(c) => total += c,
             None => {
                 gamma.out.rollback_to(snap);
@@ -3859,7 +3862,9 @@ fn score_candidate(
                     SlotFill::SpreadField(_, fty) => *fty,
                 };
 
-                match fit_cost(gamma, aty, pty, span) {
+                let db =
+                    declared_is_bounded_generic(gamma, declared[offset + i], &bounded_vars);
+                match fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span) {
                     Some(c) => total += c,
                     None => {
                         gamma.out.rollback_to(snap);
@@ -5182,18 +5187,53 @@ fn resolve_named_call_inner(
             .collect()
     };
 
-    for (fill, pty) in pairs {
+    let bounded_vars = if has_bounds {
+        bounded_generic_vars(gamma, function)
+    } else {
+        SmallVec::new()
+    };
+
+    for (fill, pty_decl) in pairs {
         if has_bounds {
             check_iterator_bounds(
                 c, gamma, function, &subs, &mut bound_tree, &mut bounds_done, false, 0, span,
             )?;
         }
-        let pty = substitute(gamma, pty, &subs, span)?;
+        let pty = substitute(gamma, pty_decl, &subs, span)?;
         match fill {
-            SlotFill::Direct(arg) => match preinferred.get(&arg) {
-                Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
-                None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
-            },
+            SlotFill::Direct(arg) => {
+                // Implicit iterable->iterator coercion at a bounded param:
+                // unify the param with `iter(arg)`'s result and record the
+                // insertion for skull to emit. Lambdas can't be iterators and
+                // need the expected type to infer, so they take the plain path.
+                let mut coerced = false;
+                if declared_is_bounded_generic(gamma, pty_decl, &bounded_vars)
+                    && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. })
+                {
+                    let aty = match preinferred.get(&arg) {
+                        Some(&t) => t,
+                        None => {
+                            let t = infer_expr(c, gamma, arg)?;
+                            resolve(gamma, t, span)
+                        }
+                    };
+                    if let Some((iter_fn, it_ty)) = implicit_iter_target(c, gamma, aty, span)
+                    {
+                        coerce(gamma, it_ty, pty, c.body.expr_spans[arg])?;
+                        gamma.out.implicit_iter_args.insert(arg, iter_fn);
+                        coerced = true;
+                    } else {
+                        coerce(gamma, aty, pty, c.body.expr_spans[arg])?;
+                        coerced = true;
+                    }
+                }
+                if !coerced {
+                    match preinferred.get(&arg) {
+                        Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
+                        None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
+                    }
+                }
+            }
             // A spread-supplied field: check the field's type against the param.
             SlotFill::SpreadField(op, fty) => {
                 coerce(gamma, fty, pty, c.body.expr_spans[op])?
@@ -5681,7 +5721,8 @@ fn infer_for_elem(
             // `[T]` routes through the stdlib iterator protocol (`VecIter`):
             // the desugar + @inline + SROA + FORL recovery emit the same
             // native numeric `for` the deleted skull template did. `Arena<T>`
-            // likewise routes through `ArenaIter` (fetch-outside skip shape).
+            // likewise routes through `ArenaPairIter` (fetch-outside skip
+            // shape; element = the `(Entity<T>, T)` tuple).
             // `for_elem_ty` keeps its Array/Arena arms -- `enumerate(..)`
             // above still calls it directly for the element type.
             let is_protocol_builtin = match *gamma.get(iter_ty) {
@@ -5906,9 +5947,10 @@ fn check_iterator_bounds(
 }
 
 /// Element type for BOUND conformance: `next` must return exactly `(bool, E)`.
-/// Multi-value iterators (`(bool, A, B)` -- ArenaIter's entity/data pair,
-/// enumerate/zip outputs) can be CONSUMED by a `for` loop but not re-wrapped
-/// by a combinator: a generic body cannot destructure an unknown-arity splat.
+/// A multi-value `next` (`(bool, A, B)`) can be CONSUMED by a `for` loop but
+/// not re-wrapped by a combinator: a generic body cannot destructure an
+/// unknown-arity splat. No stdlib iterator is multi-value anymore (pairs/
+/// enumerate/zip all yield tuple elements); only a user iterator hits this.
 fn bound_next_elem(
     gamma: &mut Gamma,
     next_ret: TyId,
@@ -5951,6 +5993,91 @@ fn bound_next_elem(
 /// and returns the resolved `(callee, return_ty, generic subs)`. Does NOT
 /// record into `resolved_overload_calls` (the caller stores it in
 /// `for_iter_protocol` / the bound tree).
+/// Implicit iterable->iterator coercion target for an argument at an
+/// `Iterator`-bounded param: `Some((iter_fn, iter_ret))` iff the arg type is
+/// not itself an iterator (no `next(aty)`) but has a plain `iter(aty)`. The
+/// same rule the `for` head applies, extended to bounded call positions --
+/// `v.any(p)` means `v.iter().any(p)`. A caller bounded generic returns
+/// `None` (bound propagation handles it), as does an unresolved infer var.
+/// On success the `iter` resolution's unifications persist (the caller
+/// either commits them or rolls back a surrounding checkpoint).
+fn implicit_iter_target(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    aty: TyId,
+    span: Span,
+) -> Option<((ModuleId, Idx<Function>), TyId)> {
+    let a = resolve(gamma, aty, span);
+    if matches!(*gamma.get(a), TypeExpr::Generic(..) | TypeExpr::Infer(..)) {
+        return None;
+    }
+    let snap = gamma.out.checkpoint();
+    let has_next = resolve_unary_by_recv(c, gamma, Ustr::from("next"), a, span).is_ok();
+    gamma.out.rollback_to(snap);
+    if has_next {
+        return None;
+    }
+    let snap = gamma.out.checkpoint();
+    match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), a, span) {
+        Ok((f, ret, _subs)) => {
+            // A bounded `iter` fn can't be a coercion target (same restriction
+            // as the for head).
+            if gamma.workspace.module(f.0).functions[f.1]
+                .generic_bounds
+                .iter()
+                .any(Option::is_some)
+            {
+                gamma.out.rollback_to(snap);
+                return None;
+            }
+            Some((f, ret))
+        }
+        Err(_) => {
+            gamma.out.rollback_to(snap);
+            None
+        }
+    }
+}
+
+/// The `VarId`s of a fn's `Iterator`-bounded generics -- the params declared
+/// as exactly one of these are the implicit-iter coercion positions.
+fn bounded_generic_vars(gamma: &Gamma, f: &Function) -> SmallVec<[VarId; 2]> {
+    f.generics
+        .iter()
+        .zip(f.generic_bounds.iter())
+        .filter(|(_, b)| b.is_some())
+        .filter_map(|(g, _)| match *gamma.get(*g) {
+            TypeExpr::Generic(v, _) => Some(v),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a declared (pre-substitution) param type is one of the fn's
+/// bounded generics.
+fn declared_is_bounded_generic(gamma: &Gamma, declared: TyId, bounded: &[VarId]) -> bool {
+    matches!(*gamma.get(declared), TypeExpr::Generic(v, _) if bounded.contains(&v))
+}
+
+/// `fit_cost`, trying the implicit-iter coercion first when the param is a
+/// bounded generic: a coerced fit costs +1 so an exact match (a concrete
+/// overload, or a real iterator arg) always outranks it.
+fn fit_cost_with_iter_coercion(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    aty: TyId,
+    pty: TyId,
+    declared_bounded: bool,
+    span: Span,
+) -> Option<usize> {
+    if declared_bounded {
+        if let Some((_, it_ty)) = implicit_iter_target(c, gamma, aty, span) {
+            return fit_cost(gamma, it_ty, pty, span).map(|k| k + 1);
+        }
+    }
+    fit_cost(gamma, aty, pty, span)
+}
+
 fn resolve_unary_by_recv(
     c: BodyCtx,
     gamma: &mut Gamma,
