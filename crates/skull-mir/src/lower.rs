@@ -1821,6 +1821,20 @@ impl Builder<'_> {
     }
 
     fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let v = self.lower_expr_inner(e)?;
+        // Implicit iterable->iterator coercion at a bounded call arg: bone
+        // recorded the resolved `iter` fn; wrap the arg value in that call
+        // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
+        if let Some(&(m, f)) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
+            return Ok(self.emit_cur(Inst::Call {
+                func: FuncRef { module: m, func: f },
+                args: vec![v],
+            }));
+        }
+        Ok(v)
+    }
+
+    fn lower_expr_inner(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         match self.body.expr_arena[e].clone() {
             Expr::Unit | Expr::Null => Ok(self.emit_cur(Inst::Const(Lit::Nil))),
             Expr::Int(i) => Ok(self.emit_cur(Inst::Const(Lit::Int(i)))),

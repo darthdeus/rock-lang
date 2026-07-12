@@ -2602,6 +2602,33 @@ fn next<T>(it: ArenaPairIter<T>) -> (bool, (Entity<T>, T)) {
     return (true, (Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e._data))
 }
 
+struct ArenaKeyIter<T> {
+    arena: Arena<T>,
+    entries: [ArenaEntry<T>],
+    n: int,
+    i: int,
+}
+
+@inline
+fn keys<T>(a: Arena<T>) -> ArenaKeyIter<T> {
+    return ArenaKeyIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
+}
+
+@inline
+fn next<T>(it: ArenaKeyIter<T>) -> (bool, Entity<T>) {
+    let i = it.i
+    if i >= it.n { return (false, phantom()) }
+    let slot = it.entries.get(i)
+    while is_null(slot) || !slot.unwrap().is_occupied {
+        i = i + 1
+        if i >= it.n { it.i = i; return (false, phantom()) }
+        slot = it.entries.get(i)
+    }
+    let e = slot.unwrap()
+    it.i = i + 1
+    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation })
+}
+
 @inline
 fn iter<T>(a: Arena<T>) -> ArenaPairIter<T> {
     return pairs(a)
