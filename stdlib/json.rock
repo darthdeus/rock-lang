@@ -240,7 +240,7 @@ fn json_indent(level: int) -> string {
 fn encode_string(s: string) -> string {
     let parts: [string] = []
     parts.push("\"")
-    let n = length(s)
+    let n = len(s)
     let i = 0
     while i < n {
         let b = byte(s, i)
@@ -303,7 +303,7 @@ struct JsonParser {
 }
 
 fn json_decode(s: string) -> JsonValue? {
-    let p = JsonParser { src: s, pos: 0, len: length(s), ok: true }
+    let p = JsonParser { src: s, pos: 0, len: len(s), ok: true }
     parse_skip_ws(p)
     let v = parse_value(p)
     parse_skip_ws(p)
@@ -345,7 +345,7 @@ fn parse_value(p: JsonParser) -> JsonValue {
 }
 
 fn parse_keyword(p: JsonParser, kw: string, value: JsonValue) -> JsonValue {
-    let klen = length(kw)
+    let klen = len(kw)
     if p.pos + klen > p.len {
         p.ok = false
         return JsonValue::Null
@@ -423,7 +423,7 @@ fn parse_string_raw(p: JsonParser) -> string? {
 }
 
 fn parse_hex4(s: string) -> int? {
-    if length(s) != 4 { return null }
+    if len(s) != 4 { return null }
     let result = 0
     let i = 0
     while i < 4 {

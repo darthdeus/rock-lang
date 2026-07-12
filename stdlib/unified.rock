@@ -2619,18 +2619,17 @@ fn Arena<T>.all(arena, predicate: fn(T) -> bool) -> bool {
 }
 
 // String manipulation functions
-@inline inline(lua) fn length(s: string) -> int = "string.len(s)"
+// string had a redundant `len` + `length` pair (both `string.len`); keep
+// `len` to match Vec/Map/Arena. (Vec2.length is an unrelated overload.)
+@inline inline(lua) fn string.len(s) -> int = "string.len(s)"
 
-// UFCS alias: "hello".len() resolves to len("hello")
-fn len(s: string) -> int { length(s) }
 
-
-inline(lua) fn substring(s: string, start: int, end_idx: int) -> string = """
+inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
     -- Rock uses 0-based indexing, Lua uses 1-based
     return string.sub(s, start + 1, end_idx)
 """
 
-inline(lua) fn split(s: string, delimiter: string) -> [string] = """
+inline(lua) fn string.split(s, delimiter: string) -> [string] = """
     local result = vec_new()
     local pattern = delimiter:gsub("([^%w])", "%%%1")  -- escape special characters
     for match in (s..delimiter):gmatch("(.-)"..pattern) do
@@ -2640,33 +2639,33 @@ inline(lua) fn split(s: string, delimiter: string) -> [string] = """
     return result
 """
 
-inline(lua) fn trim(s: string) -> string = """
+inline(lua) fn string.trim(s) -> string = """
     return (s:gsub("^%s*(.-)%s*$", "%1"))
 """
 
-@inline inline(lua) fn upper(s: string) -> string = "string.upper(s)"
+@inline inline(lua) fn string.upper(s) -> string = "string.upper(s)"
 
-@inline inline(lua) fn lower(s: string) -> string = "string.lower(s)"
+@inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
 
-inline(lua) fn contains(s: string, substr: string) -> bool = """
+inline(lua) fn string.contains(s, substr: string) -> bool = """
     return string.find(s, substr, 1, true) ~= nil
 """
 
-inline(lua) fn starts_with(s: string, prefix: string) -> bool = """
+inline(lua) fn string.starts_with(s, prefix: string) -> bool = """
     return string.sub(s, 1, string.len(prefix)) == prefix
 """
 
-inline(lua) fn ends_with(s: string, suffix: string) -> bool = """
+inline(lua) fn string.ends_with(s, suffix: string) -> bool = """
     return suffix == "" or string.sub(s, -string.len(suffix)) == suffix
 """
 
-inline(lua) fn replace(s: string, old: string, new: string) -> string = """
+inline(lua) fn string.replace(s, old: string, new: string) -> string = """
     local escaped_old = old:gsub("([%%^$()%.%[%]*+%-?])", "%%%1")
     local escaped_new = new:gsub("%%", "%%%%")
     return (s:gsub(escaped_old, escaped_new))
 """
 
-inline(lua) fn find(s: string, substr: string) -> int = """
+inline(lua) fn string.find(s, substr: string) -> int = """
     local pos = string.find(s, substr, 1, true)
     if pos then
         return pos - 1  -- Convert to 0-based index
@@ -2677,18 +2676,18 @@ inline(lua) fn find(s: string, substr: string) -> int = """
 
 @inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
 
-inline(lua) fn byte(s: string, index: int) -> int = """
+inline(lua) fn string.byte(s, index: int) -> int = """
     return string.byte(s, index + 1) or 0  -- Convert to 1-based, return 0 if out of bounds
 """
 
-inline(lua) fn char_at(s: string, index: int) -> string = """
+inline(lua) fn string.char_at(s, index: int) -> string = """
     if index < 0 or index >= string.len(s) then
         return ""
     end
     return string.sub(s, index + 1, index + 1)  -- Convert to 1-based indexing
 """
 
-@inline inline(lua) fn repeat(s: string, count: int) -> string = "string.rep(s, count)"
+@inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
 
 fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
 inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"
@@ -2759,7 +2758,7 @@ inline(lua) fn __rock_fmt_percent(v: float, p: int) -> string = """
 
 // Left-align `s` in a field of `width` chars by appending spaces. Returns
 // `s` unchanged when `#s >= width` (never truncates).
-inline(lua) fn pad_right(s: string, width: int) -> string = """
+inline(lua) fn string.pad_right(s, width: int) -> string = """
     local len = #s
     if len >= width then return s end
     return s .. string.rep(" ", width - len)
@@ -2767,7 +2766,7 @@ inline(lua) fn pad_right(s: string, width: int) -> string = """
 
 // Right-align `s` in a field of `width` chars by prepending spaces. Returns
 // `s` unchanged when `#s >= width` (never truncates).
-inline(lua) fn pad_left(s: string, width: int) -> string = """
+inline(lua) fn string.pad_left(s, width: int) -> string = """
     local len = #s
     if len >= width then return s end
     return string.rep(" ", width - len) .. s
@@ -2784,10 +2783,10 @@ inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
 @inline inline(lua) fn string_match(s: string, pattern: string) -> string? = "string.match(s, pattern)"
 
 // Lazy iterator over all matches of pattern in s — works directly in for-loops
-@inline inline(lua) fn gmatch(s: string, pattern: string) -> fn() -> string? = "string.gmatch(s, pattern)"
+@inline inline(lua) fn string.gmatch(s, pattern: string) -> fn() -> string? = "string.gmatch(s, pattern)"
 
 // Pattern-based replacement (use replace for literal replacement)
-inline(lua) fn gsub(s: string, pattern: string, replacement: string) -> string = """
+inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     return (string.gsub(s, pattern, replacement))
 """
 
@@ -2800,19 +2799,19 @@ inline(lua) fn join(parts: [string], separator: string) -> string = """
 """
 
 // Split a string into lines
-fn lines(s: string) -> [string] {
+fn string.lines(s) -> [string] {
     return split(s, "\n")
 }
 
 // Parse a decimal integer from a string. Returns null if the string is not a valid integer.
-fn parse_int(s: string) -> int? {
+fn string.parse_int(s) -> int? {
     let f = parse_float(s)
     if f == null { return null }
     return int(floor(f.unwrap()))
 }
 
 // Parse a float from a string. Returns null if the string is not a valid number.
-@inline inline(lua) fn parse_float(s: string) -> float? = "tonumber(s)"
+@inline inline(lua) fn string.parse_float(s) -> float? = "tonumber(s)"
 
 // Read an environment variable by name. Returns null if the variable is not set.
 @inline inline(lua) fn env_var(name: string) -> string? = "os.getenv(name)"
