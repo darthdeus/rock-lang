@@ -1089,7 +1089,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 
 // Safe accessor matching the unified `.get(i) -> T?` surface across all
 // collection types. `v[i]` is the direct counterpart.
-@inline fn get<T>(vec: [T], index: int) -> T? {
+@inline fn Vec<T>.get(vec, index: int) -> T? {
     return vec_get(vec, index)
 }
 
@@ -1109,12 +1109,12 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // calls), so the underlying functions stay @nomangle with the prefix
 // name. Users still write `xs.push(x)`/`xs.len()`/etc. — these
 // wrappers are how those dot-form calls resolve.
-@inline fn push<T>(vec: [T], item: T) { vec_push(vec, item) }
-@inline fn set<T>(vec: [T], index: int, value: T) { vec_set(vec, index, value) }
-@inline fn len<T>(vec: [T]) -> int { return vec_len(vec) }
+@inline fn Vec<T>.push(vec, item: T) { vec_push(vec, item) }
+@inline fn Vec<T>.set(vec, index: int, value: T) { vec_set(vec, index, value) }
+@inline fn Vec<T>.len(vec) -> int { return vec_len(vec) }
 
 
-fn pop<T>(vec: [T]) -> T? {
+fn Vec<T>.pop(vec) -> T? {
     if vec.len == 0 {
         return null
     }
@@ -1124,18 +1124,18 @@ fn pop<T>(vec: [T]) -> T? {
     return value
 }
 
-fn is_empty<T>(vec: [T]) -> bool {
+fn Vec<T>.is_empty(vec) -> bool {
     return vec.len == 0
 }
 
-fn clear<T>(vec: [T]) {
+fn Vec<T>.clear(vec) {
     for i in 0..vec.len {
         table_unset(vec._data, i + 1)
     }
     vec.len = 0
 }
 
-fn remove_at<T>(vec: [T], index: int) -> T? {
+fn Vec<T>.remove_at(vec, index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
@@ -1148,7 +1148,7 @@ fn remove_at<T>(vec: [T], index: int) -> T? {
     return value
 }
 
-fn swap_remove<T>(vec: [T], index: int) -> T? {
+fn Vec<T>.swap_remove(vec, index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
@@ -1167,7 +1167,7 @@ fn swap_remove<T>(vec: [T], index: int) -> T? {
 // uses (`let it = enumerate(v)`), so the declared Vec type is the real runtime
 // shape. Chains (`v.iter().enumerate()`) resolve to the EnumIter overload.
 
-fn enumerate<T>(collection: [T]) -> [(int, T)] {
+fn Vec<T>.enumerate(collection) -> [(int, T)] {
     let out: [(int, T)] = []
     for i in 0..collection.len {
         out.push((i, collection[i]))
@@ -1175,7 +1175,7 @@ fn enumerate<T>(collection: [T]) -> [(int, T)] {
     return out
 }
 
-fn enumerate<T>(collection: Arena<T>) -> [(int, (Entity<T>, T))] {
+fn Arena<T>.enumerate(collection) -> [(int, (Entity<T>, T))] {
     let out: [(int, (Entity<T>, T))] = []
     let i = 0
     for (e, v) in collection {
@@ -1185,7 +1185,7 @@ fn enumerate<T>(collection: Arena<T>) -> [(int, (Entity<T>, T))] {
     return out
 }
 
-fn enumerate<K, V>(collection: Map<K, V>) -> [(int, (K, V))] {
+fn Map<K, V>.enumerate(collection) -> [(int, (K, V))] {
     let out: [(int, (K, V))] = []
     let i = 0
     for (k, v) in collection {
@@ -1242,7 +1242,7 @@ inline(lua) fn enumerate(collection: NativeBufferU32) -> [(int, int)] = """
 """
 
 // rev() reverses any [T] into a new Vec.
-fn rev<T>(collection: [T]) -> [T] {
+fn Vec<T>.rev(collection) -> [T] {
     let out: [T] = []
     let n = collection.len
     for i in 0..n {
@@ -1875,11 +1875,11 @@ fn map_new<K, V>() -> Map<K, V> {
     transmute(table_new())
 }
 
-fn insert<K, V>(map: Map<K, V>, key: K, value: V) {
+fn Map<K, V>.insert(map, key: K, value: V) {
     map[key] = value
 }
 
-@nomangle @inline inline(lua) fn get<K, V>(map: Map<K, V>, key: K) -> V? = """
+@nomangle @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
     return map[key]
 """
 
@@ -1896,17 +1896,17 @@ fn insert<K, V>(map: Map<K, V>, key: K, value: V) {
     v
 }
 
-fn remove<K, V>(map: Map<K, V>, key: K) -> V? {
+fn Map<K, V>.remove(map, key: K) -> V? {
     let old = get(map, key)
     table_unset(map, key)
     old
 }
 
-fn contains<K, V>(map: Map<K, V>, key: K) -> bool {
+fn Map<K, V>.contains(map, key: K) -> bool {
     get(map, key) != null
 }
 
-fn len<K, V>(map: Map<K, V>) -> int {
+fn Map<K, V>.len(map) -> int {
     let count = 0
     for (k, v) in map {
         count = count + 1
@@ -1915,13 +1915,13 @@ fn len<K, V>(map: Map<K, V>) -> int {
 }
 
 
-fn clear<K, V>(map: Map<K, V>) {
+fn Map<K, V>.clear(map) {
     for (k, v) in map {
         table_unset(map, k)
     }
 }
 
-fn keys<K, V>(map: Map<K, V>) -> [K] {
+fn Map<K, V>.keys(map) -> [K] {
     let keys: [K] = []
     for (k, v) in map {
         vec_push(keys, k)
@@ -1930,7 +1930,7 @@ fn keys<K, V>(map: Map<K, V>) -> [K] {
     return keys
 }
 
-fn values<K, V>(map: Map<K, V>) -> [V] {
+fn Map<K, V>.values(map) -> [V] {
     let keys = keys(map)
     let values: [V] = []
     for k in keys {
@@ -1939,7 +1939,7 @@ fn values<K, V>(map: Map<K, V>) -> [V] {
     return values
 }
 
-fn to_array<K, V>(map: Map<K, V>) -> [(K, V)] {
+fn Map<K, V>.to_array(map) -> [(K, V)] {
     let keys = keys(map)
     let result: [(K, V)] = []
     for k in keys {
@@ -1951,7 +1951,7 @@ fn to_array<K, V>(map: Map<K, V>) -> [(K, V)] {
 // Additional Map operations
 
 // Get value or insert default if key doesn't exist
-fn get_or_insert<K, V>(map: Map<K, V>, key: K, default_value: V) -> V {
+fn Map<K, V>.get_or_insert(map, key: K, default_value: V) -> V {
     let existing = get(map, key)
     if existing != null {
         return existing
@@ -1961,7 +1961,7 @@ fn get_or_insert<K, V>(map: Map<K, V>, key: K, default_value: V) -> V {
 }
 
 // Update existing value only if key exists, returns old value if it existed
-fn update<K, V>(map: Map<K, V>, key: K, value: V) -> V? {
+fn Map<K, V>.update(map, key: K, value: V) -> V? {
     let old = get(map, key)
     if old != null {
         map[key] = value
@@ -1970,7 +1970,7 @@ fn update<K, V>(map: Map<K, V>, key: K, value: V) -> V? {
 }
 
 // Insert or update value (upsert), returns old value if it existed
-fn upsert<K, V>(map: Map<K, V>, key: K, value: V) -> V? {
+fn Map<K, V>.upsert(map, key: K, value: V) -> V? {
     let old = get(map, key)
     map[key] = value
     old
@@ -2058,7 +2058,7 @@ struct VecIter<T> {
 }
 
 @inline
-fn iter<T>(v: [T]) -> VecIter<T> {
+fn Vec<T>.iter(v) -> VecIter<T> {
     return VecIter { vec: v, i: 0 }
 }
 
@@ -2186,7 +2186,7 @@ fn TakeWhileIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
 
 // Vec operations
 
-fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {
+fn Vec<T>.map<U>(vec, f: fn(T) -> U) -> [U] {
     let result: [U] = []
 
     for item in vec {
@@ -2196,7 +2196,7 @@ fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {
     return result
 }
 
-fn filter<T>(vec: [T], predicate: fn(T) -> bool) -> [T] {
+fn Vec<T>.filter(vec, predicate: fn(T) -> bool) -> [T] {
     let result: [T] = []
 
     for item in vec {
@@ -2206,7 +2206,7 @@ fn filter<T>(vec: [T], predicate: fn(T) -> bool) -> [T] {
     return result
 }
 
-fn reduce<T, U>(vec: [T], initial: U, f: (U, T) -> U) -> U {
+fn Vec<T>.reduce<U>(vec, initial: U, f: (U, T) -> U) -> U {
     let result = initial
     for item in vec {
         result = f(result, item)
@@ -2214,7 +2214,7 @@ fn reduce<T, U>(vec: [T], initial: U, f: (U, T) -> U) -> U {
     return result
 }
 
-fn fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
+fn Vec<T>.fold_right<U>(vec, initial: U, f: (T, U) -> U) -> U {
     let result = initial
 
     // Process array in reverse order
@@ -2230,9 +2230,9 @@ fn vec_new_with_capacity<T>(capacity: int) -> [T] {
     return Vec { _data: table_new_with_size(capacity), len: 0 }
 }
 
-fn capacity<T>(vec: [T]) -> int { return table_len(vec._data) }
+fn Vec<T>.capacity(vec) -> int { return table_len(vec._data) }
 
-fn insert_at<T>(vec: [T], index: int, value: T) {
+fn Vec<T>.insert_at(vec, index: int, value: T) {
     if index < 0 || index > vec.len { error("Error: Index out of bounds") }
 
     // Convert 0-based to 1-based for Lua
@@ -2241,38 +2241,38 @@ fn insert_at<T>(vec: [T], index: int, value: T) {
     vec.len += 1
 }
 
-fn clone<T>(vec: [T]) -> [T] {
+fn Vec<T>.clone(vec) -> [T] {
     return Vec { _data: table_copy_array(vec._data), len: vec.len }
 }
 
-fn find<T>(vec: [T], predicate: fn(T) -> bool) -> T? {
+fn Vec<T>.find(vec, predicate: fn(T) -> bool) -> T? {
     for item in vec {
         if predicate(item) { return item }
     }
     return null
 }
 
-fn any<T>(vec: [T], predicate: fn(T) -> bool) -> bool {
+fn Vec<T>.any(vec, predicate: fn(T) -> bool) -> bool {
     for item in vec {
         if predicate(item) { return true }
     }
     return false
 }
 
-fn all<T>(vec: [T], predicate: fn(T) -> bool) -> bool {
+fn Vec<T>.all(vec, predicate: fn(T) -> bool) -> bool {
     for item in vec {
         if !predicate(item) { return false }
     }
     return true
 }
 
-inline(lua) fn sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+inline(lua) fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
 """
 
-fn sample<T>(vec: [T]) -> T? {
+fn Vec<T>.sample(vec) -> T? {
     let len = vec_len(vec)
     if len == 0 { return null }
     let index = random_int(0, len)
@@ -2403,9 +2403,9 @@ fn entity_new<T>(arena: Arena<T>, index: int, generation: int) -> Entity<T> {
     return Entity { _arena: arena, _index: index, _generation: generation }
 }
 
-fn get<T>(entity: Entity<T>) -> T? { return get(entity._arena, entity) }
+fn Entity<T>.get(entity) -> T? { return get(entity._arena, entity) }
 
-fn equals<T>(a: Entity<T>, b: Entity<T>) -> bool {
+fn Entity<T>.equals(a, b: Entity<T>) -> bool {
     return a._index == b._index && a._generation == b._generation
 }
 
@@ -2440,7 +2440,7 @@ fn arena_get_generation_at<T>(entries: [ArenaEntry<T>], index: int) -> int {
     return 0
 }
 
-fn insert<T>(arena: Arena<T>, value: T) -> Entity<T> {
+fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     let index: int = 0
     let generation: int = 0
 
@@ -2460,7 +2460,7 @@ fn insert<T>(arena: Arena<T>, value: T) -> Entity<T> {
     return entity_new(arena, index, generation)
 }
 
-fn get<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
+fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
     let index: int = entity._index
     let entry: ArenaEntry<T>? = vec_get(arena.entries, index)
     if is_null(entry) {
@@ -2477,7 +2477,7 @@ fn get<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
     }
 }
 
-fn contains<T>(arena: Arena<T>, entity: Entity<T>) -> bool {
+fn Arena<T>.contains(arena, entity: Entity<T>) -> bool {
     let entry = vec_get(arena.entries, entity._index)
     if is_null(entry) {
         return false
@@ -2486,11 +2486,11 @@ fn contains<T>(arena: Arena<T>, entity: Entity<T>) -> bool {
     return e.is_occupied && e.generation == entity._generation
 }
 
-fn remove<T>(entity: Entity<T>) -> T? {
+fn Entity<T>.remove(entity) -> T? {
     remove(entity._arena, entity)
 }
 
-fn remove<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
+fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
     let index = entity._index
     let entry = vec_get(arena.entries, index)
     if is_null(entry) {
@@ -2509,18 +2509,18 @@ fn remove<T>(arena: Arena<T>, entity: Entity<T>) -> T? {
     }
 }
 
-fn len<T>(arena: Arena<T>) -> int {
+fn Arena<T>.len(arena) -> int {
     return arena.occupied_count
 }
 
 
-fn clear<T>(arena: Arena<T>) {
+fn Arena<T>.clear(arena) {
     arena.entries = []
     arena.free_indices = []
     arena.occupied_count = 0
 }
 
-fn random<T>(arena: Arena<T>) -> (Entity<T>, T)? {
+fn Arena<T>.random(arena) -> (Entity<T>, T)? {
     let len = len(arena)
     if len == 0 { return null }
 
@@ -2558,7 +2558,7 @@ struct ArenaIter<T> {
 }
 
 @inline
-fn iter<T>(a: Arena<T>) -> ArenaIter<T> {
+fn Arena<T>.iter(a) -> ArenaIter<T> {
     // entries/len snapshot once per loop, matching the old template's
     // preheader hoist (mutation mid-iteration is recorded UB).
     return ArenaIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
@@ -2581,7 +2581,7 @@ fn ArenaIter<T>.next(it) -> (bool, Entity<T>, T) {
 
 // Arena functional methods
 
-fn filter<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> [(Entity<T>, T)] {
+fn Arena<T>.filter(arena, predicate: fn(T) -> bool) -> [(Entity<T>, T)] {
     let result: [(Entity<T>, T)] = []
     for (e, item) in arena {
         if predicate(item) { vec_push(result, (e, item)) }
@@ -2589,7 +2589,7 @@ fn filter<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> [(Entity<T>, T)] {
     return result
 }
 
-fn map<T, U>(arena: Arena<T>, f: fn(T) -> U) -> [(Entity<T>, U)] {
+fn Arena<T>.map<U>(arena, f: fn(T) -> U) -> [(Entity<T>, U)] {
     let result: [(Entity<T>, U)] = []
     for (e, item) in arena {
         vec_push(result, (e, f(item)))
@@ -2597,21 +2597,21 @@ fn map<T, U>(arena: Arena<T>, f: fn(T) -> U) -> [(Entity<T>, U)] {
     return result
 }
 
-fn find<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> (Entity<T>, T)? {
+fn Arena<T>.find(arena, predicate: fn(T) -> bool) -> (Entity<T>, T)? {
     for (e, item) in arena {
         if predicate(item) { return (e, item) }
     }
     return null
 }
 
-fn any<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> bool {
+fn Arena<T>.any(arena, predicate: fn(T) -> bool) -> bool {
     for (_, item) in arena {
         if predicate(item) { return true }
     }
     return false
 }
 
-fn all<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> bool {
+fn Arena<T>.all(arena, predicate: fn(T) -> bool) -> bool {
     for (_, item) in arena {
         if !predicate(item) { return false }
     }
