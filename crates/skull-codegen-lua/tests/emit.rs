@@ -503,17 +503,20 @@ fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
 }
 
 #[test]
-fn tuple_boxed_use_still_packs_table() {
-    // A tuple result stored whole (not destructured) still materializes a table
-    // so downstream `.0` indexing is unchanged. This pins the pack path.
+fn tuple_local_whole_store_scalarizes() {
+    // A tuple result stored whole and only field-read never packs a table: the
+    // multi-return lands in per-field cells and `.1` loads its cell (tuple
+    // SROA). The escaping case that MUST pack is pinned in
+    // skull/tests/tuple_scalarize.rs (tuple_whole_use_keeps_table).
     let src = "\
 fn pair() -> (bool, int) { (true, 42) }\n\
 fn use_it() -> int { let t = pair(); t.1 }";
     let body = emit_clean(src, "use_it");
     assert!(
-        body.contains("[1]") || body.contains("[2]"),
-        "boxed tuple use must index a packed table:\n{body}"
+        !body.contains("[1]") && !body.contains("[2]"),
+        "non-escaping whole-stored tuple should scalarize, not pack:\n{body}"
     );
+    assert!(body.contains("= pair()"), "multi-assign call expected:\n{body}");
 }
 
 #[test]

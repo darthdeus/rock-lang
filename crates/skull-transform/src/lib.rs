@@ -360,6 +360,9 @@ enum StructId {
     /// Keyed by the ENUM name (`__ty`), so every variant of one enum stored to a
     /// cell is consistent (the field union covers all variants' payload slots).
     Enum(ustr::Ustr),
+    /// `MakeTuple` -- a positional table (`{v0, v1, ..}`), keyed by width. Fields
+    /// are `_<i>`, the same naming `TupleIndex` reads already rewrite through.
+    Tuple(usize),
 }
 
 /// The source of a scalarized field's value: an existing operand, or a string
@@ -393,6 +396,13 @@ fn ctor_fields(
     match inst {
         Inst::MakeValueStruct { name, fields } => Some((StructId::Value(*name), op(fields))),
         Inst::MakeStruct { ty, fields } => Some((StructId::Plain(*ty), op(fields))),
+        Inst::MakeTuple(vs) => Some((
+            StructId::Tuple(vs.len()),
+            vs.iter()
+                .enumerate()
+                .map(|(i, v)| (ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*v)))
+                .collect(),
+        )),
         Inst::MakeEnum { tag, ty, positional, named } => {
             let mut f = vec![
                 (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(*tag)),
@@ -563,6 +573,13 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                 }
                 if alias[ck].is_some() {
                     disq[ck] = true;
+                    continue;
+                }
+                // A plain nil store (a folded `phantom()` on an iterator done
+                // path) is compatible with any ctor candidate: it neither
+                // establishes nor breaks the cell's struct id. The rewrite
+                // expands it to per-field nil stores.
+                if matches!(&func.insts[*value], Inst::Const(Lit::Nil)) {
                     continue;
                 }
                 match ctor_fields(&func.insts[*value], cell_enum[ck]) {
@@ -784,6 +801,20 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         .flat_map(|(_, b)| b.insts.iter().copied())
         .filter_map(|i| match &func.insts[i] {
             Inst::Store { cell, value } if is_cand(*cell) => {
+                // A nil store writes nil to EVERY field cell (sorted for
+                // deterministic emission), reusing the nil value inst.
+                if matches!(&func.insts[*value], Inst::Const(Lit::Nil)) {
+                    let mut fs: Vec<ustr::Ustr> = cand_fields[rep[raw(*cell) as usize]]
+                        .as_ref()
+                        .map(|s| s.iter().copied().collect())
+                        .unwrap_or_default();
+                    fs.sort_unstable();
+                    return Some((
+                        i,
+                        *cell,
+                        fs.into_iter().map(|f| (f, FieldSrc::Operand(*value))).collect(),
+                    ));
+                }
                 ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
                     .map(|(_, fields)| (i, *cell, fields))
             }

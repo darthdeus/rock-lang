@@ -4242,7 +4242,7 @@ impl Builder<'_> {
         }
         if self.iter_is_arena(iter) {
             // Direct `for .. in arena` arrives with `for_iter_protocol`
-            // populated (bone routes Arena to the stdlib ArenaIter); only
+            // populated (bone routes Arena to the stdlib ArenaPairIter); only
             // `enumerate(arena)` still uses the template above.
             return Err(gap(
                 "for over Arena must route through the iterator protocol (for_iter_protocol missing)",

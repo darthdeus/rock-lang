@@ -2132,11 +2132,11 @@ fn enumerate<I: Iterator<T>, T>(it: I) -> EnumIter<I, T> {
 }
 
 @inline
-fn next<I: Iterator<T>, T>(it: EnumIter<I, T>) -> (bool, int, T) {
+fn next<I: Iterator<T>, T>(it: EnumIter<I, T>) -> (bool, (int, T)) {
     let (ok, x) = next(it.__inner)
-    if !ok { return (false, 0, phantom()) }
+    if !ok { return (false, phantom()) }
     it.__i = it.__i + 1
-    return (true, it.__i, x)
+    return (true, (it.__i, x))
 }
 
 struct ZipIter<I1, I2, A, B> {
@@ -2150,12 +2150,12 @@ fn zip<I1: Iterator<A>, I2: Iterator<B>, A, B>(a: I1, b: I2) -> ZipIter<I1, I2, 
 }
 
 @inline
-fn next<I1: Iterator<A>, I2: Iterator<B>, A, B>(it: ZipIter<I1, I2, A, B>) -> (bool, A, B) {
+fn next<I1: Iterator<A>, I2: Iterator<B>, A, B>(it: ZipIter<I1, I2, A, B>) -> (bool, (A, B)) {
     let (ok_a, x) = next(it.__a)
-    if !ok_a { return (false, phantom(), phantom()) }
+    if !ok_a { return (false, phantom()) }
     let (ok_b, y) = next(it.__b)
-    if !ok_b { return (false, phantom(), phantom()) }
-    return (true, x, y)
+    if !ok_b { return (false, phantom()) }
+    return (true, (x, y))
 }
 
 struct TakeWhileIter<I, T> {
@@ -2184,47 +2184,56 @@ fn next<I: Iterator<T>, T>(it: TakeWhileIter<I, T>) -> (bool, T) {
     return (true, x)
 }
 
-// Vec operations
+// Iterator terminal ops -- consume any `I: Iterator<T>` into a materialized
+// value or scalar. The lazy combinators above are intermediate (iterator ->
+// iterator); these are the other half of the API. Bounded, so they fully
+// inline at the call site like the combinators.
 
-fn map<T, U>(vec: [T], f: fn(T) -> U) -> [U] {
-    let result: [U] = []
-
-    for item in vec {
-        vec_push(result, f(item))
-    }
-
-    return result
-}
-
-fn filter<T>(vec: [T], predicate: fn(T) -> bool) -> [T] {
+@inline
+fn collect<I: Iterator<T>, T>(it: I) -> [T] {
     let result: [T] = []
-
-    for item in vec {
-        if predicate(item) { vec_push(result, item) }
-    }
-
-    return result
-}
-
-fn reduce<T, U>(vec: [T], initial: U, f: (U, T) -> U) -> U {
-    let result = initial
-    for item in vec {
-        result = f(result, item)
+    for x in it {
+        vec_push(result, x)
     }
     return result
 }
 
-fn fold_right<T, U>(vec: [T], initial: U, f: (T, U) -> U) -> U {
-    let result = initial
-
-    // Process array in reverse order
-    let i = vec_len(vec) - 1
-    while i >= 0 {
-        result = f(vec[i], result)
-        i = i - 1
+@inline
+fn reduce<I: Iterator<T>, T, U>(it: I, initial: U, f: (U, T) -> U) -> U {
+    let acc = initial
+    for x in it {
+        acc = f(acc, x)
     }
-    return result
+    return acc
 }
+
+@inline
+fn find<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> T? {
+    for x in it {
+        if pred(x) { return x }
+    }
+    return null
+}
+
+@inline
+fn any<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> bool {
+    for x in it {
+        if pred(x) { return true }
+    }
+    return false
+}
+
+@inline
+fn all<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> bool {
+    for x in it {
+        if !pred(x) { return false }
+    }
+    return true
+}
+
+// Vec operations
+// The eager functional ops (map/filter/reduce/fold_right/find/any/all) are
+// deleted: `v.iter().<combinators>().<terminal>()` is the one mechanism.
 
 fn vec_new_with_capacity<T>(capacity: int) -> [T] {
     return Vec { _data: table_new_with_size(capacity), len: 0 }
@@ -2243,27 +2252,6 @@ fn insert_at<T>(vec: [T], index: int, value: T) {
 
 fn clone<T>(vec: [T]) -> [T] {
     return Vec { _data: table_copy_array(vec._data), len: vec.len }
-}
-
-fn find<T>(vec: [T], predicate: fn(T) -> bool) -> T? {
-    for item in vec {
-        if predicate(item) { return item }
-    }
-    return null
-}
-
-fn any<T>(vec: [T], predicate: fn(T) -> bool) -> bool {
-    for item in vec {
-        if predicate(item) { return true }
-    }
-    return false
-}
-
-fn all<T>(vec: [T], predicate: fn(T) -> bool) -> bool {
-    for item in vec {
-        if !predicate(item) { return false }
-    }
-    return true
 }
 
 inline(lua) fn sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
@@ -2550,7 +2538,44 @@ fn random<T>(arena: Arena<T>) -> (Entity<T>, T)? {
 // while; the loop body runs only on a dead/nil slot) -- the naive
 // fetch-inside shape blacklists to the interpreter at light fragmentation
 // (docs/iterator-desugaring-investigation.md, 8.8x at 10% holes).
-struct ArenaIter<T> {
+// Arena iteration -- two modes, both `Iterator<..>`-conformant so they compose
+// with the combinators + terminals. `values()` yields `T`; `pairs()` yields a
+// `(Entity<T>, T)` tuple ELEMENT (2-tuple `next`, not multi-value -- a bound
+// cannot wrap an unknown-arity splat). Bare `for (e, v) in arena` desugars
+// through `iter(arena)` = pairs mode; the per-iteration pair tuple (and the
+// Entity, when unused) scalarizes away at codegen (tuple SROA,
+// `crates/skull/tests/tuple_scalarize.rs`). Both keep the fetch-outside
+// skip-loop shape (naive fetch-inside blacklists to the interpreter at ~10%
+// holes, `docs/iterator-desugaring-investigation.md`). entries/len snapshot
+// once per loop (mutation mid-iteration beyond removing the current element
+// is recorded UB).
+
+struct ArenaValIter<T> {
+    entries: [ArenaEntry<T>],
+    n: int,
+    i: int,
+}
+
+@inline
+fn values<T>(a: Arena<T>) -> ArenaValIter<T> {
+    return ArenaValIter { entries: a.entries, n: a.entries.len, i: 0 }
+}
+
+@inline
+fn next<T>(it: ArenaValIter<T>) -> (bool, T) {
+    let i = it.i
+    if i >= it.n { return (false, phantom()) }
+    let slot = it.entries.get(i)
+    while is_null(slot) || !slot.unwrap().is_occupied {
+        i = i + 1
+        if i >= it.n { it.i = i; return (false, phantom()) }
+        slot = it.entries.get(i)
+    }
+    it.i = i + 1
+    return (true, slot.unwrap()._data)
+}
+
+struct ArenaPairIter<T> {
     arena: Arena<T>,
     entries: [ArenaEntry<T>],
     n: int,
@@ -2558,64 +2583,28 @@ struct ArenaIter<T> {
 }
 
 @inline
-fn iter<T>(a: Arena<T>) -> ArenaIter<T> {
-    // entries/len snapshot once per loop, matching the old template's
-    // preheader hoist (mutation mid-iteration is recorded UB).
-    return ArenaIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
+fn pairs<T>(a: Arena<T>) -> ArenaPairIter<T> {
+    return ArenaPairIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
 }
 
 @inline
-fn next<T>(it: ArenaIter<T>) -> (bool, Entity<T>, T) {
+fn next<T>(it: ArenaPairIter<T>) -> (bool, (Entity<T>, T)) {
     let i = it.i
-    if i >= it.n { return (false, phantom(), phantom()) }
+    if i >= it.n { return (false, phantom()) }
     let slot = it.entries.get(i)
     while is_null(slot) || !slot.unwrap().is_occupied {
         i = i + 1
-        if i >= it.n { it.i = i; return (false, phantom(), phantom()) }
+        if i >= it.n { it.i = i; return (false, phantom()) }
         slot = it.entries.get(i)
     }
     let e = slot.unwrap()
     it.i = i + 1
-    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e._data)
+    return (true, (Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e._data))
 }
 
-// Arena functional methods
-
-fn filter<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> [(Entity<T>, T)] {
-    let result: [(Entity<T>, T)] = []
-    for (e, item) in arena {
-        if predicate(item) { vec_push(result, (e, item)) }
-    }
-    return result
-}
-
-fn map<T, U>(arena: Arena<T>, f: fn(T) -> U) -> [(Entity<T>, U)] {
-    let result: [(Entity<T>, U)] = []
-    for (e, item) in arena {
-        vec_push(result, (e, f(item)))
-    }
-    return result
-}
-
-fn find<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> (Entity<T>, T)? {
-    for (e, item) in arena {
-        if predicate(item) { return (e, item) }
-    }
-    return null
-}
-
-fn any<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> bool {
-    for (_, item) in arena {
-        if predicate(item) { return true }
-    }
-    return false
-}
-
-fn all<T>(arena: Arena<T>, predicate: fn(T) -> bool) -> bool {
-    for (_, item) in arena {
-        if !predicate(item) { return false }
-    }
-    return true
+@inline
+fn iter<T>(a: Arena<T>) -> ArenaPairIter<T> {
+    return pairs(a)
 }
 
 // String manipulation functions

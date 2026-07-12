@@ -5681,7 +5681,8 @@ fn infer_for_elem(
             // `[T]` routes through the stdlib iterator protocol (`VecIter`):
             // the desugar + @inline + SROA + FORL recovery emit the same
             // native numeric `for` the deleted skull template did. `Arena<T>`
-            // likewise routes through `ArenaIter` (fetch-outside skip shape).
+            // likewise routes through `ArenaPairIter` (fetch-outside skip
+            // shape; element = the `(Entity<T>, T)` tuple).
             // `for_elem_ty` keeps its Array/Arena arms -- `enumerate(..)`
             // above still calls it directly for the element type.
             let is_protocol_builtin = match *gamma.get(iter_ty) {
@@ -5906,9 +5907,10 @@ fn check_iterator_bounds(
 }
 
 /// Element type for BOUND conformance: `next` must return exactly `(bool, E)`.
-/// Multi-value iterators (`(bool, A, B)` -- ArenaIter's entity/data pair,
-/// enumerate/zip outputs) can be CONSUMED by a `for` loop but not re-wrapped
-/// by a combinator: a generic body cannot destructure an unknown-arity splat.
+/// A multi-value `next` (`(bool, A, B)`) can be CONSUMED by a `for` loop but
+/// not re-wrapped by a combinator: a generic body cannot destructure an
+/// unknown-arity splat. No stdlib iterator is multi-value anymore (pairs/
+/// enumerate/zip all yield tuple elements); only a user iterator hits this.
 fn bound_next_elem(
     gamma: &mut Gamma,
     next_ret: TyId,

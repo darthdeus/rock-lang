@@ -828,6 +828,26 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<V
 /// each, including ones the inlined bodies themselves introduced). These are the
 /// caller chunk's INLINE codegen dependencies: incremental emit must re-emit
 /// `func` when any of them change (`docs/skull-incremental-emit-plan.md`).
+/// Canonicalize a call to a zero-arg `inline(lua)` fn whose whole body is
+/// `return nil` (the `phantom()` shape) into `Const(Nil)`. `inline(lua)` bodies
+/// never splice, so without this the residual call is an opaque non-ctor store
+/// that blocks SROA from splitting iterator element cells -- the done-path
+/// `(false, phantom())` store must read as a plain nil for pair-element tuples
+/// to scalarize.
+fn fold_nil_body_calls(ws: &Workspace, func: &mut MirFunc) {
+    let ids: Vec<Idx<Inst>> = func.insts.iter().map(|(i, _)| i).collect();
+    for i in ids {
+        let Inst::Call { func: fref, args } = &func.insts[i] else { continue };
+        if !args.is_empty() {
+            continue;
+        }
+        let f = &ws.module(fref.module).functions[fref.func];
+        if f.lua_body.is_some_and(|b| b.trim() == "return nil") {
+            func.insts[i] = Inst::Const(Lit::Nil);
+        }
+    }
+}
+
 pub fn inline_functions(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -873,6 +893,8 @@ pub fn inline_functions(
         resume = Some(pos);
         budget -= 1;
     }
+    // After splicing: spliced bodies carry the callees' phantom() calls.
+    fold_nil_body_calls(ws, func);
     Ok((spliced, records))
 }
 
