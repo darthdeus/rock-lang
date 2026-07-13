@@ -274,10 +274,10 @@ pub fn completion_matrix(
 
 /// `rock lsp completion <file:line:col> --repl [--policies ..] [--top N]`.
 ///
-/// The small interactive step toward the completion tweaker: the project loads
-/// ONCE, then each line you type is spliced at the cursor and the rank x policy
-/// matrix reprints. Blank line / EOF / `q` quits. (Per-keystroke raw mode is
-/// the next rung -- this reuses the same `MatrixProbe`.)
+/// The completion tweaker: the project loads ONCE, then you type at the cursor
+/// and the rank x policy matrix reprints. On a TTY this is per-keystroke (raw
+/// mode); piped stdin falls back to a line-at-a-time loop (so scripts/tests
+/// still work). Esc / Ctrl-C / Ctrl-D quit.
 pub fn completion_repl(
     file_path: &str,
     line: u32,
@@ -285,8 +285,18 @@ pub fn completion_repl(
     policies: &[bone_query::MatchPolicy],
     top: usize,
 ) -> Result<()> {
+    use std::io::IsTerminal;
+    let probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
+    if std::io::stdin().is_terminal() {
+        completion_repl_raw(probe)
+    } else {
+        completion_repl_lines(probe)
+    }
+}
+
+/// Piped/non-TTY fallback: one prefix per input line.
+fn completion_repl_lines(mut probe: MatrixProbe) -> Result<()> {
     use std::io::{BufRead, Write};
-    let mut probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
     println!("{}", probe.header());
     println!("type a prefix, Enter to rank; blank line or `q` to quit.\n");
     let stdin = std::io::stdin();
@@ -303,6 +313,63 @@ pub fn completion_repl(
             break;
         }
         println!("{}", probe.render(prefix));
+    }
+    Ok(())
+}
+
+/// Restores cooked terminal mode on drop -- so a panic mid-loop can't leave the
+/// user's shell in raw mode.
+struct RawGuard;
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Per-keystroke TTY loop: maintain an edit buffer, and on every key redraw the
+/// whole matrix for the current prefix in place.
+fn completion_repl_raw(mut probe: MatrixProbe) -> Result<()> {
+    use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{Clear, ClearType};
+    use crossterm::{cursor::MoveTo, execute};
+    use std::io::Write;
+
+    crossterm::terminal::enable_raw_mode()?;
+    let _guard = RawGuard;
+    let mut out = std::io::stdout();
+    let mut prefix = String::new();
+
+    let draw = |out: &mut std::io::Stdout, probe: &mut MatrixProbe, prefix: &str| -> Result<()> {
+        execute!(out, Clear(ClearType::All), MoveTo(0, 0))?;
+        // Raw mode: bare `\n` doesn't return the carriage, so emit CRLF.
+        let mut body = format!("{}\r\n", probe.header());
+        body.push_str("live -- type to edit prefix; Esc / Ctrl-C / Ctrl-D quit\r\n\r\n");
+        body.push_str(&format!("prefix> {prefix}\r\n\r\n"));
+        if !prefix.is_empty() {
+            body.push_str(&probe.render(prefix).replace('\n', "\r\n"));
+        }
+        out.write_all(body.as_bytes())?;
+        out.flush()?;
+        Ok(())
+    };
+
+    draw(&mut out, &mut probe, &prefix)?;
+    loop {
+        let Event::Key(k) = read()? else { continue };
+        if k.kind != KeyEventKind::Press {
+            continue; // ignore key-release (Windows) / repeat duplication
+        }
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Esc => break,
+            KeyCode::Char('c' | 'd') if ctrl => break,
+            KeyCode::Backspace => {
+                prefix.pop();
+            }
+            KeyCode::Char(c) if !c.is_control() => prefix.push(c),
+            _ => continue, // Enter, arrows, etc. -- no redraw needed
+        }
+        draw(&mut out, &mut probe, &prefix)?;
     }
     Ok(())
 }
