@@ -248,6 +248,115 @@ pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Res
     Ok(())
 }
 
+/// `rock lsp completion-matrix <file:line:col> --prefixes a,b,c
+/// [--policies clean,subseq,subseq3] [--top N]`.
+///
+/// Tuning harness: at ONE cursor, splice each test prefix in place of the
+/// identifier run ending there, run completion under each admission policy, and
+/// print a side-by-side matrix (rank x policy, cells `label [bBAND]`). Lets you
+/// eyeball what each policy admits/orders before picking a default. The real
+/// project is loaded so cross-file symbols resolve like the live server.
+pub fn completion_matrix(
+    file_path: &str,
+    line: u32,
+    column: u32,
+    prefixes: &[String],
+    policies: &[bone_query::MatchPolicy],
+    top: usize,
+) -> Result<()> {
+    let file_path = canonical(file_path);
+    let src = fs_err::read_to_string(&file_path)?;
+
+    // Absolute byte offset of the cursor, then walk back over the identifier run
+    // ending there -- that run is what each test prefix replaces.
+    let cur = line_col_to_offset(&src, line, column);
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut start = cur;
+    while start > 0 && is_ident(src.as_bytes()[start - 1]) {
+        start -= 1;
+    }
+    let orig_ident = &src[start..cur];
+
+    let mut bone = BoneWorkspace::new();
+    bone.load_project(&file_path);
+
+    println!(
+        "cursor {}:{}  identifier at cursor: {:?}  policies: [{}]  top {}\n",
+        line,
+        column,
+        orig_ident,
+        policies.iter().map(|p| p.name()).collect::<Vec<_>>().join(", "),
+        top,
+    );
+
+    for prefix in prefixes {
+        // Splice: keep everything after the cursor (mid-word tails survive),
+        // replace [start, cur) with the test prefix, cursor at its end.
+        let spliced = format!("{}{}{}", &src[..start], prefix, &src[cur..]);
+        let new_off = start + prefix.len();
+        let pos = bone_query::offset_to_position(&spliced, new_off);
+        bone.update(&file_path, spliced);
+
+        // One ranked list per policy.
+        let cols: Vec<Vec<String>> = policies
+            .iter()
+            .map(|&p| {
+                bone_query::set_match_policy(p);
+                let items = bone.completion(&file_path, pos);
+                items
+                    .into_iter()
+                    .take(top)
+                    .map(|it| {
+                        let band = it
+                            .sort_text
+                            .as_deref()
+                            .filter(|st| st.len() >= 18 && st.as_bytes()[..18].iter().all(u8::is_ascii_digit))
+                            .map_or('?', |st| st.as_bytes()[2] as char);
+                        format!("{} [b{band}]", it.label)
+                    })
+                    .collect()
+            })
+            .collect();
+        bone_query::set_match_policy(bone_query::MatchPolicy::Clean);
+
+        println!("=== prefix {:?}  (cursor -> {}:{})", prefix, pos.line + 1, pos.character + 1);
+        let rows = cols.iter().map(Vec::len).max().unwrap_or(0);
+        let width = 46usize;
+        // Header row of policy names.
+        let hdr: Vec<String> = policies
+            .iter()
+            .map(|p| format!("{:<width$}", p.name(), width = width))
+            .collect();
+        println!("     {}", hdr.join(""));
+        for r in 0..rows {
+            let cells: Vec<String> = cols
+                .iter()
+                .map(|c| {
+                    let s = c.get(r).map_or("", String::as_str);
+                    let s: String = s.chars().take(width - 2).collect();
+                    format!("{s:<width$}", width = width)
+                })
+                .collect();
+            println!("{:>3}. {}", r + 1, cells.join(""));
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// Absolute byte offset of a 1-based (line, column) in `src`. Columns are byte
+/// columns; identifiers are ASCII so this matches the LSP char columns here.
+fn line_col_to_offset(src: &str, line: u32, column: u32) -> usize {
+    let mut off = 0usize;
+    for (i, l) in src.split_inclusive('\n').enumerate() {
+        if i as u32 + 1 == line {
+            return (off + (column as usize).saturating_sub(1)).min(src.len());
+        }
+        off += l.len();
+    }
+    off.min(src.len())
+}
+
 /// `rock-lsp references <file:line:col> --backend bone`.
 pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);

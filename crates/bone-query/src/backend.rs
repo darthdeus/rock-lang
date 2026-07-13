@@ -40,6 +40,7 @@ use crate::completion::classify::*;
 use crate::completion::rank::*;
 use crate::completion::select::*;
 use crate::completion::sources::*;
+use crate::completion::match_policy::admit;
 use crate::query::{clean_match, SymCat};
 use crate::rank_key::RankKey;
 
@@ -1735,7 +1736,7 @@ impl BoneWorkspace {
                 Some(p) => format!("Entity<{p}>"),
                 None => "Entity<>".to_string(),
             };
-            if clean_match(label.as_bytes(), prefix.as_bytes()) {
+            if admit(label.as_bytes(), prefix.as_bytes()) {
                 let key = RankKey {
                     len: RankKey::len_key(9999, label.len()),
                     ..Default::default()
@@ -1766,7 +1767,7 @@ impl BoneWorkspace {
                 {
                     continue;
                 }
-                if !prefix.is_empty() && !clean_match(pname.as_str().as_bytes(), prefix.as_bytes()) {
+                if !prefix.is_empty() && !admit(pname.as_str().as_bytes(), prefix.as_bytes()) {
                     continue;
                 }
                 let score = fuzzy_score(pname.as_str().as_bytes(), prefix.as_bytes());
@@ -1794,7 +1795,7 @@ impl BoneWorkspace {
         if coroutine_slot {
             // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0,
             // superseding the plain struct symbol.
-            if coframe && clean_match(b"CoFrame", prefix.as_bytes()) {
+            if coframe && admit(b"CoFrame", prefix.as_bytes()) {
                 sink.retain_not_named("CoFrame");
                 let key = RankKey {
                     len: RankKey::len_key(9999, "CoFrame".len()),
@@ -1806,7 +1807,7 @@ impl BoneWorkspace {
                     CandShape::CoFrame,
                 ));
             }
-        } else if !expr_position && !prefix.is_empty() && clean_match(b"Coroutine", prefix.as_bytes()) {
+        } else if !expr_position && !prefix.is_empty() && admit(b"Coroutine", prefix.as_bytes()) {
             // (b) completing the `Coroutine` type name -> snippet forms replace
             // the bare type: `Coroutine<CoFrame>` first, `Coroutine<$0>` second.
             sink.retain_not_named("Coroutine");

@@ -4189,7 +4189,7 @@ pub fn completion(
         if name.starts_with('_') && !show_private {
             return false;
         }
-        clean_match(name.as_bytes(), pfx)
+        crate::completion::match_policy::admit(name.as_bytes(), pfx)
     };
 
     // A TYPE slot offers the type universe only: structs / bare enums /
@@ -4293,8 +4293,8 @@ pub fn completion(
                         continue;
                     }
                     let hit = pfx.is_empty()
-                        || clean_match(vname.as_bytes(), pfx)
-                        || clean_match(qualified.as_bytes(), pfx);
+                        || crate::completion::match_policy::admit(vname.as_bytes(), pfx)
+                        || crate::completion::match_policy::admit(qualified.as_bytes(), pfx);
                     if hit && seen.insert(qn) {
                         out.push(CompletionEntry {
                             name: qn,

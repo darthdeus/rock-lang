@@ -776,17 +776,24 @@ fn arg_position_ranks_expected_enum_variant_first() {
 }
 
 #[test]
-fn plain_completion_filters_midword_scatter_keeps_clean_and_camelcase() {
-    // `nog` mid-word-scatters `stone_log` (sto-N-e ... l-O-G) -- filtered. It
-    // cleanly matches the camelCase variant `NotGround` (N-o ... -G-round, the
-    // `G` is a word boundary) -- kept. A clean prefix-ish query still finds the
-    // function.
+fn plain_completion_demotes_midword_scatter_below_clean_and_camelcase() {
+    // `nog` (3 chars -> subseq admission) mid-word-scatters `stone_log`
+    // (sto-N-e ... l-O-G): ADMITTED under the default subseq3 policy but DEMOTED
+    // to band 3. It cleanly matches the camelCase variant `NotGround`
+    // (N-o ... -G-round, the `G` a word boundary) -- band 2 -- which therefore
+    // ranks ABOVE the scatter. Admission is permissive; the band does the work.
     let src = "fn stone_log() {}\n\
                enum E { NotGround }\n\
                fn r() {\n  nog\n}\n";
-    let l = labels(src, 3, 5);
-    assert!(!l.iter().any(|x| x == "stone_log"), "mid-word scatter filtered: {l:?}");
-    assert!(l.iter().any(|x| x == "E::NotGround"), "camelCase variant kept: {l:?}");
+    // `item` panics if the label is absent, so reaching both proves admission.
+    let ng = item(src, 3, 5, "E::NotGround");
+    let sl = item(src, 3, 5, "stone_log");
+    assert!(
+        ng.sort_text < sl.sort_text,
+        "clean camelCase must rank above mid-word scatter: {:?} vs {:?}",
+        ng.sort_text,
+        sl.sort_text,
+    );
     // The same function is still found by a clean (word-boundary) query.
     let l2 = labels("fn stone_log() {}\nfn r() {\n  stlog\n}\n", 2, 7);
     assert!(l2.iter().any(|x| x == "stone_log"), "clean query finds the fn: {l2:?}");

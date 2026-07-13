@@ -16,6 +16,7 @@ use crate::backend::{
     analyze_variant, bind_generic, expected_for_anchor, nominal_base,
     preceding_arg_starts, ty_of, user_module_for_path, ExpectedArg,
 };
+use crate::completion::match_policy::admit;
 use crate::query::{clean_match, SymCat};
 use crate::rank_key::RankKey;
 
@@ -120,7 +121,7 @@ pub(crate) fn field_ref_arg_completions(
             if fty != v_str {
                 continue;
             }
-            if !(prefix.is_empty() || clean_match(fld.name.as_bytes(), pfx)) {
+            if !(prefix.is_empty() || admit(fld.name.as_bytes(), pfx)) {
                 continue;
             }
             if !seen.insert(fld.name) {
@@ -722,7 +723,7 @@ pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<Complet
     for m in ws.modules.iter() {
         for (_, dec) in m.decorators.iter() {
             let name = dec.name.as_str();
-            if !clean_match(name.as_bytes(), prefix.as_bytes()) || !seen.insert(name.to_string()) {
+            if !admit(name.as_bytes(), prefix.as_bytes()) || !seen.insert(name.to_string()) {
                 continue;
             }
             let params: Vec<String> = dec
@@ -779,7 +780,7 @@ pub(crate) fn enum_record_field_completions(
             .into_iter()
             .enumerate()
             .filter(|(_, (name, _))| {
-                prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())
+                prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())
             })
             .map(|(i, (name, ty))| CompletionItem {
                 label: format!("{name}: {ty}"),
@@ -832,7 +833,7 @@ pub(crate) fn struct_literal_field_completions(
         .into_iter()
         .enumerate()
         .filter(|(_, (n, _, _))| !present.contains(n))
-        .filter(|(_, (n, _, _))| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
+        .filter(|(_, (n, _, _))| prefix.is_empty() || admit(n.as_bytes(), prefix.as_bytes()))
         .map(|(i, (n, ty, has_default))| CompletionItem {
             label: format!("{n}: {ty}"),
             kind: Some(CompletionItemKind::FIELD),
@@ -890,7 +891,7 @@ pub(crate) fn enum_qualified_completions(
 
     let pattern = in_pattern_position(src, offset);
     let matches_prefix =
-        |v: &str| prefix.is_empty() || clean_match(v.as_bytes(), prefix.as_bytes());
+        |v: &str| prefix.is_empty() || admit(v.as_bytes(), prefix.as_bytes());
     // When the in-progress prefix matches NO variant (a typo like `TextAlign::top`),
     // returning empty hands the popup to the client's buffer-word fallback -- the
     // worst outcome, since an enum is a closed set. Show every variant instead, and
@@ -1187,7 +1188,7 @@ fn build_member_items(
             if name.starts_with('_') && !show_private {
                 return None;
             }
-            (prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {
+            (prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {
                 sort_text: Some(if bool_ctx {
                     member_bool_sort_text(&name, pfx, ty == "bool", 0)
                 } else if arg_ctx {
@@ -1203,7 +1204,7 @@ fn build_member_items(
             })
         });
         let method_items = methods.into_iter().zip(method_match).filter_map(|(m, rmatch)| {
-            (prefix.is_empty() || clean_match(m.name.as_bytes(), prefix.as_bytes())).then(|| {
+            (prefix.is_empty() || admit(m.name.as_bytes(), prefix.as_bytes())).then(|| {
                 // Inline `(params) -> ret`. A method with args left after the
                 // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
                 // inside); one with no remaining args inserts `name()` as plain

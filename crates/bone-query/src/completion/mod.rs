@@ -4,6 +4,7 @@
 //! plumbing (`BoneWorkspace::completion`, `ExpectedArg`, Session variants).
 
 pub(crate) mod classify;
+pub(crate) mod match_policy;
 pub(crate) mod rank;
 pub(crate) mod select;
 pub(crate) mod sources;
