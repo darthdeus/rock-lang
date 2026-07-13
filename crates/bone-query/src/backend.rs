@@ -2184,6 +2184,27 @@ impl BoneWorkspace {
         let Some(proj) = self.projects.get(&root) else {
             return Ok(0);
         };
+        self.write_ctags_for(&root, proj)
+    }
+
+    /// Regenerate `.rock.tags` for every loaded STICK project root, not just the
+    /// edited file's. The editor holds one tags file per open package and any
+    /// of them may be stale (a sibling package edited last session, never
+    /// re-saved this one); refreshing all of them on save keeps cross-package
+    /// tag jumps accurate. Standalone-file roots (a scratch `.rock` with no
+    /// `stick.toml`, keyed by its parent dir) are skipped -- an all-roots sweep
+    /// must not scatter `.rock.tags` into `~` or `/tmp`. Per-root `(root, result)`
+    /// so the caller can log individual failures; one root's error never blocks
+    /// the others.
+    pub fn write_all_ctags(&self) -> Vec<(PathBuf, std::io::Result<usize>)> {
+        self.projects
+            .iter()
+            .filter(|(root, _)| root.join("stick.toml").exists())
+            .map(|(root, proj)| (root.clone(), self.write_ctags_for(root, proj)))
+            .collect()
+    }
+
+    fn write_ctags_for(&self, root: &Path, proj: &BoneProject) -> std::io::Result<usize> {
         let ws = proj.session.workspace();
 
         let mut entries = Vec::new();
