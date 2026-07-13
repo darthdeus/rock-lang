@@ -264,48 +264,126 @@ pub fn completion_matrix(
     policies: &[bone_query::MatchPolicy],
     top: usize,
 ) -> Result<()> {
-    let file_path = canonical(file_path);
-    let src = fs_err::read_to_string(&file_path)?;
-
-    // Absolute byte offset of the cursor, then walk back over the identifier run
-    // ending there -- that run is what each test prefix replaces.
-    let cur = line_col_to_offset(&src, line, column);
-    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut start = cur;
-    while start > 0 && is_ident(src.as_bytes()[start - 1]) {
-        start -= 1;
-    }
-    let orig_ident = &src[start..cur];
-
-    let mut bone = BoneWorkspace::new();
-    bone.load_project(&file_path);
-
-    println!(
-        "cursor {}:{}  identifier at cursor: {:?}  policies: [{}]  top {}\n",
-        line,
-        column,
-        orig_ident,
-        policies.iter().map(|p| p.name()).collect::<Vec<_>>().join(", "),
-        top,
-    );
-
+    let mut probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
+    println!("{}\n", probe.header());
     for prefix in prefixes {
-        // Splice: keep everything after the cursor (mid-word tails survive),
-        // replace [start, cur) with the test prefix, cursor at its end.
-        let spliced = format!("{}{}{}", &src[..start], prefix, &src[cur..]);
-        let new_off = start + prefix.len();
-        let pos = bone_query::offset_to_position(&spliced, new_off);
-        bone.update(&file_path, spliced);
+        println!("{}", probe.render(prefix));
+    }
+    Ok(())
+}
 
-        // One ranked list per policy.
-        let cols: Vec<Vec<String>> = policies
+/// `rock lsp completion <file:line:col> --repl [--policies ..] [--top N]`.
+///
+/// The small interactive step toward the completion tweaker: the project loads
+/// ONCE, then each line you type is spliced at the cursor and the rank x policy
+/// matrix reprints. Blank line / EOF / `q` quits. (Per-keystroke raw mode is
+/// the next rung -- this reuses the same `MatrixProbe`.)
+pub fn completion_repl(
+    file_path: &str,
+    line: u32,
+    column: u32,
+    policies: &[bone_query::MatchPolicy],
+    top: usize,
+) -> Result<()> {
+    use std::io::{BufRead, Write};
+    let mut probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
+    println!("{}", probe.header());
+    println!("type a prefix, Enter to rank; blank line or `q` to quit.\n");
+    let stdin = std::io::stdin();
+    let mut lock = stdin.lock();
+    loop {
+        print!("> ");
+        std::io::stdout().flush().ok();
+        let mut buf = String::new();
+        if lock.read_line(&mut buf)? == 0 {
+            break; // EOF
+        }
+        let prefix = buf.trim_end_matches(['\n', '\r']);
+        if prefix.is_empty() || prefix == "q" {
+            break;
+        }
+        println!("{}", probe.render(prefix));
+    }
+    Ok(())
+}
+
+/// One cursor prepared for repeated "what if I typed <prefix>" probes: the file
+/// text with the trailing identifier removed and the project loaded, so each
+/// `render` is just a splice + per-policy completion (no reload).
+struct MatrixProbe {
+    bone: BoneWorkspace,
+    file_path: String,
+    /// Source with the identifier run at the cursor already removed.
+    head: String,
+    tail: String,
+    orig_ident: String,
+    line: u32,
+    column: u32,
+    policies: Vec<bone_query::MatchPolicy>,
+    top: usize,
+}
+
+impl MatrixProbe {
+    fn load(
+        file_path: &str,
+        line: u32,
+        column: u32,
+        policies: Vec<bone_query::MatchPolicy>,
+        top: usize,
+    ) -> Result<MatrixProbe> {
+        let file_path = canonical(file_path);
+        let src = fs_err::read_to_string(&file_path)?;
+        // Walk back over the identifier run ending at the cursor -- that run is
+        // what each probed prefix replaces.
+        let cur = line_col_to_offset(&src, line, column);
+        let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let mut start = cur;
+        while start > 0 && is_ident(src.as_bytes()[start - 1]) {
+            start -= 1;
+        }
+        let mut bone = BoneWorkspace::new();
+        bone.load_project(&file_path);
+        Ok(MatrixProbe {
+            bone,
+            head: src[..start].to_string(),
+            tail: src[cur..].to_string(),
+            orig_ident: src[start..cur].to_string(),
+            file_path,
+            line,
+            column,
+            policies,
+            top,
+        })
+    }
+
+    fn header(&self) -> String {
+        format!(
+            "cursor {}:{}  identifier at cursor: {:?}  policies: [{}]  top {}",
+            self.line,
+            self.column,
+            self.orig_ident,
+            self.policies.iter().map(|p| p.name()).collect::<Vec<_>>().join(", "),
+            self.top,
+        )
+    }
+
+    /// Splice `prefix` at the cursor, run completion under each policy, and
+    /// format the rank x policy matrix (band-tagged cells).
+    fn render(&mut self, prefix: &str) -> String {
+        let spliced = format!("{}{}{}", self.head, prefix, self.tail);
+        let new_off = self.head.len() + prefix.len();
+        let pos = bone_query::offset_to_position(&spliced, new_off);
+        self.bone.update(&self.file_path, spliced);
+
+        let cols: Vec<Vec<String>> = self
+            .policies
             .iter()
             .map(|&p| {
                 bone_query::set_match_policy(p);
-                let items = bone.completion(&file_path, pos);
-                items
+                self.bone
+                    .completion(&self.file_path, pos)
                     .into_iter()
-                    .take(top)
+                    .take(self.top)
                     .map(|it| {
                         let band = it
                             .sort_text
@@ -317,17 +395,22 @@ pub fn completion_matrix(
                     .collect()
             })
             .collect();
-        bone_query::set_match_policy(bone_query::MatchPolicy::Clean);
+        bone_query::set_match_policy(bone_query::MatchPolicy::default_policy());
 
-        println!("=== prefix {:?}  (cursor -> {}:{})", prefix, pos.line + 1, pos.character + 1);
-        let rows = cols.iter().map(Vec::len).max().unwrap_or(0);
         let width = 46usize;
-        // Header row of policy names.
-        let hdr: Vec<String> = policies
+        let mut out = format!(
+            "=== prefix {:?}  (cursor -> {}:{})\n",
+            prefix,
+            pos.line + 1,
+            pos.character + 1
+        );
+        let hdr: Vec<String> = self
+            .policies
             .iter()
             .map(|p| format!("{:<width$}", p.name(), width = width))
             .collect();
-        println!("     {}", hdr.join(""));
+        out.push_str(&format!("     {}\n", hdr.join("")));
+        let rows = cols.iter().map(Vec::len).max().unwrap_or(0);
         for r in 0..rows {
             let cells: Vec<String> = cols
                 .iter()
@@ -337,11 +420,10 @@ pub fn completion_matrix(
                     format!("{s:<width$}", width = width)
                 })
                 .collect();
-            println!("{:>3}. {}", r + 1, cells.join(""));
+            out.push_str(&format!("{:>3}. {}\n", r + 1, cells.join("")));
         }
-        println!();
+        out
     }
-    Ok(())
 }
 
 /// Absolute byte offset of a 1-based (line, column) in `src`. Columns are byte

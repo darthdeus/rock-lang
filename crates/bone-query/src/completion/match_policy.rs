@@ -48,6 +48,11 @@ impl MatchPolicy {
         }
     }
 
+    /// The policy a fresh thread starts with (env override, else `Subseq3`).
+    pub fn default_policy() -> MatchPolicy {
+        MatchPolicy::from_env()
+    }
+
     fn from_env() -> MatchPolicy {
         std::env::var("ROCK_LSP_MATCH_POLICY")
             .ok()

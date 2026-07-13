@@ -82,6 +82,12 @@ fn build_cli() -> Command {
                     Arg::new("top")
                         .long("top")
                         .help("Rows per policy column (default 10)."),
+                )
+                .arg(
+                    Arg::new("repl")
+                        .long("repl")
+                        .action(ArgAction::SetTrue)
+                        .help("Interactive: load once, then type a prefix per line to reprint the policy matrix (blank/`q` quits)."),
                 ),
         )
         .subcommand(position_subcmd("definition", "Go to definition at a specific position"))
@@ -183,7 +189,8 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
                 .get_many::<String>("prefixes")
                 .map(|v| v.cloned().collect())
                 .unwrap_or_default();
-            if prefixes.is_empty() {
+            let repl = m.get_flag("repl");
+            if prefixes.is_empty() && !repl {
                 cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"))
             } else {
                 let policies = match m.get_one::<String>("policies") {
@@ -204,7 +211,11 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
                     .get_one::<String>("top")
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(10);
-                cli::bone_lsp::completion_matrix(&file, line, col, &prefixes, &policies, top)
+                if repl {
+                    cli::bone_lsp::completion_repl(&file, line, col, &policies, top)
+                } else {
+                    cli::bone_lsp::completion_matrix(&file, line, col, &prefixes, &policies, top)
+                }
             }
         }
         Some(("definition", m)) => {
