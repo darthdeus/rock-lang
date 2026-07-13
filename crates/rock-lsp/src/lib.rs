@@ -857,7 +857,7 @@ fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
                         // conventional ctags cadence -- no per-keystroke cost).
                         // Sourced from the live bone session, so it stays fresh
                         // even in pure-edit sessions that never run `rock compile`.
-                        regenerate_ctags(&workspace, &uri, "save");
+                        regenerate_all_ctags(&workspace, "save");
                     }
 
                     "textDocument/didOpen" => {
@@ -1004,16 +1004,35 @@ fn main_loop(connection: Connection, params: serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// Regenerate the project's workspace-wide `.rock.tags` from the live bone
-/// session. Best-effort: a write failure is logged, never propagated -- ctags
-/// must not break editing. Called on didOpen (full build / restart) and didSave
-/// (refresh).
+/// Regenerate the `.rock.tags` for the project root containing `uri` from the
+/// live bone session. Used on didOpen: the first open batch-loads that root's
+/// whole compilation unit, so its tags are complete after this one write, and a
+/// restart (which re-opens every buffer) refreshes each open root exactly once
+/// via its own didOpen -- no cross-root fan-out here, which would rewrite every
+/// root once per reopened buffer. Best-effort: a failure is logged, never
+/// propagated -- ctags must not break editing.
 fn regenerate_ctags(workspace: &LspWorkspace, uri: &Uri, when: &str) {
     let uri_s = uri.as_str();
     let file_path = uri_s.strip_prefix("file://").unwrap_or(uri_s);
     match workspace.bone.write_ctags(file_path) {
         Ok(n) => log::debug!("wrote .rock.tags on {when} ({n} symbols)"),
         Err(e) => log::warn!("ctags: failed to write .rock.tags: {e}"),
+    }
+}
+
+/// Regenerate `.rock.tags` for EVERY open project root, not just the edited
+/// file's -- an editor with several packages open (e.g. `mag` + `stone`) must
+/// keep all their tag files fresh so a jump from one resolves the other, even
+/// while editing only one. Used on didSave: the save is the point a sibling
+/// root's stale tags should catch up. `write_tags_file` skips roots whose bytes
+/// are unchanged, so the untouched siblings cost a compare, not a rewrite.
+/// Best-effort: a failure is logged per root, never propagated.
+fn regenerate_all_ctags(workspace: &LspWorkspace, when: &str) {
+    for (root, res) in workspace.bone.write_all_ctags() {
+        match res {
+            Ok(n) => log::debug!("wrote {}/.rock.tags on {when} ({n} symbols)", root.display()),
+            Err(e) => log::warn!("ctags: failed to write {}/.rock.tags: {e}", root.display()),
+        }
     }
 }
 

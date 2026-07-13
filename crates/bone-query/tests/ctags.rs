@@ -220,6 +220,82 @@ fn write_ctags_emits_macros() {
 }
 
 #[test]
+fn write_all_ctags_regenerates_every_open_root() {
+    // Two separate stick projects, a file open in each. A save in ONE must
+    // refresh BOTH `.rock.tags` (the editor may hold a stale sibling from a
+    // prior session) -- `write_all_ctags` regenerates every loaded root, not
+    // just the edited file's root.
+    let dir = tempfile::tempdir().unwrap();
+    let pa = dir.path().join("alpha");
+    let pb = dir.path().join("beta");
+    std::fs::create_dir_all(&pa).unwrap();
+    std::fs::create_dir_all(&pb).unwrap();
+    std::fs::write(pa.join("stick.toml"), "[package]\nname = \"alpha\"\n").unwrap();
+    std::fs::write(pb.join("stick.toml"), "[package]\nname = \"beta\"\n").unwrap();
+    std::fs::write(pa.join("a.rock"), "fn alpha_fn() -> int { 1 }\n").unwrap();
+    std::fs::write(pb.join("b.rock"), "fn beta_fn() -> int { 2 }\n").unwrap();
+
+    let a = pa.join("a.rock").to_string_lossy().to_string();
+    let b = pb.join("b.rock").to_string_lossy().to_string();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&a, "fn alpha_fn() -> int { 1 }\n".to_string());
+    bone.update(&b, "fn beta_fn() -> int { 2 }\n".to_string());
+
+    // Pre-seed both tag files with stale junk to prove they get rewritten.
+    std::fs::write(pa.join(".rock.tags"), "STALE\n").unwrap();
+    std::fs::write(pb.join(".rock.tags"), "STALE\n").unwrap();
+
+    // One call, no path argument: regenerate every open root.
+    let results = bone.write_all_ctags();
+    assert_eq!(results.len(), 2, "expected both roots regenerated, got {results:?}");
+    for (root, res) in &results {
+        res.as_ref().unwrap_or_else(|e| panic!("write failed for {}: {e}", root.display()));
+    }
+
+    let tags_a = std::fs::read_to_string(pa.join(".rock.tags")).unwrap();
+    let tags_b = std::fs::read_to_string(pb.join(".rock.tags")).unwrap();
+    assert!(tags_a.lines().any(|l| l.starts_with("alpha_fn\t")), "alpha root not refreshed:\n{tags_a}");
+    assert!(tags_b.lines().any(|l| l.starts_with("beta_fn\t")), "beta root not refreshed:\n{tags_b}");
+    assert!(!tags_a.contains("STALE"), "alpha tags still stale:\n{tags_a}");
+    assert!(!tags_b.contains("STALE"), "beta tags still stale:\n{tags_b}");
+}
+
+#[test]
+fn write_all_ctags_skips_standalone_non_stick_roots() {
+    // A real stick project plus a standalone scratch `.rock` opened in the same
+    // session (no stick.toml -- its root falls back to the parent dir). The
+    // all-roots save sweep must write ONLY the stick project's tags, never
+    // scatter a `.rock.tags` into the scratch file's parent (`~`/`/tmp` in real
+    // use).
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("stick.toml"), "[package]\nname = \"proj\"\n").unwrap();
+    std::fs::write(proj.join("a.rock"), "fn alpha_fn() -> int { 1 }\n").unwrap();
+    // Standalone scratch file directly under the tempdir (no stick.toml here).
+    std::fs::write(dir.path().join("scratch.rock"), "fn scratch_fn() -> int { 9 }\n").unwrap();
+
+    let a = proj.join("a.rock").to_string_lossy().to_string();
+    let scratch = dir.path().join("scratch.rock").to_string_lossy().to_string();
+    let mut bone = BoneWorkspace::new();
+    bone.update(&a, "fn alpha_fn() -> int { 1 }\n".to_string());
+    bone.update(&scratch, "fn scratch_fn() -> int { 9 }\n".to_string());
+
+    let results = bone.write_all_ctags();
+    assert_eq!(results.len(), 1, "only the stick root should be swept, got {results:?}");
+    assert!(
+        results[0].0.ends_with("proj"),
+        "the swept root should be the stick project, got {:?}",
+        results[0].0
+    );
+    assert!(proj.join(".rock.tags").exists(), "stick project tags should be written");
+    assert!(
+        !dir.path().join(".rock.tags").exists(),
+        "no .rock.tags should be scattered into the scratch file's non-stick parent"
+    );
+}
+
+#[test]
 fn write_ctags_covers_whole_project_not_just_opened_file() {
     // A stick.toml project with two files. Opening ONE (a single `update`, which
     // batch-loads the project) must still tag symbols from BOTH -- the ctags file
