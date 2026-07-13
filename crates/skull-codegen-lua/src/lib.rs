@@ -312,14 +312,14 @@ pub fn emit_function(
 /// synthetic functions with an already-final name (a global-initializer fn).
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
 pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) -> String {
-    emit_named_framed(ws, ctx, name, func, None, None)
+    emit_named_framed(ws, ctx, name, func, None, None, None)
 }
 
 /// P2.6/P3 (docs/closure-env-records-plan.md): the plan for hoisting lambda
 /// bodies to sibling top-level fns. EVERY live lambda hoists to
 /// `function <name>__lambda<k>(...) ... end` — including under a coroutine
 /// frame (the step emission), where frame captures collapse to `s`
-/// (docs/coroutine-frame-lambda-plan.md); only hook/defer clone emissions
+/// (docs/coroutine-frame-lambda-plan.md); only hook/defer emissions
 /// (`FrameCtx::hoist_lambdas == false`) keep the inline-closure path:
 ///   - **capture-free** (`captures[c]` empty): body `(<params>)`, referenced by
 ///     bare global name at the creation site — a raw fn value, no record.
@@ -443,7 +443,11 @@ fn non_dominating_by_value_captures(
         }
     }
     // Cache idoms per parent-scope entry (small regions; recomputed at most once
-    // per distinct parent).
+    // per distinct parent). Built LAZILY at the first cross-block dominance query:
+    // most lambda scopes filter out every capture below (boxed / loop-binding /
+    // frame / transitive / multi-write) or resolve same-block by inst position,
+    // so the classic fixpoint is never needed for them -- computing it up front
+    // per parent was pure waste.
     let mut idoms: HashMap<Idx<Block>, HashMap<Idx<Block>, Idx<Block>>> = HashMap::default();
     for s in &tree.scopes {
         let Some(lid) = s.lambda else { continue };
@@ -452,7 +456,6 @@ fn non_dominating_by_value_captures(
         let sid = tree.scope_of_block(cblock); // sanity: create block is in the parent region
         debug_assert_eq!(sid, Some(parent), "a lambda's creation block lies in its parent scope");
         let parent_entry = tree.scopes[parent].entry;
-        let idom = idoms.entry(parent_entry).or_insert_with(|| dominators(func, parent_entry));
         // captures of THIS scope owned by the parent: read directly at cblock.
         let scope_id = (0..tree.scopes.len()).find(|&i| tree.scopes[i].lambda == Some(lid)).unwrap();
         for &c in &own.captures[scope_id] {
@@ -481,6 +484,9 @@ fn non_dominating_by_value_captures(
                     .expect("the creating Inst::Lambda lives in its creation block");
                 wpos < cpos
             } else {
+                let idom = idoms
+                    .entry(parent_entry)
+                    .or_insert_with(|| dominators(func, parent_entry));
                 dominates(idom, wblock, cblock)
             };
             if !write_dominates {
@@ -581,7 +587,7 @@ fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<Block
 /// lambda-internal cell-count edits (the P2 finding in
 /// docs/coroutine-frame-lambda-plan.md). `hoist_lambdas` is true only for the
 /// step emission: lambdas hoist like non-frame ones, with frame captures
-/// collapsing to `s` (P1); the hook/defer clone emissions keep it false
+/// collapsing to `s` (P1); the hook/defer emissions keep it false
 /// (mechanism 3, an all-cells frame with no plan).
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
@@ -612,9 +618,19 @@ pub fn emit_named_framed(
     // The coroutine transform already built the scope tree + ownership (once, for
     // frame membership) and threads them here so the step's hoist plan reuses them
     // instead of rebuilding on the post-rewrite CFG. `None` for ordinary fns and
-    // hook/defer clones (which rebuild, or take the no-hoist path).
+    // hook/defer bodies (which rebuild, or take the no-hoist path).
     precomputed: Option<(&scope::ScopeTree, &scope::Ownership)>,
+    // A hook/defer body is a detached region of the co-fn step: it lives in the
+    // step's own inst/cell/block arena, entered at its own block with `params =
+    // [s]`. This override renders exactly that region of the SHARED `func` instead
+    // of cloning the whole `MirFunc` just to swap `entry`/`params` (the clone
+    // deep-copied the entire arena per hook/defer). `None` uses `func`'s own
+    // entry/params. Everything else reads the shared arena, so a frame-field cell
+    // renders byte-identically to the pre-elision clone.
+    entry_override: Option<(Idx<Block>, &[Idx<Cell>])>,
 ) -> String {
+    let entry = entry_override.map_or_else(|| func.entry(), |(e, _)| e);
+    let params = entry_override.map_or(func.params.as_slice(), |(_, p)| p);
     let lambda_params = collect_lambda_params(func);
     // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
     // a coroutine `__step` keeps raw `c<raw>` names (frame-field naming depends on
@@ -637,7 +653,7 @@ pub fn emit_named_framed(
     // The scope analysis also drives box classification. All need the same tree,
     // so build it once. Under a frame (`hoist_lambdas`, the step emission) the
     // same plan applies with frame captures collapsing to `s` and frame cells
-    // never boxing (the frame table IS the box); hook/defer clone emissions
+    // never boxing (the frame table IS the box); hook/defer emissions
     // (`!hoist_lambdas`) keep the pre-P1 inline path.
     let hoist_ok = frame.is_none_or(|f| f.hoist_lambdas);
     // Built here for an ordinary fn; reused from the coroutine transform for the
@@ -670,7 +686,7 @@ pub fn emit_named_framed(
     let mut out = String::new();
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, func, func.entry(), &func.params, &lambda_params, true, scope::ROOT, plan_ref, None, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
+    render_scope(ws, ctx, func, entry, params, &lambda_params, true, scope::ROOT, plan_ref, None, frame, &cell_colors, &boxed, &hoist, &hoist_names, &mut out);
     out.push('\n');
     // Append each lambda body as a sibling top-level fn in THIS chunk (the
     // const-hoist precedent -- an overlay body-edit carries them). Referenced by
@@ -1500,7 +1516,7 @@ struct Emitter<'a> {
     /// Hoist plan (P2.6/P3): a hoisted `Inst::Lambda` in `hoisted_name` renders as
     /// a bare global-name reference (capture-free) or a `setmetatable` env record
     /// (capturing) instead of an inline closure. `None` for lambda-free fns and
-    /// hook/defer clone emissions (whose lambdas stay inline closures).
+    /// hook/defer emissions (whose lambdas stay inline closures).
     plan: Option<&'a HoistPlan>,
     /// The env-record context when THIS scope is a hoisted capturing lambda body:
     /// its captures render `e.c<color>`. `None` for the enclosing fn, capture-free
@@ -1916,7 +1932,7 @@ impl Emitter<'_> {
                     return;
                 }
                 // Inline `function(<params>) <body> end` -- ONLY in a hook/defer
-                // clone emission (`hoist_lambdas == false`; every other live
+                // body emission (`hoist_lambdas == false`; every other live
                 // lambda hoists). Captured cells are frame fields (`c<s>.c<N>`)
                 // handled by the all-cells aux FrameCtx; the body declares
                 // nothing (`is_top = false`), so no env/snapshot is needed.

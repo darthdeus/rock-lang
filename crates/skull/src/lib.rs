@@ -1683,6 +1683,9 @@ mod tests {
                    last\n\
                    }";
         let lua = emit(src);
+        // Naive substring over the whole emitted module: any `for c` anywhere
+        // (another fn's counted loop, a stray comment) would trip it, so keep
+        // this program a single fn with no counted loop of its own.
         assert!(
             !lua.contains("for c"),
             "counter-reassigning loop must NOT become a for (slot stored >2x), got:\n{lua}"

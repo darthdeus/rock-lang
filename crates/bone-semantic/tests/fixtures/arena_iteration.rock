@@ -1,5 +1,5 @@
 //! Iterating an `Arena<T>` yields `(Entity<T>, T)` via the iter/next protocol
-//! (stdlib `ArenaIter`; `next -> (bool, Entity<T>, T)`, elem = the tuple tail).
+//! (stdlib `ArenaPairIter`; `next -> (bool, (Entity<T>, T))`, elem = the tuple).
 //! `for (e, item) in arena` destructures the pair; `for pair in arena` binds
 //! the whole tuple. These fixtures compile stdlib-free, so each section
 //! carries a local protocol; the `next` bodies are type-only stubs

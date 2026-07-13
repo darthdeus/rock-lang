@@ -51,7 +51,9 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
 /// the rock identifier; the emitted definition is mangled
 /// (`hot__int_int_int_ret_float`), so match the `function <name>` prefix. The
 /// first top-level `\nend\n` closes the function (nested blocks are indented
-/// `end`s, never column-0).
+/// `end`s, never column-0). A hoisted def (`<name>__lambda0`) shares the
+/// `function <name>` prefix, but the enclosing `<name>` is emitted first, so
+/// `.find` returns the enclosing body -- not the hoist.
 pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     let head = format!("function {name}");
     let start = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
