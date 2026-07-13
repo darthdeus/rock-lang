@@ -443,6 +443,11 @@ pub struct Args {
 
     pub app_args: Vec<String>,
 
+    /// Launch the game's luajit with `-jv` (verbose trace log to stderr).
+    /// Equivalent to setting `STONE_JV=1`; applies to any command that
+    /// runs the game (`stone`, `frame`, `run`, `perf`, `sim`).
+    pub jv: bool,
+
     /// For `rock test`: re-run tests on every `.rock` file change in
     /// the given paths. Watches the same paths passed to `rock test`
     /// (defaults to `tests/`). Compilation/test failures don't abort
@@ -556,6 +561,8 @@ impl Args {
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua) or `bone` (type-check only, no codegen). Can also be set via ROCK_BACKEND=bone|skull."))
+            .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
+                .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
                 .help("Arguments to pass through to the Rock app (everything after --)"))
     }
@@ -598,6 +605,7 @@ impl Args {
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
             app_args: many_str("app_args"),
+            jv: m.get_flag("jv"),
             watch: m.get_flag("watch"),
             package: m.get_flag("package"),
             // Backend selection. An explicit `--backend` flag wins; otherwise an

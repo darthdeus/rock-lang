@@ -339,6 +339,13 @@ pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::
 pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
     let luajit_path = luajit_path();
     let mut cmd = std::process::Command::new(&luajit_path);
+    // STONE_JV=1 (set directly or via the `--jv` CLI flag) turns on LuaJIT's
+    // verbose trace log. `-j*` flags are only honored BEFORE the script name --
+    // anything after lua_file is passed to the game as arg[] -- so it leads.
+    // jit.v resolves from share/luajit-2.1/ via the LUA_PATH set below.
+    if std::env::var("STONE_JV").as_deref() == Ok("1") {
+        cmd.arg("-jv");
+    }
     cmd.arg(lua_file)
         .env("LUA_PATH", lua_path_value())
         .env(lib_path_var(), lib_path_with_inherited());
@@ -618,5 +625,36 @@ mod tests {
         assert!(err.contains("ambiguous project `dup`"), "unexpected: {err}");
         assert!(err.contains("games/dup") && err.contains("demos/dup"),
             "should list both candidates: {err}");
+    }
+
+    #[test]
+    fn stone_jv_env_inserts_jv_before_script() {
+        use std::ffi::OsStr;
+        let lua = std::path::Path::new("tmp/main.lua");
+
+        // SAFETY: nextest runs each test in its own process, so mutating this
+        // process-global env var can't race a sibling test. Restored below.
+        let prev = std::env::var_os("STONE_JV");
+
+        unsafe { std::env::set_var("STONE_JV", "1") };
+        let cmd = build_luajit_command(lua, &[]);
+        let args: Vec<_> = cmd.get_args().map(OsStr::to_os_string).collect();
+        let jv = args.iter().position(|a| a == "-jv");
+        let script = args.iter().position(|a| a == OsStr::new("tmp/main.lua"));
+        assert!(jv.is_some(), "STONE_JV=1 should insert -jv; args={args:?}");
+        assert!(script.is_some(), "script arg present; args={args:?}");
+        // luajit only honors -j* flags BEFORE the script name.
+        assert!(jv.unwrap() < script.unwrap(), "-jv must precede the script; args={args:?}");
+
+        unsafe { std::env::set_var("STONE_JV", "0") };
+        let cmd0 = build_luajit_command(lua, &[]);
+        assert!(!cmd0.get_args().any(|a| a == "-jv"), "STONE_JV=0 must not insert -jv");
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("STONE_JV", v),
+                None => std::env::remove_var("STONE_JV"),
+            }
+        }
     }
 }
