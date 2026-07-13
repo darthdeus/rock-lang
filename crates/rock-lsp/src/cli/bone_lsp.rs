@@ -317,43 +317,78 @@ fn completion_repl_lines(mut probe: MatrixProbe) -> Result<()> {
     Ok(())
 }
 
-/// Restores cooked terminal mode on drop -- so a panic mid-loop can't leave the
-/// user's shell in raw mode.
+/// Restores cooked mode + cursor on drop -- so a panic mid-loop can't leave the
+/// user's shell in raw mode with a hidden cursor.
 struct RawGuard;
 impl Drop for RawGuard {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
         let _ = crossterm::terminal::disable_raw_mode();
     }
 }
 
-/// Per-keystroke TTY loop: maintain an edit buffer, and on every key redraw the
-/// whole matrix for the current prefix in place.
+/// Per-keystroke TTY loop: the current prefix's matrix is live at the top;
+/// Enter commits it to a unique history stacked below (newest first, no dupes).
 fn completion_repl_raw(mut probe: MatrixProbe) -> Result<()> {
     use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
-    use crossterm::terminal::{Clear, ClearType};
-    use crossterm::{cursor::MoveTo, execute};
+    use crossterm::terminal::{size, Clear, ClearType};
+    use crossterm::{cursor::MoveTo, queue};
     use std::io::Write;
 
     crossterm::terminal::enable_raw_mode()?;
     let _guard = RawGuard;
-    let mut out = std::io::stdout();
+    queue!(std::io::stdout(), crossterm::cursor::Hide)?;
     let mut prefix = String::new();
+    // Committed queries, newest first, each with its precomputed matrix block.
+    // Results are fixed for the session, so we render a query once at commit.
+    let mut history: Vec<(String, Vec<String>)> = Vec::new();
 
-    let draw = |out: &mut std::io::Stdout, probe: &mut MatrixProbe, prefix: &str| -> Result<()> {
-        execute!(out, Clear(ClearType::All), MoveTo(0, 0))?;
-        // Raw mode: bare `\n` doesn't return the carriage, so emit CRLF.
-        let mut body = format!("{}\r\n", probe.header());
-        body.push_str("live -- type to edit prefix; Esc / Ctrl-C / Ctrl-D quit\r\n\r\n");
-        body.push_str(&format!("prefix> {prefix}\r\n\r\n"));
+    // Build the full frame as logical lines, then paint flicker-free.
+    let frame = |probe: &mut MatrixProbe, prefix: &str, history: &[(String, Vec<String>)]| {
+        let mut lines = vec![
+            probe.header(),
+            "live -- type to edit; Enter saves to history; Esc / Ctrl-C / Ctrl-D quit".to_string(),
+            String::new(),
+            format!("query> {prefix}"),
+        ];
         if !prefix.is_empty() {
-            body.push_str(&probe.render(prefix).replace('\n', "\r\n"));
+            lines.extend(probe.render_lines(prefix));
         }
-        out.write_all(body.as_bytes())?;
+        if !history.is_empty() {
+            lines.push(String::new());
+            lines.push("--- history (unique, newest first) ---".to_string());
+            for (_, block) in history {
+                lines.push(String::new());
+                lines.extend(block.iter().cloned());
+            }
+        }
+        lines
+    };
+
+    let paint = |lines: &[String]| -> Result<()> {
+        // Unknown or zero height (e.g. a pty with no winsize) must NOT clamp to
+        // zero rows -- treat it as unbounded so the frame still renders.
+        let rows = match size() {
+            Ok((_, h)) if h > 0 => h as usize,
+            _ => usize::MAX,
+        };
+        let mut out = std::io::stdout();
+        let mut buf = Vec::new();
+        queue!(buf, MoveTo(0, 0))?;
+        // Clear each line to EOL as we overwrite it (no full-screen wipe = no
+        // flash), then clear anything left below the new frame.
+        for line in lines.iter().take(rows) {
+            buf.extend_from_slice(line.as_bytes());
+            queue!(buf, Clear(ClearType::UntilNewLine))?;
+            buf.extend_from_slice(b"\r\n");
+        }
+        queue!(buf, Clear(ClearType::FromCursorDown))?;
+        out.write_all(&buf)?;
         out.flush()?;
         Ok(())
     };
 
-    draw(&mut out, &mut probe, &prefix)?;
+    paint(&frame(&mut probe, &prefix, &history))?;
     loop {
         let Event::Key(k) = read()? else { continue };
         if k.kind != KeyEventKind::Press {
@@ -363,13 +398,22 @@ fn completion_repl_raw(mut probe: MatrixProbe) -> Result<()> {
         match k.code {
             KeyCode::Esc => break,
             KeyCode::Char('c' | 'd') if ctrl => break,
+            KeyCode::Enter => {
+                if !prefix.is_empty() {
+                    // Unique + move-to-front: a re-query bumps its old entry
+                    // instead of stacking a duplicate.
+                    history.retain(|(p, _)| p != &prefix);
+                    let block = probe.render_lines(&prefix);
+                    history.insert(0, (std::mem::take(&mut prefix), block));
+                }
+            }
             KeyCode::Backspace => {
                 prefix.pop();
             }
             KeyCode::Char(c) if !c.is_control() => prefix.push(c),
-            _ => continue, // Enter, arrows, etc. -- no redraw needed
+            _ => continue, // arrows etc. -- no state change
         }
-        draw(&mut out, &mut probe, &prefix)?;
+        paint(&frame(&mut probe, &prefix, &history))?;
     }
     Ok(())
 }
@@ -435,8 +479,14 @@ impl MatrixProbe {
     }
 
     /// Splice `prefix` at the cursor, run completion under each policy, and
-    /// format the rank x policy matrix (band-tagged cells).
+    /// format the rank x policy matrix (band-tagged cells) as one string.
     fn render(&mut self, prefix: &str) -> String {
+        self.render_lines(prefix).join("\n")
+    }
+
+    /// The matrix as logical lines (no trailing newlines) -- the raw TTY painter
+    /// needs lines to clear each to EOL for flicker-free redraw.
+    fn render_lines(&mut self, prefix: &str) -> Vec<String> {
         let spliced = format!("{}{}{}", self.head, prefix, self.tail);
         let new_off = self.head.len() + prefix.len();
         let pos = bone_query::offset_to_position(&spliced, new_off);
@@ -465,18 +515,18 @@ impl MatrixProbe {
         bone_query::set_match_policy(bone_query::MatchPolicy::default_policy());
 
         let width = 46usize;
-        let mut out = format!(
-            "=== prefix {:?}  (cursor -> {}:{})\n",
+        let mut lines = vec![format!(
+            "=== prefix {:?}  (cursor -> {}:{})",
             prefix,
             pos.line + 1,
             pos.character + 1
-        );
+        )];
         let hdr: Vec<String> = self
             .policies
             .iter()
             .map(|p| format!("{:<width$}", p.name(), width = width))
             .collect();
-        out.push_str(&format!("     {}\n", hdr.join("")));
+        lines.push(format!("     {}", hdr.join("")));
         let rows = cols.iter().map(Vec::len).max().unwrap_or(0);
         for r in 0..rows {
             let cells: Vec<String> = cols
@@ -487,9 +537,9 @@ impl MatrixProbe {
                     format!("{s:<width$}", width = width)
                 })
                 .collect();
-            out.push_str(&format!("{:>3}. {}\n", r + 1, cells.join("")));
+            lines.push(format!("{:>3}. {}", r + 1, cells.join("")));
         }
-        out
+        lines
     }
 }
 
