@@ -1,8 +1,8 @@
 // Pure-Rock JSON library.
 //
 // JsonValue is the typed surface; json_encode / json_decode are the entry
-// points. No inline(lua) — portable across Rock backends. Part of the
-// Phase-0 effort for the CLR migration (see docs/clr-backend-plan.md).
+// points. No inline(lua) — portable across Rock backends. Canonical example of
+// a Layer-2 pure-Rock stdlib module (see docs/stdlib-multibackend-plan.md).
 
 enum JsonValue {
     Null,
