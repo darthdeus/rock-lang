@@ -247,21 +247,23 @@ fn function_completion_carries_an_inline_signature() {
     // A function-name completion shows its signature: the full `fn ..` in the
     // detail panel, and the concise `(params) -> ret` inline (labelDetails) next
     // to the name in the popup.
-    let src = "fn distance(a: int, b: int) -> int { a }\nfn run() {\n  dist\n}\n";
+    // `separation`, not a stdlib UFCS method name (`distance`/`dot`/... now
+    // live in stdlib/math_types.rock), so only the local fn completes here.
+    let src = "fn separation(a: int, b: int) -> int { a }\nfn run() {\n  sep\n}\n";
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     let item = bone
-        .completion(PATH, Position::new(2, 6))
+        .completion(PATH, Position::new(2, 5))
         .into_iter()
-        .find(|c| c.label == "distance")
-        .expect("`distance` should be completed");
+        .find(|c| c.label == "separation")
+        .expect("`separation` should be completed");
     assert_eq!(
         item.detail.as_deref(),
-        Some("fn distance(a: int, b: int) -> int"),
+        Some("fn separation(a: int, b: int) -> int"),
         "detail panel = full signature"
     );
-    // Accepts as a snippet that inserts `distance()` with the cursor inside.
-    assert_eq!(item.insert_text.as_deref(), Some("distance($0)"));
+    // Accepts as a snippet that inserts `separation()` with the cursor inside.
+    assert_eq!(item.insert_text.as_deref(), Some("separation($0)"));
     assert_eq!(item.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
     let inline = item.label_details.and_then(|d| d.detail);
     assert_eq!(

@@ -1,0 +1,109 @@
+// Tier-0 math value types: Vec2/Vec3/Vec4 and their pure algebra. The
+// keystone type family all backends share (game math and shader math).
+// Relocated from stone/engine/math/ so the stdlib owns them; the v()/zero()
+// constructor helpers and the fns routed through them stay in the engine for
+// now (they collide with test-fixture `v`/`zero` overloads) -- see
+// docs/stdlib-multibackend-plan.md backlog item 3.
+
+value Vec2 {
+    x: float,
+    y: float,
+}
+
+value Vec3 {
+    x: float,
+    y: float,
+    z: float,
+}
+
+value Vec4 {
+    x: float,
+    y: float,
+    z: float,
+    w: float,
+}
+
+@pure operator +(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+@pure operator +(a: Vec2, b: float) -> Vec2 {
+    return Vec2 { x: a.x + b, y: a.y + b }
+}
+
+@pure operator -(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+@pure operator *(a: Vec2, b: float) -> Vec2 {
+    return Vec2 { x: a.x * b, y: a.y * b }
+}
+
+@pure operator *(a: float, b: Vec2) -> Vec2 {
+    return Vec2 { x: a * b.x, y: a * b.y }
+}
+
+@pure operator *(a: Vec2, b: int) -> Vec2 {
+    return Vec2 { x: int_to_float(b) * a.x, y: int_to_float(b) * a.y }
+}
+
+@pure operator *(a: int, b: Vec2) -> Vec2 {
+    return Vec2 { x: int_to_float(a) * b.x, y: int_to_float(a) * b.y }
+}
+
+@pure operator *(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x * b.x, y: a.y * b.y }
+}
+
+@pure operator /(a: Vec2, b: float) -> Vec2 {
+    return Vec2 { x: a.x / b, y: a.y / b }
+}
+
+@pure operator /(a: Vec2, b: int) -> Vec2 {
+    return Vec2 { x: a.x / int_to_float(b), y: a.y / int_to_float(b) }
+}
+
+@pure fn vec2_distance(a: Vec2, b: Vec2) -> float {
+    let dx = a.x - b.x
+    let dy = a.y - b.y
+
+    return sqrt(dx * dx + dy * dy)
+}
+
+@pure fn vec2_rotated(v: Vec2, angle: float) -> Vec2 {
+    let cos_a = cos(angle)
+    let sin_a = sin(angle)
+
+    return Vec2 {
+        x: v.x * cos_a - v.y * sin_a,
+        y: v.x * sin_a + v.y * cos_a
+    }
+}
+
+@pure fn vec2_angle(v: Vec2) -> float {
+    return atan2(v.y, v.x)
+}
+
+@pure fn vec2_neg(v: Vec2) -> Vec2 {
+    return Vec2 { x: -v.x, y: -v.y }
+}
+
+@pure fn vec2_dot(a: Vec2, b: Vec2) -> float {
+    return a.x * b.x + a.y * b.y
+}
+
+@pure fn vec2_length(v: Vec2) -> float {
+    return (v.x * v.x + v.y * v.y).sqrt()
+}
+
+// Bare-name UFCS wrappers for vec2_*.
+@pure fn Vec2.distance(a, b: Vec2) -> float { return vec2_distance(a, b) }
+@pure fn Vec2.rotated(v, angle: float) -> Vec2 { return vec2_rotated(v, angle) }
+@pure fn Vec2.angle(v) -> float { return vec2_angle(v) }
+@pure fn Vec2.neg(v) -> Vec2 { return vec2_neg(v) }
+@pure fn Vec2.dot(a, b: Vec2) -> float { return vec2_dot(a, b) }
+@pure fn Vec2.length(v) -> float { return vec2_length(v) }
+
+fn Vec2.to_array(v) -> [float] {
+    return [v.x, v.y]
+}
