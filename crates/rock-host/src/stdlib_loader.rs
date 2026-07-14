@@ -9,8 +9,8 @@ pub struct StdlibFile {
 }
 
 /// The stdlib files, in load order. `unified.rock` is the core stdlib;
-/// `json.rock` builds on it.
-const STDLIB_NAMES: &[&str] = &["unified.rock", "json.rock"];
+/// `strings.rock` (portable string algorithms) and `json.rock` build on it.
+const STDLIB_NAMES: &[&str] = &["unified.rock", "strings.rock", "json.rock"];
 
 /// Directory the stdlib `.rock` files are read from at RUNTIME (not embedded).
 /// `ROCK_STDLIB_DIR` overrides; otherwise it's the repo's `stdlib/`, resolved

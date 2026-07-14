@@ -243,7 +243,7 @@ fn encode_string(s: string) -> string {
     let n = s.len()
     let i = 0
     while i < n {
-        let b = s.byte(i)
+        let b = s.unit_at(i)
         if b == 34 {
             parts.push("\\\"")
         } else if b == 92 {
@@ -262,7 +262,7 @@ fn encode_string(s: string) -> string {
             parts.push("\\u")
             parts.push(hex4(b))
         } else {
-            parts.push(s.char_at(i))
+            parts.push(s.substring(i, i + 1))
         }
         i = i + 1
     }
@@ -272,10 +272,14 @@ fn encode_string(s: string) -> string {
 
 fn hex4(n: int) -> string {
     let digits = "0123456789abcdef"
-    let d0 = digits.char_at((n ./ 4096) % 16)
-    let d1 = digits.char_at((n ./ 256) % 16)
-    let d2 = digits.char_at((n ./ 16) % 16)
-    let d3 = digits.char_at(n % 16)
+    let i0 = (n ./ 4096) % 16
+    let i1 = (n ./ 256) % 16
+    let i2 = (n ./ 16) % 16
+    let i3 = n % 16
+    let d0 = digits.substring(i0, i0 + 1)
+    let d1 = digits.substring(i1, i1 + 1)
+    let d2 = digits.substring(i2, i2 + 1)
+    let d3 = digits.substring(i3, i3 + 1)
     return "{d0}{d1}{d2}{d3}"
 }
 
@@ -314,7 +318,7 @@ fn json_decode(s: string) -> JsonValue? {
 
 fn parse_skip_ws(p: JsonParser) {
     while p.pos < p.len {
-        let b = p.src.byte(p.pos)
+        let b = p.src.unit_at(p.pos)
         if b == 32 || b == 9 || b == 10 || b == 13 {
             p.pos = p.pos + 1
         } else {
@@ -329,7 +333,7 @@ fn parse_value(p: JsonParser) -> JsonValue {
         p.ok = false
         return JsonValue::Null
     }
-    let b = p.src.byte(p.pos)
+    let b = p.src.unit_at(p.pos)
     if b == 110 { return parse_keyword(p, "null", JsonValue::Null) }
     if b == 116 { return parse_keyword(p, "true", JsonValue::Bool(true)) }
     if b == 102 { return parse_keyword(p, "false", JsonValue::Bool(false)) }
@@ -368,14 +372,14 @@ fn parse_string_value(p: JsonParser) -> JsonValue {
 // Consumes a JSON string literal starting at p.pos (which must point at the
 // opening quote). On error sets p.ok = false and returns null.
 fn parse_string_raw(p: JsonParser) -> string? {
-    if p.src.byte(p.pos) != 34 {
+    if p.src.unit_at(p.pos) != 34 {
         p.ok = false
         return null
     }
     p.pos = p.pos + 1
     let parts: [string] = []
     while p.pos < p.len {
-        let b = p.src.byte(p.pos)
+        let b = p.src.unit_at(p.pos)
         if b == 34 {
             p.pos = p.pos + 1
             return join(parts, "")
@@ -386,7 +390,7 @@ fn parse_string_raw(p: JsonParser) -> string? {
                 p.ok = false
                 return null
             }
-            let esc = p.src.byte(p.pos)
+            let esc = p.src.unit_at(p.pos)
             p.pos = p.pos + 1
             if esc == 34 { parts.push("\"") }
             else if esc == 92 { parts.push("\\") }
@@ -410,7 +414,7 @@ fn parse_string_raw(p: JsonParser) -> string? {
                 }
                 let cp = hi.unwrap()
                 if cp >= 0xD800 && cp <= 0xDBFF {
-                    if p.pos + 6 > p.len || p.src.byte(p.pos) != 92 || p.src.byte(p.pos + 1) != 117 {
+                    if p.pos + 6 > p.len || p.src.unit_at(p.pos) != 92 || p.src.unit_at(p.pos + 1) != 117 {
                         p.ok = false
                         return null
                     }
@@ -433,7 +437,7 @@ fn parse_string_raw(p: JsonParser) -> string? {
                 return null
             }
         } else {
-            parts.push(p.src.char_at(p.pos))
+            parts.push(p.src.substring(p.pos, p.pos + 1))
             p.pos = p.pos + 1
         }
     }
@@ -446,7 +450,7 @@ fn parse_hex4(s: string) -> int? {
     let result = 0
     let i = 0
     while i < 4 {
-        let b = s.byte(i)
+        let b = s.unit_at(i)
         let d = 0
         if b >= 48 && b <= 57 {
             d = b - 48
@@ -466,22 +470,22 @@ fn parse_hex4(s: string) -> int? {
 fn parse_number(p: JsonParser) -> JsonValue {
     let start = p.pos
     let is_float = false
-    if p.src.byte(p.pos) == 45 {
+    if p.src.unit_at(p.pos) == 45 {
         p.pos = p.pos + 1
     }
     while p.pos < p.len {
-        let b = p.src.byte(p.pos)
+        let b = p.src.unit_at(p.pos)
         if b >= 48 && b <= 57 {
             p.pos = p.pos + 1
         } else {
             break
         }
     }
-    if p.pos < p.len && p.src.byte(p.pos) == 46 {
+    if p.pos < p.len && p.src.unit_at(p.pos) == 46 {
         is_float = true
         p.pos = p.pos + 1
         while p.pos < p.len {
-            let b = p.src.byte(p.pos)
+            let b = p.src.unit_at(p.pos)
             if b >= 48 && b <= 57 {
                 p.pos = p.pos + 1
             } else {
@@ -490,18 +494,18 @@ fn parse_number(p: JsonParser) -> JsonValue {
         }
     }
     if p.pos < p.len {
-        let b = p.src.byte(p.pos)
+        let b = p.src.unit_at(p.pos)
         if b == 101 || b == 69 {
             is_float = true
             p.pos = p.pos + 1
             if p.pos < p.len {
-                let sign = p.src.byte(p.pos)
+                let sign = p.src.unit_at(p.pos)
                 if sign == 43 || sign == 45 {
                     p.pos = p.pos + 1
                 }
             }
             while p.pos < p.len {
-                let b2 = p.src.byte(p.pos)
+                let b2 = p.src.unit_at(p.pos)
                 if b2 >= 48 && b2 <= 57 {
                     p.pos = p.pos + 1
                 } else {
@@ -535,7 +539,7 @@ fn parse_array_value(p: JsonParser) -> JsonValue {
     p.pos = p.pos + 1   // consume [
     let items: [JsonValue] = []
     parse_skip_ws(p)
-    if p.pos < p.len && p.src.byte(p.pos) == 93 {
+    if p.pos < p.len && p.src.unit_at(p.pos) == 93 {
         p.pos = p.pos + 1
         return JsonValue::Array(items)
     }
@@ -549,7 +553,7 @@ fn parse_array_value(p: JsonParser) -> JsonValue {
             p.ok = false
             return JsonValue::Null
         }
-        let b = p.src.byte(p.pos)
+        let b = p.src.unit_at(p.pos)
         if b == 93 {
             p.pos = p.pos + 1
             return JsonValue::Array(items)
@@ -568,7 +572,7 @@ fn parse_object_value(p: JsonParser) -> JsonValue {
     p.pos = p.pos + 1   // consume {
     let m: Map<string, JsonValue> = map_new()
     parse_skip_ws(p)
-    if p.pos < p.len && p.src.byte(p.pos) == 125 {
+    if p.pos < p.len && p.src.unit_at(p.pos) == 125 {
         p.pos = p.pos + 1
         return JsonValue::Object(m)
     }
@@ -577,7 +581,7 @@ fn parse_object_value(p: JsonParser) -> JsonValue {
         let key = parse_string_raw(p)
         if key == null { return JsonValue::Null }
         parse_skip_ws(p)
-        if p.pos >= p.len || p.src.byte(p.pos) != 58 {
+        if p.pos >= p.len || p.src.unit_at(p.pos) != 58 {
             p.ok = false
             return JsonValue::Null
         }
@@ -591,7 +595,7 @@ fn parse_object_value(p: JsonParser) -> JsonValue {
             p.ok = false
             return JsonValue::Null
         }
-        let b = p.src.byte(p.pos)
+        let b = p.src.unit_at(p.pos)
         if b == 125 {
             p.pos = p.pos + 1
             return JsonValue::Object(m)

@@ -1,0 +1,191 @@
+// Portable string algorithms (Layer 2): pure Rock over the tier-0 string
+// primitives in unified.rock (find/substring/len/unit_at/from_codepoint/
+// string_char/StringBuilder). No Lua patterns, no per-unit hot loops -- the
+// workhorse is plain-text `find` + `substring`, both native on every backend.
+// String contract + rationale: docs/stdlib-multibackend-plan.md.
+
+// Split `s` on every plain-text occurrence of `delimiter`. Empty delimiter is
+// a programmer error (nothing to split on).
+fn string.split(s, delimiter: string) -> [string] {
+    let dl = delimiter.len()
+    if dl == 0 { error("split: empty delimiter") }
+    let result: [string] = []
+    let n = s.len()
+    let start = 0
+    while true {
+        let idx = s.find(delimiter, start)
+        if idx < 0 {
+            result.push(s.substring(start, n))
+            break
+        }
+        result.push(s.substring(start, idx))
+        start = idx + dl
+    }
+    return result
+}
+
+// Replace every plain-text occurrence of `old` with `new`. Empty needle is a
+// programmer error.
+fn string.replace(s, old: string, new: string) -> string {
+    let ol = old.len()
+    if ol == 0 { error("replace: empty needle") }
+    let sb = sb_new()
+    let n = s.len()
+    let start = 0
+    while true {
+        let idx = s.find(old, start)
+        if idx < 0 {
+            sb_push(sb, s.substring(start, n))
+            break
+        }
+        sb_push(sb, s.substring(start, idx))
+        sb_push(sb, new)
+        start = idx + ol
+    }
+    return sb_build(sb)
+}
+
+fn string.contains(s, substr: string) -> bool {
+    return s.find(substr) >= 0
+}
+
+fn string.starts_with(s, prefix: string) -> bool {
+    return s.substring(0, prefix.len()) == prefix
+}
+
+fn string.ends_with(s, suffix: string) -> bool {
+    let sl = s.len()
+    let fl = suffix.len()
+    if fl > sl { return false }
+    return s.substring(sl - fl, sl) == suffix
+}
+
+// ASCII whitespace only (space \t \n \r \f \v) -- what Lua's %s matched.
+@pure fn is_ascii_ws(u: int) -> bool {
+    return u == 32 || u == 9 || u == 10 || u == 13 || u == 12 || u == 11
+}
+
+fn string.trim(s) -> string {
+    let n = s.len()
+    let start = 0
+    while start < n && is_ascii_ws(s.unit_at(start)) { start = start + 1 }
+    let end = n
+    while end > start && is_ascii_ws(s.unit_at(end - 1)) { end = end - 1 }
+    return s.substring(start, end)
+}
+
+// Join a vector of strings with a separator. Named `join` because the receiver
+// is `[string]` -- UFCS keys the method namespace off the first param's type,
+// so `strings.join(", ")` dispatches through `vec_*` to match LSP completion.
+fn join(parts: [string], separator: string) -> string {
+    let sb = sb_new()
+    let first = true
+    for p in parts {
+        if !first { sb_push(sb, separator) }
+        sb_push(sb, p)
+        first = false
+    }
+    return sb_build(sb)
+}
+
+// Code-point iterator over the native units (UTF-8 decode on luajit). Yields
+// code points as ints; the portable way to walk real characters. Costs
+// nothing when unused.
+struct CharsIter {
+    s: string,
+    i: int,
+    n: int,
+}
+
+fn string.chars(s) -> CharsIter {
+    return CharsIter { s: s, i: 0, n: s.len() }
+}
+
+fn CharsIter.next(it) -> (bool, int) {
+    if it.i >= it.n { return (false, 0) }
+    let b0 = it.s.unit_at(it.i)
+    if b0 < 0x80 {
+        it.i = it.i + 1
+        return (true, b0)
+    } else if b0 < 0xE0 {
+        let b1 = it.s.unit_at(it.i + 1)
+        it.i = it.i + 2
+        return (true, (b0 - 0xC0) * 0x40 + (b1 - 0x80))
+    } else if b0 < 0xF0 {
+        let b1 = it.s.unit_at(it.i + 1)
+        let b2 = it.s.unit_at(it.i + 2)
+        it.i = it.i + 3
+        return (true, (b0 - 0xE0) * 0x1000 + (b1 - 0x80) * 0x40 + (b2 - 0x80))
+    } else {
+        let b1 = it.s.unit_at(it.i + 1)
+        let b2 = it.s.unit_at(it.i + 2)
+        let b3 = it.s.unit_at(it.i + 3)
+        it.i = it.i + 4
+        return (true, (b0 - 0xF0) * 0x40000 + (b1 - 0x80) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// String-interpolation format helpers. Called by generated code by name, so
+// they keep @nomangle. Emitted as inline(lua) on the luajit backend.
+// ---------------------------------------------------------------------------
+
+// Pad a formatted value to `width` characters. `align` is one of "<", ">",
+// "^", "=" (bare ">" and "=" are treated identically here -- sign-aware
+// zero-pad is handled earlier in codegen for numeric types, so by the time we
+// reach this helper `=` is effectively `>`). `fill` is any single character.
+// When `#s >= width`, returns `s` unchanged (never truncates -- matches
+// Python's format-spec behavior).
+@nomangle
+inline(lua) fn __rock_fmt_pad(s: string, width: int, align: string, fill: string) -> string = """
+    s = tostring(s)
+    local n = #s
+    if n >= width then return s end
+    local pad = width - n
+    if align == "<" then
+        return s .. string.rep(fill, pad)
+    elseif align == "^" then
+        local left = math.floor(pad / 2)
+        return string.rep(fill, left) .. s .. string.rep(fill, pad - left)
+    else
+        return string.rep(fill, pad) .. s
+    end
+"""
+
+// Insert `sep` every `group` digits from the right of the integer portion of
+// the numeric string `s`. Python convention: `,` / `_` with decimal uses
+// group=3; `_` with hex/oct/bin uses group=4 (nibble grouping). Preserves
+// optional leading sign and any fractional part.
+@nomangle
+inline(lua) fn __rock_fmt_grouping(s: string, sep: string, group: int) -> string = """
+    local sign, num, frac = s:match("^([%+%-]?)(%w+)(%.?.*)$")
+    if not num then return s end
+    local pattern = "(" .. string.rep(".", group) .. ")"
+    local reversed = num:reverse():gsub(pattern, "%1" .. sep)
+    if reversed:sub(-#sep) == sep then
+        reversed = reversed:sub(1, -#sep - 1)
+    end
+    return sign .. reversed:reverse() .. frac
+"""
+
+// `{x:b}` binary conversion (string.format has no %b): floor, sign,
+// repeated %2.
+@nomangle
+inline(lua) fn __rock_fmt_binary(n: int) -> string = """
+    local __n = math.floor(n)
+    if __n == 0 then return "0" end
+    local __neg = __n < 0
+    if __neg then __n = -__n end
+    local __s = ""
+    while __n > 0 do __s = (__n % 2) .. __s; __n = math.floor(__n / 2) end
+    return (__neg and "-" or "") .. __s
+"""
+
+// `{x:.P%}` percent conversion: x*100 with P decimals + literal `%` (P < 0
+// means the default 6).
+@nomangle
+inline(lua) fn __rock_fmt_percent(v: float, p: int) -> string = """
+    local __p = p
+    if __p < 0 then __p = 6 end
+    return string.format("%." .. __p .. "f", v * 100) .. "%"
+"""
