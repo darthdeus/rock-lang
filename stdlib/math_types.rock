@@ -1,9 +1,8 @@
-// Tier-0 math value types: Vec2/Vec3/Vec4 and their pure algebra. The
-// keystone type family all backends share (game math and shader math).
-// Relocated from stone/engine/math/ so the stdlib owns them; the v()/zero()
-// constructor helpers and the fns routed through them stay in the engine for
-// now (they collide with test-fixture `v`/`zero` overloads) -- see
-// docs/stdlib-multibackend-plan.md backlog item 3.
+// Tier-0 math value types: Vec2/Vec3/Vec4 and their pure algebra -- the
+// keystone type family all backends share (game math and shader math),
+// including the v()/zero() constructors and the Vec2 helpers routed through
+// them. IVec2/Rect/Color and their constructors stay engine-side
+// (stone/engine/math/) because they touch engine-only types or globals.
 
 value Vec2 {
     x: float,
@@ -106,4 +105,86 @@ value Vec4 {
 
 fn Vec2.to_array(v) -> [float] {
     return [v.x, v.y]
+}
+
+// Vec2 constructors. The IVec2 overload stays engine-side (IVec2 is
+// engine-defined). @inline only where each param is used once -- the one-arg
+// v(x) reuses x, so V0 leaves it non-inline (would double-eval args like
+// v(off / 32)); V1 will bind to a local and make it inline-safe too.
+@inline @pure fn zero() -> Vec2 { return Vec2 { x: 0, y: 0 } }
+@inline @pure fn v() -> Vec2 { return Vec2 { x: 0, y: 0 } }
+@pure fn v(x: float) -> Vec2 { return Vec2 { x: x, y: x } }
+@inline @pure fn v(x: float, y: float) -> Vec2 { return Vec2 { x: x, y: y } }
+
+@pure fn vec2_normalize(v: Vec2) -> Vec2 {
+    if v.x == 0 && v.y == 0 {
+        return zero()
+    } else {
+        let len = sqrt(v.x * v.x + v.y * v.y)
+        return Vec2 { x: v.x / len, y: v.y / len }
+    }
+}
+@pure fn Vec2.normalize(v) -> Vec2 { return vec2_normalize(v) }
+
+// Per-element sign/abs. UFCS: `d.sign()`, `d.abs()`.
+@pure fn Vec2.sign(a) -> Vec2 { return v(sign(a.x), sign(a.y)) }
+@pure fn Vec2.abs(a) -> Vec2 { return v(abs(a.x), abs(a.y)) }
+
+@pure fn vec2_from_angle(angle: float) -> Vec2 {
+    return v(angle.cos(), angle.sin())
+}
+
+@pure fn vec2_rotate(a: Vec2, angle: float) -> Vec2 {
+    let cos = angle.cos()
+    let sin = angle.sin()
+
+    return v(a.x * cos - a.y * sin, a.x * sin + a.y * cos)
+}
+
+// Rotate `rhs` by the angle of `a` (complex multiply). Normalized `a` gives a
+// pure rotation; otherwise it also scales by |a|.
+@pure fn vec2_rotate(a: Vec2, rhs: Vec2) -> Vec2 {
+    return v(a.x * rhs.x - a.y * rhs.y, a.x * rhs.y + a.y * rhs.x)
+}
+
+fn vec2_wiggle(v: Vec2, angle: float) -> Vec2 {
+    return v.rotate(vec2_from_angle(random_range(angle / -2.0, angle / 2)))
+}
+
+@pure fn Vec2.rotate(v, angle: float) -> Vec2 { return vec2_rotate(v, angle) }
+@pure fn Vec2.rotate(v, rhs: Vec2) -> Vec2 { return vec2_rotate(v, rhs) }
+fn Vec2.wiggle(v, angle: float) -> Vec2 { return vec2_wiggle(v, angle) }
+
+fn random_dir() -> Vec2 {
+    let angle = random_range(0.0, PI * 2.0)
+    return v(angle.cos(), angle.sin())
+}
+
+fn random_vec(min: float, max: float) -> Vec2 {
+    return random_dir() * random_range(min, max)
+}
+
+fn random_offset(radius: float) -> Vec2 {
+    return random_dir() * random_range(0.0, radius)
+}
+
+fn random_circle(radius: float) -> Vec2 {
+    return random_offset(radius)
+}
+
+fn random_box(center: Vec2, size: Vec2) -> Vec2 {
+    return center + v(random_range(-1 * size.x, size.x) / 2, random_range(-1 * size.y, size.y) / 2)
+}
+
+fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
+    return position + random_vec(min, max)
+}
+
+@pure fn intersect_circle(center_a: Vec2, radius_a: float, center_b: Vec2, radius_b: float) -> bool {
+    let dist = vec2_distance(center_a, center_b)
+    return dist < (radius_a + radius_b)
+}
+
+@pure fn Vec2.lerp(a, b: Vec2, t: float) -> Vec2 {
+    return v(lerp(a.x, b.x, t), lerp(a.y, b.y, t))
 }
