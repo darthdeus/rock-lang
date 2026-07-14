@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn parse_static_local_annotated() {
-        check("static scratch: [Vec2] = []", "(block (static scratch [Vec2] []))");
+        check("static scratch: [FixVec2] = []", "(block (static scratch [FixVec2] []))");
     }
 
     #[test]
@@ -739,8 +739,8 @@ mod tests {
             "(fn f <T> ((x int) (ys T ...) (z int = 3)) int (block x))"
         );
         assert_eq!(
-            item_sexp("value Vec2 { x: float, y: float }"),
-            "(value-struct Vec2 (field x float) (field y float))"
+            item_sexp("value FixVec2 { x: float, y: float }"),
+            "(value-struct FixVec2 (field x float) (field y float))"
         );
         assert_eq!(
             item_sexp("struct Foo<T> { a: T, b: int = 0 }"),

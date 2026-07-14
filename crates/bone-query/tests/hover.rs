@@ -102,9 +102,9 @@ fn brace_hover_resolves_the_block_in_every_braced_form() {
 
 const SRC: &str = "\
 enum Dir { North, South }
-struct Vec2 { x: int, y: int }
+struct FixVec2 { x: int, y: int }
 fn pick(d: Dir) -> int {
-    let v = Vec2 { x: 3, y: 5 }
+    let v = FixVec2 { x: 3, y: 5 }
     let r = if d == Dir::North { 1 } else { 2 }
     match d {
         Dir::North => 1
@@ -160,7 +160,7 @@ fn struct_literal_colon_hovers_the_field() {
     // The `:` in `x: 3` (line 3) -> the field, same as hovering `x`.
     let colon = SRC.lines().nth(3).unwrap().find(": 3").unwrap() as u32;
     let h = at(&b, 3, colon).expect("field `:` hovers");
-    assert!(h.contains("x: int (field of Vec2)"), "`:` -> field: {h:?}");
+    assert!(h.contains("x: int (field of FixVec2)"), "`:` -> field: {h:?}");
 }
 
 #[test]

@@ -15,12 +15,12 @@ mod common;
 use common::{emit_module, function_body};
 
 const VALUE_FIELD_LOOP: &str = r#"
-value Vec2 { x: float, y: float }
+value FixVec2 { x: float, y: float }
 value IVec2 { x: int, y: int }
 
-@pure fn v(x: float, y: float) -> Vec2 { return Vec2 { x: x, y: y } }
+@pure fn v(x: float, y: float) -> FixVec2 { return FixVec2 { x: x, y: y } }
 @pure fn iv(x: int, y: int) -> IVec2 { return IVec2 { x: x, y: y } }
-@pure fn tile_center(g: IVec2) -> Vec2 {
+@pure fn tile_center(g: IVec2) -> FixVec2 {
     return v(((g.x + g.y) as float), ((g.x - g.y) as float))
 }
 
@@ -55,7 +55,7 @@ fn main() {
 /// `field_rewrites`. Runs under luajit so the uninit read is actually caught.
 const VALUE_FIELD_AND_WHOLE_USE: &str = r#"
 value Color { r: float, g: float, b: float, a: float }
-value Vec3 { x: float, y: float, z: float }
+value FixVec3 { x: float, y: float, z: float }
 
 // `c` is field-read into a local (`let r = c.r`) AND used as a whole struct
 // (`c == c2`). The whole-struct use escapes, so the cell must NOT be split and the
@@ -71,7 +71,7 @@ value Vec3 { x: float, y: float, z: float }
 // `Color_ct(`; covered separately in `const_hoist.rs`).
 fn coexist(k: float) -> float {
     let c = Color { r: k, g: 0.5, b: 0.0, a: 1.0 }
-    let v = Vec3 { x: k, y: 20.0, z: 30.0 }
+    let v = FixVec3 { x: k, y: 20.0, z: 30.0 }
     let r = c.r
     let z = v.z
     let c2 = Color { r: k, g: 0.5, b: 0.0, a: 1.0 }
@@ -119,8 +119,8 @@ fn value_struct_field_reads_dont_materialize_cdata() {
     // The inlined value structs are consumed only by field reads, so neither
     // ctor should survive in the hot loop -- SROA splits the cells into scalars.
     assert!(
-        !hot.contains("Vec2_ct("),
-        "Vec2 cdata ctor survived inlining in hot() (should scalarize away):\n{hot}"
+        !hot.contains("FixVec2_ct("),
+        "FixVec2 cdata ctor survived inlining in hot() (should scalarize away):\n{hot}"
     );
     assert!(
         !hot.contains("IVec2_ct("),

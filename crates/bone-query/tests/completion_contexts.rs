@@ -77,19 +77,19 @@ fn member_ufcs_overloads_dedup_to_one_item() {
     // Two overloads of `rotate` on the receiver struct must surface as ONE
     // member item (same label, same insert -- the duplicate is popup noise;
     // the general path already dedups overloads by name, first-wins).
-    let src = "struct Vec2 { x: float, y: float }\n\
-               fn rotate(v: Vec2, angle: float) -> Vec2 { v }\n\
-               fn rotate(v: Vec2, rhs: Vec2) -> Vec2 { v }\n\
-               fn r(p: Vec2) {\n  p.\n}\n";
+    let src = "struct FixVec2 { x: float, y: float }\n\
+               fn rotate(v: FixVec2, angle: float) -> FixVec2 { v }\n\
+               fn rotate(v: FixVec2, rhs: FixVec2) -> FixVec2 { v }\n\
+               fn r(p: FixVec2) {\n  p.\n}\n";
     let l = labels(src, 4, 4);
     assert_eq!(l.iter().filter(|s| s.as_str() == "rotate").count(), 1, "{l:?}");
 }
 
 #[test]
 fn struct_literal_offers_remaining_fields() {
-    // `Vec2 { ` -> the struct's fields (was: the global namespace).
-    let src = "struct Vec2 { x: float, y: float }\nfn r() {\n  let v = Vec2 { \n}\n";
-    let l = labels(src, 2, 16);
+    // `FixVec2 { ` -> the struct's fields (was: the global namespace).
+    let src = "struct FixVec2 { x: float, y: float }\nfn r() {\n  let v = FixVec2 { \n}\n";
+    let l = labels(src, 2, 19);
     assert!(l.contains(&"x: float".to_string()), "{l:?}");
     assert!(l.contains(&"y: float".to_string()), "{l:?}");
     assert!(!l.iter().any(|s| s == "Arena"), "must not leak global types: {l:?}");
@@ -97,9 +97,9 @@ fn struct_literal_offers_remaining_fields() {
 
 #[test]
 fn struct_literal_skips_already_written_fields() {
-    let src = "struct Vec2 { x: float, y: float }\nfn r() {\n  let v = Vec2 { x: 1.0, \n}\n";
+    let src = "struct FixVec2 { x: float, y: float }\nfn r() {\n  let v = FixVec2 { x: 1.0, \n}\n";
     // cursor after `x: 1.0, ` -> only `y` remains.
-    let l = labels(src, 2, 24);
+    let l = labels(src, 2, 27);
     assert!(l.contains(&"y: float".to_string()), "{l:?}");
     assert!(!l.contains(&"x: float".to_string()), "x already written: {l:?}");
 }
@@ -174,7 +174,7 @@ fn decorator_completion_inserts_only_the_name() {
 
 #[test]
 fn member_access_offers_fields_and_ufcs_methods() {
-    let src = "struct Vec2 { x: float, y: float }\nfn dist(a: Vec2) -> float { a.x }\nfn r() {\n  let v = Vec2 { x: 1.0, y: 2.0 }\n  v.\n}\n";
+    let src = "struct FixVec2 { x: float, y: float }\nfn dist(a: FixVec2) -> float { a.x }\nfn r() {\n  let v = FixVec2 { x: 1.0, y: 2.0 }\n  v.\n}\n";
     // cursor after `v.` (line 4).
     let l = labels(src, 4, 4);
     assert!(l.contains(&"x: float".to_string()), "field: {l:?}");
@@ -187,7 +187,7 @@ fn member_completion_on_a_vec_receiver() {
     // the stdlib `Vec` struct ({data, len}); its `.len` field + Vec UFCS methods
     // must be offered. Regression: `struct_name_of_ty` returned None for `Array`
     // (not a `Nominal` ctor), so member completion came up empty and fell
-    // through. Parked as the `.len` bug (`global POS_HIST: [Vec2]`).
+    // through. Parked as the `.len` bug (`global POS_HIST: [FixVec2]`).
     //
     // Also pins the quality gates: the internal `_data` field is hidden (soft-
     // private via the `_` prefix -- no Vec special-case), and UFCS is
@@ -1775,9 +1775,9 @@ fn qualifier_inside_a_comment_gets_global_completion() {
 
 #[test]
 fn struct_literal_head_inside_a_string_gets_no_field_completion() {
-    // The byte scanner is string-blind: `"Vec2 { |` served Vec2's fields as
+    // The byte scanner is string-blind: `"FixVec2 { |` served FixVec2's fields as
     // if the cursor were in a real literal. The AST classifier sees a string.
-    let src = "struct Vec2 { x: float, y: float }\nfn render() {}\nfn r() {\n  let s = \"Vec2 { \n}\n";
+    let src = "struct FixVec2 { x: float, y: float }\nfn render() {}\nfn r() {\n  let s = \"FixVec2 { \n}\n";
     let l = labels(src, 3, 18);
     assert!(
         !l.contains(&"x: float".to_string()),
@@ -2095,16 +2095,16 @@ fn chained_member_through_inferred_local_newtype_head_in_fallback() {
 fn call_receiver_suppresses_globals_when_no_member_matches() {
     // `getitems().ce|` -- the receiver resolves to `[Item]` (a Vec), and `ce`
     // matches no Vec member. General completion must be SUPPRESSED: leaking the
-    // global `centroid([Vec2])` / `ceil` would be an invalid UFCS suggestion
+    // global `centroid([FixVec2])` / `ceil` would be an invalid UFCS suggestion
     // (`centroid([Item])` doesn't type-check). A call receiver used to fall
     // through to general on an empty member result; a name path never did.
-    let src = "struct Vec2 { x: float, y: float }\n\
+    let src = "struct FixVec2 { x: float, y: float }\n\
                struct Item { kind: int }\n\
-               fn centroid(v: [Vec2]) -> Vec2 { return v[0] }\n\
+               fn centroid(v: [FixVec2]) -> FixVec2 { return v[0] }\n\
                fn getitems() -> [Item] { return [] }\n\
                fn r() {\n  let n = getitems().ce\n}\n";
     let leak = labels(src, 5, 23);
-    assert!(!leak.contains(&"centroid".to_string()), "leaked [Vec2] global as UFCS: {leak:?}");
+    assert!(!leak.contains(&"centroid".to_string()), "leaked [FixVec2] global as UFCS: {leak:?}");
     assert!(!leak.contains(&"ceil".to_string()), "leaked a global after member `.`: {leak:?}");
 
     // Non-vacuous: the same receiver DOES offer its Vec members for a real

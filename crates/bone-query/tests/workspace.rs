@@ -136,7 +136,7 @@ fn hover_on_signature_types_shows_the_definition() {
 
 #[test]
 fn hover_on_a_struct_field_declaration_shows_field_of() {
-    let src = "struct Vec2 { x: float, y: float }\nstruct Mob {\n  pos: Vec2,\n  dir: int,\n}\n";
+    let src = "struct FixVec2 { x: float, y: float }\nstruct Mob {\n  pos: FixVec2,\n  dir: int,\n}\n";
     let bone = fresh(src);
     // `pos` on line 2 at col 2.
     let hover = bone
@@ -146,7 +146,7 @@ fn hover_on_a_struct_field_declaration_shows_field_of() {
         lsp_types::HoverContents::Markup(m) => m.value,
         other => panic!("expected markup hover, got {other:?}"),
     };
-    assert!(text.contains("pos: Vec2 (field of Mob)"), "field-of hover: {text:?}");
+    assert!(text.contains("pos: FixVec2 (field of Mob)"), "field-of hover: {text:?}");
 }
 
 #[test]
@@ -945,7 +945,7 @@ fn completion_offers_struct_fields_on_broken_dot() {
 #[test]
 fn completion_member_on_struct_literal_let_and_chain() {
     // receiver `p` is an inferred `let` bound to a struct literal; chained field.
-    let src = "struct Vec2 { x: float, y: float }\nstruct Player { pos: Vec2, name: string }\nfn main() {\n  let p = Player { pos: Vec2 { x: 0.0, y: 0.0 }, name: \"h\" }\n  p.pos.\n}\n";
+    let src = "struct FixVec2 { x: float, y: float }\nstruct Player { pos: FixVec2, name: string }\nfn main() {\n  let p = Player { pos: FixVec2 { x: 0.0, y: 0.0 }, name: \"h\" }\n  p.pos.\n}\n";
     let mut bone = fresh(src);
     let labels: Vec<String> = bone
         .completion(PATH, Position::new(4, 8))
@@ -1034,7 +1034,7 @@ fn unknown_file_degrades_to_empty() {
 
 #[test]
 fn pure_fn_calling_stdlib_lerp_is_not_flagged_impure() {
-    // Regression: the engine's `@pure fn lerp(Vec2,..)` delegates to the stdlib
+    // Regression: the engine's `@pure fn lerp(FixVec2,..)` delegates to the stdlib
     // `lerp(float,..)`. bone's `@pure` check is annotation-based (a @pure body
     // may only call @pure callees), so the stdlib lerp must itself be `@pure`
     // (it is -- pure arithmetic). Otherwise a @pure caller is wrongly flagged

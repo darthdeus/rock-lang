@@ -9,7 +9,7 @@ use lsp_types::{Position, Range, SemanticTokenModifier, SemanticTokenType};
 /// it's the `textDocument/semanticTokens/range` path nvim uses for open/scroll.
 #[test]
 fn range_matches_full_over_whole_file_and_subsets_for_a_viewport() {
-    let src = "struct Vec2 { x: int }\nfn a() -> int { let q = 1\n  q }\nfn b() -> int { let w = 2\n  w }\n";
+    let src = "struct FixVec2 { x: int }\nfn a() -> int { let q = 1\n  q }\nfn b() -> int { let w = 2\n  w }\n";
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     let full = bone.semantic_tokens(PATH).data;
@@ -56,9 +56,9 @@ fn type_at(toks: &[(u32, u32, SemanticTokenType)], pos: Position) -> Option<Sema
 
 #[test]
 fn struct_reference_colors_as_struct_not_variable() {
-    let src = "struct Vec2 { x: int, y: int }\nfn run() {\n  let v = Vec2 { x: 1, y: 2 }\n}\n";
+    let src = "struct FixVec2 { x: int, y: int }\nfn run() {\n  let v = FixVec2 { x: 1, y: 2 }\n}\n";
     let toks = decode(src);
-    // `Vec2` in the literal head, line 2 col 10.
+    // `FixVec2` in the literal head, line 2 col 10.
     assert_eq!(
         type_at(&toks, Position::new(2, 10)),
         Some(SemanticTokenType::STRUCT),
@@ -69,7 +69,7 @@ fn struct_reference_colors_as_struct_not_variable() {
 
 #[test]
 fn field_access_colors_as_property_not_variable() {
-    let src = "struct Vec2 { x: int, y: int }\nfn run() {\n  let v = Vec2 { x: 1, y: 2 }\n  let n = v.x\n}\n";
+    let src = "struct FixVec2 { x: int, y: int }\nfn run() {\n  let v = FixVec2 { x: 1, y: 2 }\n  let n = v.x\n}\n";
     let toks = decode(src);
     // `x` after `v.` on line 3: "  let n = v.x" -> x at col 12.
     assert_eq!(
@@ -82,7 +82,7 @@ fn field_access_colors_as_property_not_variable() {
 
 #[test]
 fn parameter_colors_as_parameter_at_decl_and_use() {
-    let src = "struct Vec2 { x: int }\nfn f(a: Vec2) -> int {\n  a.x\n}\n";
+    let src = "struct FixVec2 { x: int }\nfn f(a: FixVec2) -> int {\n  a.x\n}\n";
     let toks = decode(src);
     // param decl `a` (line 1 col 5) and its use `a` (line 2 col 2).
     assert_eq!(
@@ -101,20 +101,20 @@ fn parameter_colors_as_parameter_at_decl_and_use() {
 
 #[test]
 fn struct_field_names_color_as_property_at_decl_and_literal() {
-    let src = "struct Vec2 { x: int, y: int }\nfn run() {\n  let v = Vec2 { x: 1, y: 2 }\n}\n";
+    let src = "struct FixVec2 { x: int, y: int }\nfn run() {\n  let v = FixVec2 { x: 1, y: 2 }\n}\n";
     let toks = decode(src);
-    // field DECL `x` (line 0 col 14) and literal field name `x` (line 2 col 17).
+    // field DECL `x` (line 0 col 17) and literal field name `x` (line 2 col 20).
     assert_eq!(
-        type_at(&toks, Position::new(0, 14)),
+        type_at(&toks, Position::new(0, 17)),
         Some(SemanticTokenType::PROPERTY),
         "field decl, got {:?}",
-        type_at(&toks, Position::new(0, 14))
+        type_at(&toks, Position::new(0, 17))
     );
     assert_eq!(
-        type_at(&toks, Position::new(2, 17)),
+        type_at(&toks, Position::new(2, 20)),
         Some(SemanticTokenType::PROPERTY),
         "struct-literal field name, got {:?}",
-        type_at(&toks, Position::new(2, 17))
+        type_at(&toks, Position::new(2, 20))
     );
 }
 

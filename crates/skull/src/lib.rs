@@ -1187,9 +1187,9 @@ mod tests {
     fn exec_array_spread() {
         // Tuple spread (static arity), struct spread (declared fields), and
         // array spread (runtime copy loop), all spliced into one literal.
-        let src = "struct Vec2 { x: int, y: int }\n\
+        let src = "struct FixVec2 { x: int, y: int }\n\
                    fn tup() -> [int] { [0, ...(1, 2), 3] }\n\
-                   fn strct(p: Vec2) -> [int] { [...p, 9] }\n\
+                   fn strct(p: FixVec2) -> [int] { [...p, 9] }\n\
                    fn vecs(a: [int], b: [int]) -> [int] { [...a, ...b, 99] }";
         // Returns/params typed `[T]` are the Vec shape `{_data, len}`; `show`
         // reads it, `v` builds it.

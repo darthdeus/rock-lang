@@ -4,23 +4,23 @@
 //!   - newtype N(W)     -> unary `-`/`!` returns N; ordering forwards to W
 //!                         (W must be numeric, else rejected)
 //!   - other types      -> dispatch to a `__unm` / `__not` function by name,
-//!                         result is that function's return type (e.g. `-Vec2`)
+//!                         result is that function's return type (e.g. `-FixVec2`)
 //! bone has no codegen, so only the result TYPE matters here.
 //! Verified vs rock (tests/operators_comprehensive.rock, tests/newtypes.rock).
 
-// `-Vec2` dispatches to the user `__unm(Vec2) -> Vec2`.
+// `-FixVec2` dispatches to the user `__unm(FixVec2) -> FixVec2`.
 //- struct_unary_minus
-struct Vec2 { x: int, y: int }
+struct FixVec2 { x: int, y: int }
 // body is arithmetic-free on purpose: the fixture harness loads no stdlib, so
 // `0 - v.x` (folds to `__op_sub`) would not resolve. bone only type-checks the
-// body; its result type (Vec2) is what `-v` dispatch depends on.
-fn __unm(v: Vec2) -> Vec2 {
-    Vec2 { x: v.x, y: v.y }
+// body; its result type (FixVec2) is what `-v` dispatch depends on.
+fn __unm(v: FixVec2) -> FixVec2 {
+    FixVec2 { x: v.x, y: v.y }
 }
-fn f() -> Vec2 {
-    let v = Vec2 { x: 3, y: 4 }
+fn f() -> FixVec2 {
+    let v = FixVec2 { x: 3, y: 4 }
     let n = -v
-      //^ Vec2
+      //^ FixVec2
     n
 }
 

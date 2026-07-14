@@ -5,10 +5,10 @@
 
 // Two fields share one value.
 //- struct_two_fields
-struct Vec2 { x: int, y: int }
-fn f() -> Vec2 {
-    let v = Vec2 { x + y: 5 }
-      //^ Vec2
+struct FixVec2 { x: int, y: int }
+fn f() -> FixVec2 {
+    let v = FixVec2 { x + y: 5 }
+      //^ FixVec2
     v
 }
 

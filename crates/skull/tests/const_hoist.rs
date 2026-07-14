@@ -2,14 +2,14 @@
 //! function-owned module-scope constant, not rebuilt at each use.
 //!
 //! The mag HUD/text path's `make_text_vertex` writes a nested
-//! `outline_color: Vec2 { 0.0, 0.0 }` into every glyph vertex slot. opt #3 does
+//! `outline_color: FixVec2 { 0.0, 0.0 }` into every glyph vertex slot. opt #3 does
 //! not recurse into nested value-struct fields, so this becomes a literal
-//! `slot.outline_color = Vec2_ct(0.0, 0.0)` per store. On a trace it sinks; in the
+//! `slot.outline_color = FixVec2_ct(0.0, 0.0)` per store. On a trace it sinks; in the
 //! interpreter (mag's aborted HUD loops) it allocates a fresh cdata every store --
 //! the entire skull-vs-rock interpreter-path gap on the text loop (skull 8.25 vs
 //! rock 6.70 KB per draw_text call; `benchmarks/opt_showcase/07_text_interp_alloc.rock`).
 //! rock hoists an all-constant value-struct literal to a module-scope constant
-//! (`__rock_const_Vec2_...`); skull emits `__skull_kc_<fn>_<g> = <Name>_ct(..)`
+//! (`__rock_const_FixVec2_...`); skull emits `__skull_kc_<fn>_<g> = <Name>_ct(..)`
 //! once and references it. Value structs are immutable, so one shared cdata is
 //! sound, built once at chunk load (0 alloc on BOTH the traced and interpreted
 //! paths -- unlike a per-call function-entry local, which defeats SINK).
@@ -24,20 +24,20 @@ fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
 }
 
-// Two nested const Vec2 fields, both a DISTINCTIVE `Vec2 { 3.0, 7.0 }`, written
+// Two nested const FixVec2 fields, both a DISTINCTIVE `FixVec2 { 3.0, 7.0 }`, written
 // into a NativeBuffer<Outer> slot. opt #3 lowers the store to
-// `slot.a = Vec2_ct(3, 7); slot.b = Vec2_ct(3, 7)`. Hoisting + dedup makes that
-// one module-scope `__skull_kc_..._N = Vec2_ct(3.0, 7.0)` referenced twice.
+// `slot.a = FixVec2_ct(3, 7); slot.b = FixVec2_ct(3, 7)`. Hoisting + dedup makes that
+// one module-scope `__skull_kc_..._N = FixVec2_ct(3.0, 7.0)` referenced twice.
 const TWO_CONST_NESTED: &str = r#"
-value Vec2 { x: float, y: float }
-value Outer { a: Vec2, b: Vec2, c: float }
+value FixVec2 { x: float, y: float }
+value Outer { a: FixVec2, b: FixVec2, c: float }
 
 @nomangle inline(lua) fn __nb_alloc_Outer(n: int) -> Ptr<Outer> = 'return ffi.new("Outer[?]", n)'
 fn nb(n: int) -> NativeBuffer<Outer> { return NativeBuffer { ptr: __nb_alloc_Outer(n), len: n } }
 
 fn fill(buf: NativeBuffer<Outer>, n: int) {
     for i in 0..n {
-        buf[i] = Outer { a: Vec2 { x: 3.0, y: 7.0 }, b: Vec2 { x: 3.0, y: 7.0 }, c: i as float }
+        buf[i] = Outer { a: FixVec2 { x: 3.0, y: 7.0 }, b: FixVec2 { x: 3.0, y: 7.0 }, c: i as float }
     }
 }
 
@@ -51,20 +51,20 @@ fn main() {
 fn const_value_struct_ctor_is_hoisted_to_module_scope() {
     let lua = emit_module(TWO_CONST_NESTED);
     // The distinctive ctor is BUILT exactly once, in a module-scope hoist def.
-    let builds = count(&lua, "Vec2_ct(3.0, 7.0)");
+    let builds = count(&lua, "FixVec2_ct(3.0, 7.0)");
     assert_eq!(
         builds, 1,
-        "the all-constant Vec2 {{3,7}} must be built once (one hoist def), found {builds}:\n{lua}"
+        "the all-constant FixVec2 {{3,7}} must be built once (one hoist def), found {builds}:\n{lua}"
     );
     // The def is a `__skull_kc_*` global assignment, not inside the loop.
     assert!(
-        lua.contains("__skull_kc_") && lua.contains("= Vec2_ct(3.0, 7.0)"),
-        "expected a module-scope `__skull_kc_* = Vec2_ct(3.0, 7.0)` hoist def:\n{lua}"
+        lua.contains("__skull_kc_") && lua.contains("= FixVec2_ct(3.0, 7.0)"),
+        "expected a module-scope `__skull_kc_* = FixVec2_ct(3.0, 7.0)` hoist def:\n{lua}"
     );
     // The hot function rebuilds nothing -- it references the global instead.
     let body = function_body(&lua, "fill");
     assert_eq!(
-        count(body, "Vec2_ct("),
+        count(body, "FixVec2_ct("),
         0,
         "fill must reference the hoisted global, not rebuild the ctor:\n{body}"
     );

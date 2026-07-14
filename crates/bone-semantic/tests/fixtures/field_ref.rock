@@ -168,10 +168,10 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 //- value_struct_field_ok
-value Vec2 { x: float, y: float }
-fn take(f: FieldOf<Vec2, float>) {}
+value FixVec2 { x: float, y: float }
+fn take(f: FieldOf<FixVec2, float>) {}
 fn main() {
-    let f: FieldOf<Vec2, float> = .x
-      //^ FieldOf<Vec2, float>
+    let f: FieldOf<FixVec2, float> = .x
+      //^ FieldOf<FixVec2, float>
     take(f)
 }
