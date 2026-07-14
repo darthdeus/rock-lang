@@ -24,7 +24,7 @@ use bone_semantic::hir::{
 };
 use ustr::Ustr;
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId};
+use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
 use comfy_la_arena::{Idx, IdxRange};
 use skull_parser::CompilerError;
 
@@ -6338,6 +6338,71 @@ impl Builder<'_> {
             _ => None,
         }
     }
+
+}
+
+// -- Map value-struct key rejection (a fatal emit-time pass; see
+// `value_struct_map_key`). These mirror the `Lowerer` type helpers but take
+// `(ws, inf)` directly so the check runs without building a full lowering
+// context. --
+
+fn map_ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
+    match ty {
+        TyId::Static(mid, idx) => Some(ws.module(mid).ty_arena[idx]),
+        TyId::Local(idx) => Some(inf.ty_arena[idx]),
+    }
+}
+
+fn map_resolve_tyid(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TyId> {
+    match map_ty_node(ws, inf, ty)? {
+        TypeExpr::Infer(var, _) => map_resolve_tyid(ws, inf, inf.substitutions.get(var)?),
+        _ => Some(ty),
+    }
+}
+
+fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
+    ws.struct_by_name
+        .get(&name)
+        .map(|sid| ws.modules[sid.module.index()].structs[sid.def].is_value)
+        .unwrap_or(false)
+}
+
+/// When `ty` resolves to `Map<K, V>` with `K` a `value` struct, returns K's name.
+fn map_key_value_struct(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
+    let ty = map_resolve_tyid(ws, inf, ty)?;
+    let TypeExpr::App { ctor: TypeCtor::Map, params } = map_ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    let k = map_resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match map_ty_node(ws, inf, k)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// Scan module `mid`'s function bodies for a `Map<K, V>` whose key `K` is a
+/// `value` struct. Value structs are C-layout cdata; as Lua table keys they
+/// hash by pointer identity, so a runtime-built key silently misses an entry
+/// stored under an equal-by-value but distinct instance (store `mk(1,2)`, read
+/// a fresh `mk(1,2)` -> nil). int / string / bool / float / newtype keys are Lua
+/// value-keyed and stay allowed. Returns the first offending (key name, span).
+pub fn value_struct_map_key(ws: &Workspace, mid: ModuleId) -> Option<(Ustr, Span)> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (fid, _f) in module.functions.iter() {
+        let owner = BodyOwner::Function(fid);
+        let (Some(body), Some(inf)) = (module.bodies.get(&owner), ir.per_fn.get(&owner)) else {
+            continue;
+        };
+        for (e, tyid) in inf.expr_types.iter() {
+            if let Some(name) = map_key_value_struct(ws, inf, *tyid) {
+                return Some((name, body.expr_spans[e]));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

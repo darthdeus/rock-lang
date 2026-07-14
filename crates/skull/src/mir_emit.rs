@@ -1156,8 +1156,19 @@ fn validate_on_reload_nomangle(ws: &Workspace) -> Result<(), CompilerError> {
     Ok(())
 }
 
-pub fn emit_full(ws: &Workspace, _user_mid: ModuleId) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     validate_on_reload_nomangle(ws)?;
+    if let Some((key, span)) = skull_mir::lower::value_struct_map_key(ws, user_mid) {
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "`{key}` is a `value` struct and cannot be a `Map` key -- value structs hash by \
+                 cdata pointer identity, so a runtime-built key silently misses an entry stored \
+                 under an equal-by-value instance. Use an int/string/bool/float/newtype key, or a \
+                 string key derived from the struct's fields."
+            ),
+        ));
+    }
     let cg = CodegenCtx::new(ws);
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
