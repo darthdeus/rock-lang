@@ -6346,16 +6346,16 @@ impl Builder<'_> {
 // `(ws, inf)` directly so the check runs without building a full lowering
 // context. --
 
-fn map_ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
+fn ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
     match ty {
         TyId::Static(mid, idx) => Some(ws.module(mid).ty_arena[idx]),
         TyId::Local(idx) => Some(inf.ty_arena[idx]),
     }
 }
 
-fn map_resolve_tyid(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TyId> {
-    match map_ty_node(ws, inf, ty)? {
-        TypeExpr::Infer(var, _) => map_resolve_tyid(ws, inf, inf.substitutions.get(var)?),
+fn resolve_tyid(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TyId> {
+    match ty_node(ws, inf, ty)? {
+        TypeExpr::Infer(var, _) => resolve_tyid(ws, inf, inf.substitutions.get(var)?),
         _ => Some(ty),
     }
 }
@@ -6369,12 +6369,12 @@ fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
 
 /// When `ty` resolves to `Map<K, V>` with `K` a `value` struct, returns K's name.
 fn map_key_value_struct(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
-    let ty = map_resolve_tyid(ws, inf, ty)?;
-    let TypeExpr::App { ctor: TypeCtor::Map, params } = map_ty_node(ws, inf, ty)? else {
+    let ty = resolve_tyid(ws, inf, ty)?;
+    let TypeExpr::App { ctor: TypeCtor::Map, params } = ty_node(ws, inf, ty)? else {
         return None;
     };
-    let k = map_resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
-    match map_ty_node(ws, inf, k)? {
+    let k = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match ty_node(ws, inf, k)? {
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
             Some(name)
         }
@@ -6399,6 +6399,78 @@ pub fn value_struct_map_key(ws: &Workspace, mid: ModuleId) -> Option<(Ustr, Span
         for (e, tyid) in inf.expr_types.iter() {
             if let Some(name) = map_key_value_struct(ws, inf, *tyid) {
                 return Some((name, body.expr_spans[e]));
+            }
+        }
+    }
+    None
+}
+
+/// When `ty` resolves to `NativeArray<E>` with `E` a nullable type, returns true.
+fn na_optional_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> bool {
+    let Some(ty) = resolve_tyid(ws, inf, ty) else { return false };
+    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), params }) = ty_node(ws, inf, ty)
+    else {
+        return false;
+    };
+    if name.as_str() != "NativeArray" {
+        return false;
+    }
+    let Some(elem_idx) = params.into_iter().next() else { return false };
+    let Some(elem) = resolve_tyid(ws, inf, ty.with_idx(elem_idx)) else { return false };
+    matches!(ty_node(ws, inf, elem), Some(TypeExpr::Nullable(..)))
+}
+
+/// Scan module `mid`'s bodies for an expression whose inferred type is
+/// `NativeArray<T?>`. `![T?]` is a bare Lua table; `#` / `ipairs` stop at the
+/// first nil, so an embedded `null` silently truncates iteration -- use `[T?]`
+/// (Vec, tracked `.len`) instead. bone rejects the annotated forms; an inferred
+/// literal (`![1, null]`) slips through, so this is the emit-time gate. Returns
+/// the first offending expression's span.
+pub fn native_array_optional_elem(ws: &Workspace, mid: ModuleId) -> Option<Span> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, tyid) in inf.expr_types.iter() {
+            if na_optional_elem(ws, inf, *tyid) {
+                return Some(body.expr_spans[e]);
+            }
+        }
+    }
+    None
+}
+
+fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
+    match body.expr_arena[e] {
+        Expr::Int(v) => Some(v),
+        Expr::UnaryMinus(inner) => match body.expr_arena[inner] {
+            Expr::Int(v) => Some(-v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Scan module `mid`'s bodies for a `string_char(<literal>)` call whose literal
+/// argument is outside ASCII 0..=127. `string_char` is `string.char` on luajit:
+/// a code > 127 emits a lone high byte (invalid UTF-8 alone, a different code
+/// unit on a UTF-16 backend); a negative code aborts `string.char` at runtime.
+/// Portable only for 0..=127; for code points use `from_codepoint`. Dynamic
+/// (non-literal) arguments are out of scope. Returns the offending arg's span.
+pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option<Span> {
+    let module = ws.module(mid);
+    for (_owner, body) in module.bodies.iter() {
+        for (_e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = *expr else {
+                continue;
+            };
+            if name.as_str() != "string_char" {
+                continue;
+            }
+            let Some(arg) = args.into_iter().next() else { continue };
+            let Some(code) = const_int(body, arg) else { continue };
+            if !(0..=127).contains(&code) {
+                return Some(body.expr_spans[arg]);
             }
         }
     }

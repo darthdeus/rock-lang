@@ -1777,7 +1777,7 @@ inline(lua) fn random_seed(seed: int) = """
 @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
 @pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
 @pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
-@pure @inline inline(lua) fn atan2(x: float, y: float) -> float = "math.atan2(x, y)"
+@pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"
 @pure fn round(x: float) -> float { return floor(x + 0.5) }
 @pure fn round_to_places(x: float, places: int) -> float {
     let mult = pow(10.0, float(places))
@@ -2691,6 +2691,24 @@ inline(lua) fn string.find(s, substr: string) -> int = """
 """
 
 @inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
+
+inline(lua) fn from_codepoint(cp: int) -> string = """
+    if cp < 0 or cp > 0x10FFFF then
+        error("from_codepoint: codepoint out of range: " .. tostring(cp))
+    end
+    if cp >= 0xD800 and cp <= 0xDFFF then
+        error("from_codepoint: surrogate is not a code point: " .. tostring(cp))
+    end
+    if cp < 0x80 then
+        return string.char(cp)
+    elseif cp < 0x800 then
+        return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + (cp % 0x40))
+    elseif cp < 0x10000 then
+        return string.char(0xE0 + math.floor(cp / 0x1000), 0x80 + (math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40))
+    else
+        return string.char(0xF0 + math.floor(cp / 0x40000), 0x80 + (math.floor(cp / 0x1000) % 0x40), 0x80 + (math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40))
+    end
+"""
 
 inline(lua) fn string.byte(s, index: int) -> int = """
     return string.byte(s, index + 1) or 0  -- Convert to 1-based, return 0 if out of bounds

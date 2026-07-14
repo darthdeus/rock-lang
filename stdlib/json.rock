@@ -403,12 +403,31 @@ fn parse_string_raw(p: JsonParser) -> string? {
                 }
                 let hex = p.src.substring(p.pos, p.pos + 4)
                 p.pos = p.pos + 4
-                let cp = parse_hex4(hex)
-                if cp == null {
+                let hi = parse_hex4(hex)
+                if hi == null {
                     p.ok = false
                     return null
                 }
-                parts.push(codepoint_to_utf8(cp.unwrap()))
+                let cp = hi.unwrap()
+                if cp >= 0xD800 && cp <= 0xDBFF {
+                    if p.pos + 6 > p.len || p.src.byte(p.pos) != 92 || p.src.byte(p.pos + 1) != 117 {
+                        p.ok = false
+                        return null
+                    }
+                    let lo = parse_hex4(p.src.substring(p.pos + 2, p.pos + 6))
+                    if lo == null || lo.unwrap() < 0xDC00 || lo.unwrap() > 0xDFFF {
+                        p.ok = false
+                        return null
+                    }
+                    p.pos = p.pos + 6
+                    cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo.unwrap() - 0xDC00)
+                } else if cp >= 0xDC00 && cp <= 0xDFFF {
+                    // JSON permits lone surrogates; we reject them as a decode
+                    // failure (malformed input is data, not a programmer error).
+                    p.ok = false
+                    return null
+                }
+                parts.push(from_codepoint(cp))
             } else {
                 p.ok = false
                 return null
@@ -442,25 +461,6 @@ fn parse_hex4(s: string) -> int? {
         i = i + 1
     }
     return result
-}
-
-// Encode a Unicode codepoint as UTF-8. Surrogate-pair joining for codepoints
-// > 0xFFFF is not implemented — JSON \uXXXX escapes are the only path that
-// produces these here, and most real-world JSON encodes BMP characters
-// directly anyway.
-fn codepoint_to_utf8(cp: int) -> string {
-    if cp < 0x80 {
-        return string_char(cp)
-    }
-    if cp < 0x800 {
-        let b1 = 0xC0 + (cp ./ 64)
-        let b2 = 0x80 + (cp % 64)
-        return "{string_char(b1)}{string_char(b2)}"
-    }
-    let b1 = 0xE0 + (cp ./ 4096)
-    let b2 = 0x80 + ((cp ./ 64) % 64)
-    let b3 = 0x80 + (cp % 64)
-    return "{string_char(b1)}{string_char(b2)}{string_char(b3)}"
 }
 
 fn parse_number(p: JsonParser) -> JsonValue {
