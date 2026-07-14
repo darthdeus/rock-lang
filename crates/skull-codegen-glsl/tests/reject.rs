@@ -81,6 +81,22 @@ fn reject_unmapped_inline_lua_call() {
     reject(src, &["uses_prim"], "no GLSL intrinsic mapping");
 }
 
+// SENTINEL: milestone B reloops straight-line + counted-for only; a conditional
+// branch (`if` / `&&`) is rejected, not miscompiled. (The current reject reason is
+// incidental -- an `if` lowers through a nil, caught by the profile pass before
+// emit_seq's explicit conditional-branch reject; either way it rejects.) Flip this
+// to a golden test when the if-diamond / short-circuit reloop lands
+// (docs/glsl-fn-emission.md).
+#[test]
+fn reject_if_branch_sentinel() {
+    let src = r#"
+        @pure fn pick(a: float, b: float) -> float {
+            if a > b { return a } else { return b }
+        }
+    "#;
+    reject(src, &["pick"], "shader profile:");
+}
+
 #[test]
 fn reject_unknown_root() {
     let src = r#"
