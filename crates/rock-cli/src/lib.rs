@@ -78,6 +78,12 @@ pub enum CliCommand {
     Fmt,
     Frame,
     Stone,
+    /// `rock replay <game> <file>` — windowed replay playback of a recorded
+    /// log (docs/replay-scrub-plan.md P3.5). Unlike `rock frame --replay`
+    /// (batch headless, exits at log end), this opens a window, plays the log,
+    /// and freezes at the last tick with the timeline bar live so the developer
+    /// can scrub. Do NOT overload `rock frame` -- its contract is batch headless.
+    Replay,
     /// `rock stone-test <root>` — long-lived headless watch process driven
     /// over JSON-line stdio. Test infrastructure for incremental
     /// compilation / hot-reload assertions. See
@@ -220,7 +226,7 @@ impl clap::ValueEnum for CliCommand {
         &[
             Self::Compile, Self::CompileSingle, Self::Test,
             Self::TestCompile, Self::Run, Self::Watch, Self::Fmt, Self::Frame,
-            Self::Stone, Self::Perf,
+            Self::Stone, Self::Replay, Self::Perf,
             Self::Sim,
             Self::Completions,
             Self::StoneTest,
@@ -263,6 +269,7 @@ impl CliCommand {
             Self::Fmt => "fmt",
             Self::Frame => "frame",
             Self::Stone => "stone",
+            Self::Replay => "replay",
             Self::StoneTest => "stone-test",
             Self::Perf => "perf",
             Self::Sim => "sim",
@@ -349,7 +356,7 @@ impl Backend {
                 Test, Compile, CompileSingle, TestCompile, Run, Watch,
             ],
             Self::Skull => &[
-                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim,
+                Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, Perf, Sim,
             ],
         }
     }
@@ -427,6 +434,15 @@ pub struct Args {
     /// input/wall-clock. Mutually exclusive with `--record`.
     pub replay: Option<String>,
 
+    /// For `rock frame --record`: hash + checkpoint game state every N ticks
+    /// for desync detection (docs/replay-scrub-plan.md P2). Default 60; 0
+    /// disables checkpointing.
+    pub checkpoint_interval: Option<usize>,
+
+    /// For `rock stone`: disable the always-on flight recorder for this
+    /// session. Equivalent to STONE_NO_FLIGHT_RECORDER=1.
+    pub no_record: bool,
+
     /// For `rock completion-sweep`: keep every Nth derived probe position
     /// (1 = exhaustive). Controls corpus size vs coverage.
     pub stride: usize,
@@ -442,6 +458,11 @@ pub struct Args {
     pub list: bool,
 
     pub app_args: Vec<String>,
+
+    /// Launch the game's luajit with `-jv` (verbose trace log to stderr).
+    /// Equivalent to setting `STONE_JV=1`; applies to any command that
+    /// runs the game (`stone`, `frame`, `run`, `perf`, `sim`).
+    pub jv: bool,
 
     /// For `rock test`: re-run tests on every `.rock` file change in
     /// the given paths. Watches the same paths passed to `rock test`
@@ -541,6 +562,11 @@ impl Args {
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")
                 .help("For `rock frame`: drive the run from replay log FILE instead of live input/wall-clock."))
+            .arg(Arg::new("checkpoint-interval").long("checkpoint-interval").value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock frame --record`: hash game state every N ticks for desync detection (default 60; 0 disables)."))
+            .arg(Arg::new("no-record").long("no-record").action(ArgAction::SetTrue)
+                .help("For `rock stone`: disable the always-on flight recorder for this session (same as STONE_NO_FLIGHT_RECORDER=1)."))
             .arg(Arg::new("stride").long("stride").default_value("10")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
@@ -556,6 +582,8 @@ impl Args {
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua) or `bone` (type-check only, no codegen). Can also be set via ROCK_BACKEND=bone|skull."))
+            .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
+                .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
                 .help("Arguments to pass through to the Rock app (everything after --)"))
     }
@@ -594,10 +622,13 @@ impl Args {
             update_snapshots: m.get_flag("update-snapshots"),
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
+            checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),
+            no_record: m.get_flag("no-record"),
             stride: *m.get_one::<usize>("stride").unwrap(),
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
             app_args: many_str("app_args"),
+            jv: m.get_flag("jv"),
             watch: m.get_flag("watch"),
             package: m.get_flag("package"),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
@@ -621,6 +652,20 @@ impl Args {
     }
 }
 
+
+#[cfg(test)]
+mod arg_tests {
+    use super::Args;
+
+    #[test]
+    fn no_record_flag_parses_and_defaults_off() {
+        let parse = |argv: &[&str]| {
+            Args::from_matches(Args::command().try_get_matches_from(argv).expect("parse"))
+        };
+        assert!(parse(&["rock", "stone", "bitgun", "--no-record"]).no_record);
+        assert!(!parse(&["rock", "stone", "bitgun"]).no_record);
+    }
+}
 
 #[cfg(test)]
 mod caps_tests {

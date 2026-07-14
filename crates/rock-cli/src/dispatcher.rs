@@ -252,8 +252,25 @@ impl CommandContext {
             self.args.dump_state,
             self.args.record.as_deref(),
             self.args.replay.as_deref(),
+            self.args.checkpoint_interval,
             &self.args.app_args,
         )
+    }
+
+    /// `rock replay <game> <file>` — windowed playback (docs/replay-scrub-plan.md
+    /// P3.5). Dedicated command, NOT `rock frame --replay` (batch headless): the
+    /// window stays open and freezes at the last tick with the timeline bar live.
+    fn handle_replay(&self) -> Result<()> {
+        if self.args.files.len() < 2 {
+            anyhow::bail!("usage: rock replay <game> <file.replay>");
+        }
+        let game = self.args.files[0].clone();
+        let replay_file = self.args.files[1].clone();
+        if !std::path::Path::new(&replay_file).exists() {
+            anyhow::bail!("replay log not found: {replay_file}");
+        }
+        let output = self.get_output_or_default("tmp")?;
+        do_replay_window(self.args.backend, &game, output, &replay_file, &self.args.app_args)
     }
 
     /// `rock perf` on the skull backend.
@@ -405,11 +422,13 @@ impl CommandContext {
                     self.args.quiet,
                     &self.args.app_args,
                     crate::Backend::Skull,
+                    self.args.no_record,
                 )
             }
             // frame/perf/sim are backend-parameterized: the compile + @sim
             // collection routes through skull, the spawn/profile/run half is shared.
             CliCommand::Frame => self.handle_frame(),
+            CliCommand::Replay => self.handle_replay(),
             CliCommand::Perf => self.handle_perf(),
             CliCommand::Sim => self.handle_sim(),
             // See the bone fallthrough: the capability gate already rejected

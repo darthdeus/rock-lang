@@ -41,6 +41,7 @@ fn run_frame(game: &str, frames: u32, extra: &[&str]) -> serde_json::Value {
 
     let output = Command::new(rock_bin)
         .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame");
@@ -69,16 +70,127 @@ fn run_frame_raw(game: &str, frames: u32, extra: &[&str]) -> std::process::Outpu
     args.extend_from_slice(extra);
     Command::new(rock_bin)
         .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame")
 }
 
-/// Remove the wall-clock diagnostics carve-out (see module docs).
+/// Like `run_frame_raw` but with extra environment variables set on the child.
+fn run_frame_raw_env(
+    game: &str,
+    frames: u32,
+    extra: &[&str],
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
+    args.extend_from_slice(extra);
+    Command::new(rock_bin)
+        .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .envs(env.iter().copied())
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock frame")
+}
+
+/// Remove the wall-clock diagnostics carve-out (see module docs). This is the
+/// BYTE-IDENTITY contract: record vs a RENDERED replay must match on everything
+/// except non-reproducible wall-clock diagnostics (PROFILER), INCLUDING all
+/// render state -- so this is deliberately NOT the sim-state predicate (which
+/// the render-skipped seek test uses). Both runs render here, so render state
+/// is identical and must be compared.
 fn strip_diagnostics(v: &mut serde_json::Value) {
+    if let Some(obj) = v.as_object_mut() {
+        // The `__stone_diag` envelope is the non-dumped test-observability
+        // readout (`_G.__stone_diag`), not registered game/engine state. It
+        // carries replay-only counters (ghost draws, etc.) that legitimately
+        // differ between a record run and its replay -- drop it wholesale.
+        obj.remove("__stone_diag");
+    }
     if let Some(stone) = v.get_mut("stone").and_then(|s| s.as_object_mut()) {
         stone.remove("PROFILER");
     }
+}
+
+/// Piece 2 of P3: a window resize during recording is captured as an `r`
+/// line and re-applied at the matching tick on replay (so screen_to_world
+/// reproduces). Headless never resizes, so we inject a resize line into a
+/// recorded log and assert replay adopts it. `tonumber` parses the decimal
+/// coords fine (records write %a hex; both round-trip).
+#[test]
+fn replay_applies_recorded_window_resize() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("resize.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let _ = run_frame("bitgun", 30, &["--record", &log_s]);
+
+    // Insert a resize to 800x600 at tick 5, after the 5 header lines.
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    lines.insert(5, "r 5 800 600".to_string());
+    std::fs::write(&log, lines.join("\n") + "\n").expect("rewrite log");
+
+    let state = run_frame("bitgun", 30, &["--replay", &log_s]);
+    let ws = &state["stone"]["WINDOW_SIZE"];
+    assert_eq!(
+        ws["x"].as_f64(),
+        Some(800.0),
+        "replay must adopt the recorded resize width\nWINDOW_SIZE={ws}"
+    );
+    assert_eq!(
+        ws["y"].as_f64(),
+        Some(600.0),
+        "replay must adopt the recorded resize height\nWINDOW_SIZE={ws}"
+    );
+}
+
+/// Piece 1 of P3: the record log is streamed to disk as ticks are captured,
+/// so a crash before shutdown still leaves a valid, replayable partial log.
+/// `STONE_CRASH_AT_FRAME` hard-exits the game with no shutdown flush — the
+/// exact scenario incremental flush protects. Before streaming (buffer +
+/// write-at-shutdown), the crash left an empty/absent log.
+#[test]
+fn record_log_survives_a_crash_via_incremental_flush() {
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("crash.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let out = run_frame_raw_env(
+        "bitgun",
+        1000,
+        &["--record", &log_s],
+        &[("STONE_CRASH_AT_FRAME", "10")],
+    );
+    assert!(
+        !out.status.success(),
+        "the crash hook should exit nonzero\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = std::fs::read_to_string(&log).expect("partial log must exist after a crash");
+    assert!(
+        text.starts_with("STONE_REPLAY"),
+        "partial log must still start with the header\n{text}"
+    );
+    let ticks = text.lines().filter(|l| l.starts_with("t ")).count();
+    assert!(
+        ticks >= 5,
+        "crash-surviving log must contain streamed tick lines; got {ticks}\n{text}"
+    );
+
+    // The partial log is a valid prefix and replays cleanly.
+    let rep = run_frame_raw("bitgun", 1000, &["--replay", &log_s]);
+    assert!(
+        rep.status.success(),
+        "partial crash log must replay cleanly\nstderr:\n{}",
+        String::from_utf8_lossy(&rep.stderr)
+    );
 }
 
 #[test]
