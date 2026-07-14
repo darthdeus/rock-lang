@@ -1322,7 +1322,20 @@ fn render_scope(
     // Tree-folded values get no register; the colorer sees through them.
     let inlinable = compute_inlinable(func, &rpo);
     let t_ra = std::time::Instant::now();
-    let colors = regalloc::color_values(func, &rpo, &inlinable);
+    // Counted-loop regions partition the coloring so loop-body temps get
+    // body-scoped `local`s (see `ValueAlloc::color_scope`). Partitioning trades
+    // some color sharing for scoping; if a monster function's palette total
+    // nears LuaJIT's 200-active-locals parse cap, drop the partitions.
+    let mut loop_scopes: Vec<regalloc::LoopScope> = loops
+        .iter()
+        .map(|(&h, cl)| regalloc::LoopScope { header: h, region: cl.region.iter().copied().collect() })
+        .collect();
+    loop_scopes.sort_by_key(|ls| raw(ls.header));
+    let mut va = regalloc::color_values(func, &rpo, &inlinable, &loop_scopes);
+    if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
+        va = regalloc::color_values(func, &rpo, &inlinable, &[]);
+    }
+    let regalloc::ValueAlloc { colors, color_scope } = va;
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
     // Param list `(e, a, b, c)` — written straight into the buffer (no
@@ -1346,7 +1359,13 @@ fn render_scope(
     // for uncolored slots — inlined / non-value insts — which we skip), then the
     // cell locals. All written directly into a single `  local ...` line; we
     // stamp the keyword up front and `truncate` it back if nothing is declared.
-    let mut distinct: Vec<u32> = colors.iter().copied().filter(|&c| c != u32::MAX).collect();
+    // Loop-owned colors are declared inside their `for` block (expand_for), not
+    // here.
+    let mut distinct: Vec<u32> = colors
+        .iter()
+        .copied()
+        .filter(|&c| c != u32::MAX && color_scope[c as usize].is_none())
+        .collect();
     distinct.sort_unstable();
     distinct.dedup();
     let decl_start = out.len();
@@ -1436,6 +1455,7 @@ fn render_scope(
         ctx,
         func,
         colors,
+        color_scope,
         cell_colors,
         lambda_params,
         frame,
@@ -1488,6 +1508,9 @@ struct Emitter<'a> {
     /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored); read per operand by
     /// [`write_vname`] as `colors[raw(id)]` instead of a hash probe.
     colors: Vec<u32>,
+    /// `color -> owning loop header` (None = function top): loop-owned colors
+    /// get their `local` line inside the `for` block ([`Self::expand_for`]).
+    color_scope: Vec<Option<Idx<Block>>>,
     cell_colors: &'a [u32],
     lambda_params: &'a HashSet<Idx<Cell>>,
     frame: Option<&'a FrameCtx>,
@@ -1651,6 +1674,30 @@ impl Emitter<'_> {
 
         self.emitted[raw(header) as usize] = true;
         let _ = writeln!(out, "  for {slot_name} = {slot_name}, {limit} do");
+        // Body-scoped temp registers: declared INSIDE the `for` block, above the
+        // loop-control slots, so LuaJIT's snapshot liveness can prune them at
+        // loop exits (else they pin their values into every side trace and
+        // `asm_head_side` aborts past ~16 inherited FP values — the
+        // "NYI: register coalescing too complex" blacklist class).
+        let mut own: Vec<u32> = self
+            .color_scope
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| **s == Some(header))
+            .map(|(c, _)| c as u32)
+            .collect();
+        if !own.is_empty() {
+            own.sort_unstable();
+            out.push_str("  local ");
+            for (i, &c) in own.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push('r');
+                push_uint(out, c);
+            }
+            out.push('\n');
+        }
         self.emit_block(out, body_entry);
         for &bb in self.rpo {
             if region.contains(&bb) {
