@@ -1,0 +1,138 @@
+//! Defer-to-use inference for unconstrained lambda params
+//! (docs/lambda-defer-inference-design.md): an overload ambiguity or field
+//! projection whose operand is an unresolved lambda-param tyvar queues a
+//! pending constraint, resolved when a later use in the same body pins the
+//! param. The harness loads no stdlib, so every overload candidate is defined
+//! in-fixture -- `*(W,int)` ties with `*(int,int)` at fit cost 0, mirroring
+//! the stdlib Vec2 collision that motivated this.
+
+//- defer_mul_pinned_by_int_call
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2
+    let y = f(5)
+      //^ int
+}
+
+//- defer_mul_pinned_by_struct_call
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2
+    let y = f(W { a: 1.0 })
+      //^ W
+}
+
+//- defer_placeholder_mul
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let d = _ * 2
+    let y = d(5)
+      //^ int
+}
+
+//- defer_chained_ops
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+operator +(l: int, r: int) -> int { return l }
+operator +(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2 + 1
+    let y = f(5)
+      //^ int
+}
+
+//- defer_field_projection
+struct P { x: int }
+struct Q { x: float }
+fn main() {
+    let get_x = _.x
+    let p = P { x: 3 }
+    let y = get_x(p)
+      //^ int
+}
+
+//- defer_two_params
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let m = (a, b) => a * b
+    let y = m(2, 3)
+      //^ int
+}
+
+//- defer_lambda_arg_before_pinning_arg
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn apply<T, U>(f: fn(T) -> U, v: T) -> U { return f(v) }
+fn main() {
+    let y = apply(x => x * 2, 5)
+      //^ int
+}
+
+//- defer_use_inside_later_lambda
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+operator +(l: int, r: int) -> int { return l }
+fn main() {
+    let twice = x => x * 2
+    let composed = y => twice(y + 1)
+    let z = composed(4)
+      //^ int
+}
+
+//- defer_result_consumed_as_any
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn take_any(v: any) -> int { return 0 }
+fn main() {
+    let m = (a, b) => a * b
+    let y = take_any(m(2, 3))
+      //^ int
+}
+
+//- defer_result_widens_to_float
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2
+    let y: float = f(5)
+      //^ float
+}
+
+//- unpinned_lambda_param_errors @fail
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2
+}
+
+//- first_use_pins_second_conflicts @fail
+struct W { a: float }
+operator *(l: int, r: int) -> int { return l }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2
+    let a = f(W { a: 1.0 })
+    let b = f(5)
+}
+
+//- solved_lambda_param_ambiguity_still_errors @fail
+fn amb(x: any, y: int) -> int { return 0 }
+fn amb(x: int, y: any) -> int { return 1 }
+fn main() {
+    let f = (x: int) => amb(x, 3)
+    let y = f(5)
+}

@@ -63,6 +63,24 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
     }
 }
 
+/// Why `select_overload` failed: a cost tie between fitting candidates
+/// (deferrable when an operand is an unpinned lambda-param var) vs no
+/// candidate fitting at all (never deferrable -- an unresolved var unifies
+/// with anything, so a no-fit means some OTHER operand rejects everywhere).
+#[derive(Debug)]
+pub(crate) enum SelectError {
+    Tied(CompilerError),
+    NoFit(CompilerError),
+}
+
+impl From<SelectError> for CompilerError {
+    fn from(e: SelectError) -> CompilerError {
+        match e {
+            SelectError::Tied(e) | SelectError::NoFit(e) => e,
+        }
+    }
+}
+
 pub(crate) fn select_overload(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -73,7 +91,7 @@ pub(crate) fn select_overload(
     arg_tys_msg: &[TyId],
     name: Ustr,
     span: Span,
-) -> Result<(ModuleId, Idx<Function>), CompilerError> {
+) -> Result<(ModuleId, Idx<Function>), SelectError> {
     let mut best: Option<(usize, (ModuleId, Idx<Function>))> = None;
     let mut tied = false;
     // The bound-conformance failure of an otherwise-fitting `Iterator`-bounded
@@ -105,31 +123,34 @@ pub(crate) fn select_overload(
 
     match best {
         Some((_, pick)) if !tied => Ok(pick),
-        Some(_) => comp_error!(
+        Some(_) => Err(SelectError::Tied(CompilerError::new_with_label(
             span,
-            "Ambiguous overload for `{name}` with argument types ({})",
-            arg_tys_msg
-                .iter()
-                .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
-                .join(", ")
-        ),
+            format!(
+                "Ambiguous overload for `{name}` with argument types ({})",
+                arg_tys_msg
+                    .iter()
+                    .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
+                    .join(", ")
+            ),
+        ))),
 
         None => {
             let args_msg = arg_tys_msg
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
                 .join(", ");
-            match bound_fail {
-                Some(be) => comp_error!(
-                    span,
-                    "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}",
-                    be.message
-                ),
-                None => comp_error!(
-                    span,
-                    "No overload for `{name}` with argument types ({args_msg})"
-                ),
-            }
+            Err(SelectError::NoFit(CompilerError::new_with_label(
+                span,
+                match bound_fail {
+                    Some(be) => format!(
+                        "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}",
+                        be.message
+                    ),
+                    None => format!(
+                        "No overload for `{name}` with argument types ({args_msg})"
+                    ),
+                },
+            )))
         }
     }
 }
@@ -901,6 +922,39 @@ pub(crate) fn resolve_named_call_inner(
             Ok(pick) => pick,
 
             Err(e) => {
+                // Defer-to-use: a cost tie whose operand is an unpinned
+                // lambda-param var re-resolves when a later use pins it
+                // (defer.rs). Wins over the `__op_*` fallback below -- the
+                // deferred path records a real callee once it commits.
+                if let SelectError::Tied(_) = e {
+                    if !gamma.quiet {
+                        if let Some((v, origin)) = deferrable_operand(gamma, &arg_tys, span) {
+                            let result = defer_result_var(gamma, origin, span);
+                            // The callee's purity is unknown until it
+                            // resolves; clear global refinements as any
+                            // non-`@pure` call would.
+                            gamma.refined_nonnull.retain(|(root, _)| !root.is_global());
+                            queue_pending(
+                                gamma,
+                                v,
+                                Pending::Call {
+                                    name,
+                                    call_expr,
+                                    recv_override,
+                                    args: arg_list,
+                                    arg_ty,
+                                    arg_tys,
+                                    preinferred,
+                                    origin,
+                                    span,
+                                    result,
+                                },
+                            );
+                            return Ok(result);
+                        }
+                    }
+                }
+
                 if name.as_str().starts_with("__op_") {
                     if let Some(&first) = arg_tys.first() {
                         if arg_tys.iter().all(|&t| {
@@ -911,11 +965,43 @@ pub(crate) fn resolve_named_call_inner(
                     }
                 }
 
-                return Err(e);
+                return Err(e.into());
             }
         }
     };
 
+    let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
+    commit_selected_call(
+        c,
+        gamma,
+        name,
+        callee_mid,
+        callee_fn,
+        recv_override,
+        &arg_list,
+        &preinferred,
+        call_expr,
+        span,
+    )
+}
+
+/// The post-selection half of a named call: record the callee, instantiate
+/// its generics, coerce/check every arg against the substituted params, run
+/// bound conformance and the fn-eq ban, apply the callee's purity effect, and
+/// return the substituted return type. Shared by the eager path above and the
+/// pending-constraint retry (defer.rs).
+pub(crate) fn commit_selected_call(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    name: Ustr,
+    callee_mid: ModuleId,
+    callee_fn: Idx<Function>,
+    recv_override: Option<TyId>,
+    arg_list: &[Idx<Expr>],
+    preinferred: &FxHashMap<Idx<Expr>, TyId>,
+    call_expr: Idx<Expr>,
+    span: Span,
+) -> Result<TyId, CompilerError> {
     gamma
         .out
         .record_resolved_call(call_expr, callee_mid, callee_fn, span)?;
@@ -967,8 +1053,6 @@ pub(crate) fn resolve_named_call_inner(
     } else {
         0
     };
-
-    let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
 
     let pairs: Vec<(SlotFill, TyId)> = if function.is_variadic {
         let velem = param_tys[param_tys.len() - 1];

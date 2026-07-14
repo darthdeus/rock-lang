@@ -24,6 +24,17 @@ pub(crate) fn infer_lambda(
         };
 
         gamma.assign_named_type(pb, ty)?;
+
+        // Defer-to-use: a param left as an unresolved var (fresh, or the
+        // callee's instantiated generic) may be pinned by a later use in this
+        // body -- sanction it so ambiguities on it queue instead of erroring.
+        let name = binding.name;
+        let r = resolve(gamma, ty, expr_span);
+        if let TypeExpr::Infer(v, _) = *gamma.get(r) {
+            let origin = DeferOrigin { name, span: expr_span };
+            gamma.deferrable_vars.entry(v).or_insert(origin);
+        }
+
         param_tys.push(ty)
     }
 

@@ -287,6 +287,10 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
         }
     };
 
+    // Statement boundary: a sequence point, so any pinned lambda-param var is
+    // committed -- resolve the constraints deferred on it (defer.rs).
+    drain_ready_pendings(gamma)?;
+
     Ok(())
 }
 
@@ -1094,7 +1098,7 @@ pub fn infer_expr_used(
             let base_ty = infer_expr(c, gamma, base)?;
             let base_ty = resolve(gamma, base_ty, expr_span);
 
-            let fty = struct_field_ty(gamma, base_ty, field, expr_span)?;
+            let fty = field_ty_or_defer(gamma, base_ty, field, expr_span)?;
 
             match path_key(c, e) {
                 Some(p) if gamma.refined_nonnull.contains(&p) => {

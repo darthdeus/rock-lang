@@ -27,6 +27,25 @@ pub(crate) fn resolve_enum(gamma: &Gamma, name: Ustr) -> Option<EnumId> {
     gamma.workspace.enums_by_name.get(&name).copied()
 }
 
+/// Every struct in the workspace defining `field` -- the reverse field
+/// inference scan for an unresolved base (unique match pins the struct;
+/// several matches are ambiguous, deferrable on a lambda-param base).
+pub(crate) fn structs_with_field(gamma: &Gamma, field: Ustr) -> Vec<StructId> {
+    let mut matches: Vec<StructId> = Vec::new();
+
+    for m in gamma.workspace.modules.iter() {
+        let mid = m.module_id();
+
+        for (def, sdef) in m.structs.iter() {
+            if sdef.fields.iter().any(|f| f.name == field) {
+                matches.push(StructId { module: mid, def });
+            }
+        }
+    }
+
+    matches
+}
+
 // Resolve the type of `field` on a nominal struct, with generic subst.
 // `base_ty` must be resolved and peeled nullable for safe nav.
 pub(crate) fn struct_field_ty(
@@ -50,17 +69,7 @@ pub(crate) fn struct_field_ty(
         } => (*VEC, params),
 
         TypeExpr::Infer(..) => {
-            let mut matches: Vec<StructId> = Vec::new();
-
-            for m in gamma.workspace.modules.iter() {
-                let mid = m.module_id();
-
-                for (def, sdef) in m.structs.iter() {
-                    if sdef.fields.iter().any(|f| f.name == field) {
-                        matches.push(StructId { module: mid, def });
-                    }
-                }
-            }
+            let matches = structs_with_field(gamma, field);
 
             let sid = match matches.as_slice() {
                 [one] => *one,

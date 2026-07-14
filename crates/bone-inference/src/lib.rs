@@ -19,6 +19,7 @@ mod narrowing;
 
 use narrowing::{detect_null_narrow, infer_branch, path_key, stmt_guard_narrows, Narrow, Root};
 
+mod defer;
 mod purity;
 mod expr;
 mod lambda;
@@ -28,6 +29,7 @@ mod fields;
 mod patterns;
 mod iter;
 
+pub(crate) use defer::*;
 pub(crate) use purity::*;
 pub use expr::*;
 pub(crate) use lambda::*;
@@ -92,6 +94,13 @@ pub struct Gamma<'a> {
     /// empty for unbounded fns and non-fn bodies.
     pub fn_bounds: Vec<(VarId, usize, TyId)>,
 
+    // Defer-to-use for unconstrained lambda params (defer.rs). Body-local by
+    // design; kept out of `BodyInference` so checkpoint/rollback (substitution
+    // trail only) never sees it -- deferral never queues under `quiet`.
+    pub(crate) deferrable_vars: FxHashMap<VarId, DeferOrigin>,
+    pub(crate) pending: Vec<Option<Pending>>,
+    pub(crate) pending_by_var: FxHashMap<VarId, SmallVec<[usize; 2]>>,
+
     pub out: BodyInference,
 }
 
@@ -122,6 +131,10 @@ impl<'a> Gamma<'a> {
 
             fn_bounds: Vec::new(),
 
+            deferrable_vars: Default::default(),
+            pending: Vec::new(),
+            pending_by_var: Default::default(),
+
             out: BodyInference {
                 body_generation: body.generation,
 
@@ -151,6 +164,13 @@ impl<'a> Gamma<'a> {
 
     pub fn module(&self) -> &Module {
         &self.workspace.modules[self.current_module_id.index()]
+    }
+
+    /// A `BodyCtx` for this Gamma's own body -- pending-constraint retries run
+    /// outside the syntactic walk, where no `c` is threaded through.
+    pub(crate) fn body_ctx(&self) -> BodyCtx<'a> {
+        let ws: &'a Workspace = self.workspace;
+        BodyCtx { module: &ws.modules[self.current_module_id.index()], body: self.body }
     }
 
     pub fn render(&self, ty: TyId) -> String {
@@ -461,6 +481,8 @@ pub fn check_function(
         gamma.body_errors.append(&mut purity_errors);
     }
 
+    report_unpinned_lambda_params(&mut gamma);
+
     let errors = std::mem::take(&mut gamma.body_errors);
 
     Ok(Some((BodyOwner::Function(f_id), gamma.out, errors)))
@@ -504,6 +526,8 @@ pub fn check_decorator(
         gamma.body_errors.push(e);
     }
 
+    report_unpinned_lambda_params(&mut gamma);
+
     let errors = std::mem::take(&mut gamma.body_errors);
 
     Ok(Some((BodyOwner::Decorator(d_id), gamma.out, errors)))
@@ -533,6 +557,8 @@ pub fn check_global(
     })() {
         gamma.body_errors.push(e);
     }
+
+    report_unpinned_lambda_params(&mut gamma);
 
     let errors = std::mem::take(&mut gamma.body_errors);
 
@@ -581,6 +607,8 @@ pub fn check_struct_defaults(
     }
 
     gamma.sibling_fields.pop();
+
+    report_unpinned_lambda_params(&mut gamma);
 
     let errors = std::mem::take(&mut gamma.body_errors);
 
