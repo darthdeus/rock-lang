@@ -1041,7 +1041,7 @@ fn kind_digit(path: &str, src: &str, label: &str) -> char {
         .iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("no completion `{label}`"));
-    it.sort_text.as_deref().expect("sort_text").as_bytes()[4] as char
+    it.sort_text.as_deref().expect("sort_text").as_bytes()[3] as char
 }
 
 #[test]
@@ -1122,7 +1122,7 @@ fn kind_digit_at(bone: &mut BoneWorkspace, path: &str, pos: Position, label: &st
         .iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("no completion `{label}`"));
-    it.sort_text.as_deref().expect("sort_text").as_bytes()[4] as char
+    it.sort_text.as_deref().expect("sort_text").as_bytes()[3] as char
 }
 
 #[test]
