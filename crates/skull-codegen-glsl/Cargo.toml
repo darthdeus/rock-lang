@@ -1,0 +1,26 @@
+[package]
+name = "skull-codegen-glsl"
+version = "0.1.0"
+edition = "2024"
+
+# skull-codegen-glsl: GLSL function-library emission (route B, docs/glsl-spike.md).
+# A second codegen backend over the shared skull-mir substrate (the sibling of
+# skull-codegen-lua). Given a typechecked workspace + a set of root fn names, it
+# emits GLSL function definitions for the roots + their reachable callees,
+# topologically ordered. Value structs stay first-class vecN (the values-first-class
+# ScalarCtx flag); a strict profile pass rejects everything above tier 0.
+
+[dependencies]
+comfy-la-arena = { workspace = true }
+rustc-hash = { workspace = true }
+skull-mir = { path = "../skull-mir" }
+skull-codegen-lua = { path = "../skull-codegen-lua" }
+bone-semantic = { path = "../bone-semantic" }
+skull-parser = { path = "../skull-parser" }
+ustr = { workspace = true }
+
+[dev-dependencies]
+rock-host = { path = "../rock-host" }
+
+[lints]
+workspace = true

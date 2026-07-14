@@ -490,6 +490,14 @@ pub struct ScalarCtx {
     /// changes scalar-ABI eligibility, so [`update_body`](Self::update_body)
     /// reports exactly those.
     ref_counts: HashMap<Ustr, u32>,
+    /// When set, the scalarized value ABI is disabled workspace-wide: every fn
+    /// keeps value structs as first-class single values (params/returns/args),
+    /// never splatting them to leaf scalars. Used by the GLSL backend, where a
+    /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves
+    /// (`docs/glsl-spike.md` finding 5). The toggle is contained because
+    /// [`fn_uses_scalar_abi`] is the single gate the definition and every call site
+    /// both consult, so flipping it here can never drift the two ABIs apart.
+    values_first_class: bool,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -524,7 +532,16 @@ impl ScalarCtx {
                 }
             }
         }
-        Self { taken_by_ref, per_body, ref_counts }
+        Self { taken_by_ref, per_body, ref_counts, values_first_class: false }
+    }
+
+    /// Like [`new`](Self::new) but with the scalarized value ABI disabled: value
+    /// structs stay first-class single values everywhere (the GLSL backend's
+    /// requirement -- a `vecN` is not scalar leaves). See [`values_first_class`].
+    pub fn new_values_first_class(ws: &Workspace) -> Self {
+        let mut scx = Self::new(ws);
+        scx.values_first_class = true;
+        scx
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into
@@ -576,6 +593,9 @@ impl ScalarCtx {
 /// (`@nomangle` / `@test` / `main`) and NOT taken by reference (an indirect callee
 /// can't splat). A non-scalar callee receives/returns a single cdata.
 fn fn_uses_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> bool {
+    if scx.values_first_class {
+        return false;
+    }
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern {
         return false;
