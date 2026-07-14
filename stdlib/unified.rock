@@ -776,31 +776,33 @@ fn print_float(value: float) { print(to_string(value)) }
 
 global __stone_log_level: int = -1
 
+// Level source is a platform SEAM: stone installs `_G.__rock_log_level_source`
+// (routing to the one rock-log level) via stone/engine/log_sink.rock. When no
+// sink is installed (rock test / rock run, or early global-init before the
+// install), keep an info default; the nil/<0 guard preserves the contract for
+// that ordering edge (tests/log_once_global_init.rock).
 @nomangle inline(lua) fn __stone_log_init() = """
-    -- Phase 4: the level lives in the one logger (rock-log). Sync it
-    -- via the FFI bridge each call so runtime changes (--verbose / the
-    -- stone_log_set_level bridge) apply. Before ffi.load (`_G.stone`
-    -- nil) — i.e. logging from a Lua `global X = {...}` initializer
-    -- that runs before stone_init() — keep an info default; the
-    -- defensive nil/<0 guard preserves the contract for that ordering
-    -- edge (see tests/log_once_global_init.rock). No more Lua-side
-    -- STONE_LOG parse (rock-log owns the single parser).
-    if _G.stone ~= nil then
-        __stone_log_level = stone.stone_log_get_level()
-    elseif __stone_log_level == nil or __stone_log_level < 0 then
+    local src = _G.__rock_log_level_source
+    if src ~= nil then
+        local lvl = src()
+        if lvl ~= nil then __stone_log_level = lvl; return end
+    end
+    if __stone_log_level == nil or __stone_log_level < 0 then
         __stone_log_level = 2
     end
 """
 
-// Single emit point. Routes into the one logger (rock-log) via the
-// FFI bridge so the whole game process shares one sink/level/format.
-// Pre-ffi.load (early global-init before stone_init) the cdylib isn't
-// loaded yet, so fall back to print() -- without this, early Rock logs
-// would error on the nil `_G.stone`.
+// Single emit point, a platform SEAM. Stone installs `_G.__rock_log_sink`
+// (routing to the one rock-log sink) via stone/engine/log_sink.rock. With no
+// sink installed (rock test / rock run, or early global-init before the
+// install) fall back to a portable print() so logs still surface.
 @nomangle inline(lua) fn __stone_emit(level: int, category: string, msg: string) = """
-    if _G.stone ~= nil then
-        stone.stone_log(level, category or "", msg)
-    elseif category and #category > 0 then
+    local sink = _G.__rock_log_sink
+    if sink ~= nil then
+        sink(level, category or "", msg)
+        return
+    end
+    if category and #category > 0 then
         print("[" .. category .. "] " .. msg)
     else
         print(msg)
@@ -819,11 +821,13 @@ fn log_info(category: string, msg: string) { __stone_log(2, category, msg) }
 fn log_debug(category: string, msg: string) { __stone_log(3, category, msg) }
 fn log_trace(category: string, msg: string) { __stone_log(4, category, msg) }
 
-// Sets the ONE level source (rock-log via the FFI bridge) so it
-// affects all gating — Rust + Rock — not just this Lua global.
-// Pre-ffi.load it only updates the local default.
+// Sets the ONE level source (the rock-log level, via the stone-installed
+// `_G.__rock_log_level_sink` seam) so it affects all gating -- Rust + Rock --
+// not just this Lua global. With no sink installed it only updates the local
+// default.
 inline(lua) fn log_set_level(level: int) = """
-    if _G.stone ~= nil then stone.stone_log_set_level(level) end
+    local sink = _G.__rock_log_level_sink
+    if sink ~= nil then sink(level) end
     __stone_log_level = level
 """
 fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
