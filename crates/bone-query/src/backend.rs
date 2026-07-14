@@ -1915,7 +1915,7 @@ impl BoneWorkspace {
                     // (type_rank 0); the shared key folds in match quality
                     // (prefix on the root beats a scattered subsequence), the
                     // root locality, the hop distance, and field-before-method.
-                    let rk = arg_rank_key(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method));
+                    let rk = arg_rank_key(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
                     sink.push(Cand::new(
                         rk,
                         CandName::Owned(key),
