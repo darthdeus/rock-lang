@@ -96,4 +96,8 @@ fn nested_counted_loops() {
     assert!(glsl.contains("for (; x < "), "got:\n{glsl}");
     assert!(glsl.contains("dist = min(dist, length(diff));"), "got:\n{glsl}");
     assert!(glsl.contains("return dist;"), "got:\n{glsl}");
+    // Vec operators render inline (native infix) and are NOT emitted as GLSL fn
+    // definitions (they are reachability leaves, like intrinsics).
+    assert!(!glsl.contains("__op_add"), "vec operators must not emit fn defs:\n{glsl}");
+    assert!(!glsl.contains("__op_sub"), "vec operators must not emit fn defs:\n{glsl}");
 }

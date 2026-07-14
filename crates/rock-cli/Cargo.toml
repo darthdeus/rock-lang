@@ -32,6 +32,7 @@ bone-incremental = { path = "../bone-incremental" }
 bone-query = { path = "../bone-query" }
 rock-lsp = { path = "../rock-lsp" }
 skull = { path = "../skull" }
+skull-codegen-glsl = { path = "../skull-codegen-glsl" }
 lsp-types = { path = "../lsp-types-manual", package = "lsp-types-manual" }
 
 clap = { workspace = true }

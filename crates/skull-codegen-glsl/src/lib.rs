@@ -112,9 +112,10 @@ impl Reach<'_> {
             return Ok(());
         }
         let f = &self.ws.module(fref.module).functions[fref.func];
-        // An intrinsic (mapping-table entry) is a leaf: rendered inline at call
-        // sites, never emitted as a GLSL definition, never walked.
-        if intrinsic_template(f).is_some() {
+        // An intrinsic mapping OR a Vec operator is rendered inline at call sites
+        // (a native builtin / infix op), never emitted as a GLSL definition, never
+        // walked -- so it's a reachability leaf.
+        if renders_inline(f) {
             self.black.insert(fref);
             return Ok(());
         }
@@ -271,6 +272,15 @@ fn intrinsic_template(f: &Function) -> Option<&'static str> {
         ("v", 0) | ("zero", 0) => Some("vec2(0.0)"),
         _ => None,
     }
+}
+
+/// Whether a callee is rendered inline at call sites (an intrinsic template or a
+/// Vec operator's native infix), rather than emitted as a GLSL fn definition. A
+/// `__op_*` reaching codegen as a real call is always non-scalar (scalar ops lower
+/// to native MIR insts), so a 2-arg `__op_*` is always a Vec operator.
+fn renders_inline(f: &Function) -> bool {
+    intrinsic_template(f).is_some()
+        || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
 }
 
 /// The GLSL infix operator symbol for a non-scalar `__op_*` (Vec operator) call.

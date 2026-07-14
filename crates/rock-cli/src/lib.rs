@@ -219,6 +219,13 @@ pub enum CliCommand {
     /// `--iters` timed runs after `--warmup`. Runs BOTH backends itself, so it
     /// ignores `--backend`. See `backend_stats::do_backend_stats`.
     BackendStats,
+    /// `rock shader <file.rock> <fn> [fn...] --output <file.glsl>` -- GLSL
+    /// function-library emission (route B, `docs/glsl-fn-emission.md`). Type-checks
+    /// the file against the stdlib, then emits GLSL fn definitions for the named
+    /// root fns + their reachable tier-0 callees, topologically ordered. Strict
+    /// profile (rejects anything above tier 0). Backend-agnostic: dispatched before
+    /// the backend switch, like `fmt`/`completions`.
+    Shader,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -247,6 +254,7 @@ impl clap::ValueEnum for CliCommand {
             Self::CompletionEpisodes,
             Self::IterCascade,
             Self::BackendStats,
+            Self::Shader,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -291,6 +299,7 @@ impl CliCommand {
             Self::CompletionEpisodes => "completion-episodes",
             Self::IterCascade => "iter-cascade",
             Self::BackendStats => "backend-stats",
+            Self::Shader => "shader",
         }
     }
 }
