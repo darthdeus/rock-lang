@@ -151,7 +151,7 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             push(*value);
             push(*fmt);
         }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) => {
+        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) | Inst::IntToFloat(x) => {
             push(*x)
         }
         Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter().for_each(|a| push(*a)),

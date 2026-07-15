@@ -94,6 +94,7 @@ fn fmt_inst(
         Inst::Format { value, fmt } => format!("format {:?} v{}", fmt.as_str(), v(*value)),
         Inst::FormatDyn { value, fmt } => format!("format_dyn v{} v{}", v(*fmt), v(*value)),
         Inst::FloatToInt(x) => format!("float_to_int v{}", v(*x)),
+        Inst::IntToFloat(x) => format!("int_to_float v{}", v(*x)),
 
         Inst::IntLt(a, b) => bin("int.lt", a, b),
         Inst::IntLeq(a, b) => bin("int.leq", a, b),

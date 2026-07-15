@@ -1155,6 +1155,7 @@ pub fn lower_function(
         param_shapes,
         ret_shape,
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
+        ret_ty: func.return_ty,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
@@ -1218,6 +1219,7 @@ pub fn lower_global(
         param_shapes: Vec::new(),
         ret_shape: None,
         ret_tuple: None,
+        ret_ty: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -1269,6 +1271,7 @@ pub fn lower_decorator(
         param_shapes: Vec::new(),
         ret_shape: None,
         ret_tuple: None,
+        ret_ty: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -1318,6 +1321,9 @@ struct Builder<'a> {
     /// N Lua values (multi-return ABI), not one heap table. Set for named fns;
     /// lambdas decide per-body at their own return site.
     ret_tuple: Option<usize>,
+    /// The fn's declared return type -- the expected type at a scalar `return`
+    /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
+    ret_ty: Option<TyId>,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1470,7 +1476,12 @@ impl Builder<'_> {
             let v = self.lower_expr(e)?;
             return Ok(self.tuple_return_operands(v, n));
         }
-        Ok(vec![self.lower_expr(e)?])
+        let v = self.lower_expr(e)?;
+        let v = match self.ret_ty {
+            Some(rt) => self.coerced(v, e, rt),
+            None => v,
+        };
+        Ok(vec![v])
     }
 
     /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
@@ -1580,6 +1591,10 @@ impl Builder<'_> {
             param_shapes: Vec::new(),
             ret_shape: None,
             ret_tuple: None,
+            // A nested fn is emitted as a sibling top-level Lua fn and is never a
+            // GLSL callee (referenced indirectly), so a return coercion here is
+            // Lua-identity only; leaving it off matches today's emitted text.
+            ret_ty: None,
             group_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
@@ -1640,6 +1655,7 @@ impl Builder<'_> {
                         self.group_binds.insert(raw(name), (cells, shape));
                     } else {
                         let v = self.lower_expr(value)?;
+                        let v = self.coerced_to_binding(v, value, name);
                         let cell = self.f.new_cell(Some(self.body.binding_arena[name].name));
                         self.emit_cur(Inst::Store { cell, value: v });
                         self.binds.insert(raw(name), cell);
@@ -2248,6 +2264,7 @@ impl Builder<'_> {
                     .get(&raw(b))
                     .ok_or_else(|| gap("assignment to an unbound variable"))?;
                 let v = self.lower_expr(value)?;
+                let v = self.coerced_to_binding(v, value, b);
                 self.emit_cur(Inst::Store { cell, value: v });
             }
             Expr::FieldAccess { base, field } => {
@@ -2915,7 +2932,17 @@ impl Builder<'_> {
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
-                arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?
+                arg_idxs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &a)| {
+                        let v = self.lower_expr(a)?;
+                        Ok(match self.param_ty(func, i) {
+                            Some(t) => self.coerced(v, a, t),
+                            None => v,
+                        })
+                    })
+                    .collect::<Result<_, CompilerError>>()?
             };
             if let Some(n) = ret_tuple {
                 return Ok(self.emit_tuple_call_tree(func, args, n, tree));
@@ -3397,6 +3424,7 @@ impl Builder<'_> {
                     r
                 }
             };
+            let r = self.coerce_field_repr(r, lf.value, name, lf.name);
             litmap.push((lf.name, r));
         }
         let parts: Vec<ValueRepr> = match self.struct_field_names(name) {
@@ -3475,6 +3503,10 @@ impl Builder<'_> {
                 }
             };
             if pidx < slots.len() {
+                let v = match self.param_ty(func, pidx) {
+                    Some(t) => self.coerced(v, a, t),
+                    None => v,
+                };
                 slots[pidx] = Some(v);
             }
         }
@@ -3925,6 +3957,14 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let lv = self.lower_expr(a)?;
         let rv = self.lower_expr(b)?;
+        // Promote an int operand exactly when `arith_inst` picks a Float* variant
+        // (`x + 1`, `f * i`, and `/` which is always float division): the op is
+        // typed float, so an int operand is used-as-float. String concat and pure
+        // int ops leave their operands untouched.
+        let str_op = op == "__op_add" && (lt == ArithTy::Str || rt == ArithTy::Str);
+        let to_float = !str_op && (op == "__op_div" || lt == ArithTy::Float || rt == ArithTy::Float);
+        let lv = self.coerce_i2f(lv, lt == ArithTy::Int, to_float);
+        let rv = self.coerce_i2f(rv, rt == ArithTy::Int, to_float);
         let inst = arith_inst(op, lt, rt, lv, rv)?;
         Ok(self.emit_cur(inst))
     }
@@ -3948,6 +3988,11 @@ impl Builder<'_> {
                 let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
                 let lv = self.lower_expr(lhs)?;
                 let rv = self.lower_expr(rhs)?;
+                // A mixed float compare (`x > 0`, `i < f`) promotes its int side --
+                // both Float* operands must arrive float (GLSL ES has no implicit
+                // int->float in a compare).
+                let lv = self.coerce_i2f(lv, lf == Some(ArithTy::Int), float);
+                let rv = self.coerce_i2f(rv, rf == Some(ArithTy::Int), float);
                 let inst = match (op, float) {
                     (BinOp::Lt, false) => Inst::IntLt(lv, rv),
                     (BinOp::Lt, true) => Inst::FloatLt(lv, rv),
@@ -4006,6 +4051,13 @@ impl Builder<'_> {
                     let func = self.resolve_op_helper(name)?;
                     return Ok(self.emit_cur(Inst::Call { func, args: vec![lv, rv] }));
                 }
+                // Mixed `float == int` promotes the int side (untyped `Eq` renders a
+                // single `==`; both operands must arrive same-typed for GLSL).
+                let lf = self.arith_ty(lhs);
+                let rf = self.arith_ty(rhs);
+                let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
+                let lv = self.coerce_i2f(lv, lf == Some(ArithTy::Int), float);
+                let rv = self.coerce_i2f(rv, rf == Some(ArithTy::Int), float);
                 Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
                     Inst::Eq(lv, rv)
                 } else {
@@ -6048,6 +6100,73 @@ impl Builder<'_> {
 
     fn arith_ty(&self, e: Idx<Expr>) -> Option<ArithTy> {
         self.arith_ty_of(self.expr_ty(e)?)
+    }
+
+    /// int->float subsumption funnel. Wraps `value` in [`Inst::IntToFloat`] iff
+    /// bone typed `value_expr` int and `expected` resolves to float -- the single
+    /// sink for general int->float coercion (`fn f(i: int) -> float { return i }`,
+    /// `takes_float(int_expr)`, an int literal in a float slot). Fires ONLY
+    /// int-expr-in-float-slot; never int->int (loop counters/bounds, idiv/imod
+    /// operands, int==int stay untouched -- the counted-loop latch recognition
+    /// keeps matching `Const(Lit::Int(1))`). Identity on luajit; materialized by
+    /// non-Lua backends. See `docs/typed-mir-coercion-plan.md`.
+    fn coerced(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, expected: TyId) -> Idx<Inst> {
+        let to_float = self.resolve_ty(expected).and_then(|t| self.arith_ty_of(t)) == Some(ArithTy::Float);
+        self.coerce_i2f(value, self.arith_ty(value_expr) == Some(ArithTy::Int), to_float)
+    }
+
+    /// [`Self::coerced`] against a `let`/assignment target binding's type (the
+    /// inferred type, falling back to the declared annotation).
+    fn coerced_to_binding(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, name: Idx<BindingInfo>) -> Idx<Inst> {
+        let ty = self
+            .inf
+            .and_then(|i| i.binding_types.get(name).copied())
+            .or(self.body.binding_arena[name].declared_ty);
+        match ty {
+            Some(t) => self.coerced(value, value_expr, t),
+            None => value,
+        }
+    }
+
+    /// [`Self::coerced`] keyed on already-computed operand classes -- the scalar-op
+    /// path knows the operand's [`ArithTy`] and whether the resolved op is float,
+    /// but has no single expected `TyId` to pass to `coerced`.
+    fn coerce_i2f(&mut self, value: Idx<Inst>, from_int: bool, to_float: bool) -> Idx<Inst> {
+        if from_int && to_float {
+            self.emit_cur(Inst::IntToFloat(value))
+        } else {
+            value
+        }
+    }
+
+    /// The declared type of a callee's positional parameter `pidx` (the expected
+    /// type at a call-arg coercion sink), or `None` past the fixed arity.
+    fn param_ty(&self, func: FuncRef, pidx: usize) -> Option<TyId> {
+        self.ws.module(func.module).functions[func.func]
+            .param_decls
+            .get(pidx)
+            .map(|pd| pd.ty)
+    }
+
+    /// A (value) struct field's declared type, for the value-struct-literal
+    /// construction sink (`Vec2 { x: 0 }` -> the `x` field coerces int->float).
+    fn struct_field_ty(&self, name: Ustr, field: Ustr) -> Option<TyId> {
+        let sid = *self.ws.struct_by_name.get(&name)?;
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        sd.fields.iter().find(|f| f.name == field).map(|f| f.ty)
+    }
+
+    /// Coerce a value-struct field's repr int->float at CONSTRUCTION (before any
+    /// scalar-ABI splat, per the plan): only a `Scalar` leaf can be an int; a
+    /// `Group` / nested-value repr is already composite.
+    fn coerce_field_repr(&mut self, r: ValueRepr, value_expr: Idx<Expr>, struct_name: Ustr, field: Ustr) -> ValueRepr {
+        match r {
+            ValueRepr::Scalar(s) => match self.struct_field_ty(struct_name, field) {
+                Some(fty) => ValueRepr::Scalar(self.coerced(s, value_expr, fty)),
+                None => ValueRepr::Scalar(s),
+            },
+            other => other,
+        }
     }
 
 

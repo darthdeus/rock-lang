@@ -724,10 +724,17 @@ fn collect_const_hoists(
         let Inst::MakeValueStruct { name, fields } = inst else {
             continue;
         };
+        // An int->float-subsumed constant field (`IntToFloat(Const)`) is still a
+        // compile-time constant: hoist as its inner literal (identity on luajit),
+        // so a `Vec2 { x: 0 }` ctor stays hoistable.
         let lits: Option<Vec<Lit>> = fields
             .iter()
             .map(|(_, op)| match &func.insts[*op] {
                 Inst::Const(l) => Some(l.clone()),
+                Inst::IntToFloat(x) => match &func.insts[*x] {
+                    Inst::Const(l) => Some(l.clone()),
+                    _ => None,
+                },
                 _ => None,
             })
             .collect();
@@ -1229,7 +1236,7 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..)
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::ToString(_) | Inst::FloatToInt(_)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::ToString(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeArray(_) | Inst::MakeVec(_)
             | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. }
@@ -1760,6 +1767,17 @@ impl Emitter<'_> {
     /// register `r<color>`, or — if it was tree-folded — its expression in
     /// parentheses, recursively. Every value-operand reference goes through here.
     fn write_opnd(&self, out: &mut String, id: Idx<Inst>) {
+        // int->float subsumption is identity on luajit (all doubles): a FOLDED
+        // (inlinable) coercion renders exactly as the inner operand in this
+        // position -- no register, no extra precedence wrap -- so emitted Lua
+        // stays byte-identical. A MATERIALIZED one (its operand is reused, e.g.
+        // an @inline-spliced arg) keeps its own register (fall through) and the
+        // `rN = <inner>` def carries the identity.
+        if self.inlinable[raw(id) as usize] {
+            if let Inst::IntToFloat(x) = self.func.insts[id] {
+                return self.write_opnd(out, x);
+            }
+        }
         // A hoisted all-constant value ctor renders as its module-scope global,
         // whether it would otherwise inline or materialize a register.
         if let Some(&g) = self.hoist.get(&id) {
@@ -1863,6 +1881,11 @@ impl Emitter<'_> {
                 self.write_opnd(out, *x);
                 out.push(')');
             }
+            // int->float subsumption is invisible on luajit (all doubles): render
+            // the inner value's expression verbatim (identity). Reached only if a
+            // pass ever materializes one; the operand path (`write_opnd`) folds it
+            // away. `write_value` (not `write_opnd`) to avoid a double wrap.
+            Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
 
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),

@@ -525,3 +525,52 @@ fn int_literal_float_contexts() {
          return 0.0;\n}"
     );
 }
+
+// --- non-literal int->float subsumption (typed-MIR coercion) ----------------
+// bone allows general int->float subsumption (`fn f(i: int) -> float { return i }`
+// and `takes_float(i)` both compile). On GLSL that materializes a `float(...)`
+// wrap; the coercion is inserted at lowering (Inst::IntToFloat), not re-derived
+// in the emitter. Docs: docs/typed-mir-coercion-plan.md.
+
+/// An int PARAM (non-literal) returned from a float fn gets a `float(...)` wrap.
+#[test]
+fn int_param_returned_from_float_fn() {
+    let src = r#"@pure fn f(i: int) -> float { return i }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(glsl.trim(), "float f(int i) {\n  return float(i);\n}");
+}
+
+/// An int arg (non-literal) at a float param gets a `float(...)` wrap.
+#[test]
+fn int_arg_at_float_param() {
+    let src = r#"
+        @pure fn takes_float(x: float) -> float { return x }
+        @pure fn f(i: int) -> float { return takes_float(i) }
+    "#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert!(glsl.contains("return takes_float(float(i));"), "got:\n{glsl}");
+}
+
+/// An int (non-literal) mixed into float arithmetic gets a `float(...)` wrap.
+#[test]
+fn int_in_mixed_arithmetic() {
+    let src = r#"@pure fn f(x: float, i: int) -> float { return x + i }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(glsl.trim(), "float f(float x, int i) {\n  return (x + float(i));\n}");
+}
+
+/// Cell typing: a `let y: float = 0` binding declares `float y;` (from the
+/// binding's declared type via Cell.ty) and stores `0.0` -- NOT `int y; y = 0`
+/// (the first-store inference corner this replaces).
+#[test]
+fn let_float_annotation_cell_typing() {
+    let src = r#"@pure fn f() -> float { let y: float = 0  return y }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f() {\n  \
+         float y;\n  \
+         y = 0.0;\n  \
+         return y;\n}"
+    );
+}

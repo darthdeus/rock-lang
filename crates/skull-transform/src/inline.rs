@@ -554,7 +554,19 @@ fn coalesce_overrides(
         if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
             continue;
         }
-        if let Inst::Load(c) = caller.insts[*arg] {
+        // int->float subsumption is identity on luajit, so an `IntToFloat(Load c)`
+        // arg coalesces to `c` exactly like a bare `Load c` (this pass runs only on
+        // the Lua path; GLSL never inlines) -- otherwise the wrap would defeat
+        // coalescing and perturb the emitted Lua.
+        let arg_load = match caller.insts[*arg] {
+            Inst::Load(c) => Some(c),
+            Inst::IntToFloat(inner) => match caller.insts[inner] {
+                Inst::Load(c) => Some(c),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(c) = arg_load {
             overrides.insert(*param, c);
             coalesced[i] = true;
         }

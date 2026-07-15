@@ -197,7 +197,7 @@ fn profile_body(
             | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::FloatToInt(_)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
             | Inst::MakeValueStruct { .. }
             | Inst::Field { .. }
             | Inst::Store { .. } => {}
@@ -490,6 +490,7 @@ impl FnEmit<'_> {
             | Inst::Eq(..) | Inst::NotEq(..) | Inst::Not(_) => GlslTy::Bool,
             Inst::Neg(x) => self.ty_of(*x),
             Inst::FloatToInt(_) => GlslTy::Int,
+            Inst::IntToFloat(_) => GlslTy::Float,
             Inst::Load(c) => self.cell_ty.get(c).copied().unwrap_or(GlslTy::Float),
             Inst::Field { .. } => GlslTy::Float, // Vec component
             Inst::MakeValueStruct { name, .. } => match name.as_str() {
@@ -584,6 +585,12 @@ impl FnEmit<'_> {
             Inst::Neg(x) => format!("(-{})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
             Inst::FloatToInt(x) => format!("int({})", self.render_val(*x)?),
+            // int->float subsumption (inserted at lowering): fold an int literal
+            // to float text, else materialize the `float(...)` conversion.
+            Inst::IntToFloat(x) => match &self.f.insts[*x] {
+                Inst::Const(Lit::Int(i)) => fmt_float(*i as f64),
+                _ => format!("float({})", self.render_val(*x)?),
+            },
             Inst::Field { base, field } => format!("{}.{}", self.render_val(*base)?, field),
             Inst::MakeValueStruct { name, fields } => {
                 let ctor = match name.as_str() {

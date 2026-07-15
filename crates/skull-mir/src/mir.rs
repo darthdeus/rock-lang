@@ -145,6 +145,14 @@ pub enum Inst {
     /// it floors. Every other `as` is identity at runtime and lowers to no op
     /// (the inner value is returned directly).
     FloatToInt(Idx<Inst>),
+    /// int->float subsumption (`fn f(i: int) -> float { return i }`,
+    /// `takes_float(int_expr)`, an int literal in a float slot). Inserted at
+    /// lowering by the `coerced` funnel at every sink where bone typed the value
+    /// int and the flow position float. Identity on luajit (all doubles), so
+    /// codegen-lua renders it as the operand verbatim; non-Lua backends
+    /// materialize the conversion (GLSL: fold an int Const to float text, else
+    /// wrap `float(...)`). See `docs/typed-mir-coercion-plan.md`.
+    IntToFloat(Idx<Inst>),
 
     // --- unary ---
     Neg(Idx<Inst>),
