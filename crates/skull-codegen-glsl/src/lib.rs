@@ -523,21 +523,20 @@ impl FnEmit<'_> {
         }
     }
 
-    /// Render with a known expected type. In a float context an int literal
-    /// renders as float text and any other int-typed value gets an explicit
-    /// `float(...)` -- GLSL ES has no implicit int->float conversion and desktop
-    /// drivers vary on the corner, so never lean on the implicit rule.
+    /// Render at a float context slot. int->float subsumption is materialized at
+    /// lowering (`Inst::IntToFloat`, which `render_val` folds/wraps), so an
+    /// int-typed value reaching here that is NOT already coerced is a MISSED
+    /// lowering sink -- a hard emit error, never silent driver-dependent GLSL.
+    /// (GLSL ES has no implicit int->float; desktop drivers vary on the corner.)
     fn render_val_t(&self, iid: Idx<Inst>, want: GlslTy) -> Result<String, CompilerError> {
-        if want == GlslTy::Float {
-            match &self.f.insts[iid] {
-                Inst::Const(Lit::Int(i)) => return Ok(fmt_float(*i as f64)),
-                Inst::Neg(x) => return Ok(format!("(-{})", self.render_val_t(*x, GlslTy::Float)?)),
-                _ => {
-                    if self.ty_of(iid) == GlslTy::Int {
-                        return Ok(format!("float({})", self.render_val(iid)?));
-                    }
-                }
-            }
+        if want == GlslTy::Float && self.ty_of(iid) == GlslTy::Int {
+            return Err(err(
+                self.span(),
+                format!(
+                    "shader profile: int-typed value ({}) in a float context without an IntToFloat coercion -- a missed lowering sink (docs/typed-mir-coercion-plan.md)",
+                    inst_kind(&self.f.insts[iid])
+                ),
+            ));
         }
         self.render_val(iid)
     }
@@ -586,15 +585,10 @@ impl FnEmit<'_> {
             Inst::FloatGt(a, b) => fbin(a, ">", b, self)?,
             Inst::IntGeq(a, b) => bin(a, ">=", b, self)?,
             Inst::FloatGeq(a, b) => fbin(a, ">=", b, self)?,
-            // Untyped Eq/NotEq: a float on either side floats the comparison.
-            Inst::Eq(a, b) | Inst::NotEq(a, b) => {
-                let op = if matches!(self.f.insts[iid], Inst::Eq(..)) { "==" } else { "!=" };
-                if self.ty_of(*a) == GlslTy::Float || self.ty_of(*b) == GlslTy::Float {
-                    fbin(a, op, b, self)?
-                } else {
-                    bin(a, op, b, self)?
-                }
-            }
+            // Untyped Eq/NotEq: operands arrive same-typed (a mixed `float == int`
+            // was int->float-coerced at lowering), so render a plain compare.
+            Inst::Eq(a, b) => bin(a, "==", b, self)?,
+            Inst::NotEq(a, b) => bin(a, "!=", b, self)?,
             Inst::Neg(x) => format!("(-{})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
             Inst::FloatToInt(x) => format!("int({})", self.render_val(*x)?),
@@ -1099,4 +1093,63 @@ pub fn emit_shader_library(
         out.push_str(&emit_fn_def(ws, &overloaded, fref, mf)?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod assertion_flip_tests {
+    use super::*;
+    use ustr::Ustr;
+
+    fn build_ws(src: &str) -> (Workspace, ModuleId) {
+        let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect();
+        modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+        let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("mid");
+        (ws, mid)
+    }
+
+    /// The unfuck's flipped assertion: a MISSED int->float coercion sink reaches
+    /// the emitter as a raw int-typed value in a float slot and must be a HARD
+    /// emit error, never silent driver-dependent GLSL. Here we lower
+    /// `f(i: int) -> float { return i }` (whose return sink DOES coerce) and then
+    /// strip the `IntToFloat` to simulate a missed sink.
+    #[test]
+    fn missed_sink_is_a_hard_emit_error() {
+        let (ws, mid) = build_ws("@pure fn f(i: int) -> float { return i }");
+        let scx = ScalarCtx::new_values_first_class(&ws);
+        let overloaded = compute_overloaded_names(&ws);
+        let fref = resolve_root(&ws, mid, "f").expect("root");
+        let mut mf = lower_function(&ws, &scx, fref.module, fref.func).expect("lower");
+
+        // The coercion is present today (regression pin for the return sink).
+        assert!(
+            mf.insts.iter().any(|(_, i)| matches!(i, Inst::IntToFloat(_))),
+            "expected an IntToFloat coercion at the return sink"
+        );
+
+        // Strip it: rewrite each `return` to the raw int operand.
+        let bids: Vec<_> = mf.blocks.iter().map(|(b, _)| b).collect();
+        for bid in bids {
+            if let Term::Return(vs) = mf.blocks[bid].term.clone() {
+                let stripped: Vec<_> = vs
+                    .iter()
+                    .map(|&v| match mf.insts[v] {
+                        Inst::IntToFloat(x) => x,
+                        _ => v,
+                    })
+                    .collect();
+                mf.set_term(bid, Term::Return(stripped));
+            }
+        }
+
+        let r = emit_fn_def(&ws, &overloaded, fref, &mf);
+        let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
+        assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
+    }
 }
