@@ -461,8 +461,21 @@ impl FnEmit<'_> {
         Ok(())
     }
 
-    /// Type every non-param cell from the value of its first store, in RPO.
+    /// Type every non-param cell: prefer bone's binding type ([`Cell::ty`]) where
+    /// it maps to a tier-0 GLSL type (fixes `let y: float = 0`, whose first store's
+    /// rep is int); fall back to first-store inference (RPO) for compiler-minted
+    /// temps (if-result, loop counter) that carry no binding type.
     fn compute_cell_types(&mut self) {
+        for (cid, cell) in self.f.cells.iter() {
+            if self.cell_ty.contains_key(&cid) {
+                continue;
+            }
+            if let Some(ty) = cell.ty {
+                if let Ok(g) = glsl_ty(self.ws, ty, Span::default(), "local") {
+                    self.cell_ty.insert(cid, g);
+                }
+            }
+        }
         let rpo = reverse_postorder(self.f, self.f.entry);
         for &b in &rpo {
             for &iid in &self.f.blocks[b].insts {

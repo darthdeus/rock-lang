@@ -1381,7 +1381,8 @@ impl Builder<'_> {
                     self.group_binds.insert(raw(*pb), (cells, shape));
                 }
                 None => {
-                    let cell = self.f.new_cell(Some(name));
+                    let cty = self.binding_ty(*pb);
+                    let cell = self.f.new_cell_typed(Some(name), cty);
                     self.f.params.push(cell);
                     self.binds.insert(raw(*pb), cell);
                 }
@@ -1656,7 +1657,8 @@ impl Builder<'_> {
                     } else {
                         let v = self.lower_expr(value)?;
                         let v = self.coerced_to_binding(v, value, name);
-                        let cell = self.f.new_cell(Some(self.body.binding_arena[name].name));
+                        let cty = self.binding_ty(name);
+                        let cell = self.f.new_cell_typed(Some(self.body.binding_arena[name].name), cty);
                         self.emit_cur(Inst::Store { cell, value: v });
                         self.binds.insert(raw(name), cell);
                     }
@@ -6115,14 +6117,18 @@ impl Builder<'_> {
         self.coerce_i2f(value, self.arith_ty(value_expr) == Some(ArithTy::Int), to_float)
     }
 
-    /// [`Self::coerced`] against a `let`/assignment target binding's type (the
-    /// inferred type, falling back to the declared annotation).
-    fn coerced_to_binding(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, name: Idx<BindingInfo>) -> Idx<Inst> {
-        let ty = self
-            .inf
+    /// A variable binding's type: the inferred type, falling back to the declared
+    /// annotation. The expected type at a `let`/assignment coercion sink and the
+    /// [`Cell::ty`] for a binding cell.
+    fn binding_ty(&self, name: Idx<BindingInfo>) -> Option<TyId> {
+        self.inf
             .and_then(|i| i.binding_types.get(name).copied())
-            .or(self.body.binding_arena[name].declared_ty);
-        match ty {
+            .or(self.body.binding_arena[name].declared_ty)
+    }
+
+    /// [`Self::coerced`] against a `let`/assignment target binding's type.
+    fn coerced_to_binding(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, name: Idx<BindingInfo>) -> Idx<Inst> {
+        match self.binding_ty(name) {
             Some(t) => self.coerced(value, value_expr, t),
             None => value,
         }

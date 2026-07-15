@@ -23,6 +23,7 @@
 //! The taxonomy grows as lowering phases land (constructors, container ops,
 //! cast, stringify/format, inline-lua) — see the plan's phase checklist.
 
+use bone_semantic::hir::TyId;
 use comfy_la_arena::{Arena, Idx};
 use ustr::Ustr;
 
@@ -386,6 +387,13 @@ impl Inst {
 pub struct Cell {
     pub name: Option<Ustr>,
     pub loop_binding: bool,
+    /// bone's type for this variable, when known at the binding site (params,
+    /// `let`s). Non-Lua backends declare typed locals from it (the GLSL emitter
+    /// reads it before falling back to first-store inference), fixing the
+    /// `let y: float = 0` corner where the first store's rep is int. `None` for a
+    /// compiler-minted temp (if-result, loop counter, call dest), whose type the
+    /// backend infers from its first store. codegen-lua ignores it (untyped Lua).
+    pub ty: Option<TyId>,
 }
 
 /// How a block ends. Control flow lives ONLY here.
@@ -536,9 +544,16 @@ impl MirFunc {
         self.entry
     }
 
-    /// Allocate a fresh variable cell.
+    /// Allocate a fresh variable cell (untyped -- the backend infers from the
+    /// first store). Use [`Self::new_cell_typed`] at a binding site with a
+    /// declared/inferred type.
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name, loop_binding: false })
+        self.cells.alloc(Cell { name, loop_binding: false, ty: None })
+    }
+
+    /// Allocate a fresh variable cell carrying bone's type for the binding.
+    pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
+        self.cells.alloc(Cell { name, loop_binding: false, ty })
     }
 
     /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
