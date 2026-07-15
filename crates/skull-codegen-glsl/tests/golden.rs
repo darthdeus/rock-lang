@@ -101,3 +101,395 @@ fn nested_counted_loops() {
     assert!(!glsl.contains("__op_add"), "vec operators must not emit fn defs:\n{glsl}");
     assert!(!glsl.contains("__op_sub"), "vec operators must not emit fn defs:\n{glsl}");
 }
+
+// --- relooper: structured control flow (docs/glsl-relooper-plan.md) ---------
+
+/// Milestone 2: the `pick` shape that `reject_if_branch_sentinel` pinned now
+/// emits an if/else (both arms diverge; ipdom collapses to the virtual exit).
+#[test]
+fn if_branch_pick() {
+    let src = r#"@pure fn pick(a: float, b: float) -> float { if a > b { return a } else { return b } }"#;
+    let glsl = emit(src, &["pick"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float pick(float a, float b) {\n  \
+         if ((a > b)) {\n    \
+           return a;\n  \
+         } else {\n    \
+           return b;\n  \
+         }\n}"
+    );
+}
+
+/// The motivating fn: `vec2_normalize`'s zero-guard body emits (NOT the GLSL
+/// `normalize` builtin, which is undefined at 0). The `&&` becomes a bool temp
+/// diamond; the outer `if` splits the guard from the normalize. (The `v.x == 0`
+/// int-literal-in-float-comparison is a separate rendering gap, not the relooper's.)
+#[test]
+fn vec2_normalize_body() {
+    let src = r#"@pure fn root(v: Vec2) -> Vec2 { return vec2_normalize(v) }"#;
+    let glsl = emit(src, &["vec2_normalize"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "vec2 vec2_normalize(vec2 v) {\n  \
+         bool t2;\n  \
+         float len;\n  \
+         if ((v.x == 0)) {\n    \
+           t2 = (v.y == 0);\n  \
+         } else {\n    \
+           t2 = false;\n  \
+         }\n  \
+         if (t2) {\n    \
+           return vec2(0.0);\n  \
+         } else {\n    \
+           len = sqrt(((v.x * v.x) + (v.y * v.y)));\n    \
+           return vec2((v.x / len), (v.y / len));\n  \
+         }\n}"
+    );
+}
+
+/// Statement `if` with no else: the empty else block is suppressed.
+#[test]
+fn statement_if_no_else() {
+    let src = r#"@pure fn f(x: float) -> float { let r = x if x > 0.0 { r = x * 2.0 } return r }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f(float x) {\n  \
+         float r;\n  \
+         r = x;\n  \
+         if ((x > 0.0)) {\n    \
+           r = (x * 2.0);\n  \
+         }\n  \
+         return r;\n}"
+    );
+}
+
+/// if / else-if ladder (the grass `mask_red` shape): nested full diamonds.
+#[test]
+fn if_else_if_ladder() {
+    let src = r#"@pure fn mask(x: float) -> float {
+        if x < 0.0 { return 0.0 } else if x < 1.0 { return x } else { return 1.0 }
+    }"#;
+    let glsl = emit(src, &["mask"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float mask(float x) {\n  \
+         if ((x < 0.0)) {\n    \
+           return 0.0;\n  \
+         } else {\n    \
+           if ((x < 1.0)) {\n      \
+             return x;\n    \
+           } else {\n      \
+             return 1.0;\n    \
+           }\n  \
+         }\n}"
+    );
+}
+
+/// Expression-position `if` into a cell: both arms store the result cell.
+#[test]
+fn expression_if_into_cell() {
+    let src = r#"@pure fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f(float x) {\n  \
+         float t1;\n  \
+         float r;\n  \
+         if ((x > 0.0)) {\n    \
+           t1 = x;\n  \
+         } else {\n    \
+           t1 = (0.0 - x);\n  \
+         }\n  \
+         r = t1;\n  \
+         return r;\n}"
+    );
+}
+
+/// `&&` in a nested if: short-circuit becomes a bool temp diamond.
+#[test]
+fn and_in_nested_if() {
+    let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f(float x, float y) {\n  \
+         bool t2;\n  \
+         if ((x > 0.0)) {\n    \
+           t2 = (y > 0.0);\n  \
+         } else {\n    \
+           t2 = false;\n  \
+         }\n  \
+         if (t2) {\n    \
+           return 1.0;\n  \
+         }\n  \
+         return 0.0;\n}"
+    );
+}
+
+/// `||` in a nested if.
+#[test]
+fn or_in_nested_if() {
+    let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 || y > 0.0 { return 1.0 } return 0.0 }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f(float x, float y) {\n  \
+         bool t2;\n  \
+         if ((x > 0.0)) {\n    \
+           t2 = true;\n  \
+         } else {\n    \
+           t2 = (y > 0.0);\n  \
+         }\n  \
+         if (t2) {\n    \
+           return 1.0;\n  \
+         }\n  \
+         return 0.0;\n}"
+    );
+}
+
+/// Early `return` inside an `if` inside a counted `for`: the empty-else rule
+/// keeps the return unnested; the counted-for shape survives the early exit.
+#[test]
+fn early_return_in_counted_for() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let acc = 0
+        for i in 0..n {
+            if i > 5 { return acc }
+            acc = acc + i
+        }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f(int n) {\n  \
+         int acc;\n  \
+         int i;\n  \
+         int t3;\n  \
+         acc = 0;\n  \
+         i = 0;\n  \
+         t3 = n;\n  \
+         for (; i < t3; i = i + 1) {\n    \
+           if ((i > 5)) {\n      \
+             return acc;\n    \
+           }\n    \
+           acc = (acc + i);\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}
+
+/// `while` with a compound `&&` condition: the header is a multi-block region
+/// (a diamond computing the bool), emitted via `while (true) { <cond>; if (!c) break; <body> }`.
+#[test]
+fn while_compound_condition() {
+    let src = r#"@pure fn f(x: float) -> float {
+        let acc = 0.0
+        let i = 0
+        while i < 10 && acc < 100.0 {
+            acc = acc + x
+            i = i + 1
+        }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f(float x) {\n  \
+         float acc;\n  \
+         int i;\n  \
+         bool t3;\n  \
+         acc = 0.0;\n  \
+         i = 0;\n  \
+         while (true) {\n    \
+           if ((i < 10)) {\n      \
+             t3 = (acc < 100.0);\n    \
+           } else {\n      \
+             t3 = false;\n    \
+           }\n    \
+           if (!(t3)) { break; }\n    \
+           acc = (acc + x);\n    \
+           i = (i + 1);\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}
+
+/// break + continue in a counted `for` (continue -> the for-header increment).
+#[test]
+fn break_continue_in_counted_for() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let acc = 0
+        for i in 0..n {
+            if i > 5 { break }
+            if i == 2 { continue }
+            acc = acc + i
+        }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f(int n) {\n  \
+         int acc;\n  \
+         int i;\n  \
+         int t3;\n  \
+         acc = 0;\n  \
+         i = 0;\n  \
+         t3 = n;\n  \
+         for (; i < t3; i = i + 1) {\n    \
+           if ((i > 5)) {\n      \
+             break;\n    \
+           }\n    \
+           if ((i == 2)) {\n      \
+             continue;\n    \
+           }\n    \
+           acc = (acc + i);\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}
+
+/// break + continue in a general `while`.
+#[test]
+fn break_continue_in_while() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let acc = 0
+        let i = 0
+        while i < n {
+            i = i + 1
+            if i > 5 { break }
+            if i == 2 { continue }
+            acc = acc + i
+        }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f(int n) {\n  \
+         int acc;\n  \
+         int i;\n  \
+         acc = 0;\n  \
+         i = 0;\n  \
+         while (true) {\n    \
+           if (!((i < n))) { break; }\n    \
+           i = (i + 1);\n    \
+           if ((i > 5)) {\n      \
+             break;\n    \
+           }\n    \
+           if ((i == 2)) {\n      \
+             continue;\n    \
+           }\n    \
+           acc = (acc + i);\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}
+
+/// Nested loop + if (the grass wind-loop shape).
+#[test]
+fn nested_loop_with_if() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let acc = 0
+        for y in 0..n {
+            for x in 0..n {
+                if x == y { acc = acc + 1 }
+            }
+        }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f(int n) {\n  \
+         int acc;\n  \
+         int y;\n  \
+         int t3;\n  \
+         int x;\n  \
+         int t5;\n  \
+         acc = 0;\n  \
+         y = 0;\n  \
+         t3 = n;\n  \
+         for (; y < t3; y = y + 1) {\n    \
+           x = 0;\n    \
+           t5 = n;\n    \
+           for (; x < t5; x = x + 1) {\n      \
+             if ((x == y)) {\n        \
+               acc = (acc + 1);\n      \
+             }\n    \
+           }\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}
+
+/// Milestone finding: `match` lowers to `Branch` chains (NOT `Term::Switch`),
+/// so a tier-0 int `match` is accepted and emitted as an if / else-if ladder.
+#[test]
+fn match_int_ladder() {
+    let src = r#"@pure fn f(n: int) -> int {
+        match n { 1 => { return 10 } 2 => { return 20 } _ => { return 0 } }
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f(int n) {\n  \
+         if ((n == 1)) {\n    \
+           return 10;\n  \
+         } else {\n    \
+           if ((n == 2)) {\n      \
+             return 20;\n    \
+           } else {\n      \
+             return 0;\n    \
+           }\n  \
+         }\n}"
+    );
+}
+
+/// Nested general `while` loops with an inner `break` (the inner loop's exit
+/// aliases the outer loop's back-edge region -- pins the `loop_binding` gate
+/// that keeps a manual `while i < n { .. i = i + 1 }` off the range-for path).
+#[test]
+fn nested_while_loops() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let acc = 0
+        let i = 0
+        while i < n {
+            let j = 0
+            while j < i {
+                if j == 3 { break }
+                acc = acc + 1
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f(int n) {\n  \
+         int acc;\n  \
+         int i;\n  \
+         int j;\n  \
+         acc = 0;\n  \
+         i = 0;\n  \
+         while (true) {\n    \
+           if (!((i < n))) { break; }\n    \
+           j = 0;\n    \
+           while (true) {\n      \
+             if (!((j < i))) { break; }\n      \
+             if ((j == 3)) {\n        \
+               break;\n      \
+             }\n      \
+             acc = (acc + 1);\n      \
+             j = (j + 1);\n    \
+           }\n    \
+           i = (i + 1);\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}

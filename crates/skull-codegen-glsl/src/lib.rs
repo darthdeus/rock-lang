@@ -17,6 +17,8 @@
 //! spec from `docs/glsl-spike.md`, keyed by the callee's mangled signature (name +
 //! GLSL param types) -- the future `@intrinsic` GLSL column.
 
+mod structure;
+
 use bone_semantic::hir::{BuiltinTy, Function, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
@@ -26,6 +28,7 @@ use skull_codegen_lua::{compute_overloaded_names, mangle_fn};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
 use skull_parser::CompilerError;
+use structure::{LoopRegion, Structure};
 use ustr::Ustr;
 
 /// A tier-0 GLSL type. Everything else is rejected by the profile pass.
@@ -181,9 +184,11 @@ fn profile_body(
             Inst::Const(Lit::Str(_)) => {
                 return Err(err(span, format!("shader profile: `{}` uses a non-tier-0 construct (string literal) that has no GLSL lowering", f.name)));
             }
-            Inst::Const(Lit::Nil) => {
-                return Err(err(span, format!("shader profile: `{}` uses a non-tier-0 construct (null / optional) that has no GLSL lowering", f.name)));
-            }
+            // A bare `Nil` const may be a dead placeholder (`return` in expression
+            // position emits an unused nil, `lower.rs`); a genuinely-used null /
+            // optional is rejected when it renders (`render_val`). Rejecting every
+            // nil here would refuse `if a { return .. } else { .. }`.
+            Inst::Const(Lit::Nil) => {}
             // Allowed tier-0 instructions.
             Inst::Const(_)
             | Inst::Load(_)
@@ -304,10 +309,15 @@ struct FnEmit<'a> {
     cell_name: HashMap<Idx<Cell>, String>,
     /// Cell -> GLSL type (params from signature, others from first store).
     cell_ty: HashMap<Idx<Cell>, GlslTy>,
-    /// Loop headers -> their recognized counted-loop shape.
-    loops: HashMap<Idx<Block>, LoopInfo>,
-    /// Preheader stores that initialize a loop counter (rendered as the for-loop's
-    /// counter init, so the plain store is suppressed... actually kept, see walk).
+    /// Loop headers matching the range-`for` shape -> their counted-loop info.
+    counted: HashMap<Idx<Block>, LoopInfo>,
+    /// Other natural-loop headers (general `while`) -> their region.
+    general: HashMap<Idx<Block>, LoopRegion>,
+    /// Dominators / post-dominators / natural loops.
+    structure: Structure,
+    /// Loop headers currently being emitted (so the header region walk doesn't
+    /// re-wrap them as a fresh loop).
+    active: HashSet<Idx<Block>>,
     out: String,
     indent: usize,
     /// Guard against unstructured control flow / infinite walks.
@@ -324,6 +334,14 @@ struct LoopInfo {
     exit: Idx<Block>,
 }
 
+/// The enclosing loop's jump targets, mirroring skull-mir's `loop_targets`:
+/// `Goto(cont)` -> `continue`, `Goto(brk)` -> `break`.
+#[derive(Clone, Copy, Default)]
+struct LoopCtx {
+    cont: Option<Idx<Block>>,
+    brk: Option<Idx<Block>>,
+}
+
 /// Emit `<ret> <name>(<params>) { <body> }` for one lowered fn.
 fn emit_fn_def(
     ws: &Workspace,
@@ -338,20 +356,40 @@ fn emit_fn_def(
         None => "void",
     };
 
+    let st = structure::analyze(mf);
+    let mut counted = HashMap::default();
+    let mut general = HashMap::default();
+    for (&h, region) in &st.loops {
+        // The range-`for` fast path is valid only when the header's own `Branch`
+        // IS the loop test (its else is the real exit). A `while i < N && ..`
+        // header also looks like `i < N` with an `i + 1` latch, but its exit lies
+        // inside the loop -- that one takes the general path.
+        match match_counted_loop(mf, h) {
+            Some(li) if li.exit == region.exit && region.body.contains(&li.latch) => {
+                counted.insert(h, li);
+            }
+            _ => {
+                general.insert(h, region.clone());
+            }
+        }
+    }
+
     let mut e = FnEmit {
         ws,
         overloaded,
         f: mf,
         cell_name: HashMap::default(),
         cell_ty: HashMap::default(),
-        loops: HashMap::default(),
+        counted,
+        general,
+        structure: st,
+        active: HashSet::default(),
         out: String::new(),
         indent: 1,
         visited: HashSet::default(),
     };
     e.assign_cell_names();
     e.assign_param_types(f)?;
-    e.recognize_loops();
     e.compute_cell_types();
 
     // Parameter list.
@@ -377,7 +415,7 @@ fn emit_fn_def(
         }
     }
 
-    e.emit_seq(mf.entry, None)?;
+    e.emit_seq(mf.entry, None, LoopCtx::default())?;
     let body = std::mem::take(&mut e.out);
 
     Ok(format!(
@@ -467,16 +505,6 @@ impl FnEmit<'_> {
         }
     }
 
-    fn recognize_loops(&mut self) {
-        let mut loops = HashMap::default();
-        for (h, _) in self.f.blocks.iter() {
-            if let Some(li) = match_counted_loop(self.f, h) {
-                loops.insert(h, li);
-            }
-        }
-        self.loops = loops;
-    }
-
     /// Render a value instruction as a GLSL expression (inlined; MIR values are
     /// single-use, so no CSE duplication).
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
@@ -557,24 +585,33 @@ impl FnEmit<'_> {
     }
 
     /// Emit a structured sequence of blocks starting at `start`, stopping before
-    /// `stop` (its continuation). The restricted profile admits straight-line
-    /// code, counted `for` loops, and (later) if-diamonds.
-    fn emit_seq(&mut self, start: Idx<Block>, stop: Option<Idx<Block>>) -> Result<(), CompilerError> {
+    /// `stop` (its continuation). Handles straight-line code, if-diamonds,
+    /// counted `for` loops, and general `while` loops; `ctx` carries the
+    /// enclosing loop's break/continue targets.
+    fn emit_seq(&mut self, start: Idx<Block>, stop: Option<Idx<Block>>, ctx: LoopCtx) -> Result<(), CompilerError> {
         let mut cur = start;
         loop {
             if Some(cur) == stop {
                 return Ok(());
             }
+            // Loop headers are dispatched structurally (before the visited guard):
+            // `emit_general` re-enters `emit_seq` on the header for its condition
+            // region, so the header must not already be marked visited.
+            if !self.active.contains(&cur) {
+                if let Some(li) = self.counted.get(&cur).copied() {
+                    self.emit_counted(li)?;
+                    cur = li.exit;
+                    continue;
+                }
+                if let Some(region) = self.general.get(&cur).cloned() {
+                    self.emit_general(&region, ctx)?;
+                    cur = region.exit;
+                    continue;
+                }
+            }
             if !self.visited.insert(cur) {
                 return Err(err(self.span(), "shader profile: unstructured control flow (unsupported loop/branch shape)"));
             }
-            // Loop header?
-            if let Some(li) = self.loops.get(&cur).copied() {
-                self.emit_loop(li)?;
-                cur = li.exit;
-                continue;
-            }
-            // Straight-line effects.
             self.emit_block_effects(cur)?;
             match self.f.blocks[cur].term.clone() {
                 Term::Return(vs) => {
@@ -583,10 +620,24 @@ impl FnEmit<'_> {
                 }
                 Term::Unreachable => return Ok(()),
                 Term::Goto(t) => {
+                    if Some(t) == ctx.cont {
+                        self.push("continue;");
+                        return Ok(());
+                    }
+                    if Some(t) == ctx.brk {
+                        self.push("break;");
+                        return Ok(());
+                    }
+                    if Some(t) == stop {
+                        return Ok(());
+                    }
                     cur = t;
                 }
-                Term::Branch { .. } => {
-                    return Err(err(self.span(), "shader profile: conditional branch (if / &&) is not yet supported on GLSL"));
+                Term::Branch { cond, then_bb, else_bb } => {
+                    match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
+                        Some(m) => cur = m,
+                        None => return Ok(()),
+                    }
                 }
                 Term::Switch { .. } => {
                     return Err(err(self.span(), "shader profile: `match` is not tier 0"));
@@ -596,6 +647,73 @@ impl FnEmit<'_> {
                 }
             }
         }
+    }
+
+    /// Whether `b` produces no statement and just forwards to another block
+    /// (`Some(target)`): the empty else/then arm of a statement `if`, or a bare
+    /// `break`/`continue` block.
+    fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
+        if let Term::Goto(t) = self.f.blocks[b].term {
+            let has_store = self.f.blocks[b]
+                .insts
+                .iter()
+                .any(|&i| matches!(self.f.insts[i], Inst::Store { .. }));
+            if !has_store {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    /// Emit an `if`-diamond for a `Branch`. Returns the block to continue at
+    /// (the merge / join), or `None` when both arms diverge and the arms have
+    /// absorbed the continuation.
+    fn emit_branch(
+        &mut self,
+        blk: Idx<Block>,
+        cond: Idx<Inst>,
+        then_bb: Idx<Block>,
+        else_bb: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Result<Option<Idx<Block>>, CompilerError> {
+        let cond_s = self.render_val(cond)?;
+        // Empty else -> then-only `if`; continue at the else target.
+        if let Some(j) = self.empty_forward(else_bb) {
+            self.push(&format!("if ({cond_s}) {{"));
+            self.indent += 1;
+            self.emit_seq(then_bb, Some(j), ctx)?;
+            self.indent -= 1;
+            self.push("}");
+            return Ok(Some(j));
+        }
+        // Empty then -> invert and emit the else arm only.
+        if let Some(j) = self.empty_forward(then_bb) {
+            self.push(&format!("if (!({cond_s})) {{"));
+            self.indent += 1;
+            self.emit_seq(else_bb, Some(j), ctx)?;
+            self.indent -= 1;
+            self.push("}");
+            return Ok(Some(j));
+        }
+        // Full diamond. The merge is ipdom, unless an arm diverges (ipdom
+        // collapses to the virtual exit or a loop target) -- then the arms absorb
+        // the continuation up to the enclosing stop and there is no fall-through.
+        let merge = self
+            .structure
+            .ipdom(blk)
+            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
+        let arm_stop = merge.or(stop);
+        self.push(&format!("if ({cond_s}) {{"));
+        self.indent += 1;
+        self.emit_seq(then_bb, arm_stop, ctx)?;
+        self.indent -= 1;
+        self.push("} else {");
+        self.indent += 1;
+        self.emit_seq(else_bb, arm_stop, ctx)?;
+        self.indent -= 1;
+        self.push("}");
+        Ok(merge)
     }
 
     /// Emit the straight-line effect statements of a block (Stores). Value insts
@@ -623,17 +741,84 @@ impl FnEmit<'_> {
         Ok(())
     }
 
-    fn emit_loop(&mut self, li: LoopInfo) -> Result<(), CompilerError> {
+    fn emit_counted(&mut self, li: LoopInfo) -> Result<(), CompilerError> {
         let slot = self.cell_name[&li.slot].clone();
         let bound = self.render_val(li.bound)?;
         let cmp = if li.inclusive { "<=" } else { "<" };
         self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
         self.indent += 1;
-        // The loop body runs from body_entry, jumping back at the latch.
-        self.emit_seq(li.body_entry, Some(li.latch))?;
+        let body_len = self.out.len();
+        let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
+        self.emit_seq(li.body_entry, None, ctx)?;
+        self.trim_trailing_continue(body_len);
         self.indent -= 1;
         self.push("}");
         Ok(())
+    }
+
+    /// A general `while`: `while (true) { <cond region>; if (!(cond)) break; <body> }`.
+    /// The condition region may be a multi-block diamond (`while a && b`), so it
+    /// goes through the structurizer recursively.
+    fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
+        let h = region.header;
+        let exit = region.exit;
+        let (test, cond, body_start, break_when_true) = self.find_test(region)?;
+
+        self.active.insert(h);
+        self.push("while (true) {");
+        self.indent += 1;
+
+        self.emit_seq(h, Some(test), outer)?;
+        self.emit_block_effects(test)?;
+        self.visited.insert(test);
+
+        let cond_s = self.render_val(cond)?;
+        if break_when_true {
+            self.push(&format!("if ({cond_s}) {{ break; }}"));
+        } else {
+            self.push(&format!("if (!({cond_s})) {{ break; }}"));
+        }
+
+        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
+        let body_len = self.out.len();
+        self.emit_seq(body_start, None, ctx)?;
+        self.trim_trailing_continue(body_len);
+
+        self.indent -= 1;
+        self.push("}");
+        self.active.remove(&h);
+        Ok(())
+    }
+
+    /// The loop's condition test: the unique `Branch` in the body with a direct
+    /// successor to the exit. Returns `(test block, cond, body entry, break-when-cond-true)`.
+    fn find_test(
+        &self,
+        region: &LoopRegion,
+    ) -> Result<(Idx<Block>, Idx<Inst>, Idx<Block>, bool), CompilerError> {
+        for &b in &region.body {
+            if let Term::Branch { cond, then_bb, else_bb } = self.f.blocks[b].term {
+                if then_bb == region.exit {
+                    return Ok((b, cond, else_bb, true));
+                }
+                if else_bb == region.exit {
+                    return Ok((b, cond, then_bb, false));
+                }
+            }
+        }
+        Err(err(self.span(), "shader profile: unstructured loop (no single condition test)"))
+    }
+
+    /// Drop a redundant trailing `continue;` that is the loop body's natural
+    /// back-edge fall-through (indented exactly at the body level).
+    fn trim_trailing_continue(&mut self, start: usize) {
+        let line = format!("{}continue;\n", "  ".repeat(self.indent));
+        if self.out.len() >= start + line.len() && self.out.ends_with(&line) {
+            let cut = self.out.len() - line.len();
+            if cut >= start && (cut == 0 || self.out.as_bytes()[cut - 1] == b'\n') {
+                self.out.truncate(cut);
+            }
+        }
     }
 }
 
@@ -642,7 +827,10 @@ impl FnEmit<'_> {
 
 /// `Some(LoopInfo)` iff `h` is a `for i in lo..hi` header: a `Branch` on
 /// `IntLt/IntLeq(load slot, bound)`, entered by exactly a preheader + a
-/// pure-increment latch (`load slot; 1; add; store slot; goto h`).
+/// pure-increment latch (`load slot; 1; add; store slot; goto h`). The `slot`
+/// cell must be `loop_binding` -- desugar provenance that only `lower_for_range`
+/// sets, so a `while i < n { ..; i = i + 1 }` (manual counter) is NOT mistaken
+/// for a range-for and takes the general path instead.
 fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
     let Term::Branch { cond, then_bb, else_bb } = f.blocks[h].term else {
         return None;
@@ -652,6 +840,9 @@ fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
         Inst::IntLeq(a, b) => (load_cell(f, *a)?, *b, true),
         _ => return None,
     };
+    if !f.cells[slot].loop_binding {
+        return None;
+    }
     // Find the pure-increment latch among h's goto-preds.
     let mut latch = None;
     for (bid, blk) in f.blocks.iter() {
@@ -717,7 +908,7 @@ fn reverse_postorder(f: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     post
 }
 
-fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
+pub(crate) fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Goto(t) => f(*t),
         Term::Branch { then_bb, else_bb, .. } => {

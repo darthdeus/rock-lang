@@ -1,0 +1,356 @@
+//! CFG structuring analyses for the relooper: dominators, immediate
+//! post-dominators (reversed CFG + a virtual exit), and natural loops. Every CFG
+//! skull-mir produces for a tier-0 fn is reducible by construction, so the simple
+//! iterative algorithms suffice at shader scale (tens of blocks).
+
+use crate::successors;
+use comfy_la_arena::{Idx, RawIdx};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use skull_mir::mir::{Block, MirFunc, Term};
+
+fn bx(b: Idx<Block>) -> usize {
+    b.into_raw().into_u32() as usize
+}
+
+fn bi(n: usize) -> Idx<Block> {
+    Idx::from_raw(RawIdx::from_u32(n as u32))
+}
+
+/// One natural loop: its header (back-edge target), the set of blocks in the
+/// loop body, and its single exit (the block outside the loop that a body block
+/// branches to). Tier-0 `while`/`for` loops are single-exit by construction.
+#[derive(Clone)]
+pub(crate) struct LoopRegion {
+    pub(crate) header: Idx<Block>,
+    pub(crate) body: HashSet<Idx<Block>>,
+    pub(crate) exit: Idx<Block>,
+}
+
+pub(crate) struct Structure {
+    /// Immediate post-dominator per block; `None` = the virtual exit (a diverging
+    /// branch has no real join).
+    ipdom: Vec<Option<Idx<Block>>>,
+    pub(crate) loops: HashMap<Idx<Block>, LoopRegion>,
+}
+
+impl Structure {
+    pub(crate) fn ipdom(&self, b: Idx<Block>) -> Option<Idx<Block>> {
+        self.ipdom[bx(b)]
+    }
+}
+
+pub(crate) fn analyze(f: &MirFunc) -> Structure {
+    let n = f.blocks.len();
+    let succ = succ_list(f);
+    let preds = pred_list(n, &succ);
+
+    let fwd_rpo = rpo(n, bx(f.entry), &succ);
+    let idom = idoms(n, bx(f.entry), &preds, &fwd_rpo);
+
+    let ipdom = post_idoms(f, n, &succ);
+    let loops = natural_loops(f, n, &succ, &preds, &idom);
+
+    Structure { ipdom, loops }
+}
+
+fn succ_list(f: &MirFunc) -> Vec<Vec<usize>> {
+    let mut s = vec![Vec::new(); f.blocks.len()];
+    for (b, blk) in f.blocks.iter() {
+        let i = bx(b);
+        successors(&blk.term, |t| s[i].push(bx(t)));
+    }
+    s
+}
+
+fn pred_list(n: usize, succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let mut p = vec![Vec::new(); n];
+    for (b, ss) in succ.iter().enumerate() {
+        for &s in ss {
+            p[s].push(b);
+        }
+    }
+    p
+}
+
+/// Reverse post-order of the nodes reachable from `entry` over `adj`.
+fn rpo(n: usize, entry: usize, adj: &[Vec<usize>]) -> Vec<usize> {
+    let mut visited = vec![false; n];
+    let mut post = Vec::new();
+    let mut stack = vec![(entry, 0usize)];
+    visited[entry] = true;
+    while let Some(&(node, i)) = stack.last() {
+        if i < adj[node].len() {
+            stack.last_mut().unwrap().1 += 1;
+            let s = adj[node][i];
+            if !visited[s] {
+                visited[s] = true;
+                stack.push((s, 0));
+            }
+        } else {
+            post.push(node);
+            stack.pop();
+        }
+    }
+    post.reverse();
+    post
+}
+
+/// Cooper-Harvey-Kennedy iterative dominators. Returns the immediate dominator of
+/// each node reachable in `rpo_order` (`entry` maps to `None`).
+fn idoms(n: usize, entry: usize, preds: &[Vec<usize>], rpo_order: &[usize]) -> Vec<Option<usize>> {
+    let mut rpo_index = vec![usize::MAX; n];
+    for (i, &b) in rpo_order.iter().enumerate() {
+        rpo_index[b] = i;
+    }
+    let mut idom = vec![None; n];
+    idom[entry] = Some(entry);
+
+    let intersect = |mut a: usize, mut b: usize, idom: &[Option<usize>], ri: &[usize]| -> usize {
+        while a != b {
+            while ri[a] > ri[b] {
+                a = idom[a].unwrap();
+            }
+            while ri[b] > ri[a] {
+                b = idom[b].unwrap();
+            }
+        }
+        a
+    };
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &b in rpo_order {
+            if b == entry {
+                continue;
+            }
+            let mut new_idom: Option<usize> = None;
+            for &p in &preds[b] {
+                if idom[p].is_some() {
+                    new_idom = Some(match new_idom {
+                        None => p,
+                        Some(ni) => intersect(p, ni, &idom, &rpo_index),
+                    });
+                }
+            }
+            if idom[b] != new_idom {
+                idom[b] = new_idom;
+                changed = true;
+            }
+        }
+    }
+    idom[entry] = None;
+    idom
+}
+
+/// Immediate post-dominators: dominators on the reversed CFG rooted at a virtual
+/// exit (node `n`) that every `Return`/`Unreachable` block flows into.
+fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Block>>> {
+    let exit = n;
+    let nn = n + 1;
+    // Reverse graph: edge b->s becomes s->b; every terminal block gets an edge
+    // from the virtual exit.
+    let mut rev_adj = vec![Vec::new(); nn];
+    let mut rev_preds = vec![Vec::new(); nn];
+    for b in 0..n {
+        for &s in &succ[b] {
+            rev_adj[s].push(b);
+        }
+        // Reverse predecessors of b are its forward successors.
+        rev_preds[b].extend_from_slice(&succ[b]);
+        let terminal = matches!(f.blocks[bi(b)].term, Term::Return(_) | Term::Unreachable);
+        if terminal {
+            rev_adj[exit].push(b);
+            rev_preds[b].push(exit);
+        }
+    }
+
+    let rev_rpo = rpo(nn, exit, &rev_adj);
+    let pidom = idoms(nn, exit, &rev_preds, &rev_rpo);
+
+    let mut out = vec![None; n];
+    for b in 0..n {
+        out[b] = match pidom[b] {
+            Some(x) if x != exit => Some(bi(x)),
+            _ => None,
+        };
+    }
+    out
+}
+
+fn dominates(idom: &[Option<usize>], a: usize, b: usize) -> bool {
+    let mut cur = b;
+    loop {
+        if cur == a {
+            return true;
+        }
+        match idom[cur] {
+            Some(p) => cur = p,
+            None => return false,
+        }
+    }
+}
+
+fn natural_loops(
+    f: &MirFunc,
+    n: usize,
+    succ: &[Vec<usize>],
+    preds: &[Vec<usize>],
+    idom: &[Option<usize>],
+) -> HashMap<Idx<Block>, LoopRegion> {
+    // Back edges grouped by header, keeping each latch (back-edge source).
+    let mut latches: HashMap<usize, Vec<usize>> = HashMap::default();
+    for latch in 0..n {
+        if idom[latch].is_none() && latch != bx(f.entry) {
+            continue; // unreachable
+        }
+        for &h in &succ[latch] {
+            if dominates(idom, h, latch) {
+                latches.entry(h).or_default().push(latch);
+            }
+        }
+    }
+
+    let mut out = HashMap::default();
+    for (h, hlatches) in latches {
+        let mut body: HashSet<usize> = HashSet::default();
+        for &l in &hlatches {
+            collect_loop_body(h, l, preds, &mut body);
+        }
+        // The loop's exit is the out-of-loop successor of the condition test: the
+        // shallowest body block that dominates every latch and leaves the loop.
+        // (Early `return`/`break` blocks branch out too, but don't dominate the
+        // latch or aren't the shallowest, so they are not mistaken for the exit.)
+        let mut candidates: Vec<usize> = body
+            .iter()
+            .copied()
+            .filter(|&b| {
+                succ[b].iter().any(|s| !body.contains(s))
+                    && hlatches.iter().all(|&l| dominates(idom, b, l))
+            })
+            .collect();
+        candidates.sort_by_key(|&b| b);
+        let Some(&test) = candidates.iter().find(|&&c| candidates.iter().all(|&c2| dominates(idom, c, c2))) else {
+            continue; // no single condition test; emit rejects via the walker
+        };
+        let exits: Vec<usize> = succ[test].iter().copied().filter(|s| !body.contains(s)).collect();
+        if exits.len() != 1 {
+            continue;
+        }
+        out.insert(
+            bi(h),
+            LoopRegion {
+                header: bi(h),
+                body: body.iter().map(|&x| bi(x)).collect(),
+                exit: bi(exits[0]),
+            },
+        );
+    }
+    out
+}
+
+/// The natural loop body of back edge `latch -> header`: `header` plus every node
+/// that reaches `latch` without passing through `header`.
+fn collect_loop_body(header: usize, latch: usize, preds: &[Vec<usize>], body: &mut HashSet<usize>) {
+    body.insert(header);
+    if body.insert(latch) {
+        let mut stack = vec![latch];
+        while let Some(x) = stack.pop() {
+            for &p in &preds[x] {
+                if p != header && body.insert(p) {
+                    stack.push(p);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skull_mir::mir::{Inst, Lit};
+    use ustr::Ustr;
+
+    /// Build a MirFunc with `n` blocks (0 = entry) and the given terminators.
+    /// Branch conds are a single shared dummy bool const.
+    fn mk(n: usize, terms: Vec<Term>) -> MirFunc {
+        let mut f = MirFunc::new(Ustr::from("t"));
+        for _ in 1..n {
+            f.new_block();
+        }
+        let _dummy = f.insts.alloc(Inst::Const(Lit::Bool(true)));
+        for (i, t) in terms.into_iter().enumerate() {
+            f.blocks[bi(i)].term = t;
+        }
+        f
+    }
+
+    fn cond() -> Idx<Inst> {
+        Idx::from_raw(RawIdx::from_u32(0))
+    }
+
+    #[test]
+    fn diamond() {
+        // 0 -> {1, 2} -> 3(return)
+        let f = mk(
+            4,
+            vec![
+                Term::Branch { cond: cond(), then_bb: bi(1), else_bb: bi(2) },
+                Term::Goto(bi(3)),
+                Term::Goto(bi(3)),
+                Term::Return(vec![]),
+            ],
+        );
+        let s = analyze(&f);
+        assert_eq!(s.ipdom(bi(0)), Some(bi(3)));
+        assert_eq!(s.ipdom(bi(1)), Some(bi(3)));
+        assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
+        assert_eq!(s.ipdom(bi(3)), None); // virtual exit
+        assert!(s.loops.is_empty());
+    }
+
+    #[test]
+    fn diverged_arm() {
+        // 0 -> {1(return), 2}; 2 -> 3(return). ipdom(0) collapses to virtual exit.
+        let f = mk(
+            4,
+            vec![
+                Term::Branch { cond: cond(), then_bb: bi(1), else_bb: bi(2) },
+                Term::Return(vec![]),
+                Term::Goto(bi(3)),
+                Term::Return(vec![]),
+            ],
+        );
+        let s = analyze(&f);
+        assert_eq!(s.ipdom(bi(0)), None);
+        assert_eq!(s.ipdom(bi(2)), Some(bi(3)));
+        assert!(s.loops.is_empty());
+    }
+
+    #[test]
+    fn nested_loop() {
+        // 0 -> 1(outer header) -> {2(inner header), 6(exit,return)}
+        // 2 -> {3, 5}; 3 -> 4; 4 -> 2(inner back edge); 5 -> 1(outer back edge)
+        let f = mk(
+            7,
+            vec![
+                Term::Goto(bi(1)),
+                Term::Branch { cond: cond(), then_bb: bi(2), else_bb: bi(6) },
+                Term::Branch { cond: cond(), then_bb: bi(3), else_bb: bi(5) },
+                Term::Goto(bi(4)),
+                Term::Goto(bi(2)),
+                Term::Goto(bi(1)),
+                Term::Return(vec![]),
+            ],
+        );
+        let s = analyze(&f);
+        let outer = s.loops.get(&bi(1)).expect("outer loop");
+        assert_eq!(outer.exit, bi(6));
+        assert!(outer.body.contains(&bi(1)) && outer.body.contains(&bi(5)) && outer.body.contains(&bi(2)));
+        assert!(!outer.body.contains(&bi(6)));
+        let inner = s.loops.get(&bi(2)).expect("inner loop");
+        assert_eq!(inner.exit, bi(5));
+        assert!(inner.body.contains(&bi(2)) && inner.body.contains(&bi(4)));
+        assert!(!inner.body.contains(&bi(1)) && !inner.body.contains(&bi(5)));
+    }
+}

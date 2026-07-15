@@ -81,20 +81,17 @@ fn reject_unmapped_inline_lua_call() {
     reject(src, &["uses_prim"], "no GLSL intrinsic mapping");
 }
 
-// SENTINEL: milestone B reloops straight-line + counted-for only; a conditional
-// branch (`if` / `&&`) is rejected, not miscompiled. (The current reject reason is
-// incidental -- an `if` lowers through a nil, caught by the profile pass before
-// emit_seq's explicit conditional-branch reject; either way it rejects.) Flip this
-// to a golden test when the if-diamond / short-circuit reloop lands
-// (docs/glsl-fn-emission.md).
+// `match` lowers to `Term::Branch` chains (NOT `Term::Switch`, which lowering
+// never produces), so a tier-0 int `match` is accepted and structured -- see
+// `golden::match_int_ladder`. A match on a non-tier-0 scrutinee still rejects at
+// the tier-0 gate; the structurizer never silently swallows it.
 #[test]
-fn reject_if_branch_sentinel() {
+fn reject_match_non_tier0() {
     let src = r#"
-        @pure fn pick(a: float, b: float) -> float {
-            if a > b { return a } else { return b }
-        }
+        enum Dir { North, South }
+        @pure fn f(d: Dir) -> int { match d { Dir::North => { return 1 } Dir::South => { return 2 } } }
     "#;
-    reject(src, &["pick"], "shader profile:");
+    reject(src, &["f"], "not tier 0");
 }
 
 #[test]
