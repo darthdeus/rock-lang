@@ -1021,7 +1021,19 @@ pub fn skull_compile_game_and_collect_sims(
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
-    let lua = skull_emit_project(dir);
+    use std::path::PathBuf;
+    let emit = skull_emit_project(dir);
+    // A game's runnable main.lua is the same shape run/stone produce via
+    // write_full_main: preamble (cimgui bindings + game source dir) + emit +
+    // __rock_main_wrapper(main). Without the preamble the fire build is missing
+    // the imgui bindings (GetStyle etc.); without the wrapper it never starts.
+    let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
+        skull_game_main(&skull_game_preamble(dir), &emit)
+    } else if emit.contains("function main(") {
+        format!("{emit}\n__rock_main_wrapper(main)\n")
+    } else {
+        emit
+    };
     match output {
         Some(out) => {
             rock_host::project::write_atomic(&out, &lua)?;
