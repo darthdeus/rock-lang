@@ -267,8 +267,8 @@ pub(crate) fn arg_path_penalty(arg: &str) -> i32 {
 /// case- and kind-neutral `RankKey` with the caller's `type_rank` (0
 /// value-of-expected-type / 1 fn-returning-it / 2 other), `dist` (shorter
 /// paths first) and `method` (field/var before method/fn).
-pub(crate) fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> String {
-    arg_rank_key(type_rank, kind, cand, query, dist, method).encode(cand)
+pub(crate) fn arg_sort_text(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8, score_bonus: i32) -> String {
+    arg_rank_key(type_rank, kind, cand, query, dist, method, score_bonus).encode(cand)
 }
 
 /// sort_text for a CLOSED-SET completion (struct-literal / record-variant
@@ -295,9 +295,11 @@ pub(crate) fn closed_set_sort_text(name: &str, prefix: &[u8], tier: u8, decl_idx
 
 /// The `RankKey` behind `arg_sort_text` -- the reach source emits it as a
 /// `Cand` fact and defers the encode to materialization.
-pub(crate) fn arg_rank_key(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8) -> RankKey {
+pub(crate) fn arg_rank_key(type_rank: u8, kind: u8, cand: &str, query: &[u8], dist: u16, method: u8, score_bonus: i32) -> RankKey {
     // `fuzzy_score` lowercases the candidate inline; `query` is pre-lowercased.
-    let score = fuzzy_score(cand.as_bytes(), query);
+    // `score_bonus` is a soft caller lean (member fields over methods) -- a
+    // within-band tiebreak a better raw match still overrides.
+    let score = fuzzy_score(cand.as_bytes(), query) + score_bonus;
     // Arg path is case-neutral, so the pre-lowercased query stands in for the raw
     // one (cs/ci prefix collapse to one band -- band is tertiary here anyway).
     let (exact, band) = match_band_exact(cand, query, query);
@@ -410,8 +412,8 @@ pub(crate) fn ci_cmp(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 /// (rank 0), everything else 1 -- the bool-context analogue of an expected
 /// type. Banded like every other path: a prefix-tier match outranks a
 /// boundary-richer higher-scoring one.
-pub(crate) fn member_bool_sort_text(name: &str, pfx: &[u8], is_bool: bool, method: u8) -> String {
-    let score = fuzzy_score(name.as_bytes(), pfx);
+pub(crate) fn member_bool_sort_text(name: &str, pfx: &[u8], is_bool: bool, method: u8, score_bonus: i32) -> String {
+    let score = fuzzy_score(name.as_bytes(), pfx) + score_bonus;
     let (exact, band) = match_band_exact(name, pfx, pfx);
     let key = RankKey {
         exact,
@@ -432,8 +434,8 @@ pub(crate) fn member_bool_sort_text(name: &str, pfx: &[u8], is_bool: bool, metho
 /// where a value of the expected type outranks a better-prefix candidate of the
 /// wrong type). The prefix filter still removes wrong-prefix candidates first,
 /// so this only reorders genuine matches.
-pub(crate) fn member_arg_sort_text(name: &str, pfx: &[u8], type_match: bool, method: u8, dist: u16) -> String {
-    let score = fuzzy_score(name.as_bytes(), pfx);
+pub(crate) fn member_arg_sort_text(name: &str, pfx: &[u8], type_match: bool, method: u8, dist: u16, score_bonus: i32) -> String {
+    let score = fuzzy_score(name.as_bytes(), pfx) + score_bonus;
     let (exact, band) = match_band_exact(name, pfx, pfx);
     let key = RankKey {
         exact,

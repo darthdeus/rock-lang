@@ -6,9 +6,14 @@
 
 /// Field order IS the ranking ladder (docs/completion-ranking-design.md):
 /// exact whole-name match, expected-type relevance, coarse match band,
-/// smart case, locality/kind, reach distance, non-fn-before-fn, fine fuzzy
+/// locality/kind, reach distance, non-fn-before-fn, smart case, fine fuzzy
 /// score, shorter-first. The ci name tiebreak lives outside: `encode`
 /// appends the lowercased name; tuple-compare callers chain `ci_cmp`.
+///
+/// LOCALITY OUTRANKS CASE: `kind` sits above `case`, so a lowercase query
+/// still surfaces a SCREAMING global over a same-band lowercase fn (`lot` ->
+/// `LOOT_OPEN` above `loot_item`). Case is a late within-band-and-kind
+/// boost, not a gate -- smart-case still decides ties among equals.
 ///
 /// Field semantics (all "lower ranks first"):
 /// - `exact`: 0 iff the candidate name equals the query case-exact.
@@ -17,12 +22,13 @@
 ///   type it is the coarse bucket only (0 direct, 4 call-through synth).
 /// - `band`: coarse match tier -- 0 case-exact prefix, 1 ci prefix,
 ///   2 clean word-boundary subsequence, 3 scattered; 0 on an empty query.
-/// - `case`: smart-case mismatch count (0-9); 0 (neutral) in typed slots.
 /// - `kind`: locality ladder -- 0 local/param, 1 global, 2 fn/type,
 ///   3 variant, 4 test-scoped symbol outside test files; 0 (neutral)
 ///   where a path ranks one kind only.
 /// - `dist`: reach hop distance; 0 for direct candidates.
 /// - `method`: 1 for a callable (needs args / has side effects), 0 else.
+/// - `case`: smart-case mismatch count (0-9); 0 (neutral) in typed slots.
+///   A late boost -- below `kind`, so locality wins first.
 /// - `fine`: `9999 - clamped fuzzy score` -- the within-band tiebreak.
 /// - `prox`: definition proximity to the request file -- 0 same file,
 ///   1 same project root, 2 other workspace code (engine/deps), 3 stdlib/
@@ -44,10 +50,10 @@ pub(crate) struct RankKey {
     pub exact: u8,
     pub type_rank: u8,
     pub band: u8,
-    pub case: u8,
     pub kind: u8,
     pub dist: u16,
     pub method: u8,
+    pub case: u8,
     pub fine: u16,
     pub prox: u8,
     pub freq: u8,
@@ -80,10 +86,10 @@ impl RankKey {
             exact: self.exact.min(9),
             type_rank: self.type_rank.min(9),
             band: self.band.min(9),
-            case: self.case.min(9),
             kind: self.kind.min(9),
             dist: self.dist.min(99),
             method: self.method.min(9),
+            case: self.case.min(9),
             fine: self.fine.min(9999),
             prox: self.prox.min(9),
             freq: self.freq.min(9),
@@ -97,14 +103,14 @@ impl RankKey {
     /// Lexicographic order of these strings == `(RankKey, ci name)` order.
     pub fn encode(&self, name: &str) -> String {
         format!(
-            "{}{}{}{}{}{:02}{}{:04}{}{}{}{:03}{}",
+            "{}{}{}{}{:02}{}{}{:04}{}{}{}{:03}{}",
             self.exact.min(9),
             self.type_rank.min(9),
             self.band.min(9),
-            self.case.min(9),
             self.kind.min(9),
             self.dist.min(99),
             self.method.min(9),
+            self.case.min(9),
             self.fine.min(9999),
             self.prox.min(9),
             self.freq.min(9),
@@ -126,13 +132,13 @@ pub fn explain_sort_text(st: &str) -> Option<String> {
     }
     let fine: u32 = st[8..12].parse().ok()?;
     Some(format!(
-        "exact={} type_rank={} band={} case={} kind={} dist={} method={} score={} prox={} freq={} rec={} len={}",
+        "exact={} type_rank={} band={} kind={} dist={} method={} case={} score={} prox={} freq={} rec={} len={}",
         &st[0..1],
         &st[1..2],
         &st[2..3],
         &st[3..4],
-        &st[4..5],
-        &st[5..7],
+        &st[4..6],
+        &st[6..7],
         &st[7..8],
         9999 - fine,
         &st[12..13],
@@ -241,7 +247,7 @@ mod tests {
         let ex = explain_sort_text(&k.encode("target_grid")).expect("decodes");
         assert_eq!(
             ex,
-            "exact=1 type_rank=2 band=3 case=0 kind=1 dist=04 method=1 score=1021 prox=2 freq=1 rec=0 len=022"
+            "exact=1 type_rank=2 band=3 kind=1 dist=04 method=1 case=0 score=1021 prox=2 freq=1 rec=0 len=022"
         );
         assert!(explain_sort_text("not-a-key").is_none());
     }

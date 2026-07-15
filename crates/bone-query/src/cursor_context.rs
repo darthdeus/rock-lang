@@ -504,6 +504,27 @@ impl CursorAst {
         None
     }
 
+    /// The bare-identifier target of an assignment whose RHS holds the cursor
+    /// (`dest = |` -> `"dest"`). `None` for a field/index target -- those resolve
+    /// through the byte anchor (their place expr is typed), whereas a bare
+    /// local/param place is typed `()`, so its slot type must be looked up from
+    /// the binding by name (see `binding_ty_by_name`).
+    pub(crate) fn assign_target_ident(&self) -> Option<String> {
+        for (_, e) in self.ast.exprs.iter() {
+            let ExprKind::Assign { target, value, .. } = &e.kind else {
+                continue;
+            };
+            let (vs, ve) = self.expr(*value).span.offset_range;
+            if vs <= self.probe && self.probe <= ve {
+                return match &self.expr(*target).kind {
+                    ExprKind::Ident(id) => Some(id.name.to_string()),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
     /// Cursor in the RHS of a comparison or null-coalesce BinOp (`lhs ==
     /// <cursor>`, `lhs ?? <cursor>`): the last byte offset of the LHS, so
     /// `type_at` resolves the compared-against type as the slot's expected

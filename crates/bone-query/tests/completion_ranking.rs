@@ -1041,7 +1041,7 @@ fn kind_digit(path: &str, src: &str, label: &str) -> char {
         .iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("no completion `{label}`"));
-    it.sort_text.as_deref().expect("sort_text").as_bytes()[4] as char
+    it.sort_text.as_deref().expect("sort_text").as_bytes()[3] as char
 }
 
 #[test]
@@ -1122,7 +1122,7 @@ fn kind_digit_at(bone: &mut BoneWorkspace, path: &str, pos: Position, label: &st
         .iter()
         .find(|c| c.label == label)
         .unwrap_or_else(|| panic!("no completion `{label}`"));
-    it.sort_text.as_deref().expect("sort_text").as_bytes()[4] as char
+    it.sort_text.as_deref().expect("sort_text").as_bytes()[3] as char
 }
 
 #[test]
@@ -1265,4 +1265,25 @@ fn freq_digits_bucket_by_reference_count() {
     assert_eq!(key_digit(PATH, &src, "zz_hot", FREQ_DIGIT), '0', "16 refs = hot bucket");
     assert_eq!(key_digit(PATH, &src, "mm_warm", FREQ_DIGIT), '1', "3 refs = warm bucket");
     assert_eq!(key_digit(PATH, &src, "aa_cold", FREQ_DIGIT), '2', "0 refs = rare bucket");
+}
+
+#[test]
+fn assignment_rhs_to_a_local_type_directs_like_typed_let() {
+    // `dest = $0` where `dest: Widget`: the RHS slot expects Widget, so a Widget
+    // local outranks a Widget? or int local. Regression: a bare-ident assign
+    // target is typed `()` by inference (place position), so the anchor gave no
+    // type direction and every local tied at type_rank 0 -- a `Widget?` could
+    // surface top in a slot that only accepts `Widget` (uncompilable). Field and
+    // typed-let targets never had this; only bare local/param targets.
+    let labels = labels_at(
+        "struct Widget { id: int }\n\
+         fn f(dest: Widget, maybe_w: Widget?, sure_w: Widget, num: int) {\n\
+         dest = $0\n\
+         }\n",
+    );
+    let sure = rank_of(&labels, "sure_w").expect("sure_w offered");
+    let maybe = rank_of(&labels, "maybe_w").expect("maybe_w offered");
+    let num = rank_of(&labels, "num").expect("num offered");
+    assert!(sure < maybe, "Widget must outrank Widget? at assign RHS: {labels:?}");
+    assert!(sure < num, "Widget must outrank int at assign RHS: {labels:?}");
 }

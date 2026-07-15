@@ -1,7 +1,8 @@
 //! Extended-ctags file emission.
 //!
-//! The bone workspace regenerates a project's `.rock.tags` on save (driven from
-//! `BoneWorkspace::write_ctags`). The format matches the old compile-path
+//! The bone workspace regenerates `.rock.tags` from the live session -- the
+//! edited file's root on open (`write_ctags`), every open root on save
+//! (`write_all_ctags`). The format matches the old compile-path
 //! generator (`rock-cli/src/ctags.rs`): a `!_TAG_*` header followed by one
 //! `name<TAB>file<TAB>line;"<TAB>kind` line per symbol, sorted by name.
 //! Kinds:
@@ -12,7 +13,6 @@
 //! Extended `key:value` attributes follow the kind, in declaration order:
 //! `signature:(a: int)`, `returns:int`, `type:int`, `struct:Point`, `enum:Color`.
 
-use std::io::Write;
 use std::path::Path;
 
 pub(crate) struct CtagsEntry {
@@ -27,27 +27,32 @@ pub(crate) struct CtagsEntry {
 }
 
 /// Write `entries` to `path` in sorted extended-ctags format. Returns the number
-/// of symbol lines written (excludes the header).
+/// of symbol lines written (excludes the header). Skips the write when the
+/// rendered bytes match what's already on disk: the all-roots save sweep
+/// re-renders every open package, but only the edited one's bytes actually
+/// change, so rewriting the rest would churn mtime for nothing.
 pub(crate) fn write_tags_file(path: &Path, mut entries: Vec<CtagsEntry>) -> std::io::Result<usize> {
+    use std::fmt::Write as _;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let file = fs_err::File::create(path)?;
-    let mut w = std::io::BufWriter::new(file);
-
-    writeln!(w, "!_TAG_FILE_FORMAT\t2\t/extended format/")?;
-    writeln!(w, "!_TAG_FILE_SORTED\t1\t/0=unsorted, 1=sorted, 2=foldcase/")?;
-    writeln!(w, "!_TAG_PROGRAM_AUTHOR\tRock Language\t//")?;
-    writeln!(w, "!_TAG_PROGRAM_NAME\trock\t//")?;
-    writeln!(w, "!_TAG_PROGRAM_VERSION\t{}\t//", env!("CARGO_PKG_VERSION"))?;
+    let mut out = String::new();
+    out.push_str("!_TAG_FILE_FORMAT\t2\t/extended format/\n");
+    out.push_str("!_TAG_FILE_SORTED\t1\t/0=unsorted, 1=sorted, 2=foldcase/\n");
+    out.push_str("!_TAG_PROGRAM_AUTHOR\tRock Language\t//\n");
+    out.push_str("!_TAG_PROGRAM_NAME\trock\t//\n");
+    let _ = writeln!(out, "!_TAG_PROGRAM_VERSION\t{}\t//", env!("CARGO_PKG_VERSION"));
 
     for e in &entries {
-        write!(w, "{}\t{}\t{};\"\t{}", e.name, e.file, e.line, e.kind)?;
+        let _ = write!(out, "{}\t{}\t{};\"\t{}", e.name, e.file, e.line, e.kind);
         for (key, value) in &e.fields {
-            write!(w, "\t{key}:{value}")?;
+            let _ = write!(out, "\t{key}:{value}");
         }
-        writeln!(w)?;
+        out.push('\n');
     }
 
-    w.flush()?;
+    if fs_err::read_to_string(path).map(|cur| cur == out).unwrap_or(false) {
+        return Ok(entries.len());
+    }
+    fs_err::write(path, out)?;
     Ok(entries.len())
 }

@@ -776,17 +776,24 @@ fn arg_position_ranks_expected_enum_variant_first() {
 }
 
 #[test]
-fn plain_completion_filters_midword_scatter_keeps_clean_and_camelcase() {
-    // `nog` mid-word-scatters `stone_log` (sto-N-e ... l-O-G) -- filtered. It
-    // cleanly matches the camelCase variant `NotGround` (N-o ... -G-round, the
-    // `G` is a word boundary) -- kept. A clean prefix-ish query still finds the
-    // function.
+fn plain_completion_demotes_midword_scatter_below_clean_and_camelcase() {
+    // `nog` (3 chars -> subseq admission) mid-word-scatters `stone_log`
+    // (sto-N-e ... l-O-G): ADMITTED under the default subseq3 policy but DEMOTED
+    // to band 3. It cleanly matches the camelCase variant `NotGround`
+    // (N-o ... -G-round, the `G` a word boundary) -- band 2 -- which therefore
+    // ranks ABOVE the scatter. Admission is permissive; the band does the work.
     let src = "fn stone_log() {}\n\
                enum E { NotGround }\n\
                fn r() {\n  nog\n}\n";
-    let l = labels(src, 3, 5);
-    assert!(!l.iter().any(|x| x == "stone_log"), "mid-word scatter filtered: {l:?}");
-    assert!(l.iter().any(|x| x == "E::NotGround"), "camelCase variant kept: {l:?}");
+    // `item` panics if the label is absent, so reaching both proves admission.
+    let ng = item(src, 3, 5, "E::NotGround");
+    let sl = item(src, 3, 5, "stone_log");
+    assert!(
+        ng.sort_text < sl.sort_text,
+        "clean camelCase must rank above mid-word scatter: {:?} vs {:?}",
+        ng.sort_text,
+        sl.sort_text,
+    );
     // The same function is still found by a clean (word-boundary) query.
     let l2 = labels("fn stone_log() {}\nfn r() {\n  stlog\n}\n", 2, 7);
     assert!(l2.iter().any(|x| x == "stone_log"), "clean query finds the fn: {l2:?}");
@@ -1641,15 +1648,16 @@ fn field_ref_empty_arg_offers_fields_and_inserts_dot() {
     assert!(!l.iter().any(|s| s == "poll_slot"), "no global dump in a FieldOf slot: {l:?}");
 }
 
-// -- smart-case: a lowercase query prefers a case-matching name ---------------
-// Typing lowercase `jlog` fuzzy-matches both the all-caps global
-// `JIT_TRACE_LOG_ENABLED` and the lowercase fn `journal_log` with an identical
-// structural score. The case-clean lowercase name must win: a case-mismatched
-// SCREAMING_CONST is demoted BELOW it, above `type_rank` (globals normally
-// outrank functions -- that's exactly what the case penalty overrides).
+// -- locality outranks case: a lowercase query still surfaces globals ---------
+// Typing lowercase `jlog` fuzzy-matches the all-caps global
+// `JIT_TRACE_LOG_ENABLED` and the lowercase fn `journal_log` in the same band.
+// Locality wins (`kind` above `case`): a global outranks a fn even though the
+// lowercase query case-matches the fn -- case is only a late boost. This is the
+// inverse of the old "lowercase demotes SCREAMING_CONST" rule (case used to sit
+// above kind); the uppercase-query test below still pins smart-case as a boost.
 
 #[test]
-fn lowercase_query_ranks_case_matching_name_above_screaming_const() {
+fn lowercase_query_still_ranks_global_above_fn_despite_case() {
     let src = "global JIT_TRACE_LOG_ENABLED: bool = false\n\
                fn journal_log() {}\n\
                fn r() {\n  jlog\n}\n";
@@ -1673,18 +1681,19 @@ fn lowercase_query_ranks_case_matching_name_above_screaming_const() {
     let fn_st = st("journal_log");
     let const_st = st("JIT_TRACE_LOG_ENABLED");
     assert!(
-        fn_st < const_st,
-        "journal_log ({fn_st}) should rank before JIT_TRACE_LOG_ENABLED ({const_st})"
+        const_st < fn_st,
+        "global JIT_TRACE_LOG_ENABLED ({const_st}) should outrank fn journal_log ({fn_st}) even for a lowercase query -- locality above case"
     );
 }
 
 #[test]
-fn uppercase_query_ranks_screaming_const_above_lowercase_fn() {
-    // The reverse of the case above: typing `JLOG` (uppercase) is a case signal
-    // for the all-caps name, so `JIT_TRACE_LOG_ENABLED` must now win -- proving
-    // the rule is genuine smart-case, not "lowercase always beats uppercase".
+fn uppercase_query_ranks_screaming_name_above_lowercase_same_kind() {
+    // Case is still a live boost -- among SAME-kind candidates (two globals, so
+    // `kind` ties), typing `JLOG` (uppercase) case-matches the all-caps name, so
+    // `JIT_TRACE_LOG_ENABLED` outranks the lowercase `journal_log_flag`. This
+    // isolates the case rung: it decides only once locality has tied.
     let src = "global JIT_TRACE_LOG_ENABLED: bool = false\n\
-               fn journal_log() {}\n\
+               global journal_log_flag: bool = false\n\
                fn r() {\n  JLOG\n}\n";
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
@@ -1704,10 +1713,10 @@ fn uppercase_query_ranks_screaming_const_above_lowercase_fn() {
             .expect("sort_text")
     };
     let const_st = st("JIT_TRACE_LOG_ENABLED");
-    let fn_st = st("journal_log");
+    let fn_st = st("journal_log_flag");
     assert!(
         const_st < fn_st,
-        "JIT_TRACE_LOG_ENABLED ({const_st}) should rank before journal_log ({fn_st}) for an uppercase query"
+        "JIT_TRACE_LOG_ENABLED ({const_st}) should rank before journal_log_flag ({fn_st}) for an uppercase query -- case boost among same-kind"
     );
 }
 
