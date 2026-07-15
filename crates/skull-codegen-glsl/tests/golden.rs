@@ -133,14 +133,8 @@ fn vec2_normalize_body() {
     assert!(
         glsl.contains(
             "vec2 normalize__Vec2_ret_Vec2(vec2 v) {\n  \
-             bool t2;\n  \
              float len;\n  \
-             if ((v.x == 0.0)) {\n    \
-               t2 = (v.y == 0.0);\n  \
-             } else {\n    \
-               t2 = false;\n  \
-             }\n  \
-             if (t2) {\n    \
+             if (((v.x == 0.0) && (v.y == 0.0))) {\n    \
                return vec2(0.0);\n  \
              } else {\n    \
                len = sqrt(((v.x * v.x) + (v.y * v.y)));\n    \
@@ -192,7 +186,9 @@ fn if_else_if_ladder() {
     );
 }
 
-/// Expression-position `if` into a cell: both arms store the result cell.
+/// Expression-position `if` into a cell folds to a ternary (cosmetic tier,
+/// `docs/glsl-relooper-plan.md` item 2): both arms single-store the single-use
+/// result cell -> `(cond ? a : b)` at the use.
 #[test]
 fn expression_if_into_cell() {
     let src = r#"@pure fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#;
@@ -200,19 +196,30 @@ fn expression_if_into_cell() {
     assert_eq!(
         glsl.trim(),
         "float f(float x) {\n  \
-         float t1;\n  \
          float r;\n  \
-         if ((x > 0.0)) {\n    \
-           t1 = x;\n  \
-         } else {\n    \
-           t1 = (0.0 - x);\n  \
-         }\n  \
-         r = t1;\n  \
+         r = ((x > 0.0) ? x : (0.0 - x));\n  \
          return r;\n}"
     );
 }
 
-/// `&&` in a nested if: short-circuit becomes a bool temp diamond.
+/// A ternary over an int-typed if-expr keeps the outer `float(...)` coercion
+/// (both arms unify to int; the `let r: float` subsumption wraps the whole
+/// ternary, exactly as the diamond's `r = float(t1)` store did).
+#[test]
+fn ternary_int_result_outer_coercion() {
+    let src = r#"@pure fn f(x: float) -> float { let r: float = if x > 0.0 { 1 } else { 2 } return r }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f(float x) {\n  \
+         float r;\n  \
+         r = float(((x > 0.0) ? 1 : 2));\n  \
+         return r;\n}"
+    );
+}
+
+/// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`
+/// (cosmetic tier -- `docs/glsl-relooper-plan.md`).
 #[test]
 fn and_in_nested_if() {
     let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#;
@@ -220,20 +227,14 @@ fn and_in_nested_if() {
     assert_eq!(
         glsl.trim(),
         "float f(float x, float y) {\n  \
-         bool t2;\n  \
-         if ((x > 0.0)) {\n    \
-           t2 = (y > 0.0);\n  \
-         } else {\n    \
-           t2 = false;\n  \
-         }\n  \
-         if (t2) {\n    \
+         if (((x > 0.0) && (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
          return 0.0;\n}"
     );
 }
 
-/// `||` in a nested if.
+/// `||` in a nested if: folds back to infix `||`.
 #[test]
 fn or_in_nested_if() {
     let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 || y > 0.0 { return 1.0 } return 0.0 }"#;
@@ -241,13 +242,7 @@ fn or_in_nested_if() {
     assert_eq!(
         glsl.trim(),
         "float f(float x, float y) {\n  \
-         bool t2;\n  \
-         if ((x > 0.0)) {\n    \
-           t2 = true;\n  \
-         } else {\n    \
-           t2 = (y > 0.0);\n  \
-         }\n  \
-         if (t2) {\n    \
+         if (((x > 0.0) || (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
          return 0.0;\n}"
@@ -305,16 +300,10 @@ fn while_compound_condition() {
         "float f(float x) {\n  \
          float acc;\n  \
          int i;\n  \
-         bool t3;\n  \
          acc = 0.0;\n  \
          i = 0;\n  \
          while (true) {\n    \
-           if ((i < 10)) {\n      \
-             t3 = (acc < 100.0);\n    \
-           } else {\n      \
-             t3 = false;\n    \
-           }\n    \
-           if (!(t3)) { break; }\n    \
+           if (!(((i < 10) && (acc < 100.0)))) { break; }\n    \
            acc = (acc + x);\n    \
            i = (i + 1);\n  \
          }\n  \
@@ -429,6 +418,47 @@ fn nested_loop_with_if() {
          }\n  \
          return acc;\n}"
     );
+}
+
+/// Const loop bound folds into the for-header (cosmetic tier,
+/// `docs/glsl-relooper-plan.md` item 3): `t = 4; for (; i < t; ...)` -> `for (;
+/// i < 4; ...)`, dropping the single-use bound temp + its declaration. A const
+/// is loop-invariant, so re-reading it each iteration is identical.
+#[test]
+fn const_loop_bound_fold() {
+    let src = r#"@pure fn f() -> int {
+        let acc = 0
+        for i in 0..4 { acc = acc + i }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f() {\n  \
+         int acc;\n  \
+         int i;\n  \
+         acc = 0;\n  \
+         i = 0;\n  \
+         for (; i < 4; i = i + 1) {\n    \
+           acc = (acc + i);\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}
+
+/// A PARAM loop bound is NOT folded (it could be reassigned in the loop body,
+/// which would change the iteration count if re-read each iteration -- only
+/// const bounds are provably loop-invariant).
+#[test]
+fn param_loop_bound_not_folded() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let acc = 0
+        for i in 0..n { acc = acc + i }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert!(glsl.contains("t3 = n;"), "param bound must stay a temp:\n{glsl}");
+    assert!(glsl.contains("for (; i < t3; i = i + 1) {"), "got:\n{glsl}");
 }
 
 /// Milestone finding: `match` lowers to `Branch` chains (NOT `Term::Switch`),

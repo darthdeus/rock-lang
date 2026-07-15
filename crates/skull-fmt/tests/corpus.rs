@@ -1,6 +1,8 @@
-//! Runs the shared `tests/fmt` corpus through skull-fmt and reports a pass/fail
-//! histogram. Informational during bring-up: it prints a summary (run with
-//! `--nocapture`) and only fails if NOTHING passes (a smoke gate).
+//! Runs the shared `tests/fmt` corpus through skull-fmt and asserts every case
+//! formats to its expected output. Prints a pass/fail histogram (run with
+//! `--nocapture`) and fails on ANY mismatch, listing the offending cases. A
+//! genuine bring-up gap goes in `KNOWN_FAILING`, which forces a same-commit
+//! removal the moment the case starts passing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,6 +85,13 @@ fn parse_cases(file: &str, text: &str) -> Vec<Case> {
     cases
 }
 
+/// Cases the formatter does not yet handle. `(file, case_name)` — matched
+/// exactly against the values printed in the failure list. Empty means the
+/// whole corpus is expected to pass; adding an entry is a ratchet: the case
+/// starts passing -> the "expected-fail passed" check goes red -> you must
+/// remove the entry in the same commit.
+const KNOWN_FAILING: &[(&str, &str)] = &[];
+
 fn trim_block(lines: &[&str]) -> String {
     let mut v: Vec<&str> = lines.to_vec();
     while v.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
@@ -126,25 +135,56 @@ fn corpus_report() {
     }
 
     eprintln!("\n=== skull-fmt corpus: {pass}/{total} cases pass ({parse_err} parse-fail passthrough) ===\n");
-    // Print first chunk of failures for triage.
-    let detail = std::env::var("FMT_DETAIL").is_ok();
-    let take = if detail { failures.len() } else { 0 };
-    for (file, name, input, exp, got) in failures.iter().take(take) {
-        eprintln!("---- {file} :: {name} ----");
-        eprintln!("INPUT:\n{input}");
-        eprintln!("EXPECTED:\n{exp}");
-        eprintln!("GOT:\n{got}\n");
-    }
-    eprintln!("\n=== failures by file ===");
-    let mut by_file: std::collections::BTreeMap<String, usize> = Default::default();
-    for (file, ..) in &failures {
-        *by_file.entry(file.clone()).or_default() += 1;
-    }
-    let mut v: Vec<_> = by_file.into_iter().collect();
-    v.sort_by(|a, b| b.1.cmp(&a.1));
-    for (file, n) in v {
-        eprintln!("{n:3}  {file}");
+
+    let is_known = |file: &str, name: &str| {
+        KNOWN_FAILING.iter().any(|(f, n)| *f == file && *n == name)
+    };
+
+    // Partition failures into unexpected (must go red) and known bring-up gaps.
+    let mut unexpected = Vec::new();
+    for (file, name, input, exp, got) in &failures {
+        if is_known(file, name) {
+            continue;
+        }
+        unexpected.push((file.clone(), name.clone(), input.clone(), exp.clone(), got.clone()));
     }
 
-    assert!(pass > 0, "no corpus cases passed");
+    // Ratchet: an allowlisted case that now passes must be removed same-commit.
+    let failed: std::collections::HashSet<(String, String)> =
+        failures.iter().map(|(f, n, ..)| (f.clone(), n.clone())).collect();
+    let stale: Vec<_> = KNOWN_FAILING
+        .iter()
+        .filter(|(f, n)| !failed.contains(&(f.to_string(), n.to_string())))
+        .collect();
+
+    if !unexpected.is_empty() {
+        eprintln!("=== {} unexpected failure(s) ===", unexpected.len());
+        for (file, name, input, exp, got) in &unexpected {
+            eprintln!("---- {file} :: {name} ----");
+            eprintln!("INPUT:\n{input}");
+            eprintln!("EXPECTED:\n{exp}");
+            eprintln!("GOT:\n{got}\n");
+        }
+        let list: Vec<String> = unexpected
+            .iter()
+            .map(|(f, n, ..)| format!("{f} :: {n}"))
+            .collect();
+        panic!(
+            "{} corpus case(s) formatted differently than expected:\n{}",
+            unexpected.len(),
+            list.join("\n")
+        );
+    }
+
+    assert!(
+        stale.is_empty(),
+        "KNOWN_FAILING entries now pass -- remove them:\n{}",
+        stale
+            .iter()
+            .map(|(f, n)| format!("{f} :: {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    assert!(pass > 0, "no corpus cases passed (corpus silently empty?)");
 }
