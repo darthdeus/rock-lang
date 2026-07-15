@@ -873,6 +873,7 @@ pub fn do_perf(
     seconds: Option<f64>,
     warmup_seconds: f64,
     gc_window: usize,
+    gc_window_start: usize,
     format: &str,
     app_args: &[String],
 ) -> Result<()> {
@@ -889,12 +890,12 @@ pub fn do_perf(
         (false, Some(_)) => None,
     };
 
-    // The GC-stopped window (profiler: warm 100 frames + N measured)
-    // must run to completion to produce a result. Force a frame cap
-    // that covers it (overriding a smaller --frames / --seconds) and
-    // drop the seconds cap so frames deterministically govern.
+    // The GC-stopped window (profiler: warm `gc_window_start` frames + N
+    // measured) must run to completion to produce a result. Force a frame cap
+    // that covers start + window + tail (overriding a smaller --frames /
+    // --seconds) and drop the seconds cap so frames deterministically govern.
     let seconds = if gc_window > 0 {
-        let need = 100 + gc_window + 20;
+        let need = gc_window_start + gc_window + 20;
         frame_cap = Some(frame_cap.map_or(need, |c| c.max(need)));
         None
     } else {
@@ -919,6 +920,7 @@ pub fn do_perf(
     cmd.env("PERF_WARMUP_SECONDS", warmup_seconds.to_string());
     if gc_window > 0 {
         cmd.env("PERF_GC_WINDOW", gc_window.to_string());
+        cmd.env("PERF_GC_WINDOW_START", gc_window_start.to_string());
     }
     cmd.env("PERF_FORMAT", format);
 
