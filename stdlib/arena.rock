@@ -1,0 +1,255 @@
+// Arena<T> + Entity<T>: generational-index entity storage (dynamic mobs,
+// projectiles). Handles survive removal; indexing returns T? for staleness.
+// The struct decls (Arena/Entity/ArenaEntry) live in unified.rock with the
+// other early type decls. Split out of unified.rock for readability.
+
+// Arena functions
+fn entity_new<T>(arena: Arena<T>, index: int, generation: int) -> Entity<T> {
+    assert(index >= 0, "entity_new::Entity index is invalid")
+    assert(generation >= 0, "Entity generation is invalid")
+
+    return Entity { _arena: arena, _index: index, _generation: generation }
+}
+
+fn Entity<T>.get(entity) -> T? { return get(entity._arena, entity) }
+
+fn Entity<T>.equals(a, b: Entity<T>) -> bool {
+    return a._index == b._index && a._generation == b._generation
+}
+
+// Stable identity string for a live entity (slot + generation), unique
+// across slot reuse -- the public form of the `_`-prefixed fields for
+// keying UI ids, maps, debug labels.
+fn entity_key<T>(entity: Entity<T>) -> string {
+    return "{entity._index}:{entity._generation}"
+}
+
+fn arena_entry_new<T>(data: T, index: int, generation: int) -> ArenaEntry<T> {
+    return ArenaEntry {
+        _data: data,
+        index: index,
+        generation: generation,
+        is_occupied: true,
+    }
+}
+
+fn arena_new<T>() -> Arena<T> {
+    return Arena { entries: [], free_indices: [], occupied_count: 0 }
+}
+
+// Helper functions for arena
+fn arena_pop_free_index(free_indices: [int]) -> int { return pop(free_indices).unwrap() }
+
+fn arena_get_generation_at<T>(entries: [ArenaEntry<T>], index: int) -> int {
+    if index >= 0 && index < vec_len(entries) {
+        let entry = vec_get(entries, index)
+        if !is_null(entry) { return entry.unwrap().generation }
+    }
+    return 0
+}
+
+fn Arena<T>.insert(arena, value: T) -> Entity<T> {
+    let index: int = 0
+    let generation: int = 0
+
+    // Work around type inference issue by avoiding pop/vec_get in same function
+    let has_free_indices: bool = vec_len(arena.free_indices) > 0
+    if has_free_indices {
+        index = arena_pop_free_index(arena.free_indices)
+        generation = arena_get_generation_at(arena.entries, index) + 1
+        vec_set(arena.entries, index, arena_entry_new(value, index, generation))
+    } else {
+        generation = 0
+        index = vec_len(arena.entries)
+        vec_push(arena.entries, arena_entry_new(value, index, generation))
+    }
+
+    arena.occupied_count = arena.occupied_count + 1
+    return entity_new(arena, index, generation)
+}
+
+fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
+    let index: int = entity._index
+    let entry: ArenaEntry<T>? = vec_get(arena.entries, index)
+    if is_null(entry) {
+        return null
+    } else {
+        let e: ArenaEntry<T> = entry.unwrap()
+        let occupied: bool = e.is_occupied
+
+        if !occupied {
+            return null
+        } else {
+            if e.generation != entity._generation { return null } else { return e._data }
+        }
+    }
+}
+
+fn Arena<T>.contains(arena, entity: Entity<T>) -> bool {
+    let entry = vec_get(arena.entries, entity._index)
+    if is_null(entry) {
+        return false
+    }
+    let e = entry.unwrap()
+    return e.is_occupied && e.generation == entity._generation
+}
+
+fn Entity<T>.remove(entity) -> T? {
+    remove(entity._arena, entity)
+}
+
+fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
+    let index = entity._index
+    let entry = vec_get(arena.entries, index)
+    if is_null(entry) {
+        return null
+    } else {
+        let e = entry.unwrap()
+
+        if e.is_occupied && e.generation == entity._generation {
+            e.is_occupied = false
+            vec_push(arena.free_indices, index)
+            arena.occupied_count = arena.occupied_count - 1
+            return e._data
+        } else {
+            return null
+        }
+    }
+}
+
+fn Arena<T>.len(arena) -> int {
+    return arena.occupied_count
+}
+
+
+fn Arena<T>.clear(arena) {
+    arena.entries = []
+    arena.free_indices = []
+    arena.occupied_count = 0
+}
+
+fn Arena<T>.random(arena) -> (Entity<T>, T)? {
+    let len = arena.len()
+    if len == 0 { return null }
+
+    // random_int is half-open [min, max), so use `len` not `len - 1`
+    // to make the last occupied slot reachable.
+    let random_index = random_int(0, len)
+    let current_count = 0
+    let entries_len = vec_len(arena.entries)
+
+    for i in 0..entries_len {
+        let entry = vec_get(arena.entries, i)
+        if !is_null(entry) && entry.unwrap().is_occupied {
+            if current_count == random_index {
+                let unwrapped_entry = entry.unwrap()
+                let entity = Entity { _arena: arena, _index: unwrapped_entry.index, _generation: unwrapped_entry.generation }
+                return (entity, unwrapped_entry._data)
+            }
+            current_count += 1
+        }
+    }
+
+    return null
+}
+
+// Arena iteration -- `for (e, v) in arena` desugars through this iter/next
+// pair. The skip loop is FETCH-OUTSIDE (one candidate fetched before the
+// while; the loop body runs only on a dead/nil slot) -- the naive
+// fetch-inside shape blacklists to the interpreter at light fragmentation
+// (docs/iterator-desugaring-investigation.md, 8.8x at 10% holes).
+// Arena iteration -- two modes, both `Iterator<..>`-conformant so they compose
+// with the combinators + terminals. `values()` yields `T`; `pairs()` yields a
+// `(Entity<T>, T)` tuple ELEMENT (2-tuple `next`, not multi-value -- a bound
+// cannot wrap an unknown-arity splat). Bare `for (e, v) in arena` desugars
+// through `iter(arena)` = pairs mode; the per-iteration pair tuple (and the
+// Entity, when unused) scalarizes away at codegen (tuple SROA,
+// `crates/skull/tests/tuple_scalarize.rs`). Both keep the fetch-outside
+// skip-loop shape (naive fetch-inside blacklists to the interpreter at ~10%
+// holes, `docs/iterator-desugaring-investigation.md`). entries/len snapshot
+// once per loop (mutation mid-iteration beyond removing the current element
+// is recorded UB).
+
+struct ArenaValIter<T> {
+    entries: [ArenaEntry<T>],
+    n: int,
+    i: int,
+}
+
+@inline
+fn values<T>(a: Arena<T>) -> ArenaValIter<T> {
+    return ArenaValIter { entries: a.entries, n: a.entries.len, i: 0 }
+}
+
+@inline
+fn next<T>(it: ArenaValIter<T>) -> (bool, T) {
+    let i = it.i
+    if i >= it.n { return (false, phantom()) }
+    let slot = it.entries.get(i)
+    while is_null(slot) || !slot.unwrap().is_occupied {
+        i = i + 1
+        if i >= it.n { it.i = i; return (false, phantom()) }
+        slot = it.entries.get(i)
+    }
+    it.i = i + 1
+    return (true, slot.unwrap()._data)
+}
+
+struct ArenaPairIter<T> {
+    arena: Arena<T>,
+    entries: [ArenaEntry<T>],
+    n: int,
+    i: int,
+}
+
+@inline
+fn pairs<T>(a: Arena<T>) -> ArenaPairIter<T> {
+    return ArenaPairIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
+}
+
+@inline
+fn next<T>(it: ArenaPairIter<T>) -> (bool, (Entity<T>, T)) {
+    let i = it.i
+    if i >= it.n { return (false, phantom()) }
+    let slot = it.entries.get(i)
+    while is_null(slot) || !slot.unwrap().is_occupied {
+        i = i + 1
+        if i >= it.n { it.i = i; return (false, phantom()) }
+        slot = it.entries.get(i)
+    }
+    let e = slot.unwrap()
+    it.i = i + 1
+    return (true, (Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e._data))
+}
+
+struct ArenaKeyIter<T> {
+    arena: Arena<T>,
+    entries: [ArenaEntry<T>],
+    n: int,
+    i: int,
+}
+
+@inline
+fn keys<T>(a: Arena<T>) -> ArenaKeyIter<T> {
+    return ArenaKeyIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
+}
+
+@inline
+fn next<T>(it: ArenaKeyIter<T>) -> (bool, Entity<T>) {
+    let i = it.i
+    if i >= it.n { return (false, phantom()) }
+    let slot = it.entries.get(i)
+    while is_null(slot) || !slot.unwrap().is_occupied {
+        i = i + 1
+        if i >= it.n { it.i = i; return (false, phantom()) }
+        slot = it.entries.get(i)
+    }
+    let e = slot.unwrap()
+    it.i = i + 1
+    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation })
+}
+
+@inline
+fn iter<T>(a: Arena<T>) -> ArenaPairIter<T> {
+    return pairs(a)
+}
