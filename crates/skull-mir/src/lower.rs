@@ -175,6 +175,97 @@ fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
         .collect()
 }
 
+// --- `@struct_expand` intrinsic (docs/pass-uniforms-design.md, Layer 2) --------
+//
+// A call to a fn declared `@struct_expand fn f<T>(u: T) -> [(string, E)]` is
+// replaced at lowering by the literal pairs list: one `(field_name, E::V(u.field))`
+// per struct field, declaration order, the variant chosen STRUCTURALLY (the unique
+// variant of `E` whose single payload type equals the field type). skull never
+// hardcodes the engine's `UniformValue`.
+
+/// The enum name `E` in a return type shaped exactly `[(string, E)]` (E nominal
+/// and a real enum). `None` for any other shape.
+fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
+    let TypeExpr::App { ctor: TypeCtor::Array, params } = static_ty(ws, ret)? else {
+        return None;
+    };
+    let elem = ret.with_idx(params.into_iter().next()?);
+    let TypeExpr::Tuple { elements } = static_ty(ws, elem)? else {
+        return None;
+    };
+    let mut it = elements.into_iter();
+    let (a, b) = (it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    if !matches!(static_ty(ws, elem.with_idx(a))?, TypeExpr::Builtin(BuiltinTy::String)) {
+        return None;
+    }
+    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = static_ty(ws, elem.with_idx(b))? else {
+        return None;
+    };
+    ws.enums_by_name.get(&name)?;
+    Some(name)
+}
+
+/// Value struct `name`'s fields as `(name, ty)` in declaration order. `None` when
+/// `name` is not a `value` struct.
+fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !sd.is_value {
+        return None;
+    }
+    Some(sd.fields.iter().map(|f| (f.name, f.ty)).collect())
+}
+
+/// Variant names of `enum_name` whose payload is a single type rendering to
+/// `want`. Zero -> no match; more than one -> ambiguous.
+fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: &str) -> Vec<Ustr> {
+    let Some(&eid) = ws.enums_by_name.get(&enum_name) else {
+        return Vec::new();
+    };
+    let ed = &ws.modules[eid.module.index()].enums[eid.def];
+    ed.variants
+        .iter()
+        .filter(|v| match &v.payload {
+            VariantPayload::Tuple(tys) if tys.len() == 1 => ws.render(None, tys[0]) == want,
+            _ => false,
+        })
+        .map(|v| v.name)
+        .collect()
+}
+
+/// Map each `(field, ty)` to the unique variant of `enum_name` carrying that
+/// payload type (declaration order preserved), or the first offending field's
+/// rejection message. The single source of the field->variant rule -- both the
+/// emit-time validator ([`struct_expand_rejection`]) and the lowering expander
+/// ([`Builder::expand_struct_pairs`]) resolve through it, so they never diverge.
+fn struct_expand_variants(
+    ws: &Workspace,
+    enum_name: Ustr,
+    field_tys: &[(Ustr, TyId)],
+) -> Result<Vec<Ustr>, String> {
+    let mut out = Vec::with_capacity(field_tys.len());
+    for (field, fty) in field_tys {
+        let want = ws.render(None, *fty);
+        match variants_for_payload(ws, enum_name, &want).as_slice() {
+            [v] => out.push(*v),
+            [] => {
+                return Err(format!(
+                    "field `{field}: {want}` has no variant of `{enum_name}` carrying that payload type"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "field `{field}: {want}` matches more than one variant of `{enum_name}` (ambiguous payload type)"
+                ))
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The scalarizable shape of a signature type (a param/return TyId): `Some` iff
 /// it is a NON-nullable nominal value struct OR a flat-eligible (boxed) enum, or a
 /// NULLABLE flat enum -- all thread as leaf scalars. A nullable flat enum threads
@@ -2851,6 +2942,13 @@ impl Builder<'_> {
             // INDIRECT call: a fn-typed struct field via UFCS (`recv.f(a)` ==
             // `f(recv, a)`, no real fn `f`) or a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
+                // A `@struct_expand` fn (docs/pass-uniforms-design.md) is replaced
+                // by its literal pairs list -- keyed on the declaration annotation
+                // (checked off the resolved FuncRef, so no user fn is hijacked by
+                // name and the common non-annotated call pays only one field read).
+                Ok(func) if self.fn_has_struct_expand(func) => {
+                    self.expand_struct_pairs(e, func, &arg_idxs)
+                }
                 Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
                     if !any_named {
@@ -5764,6 +5862,121 @@ impl Builder<'_> {
         Ok(ValueRepr::Group { name: shape.name, parts })
     }
 
+    /// True iff `func` carries the `@struct_expand` annotation.
+    fn fn_has_struct_expand(&self, func: FuncRef) -> bool {
+        self.ws.module(func.module).functions[func.func]
+            .annotations
+            .iter()
+            .any(|a| a.name.name.as_str() == "struct_expand")
+    }
+
+    /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
+    /// literal pairs list. See the free helpers above and
+    /// docs/pass-uniforms-design.md (Layer 2).
+    fn expand_struct_pairs(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let call_span = self.body.expr_spans[call];
+        let fname = self.ws.module(func.module).functions[func.func].name;
+        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
+
+        let [arg] = arg_idxs else {
+            return Err(reject(
+                call_span,
+                format!("`@struct_expand` fn `{fname}` takes exactly one argument"),
+            ));
+        };
+        let arg = *arg;
+        let arg_span = self.body.expr_spans[arg];
+
+        let ret = self.ws.module(func.module).functions[func.func]
+            .return_ty
+            .ok_or_else(|| {
+                reject(call_span, format!("`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`"))
+            })?;
+        let enum_name = pairs_return_enum(self.ws, ret).ok_or_else(|| {
+            reject(
+                call_span,
+                format!(
+                    "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
+                    self.ws.render(None, ret)
+                ),
+            )
+        })?;
+
+        // The argument must be a value struct: its Group's parts are the field
+        // values in declaration order, each lowered exactly once.
+        let repr = self.lower_expr_repr(arg)?;
+        let ValueRepr::Group { name: struct_name, parts } = repr else {
+            return Err(reject(
+                arg_span,
+                format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
+            ));
+        };
+        let Some(fields) = value_struct_field_tys(self.ws, struct_name) else {
+            return Err(reject(
+                arg_span,
+                format!("`@struct_expand` fn `{fname}` argument must be a value struct, got `{struct_name}`"),
+            ));
+        };
+        // Validation (`struct_expand_rejection`) already gated this program, so a
+        // resolution failure here is unreachable -- surface it rather than skip.
+        let variants = struct_expand_variants(self.ws, enum_name, &fields)
+            .map_err(|msg| reject(arg_span, format!("`@struct_expand`: {msg}")))?;
+
+        let mut tuples = Vec::with_capacity(fields.len());
+        for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
+            let payload = self.pack(parts[i].clone());
+            let variant_v = self.make_single_payload_variant(enum_name, variant, payload)?;
+            let key = self.emit_cur(Inst::Const(Lit::Str(*field)));
+            let tup = self.emit_cur(Inst::MakeTuple(vec![key, variant_v]));
+            tuples.push(tup);
+        }
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeVec(tuples))))
+    }
+
+    /// Construct `enum_name::variant(payload)` for a variant with a single
+    /// positional payload, mirroring [`Self::lower_enum_variant`]'s
+    /// representation choice (cdata `<Enum>_ct` when the enum is cdata-eligible,
+    /// else the boxed `{__variant}` table).
+    fn make_single_payload_variant(
+        &mut self,
+        enum_name: Ustr,
+        variant: Ustr,
+        payload: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        if let Some(shape) = enum_value_shape(self.ws, enum_name) {
+            let tag = shape
+                .tag_of(variant)
+                .ok_or_else(|| gap("struct_expand: variant not in cdata enum shape"))?;
+            let tag_inst = self.emit_cur(Inst::Const(Lit::Int(tag)));
+            let mut parts = vec![ValueRepr::Scalar(tag_inst)];
+            for (nm, c) in &shape.slots {
+                let v = if *nm == slot_name("0") {
+                    payload
+                } else {
+                    let zero = match *c {
+                        "float" => Lit::Float(0.0),
+                        "bool" => Lit::Bool(false),
+                        _ => Lit::Int(0),
+                    };
+                    self.emit_cur(Inst::Const(zero))
+                };
+                parts.push(ValueRepr::Scalar(v));
+            }
+            return Ok(self.pack(ValueRepr::Group { name: enum_name, parts }));
+        }
+        Ok(self.emit_cur(Inst::MakeEnum {
+            tag: variant,
+            ty: enum_name,
+            positional: vec![payload],
+            named: vec![],
+        }))
+    }
+
     fn lower_enum_variant(
         &mut self,
         enum_name: Ustr,
@@ -6579,6 +6792,90 @@ pub fn native_array_optional_elem(ws: &Workspace, mid: ModuleId) -> Option<Span>
         for (e, tyid) in inf.expr_types.iter() {
             if na_optional_elem(ws, inf, *tyid) {
                 return Some(body.expr_spans[e]);
+            }
+        }
+    }
+    None
+}
+
+// -- `@struct_expand` emit-time rejection (docs/pass-uniforms-design.md, Layer 2).
+// The lowering expander replaces a valid call; this pass is the FATAL gate that
+// rejects an invalid one, since a per-fn lowering error would only be recorded as
+// a lenient skip. Both resolve fields through `struct_expand_variants`, so they
+// never diverge. --
+
+/// The declaration-order `(field, ty)` list of value struct `name`, else `None`.
+fn resolve_call_fn(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+    name: Ustr,
+) -> Option<(ModuleId, Idx<Function>)> {
+    if let Some(&r) = inf.resolved_overload_calls.get(&e) {
+        return Some(r);
+    }
+    match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
+        Some([single]) => Some(*single),
+        _ => None,
+    }
+}
+
+/// Scan module `mid`'s bodies for a `@struct_expand` call that the lowering
+/// expander could not honor: a non-value-struct argument, a field whose type has
+/// no payload-unique variant of the target enum, a field type matching two
+/// variants, or a return type that is not `[(string, <enum>)]`. Returns the first
+/// spanned rejection.
+pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let f = &ws.module(fmod).functions[fid];
+            if !f.annotations.iter().any(|a| a.name.name.as_str() == "struct_expand") {
+                continue;
+            }
+            let fname = f.name;
+            let call_span = body.expr_spans[e];
+            let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
+
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            let [arg] = arg_idxs[..] else {
+                return reject(call_span, format!("`@struct_expand` fn `{fname}` takes exactly one argument"));
+            };
+            let arg_span = body.expr_spans[arg];
+
+            let Some(enum_name) = f.return_ty.and_then(|ret| pairs_return_enum(ws, ret)) else {
+                return reject(
+                    call_span,
+                    format!(
+                        "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
+                        f.return_ty.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
+                    ),
+                );
+            };
+
+            let struct_name = inf
+                .expr_types
+                .get(arg)
+                .and_then(|t| resolve_tyid(ws, inf, *t))
+                .and_then(|t| match ty_node(ws, inf, t) {
+                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => Some(n),
+                    _ => None,
+                });
+            let Some(fields) = struct_name.and_then(|n| value_struct_field_tys(ws, n)) else {
+                return reject(
+                    arg_span,
+                    format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
+                );
+            };
+
+            if let Err(msg) = struct_expand_variants(ws, enum_name, &fields) {
+                return reject(arg_span, format!("`@struct_expand`: {msg}"));
             }
         }
     }
