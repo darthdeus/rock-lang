@@ -31,6 +31,14 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
 
+/// A workspace of `src` (the `<test>` module) over the real stdlib -- for tests
+/// that inspect stdlib declarations (e.g. `@intrinsic` annotations).
+pub fn ws_with_stdlib(src: &str) -> Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+}
+
 /// Emitted Lua for `src` (the common case; `emit_mir(src).lua`).
 pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua

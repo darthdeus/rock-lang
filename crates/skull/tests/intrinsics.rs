@@ -4,7 +4,7 @@
 //! is (the declared-signature mangle, NOT a monomorphization -- there is none).
 
 mod common;
-use common::ws_of;
+use common::{ws_of, ws_with_stdlib};
 
 use skull_codegen_lua::{compute_overloaded_names, mangle_fn};
 use skull_mir::intrinsics::{
@@ -122,4 +122,60 @@ fn struct_expand_is_an_expansion_intrinsic() {
     // It is registered as an intrinsic declaration (name, arity=1).
     let declared = declared_intrinsics(&ws);
     assert!(declared.contains(&(ustr::Ustr::from("upairs"), 1)));
+}
+
+// Slice 3: the Layer-0 proving set is annotated `@intrinsic` in the stdlib, so
+// `declared_intrinsics` sees it -- the declaration side of the contract the toy
+// JS table (slice 4) is checked against with `unbacked_entries`.
+#[test]
+fn stdlib_layer0_proving_set_is_declared_intrinsic() {
+    let ws = ws_with_stdlib("fn main() {}");
+    let declared = declared_intrinsics(&ws);
+    let has = |n: &str, a: usize| {
+        assert!(declared.contains(&(ustr::Ustr::from(n), a)), "`{n}`/{a} not declared @intrinsic");
+    };
+    // Math passthroughs (luajit mapping = inline(lua) body).
+    for n in ["sin", "cos", "sqrt", "floor", "ceil"] {
+        has(n, 1);
+    }
+    has("pow", 2);
+    has("atan2", 2);
+    has("abs", 1); // float overload
+    // Math with a Rock fallback body + a backend native mapping.
+    has("min", 2);
+    has("max", 2);
+    has("clamp", 3);
+    has("lerp", 3);
+    has("smoothstep", 3);
+    has("fract", 1);
+    // Untyped indexing + NativeBuffer primitives + a StringBuilder op.
+    has("table_get", 2);
+    has("table_set", 3);
+    has("nb_get", 2);
+    has("nb_set", 3);
+    has("__nb_alloc_float", 1);
+    has("sb_new", 0);
+}
+
+/// A stdlib fn by name (first match), or panic.
+fn stdlib_fn<'a>(ws: &'a bone_semantic::inference::Workspace, name: &str) -> &'a bone_semantic::hir::Function {
+    ws.modules
+        .iter()
+        .flat_map(|m| m.functions.iter().map(|(_, f)| f))
+        .find(|f| f.name.as_str() == name)
+        .unwrap_or_else(|| panic!("no stdlib fn `{name}`"))
+}
+
+// The native-required subset is marked `@native_required` AND has a luajit
+// mapping (an `inline(lua)` body) -- the body-slot invariant `intrinsic_rejection`
+// enforces on user code, held by the stdlib itself.
+#[test]
+fn stdlib_native_required_set_has_luajit_mapping() {
+    let ws = ws_with_stdlib("fn main() {}");
+    for n in ["table_get", "table_set", "nb_get", "nb_set", "__nb_alloc_float", "__nb_alloc_int"] {
+        let f = stdlib_fn(&ws, n);
+        assert!(is_native_required(f), "`{n}` must be @native_required");
+        assert!(is_intrinsic(f), "`{n}` must be @intrinsic");
+        assert!(f.lua_body.is_some(), "`{n}` (native-required) must have an inline(lua) luajit mapping");
+    }
 }
