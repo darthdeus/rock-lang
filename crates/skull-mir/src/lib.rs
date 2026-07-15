@@ -9,5 +9,6 @@
 //! `docs/skull-bone-mir-faithful-plan.md`.
 
 pub mod display;
+pub mod intrinsics;
 pub mod lower;
 pub mod mir;
