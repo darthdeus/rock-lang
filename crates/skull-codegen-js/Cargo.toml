@@ -1,0 +1,23 @@
+[package]
+name = "skull-codegen-js"
+version = "0.1.0"
+edition = "2024"
+
+# skull-codegen-js: a TOY, math-only JS intrinsic table (docs/intrinsics-plan.md,
+# slice 4). NOT a backend -- no runtime, no node, no program emission. It exists
+# to keep the `skull_mir::intrinsics::IntrinsicTable` trait honest against a
+# THIRD table shape (luajit's in-source bodies + GLSL + this), so the abstraction
+# is validated against more than one real consumer. The seed of a future JS
+# backend, nothing more.
+
+[dependencies]
+skull-mir = { path = "../skull-mir" }
+bone-semantic = { path = "../bone-semantic" }
+
+[dev-dependencies]
+rock-host = { path = "../rock-host" }
+skull-parser = { path = "../skull-parser" }
+ustr = { workspace = true }
+
+[lints]
+workspace = true
