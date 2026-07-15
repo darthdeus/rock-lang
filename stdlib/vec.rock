@@ -194,6 +194,21 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return v(a.x / b, a.y / b, a.z / b)
 }
 
+@pure operator +(a: Vec3, b: float) -> Vec3 {
+    return v(a.x + b, a.y + b, a.z + b)
+}
+
+@pure operator *(a: Vec3, b: Vec3) -> Vec3 {
+    return v(a.x * b.x, a.y * b.y, a.z * b.z)
+}
+
+@pure fn Vec3.neg(a) -> Vec3 {
+    return v(-a.x, -a.y, -a.z)
+}
+
+@pure fn Vec3.sign(a) -> Vec3 { return v(sign(a.x), sign(a.y), sign(a.z)) }
+@pure fn Vec3.abs(a) -> Vec3 { return v(abs(a.x), abs(a.y), abs(a.z)) }
+
 @pure fn Vec3.dot(a, b: Vec3) -> float {
     return a.x * b.x + a.y * b.y + a.z * b.z
 }
@@ -231,4 +246,63 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 @inline
 @pure fn Vec3.xy(a) -> Vec2 {
     return v(a.x, a.y)
+}
+
+// Vec4 algebra -- shader-facing (colors, homogeneous coords). No zero() ctor:
+// the near-zero normalize guard returns v(0, 0, 0, 0) inline, matching Vec3.
+
+@inline
+@pure fn v(x: float, y: float, z: float, w: float) -> Vec4 {
+    return Vec4 { x: x, y: y, z: z, w: w }
+}
+
+@pure operator +(a: Vec4, b: Vec4) -> Vec4 {
+    return v(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w)
+}
+
+@pure operator +(a: Vec4, b: float) -> Vec4 {
+    return v(a.x + b, a.y + b, a.z + b, a.w + b)
+}
+
+@pure operator -(a: Vec4, b: Vec4) -> Vec4 {
+    return v(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w)
+}
+
+@pure operator *(a: Vec4, b: float) -> Vec4 {
+    return v(a.x * b, a.y * b, a.z * b, a.w * b)
+}
+
+@pure operator *(a: float, b: Vec4) -> Vec4 {
+    return v(a * b.x, a * b.y, a * b.z, a * b.w)
+}
+
+@pure operator *(a: Vec4, b: Vec4) -> Vec4 {
+    return v(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w)
+}
+
+@pure operator /(a: Vec4, b: float) -> Vec4 {
+    return v(a.x / b, a.y / b, a.z / b, a.w / b)
+}
+
+@pure fn Vec4.dot(a, b: Vec4) -> float {
+    return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w
+}
+
+@pure fn Vec4.length(a) -> float {
+    return sqrt(a.dot(a))
+}
+
+@pure fn Vec4.normalize(a) -> Vec4 {
+    let len = a.length()
+    if len < 0.000001 { return v(0.0, 0.0, 0.0, 0.0) }
+    return a / len
+}
+
+@pure fn Vec4.lerp(a, b: Vec4, t: float) -> Vec4 {
+    return v(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t,
+        a.w + (b.w - a.w) * t
+    )
 }
