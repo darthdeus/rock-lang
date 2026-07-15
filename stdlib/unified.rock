@@ -2297,6 +2297,33 @@ fn ease_in_out_circ(t: float) -> float {
     }
 }
 
+// Envelope -- goal-chasing follower with asymmetric rates (audio AR).
+// Unlike a tween (event-triggered playback of a known from/to journey),
+// an envelope has no timeline: pass the goal every step and it chases,
+// retargeting mid-flight for free. Linear rate-limited, so `value`
+// reaches the goal EXACTLY (no asymptotic tail); shaping (env^2,
+// ease_out_quad, ...) is applied by consumers at the read site.
+// Engine sugar stepping against the frame clock: Envelope.step (stone).
+
+struct Envelope {
+    value: float = 0,
+    attack: float,
+    release: float,
+}
+
+fn envelope(attack: float, release: float) -> Envelope {
+    return Envelope { value: 0, attack: attack, release: release }
+}
+
+fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
+    if e.value < goal {
+        e.value = min(goal, e.value + step_dt / e.attack)
+    } else {
+        e.value = max(goal, e.value - step_dt / e.release)
+    }
+    return e.value
+}
+
 // String manipulation functions
 // string had a redundant `len` + `length` pair (both `string.len`); keep
 // `len` to match Vec/Map/Arena. (Vec2.length is an unrelated overload.)
