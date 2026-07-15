@@ -4703,10 +4703,17 @@ impl Builder<'_> {
         self.cur = do_bb;
         // `entry` is an `ArenaEntry` (fields `index`/`generation`); the built
         // value is an `Entity` whose fields are `_`-prefixed (soft-private).
+        // `Entity` is a `value` struct (GC-carrying tier): build it as a
+        // `MakeValueStruct` so it scalarizes (a non-escaping `for (e, _)` scan
+        // builds no table) and, where it escapes, materializes through
+        // `Entity_vt` -- carrying the `__ty` tag + the value-`__eq` metatable.
+        // A raw `MakeStruct` here would leak an un-tagged, metatable-less table
+        // whose `==` silently mis-compares (arena-scan entities not equal to
+        // pairs-scan entities).
         let e_index = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("index") });
         let e_gen = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("generation") });
-        let entity = self.emit_cur(Inst::MakeStruct {
-            ty: None,
+        let entity = self.emit_cur(Inst::MakeValueStruct {
+            name: Ustr::from("Entity"),
             fields: vec![
                 (Ustr::from("_arena"), arena),
                 (Ustr::from("_index"), e_index),

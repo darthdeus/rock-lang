@@ -473,7 +473,14 @@ struct Arena<T> {
     occupied_count: int = 0,
 }
 
-struct Entity<T> {
+// GC-carrying `value` struct (generic + an `Arena<T>` field): immutable,
+// scalarized through calls/loops so a non-escaping arena `for (e, d)` pair-scan
+// builds no per-iteration Entity table; materializes as an immutable Lua table
+// (`Entity_vt`) only where it escapes (stored in a Vec / enum payload / global).
+// `==` is the metatable value eq: `_arena` by reference, `_index`/`_generation`
+// structural -- so entities from the SAME arena with equal slot+generation are
+// equal (a superset of `.equals`, which ignores the arena).
+value Entity<T> {
     // `_`-prefixed: implementation details, hidden from member completion. Use
     // the method API (`get`/`remove`/`equals`/...), not the fields.
     _arena: Arena<T>,

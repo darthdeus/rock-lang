@@ -152,6 +152,10 @@ fn arena_bare_loop_unused_entity_allocates_nothing() {
     );
 }
 
+// `Entity<T>` is a `value` struct (GC-carrying tier). An entity passed to a
+// scalar-ABI callee (`get(e)`) scalarizes into per-field leaf args -- NO
+// Entity table materializes even though the entity is "used". This is the full
+// two-tier win: the arena pair scan allocates nothing per iteration.
 const ARENA_BARE_LOOP_USED_ENTITY: &str = r#"
 struct Mob { health: int }
 
@@ -173,19 +177,55 @@ fn main() {
 "#;
 
 #[test]
-fn arena_bare_loop_used_entity_no_pair_tuple() {
+fn arena_bare_loop_used_entity_scalarizes_into_call() {
     let lua = emit_module(ARENA_BARE_LOOP_USED_ENTITY);
     let hot = function_body(&lua, "hot");
+    // The entity threads to `get` as scalar leaves (arena, index, generation) --
+    // no `Entity_vt` materialization, no table, no surviving pair tuple.
     assert!(
-        hot.contains("__ty = \"Entity\""),
-        "used entity escapes into get() and must keep its table:\n{hot}"
+        !hot.contains("Entity_vt") && !hot.contains("{"),
+        "used entity passed to a scalar-ABI callee must scalarize (no table):\n{hot}"
     );
-    // The Entity ctor is the ONLY allowed table: the pair tuple itself must
-    // still scalarize (a `{` not part of the Entity ctor is the pair).
-    let non_entity_braces =
-        hot.matches('{').count() - hot.matches("({__ty = \"Entity\"").count();
-    assert_eq!(
-        non_entity_braces, 0,
-        "pair tuple survived alongside the Entity ctor:\n{hot}"
+    assert!(
+        hot.contains("get__"),
+        "entity should thread into the scalarized get() call:\n{hot}"
+    );
+}
+
+// The door_at shape: a `for (e, d)` pair scan that RETURNS the matching entity.
+// The non-returning iterations scalarize away (no per-iteration table); only
+// the escaping return materializes, and it must go through `Entity_vt` -- the
+// tier-correct ctor carrying `__ty` + the value-`__eq` metatable (a raw
+// `MakeStruct` here silently broke cross-scan `==`, the item-6 fallout).
+const ARENA_SCAN_RETURN_ENTITY: &str = r#"
+struct Mob { health: int, tag: int }
+
+fn scan_return_hit(mobs: Arena<Mob>, want: int) -> Entity<Mob>? {
+    for (e, m) in mobs {
+        if m.tag == want { return e }
+    }
+    return null
+}
+
+fn main() {
+    let mobs: Arena<Mob> = arena_new()
+    insert(mobs, Mob { health: 10, tag: 1 })
+    let _ = scan_return_hit(mobs, 1)
+}
+"#;
+
+#[test]
+fn arena_scan_returning_entity_materializes_via_vt() {
+    let lua = emit_module(ARENA_SCAN_RETURN_ENTITY);
+    let find = function_body(&lua, "scan_return_hit");
+    assert!(
+        find.contains("Entity_vt("),
+        "the escaping returned entity must materialize via the tier-correct \
+         Entity_vt ctor (metatable-carrying), not a raw table:\n{find}"
+    );
+    // No un-tagged raw Entity table leaked (the lower_for_arena MakeStruct bug).
+    assert!(
+        !find.contains("_arena ="),
+        "no raw metatable-less Entity table may be built in the scan:\n{find}"
     );
 }
