@@ -28,6 +28,7 @@ use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
 use comfy_la_arena::{Idx, IdxRange};
 use skull_parser::CompilerError;
 
+use crate::intrinsics::ExpandKind;
 use crate::mir::*;
 
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
@@ -3074,10 +3075,10 @@ impl Builder<'_> {
             // `f(recv, a)`, no real fn `f`) or a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
                 // A `@struct_expand` fn (docs/pass-uniforms-design.md) is replaced
-                // by its literal pairs list -- keyed on the declaration annotation
-                // (checked off the resolved FuncRef, so no user fn is hijacked by
-                // name and the common non-annotated call pays only one field read).
-                Ok(func) if self.fn_has_struct_expand(func) => {
+                // by its literal pairs list -- recognized through the intrinsic
+                // registry off the resolved FuncRef, so no user fn is hijacked by
+                // name and the common non-intrinsic call pays only one field read.
+                Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::StructPairs)) => {
                     self.expand_struct_pairs(e, func, &arg_idxs)
                 }
                 Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
@@ -6017,12 +6018,11 @@ impl Builder<'_> {
         Ok(ValueRepr::Group { name: shape.name, parts })
     }
 
-    /// True iff `func` carries the `@struct_expand` annotation.
-    fn fn_has_struct_expand(&self, func: FuncRef) -> bool {
-        self.ws.module(func.module).functions[func.func]
-            .annotations
-            .iter()
-            .any(|a| a.name.name.as_str() == "struct_expand")
+    /// The compile-time expansion kind for `func`, routed through the intrinsic
+    /// registry ([`crate::intrinsics::expand_kind`]) -- the ONE recognizer, so
+    /// there is no second bespoke annotation check.
+    fn fn_expand_kind(&self, func: FuncRef) -> Option<ExpandKind> {
+        crate::intrinsics::expand_kind(&self.ws.module(func.module).functions[func.func])
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
@@ -7064,7 +7064,7 @@ pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             };
             let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
             let f = &ws.module(fmod).functions[fid];
-            if !f.annotations.iter().any(|a| a.name.name.as_str() == "struct_expand") {
+            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::StructPairs)) {
                 continue;
             }
             let fname = f.name;

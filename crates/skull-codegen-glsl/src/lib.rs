@@ -25,6 +25,7 @@ use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::{compute_overloaded_names, mangle_fn};
+use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
 use skull_parser::CompilerError;
@@ -245,50 +246,80 @@ fn inst_kind(inst: &Inst) -> &'static str {
 
 // --- intrinsic mapping table ------------------------------------------------
 
-/// The GLSL intrinsic template for a callee, or `None` if it must be emitted as a
-/// GLSL fn definition. `$1`/`$2`/`$3` are argument placeholders. Keyed by the
-/// callee's mangled signature (name + GLSL param types) -- the `docs/glsl-spike.md`
-/// tier-0 mapping table. Vector operators (`__op_*` reaching here are non-scalar,
-/// so Vec) are handled at the call site, not here.
+/// The GLSL tier-0 intrinsic table (`docs/glsl-spike.md`): one row per
+/// (name, arity) -> `$1..$n` expression template. Single source for both
+/// [`GlslIntrinsics::lookup`] (call-site rendering) and
+/// [`GlslIntrinsics::entries`] (the fail-closed key surface), so the two can
+/// never drift. Keyed by base name + arity (a user fn that merely shares a name
+/// still resolves here -- acceptable for the restricted profile; the stdlib owns
+/// these names). Vector operators (`__op_*` reaching codegen are non-scalar, so
+/// Vec) are handled at the call site, not here.
+const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
+    ("sin", 1, "sin($1)"),
+    ("cos", 1, "cos($1)"),
+    ("tan", 1, "tan($1)"),
+    ("sqrt", 1, "sqrt($1)"),
+    ("abs", 1, "abs($1)"),
+    ("floor", 1, "floor($1)"),
+    ("ceil", 1, "ceil($1)"),
+    ("fract", 1, "fract($1)"),
+    ("sign", 1, "sign($1)"),
+    ("pow", 2, "pow($1, $2)"),
+    ("atan2", 2, "atan($1, $2)"),
+    // GLSL round() half-way rounding is implementation-defined; pin floor(x+0.5).
+    ("round", 1, "floor($1 + 0.5)"),
+    ("min", 2, "min($1, $2)"),
+    ("max", 2, "max($1, $2)"),
+    ("clamp", 3, "clamp($1, $2, $3)"),
+    ("lerp", 3, "mix($1, $2, $3)"),
+    ("smoothstep", 3, "smoothstep($1, $2, $3)"),
+    // int<->float identity casts.
+    ("int_to_float", 1, "float($1)"),
+    ("float", 1, "float($1)"),
+    ("to_float", 1, "float($1)"),
+    // Vec method helpers (the field-math bodies never emit). Keyed by the base
+    // method name, which mangling strips the receiver-type prefix from
+    // (`Vec2.dot` -> `dot`); GLSL `dot`/`length`/`distance` are overloaded across
+    // vecN, so one entry covers Vec2/Vec3/Vec4.
+    ("dot", 2, "dot($1, $2)"),
+    ("length", 1, "length($1)"),
+    ("distance", 2, "distance($1, $2)"),
+    ("v", 2, "vec2($1, $2)"),
+    ("v", 1, "vec2($1)"),
+    ("v", 0, "vec2(0.0)"),
+    ("zero", 0, "vec2(0.0)"),
+    ("texture", 2, "texture($1, $2)"),
+];
+
+/// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
+/// a GLSL fn definition. Backs [`GlslIntrinsics::lookup`].
 fn intrinsic_template(f: &Function) -> Option<&'static str> {
     let n = f.name.as_str();
     let arity = f.param_decls.iter().count();
-    // Only stdlib-shaped math maps; a param must be a tier-0 scalar/vec (a user
-    // fn that merely shares a name but takes, say, a Vec, still resolves here by
-    // name -- acceptable for the restricted profile, the stdlib owns these names).
-    match (n, arity) {
-        ("sin", 1) => Some("sin($1)"),
-        ("cos", 1) => Some("cos($1)"),
-        ("tan", 1) => Some("tan($1)"),
-        ("sqrt", 1) => Some("sqrt($1)"),
-        ("abs", 1) => Some("abs($1)"),
-        ("floor", 1) => Some("floor($1)"),
-        ("ceil", 1) => Some("ceil($1)"),
-        ("fract", 1) => Some("fract($1)"),
-        ("sign", 1) => Some("sign($1)"),
-        ("pow", 2) => Some("pow($1, $2)"),
-        ("atan2", 2) => Some("atan($1, $2)"),
-        // GLSL round() half-way rounding is implementation-defined; pin floor(x+0.5).
-        ("round", 1) => Some("floor($1 + 0.5)"),
-        ("min", 2) => Some("min($1, $2)"),
-        ("max", 2) => Some("max($1, $2)"),
-        ("clamp", 3) => Some("clamp($1, $2, $3)"),
-        ("lerp", 3) => Some("mix($1, $2, $3)"),
-        ("smoothstep", 3) => Some("smoothstep($1, $2, $3)"),
-        // int<->float identity casts.
-        ("int_to_float" | "float" | "to_float", 1) => Some("float($1)"),
-        // Vec method helpers (the field-math bodies never emit). Keyed by the
-        // base method name, which mangling strips the receiver-type prefix from
-        // (`Vec2.dot` -> `dot`); GLSL `dot`/`length`/`distance` are overloaded
-        // across vecN, so one entry covers Vec2/Vec3/Vec4.
-        ("dot", 2) => Some("dot($1, $2)"),
-        ("length", 1) => Some("length($1)"),
-        ("distance", 2) => Some("distance($1, $2)"),
-        ("v", 2) => Some("vec2($1, $2)"),
-        ("v", 1) => Some("vec2($1)"),
-        ("v", 0) | ("zero", 0) => Some("vec2(0.0)"),
-        ("texture", 2) => Some("texture($1, $2)"),
-        _ => None,
+    GLSL_INTRINSICS
+        .iter()
+        .find(|(name, ar, _)| *name == n && *ar == arity)
+        .map(|(_, _, tmpl)| *tmpl)
+}
+
+/// The GLSL backend's [`IntrinsicTable`] -- the registry surface over
+/// [`GLSL_INTRINSICS`]. `lookup` is the tier-0 template; `entries` is the
+/// fail-closed key set (`unbacked_entries` checks each against the stdlib's
+/// `@intrinsic` declarations).
+pub struct GlslIntrinsics;
+
+impl IntrinsicTable for GlslIntrinsics {
+    fn backend(&self) -> &'static str {
+        "glsl"
+    }
+    fn lookup(&self, f: &Function) -> Option<Emission> {
+        intrinsic_template(f).map(Emission::Template)
+    }
+    fn entries(&self) -> Vec<IntrinsicEntry> {
+        GLSL_INTRINSICS
+            .iter()
+            .map(|(name, arity, _)| IntrinsicEntry { name, arity: *arity })
+            .collect()
     }
 }
 
@@ -297,7 +328,7 @@ fn intrinsic_template(f: &Function) -> Option<&'static str> {
 /// `__op_*` reaching codegen as a real call is always non-scalar (scalar ops lower
 /// to native MIR insts), so a 2-arg `__op_*` is always a Vec operator.
 fn renders_inline(f: &Function) -> bool {
-    intrinsic_template(f).is_some()
+    GlslIntrinsics.lookup(f).is_some()
         || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
 }
 
@@ -894,7 +925,7 @@ impl FnEmit<'_> {
                 None => e.render_val(a),
             }
         };
-        if let Some(tmpl) = intrinsic_template(cf) {
+        if let Some(Emission::Template(tmpl)) = GlslIntrinsics.lookup(cf) {
             let mut s = tmpl.to_string();
             for (i, a) in args.iter().enumerate() {
                 s = s.replace(&format!("${}", i + 1), &arg_t(i, *a, self)?);
