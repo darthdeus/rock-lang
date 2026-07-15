@@ -1741,6 +1741,7 @@ fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
     // kept local so bone tests carry no rock-host dep.
     const STDLIB: &[(&str, &str)] = &[
         ("unified.rock", include_str!("../../../stdlib/unified.rock")),
+        ("logging.rock", include_str!("../../../stdlib/logging.rock")),
         ("vec.rock", include_str!("../../../stdlib/vec.rock")),
         ("mat.rock", include_str!("../../../stdlib/mat.rock")),
         ("strings.rock", include_str!("../../../stdlib/strings.rock")),
