@@ -313,6 +313,80 @@ pub fn enum_value_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
     Some(EnumCdataShape { name, slots, variants })
 }
 
+/// The C type for a `value`-struct field, or `None` when the field is NOT
+/// C-layout-mappable (`[T]`, `Arena<T>`, `Map`, `string`, a generic `T`, or a
+/// GC-carrying nested value struct). This is the single mappability oracle:
+/// skull's cdef emission uses the string, and [`value_struct_is_gc`] classifies
+/// a struct GC-carrying when any field maps to `None`. Mirrors rock's
+/// `rock_type_to_c_type`. A nested payload-free enum stores as its int tag; a
+/// cdata-eligible payload enum nests its own `{__tag, _0}` ctype.
+pub fn value_field_c_type(ws: &Workspace, ty: TyId) -> Option<String> {
+    value_field_c_type_guarded(ws, ty, &mut Vec::new())
+}
+
+fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut Vec<Ustr>) -> Option<String> {
+    match static_ty(ws, ty)? {
+        TypeExpr::Builtin(BuiltinTy::Int) => Some("int".into()),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some("float".into()),
+        TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
+        // A nested value struct is C-mappable iff it is itself FFI-clean; a
+        // GC-carrying nested value struct makes this field (and its parent)
+        // GC-carrying too.
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
+            if value_struct_is_gc_guarded(ws, name, stack) {
+                None
+            } else {
+                Some(name.as_str().to_string())
+            }
+        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
+            if payload_free_enum_variants(ws, name).is_some() =>
+        {
+            Some("int".into())
+        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
+            if enum_value_shape(ws, name).is_some() =>
+        {
+            Some(name.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a `value` struct is GC-CARRYING (table-repr tier): it is generic, or
+/// any field is not C-layout-mappable (transitively). FFI-clean is the negation:
+/// non-generic AND every field C-mappable. `false` for a non-value / unknown
+/// name. The tier is static per type and decided once here -- every pack site
+/// (`Name_ct` vs `Name_vt`) and the prelude emission consult this one oracle.
+pub fn value_struct_is_gc(ws: &Workspace, name: Ustr) -> bool {
+    value_struct_is_gc_guarded(ws, name, &mut Vec::new())
+}
+
+fn value_struct_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut Vec<Ustr>) -> bool {
+    let Some(sid) = ws.struct_by_name.get(&name) else {
+        return false;
+    };
+    let s = &ws.modules[sid.module.index()].structs[sid.def];
+    if !s.is_value {
+        return false;
+    }
+    if !s.generics.is_empty() {
+        return true;
+    }
+    // A definition cycle among value-struct fields is not C-mappable (an
+    // infinite C layout); value_struct_defs rejects genuine cycles separately.
+    if stack.contains(&name) {
+        return true;
+    }
+    stack.push(name);
+    let field_tys: Vec<TyId> = s.fields.iter().map(|f| f.ty).collect();
+    let gc = field_tys
+        .iter()
+        .any(|ty| value_field_c_type_guarded(ws, *ty, stack).is_none());
+    stack.pop();
+    gc
+}
+
 /// The flatten shape of an enum that boxes today and is eligible to be inlined
 /// into a parent struct's Lua table (`docs/enum-allocation-report.md`). Eligible iff
 /// the enum has payload variants (not payload-free -> those are plain ints), is NOT

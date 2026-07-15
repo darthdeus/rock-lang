@@ -682,7 +682,7 @@ pub fn emit_named_framed(
         (b, plan)
     };
     let plan_ref = plan.as_ref();
-    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(func, name);
+    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
     let mut out = String::new();
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
@@ -715,6 +715,7 @@ pub fn emit_named_framed(
 /// per-use ctor (which it equals on a trace via SINK and beats in the
 /// interpreter), unlike a per-CALL function-entry local which defeats SINK.
 fn collect_const_hoists(
+    ws: &Workspace,
     func: &MirFunc,
     base: &str,
 ) -> (HashMap<Idx<Inst>, u32>, Vec<String>, String) {
@@ -755,7 +756,8 @@ fn collect_const_hoists(
     let mut defs = String::new();
     for (g, (name, lits)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let _ = write!(defs, "{gname} = {name}_ct(");
+        let suffix = if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
+        let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
                 defs.push_str(", ");
@@ -2040,8 +2042,15 @@ impl Emitter<'_> {
             }
             Inst::MakeValueStruct { name, fields } => {
                 // Positional ctor in declared field order; field names are for MIR
-                // passes only (SROA), not the `<name>_ct(...)` wire shape.
-                let _ = write!(out, "{name}_ct(");
+                // passes only (SROA), not the wire shape. The ctor NAME is chosen
+                // by tier from the ONE classification: `_vt` (table) for a
+                // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
+                let suffix = if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
+                    "_vt"
+                } else {
+                    "_ct"
+                };
+                let _ = write!(out, "{name}{suffix}(");
                 for (i, (_, id)) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");

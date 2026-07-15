@@ -915,12 +915,13 @@ fn assemble(
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
     out.push_str(&crate::enum_cdata_defs(ws));
-    let (vdefs, value_emitted) = crate::value_struct_defs(ws)?;
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws)?;
     out.push_str(&vdefs);
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc));
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws));
+    out.push_str(&crate::type_table_defs(ws, &value_gc));
     out.push_str(&crate::enum_runtime_defs(ws));
     t_scaffold += ts.elapsed();
 

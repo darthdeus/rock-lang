@@ -659,6 +659,17 @@ deco init on_reload {
         return false
     end
 
+    -- A GC-carrying value struct (table repr) carries a per-type `__eq`
+    -- metatable that is the AUTHORITY: scalar/value fields structural, GC-ref
+    -- fields BY REFERENCE. The `a == b` reference check above already invoked it
+    -- (LuaJIT fires `__eq` on two same-metamethod tables); reaching here means it
+    -- returned false, so they are unequal -- do NOT fall through to the generic
+    -- structural walk (which would compare a GC-ref field by contents).
+    local mt = getmetatable(a)
+    if mt and mt.__eq then
+        return false
+    end
+
     -- Structural equality: walk fields (skipping the `__ty` tag). Covers
     -- structs, enums, newtypes, tuples, and anonymous Lua tables alike; cdata
     -- `value` structs never reach here (they hit the primitive `==` fast path
