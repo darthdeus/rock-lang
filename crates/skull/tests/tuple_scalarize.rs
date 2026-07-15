@@ -228,4 +228,54 @@ fn arena_scan_returning_entity_materializes_via_vt() {
         !find.contains("_arena ="),
         "no raw metatable-less Entity table may be built in the scan:\n{find}"
     );
+    // Item 8 escape-site placement: the ctor moved OUT of the per-iteration yield
+    // block into the hit/return path. Exactly one Entity_vt SITE, and it sits on
+    // a `return` line -- so a MISS runs zero ctors, the scalars (arena/index/gen)
+    // ride loop-carried cells and rebuild only on the hit.
+    assert_eq!(
+        find.matches("Entity_vt(").count(),
+        1,
+        "expected exactly one Entity_vt pack site (the hit-path rebuild):\n{find}"
+    );
+    let ctor_line = find
+        .lines()
+        .find(|l| l.contains("Entity_vt("))
+        .expect("Entity_vt line");
+    assert!(
+        ctor_line.contains("return"),
+        "the Entity_vt ctor must be on the hit-path return, not the yield block \
+         (item 8: misses allocate nothing):\n{ctor_line}"
+    );
+}
+
+// Gate-stays-put pin (item 8): a NULLABLE value binding (`let v: V? = ...`) is
+// never flagged for escape-rematerialization -- so its escaping return stays a
+// boxed load, NOT a rebuild-from-field-cells (which would reconstruct a bogus
+// non-null value on the nil path). A future "simplification" of the lowering
+// gate goes red here. The `Bag`-vt ctor appears exactly ONCE (the `if` literal);
+// a second occurrence would mean the return got rematerialized.
+const NULLABLE_VALUE_RETURN: &str = r#"
+value Bag { xs: [int] }
+
+fn pick(c: bool) -> Bag? {
+    let v: Bag? = null
+    if c { v = Bag { xs: [1] } }
+    return v
+}
+
+fn main() {
+    let _ = pick(true)
+}
+"#;
+
+#[test]
+fn nullable_value_binding_return_stays_boxed() {
+    let lua = emit_module(NULLABLE_VALUE_RETURN);
+    let pick = function_body(&lua, "pick");
+    assert_eq!(
+        pick.matches("Bag_vt(").count(),
+        1,
+        "a nullable value binding's return must stay a boxed load (one ctor, the \
+         `if` literal) -- a second Bag_vt means the escape was wrongly rebuilt:\n{pick}"
+    );
 }

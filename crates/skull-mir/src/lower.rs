@@ -1787,6 +1787,9 @@ impl Builder<'_> {
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);
                         let cell = self.f.new_cell_typed(Some(self.body.binding_arena[name].name), cty);
+                        if self.binding_is_nonnull_value_struct(name) {
+                            self.f.mark_nonnull_value_struct(cell);
+                        }
                         self.emit_cur(Inst::Store { cell, value: v });
                         self.binds.insert(raw(name), cell);
                     }
@@ -5066,6 +5069,9 @@ impl Builder<'_> {
         match vars {
             BindingPattern::Leaf(b) => {
                 let cell = self.f.new_cell(Some(self.body.binding_arena[*b].name));
+                if self.binding_is_nonnull_value_struct(*b) {
+                    self.f.mark_nonnull_value_struct(cell);
+                }
                 self.emit_cur(Inst::Store { cell, value });
                 self.binds.insert(raw(*b), cell);
             }
@@ -5772,6 +5778,20 @@ impl Builder<'_> {
             .get(&name)
             .map(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
             .unwrap_or(false)
+    }
+
+    /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
+    /// license for SROA to rematerialize an escaping load of its cell (item 8).
+    /// `resolve_tyid` chases `Infer` but keeps `Nullable`, so a `V?` binding is a
+    /// `Nullable` node here and returns false; only a bare value-struct `App`
+    /// qualifies. Unsolved inference / non-value types return false (conservative).
+    fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
+        let Some(ty) = self.binding_ty(b) else { return false };
+        let Some(rt) = self.resolve_tyid(ty) else { return false };
+        matches!(
+            self.ty_node(rt),
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if self.is_value_struct(name)
+        )
     }
 
     /// Whether `recv`'s static type is a struct with a fn-typed field named
