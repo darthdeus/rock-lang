@@ -299,6 +299,23 @@ fn metric_add(m: Metric, v: float) {
     metric_recompute(m)
 }
 
+// Zero the metric in place: count/head + every summary field back to 0. The
+// ring/sorted buffers are left as-is (logically empty at count 0; metric_add
+// overwrites from head=0). Lets a caller restart a metric's window without
+// re-allocating the buffers -- the warmup transition uses this instead of
+// re-`metric_new`-ing everything.
+fn metric_reset(m: Metric) {
+    m.head = 0
+    m.count = 0
+    m.mean = 0.0
+    m.stddev = 0.0
+    m.min = 0.0
+    m.max = 0.0
+    m.p50 = 0.0
+    m.p90 = 0.0
+    m.p99 = 0.0
+}
+
 // Snapshot the live fields into a value struct -- for serializers (JSON/pretty)
 // that pass a whole summary around. Not used on the per-frame hot path, where
 // callers read m.mean / m.p99 directly.

@@ -238,6 +238,31 @@ pub(crate) fn term_uses(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
+/// A counted loop the emitter renders as a Lua `for ... do .. end` block:
+/// header + body region (excluding header and latch), as recognized by the
+/// emitter's `recognize_counted_loops`. Used to partition value colors by
+/// lexical scope.
+pub struct LoopScope {
+    pub header: Idx<Block>,
+    pub region: Vec<Idx<Block>>,
+}
+
+/// Result of [`color_values`]: the per-inst color table plus, per color, the
+/// counted loop that lexically owns it (`None` = declared at function top).
+pub struct ValueAlloc {
+    /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored: inlined or non-value).
+    pub colors: Vec<u32>,
+    /// `color -> owning loop header`. A `Some(h)` color's `local r<c>` is
+    /// declared inside loop `h`'s `for ... do` block, not at function top:
+    /// LuaJIT's snapshot liveness (`snap_usedef`) prunes slots above a jump's
+    /// free-slot watermark, so body-scoped temps disappear from loop-exit
+    /// snapshots instead of pinning their values into every side trace — past
+    /// ~16 inherited FP values `asm_head_side` aborts the side trace with
+    /// "NYI: register coalescing too complex" and the trace tree blacklists
+    /// (benchmarks/nyicoal/, docs/gc-pressure-reduction-plan.md item 1).
+    pub color_scope: Vec<Option<Idx<Block>>>,
+}
+
 /// Color every value-producing instruction in `scope` (the reachable blocks of
 /// one function or closure body) to a register index. Values that never
 /// interfere share a color. Returns a dense `raw(inst) -> color` table
@@ -249,11 +274,19 @@ pub(crate) fn term_uses(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
 /// register): they are NOT colored, and a use of one is seen THROUGH to the
 /// registers its expression reads (via [`effective_uses`]) so those stay live up
 /// to the using instruction.
+///
+/// `loops` partitions the coloring: a value whose defs and effective uses all
+/// sit inside one counted loop's body (and which is not live across the back
+/// edge) is colored from that loop's own palette, and the color is reported in
+/// [`ValueAlloc::color_scope`] so the emitter declares it inside the `for`
+/// block. Palettes are disjoint, so a loop-scoped local never shares a name
+/// with (or shadows) a function-top local.
 pub fn color_values(
     func: &MirFunc,
     scope: &[Idx<Block>],
     inline: &[bool],
-) -> Vec<u32> {
+    loops: &[LoopScope],
+) -> ValueAlloc {
     let blocks: Vec<Idx<Block>> = scope.to_vec();
     let n = blocks.len();
     // Dense block -> scope-index (raw-id keyed; usize::MAX = not in this scope).
@@ -350,6 +383,92 @@ pub fn color_values(
         }
     }
 
+    // ---- Partition values by innermost enclosing counted loop. ----
+    // Partition id: 0 = function top; k+1 = loops[k]. A block's partition is the
+    // innermost loop whose region holds it; a value's partition is the loop-nest
+    // LCA of every block it's defined or effectively used in. Values live into a
+    // loop header (back-edge liveness: cross-iteration values a body-scoped Lua
+    // `local` would re-nil each iteration) are hoisted above that loop.
+    let mut block_part = vec![0u32; func.blocks.len()];
+    for (k, ls) in loops.iter().enumerate() {
+        for &b in &ls.region {
+            let cur = block_part[raw(b)];
+            let tighter = cur == 0 || {
+                let c = &loops[cur as usize - 1];
+                (c.region.len(), raw(c.header)) > (ls.region.len(), raw(ls.header))
+            };
+            if tighter {
+                block_part[raw(b)] = k as u32 + 1;
+            }
+        }
+    }
+    let parent_of = |p: u32| -> u32 {
+        if p == 0 { 0 } else { block_part[raw(loops[p as usize - 1].header)] }
+    };
+    let depth_of = |mut p: u32| -> u32 {
+        let mut d = 0;
+        while p != 0 {
+            p = parent_of(p);
+            d += 1;
+        }
+        d
+    };
+    let lca = |mut a: u32, mut b: u32| -> u32 {
+        let (mut da, mut db) = (depth_of(a), depth_of(b));
+        while da > db {
+            a = parent_of(a);
+            da -= 1;
+        }
+        while db > da {
+            b = parent_of(b);
+            db -= 1;
+        }
+        while a != b {
+            a = parent_of(a);
+            b = parent_of(b);
+        }
+        a
+    };
+    // u32::MAX = value not seen yet (every colored value has a def, so all end assigned).
+    let mut val_part: Vec<u32> = vec![u32::MAX; v_count];
+    if !loops.is_empty() {
+        for bi in 0..n {
+            let p = block_part[raw(blocks[bi])];
+            let mut fold = |k: usize| {
+                let cur = val_part[k];
+                val_part[k] = if cur == u32::MAX { p } else { lca(cur, p) };
+            };
+            def_set[bi].for_each(&mut fold);
+            use_set[bi].for_each(&mut fold);
+        }
+        for (k, ls) in loops.iter().enumerate() {
+            let hbi = pos[raw(ls.header)];
+            if hbi == usize::MAX {
+                continue;
+            }
+            let lp = k as u32 + 1;
+            live_in[hbi].for_each(|v| {
+                let mut p = val_part[v];
+                if p == u32::MAX {
+                    return;
+                }
+                // If v's partition is this loop or nested inside it, hoist to
+                // this loop's parent.
+                let mut inside = false;
+                while p != 0 {
+                    if p == lp {
+                        inside = true;
+                        break;
+                    }
+                    p = parent_of(p);
+                }
+                if inside {
+                    val_part[v] = parent_of(lp);
+                }
+            });
+        }
+    }
+
     // Interference edges, collected from a single backward walk. Value live
     // ranges are short (mostly single-block), so the graph is SPARSE
     // (~0.2x the words a dense v_count^2 bit-matrix would touch); a CSR adjacency
@@ -397,8 +516,11 @@ pub fn color_values(
     // no per-value HashSet alloc/hash. The result is a dense `raw(inst) -> color`
     // table (`u32::MAX` = no register: inlined or non-value), so the emitter reads
     // a value's color by array index instead of hashing per operand reference.
+    // A value only takes a color its partition owns (`color_part`), so top-level
+    // and loop-scoped values never share a Lua local.
     let mut colors: Vec<u32> = vec![u32::MAX; func.insts.len()];
     let mut color_of: Vec<u32> = vec![u32::MAX; v_count];
+    let mut color_part: Vec<u32> = Vec::new();
     let mut used: Vec<bool> = Vec::new();
     for (i, &v) in values.iter().enumerate() {
         used.clear();
@@ -412,14 +534,30 @@ pub fn color_values(
                 used[c] = true;
             }
         }
+        let my = match val_part[i] {
+            u32::MAX => 0,
+            p => p,
+        };
         let mut c = 0u32;
-        while (c as usize) < used.len() && used[c as usize] {
+        loop {
+            let cu = c as usize;
+            if cu >= color_part.len() {
+                color_part.push(my); // mint a new color owned by this partition
+                break;
+            }
+            if color_part[cu] == my && !(cu < used.len() && used[cu]) {
+                break;
+            }
             c += 1;
         }
         colors[raw(v)] = c;
         color_of[i] = c;
     }
-    colors
+    let color_scope = color_part
+        .iter()
+        .map(|&p| if p == 0 { None } else { Some(loops[p as usize - 1].header) })
+        .collect();
+    ValueAlloc { colors, color_scope }
 }
 
 // --- cell coloring (mutable locals) ----------------------------------------

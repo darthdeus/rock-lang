@@ -19,6 +19,7 @@ mod cursor_context;
 pub mod invariants;
 mod rank_key;
 pub use backend::*;
+pub use completion::match_policy::{match_policy, set_match_policy, MatchPolicy};
 pub use rank_key::explain_sort_text;
 
 mod ctags;

@@ -53,16 +53,42 @@ fn build_cli() -> Command {
         )
         .subcommand(position_subcmd("hover", "Get hover information at a specific position"))
         .subcommand(
-            position_subcmd("completion", "Get completions at a specific position").arg(
-                Arg::new("explain")
-                    .long("explain")
-                    .action(ArgAction::SetTrue)
-                    .help(
-                        "Human-readable ranking breakdown: one line per item with the \
-                         decoded RankKey rungs (exact/type/band/case/kind/dist/score) \
-                         instead of JSON",
-                    ),
-            ),
+            position_subcmd("completion", "Get completions at a specific position")
+                .arg(
+                    Arg::new("explain")
+                        .long("explain")
+                        .action(ArgAction::SetTrue)
+                        .help(
+                            "Human-readable ranking breakdown: one line per item with the \
+                             decoded RankKey rungs (exact/type/band/case/kind/dist/score) \
+                             instead of JSON",
+                        ),
+                )
+                .arg(
+                    Arg::new("prefixes")
+                        .num_args(0..)
+                        .help(
+                            "Optional 'what if I typed this' prefixes. When given, splice each \
+                             in place of the identifier at the cursor and print a printable \
+                             matrix (rank x match-policy). watch-friendly for matcher tuning.",
+                        ),
+                )
+                .arg(
+                    Arg::new("policies")
+                        .long("policies")
+                        .help("Comma-separated admission policies to compare (clean,subseq,subseq3). Default: all three."),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .help("Rows per policy column (default 10)."),
+                )
+                .arg(
+                    Arg::new("repl")
+                        .long("repl")
+                        .action(ArgAction::SetTrue)
+                        .help("Interactive: load once, then type a prefix per line to reprint the policy matrix (blank/`q` quits)."),
+                ),
         )
         .subcommand(position_subcmd("definition", "Go to definition at a specific position"))
         .subcommand(position_subcmd("type-definition", "Go to the declaration of the type of the value at a specific position"))
@@ -159,7 +185,38 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
         }
         Some(("completion", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"))
+            let prefixes: Vec<String> = m
+                .get_many::<String>("prefixes")
+                .map(|v| v.cloned().collect())
+                .unwrap_or_default();
+            let repl = m.get_flag("repl");
+            if prefixes.is_empty() && !repl {
+                cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"))
+            } else {
+                let policies = match m.get_one::<String>("policies") {
+                    Some(s) => s
+                        .split(',')
+                        .map(|p| {
+                            bone_query::MatchPolicy::parse(p)
+                                .ok_or_else(|| anyhow::anyhow!("unknown policy `{p}` (clean|subseq|subseq3)"))
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                    None => vec![
+                        bone_query::MatchPolicy::Clean,
+                        bone_query::MatchPolicy::Subseq,
+                        bone_query::MatchPolicy::Subseq3,
+                    ],
+                };
+                let top = m
+                    .get_one::<String>("top")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(10);
+                if repl {
+                    cli::bone_lsp::completion_repl(&file, line, col, &policies, top)
+                } else {
+                    cli::bone_lsp::completion_matrix(&file, line, col, &prefixes, &policies, top)
+                }
+            }
         }
         Some(("definition", m)) => {
             let (file, line, col) = bone_position(m)?;

@@ -423,6 +423,7 @@ pub struct Args {
     pub seconds: Option<f64>,
     pub warmup_seconds: f64,
     pub gc_window: usize,
+    pub gc_window_start: usize,
     pub perf_format: String,
     pub type_validation: bool,
     pub headless: bool,
@@ -467,6 +468,11 @@ pub struct Args {
     pub list: bool,
 
     pub app_args: Vec<String>,
+
+    /// Launch the game's luajit with `-jv` (verbose trace log to stderr).
+    /// Equivalent to setting `STONE_JV=1`; applies to any command that
+    /// runs the game (`stone`, `frame`, `run`, `perf`, `sim`).
+    pub jv: bool,
 
     /// For `rock test`: re-run tests on every `.rock` file change in
     /// the given paths. Watches the same paths passed to `rock test`
@@ -535,7 +541,10 @@ impl Args {
                 .help("Skip the first N wall-clock seconds from perf statistics (warmup). Applies to `rock perf` only. Default 2.0s. Set to 0 to disable."))
             .arg(Arg::new("gc-window").long("gc-window").default_value("0")
                 .value_parser(clap::value_parser!(usize))
-                .help("`rock perf` only: run a GC-stopped window of N frames (after a 100-frame warmup) and report TRUE bytes/frame allocated in the summary (memory.true_alloc_kb_per_frame). The trustworthy allocation oracle; the per-section alloc_kb is duration-correlated. 0 = disabled."))
+                .help("`rock perf` only: run a GC-stopped window of N frames (opening at --gc-window-start) and report TRUE bytes/frame allocated in the summary (memory.true_alloc_kb_per_frame). The trustworthy allocation oracle; the per-section alloc_kb is duration-correlated. 0 = disabled."))
+            .arg(Arg::new("gc-window-start").long("gc-window-start").default_value("100")
+                .value_parser(clap::value_parser!(usize))
+                .help("`rock perf` only: frame the --gc-window opens on (default 100). Push it past warmup so the window lands on a warm JIT; `rock perf` sizes its frame budget to cover start + window."))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
                 .help("Output format for `rock perf` summary: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
@@ -586,6 +595,8 @@ impl Args {
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua) or `bone` (type-check only, no codegen). Can also be set via ROCK_BACKEND=bone|skull."))
+            .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
+                .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
                 .help("Arguments to pass through to the Rock app (everything after --)"))
     }
@@ -610,6 +621,7 @@ impl Args {
             seconds: m.get_one::<f64>("seconds").copied(),
             warmup_seconds: *m.get_one::<f64>("warmup-seconds").unwrap(),
             gc_window: *m.get_one::<usize>("gc-window").unwrap(),
+            gc_window_start: *m.get_one::<usize>("gc-window-start").unwrap(),
             perf_format: m.get_one::<String>("perf-format").cloned().unwrap_or_else(|| "pretty".to_string()),
             type_validation: m.get_flag("type-validation"),
             headless: m.get_flag("headless"),
@@ -630,6 +642,7 @@ impl Args {
             budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: m.get_flag("list"),
             app_args: many_str("app_args"),
+            jv: m.get_flag("jv"),
             watch: m.get_flag("watch"),
             package: m.get_flag("package"),
             // Backend selection. An explicit `--backend` flag wins; otherwise an

@@ -349,7 +349,8 @@ fn build_test_harness(tests: &[skull::SkullTest]) -> String {
             None => "nil".to_string(),
         };
         // `f` is the global test fn by name; `out` is the expected stdout (or nil).
-        h.push_str(&format!("  {{ f = {}, out = {} }},\n", t.name, out));
+        // `name` labels the FAIL line (a package unit runs many tests together).
+        h.push_str(&format!("  {{ f = {}, out = {}, name = {} }},\n", t.name, out, lua_str(&t.name)));
     }
     h.push_str("}\n");
     h.push_str(
@@ -374,9 +375,9 @@ for _, t in ipairs(__skull_T) do
   io.write = rw
   local got = table.concat(buf, ""):gsub("^%s+", ""):gsub("%s+$", "")
   if not ok then
-    io.write("\n__SKULL__\tFAIL\terror: ", __esc(tostring(err)), "\n")
+    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(err)), "\n")
   elseif t.out ~= nil and got ~= t.out then
-    io.write("\n__SKULL__\tFAIL\toutput mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
+    io.write("\n__SKULL__\tFAIL\t", t.name, ": output mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
   else
     io.write("\n__SKULL__\tPASS\t\n")
   end
@@ -458,16 +459,27 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
         }
     };
 
+    run_emitted_tests(&lua, &tests)
+}
+
+/// Given emitted workspace Lua and the `@test` fns discovered in it, run them
+/// via the harness (or the load-only validity gate when there are none) and
+/// classify the outcome. Shared by the per-file path ([`skull_build`]) and the
+/// whole-package path ([`skull_build_package`]).
+fn run_emitted_tests(
+    lua: &str,
+    tests: &[skull::SkullTest],
+) -> std::result::Result<SkullOutcome, SkullFailure> {
     let timeout = Some(std::time::Duration::from_secs(15));
 
     // No @test functions: fall back to the load-only validity gate.
     if tests.is_empty() {
-        match rock_host::lua_runner::run_lua_code_with_timeout(&lua, timeout) {
+        match rock_host::lua_runner::run_lua_code_with_timeout(lua, timeout) {
             Ok(out) if !out.contains("STDERR:") => return Ok(SkullOutcome::Pass { tests: 0 }),
             Ok(out) => {
                 return Err(SkullFailure {
                     reason: "invalid lua emitted (skull bug)".to_string(),
-                    rendered: format!("{out}\n\n--- emitted lua (truncated) ---\n{}", truncate(&lua)),
+                    rendered: format!("{out}\n\n--- emitted lua (truncated) ---\n{}", truncate(lua)),
                 });
             }
             Err(e) => {
@@ -480,7 +492,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
     }
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
-    let program = format!("{lua}{}", build_test_harness(&tests));
+    let program = format!("{lua}{}", build_test_harness(tests));
     let stdout = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
         Ok(s) => s,
         Err(e) => {
@@ -517,6 +529,78 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
     } else {
         Ok(SkullOutcome::TestFail { passed, fails })
     }
+}
+
+/// A directory that is a `stick.toml` package -- the unit `rock test` builds as
+/// ONE whole workspace (all its files + deps + its own `tests/`) rather than
+/// file-by-file. A `type=lib` split across files can only be tested this way:
+/// per-file, a file referencing a sibling's symbol fails to compile. Root
+/// `tests/` (no stick.toml, hundreds of independent colliding programs) is NOT
+/// a package and stays on the per-file path.
+fn is_test_package_dir(path: &str) -> bool {
+    let p = std::path::Path::new(path);
+    p.is_dir() && p.join("stick.toml").is_file()
+}
+
+/// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
+/// `@test`s. The package analogue of [`skull_build`]. Cross-file references
+/// resolve because every file is in one workspace.
+fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFailure> {
+    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
+    let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| SkullFailure {
+        reason: "cannot load project".to_string(),
+        rendered: e.to_string(),
+    })?;
+    // Tests INCLUDED (no `production_only`): the point is to compile the
+    // package's own tests/ WITH it, unlike the game-build compile path.
+    let (mut modules, entry_file) = skull_assemble_project(&sources).map_err(|errs| SkullFailure {
+        reason: categorize(&errs[0].message),
+        rendered: render_project_errs(&sources, &errs),
+    })?;
+    let ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
+        reason: categorize(&errs[0].message),
+        rendered: render_project_errs(&sources, &errs),
+    })?;
+    let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
+    let lua = match skull::mir_emit::emit_workspace_mir(&ws, entry_mid) {
+        Ok(e) => e.lua,
+        Err(e) => {
+            return Err(SkullFailure {
+                reason: categorize(&e.message),
+                rendered: render_project_err(&sources, &e),
+            });
+        }
+    };
+    let tests = collect_package_tests(&ws, dir);
+    run_emitted_tests(&lua, &tests)
+}
+
+/// The `@test` fns defined in the package rooted at `dir` -- its own source
+/// files and its `tests/`, but NOT stdlib or dependency packages (which live at
+/// other canonical paths). Module file paths are canonicalized absolute, so a
+/// prefix match against the canonicalized `dir` selects exactly this package.
+fn collect_package_tests(
+    ws: &bone_semantic::inference::Workspace,
+    dir: &str,
+) -> Vec<skull::SkullTest> {
+    use bone_semantic::prelude::ModuleId;
+    let root = std::path::Path::new(dir)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(dir));
+    let mut out = Vec::new();
+    for m in ws.modules.iter() {
+        if m.id == ModuleId::builtin() {
+            continue;
+        }
+        let under = std::path::Path::new(m.file.as_str())
+            .canonicalize()
+            .map(|c| c.starts_with(&root))
+            .unwrap_or(false);
+        if under {
+            out.extend(skull::module_tests(ws, m.id));
+        }
+    }
+    out
 }
 
 /// Keep emitted-Lua dumps in error reports manageable.
@@ -1082,7 +1166,19 @@ pub fn skull_compile_game_and_collect_sims(
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
-    let lua = skull_emit_project(dir);
+    use std::path::PathBuf;
+    let emit = skull_emit_project(dir);
+    // A game's runnable main.lua is the same shape run/stone produce via
+    // write_full_main: preamble (cimgui bindings + game source dir) + emit +
+    // __rock_main_wrapper(main). Without the preamble the fire build is missing
+    // the imgui bindings (GetStyle etc.); without the wrapper it never starts.
+    let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
+        skull_game_main(&skull_game_preamble(dir), &emit)
+    } else if emit.contains("function main(") {
+        format!("{emit}\n__rock_main_wrapper(main)\n")
+    } else {
+        emit
+    };
     match output {
         Some(out) => {
             rock_host::project::write_atomic(&out, &lua)?;
@@ -1154,40 +1250,61 @@ fn skull_run_project(dir: &str) -> Result<()> {
 pub fn skull_test(paths: &[String]) -> Result<()> {
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
 
+    // A test UNIT is either an isolated file (root `tests/`: independent
+    // programs that would collide in one workspace) or a whole `stick.toml`
+    // package built as ONE workspace. A cross-file lib can only be tested the
+    // second way -- per-file, any file referencing a sibling's symbol fails to
+    // compile. Package dirs go the workspace route; everything else per-file.
     let mut files = Vec::new();
+    let mut package_dirs = Vec::new();
     for path in paths {
-        files.extend(collect_rock_files(path)?);
+        if is_test_package_dir(path) {
+            package_dirs.push(path.clone());
+        } else {
+            files.extend(collect_rock_files(path)?);
+        }
     }
     files.sort();
     files.dedup();
+    package_dirs.sort();
+    package_dirs.dedup();
 
     let start = Instant::now();
-    let mut emit_ok = 0usize; // files: emit valid Lua (passes or test-fails)
-    let mut exec_pass = 0usize; // files: emit + all @tests pass
-    let mut failed = 0usize; // files: emit/load failure
+    let mut emit_ok = 0usize; // units: emit valid Lua (passes or test-fails)
+    let mut exec_pass = 0usize; // units: emit + all @tests pass
+    let mut failed = 0usize; // units: emit/load failure
     let mut tests_total = 0usize; // individual @test functions executed
     let mut tests_passed = 0usize; // individual @test functions that passed
     let mut reason_counts: HashMap<String, usize> = HashMap::new();
     let mut details: Vec<(String, String)> = Vec::new();
 
     // bone can panic during inference on some inputs (a bone bug, not ours).
-    // Silence the default panic print during the sweep and catch each file's
-    // panic so one bad file doesn't abort the whole measurement — it's reported
+    // Silence the default panic print during the sweep and catch each unit's
+    // panic so one bad unit doesn't abort the whole measurement — it's reported
     // as a `bone panic` failure instead.
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
 
+    // Run every unit (files first, then packages), collecting labelled outcomes
+    // so both kinds fold through one reporting path.
+    type UnitResult = std::thread::Result<std::result::Result<SkullOutcome, SkullFailure>>;
+    let mut outcomes: Vec<(String, UnitResult)> = Vec::new();
     for file in &files {
-        let src = match fs_err::read_to_string(file) {
-            Ok(s) => s,
-            Err(e) => {
-                failed += 1;
-                println!("{:.<60} {}  {}", short_path(file), "FAILED".red(), e);
-                continue;
+        let outcome: UnitResult = match fs_err::read_to_string(file) {
+            Ok(src) => {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build(file, &src)))
             }
+            Err(e) => Ok(Err(SkullFailure { reason: e.to_string(), rendered: e.to_string() })),
         };
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build(file, &src)));
+        outcomes.push((short_path(file).to_string(), outcome));
+    }
+    for dir in &package_dirs {
+        let outcome: UnitResult =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| skull_build_package(dir)));
+        outcomes.push((short_path(dir).to_string(), outcome));
+    }
+
+    for (label, outcome) in outcomes {
         match outcome {
             Ok(Ok(SkullOutcome::Pass { tests })) => {
                 emit_ok += 1;
@@ -1195,7 +1312,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
                 tests_total += tests;
                 tests_passed += tests;
                 if verbose {
-                    println!("{:.<60} {}", short_path(file), "PASS".green());
+                    println!("{:.<60} {}", label, "PASS".green());
                 }
             }
             Ok(Ok(SkullOutcome::TestFail { passed, fails })) => {
@@ -1204,7 +1321,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
                 tests_passed += passed;
                 println!(
                     "{:.<60} {}  {}",
-                    short_path(file),
+                    label,
                     "TESTFAIL".yellow(),
                     format!("{} @test(s) failed", fails.len()).dimmed()
                 );
@@ -1212,20 +1329,15 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
                     .entry("@test execution failed".to_string())
                     .or_insert(0) += 1;
                 if verbose {
-                    details.push((file.clone(), fails.join("\n")));
+                    details.push((label, fails.join("\n")));
                 }
             }
             Ok(Err(SkullFailure { reason, rendered })) => {
                 failed += 1;
-                println!(
-                    "{:.<60} {}  {}",
-                    short_path(file),
-                    "FAILED".red(),
-                    reason.dimmed()
-                );
+                println!("{:.<60} {}  {}", label, "FAILED".red(), reason.dimmed());
                 *reason_counts.entry(reason).or_insert(0) += 1;
                 if verbose {
-                    details.push((file.clone(), rendered));
+                    details.push((label, rendered));
                 }
             }
             Err(panic) => {
@@ -1236,15 +1348,10 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_string());
                 let reason = "bone panic (inference)".to_string();
-                println!(
-                    "{:.<60} {}  {}",
-                    short_path(file),
-                    "PANIC".red().bold(),
-                    msg.dimmed()
-                );
+                println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
                 *reason_counts.entry(reason).or_insert(0) += 1;
                 if verbose {
-                    details.push((file.clone(), msg));
+                    details.push((label, msg));
                 }
             }
         }

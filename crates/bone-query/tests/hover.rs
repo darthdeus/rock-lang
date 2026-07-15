@@ -209,3 +209,26 @@ fn whitespace_hovers_nothing() {
     assert!(at(&b, 5, 0).is_none(), "leading whitespace -> no hover");
     assert!(at(&b, 6, 0).is_none(), "blank inside match -> no hover");
 }
+
+#[test]
+fn assign_target_ident_hovers_its_binding_type_not_unit() {
+    // A variable in place position (an assign target) is typed `()` by
+    // inference; hover must show the binding's real type. Regression: the LHS
+    // of `acc = other` hovered `Type: ()` instead of `Type: struct Widget`.
+    // Field-access targets (`h.w = ..`) never had this -- they're typed exprs.
+    let src = "struct Widget { id: int }\n\
+               fn f(acc: Widget, other: Widget) {\n\
+               acc = other\n\
+               }\n";
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let off = src.find("acc = other").expect("assignment") + 1; // on the target `acc`
+    let before = &src[..off];
+    let pos = Position::new(
+        before.matches('\n').count() as u32,
+        (off - before.rfind('\n').map_or(0, |i| i + 1)) as u32,
+    );
+    let h = hover_at(&bone, pos);
+    assert!(h.contains("Widget"), "assign-target hover should show Widget, got: {h:?}");
+    assert!(!h.contains("()"), "assign-target hover must not be unit: {h:?}");
+}

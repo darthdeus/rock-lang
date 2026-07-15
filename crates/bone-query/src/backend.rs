@@ -40,6 +40,7 @@ use crate::completion::classify::*;
 use crate::completion::rank::*;
 use crate::completion::select::*;
 use crate::completion::sources::*;
+use crate::completion::match_policy::admit;
 use crate::query::{clean_match, SymCat};
 use crate::rank_key::RankKey;
 
@@ -1735,7 +1736,7 @@ impl BoneWorkspace {
                 Some(p) => format!("Entity<{p}>"),
                 None => "Entity<>".to_string(),
             };
-            if clean_match(label.as_bytes(), prefix.as_bytes()) {
+            if admit(label.as_bytes(), prefix.as_bytes()) {
                 let key = RankKey {
                     len: RankKey::len_key(9999, label.len()),
                     ..Default::default()
@@ -1766,7 +1767,7 @@ impl BoneWorkspace {
                 {
                     continue;
                 }
-                if !prefix.is_empty() && !clean_match(pname.as_str().as_bytes(), prefix.as_bytes()) {
+                if !prefix.is_empty() && !admit(pname.as_str().as_bytes(), prefix.as_bytes()) {
                     continue;
                 }
                 let score = fuzzy_score(pname.as_str().as_bytes(), prefix.as_bytes());
@@ -1794,7 +1795,7 @@ impl BoneWorkspace {
         if coroutine_slot {
             // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0,
             // superseding the plain struct symbol.
-            if coframe && clean_match(b"CoFrame", prefix.as_bytes()) {
+            if coframe && admit(b"CoFrame", prefix.as_bytes()) {
                 sink.retain_not_named("CoFrame");
                 let key = RankKey {
                     len: RankKey::len_key(9999, "CoFrame".len()),
@@ -1806,7 +1807,7 @@ impl BoneWorkspace {
                     CandShape::CoFrame,
                 ));
             }
-        } else if !expr_position && !prefix.is_empty() && clean_match(b"Coroutine", prefix.as_bytes()) {
+        } else if !expr_position && !prefix.is_empty() && admit(b"Coroutine", prefix.as_bytes()) {
             // (b) completing the `Coroutine` type name -> snippet forms replace
             // the bare type: `Coroutine<CoFrame>` first, `Coroutine<$0>` second.
             sink.retain_not_named("Coroutine");
@@ -1914,7 +1915,7 @@ impl BoneWorkspace {
                     // (type_rank 0); the shared key folds in match quality
                     // (prefix on the root beats a scattered subsequence), the
                     // root locality, the hop distance, and field-before-method.
-                    let rk = arg_rank_key(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method));
+                    let rk = arg_rank_key(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
                     sink.push(Cand::new(
                         rk,
                         CandName::Owned(key),
@@ -2184,6 +2185,27 @@ impl BoneWorkspace {
         let Some(proj) = self.projects.get(&root) else {
             return Ok(0);
         };
+        self.write_ctags_for(&root, proj)
+    }
+
+    /// Regenerate `.rock.tags` for every loaded STICK project root, not just the
+    /// edited file's. The editor holds one tags file per open package and any
+    /// of them may be stale (a sibling package edited last session, never
+    /// re-saved this one); refreshing all of them on save keeps cross-package
+    /// tag jumps accurate. Standalone-file roots (a scratch `.rock` with no
+    /// `stick.toml`, keyed by its parent dir) are skipped -- an all-roots sweep
+    /// must not scatter `.rock.tags` into `~` or `/tmp`. Per-root `(root, result)`
+    /// so the caller can log individual failures; one root's error never blocks
+    /// the others.
+    pub fn write_all_ctags(&self) -> Vec<(PathBuf, std::io::Result<usize>)> {
+        self.projects
+            .iter()
+            .filter(|(root, _)| root.join("stick.toml").exists())
+            .map(|(root, proj)| (root.clone(), self.write_ctags_for(root, proj)))
+            .collect()
+    }
+
+    fn write_ctags_for(&self, root: &Path, proj: &BoneProject) -> std::io::Result<usize> {
         let ws = proj.session.workspace();
 
         let mut entries = Vec::new();

@@ -248,6 +248,314 @@ pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Res
     Ok(())
 }
 
+/// `rock lsp completion-matrix <file:line:col> --prefixes a,b,c
+/// [--policies clean,subseq,subseq3] [--top N]`.
+///
+/// Tuning harness: at ONE cursor, splice each test prefix in place of the
+/// identifier run ending there, run completion under each admission policy, and
+/// print a side-by-side matrix (rank x policy, cells `label [bBAND]`). Lets you
+/// eyeball what each policy admits/orders before picking a default. The real
+/// project is loaded so cross-file symbols resolve like the live server.
+pub fn completion_matrix(
+    file_path: &str,
+    line: u32,
+    column: u32,
+    prefixes: &[String],
+    policies: &[bone_query::MatchPolicy],
+    top: usize,
+) -> Result<()> {
+    let mut probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
+    println!("{}\n", probe.header());
+    for prefix in prefixes {
+        println!("{}", probe.render(prefix));
+    }
+    Ok(())
+}
+
+/// `rock lsp completion <file:line:col> --repl [--policies ..] [--top N]`.
+///
+/// The completion tweaker: the project loads ONCE, then you type at the cursor
+/// and the rank x policy matrix reprints. On a TTY this is per-keystroke (raw
+/// mode); piped stdin falls back to a line-at-a-time loop (so scripts/tests
+/// still work). Esc / Ctrl-C / Ctrl-D quit.
+pub fn completion_repl(
+    file_path: &str,
+    line: u32,
+    column: u32,
+    policies: &[bone_query::MatchPolicy],
+    top: usize,
+) -> Result<()> {
+    use std::io::IsTerminal;
+    let probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
+    if std::io::stdin().is_terminal() {
+        completion_repl_raw(probe)
+    } else {
+        completion_repl_lines(probe)
+    }
+}
+
+/// Piped/non-TTY fallback: one prefix per input line.
+fn completion_repl_lines(mut probe: MatrixProbe) -> Result<()> {
+    use std::io::{BufRead, Write};
+    println!("{}", probe.header());
+    println!("type a prefix, Enter to rank; blank line or `q` to quit.\n");
+    let stdin = std::io::stdin();
+    let mut lock = stdin.lock();
+    loop {
+        print!("> ");
+        std::io::stdout().flush().ok();
+        let mut buf = String::new();
+        if lock.read_line(&mut buf)? == 0 {
+            break; // EOF
+        }
+        let prefix = buf.trim_end_matches(['\n', '\r']);
+        if prefix.is_empty() || prefix == "q" {
+            break;
+        }
+        println!("{}", probe.render(prefix));
+    }
+    Ok(())
+}
+
+/// Restores cooked mode + cursor on drop -- so a panic mid-loop can't leave the
+/// user's shell in raw mode with a hidden cursor.
+struct RawGuard;
+impl Drop for RawGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Per-keystroke TTY loop: the current prefix's matrix is live at the top;
+/// Enter commits it to a unique history stacked below (newest first, no dupes).
+fn completion_repl_raw(mut probe: MatrixProbe) -> Result<()> {
+    use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::terminal::{size, Clear, ClearType};
+    use crossterm::{cursor::MoveTo, queue};
+    use std::io::Write;
+
+    crossterm::terminal::enable_raw_mode()?;
+    let _guard = RawGuard;
+    queue!(std::io::stdout(), crossterm::cursor::Hide)?;
+    let mut prefix = String::new();
+    // Committed queries, newest first, each with its precomputed matrix block.
+    // Results are fixed for the session, so we render a query once at commit.
+    let mut history: Vec<(String, Vec<String>)> = Vec::new();
+
+    // Build the full frame as logical lines, then paint flicker-free.
+    let frame = |probe: &mut MatrixProbe, prefix: &str, history: &[(String, Vec<String>)]| {
+        let mut lines = vec![
+            probe.header(),
+            "live -- type to edit; Enter saves to history; Esc / Ctrl-C / Ctrl-D quit".to_string(),
+            String::new(),
+            format!("query> {prefix}"),
+        ];
+        if !prefix.is_empty() {
+            lines.extend(probe.render_lines(prefix));
+        }
+        if !history.is_empty() {
+            lines.push(String::new());
+            lines.push("--- history (unique, newest first) ---".to_string());
+            for (_, block) in history {
+                lines.push(String::new());
+                lines.extend(block.iter().cloned());
+            }
+        }
+        lines
+    };
+
+    let paint = |lines: &[String]| -> Result<()> {
+        // Unknown or zero height (e.g. a pty with no winsize) must NOT clamp to
+        // zero rows -- treat it as unbounded so the frame still renders.
+        let rows = match size() {
+            Ok((_, h)) if h > 0 => h as usize,
+            _ => usize::MAX,
+        };
+        let mut out = std::io::stdout();
+        let mut buf = Vec::new();
+        queue!(buf, MoveTo(0, 0))?;
+        // Clear each line to EOL as we overwrite it (no full-screen wipe = no
+        // flash), then clear anything left below the new frame.
+        for line in lines.iter().take(rows) {
+            buf.extend_from_slice(line.as_bytes());
+            queue!(buf, Clear(ClearType::UntilNewLine))?;
+            buf.extend_from_slice(b"\r\n");
+        }
+        queue!(buf, Clear(ClearType::FromCursorDown))?;
+        out.write_all(&buf)?;
+        out.flush()?;
+        Ok(())
+    };
+
+    paint(&frame(&mut probe, &prefix, &history))?;
+    loop {
+        let Event::Key(k) = read()? else { continue };
+        if k.kind != KeyEventKind::Press {
+            continue; // ignore key-release (Windows) / repeat duplication
+        }
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Esc => break,
+            KeyCode::Char('c' | 'd') if ctrl => break,
+            KeyCode::Enter => {
+                if !prefix.is_empty() {
+                    // Unique + move-to-front: a re-query bumps its old entry
+                    // instead of stacking a duplicate.
+                    history.retain(|(p, _)| p != &prefix);
+                    let block = probe.render_lines(&prefix);
+                    history.insert(0, (std::mem::take(&mut prefix), block));
+                }
+            }
+            KeyCode::Backspace => {
+                prefix.pop();
+            }
+            KeyCode::Char(c) if !c.is_control() => prefix.push(c),
+            _ => continue, // arrows etc. -- no state change
+        }
+        paint(&frame(&mut probe, &prefix, &history))?;
+    }
+    Ok(())
+}
+
+/// One cursor prepared for repeated "what if I typed <prefix>" probes: the file
+/// text with the trailing identifier removed and the project loaded, so each
+/// `render` is just a splice + per-policy completion (no reload).
+struct MatrixProbe {
+    bone: BoneWorkspace,
+    file_path: String,
+    /// Source with the identifier run at the cursor already removed.
+    head: String,
+    tail: String,
+    orig_ident: String,
+    line: u32,
+    column: u32,
+    policies: Vec<bone_query::MatchPolicy>,
+    top: usize,
+}
+
+impl MatrixProbe {
+    fn load(
+        file_path: &str,
+        line: u32,
+        column: u32,
+        policies: Vec<bone_query::MatchPolicy>,
+        top: usize,
+    ) -> Result<MatrixProbe> {
+        let file_path = canonical(file_path);
+        let src = fs_err::read_to_string(&file_path)?;
+        // Walk back over the identifier run ending at the cursor -- that run is
+        // what each probed prefix replaces.
+        let cur = line_col_to_offset(&src, line, column);
+        let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+        let mut start = cur;
+        while start > 0 && is_ident(src.as_bytes()[start - 1]) {
+            start -= 1;
+        }
+        let mut bone = BoneWorkspace::new();
+        bone.load_project(&file_path);
+        Ok(MatrixProbe {
+            bone,
+            head: src[..start].to_string(),
+            tail: src[cur..].to_string(),
+            orig_ident: src[start..cur].to_string(),
+            file_path,
+            line,
+            column,
+            policies,
+            top,
+        })
+    }
+
+    fn header(&self) -> String {
+        format!(
+            "cursor {}:{}  identifier at cursor: {:?}  policies: [{}]  top {}",
+            self.line,
+            self.column,
+            self.orig_ident,
+            self.policies.iter().map(|p| p.name()).collect::<Vec<_>>().join(", "),
+            self.top,
+        )
+    }
+
+    /// Splice `prefix` at the cursor, run completion under each policy, and
+    /// format the rank x policy matrix (band-tagged cells) as one string.
+    fn render(&mut self, prefix: &str) -> String {
+        self.render_lines(prefix).join("\n")
+    }
+
+    /// The matrix as logical lines (no trailing newlines) -- the raw TTY painter
+    /// needs lines to clear each to EOL for flicker-free redraw.
+    fn render_lines(&mut self, prefix: &str) -> Vec<String> {
+        let spliced = format!("{}{}{}", self.head, prefix, self.tail);
+        let new_off = self.head.len() + prefix.len();
+        let pos = bone_query::offset_to_position(&spliced, new_off);
+        self.bone.update(&self.file_path, spliced);
+
+        let cols: Vec<Vec<String>> = self
+            .policies
+            .iter()
+            .map(|&p| {
+                bone_query::set_match_policy(p);
+                self.bone
+                    .completion(&self.file_path, pos)
+                    .into_iter()
+                    .take(self.top)
+                    .map(|it| {
+                        let band = it
+                            .sort_text
+                            .as_deref()
+                            .filter(|st| st.len() >= 18 && st.as_bytes()[..18].iter().all(u8::is_ascii_digit))
+                            .map_or('?', |st| st.as_bytes()[2] as char);
+                        format!("{} [b{band}]", it.label)
+                    })
+                    .collect()
+            })
+            .collect();
+        bone_query::set_match_policy(bone_query::MatchPolicy::default_policy());
+
+        let width = 46usize;
+        let mut lines = vec![format!(
+            "=== prefix {:?}  (cursor -> {}:{})",
+            prefix,
+            pos.line + 1,
+            pos.character + 1
+        )];
+        let hdr: Vec<String> = self
+            .policies
+            .iter()
+            .map(|p| format!("{:<width$}", p.name(), width = width))
+            .collect();
+        lines.push(format!("     {}", hdr.join("")));
+        let rows = cols.iter().map(Vec::len).max().unwrap_or(0);
+        for r in 0..rows {
+            let cells: Vec<String> = cols
+                .iter()
+                .map(|c| {
+                    let s = c.get(r).map_or("", String::as_str);
+                    let s: String = s.chars().take(width - 2).collect();
+                    format!("{s:<width$}", width = width)
+                })
+                .collect();
+            lines.push(format!("{:>3}. {}", r + 1, cells.join("")));
+        }
+        lines
+    }
+}
+
+/// Absolute byte offset of a 1-based (line, column) in `src`. Columns are byte
+/// columns; identifiers are ASCII so this matches the LSP char columns here.
+fn line_col_to_offset(src: &str, line: u32, column: u32) -> usize {
+    let mut off = 0usize;
+    for (i, l) in src.split_inclusive('\n').enumerate() {
+        if i as u32 + 1 == line {
+            return (off + (column as usize).saturating_sub(1)).min(src.len());
+        }
+        off += l.len();
+    }
+    off.min(src.len())
+}
+
 /// `rock-lsp references <file:line:col> --backend bone`.
 pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);

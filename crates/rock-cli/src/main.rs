@@ -54,6 +54,15 @@ fn main() {
         std::process::exit(1);
     }
 
+    // `--jv` is sugar for STONE_JV=1: build_luajit_command reads that env to
+    // lead the game's luajit with -jv. Set it here so both routes converge on
+    // one mechanism, and both the in-process spawn and any child inherit it.
+    // SAFETY: single-threaded -- runs before the rayon pool (below) or any
+    // watcher/game thread spawns.
+    if args.jv {
+        unsafe { std::env::set_var("STONE_JV", "1") };
+    }
+
     // Cap rayon's global thread pool. Default rayon uses
     // available_parallelism (== logical core count), but on hybrid
     // CPUs (Alder Lake / Raptor Lake) and high-core-count machines

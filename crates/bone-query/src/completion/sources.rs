@@ -16,6 +16,7 @@ use crate::backend::{
     analyze_variant, bind_generic, expected_for_anchor, nominal_base,
     preceding_arg_starts, ty_of, user_module_for_path, ExpectedArg,
 };
+use crate::completion::match_policy::admit;
 use crate::query::{clean_match, SymCat};
 use crate::rank_key::RankKey;
 
@@ -120,7 +121,7 @@ pub(crate) fn field_ref_arg_completions(
             if fty != v_str {
                 continue;
             }
-            if !(prefix.is_empty() || clean_match(fld.name.as_bytes(), pfx)) {
+            if !(prefix.is_empty() || admit(fld.name.as_bytes(), pfx)) {
                 continue;
             }
             if !seen.insert(fld.name) {
@@ -133,7 +134,7 @@ pub(crate) fn field_ref_arg_completions(
                 format!(".{}", fld.name)
             };
             out.push(CompletionItem {
-                sort_text: Some(arg_sort_text(0, 0, fld.name.as_str(), pfx, 1, 0)),
+                sort_text: Some(arg_sort_text(0, 0, fld.name.as_str(), pfx, 1, 0, 0)),
                 // The label carries the leading `.` -- a field ref IS `.co` (no
                 // receiver), unlike member completion where the `recv.` is
                 // already typed. `filter_text` stays the bare name so typing
@@ -722,7 +723,7 @@ pub(crate) fn decorator_completions(ws: &Workspace, prefix: &str) -> Vec<Complet
     for m in ws.modules.iter() {
         for (_, dec) in m.decorators.iter() {
             let name = dec.name.as_str();
-            if !clean_match(name.as_bytes(), prefix.as_bytes()) || !seen.insert(name.to_string()) {
+            if !admit(name.as_bytes(), prefix.as_bytes()) || !seen.insert(name.to_string()) {
                 continue;
             }
             let params: Vec<String> = dec
@@ -779,7 +780,7 @@ pub(crate) fn enum_record_field_completions(
             .into_iter()
             .enumerate()
             .filter(|(_, (name, _))| {
-                prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())
+                prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())
             })
             .map(|(i, (name, ty))| CompletionItem {
                 label: format!("{name}: {ty}"),
@@ -832,7 +833,7 @@ pub(crate) fn struct_literal_field_completions(
         .into_iter()
         .enumerate()
         .filter(|(_, (n, _, _))| !present.contains(n))
-        .filter(|(_, (n, _, _))| prefix.is_empty() || clean_match(n.as_bytes(), prefix.as_bytes()))
+        .filter(|(_, (n, _, _))| prefix.is_empty() || admit(n.as_bytes(), prefix.as_bytes()))
         .map(|(i, (n, ty, has_default))| CompletionItem {
             label: format!("{n}: {ty}"),
             kind: Some(CompletionItemKind::FIELD),
@@ -890,7 +891,7 @@ pub(crate) fn enum_qualified_completions(
 
     let pattern = in_pattern_position(src, offset);
     let matches_prefix =
-        |v: &str| prefix.is_empty() || clean_match(v.as_bytes(), prefix.as_bytes());
+        |v: &str| prefix.is_empty() || admit(v.as_bytes(), prefix.as_bytes());
     // When the in-progress prefix matches NO variant (a typo like `TextAlign::top`),
     // returning empty hands the popup to the client's buffer-word fallback -- the
     // worst outcome, since an enum is a closed set. Show every variant instead, and
@@ -1183,17 +1184,24 @@ fn build_member_items(
         // unless the user is explicitly typing an `_` prefix. Fields stay public
         // (no type-check change) -- this is purely a display convention.
         let show_private = prefix.starts_with('_');
+        // Member fields get a small SCORE boost over methods (not a hard rung):
+        // typing `.` most often reaches for a field, so on a match tie the field
+        // leans first -- but a method that matches the prefix better still wins.
+        // Only with a real query: at empty prefix score is 0 and any bonus would
+        // spuriously trip the length tiebreak (empty-prefix browse stays
+        // alphabetical). Tunable; eyeball with `rock lsp completion <pos> --repl`.
+        let field_boost = if prefix.is_empty() { 0 } else { 25 };
         let field_items = fields.into_iter().zip(field_match).filter_map(|((name, ty, _), tmatch)| {
             if name.starts_with('_') && !show_private {
                 return None;
             }
-            (prefix.is_empty() || clean_match(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {
+            (prefix.is_empty() || admit(name.as_bytes(), prefix.as_bytes())).then(|| CompletionItem {
                 sort_text: Some(if bool_ctx {
-                    member_bool_sort_text(&name, pfx, ty == "bool", 0)
+                    member_bool_sort_text(&name, pfx, ty == "bool", 0, field_boost)
                 } else if arg_ctx {
-                    member_arg_sort_text(&name, pfx, tmatch, 0, 1)
+                    member_arg_sort_text(&name, pfx, tmatch, 0, 1, field_boost)
                 } else {
-                    arg_sort_text(0, 0, &name, pfx, 1, 0)
+                    arg_sort_text(0, 0, &name, pfx, 1, 0, field_boost)
                 }),
                 label: format!("{name}: {ty}"),
                 kind: Some(CompletionItemKind::FIELD),
@@ -1203,7 +1211,7 @@ fn build_member_items(
             })
         });
         let method_items = methods.into_iter().zip(method_match).filter_map(|(m, rmatch)| {
-            (prefix.is_empty() || clean_match(m.name.as_bytes(), prefix.as_bytes())).then(|| {
+            (prefix.is_empty() || admit(m.name.as_bytes(), prefix.as_bytes())).then(|| {
                 // Inline `(params) -> ret`. A method with args left after the
                 // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
                 // inside); one with no remaining args inserts `name()` as plain
@@ -1217,12 +1225,18 @@ fn build_member_items(
                     (Some(format!("{}()", m.name)), None)
                 };
                 CompletionItem {
+                    // `method` rung = 0 (same as fields): in member position the
+                    // `.` already means "give me a member", so a method is not
+                    // demoted below a field by a hard rung. Fields get only a soft
+                    // SCORE lean (MEMBER_FIELD_BOOST); methods take no bonus, so a
+                    // better-matching method still outranks a field. (In non-member
+                    // position fns are still down-ranked, by `kind`.)
                     sort_text: Some(if bool_ctx {
-                        member_bool_sort_text(&m.name, pfx, false, 1)
+                        member_bool_sort_text(&m.name, pfx, false, 0, 0)
                     } else if arg_ctx {
-                        member_arg_sort_text(&m.name, pfx, rmatch, 1, 1)
+                        member_arg_sort_text(&m.name, pfx, rmatch, 0, 1, 0)
                     } else {
-                        arg_sort_text(0, 0, &m.name, pfx, 1, 1)
+                        arg_sort_text(0, 0, &m.name, pfx, 1, 0, 0)
                     }),
                     label: m.name.clone(),
                     label_details: fn_or_type_label_details(SymCat::Function, Some(&m.signature)),
@@ -1302,7 +1316,7 @@ fn build_member_items(
                     };
                     // Reach paths are type-matches by construction (paths TO the
                     // expected type) -- prio 0, same format as the direct items.
-                    let sort_text = member_arg_sort_text(&p.suffix, pfx, true, u8::from(p.is_method), p.dist);
+                    let sort_text = member_arg_sort_text(&p.suffix, pfx, true, u8::from(p.is_method), p.dist, 0);
                     items.push(CompletionItem {
                         label,
                         kind: Some(kind),
