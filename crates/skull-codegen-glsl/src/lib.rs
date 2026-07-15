@@ -19,7 +19,7 @@
 
 mod structure;
 
-use bone_semantic::hir::{BuiltinTy, Function, TyId, TypeCtor, TypeExpr};
+use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
@@ -40,6 +40,8 @@ enum GlslTy {
     Vec2,
     Vec3,
     Vec4,
+    /// Opaque; param/uniform position only (GLSL forbids sampler locals/returns).
+    Sampler2D,
 }
 
 impl GlslTy {
@@ -51,6 +53,7 @@ impl GlslTy {
             GlslTy::Vec2 => "vec2",
             GlslTy::Vec3 => "vec3",
             GlslTy::Vec4 => "vec4",
+            GlslTy::Sampler2D => "sampler2D",
         }
     }
 }
@@ -77,6 +80,7 @@ fn glsl_ty(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<GlslTy, C
             "Vec2" => Ok(GlslTy::Vec2),
             "Vec3" => Ok(GlslTy::Vec3),
             "Vec4" => Ok(GlslTy::Vec4),
+            "Sampler2D" => Ok(GlslTy::Sampler2D),
             other => Err(err(span, format!("shader profile: {what} type `{other}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
         },
         _ => Err(err(span, format!("shader profile: {what} type is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
@@ -165,7 +169,9 @@ fn check_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
         glsl_ty(ws, pd.ty, f.name_span, &format!("parameter `{}`", pd.name))?;
     }
     if let Some(rt) = f.return_ty {
-        glsl_ty(ws, rt, f.name_span, "return")?;
+        if glsl_ty(ws, rt, f.name_span, "return")? == GlslTy::Sampler2D {
+            return Err(err(f.name_span, "shader profile: a sampler cannot be returned (GLSL forbids sampler locals/returns)"));
+        }
     }
     Ok(())
 }
@@ -275,6 +281,7 @@ fn intrinsic_template(f: &Function) -> Option<&'static str> {
         ("v", 2) => Some("vec2($1, $2)"),
         ("v", 1) => Some("vec2($1)"),
         ("v", 0) | ("zero", 0) => Some("vec2(0.0)"),
+        ("texture", 2) => Some("texture($1, $2)"),
         _ => None,
     }
 }
@@ -324,6 +331,11 @@ struct FnEmit<'a> {
     indent: usize,
     /// Guard against unstructured control flow / infinite walks.
     visited: HashSet<Idx<Block>>,
+    /// Entry mode: the uniform-struct param's cell -- a field read off it
+    /// renders as the bare field name (GLSL uniforms are globals).
+    uniform_cell: Option<Idx<Cell>>,
+    /// Entry mode: uniform field name -> GLSL type (for `ty_of` on those reads).
+    uniform_fields: HashMap<Ustr, GlslTy>,
 }
 
 #[derive(Clone, Copy)]
@@ -351,8 +363,24 @@ fn emit_fn_def(
     fref: FuncRef,
     mf: &MirFunc,
 ) -> Result<String, CompilerError> {
+    emit_fn_def_with(ws, overloaded, fref, mf, None)
+}
+
+/// [`emit_fn_def`], optionally in ENTRY mode: the uniform-struct and sampler
+/// params are dropped from the GLSL signature (their reads render as bare
+/// uniform globals) and the fn keeps its bare Rock name.
+fn emit_fn_def_with(
+    ws: &Workspace,
+    overloaded: &HashSet<Ustr>,
+    fref: FuncRef,
+    mf: &MirFunc,
+    entry: Option<&EntryShape>,
+) -> Result<String, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
-    let name = mangle_fn(ws, f, overloaded);
+    let name = match entry {
+        Some(_) => f.name.as_str().to_string(),
+        None => mangle_fn(ws, f, overloaded),
+    };
     let ret_ty = match f.return_ty {
         Some(rt) => Some(glsl_ty(ws, rt, f.name_span, "return")?),
         None => None,
@@ -391,16 +419,34 @@ fn emit_fn_def(
         out: String::new(),
         indent: 1,
         visited: HashSet::default(),
+        uniform_cell: entry.and_then(|s| s.uniform_param.map(|i| mf.params[i])),
+        uniform_fields: entry.map(|s| s.uniform_fields.iter().copied().collect()).unwrap_or_default(),
     };
     e.assign_cell_names();
-    e.assign_param_types(f)?;
+    let dropped: HashSet<usize> = entry
+        .map(|s| {
+            s.uniform_param
+                .into_iter()
+                .chain(s.samplers.iter().map(|&(i, _)| i))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (i, &c) in mf.params.iter().enumerate() {
+        if entry.is_some_and(|s| s.uniform_param == Some(i)) {
+            continue; // not a tier-0 GLSL leaf; reads render as bare globals
+        }
+        let ty = glsl_ty(ws, f.param_decls[i].ty, f.name_span, "parameter")?;
+        e.cell_ty.insert(c, ty);
+    }
     e.compute_cell_types();
 
-    // Parameter list.
+    // Parameter list (entry mode drops uniform-struct + sampler params).
     let params: Vec<String> = mf
         .params
         .iter()
-        .map(|&c| {
+        .enumerate()
+        .filter(|(i, _)| !dropped.contains(i))
+        .map(|(_, &c)| {
             let ty = e.cell_ty[&c].name();
             format!("{ty} {}", e.cell_name[&c])
         })
@@ -453,12 +499,9 @@ impl FnEmit<'_> {
         }
     }
 
-    fn assign_param_types(&mut self, f: &Function) -> Result<(), CompilerError> {
-        for (i, &c) in self.f.params.iter().enumerate() {
-            let ty = glsl_ty(self.ws, f.param_decls[i].ty, f.name_span, "parameter")?;
-            self.cell_ty.insert(c, ty);
-        }
-        Ok(())
+    /// Whether `iid` is a `Load` of the entry-mode uniform-struct param cell.
+    fn is_uniform_base(&self, iid: Idx<Inst>) -> bool {
+        matches!(self.f.insts[iid], Inst::Load(c) if Some(c) == self.uniform_cell)
     }
 
     /// Type every non-param cell: prefer bone's binding type ([`Cell::ty`]) where
@@ -505,7 +548,13 @@ impl FnEmit<'_> {
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
             Inst::Load(c) => self.cell_ty.get(c).copied().unwrap_or(GlslTy::Float),
-            Inst::Field { .. } => GlslTy::Float, // Vec component
+            Inst::Field { base, field } => {
+                if self.is_uniform_base(*base) {
+                    self.uniform_fields.get(field).copied().unwrap_or(GlslTy::Float)
+                } else {
+                    GlslTy::Float // Vec component
+                }
+            }
             Inst::MakeValueStruct { name, .. } => match name.as_str() {
                 "Vec2" => GlslTy::Vec2,
                 "Vec3" => GlslTy::Vec3,
@@ -598,7 +647,13 @@ impl FnEmit<'_> {
                 Inst::Const(Lit::Int(i)) => fmt_float(*i as f64),
                 _ => format!("float({})", self.render_val(*x)?),
             },
-            Inst::Field { base, field } => format!("{}.{}", self.render_val(*base)?, field),
+            Inst::Field { base, field } => {
+                if self.is_uniform_base(*base) {
+                    field.as_str().to_string() // uniform global, not a struct member
+                } else {
+                    format!("{}.{}", self.render_val(*base)?, field)
+                }
+            }
             Inst::MakeValueStruct { name, fields } => {
                 let ctor = match name.as_str() {
                     "Vec2" => "vec2",
@@ -1093,6 +1148,217 @@ pub fn emit_shader_library(
         out.push_str(&emit_fn_def(ws, &overloaded, fref, mf)?);
     }
     Ok(out)
+}
+
+// --- A1: fragment-entry compilation (docs/glsl-a1-plan.md) --------------------
+
+/// A classified `@shader(fragment)` entry signature.
+struct EntryShape {
+    /// Index of the uniform value-struct param, if any.
+    uniform_param: Option<usize>,
+    /// The uniform struct's fields, declaration order: (name, GLSL type).
+    uniform_fields: Vec<(Ustr, GlslTy)>,
+    /// Sampler params: (param index, name).
+    samplers: Vec<(usize, Ustr)>,
+}
+
+/// The default fullscreen vertex stage -- identical to the hand-written
+/// vignette/heat_shimmer VERTEX blocks (the loader compiles the one file twice
+/// with `#define VERTEX` / `#define PIXEL`, `stone-rs/src/shader.rs`).
+const FULLSCREEN_VERTEX: &str = "layout (location = 0) in vec2 aPos;
+layout (location = 1) in vec2 aTexCoord;
+
+out vec2 TexCoord;
+
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+    TexCoord = aTexCoord;
+}
+";
+
+/// The nominal name behind a declared type, if any (`ShimmerU`, `Sampler2D`).
+fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
+    match ty_expr(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some(n),
+        _ => None,
+    }
+}
+
+/// Classify an entry fn's params against the A1 contract: at most one uniform
+/// value struct (every field tier 0), any number of `Sampler2D`, exactly one
+/// `Vec2` (the fullscreen TexCoord varying); return `Vec4`.
+fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerError> {
+    let span = f.name_span;
+    let mut uniform_param = None;
+    let mut uniform_fields: Vec<(Ustr, GlslTy)> = Vec::new();
+    let mut samplers: Vec<(usize, Ustr)> = Vec::new();
+    let mut tc = None;
+    for (i, pd) in f.param_decls.iter().enumerate() {
+        match glsl_ty(ws, pd.ty, span, "parameter") {
+            Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
+            Ok(GlslTy::Vec2) => {
+                if tc.is_some() {
+                    return Err(err(span, "shader entry: exactly one Vec2 param (the fullscreen TexCoord varying) is allowed"));
+                }
+                tc = Some(i);
+            }
+            Ok(other) => {
+                return Err(err(span, format!(
+                    "shader entry: param `{}` ({}) is not allowed -- A1 uniforms go in one uniform struct param, plus Sampler2D params and one Vec2",
+                    pd.name, other.name()
+                )));
+            }
+            Err(e) => {
+                // Not a tier-0 leaf: a value struct here is the uniform struct.
+                let Some(sname) = nominal_name(ws, pd.ty) else { return Err(e) };
+                let Some(&sid) = ws.struct_by_name.get(&sname) else { return Err(e) };
+                if uniform_param.is_some() {
+                    return Err(err(span, "shader entry: at most one uniform struct param is allowed"));
+                }
+                let sd = &ws.modules[sid.module.index()].structs[sid.def];
+                for fd in &sd.fields {
+                    let fty = glsl_ty(ws, fd.ty, span, &format!("uniform field `{}`", fd.name))?;
+                    if fty == GlslTy::Sampler2D {
+                        return Err(err(span, format!("shader entry: uniform field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
+                    }
+                    uniform_fields.push((fd.name, fty));
+                }
+                uniform_param = Some(i);
+            }
+        }
+    }
+    if tc.is_none() {
+        return Err(err(span, "shader entry: a Vec2 param (the fullscreen TexCoord varying) is required"));
+    }
+    match f.return_ty.map(|rt| glsl_ty(ws, rt, span, "return")) {
+        Some(Ok(GlslTy::Vec4)) => {}
+        _ => return Err(err(span, "shader entry: the return type must be Vec4 (FragColor)")),
+    }
+    // Uniform names are GLSL globals: fields + samplers + the reserved
+    // TexCoord/FragColor must be pairwise distinct.
+    let mut seen: HashSet<Ustr> = [Ustr::from("TexCoord"), Ustr::from("FragColor")].into_iter().collect();
+    for name in uniform_fields.iter().map(|&(n, _)| n).chain(samplers.iter().map(|&(_, n)| n)) {
+        if !seen.insert(name) {
+            return Err(err(span, format!("shader entry: uniform name `{name}` would collide (fields, samplers, TexCoord and FragColor share the GLSL global namespace)")));
+        }
+    }
+    Ok(EntryShape { uniform_param, uniform_fields, samplers })
+}
+
+/// Emit a COMPLETE single-file shader for one `@shader(fragment)` root: the
+/// generated PIXEL block (declarations + reachable helpers + the entry fn +
+/// `main`) and the default fullscreen VERTEX block.
+pub fn emit_shader_entry(
+    ws: &Workspace,
+    mid: ModuleId,
+    root: &str,
+) -> Result<String, CompilerError> {
+    let scx = ScalarCtx::new_values_first_class(ws);
+    let overloaded = compute_overloaded_names(ws);
+    let fref = resolve_root(ws, mid, root)?;
+    let f = &ws.module(fref.module).functions[fref.func];
+
+    match shader_stage(f) {
+        Some("fragment") => {}
+        Some(stage) => {
+            return Err(err(f.name_span, format!("shader entry: @shader({stage}) is not supported yet -- only @shader(fragment) (vertex entries are A2)")));
+        }
+        None => {
+            return Err(err(f.name_span, format!("shader entry: `{root}` has no @shader(fragment) annotation")));
+        }
+    }
+    let shape = classify_entry(ws, f)?;
+
+    // The entry's signature is validated by the classification above, not
+    // check_signature (the uniform struct is not a tier-0 leaf); its body and
+    // callees go through the same strict profile pass as fn-library roots.
+    let mf = lower_function(ws, &scx, fref.module, fref.func)
+        .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
+    let mut callees: Vec<FuncRef> = Vec::new();
+    profile_body(f, &mf, &mut callees)?;
+
+    let mut reach = Reach {
+        ws,
+        scx: &scx,
+        bodies: HashMap::default(),
+        gray: HashSet::default(),
+        black: HashSet::default(),
+        order: Vec::new(),
+    };
+    reach.gray.insert(fref); // a callee calling back into the entry = recursion
+    for c in callees {
+        reach.visit(c)?;
+    }
+    reach.gray.remove(&fref);
+
+    let (mut uses_idiv, mut uses_imod) = (false, false);
+    for body in reach.bodies.values().chain(std::iter::once(&mf)) {
+        for (_, inst) in body.insts.iter() {
+            match inst {
+                Inst::IntDiv(..) => uses_idiv = true,
+                Inst::IntMod(..) => uses_imod = true,
+                _ => {}
+            }
+        }
+    }
+
+    let mut px = String::new();
+    px.push_str("in vec2 TexCoord;\nout vec4 FragColor;\n\n");
+    for (n, t) in &shape.uniform_fields {
+        px.push_str(&format!("uniform {} {};\n", t.name(), n));
+    }
+    for (_, n) in &shape.samplers {
+        px.push_str(&format!("uniform sampler2D {};\n", n));
+    }
+    px.push('\n');
+    let prelude = helper_prelude(uses_idiv, uses_imod);
+    if !prelude.is_empty() {
+        px.push_str(&prelude);
+        px.push('\n');
+    }
+    for &href in &reach.order {
+        px.push_str(&emit_fn_def(ws, &overloaded, href, &reach.bodies[&href])?);
+        px.push('\n');
+    }
+    px.push_str(&emit_fn_def_with(ws, &overloaded, fref, &mf, Some(&shape))?);
+    px.push('\n');
+    px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
+
+    Ok(format!(
+        "#version 330 core\n\n#ifdef PIXEL\n\n{px}\n#endif\n\n#ifdef VERTEX\n\n{FULLSCREEN_VERTEX}\n#endif\n"
+    ))
+}
+
+/// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
+/// root compiles as a whole-shader fragment entry (exactly one root), plain
+/// roots as a fn library.
+pub fn emit_shader(ws: &Workspace, mid: ModuleId, roots: &[String]) -> Result<String, CompilerError> {
+    let annotated = roots
+        .iter()
+        .filter(|r| {
+            resolve_root(ws, mid, r)
+                .ok()
+                .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]).is_some())
+        })
+        .count();
+    match annotated {
+        0 => emit_shader_library(ws, mid, roots),
+        1 if roots.len() == 1 => emit_shader_entry(ws, mid, &roots[0]),
+        _ => Err(err(
+            Span::default(),
+            "rock shader: a @shader(fragment) entry compiles alone -- pass exactly one root fn",
+        )),
+    }
+}
+
+/// The `@shader(<stage>)` annotation's stage argument, if the fn carries one.
+pub fn shader_stage(f: &Function) -> Option<&'static str> {
+    let ann = f.annotations.iter().find(|a| a.name.name.as_str() == "shader")?;
+    match ann.args.first().map(|a| &a.value) {
+        Some(AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => Some("fragment"),
+        Some(AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
+        _ => Some("<unknown>"),
+    }
 }
 
 #[cfg(test)]

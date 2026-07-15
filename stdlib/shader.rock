@@ -1,0 +1,12 @@
+// GPU-only shader surface (docs/glsl-a1-plan.md). Sampler2D is a phantom
+// param type for @shader entry fns -- never constructed CPU-side. texture()
+// maps to the GLSL builtin; reaching it on the CPU is a hard error, never a
+// silent stub.
+
+struct Sampler2D {
+    __handle: int,
+}
+
+inline(lua) fn texture(s: Sampler2D, uv: Vec2) -> Vec4 = """
+    error("texture() is GPU-only (shader fns are not CPU-callable)")
+"""

@@ -1744,6 +1744,7 @@ fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
         ("math_types.rock", include_str!("../../../stdlib/math_types.rock")),
         ("strings.rock", include_str!("../../../stdlib/strings.rock")),
         ("json.rock", include_str!("../../../stdlib/json.rock")),
+        ("shader.rock", include_str!("../../../stdlib/shader.rock")),
     ];
     STDLIB
         .iter()

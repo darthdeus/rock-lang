@@ -650,7 +650,7 @@ pub fn skull_shader(files: &[String], output: Option<String>) -> Result<()> {
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     let roots: Vec<String> = roots.to_vec();
-    let glsl = match skull_codegen_glsl::emit_shader_library(&ws, user_mid, &roots) {
+    let glsl = match skull_codegen_glsl::emit_shader(&ws, user_mid, &roots) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("{}", render_file_errs(path, &src, &[e]));

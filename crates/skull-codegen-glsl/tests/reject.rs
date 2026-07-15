@@ -101,3 +101,84 @@ fn reject_unknown_root() {
     "#;
     reject(src, &["absent"], "not found");
 }
+
+// --- A1 entry-contract rejects (docs/glsl-a1-plan.md) ------------------------
+
+fn reject_entry(src: &str, root: &str, needle: &str) {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
+    let err = skull_codegen_glsl::emit_shader_entry(&ws, mid, root).expect_err("must reject");
+    assert!(
+        err.message.contains(needle),
+        "error `{}` should contain `{needle}`",
+        err.message
+    );
+}
+
+#[test]
+fn reject_entry_two_uniform_structs() {
+    let src = r#"
+        value Ua { a: float }
+        value Ub { b: float }
+        @shader(fragment)
+        fn f(u1: Ua, u2: Ub, tc: Vec2) -> Vec4 { return Vec4 { x: u1.a, y: u2.b, z: 0.0, w: 1.0 } }
+    "#;
+    reject_entry(src, "f", "one uniform struct");
+}
+
+#[test]
+fn reject_entry_missing_tc() {
+    let src = r#"
+        @shader(fragment)
+        fn f(scene: Sampler2D) -> Vec4 { return texture(scene, v(0.5, 0.5)) }
+    "#;
+    reject_entry(src, "f", "Vec2");
+}
+
+#[test]
+fn reject_entry_two_tc() {
+    let src = r#"
+        @shader(fragment)
+        fn f(a: Vec2, b: Vec2) -> Vec4 { return Vec4 { x: a.x, y: b.y, z: 0.0, w: 1.0 } }
+    "#;
+    reject_entry(src, "f", "exactly one");
+}
+
+#[test]
+fn reject_entry_scalar_param() {
+    let src = r#"
+        @shader(fragment)
+        fn f(strength: float, tc: Vec2) -> Vec4 { return Vec4 { x: strength, y: tc.y, z: 0.0, w: 1.0 } }
+    "#;
+    reject_entry(src, "f", "uniform struct");
+}
+
+#[test]
+fn reject_entry_wrong_return() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> float { return tc.x }
+    "#;
+    reject_entry(src, "f", "Vec4");
+}
+
+#[test]
+fn reject_entry_uniform_name_collision() {
+    let src = r#"
+        value U { scene: float }
+        @shader(fragment)
+        fn f(u: U, scene: Sampler2D, tc: Vec2) -> Vec4 { return texture(scene, tc) }
+    "#;
+    reject_entry(src, "f", "collide");
+}
+
+#[test]
+fn reject_entry_not_fragment() {
+    let src = r#"
+        @shader(vertex)
+        fn f(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: tc.y, z: 0.0, w: 1.0 } }
+    "#;
+    reject_entry(src, "f", "fragment");
+}
