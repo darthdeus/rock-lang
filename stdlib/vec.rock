@@ -188,3 +188,82 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 @pure fn Vec2.lerp(a, b: Vec2, t: float) -> Vec2 {
     return v(lerp(a.x, b.x, t), lerp(a.y, b.y, t))
 }
+
+// Vec3 algebra. Fake-3D convention across games: xy is the ground plane, z is
+// height.
+
+@inline
+@pure fn v(x: float, y: float, z: float) -> Vec3 {
+    return Vec3 { x: x, y: y, z: z }
+}
+
+@pure operator +(a: Vec3, b: Vec3) -> Vec3 {
+    return v(a.x + b.x, a.y + b.y, a.z + b.z)
+}
+
+@pure operator -(a: Vec3, b: Vec3) -> Vec3 {
+    return v(a.x - b.x, a.y - b.y, a.z - b.z)
+}
+
+@pure operator *(a: Vec3, b: float) -> Vec3 {
+    return v(a.x * b, a.y * b, a.z * b)
+}
+
+@pure operator *(a: float, b: Vec3) -> Vec3 {
+    return v(a * b.x, a * b.y, a * b.z)
+}
+
+@pure operator /(a: Vec3, b: float) -> Vec3 {
+    return v(a.x / b, a.y / b, a.z / b)
+}
+
+@pure fn vec3_dot(a: Vec3, b: Vec3) -> float {
+    return a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+@pure fn vec3_cross(a: Vec3, b: Vec3) -> Vec3 {
+    return v(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+    )
+}
+
+@pure fn vec3_length(a: Vec3) -> float {
+    return sqrt(vec3_dot(a, a))
+}
+
+@pure fn vec3_distance(a: Vec3, b: Vec3) -> float {
+    return vec3_length(a - b)
+}
+
+@pure fn vec3_normalize(a: Vec3) -> Vec3 {
+    let len = vec3_length(a)
+    if len < 0.000001 { return v(0.0, 0.0, 0.0) }
+    return a / len
+}
+
+@pure fn vec3_lerp(a: Vec3, b: Vec3, t: float) -> Vec3 {
+    return v(
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+        a.z + (b.z - a.z) * t
+    )
+}
+
+@pure fn Vec3.dot(a, b: Vec3) -> float { return vec3_dot(a, b) }
+@pure fn Vec3.cross(a, b: Vec3) -> Vec3 { return vec3_cross(a, b) }
+@pure fn Vec3.length(a) -> float { return vec3_length(a) }
+@pure fn Vec3.distance(a, b: Vec3) -> float { return vec3_distance(a, b) }
+@pure fn Vec3.normalize(a) -> Vec3 { return vec3_normalize(a) }
+@pure fn Vec3.lerp(a, b: Vec3, t: float) -> Vec3 { return vec3_lerp(a, b, t) }
+
+@inline
+@pure fn Vec3.xy(a) -> Vec2 {
+    return v(a.x, a.y)
+}
+
+@inline
+@pure fn vec3_from_ground(ground: Vec2, z: float) -> Vec3 {
+    return v(ground.x, ground.y, z)
+}

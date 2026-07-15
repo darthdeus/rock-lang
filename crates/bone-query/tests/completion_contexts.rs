@@ -248,7 +248,7 @@ fn function_completion_carries_an_inline_signature() {
     // detail panel, and the concise `(params) -> ret` inline (labelDetails) next
     // to the name in the popup.
     // `separation`, not a stdlib UFCS method name (`distance`/`dot`/... now
-    // live in stdlib/math_types.rock), so only the local fn completes here.
+    // live in stdlib/vec.rock), so only the local fn completes here.
     let src = "fn separation(a: int, b: int) -> int { a }\nfn run() {\n  sep\n}\n";
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
