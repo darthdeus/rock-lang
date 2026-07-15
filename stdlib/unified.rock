@@ -2252,6 +2252,63 @@ fn all<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> bool {
     return true
 }
 
+// RingBuffer<T> -- fixed-capacity history buffer (trails, position history,
+// decals). `push` appends until full, then overwrites the oldest. `ago(k)`
+// indexes newest-first (ago(0) = last push); iteration is oldest-to-newest.
+
+struct RingBuffer<T> {
+    data: [T],
+    cap: int,
+    head: int,
+}
+
+fn ring_new<T>(cap: int) -> RingBuffer<T> {
+    return RingBuffer { data: [], cap: cap, head: 0 }
+}
+
+fn RingBuffer<T>.len(rb) -> int { return rb.data.len }
+
+fn RingBuffer<T>.push(rb, x: T) {
+    if rb.data.len < rb.cap {
+        rb.data.push(x)
+    } else {
+        rb.data[rb.head] = x
+    }
+    rb.head = (rb.head + 1) % rb.cap
+}
+
+fn RingBuffer<T>.ago(rb, k: int) -> T {
+    let n = rb.data.len
+    if k < 0 || k >= n {
+        error("RingBuffer.ago out of range: k={k}, len={n}")
+    }
+    return rb.data[((rb.head - 1 - k) % n + n) % n]
+}
+
+fn RingBuffer<T>.clear(rb) {
+    rb.data.clear()
+    rb.head = 0
+}
+
+struct RingIter<T> {
+    rb: RingBuffer<T>,
+    i: int,
+}
+
+@inline
+fn RingBuffer<T>.iter(rb) -> RingIter<T> {
+    return RingIter { rb: rb, i: 0 }
+}
+
+@inline
+fn RingIter<T>.next(it) -> (bool, T) {
+    let n = it.rb.data.len
+    if it.i >= n { return (false, phantom()) }
+    let idx = (it.rb.head + it.rb.cap - n + it.i) % it.rb.cap
+    it.i = it.i + 1
+    return (true, it.rb.data[idx])
+}
+
 // Vec operations
 // The eager functional ops (map/filter/reduce/fold_right/find/any/all) are
 // deleted: `v.iter().<combinators>().<terminal>()` is the one mechanism.
