@@ -420,6 +420,47 @@ fn nested_loop_with_if() {
     );
 }
 
+/// Const loop bound folds into the for-header (cosmetic tier,
+/// `docs/glsl-relooper-plan.md` item 3): `t = 4; for (; i < t; ...)` -> `for (;
+/// i < 4; ...)`, dropping the single-use bound temp + its declaration. A const
+/// is loop-invariant, so re-reading it each iteration is identical.
+#[test]
+fn const_loop_bound_fold() {
+    let src = r#"@pure fn f() -> int {
+        let acc = 0
+        for i in 0..4 { acc = acc + i }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "int f() {\n  \
+         int acc;\n  \
+         int i;\n  \
+         acc = 0;\n  \
+         i = 0;\n  \
+         for (; i < 4; i = i + 1) {\n    \
+           acc = (acc + i);\n  \
+         }\n  \
+         return acc;\n}"
+    );
+}
+
+/// A PARAM loop bound is NOT folded (it could be reassigned in the loop body,
+/// which would change the iteration count if re-read each iteration -- only
+/// const bounds are provably loop-invariant).
+#[test]
+fn param_loop_bound_not_folded() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let acc = 0
+        for i in 0..n { acc = acc + i }
+        return acc
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert!(glsl.contains("t3 = n;"), "param bound must stay a temp:\n{glsl}");
+    assert!(glsl.contains("for (; i < t3; i = i + 1) {"), "got:\n{glsl}");
+}
+
 /// Milestone finding: `match` lowers to `Branch` chains (NOT `Term::Switch`),
 /// so a tier-0 int `match` is accepted and emitted as an if / else-if ladder.
 #[test]

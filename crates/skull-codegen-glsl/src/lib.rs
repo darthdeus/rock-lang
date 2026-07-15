@@ -636,6 +636,41 @@ impl FnEmit<'_> {
             );
             self.folded_block.insert(b, rcell);
         }
+
+        // Bound temps (item 3): a counted loop's bound `t = <const>; for (; i < t;
+        // ..)` folds to `for (; i < <const>; ..)`, dropping the single-use temp.
+        // Only a CONST bound is provably loop-invariant -- a param/expr bound
+        // could be reassigned in the body, changing the count if re-read.
+        let bounds: Vec<Idx<Inst>> = self.counted.values().map(|li| li.bound).collect();
+        for bound in bounds {
+            let Inst::Load(bcell) = self.f.insts[bound] else { continue };
+            if load_count.get(&bcell).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(v) = self.single_store_value(bcell) else { continue };
+            if matches!(self.f.insts[v], Inst::Const(_)) {
+                self.folded_bound.insert(bcell, v);
+            }
+        }
+    }
+
+    /// The single value stored to `cell`, or `None` if it is stored zero or more
+    /// than once anywhere in the fn.
+    fn single_store_value(&self, cell: Idx<Cell>) -> Option<Idx<Inst>> {
+        let mut found = None;
+        for (_, blk) in self.f.blocks.iter() {
+            for &iid in &blk.insts {
+                if let Inst::Store { cell: c, value } = self.f.insts[iid] {
+                    if c == cell {
+                        if found.is_some() {
+                            return None;
+                        }
+                        found = Some(value);
+                    }
+                }
+            }
+        }
+        found
     }
 
     /// Whether `rcell`'s single use is in `join` with no `Store` preceding it
