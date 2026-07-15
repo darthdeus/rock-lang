@@ -133,14 +133,8 @@ fn vec2_normalize_body() {
     assert!(
         glsl.contains(
             "vec2 normalize__Vec2_ret_Vec2(vec2 v) {\n  \
-             bool t2;\n  \
              float len;\n  \
-             if ((v.x == 0.0)) {\n    \
-               t2 = (v.y == 0.0);\n  \
-             } else {\n    \
-               t2 = false;\n  \
-             }\n  \
-             if (t2) {\n    \
+             if (((v.x == 0.0) && (v.y == 0.0))) {\n    \
                return vec2(0.0);\n  \
              } else {\n    \
                len = sqrt(((v.x * v.x) + (v.y * v.y)));\n    \
@@ -212,7 +206,8 @@ fn expression_if_into_cell() {
     );
 }
 
-/// `&&` in a nested if: short-circuit becomes a bool temp diamond.
+/// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`
+/// (cosmetic tier -- `docs/glsl-relooper-plan.md`).
 #[test]
 fn and_in_nested_if() {
     let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#;
@@ -220,20 +215,14 @@ fn and_in_nested_if() {
     assert_eq!(
         glsl.trim(),
         "float f(float x, float y) {\n  \
-         bool t2;\n  \
-         if ((x > 0.0)) {\n    \
-           t2 = (y > 0.0);\n  \
-         } else {\n    \
-           t2 = false;\n  \
-         }\n  \
-         if (t2) {\n    \
+         if (((x > 0.0) && (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
          return 0.0;\n}"
     );
 }
 
-/// `||` in a nested if.
+/// `||` in a nested if: folds back to infix `||`.
 #[test]
 fn or_in_nested_if() {
     let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 || y > 0.0 { return 1.0 } return 0.0 }"#;
@@ -241,13 +230,7 @@ fn or_in_nested_if() {
     assert_eq!(
         glsl.trim(),
         "float f(float x, float y) {\n  \
-         bool t2;\n  \
-         if ((x > 0.0)) {\n    \
-           t2 = true;\n  \
-         } else {\n    \
-           t2 = (y > 0.0);\n  \
-         }\n  \
-         if (t2) {\n    \
+         if (((x > 0.0) || (y > 0.0))) {\n    \
            return 1.0;\n  \
          }\n  \
          return 0.0;\n}"
@@ -305,16 +288,10 @@ fn while_compound_condition() {
         "float f(float x) {\n  \
          float acc;\n  \
          int i;\n  \
-         bool t3;\n  \
          acc = 0.0;\n  \
          i = 0;\n  \
          while (true) {\n    \
-           if ((i < 10)) {\n      \
-             t3 = (acc < 100.0);\n    \
-           } else {\n      \
-             t3 = false;\n    \
-           }\n    \
-           if (!(t3)) { break; }\n    \
+           if (!(((i < 10) && (acc < 100.0)))) { break; }\n    \
            acc = (acc + x);\n    \
            i = (i + 1);\n  \
          }\n  \
