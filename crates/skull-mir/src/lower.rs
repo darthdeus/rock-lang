@@ -6678,6 +6678,79 @@ pub fn value_struct_map_key(ws: &Workspace, mid: ModuleId) -> Option<(Ustr, Span
     None
 }
 
+/// A GC-carrying `value` struct (table repr, no C layout) named at a nominal
+/// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
+/// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
+fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
+    map_is_value_struct(ws, name) && value_struct_is_gc(ws, name)
+}
+
+/// When `ty` resolves to `NativeBuffer<E>` with `E` a GC-carrying value struct,
+/// returns E's name -- `ffi.new("E[?]")` would name a non-existent ctype.
+fn native_buffer_gc_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, ty)?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    if nb.as_str() != "NativeBuffer" {
+        return None;
+    }
+    let elem = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match ty_node(ws, inf, elem)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if nominal_is_gc_value(ws, name) => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// Reject a GC-carrying value struct used at a genuine C boundary (an `extern`
+/// signature, or a `NativeBuffer<T>` element) -- a spanned emit-time error, since
+/// the cdef the boundary needs was never emitted for this tier. Replaces the old
+/// silent skip-then-crash (unfuck #51). Returns `(message, span)` for the first
+/// offender, scanning externs then body types. FFI-clean value structs are
+/// unaffected (they have a cdef and stay boundary-legal).
+pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
+    let module = ws.module(mid);
+    // 1. extern signatures: a param/return that is a GC-carrying value struct.
+    for (_, f) in module.functions.iter() {
+        if !f.is_extern {
+            continue;
+        }
+        let tys = f.param_decls.iter().map(|p| p.ty).chain(f.return_ty);
+        for ty in tys {
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) = static_ty(ws, ty) {
+                if nominal_is_gc_value(ws, n) {
+                    return Some((format!(
+                        "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
+                         cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
+                         value struct (fields int/float/bool or nested FFI-clean value structs), \
+                         or pass the fields individually."
+                    ), f.name_span));
+                }
+            }
+        }
+    }
+    // 2. NativeBuffer<GcValue> element anywhere in a body's inferred types.
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else {
+            continue;
+        };
+        for (e, tyid) in inf.expr_types.iter() {
+            if let Some(n) = native_buffer_gc_elem(ws, inf, *tyid) {
+                return Some((format!(
+                    "`NativeBuffer<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
+                     (immutable Lua table) with no C layout, so `ffi.new(\"{n}[?]\")` names no \
+                     ctype. Only FFI-clean value structs (C-mappable fields) are NativeBuffer \
+                     elements."
+                ), body.expr_spans[e]));
+            }
+        }
+    }
+    None
+}
+
 /// When `ty` resolves to `NativeArray<E>` with `E` a nullable type, returns true.
 fn na_optional_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> bool {
     let Some(ty) = resolve_tyid(ws, inf, ty) else { return false };

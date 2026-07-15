@@ -1185,6 +1185,9 @@ pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEm
             ),
         ));
     }
+    if let Some((msg, span)) = skull_mir::lower::gc_value_c_boundary(ws, user_mid) {
+        return Err(CompilerError::new_with_label(span, msg));
+    }
     let cg = CodegenCtx::new(ws);
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
