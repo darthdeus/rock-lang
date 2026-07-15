@@ -158,6 +158,60 @@ fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Opti
     Some(ValueShape { name, fields })
 }
 
+/// The scalar-ABI shape of a GC-CARRYING value struct (`value_struct_is_gc`):
+/// every declared field is ONE leaf -- a `Prim` for a scalar, generic `T`,
+/// array/arena/map, or string (a single boxed slot), or `Nested` for a nested
+/// value struct / cdata enum field (which threads its own leaves). Uniform
+/// per-field slotting: the field COUNT is fixed by the declaration, so a generic
+/// `T` field is one slot regardless of the instantiation -- one classification,
+/// one slot shape. `None` unless `name` is a GC-carrying value struct.
+///
+/// Materialization uses the table `<Name>_vt` ctor (chosen at the pack site by
+/// tier), never `<Name>_ct`; the leaf threading is repr-agnostic (`pack` builds
+/// an `Inst::MakeValueStruct` that codegen renders per tier).
+fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
+    value_shape_gc_rec(ws, name, &mut Vec::new())
+}
+
+fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
+    if !value_struct_is_gc(ws, name) {
+        return None;
+    }
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
+    let mut fields = Vec::with_capacity(sd.fields.len());
+    for f in &sd.fields {
+        let fs = match static_ty(ws, f.ty) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
+                if payload_free_enum_variants(ws, n).is_some() {
+                    FieldShape::Prim
+                } else if let Some(es) = enum_value_shape(ws, n) {
+                    FieldShape::Nested(es.value_shape())
+                } else if map_is_value_struct(ws, n) {
+                    // Nested value struct (either tier): thread its own leaves; a
+                    // cyclic/odd shape falls back to one boxed slot.
+                    match value_shape(ws, n).or_else(|| value_shape_gc_rec(ws, n, visiting)) {
+                        Some(sub) => FieldShape::Nested(sub),
+                        None => FieldShape::Prim,
+                    }
+                } else {
+                    // Array / Arena / Map / other nominal collection -> one slot.
+                    FieldShape::Prim
+                }
+            }
+            // Builtin scalar, generic `T`, nullable, tuple -> one slot.
+            _ => FieldShape::Prim,
+        };
+        fields.push((f.name, fs));
+    }
+    visiting.pop();
+    Some(ValueShape { name, fields })
+}
+
 /// Declared field names of struct `name`, in declaration order (the positional
 /// `<name>_ct` ctor order). A cdata-eligible enum is `[__tag, _0]` (it rides the
 /// value-struct `<Enum>_ct` path). Empty if `name` is neither.
@@ -183,9 +237,9 @@ fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
 /// the single-cdata ABI (cdata has no spare field for a nil discriminator).
 fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-            value_shape(ws, n).or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape()))
-        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => value_shape(ws, n)
+            .or_else(|| value_shape_gc(ws, n))
+            .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape())),
         TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
                 flat_enum_shape(ws, n).map(|s| s.value_shape())
