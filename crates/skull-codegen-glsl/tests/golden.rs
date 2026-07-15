@@ -123,8 +123,7 @@ fn if_branch_pick() {
 
 /// The motivating fn: `vec2_normalize`'s zero-guard body emits (NOT the GLSL
 /// `normalize` builtin, which is undefined at 0). The `&&` becomes a bool temp
-/// diamond; the outer `if` splits the guard from the normalize. (The `v.x == 0`
-/// int-literal-in-float-comparison is a separate rendering gap, not the relooper's.)
+/// diamond; the outer `if` splits the guard from the normalize.
 #[test]
 fn vec2_normalize_body() {
     let src = r#"@pure fn root(v: Vec2) -> Vec2 { return vec2_normalize(v) }"#;
@@ -134,8 +133,8 @@ fn vec2_normalize_body() {
         "vec2 vec2_normalize(vec2 v) {\n  \
          bool t2;\n  \
          float len;\n  \
-         if ((v.x == 0)) {\n    \
-           t2 = (v.y == 0);\n  \
+         if ((v.x == 0.0)) {\n    \
+           t2 = (v.y == 0.0);\n  \
          } else {\n    \
            t2 = false;\n  \
          }\n  \
@@ -491,5 +490,38 @@ fn nested_while_loops() {
            i = (i + 1);\n  \
          }\n  \
          return acc;\n}"
+    );
+}
+
+/// Int literals in float contexts render as float literals: GLSL ES has no
+/// implicit int->float conversion, and desktop drivers vary on the corner.
+/// Int contexts (the match ladder's `n == 1`, counted-for bounds) keep ints.
+#[test]
+fn int_literal_float_contexts() {
+    let src = r#"
+        @pure fn root(x: float) -> float {
+            let y = 0.5
+            if x > 0 {
+                y = x + 1
+            }
+            if x == 3 {
+                y = sin(2)
+            }
+            return 0
+        }
+    "#;
+    let glsl = emit(src, &["root"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float root(float x) {\n  \
+         float y;\n  \
+         y = 0.5;\n  \
+         if ((x > 0.0)) {\n    \
+           y = (x + 1.0);\n  \
+         }\n  \
+         if ((x == 3.0)) {\n    \
+           y = sin(2.0);\n  \
+         }\n  \
+         return 0.0;\n}"
     );
 }

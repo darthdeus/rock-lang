@@ -305,6 +305,8 @@ struct FnEmit<'a> {
     ws: &'a Workspace,
     overloaded: &'a HashSet<Ustr>,
     f: &'a MirFunc,
+    /// GLSL return type (None = void); floats coerce int-literal returns.
+    ret_ty: Option<GlslTy>,
     /// Cell -> emitted GLSL identifier.
     cell_name: HashMap<Idx<Cell>, String>,
     /// Cell -> GLSL type (params from signature, others from first store).
@@ -351,10 +353,11 @@ fn emit_fn_def(
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     let name = mangle_fn(ws, f, overloaded);
-    let ret = match f.return_ty {
-        Some(rt) => glsl_ty(ws, rt, f.name_span, "return")?.name(),
-        None => "void",
+    let ret_ty = match f.return_ty {
+        Some(rt) => Some(glsl_ty(ws, rt, f.name_span, "return")?),
+        None => None,
     };
+    let ret = ret_ty.map_or("void", |t| t.name());
 
     let st = structure::analyze(mf);
     let mut counted = HashMap::default();
@@ -378,6 +381,7 @@ fn emit_fn_def(
         ws,
         overloaded,
         f: mf,
+        ret_ty,
         cell_name: HashMap::default(),
         cell_ty: HashMap::default(),
         counted,
@@ -505,11 +509,38 @@ impl FnEmit<'_> {
         }
     }
 
+    /// Render with a known expected type. In a float context an int literal
+    /// renders as float text and any other int-typed value gets an explicit
+    /// `float(...)` -- GLSL ES has no implicit int->float conversion and desktop
+    /// drivers vary on the corner, so never lean on the implicit rule.
+    fn render_val_t(&self, iid: Idx<Inst>, want: GlslTy) -> Result<String, CompilerError> {
+        if want == GlslTy::Float {
+            match &self.f.insts[iid] {
+                Inst::Const(Lit::Int(i)) => return Ok(fmt_float(*i as f64)),
+                Inst::Neg(x) => return Ok(format!("(-{})", self.render_val_t(*x, GlslTy::Float)?)),
+                _ => {
+                    if self.ty_of(iid) == GlslTy::Int {
+                        return Ok(format!("float({})", self.render_val(iid)?));
+                    }
+                }
+            }
+        }
+        self.render_val(iid)
+    }
+
     /// Render a value instruction as a GLSL expression (inlined; MIR values are
     /// single-use, so no CSE duplication).
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         let bin = |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
             Ok(format!("({} {} {})", s.render_val(*a)?, op, s.render_val(*b)?))
+        };
+        let fbin = |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
+            Ok(format!(
+                "({} {} {})",
+                s.render_val_t(*a, GlslTy::Float)?,
+                op,
+                s.render_val_t(*b, GlslTy::Float)?
+            ))
         };
         Ok(match &self.f.insts[iid] {
             Inst::Const(Lit::Float(f)) => fmt_float(*f),
@@ -518,20 +549,38 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Nil) => return Err(err(self.span(), "shader profile: null literal is not tier 0")),
             Inst::Const(Lit::Str(_)) => return Err(err(self.span(), "shader profile: string literal is not tier 0")),
             Inst::Load(c) => self.cell_name[c].clone(),
-            Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
-            Inst::IntSub(a, b) | Inst::FloatSub(a, b) => bin(a, "-", b, self)?,
-            Inst::IntMul(a, b) | Inst::FloatMul(a, b) => bin(a, "*", b, self)?,
-            Inst::FloatDiv(a, b) => bin(a, "/", b, self)?,
-            Inst::FloatMod(a, b) => format!("mod({}, {})", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::IntAdd(a, b) => bin(a, "+", b, self)?,
+            Inst::FloatAdd(a, b) => fbin(a, "+", b, self)?,
+            Inst::IntSub(a, b) => bin(a, "-", b, self)?,
+            Inst::FloatSub(a, b) => fbin(a, "-", b, self)?,
+            Inst::IntMul(a, b) => bin(a, "*", b, self)?,
+            Inst::FloatMul(a, b) => fbin(a, "*", b, self)?,
+            Inst::FloatDiv(a, b) => fbin(a, "/", b, self)?,
+            Inst::FloatMod(a, b) => format!(
+                "mod({}, {})",
+                self.render_val_t(*a, GlslTy::Float)?,
+                self.render_val_t(*b, GlslTy::Float)?
+            ),
             // GLSL int / and % are undefined on negatives -> floored helpers.
             Inst::IntDiv(a, b) => format!("__rock_idiv({}, {})", self.render_val(*a)?, self.render_val(*b)?),
             Inst::IntMod(a, b) => format!("__rock_imod({}, {})", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::IntLt(a, b) | Inst::FloatLt(a, b) => bin(a, "<", b, self)?,
-            Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => bin(a, "<=", b, self)?,
-            Inst::IntGt(a, b) | Inst::FloatGt(a, b) => bin(a, ">", b, self)?,
-            Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => bin(a, ">=", b, self)?,
-            Inst::Eq(a, b) => bin(a, "==", b, self)?,
-            Inst::NotEq(a, b) => bin(a, "!=", b, self)?,
+            Inst::IntLt(a, b) => bin(a, "<", b, self)?,
+            Inst::FloatLt(a, b) => fbin(a, "<", b, self)?,
+            Inst::IntLeq(a, b) => bin(a, "<=", b, self)?,
+            Inst::FloatLeq(a, b) => fbin(a, "<=", b, self)?,
+            Inst::IntGt(a, b) => bin(a, ">", b, self)?,
+            Inst::FloatGt(a, b) => fbin(a, ">", b, self)?,
+            Inst::IntGeq(a, b) => bin(a, ">=", b, self)?,
+            Inst::FloatGeq(a, b) => fbin(a, ">=", b, self)?,
+            // Untyped Eq/NotEq: a float on either side floats the comparison.
+            Inst::Eq(a, b) | Inst::NotEq(a, b) => {
+                let op = if matches!(self.f.insts[iid], Inst::Eq(..)) { "==" } else { "!=" };
+                if self.ty_of(*a) == GlslTy::Float || self.ty_of(*b) == GlslTy::Float {
+                    fbin(a, op, b, self)?
+                } else {
+                    bin(a, op, b, self)?
+                }
+            }
             Inst::Neg(x) => format!("(-{})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
             Inst::FloatToInt(x) => format!("int({})", self.render_val(*x)?),
@@ -544,7 +593,7 @@ impl FnEmit<'_> {
                     other => return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0"))),
                 };
                 let args: Result<Vec<String>, CompilerError> =
-                    fields.iter().map(|(_, v)| self.render_val(*v)).collect();
+                    fields.iter().map(|(_, v)| self.render_val_t(*v, GlslTy::Float)).collect();
                 format!("{ctor}({})", args?.join(", "))
             }
             Inst::Call { func, args } => self.render_call(*func, args)?,
@@ -567,16 +616,25 @@ impl FnEmit<'_> {
                 return Ok(format!("({} {} {})", render_operand(0, self)?, sym, render_operand(1, self)?));
             }
         }
+        // Args render against the declared param type where it maps to GLSL
+        // (a generic param, e.g. `min<T>`, doesn't -- those render plain).
+        let arg_t = |i: usize, a: Idx<Inst>, e: &Self| -> Result<String, CompilerError> {
+            match cf.param_decls.get(i).and_then(|p| glsl_ty(e.ws, p.ty, cf.name_span, "arg").ok()) {
+                Some(want) => e.render_val_t(a, want),
+                None => e.render_val(a),
+            }
+        };
         if let Some(tmpl) = intrinsic_template(cf) {
             let mut s = tmpl.to_string();
             for (i, a) in args.iter().enumerate() {
-                s = s.replace(&format!("${}", i + 1), &self.render_val(*a)?);
+                s = s.replace(&format!("${}", i + 1), &arg_t(i, *a, self)?);
             }
             return Ok(s);
         }
         // An emittable user fn -> a plain call to its (mangled) GLSL name.
         let gname = mangle_fn(self.ws, cf, self.overloaded);
-        let rargs: Result<Vec<String>, CompilerError> = args.iter().map(|a| self.render_val(*a)).collect();
+        let rargs: Result<Vec<String>, CompilerError> =
+            args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
         Ok(format!("{gname}({})", rargs?.join(", ")))
     }
 
@@ -721,7 +779,10 @@ impl FnEmit<'_> {
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.f.blocks[b].insts.clone() {
             if let Inst::Store { cell, value } = self.f.insts[iid] {
-                let rhs = self.render_val(value)?;
+                let rhs = match self.cell_ty.get(&cell) {
+                    Some(&want) => self.render_val_t(value, want)?,
+                    None => self.render_val(value)?,
+                };
                 let line = format!("{} = {};", self.cell_name[&cell], rhs);
                 self.push(&line);
             }
@@ -733,7 +794,10 @@ impl FnEmit<'_> {
         match vs {
             [] => self.push("return;"),
             [v] => {
-                let s = self.render_val(*v)?;
+                let s = match self.ret_ty {
+                    Some(want) => self.render_val_t(*v, want)?,
+                    None => self.render_val(*v)?,
+                };
                 self.push(&format!("return {s};"));
             }
             _ => return Err(err(self.span(), "shader profile: multi-value return is not tier 0")),
