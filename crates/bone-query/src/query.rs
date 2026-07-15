@@ -3548,19 +3548,27 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<
     // the duplicate is popup noise), first-wins to match the general path's
     // per-name fn dedup.
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
+    // Iterator receivers additionally get the generic `Iterator`-bounded
+    // combinators (`enumerate`/`map`/`filter`/`collect`/...) whose first param
+    // is `it: I` with `<I: Iterator<..>>` -- not a nominal match, but UFCS-legal
+    // (`it.enumerate()`). Gated on the receiver structurally satisfying
+    // `Iterator` (bone's rule: a `next(recv) -> (bool, E)` in scope).
+    let recv_is_iter = receiver_is_iterator(ws, name);
     for m in ws.modules.iter() {
         for f in m.functions.values() {
             if f.name.as_str().starts_with("__") {
                 continue;
             }
             if let Some(p0) = f.param_decls.first() {
-                if struct_name_of_ty(ws, None, p0.ty) != Some(name) {
-                    continue;
-                }
-                if let Some(want) = recv_elem {
-                    if !vec_param_elem_matches(ws, p0.ty, want) {
-                        continue;
+                let nominal_match = struct_name_of_ty(ws, None, p0.ty) == Some(name);
+                if nominal_match {
+                    if let Some(want) = recv_elem {
+                        if !vec_param_elem_matches(ws, p0.ty, want) {
+                            continue;
+                        }
                     }
+                } else if !(recv_is_iter && fn_first_param_is_iter_bound(ws, f)) {
+                    continue;
                 }
                 if seen.insert(f.name) {
                     out.push(UfcsMethod {
@@ -3576,6 +3584,49 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<
         }
     }
     out
+}
+
+/// Whether receiver struct `name` structurally satisfies `Iterator` -- bone's
+/// rule (`bone-inference/src/iter.rs`): a `next(name) -> (bool, E)` resolves.
+/// Gates the generic `Iterator`-bounded UFCS combinators.
+fn receiver_is_iterator(ws: &Workspace, name: Ustr) -> bool {
+    ws.modules.iter().flat_map(|m| m.functions.values()).any(|f| {
+        f.name.as_str() == "next"
+            && f.param_decls
+                .first()
+                .is_some_and(|p0| struct_name_of_ty(ws, None, p0.ty) == Some(name))
+            && f.return_ty.is_some_and(|rt| ty_is_bool_first_pair(ws, rt))
+    })
+}
+
+/// Whether `ty` is a 2-tuple `(bool, _)` -- an `Iterator` `next` return shape.
+fn ty_is_bool_first_pair(ws: &Workspace, ty: TyId) -> bool {
+    let Some(hir::TypeExpr::Tuple { elements }) = deref_ty(ws, None, ty) else {
+        return false;
+    };
+    let idxs: Vec<_> = elements.into_iter().collect();
+    idxs.len() == 2
+        && matches!(
+            deref_ty(ws, None, ty.with_idx(idxs[0])),
+            Some(hir::TypeExpr::Builtin(hir::BuiltinTy::Bool))
+        )
+}
+
+/// Whether fn `f`'s first param is an `Iterator`-bounded generic (`it: I` with
+/// `<I: Iterator<..>>`) -- the combinator shape that's UFCS-callable on any
+/// iterator receiver.
+fn fn_first_param_is_iter_bound(ws: &Workspace, f: &hir::Function) -> bool {
+    let Some(p0) = f.param_decls.first() else {
+        return false;
+    };
+    let Some(hir::TypeExpr::Generic(pv, _)) = deref_ty(ws, None, p0.ty) else {
+        return false;
+    };
+    let pv = *pv;
+    f.generics.iter().zip(&f.generic_bounds).any(|(g, bound)| {
+        bound.is_some()
+            && matches!(deref_ty(ws, None, *g), Some(hir::TypeExpr::Generic(gv, _)) if *gv == pv)
+    })
 }
 
 /// Whether a Vec UFCS candidate whose first param is `[E']` applies to a

@@ -233,6 +233,65 @@ fn member_completion_on_a_ufcs_call_receiver() {
 }
 
 #[test]
+fn member_completion_offers_iterator_combinators() {
+    // `it.<cursor>` where `it: VecIter<T>` (result of `xs.iter()`). The generic
+    // `Iterator`-bounded combinators (`enumerate<I: Iterator<T>, T>(it: I)`,
+    // `map`, `filter`, `collect`, ...) are UFCS-callable on ANY iterator receiver,
+    // so completion must offer them alongside the struct's own `next`. Regression:
+    // `ufcs_methods` matched only NOMINAL first params, so a generic first param
+    // never surfaced -> `it.enu` returned 0 items. Capture:
+    // 1784133159-wisp_intent.rock (`m.trail.iter().enu()`).
+    let src = "fn r(xs: [int]) {\n  let it = xs.iter()\n  it.\n  let _n = 0\n}\n";
+    let l = labels(src, 2, 5); // after `it.`
+    assert!(l.contains(&"enumerate".to_string()), "iterator combinator: {l:?}");
+    assert!(l.contains(&"map".to_string()), "iterator combinator: {l:?}");
+    assert!(l.contains(&"filter".to_string()), "iterator combinator: {l:?}");
+    assert!(l.contains(&"collect".to_string()), "iterator terminal: {l:?}");
+    assert!(l.contains(&"next".to_string()), "direct struct method: {l:?}");
+}
+
+#[test]
+fn iterator_combinators_offered_on_user_defined_iterator() {
+    // A user struct with a conforming `next(recv) -> (bool, E)` satisfies
+    // `Iterator` structurally -- the combinators are UFCS-callable on it too,
+    // same rule bone uses for the bound.
+    let src = "struct Counter { n: int }\n\
+               fn Counter.next(c) -> (bool, int) { return (c.n <= 0, c.n) }\n\
+               fn r() {\n  let c = Counter { n: 3 }\n  c.\n  let _x = 0\n}\n";
+    let l = labels(src, 4, 4); // after `c.`
+    assert!(l.contains(&"next".to_string()), "own method: {l:?}");
+    assert!(l.contains(&"enumerate".to_string()), "combinator on user iterator: {l:?}");
+    assert!(l.contains(&"map".to_string()), "combinator on user iterator: {l:?}");
+}
+
+#[test]
+fn iterator_combinators_not_offered_when_next_is_nonconforming() {
+    // A `next` that does NOT return `(bool, E)` (here `-> int`) does not make the
+    // receiver an `Iterator` -- no combinators. Mirrors `bound_next_elem`.
+    let src = "struct Fake { n: int }\n\
+               fn Fake.next(f) -> int { return f.n }\n\
+               fn r() {\n  let f = Fake { n: 3 }\n  f.\n  let _x = 0\n}\n";
+    let l = labels(src, 4, 4); // after `f.`
+    assert!(l.contains(&"next".to_string()), "own method: {l:?}");
+    assert!(!l.contains(&"enumerate".to_string()), "no combinator on non-iterator next: {l:?}");
+    assert!(!l.contains(&"map".to_string()), "no combinator on non-iterator next: {l:?}");
+}
+
+#[test]
+fn iterator_combinators_not_offered_on_non_iterator() {
+    // The combinator UFCS surface is gated on the receiver structurally
+    // satisfying `Iterator` (a `next(recv) -> (bool, E)` in scope). A plain
+    // struct with no `next` must NOT get `enumerate`/`map`/`collect`.
+    let src = "struct Plain { a: int }\n\
+               fn r() {\n  let p = Plain { a: 1 }\n  p.\n  let _n = 0\n}\n";
+    let l = labels(src, 3, 4); // after `p.`
+    assert!(l.contains(&"a: int".to_string()), "field present: {l:?}");
+    assert!(!l.contains(&"enumerate".to_string()), "no combinator on non-iterator: {l:?}");
+    assert!(!l.contains(&"map".to_string()), "no combinator on non-iterator: {l:?}");
+    assert!(!l.contains(&"collect".to_string()), "no combinator on non-iterator: {l:?}");
+}
+
+#[test]
 fn member_in_fn_returning_a_struct_is_not_a_struct_literal() {
     // Regression: `fn c() -> Result { return res. }` -- the `-> Result {` body
     // brace must NOT be read as a `Result { }` literal; `res.` is member access.
