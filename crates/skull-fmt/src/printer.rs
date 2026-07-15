@@ -281,6 +281,12 @@ impl<'a> Printer<'a> {
                 parts.push(Doc::text(" "));
             } else {
                 parts.push(hardline());
+                // Standalone comments between annotation lines (the parser
+                // attaches none of them to the item, so recover from trivia).
+                for (_, t) in self.trivia.standalone_comments_between(anno.span.line_range.1, next_line) {
+                    parts.push(self.comment_line(t));
+                    parts.push(hardline());
+                }
             }
         }
         // Inline annotations (`@pure fn ..`) sit on the signature line; their
