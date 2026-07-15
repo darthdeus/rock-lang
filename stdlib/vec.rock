@@ -62,46 +62,28 @@ value Vec4 {
     return Vec2 { x: a.x / int_to_float(b), y: a.y / int_to_float(b) }
 }
 
-@pure fn vec2_distance(a: Vec2, b: Vec2) -> float {
+@pure fn Vec2.distance(a, b: Vec2) -> float {
     let dx = a.x - b.x
     let dy = a.y - b.y
 
     return sqrt(dx * dx + dy * dy)
 }
 
-@pure fn vec2_rotated(v: Vec2, angle: float) -> Vec2 {
-    let cos_a = cos(angle)
-    let sin_a = sin(angle)
-
-    return Vec2 {
-        x: v.x * cos_a - v.y * sin_a,
-        y: v.x * sin_a + v.y * cos_a
-    }
-}
-
-@pure fn vec2_angle(v: Vec2) -> float {
+@pure fn Vec2.angle(v) -> float {
     return atan2(v.y, v.x)
 }
 
-@pure fn vec2_neg(v: Vec2) -> Vec2 {
+@pure fn Vec2.neg(v) -> Vec2 {
     return Vec2 { x: -v.x, y: -v.y }
 }
 
-@pure fn vec2_dot(a: Vec2, b: Vec2) -> float {
+@pure fn Vec2.dot(a, b: Vec2) -> float {
     return a.x * b.x + a.y * b.y
 }
 
-@pure fn vec2_length(v: Vec2) -> float {
+@pure fn Vec2.length(v) -> float {
     return (v.x * v.x + v.y * v.y).sqrt()
 }
-
-// Bare-name UFCS wrappers for vec2_*.
-@pure fn Vec2.distance(a, b: Vec2) -> float { return vec2_distance(a, b) }
-@pure fn Vec2.rotated(v, angle: float) -> Vec2 { return vec2_rotated(v, angle) }
-@pure fn Vec2.angle(v) -> float { return vec2_angle(v) }
-@pure fn Vec2.neg(v) -> Vec2 { return vec2_neg(v) }
-@pure fn Vec2.dot(a, b: Vec2) -> float { return vec2_dot(a, b) }
-@pure fn Vec2.length(v) -> float { return vec2_length(v) }
 
 fn Vec2.to_array(v) -> [float] {
     return [v.x, v.y]
@@ -116,7 +98,7 @@ fn Vec2.to_array(v) -> [float] {
 @pure fn v(x: float) -> Vec2 { return Vec2 { x: x, y: x } }
 @inline @pure fn v(x: float, y: float) -> Vec2 { return Vec2 { x: x, y: y } }
 
-@pure fn vec2_normalize(v: Vec2) -> Vec2 {
+@pure fn Vec2.normalize(v) -> Vec2 {
     if v.x == 0 && v.y == 0 {
         return zero()
     } else {
@@ -124,7 +106,6 @@ fn Vec2.to_array(v) -> [float] {
         return Vec2 { x: v.x / len, y: v.y / len }
     }
 }
-@pure fn Vec2.normalize(v) -> Vec2 { return vec2_normalize(v) }
 
 // Per-element sign/abs. UFCS: `d.sign()`, `d.abs()`.
 @pure fn Vec2.sign(a) -> Vec2 { return v(sign(a.x), sign(a.y)) }
@@ -134,26 +115,22 @@ fn Vec2.to_array(v) -> [float] {
     return v(angle.cos(), angle.sin())
 }
 
-@pure fn vec2_rotate(a: Vec2, angle: float) -> Vec2 {
+@pure fn Vec2.rotate(a, angle: float) -> Vec2 {
     let cos = angle.cos()
     let sin = angle.sin()
 
     return v(a.x * cos - a.y * sin, a.x * sin + a.y * cos)
 }
 
-// Rotate `rhs` by the angle of `a` (complex multiply). Normalized `a` gives a
-// pure rotation; otherwise it also scales by |a|.
-@pure fn vec2_rotate(a: Vec2, rhs: Vec2) -> Vec2 {
+// Complex-multiply `a` by `rhs`: rotates `a` by the angle of `rhs` (and scales
+// by |rhs|). A normalized `rhs` gives a pure rotation.
+@pure fn Vec2.rotate(a, rhs: Vec2) -> Vec2 {
     return v(a.x * rhs.x - a.y * rhs.y, a.x * rhs.y + a.y * rhs.x)
 }
 
-fn vec2_wiggle(v: Vec2, angle: float) -> Vec2 {
+fn Vec2.wiggle(v, angle: float) -> Vec2 {
     return v.rotate(vec2_from_angle(random_range(angle / -2.0, angle / 2)))
 }
-
-@pure fn Vec2.rotate(v, angle: float) -> Vec2 { return vec2_rotate(v, angle) }
-@pure fn Vec2.rotate(v, rhs: Vec2) -> Vec2 { return vec2_rotate(v, rhs) }
-fn Vec2.wiggle(v, angle: float) -> Vec2 { return vec2_wiggle(v, angle) }
 
 fn random_dir() -> Vec2 {
     let angle = random_range(0.0, PI * 2.0)
@@ -181,7 +158,7 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 }
 
 @pure fn intersect_circle(center_a: Vec2, radius_a: float, center_b: Vec2, radius_b: float) -> bool {
-    let dist = vec2_distance(center_a, center_b)
+    let dist = center_a.distance(center_b)
     return dist < (radius_a + radius_b)
 }
 
@@ -217,11 +194,11 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return v(a.x / b, a.y / b, a.z / b)
 }
 
-@pure fn vec3_dot(a: Vec3, b: Vec3) -> float {
+@pure fn Vec3.dot(a, b: Vec3) -> float {
     return a.x * b.x + a.y * b.y + a.z * b.z
 }
 
-@pure fn vec3_cross(a: Vec3, b: Vec3) -> Vec3 {
+@pure fn Vec3.cross(a, b: Vec3) -> Vec3 {
     return v(
         a.y * b.z - a.z * b.y,
         a.z * b.x - a.x * b.z,
@@ -229,21 +206,21 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     )
 }
 
-@pure fn vec3_length(a: Vec3) -> float {
-    return sqrt(vec3_dot(a, a))
+@pure fn Vec3.length(a) -> float {
+    return sqrt(a.dot(a))
 }
 
-@pure fn vec3_distance(a: Vec3, b: Vec3) -> float {
-    return vec3_length(a - b)
+@pure fn Vec3.distance(a, b: Vec3) -> float {
+    return (a - b).length()
 }
 
-@pure fn vec3_normalize(a: Vec3) -> Vec3 {
-    let len = vec3_length(a)
+@pure fn Vec3.normalize(a) -> Vec3 {
+    let len = a.length()
     if len < 0.000001 { return v(0.0, 0.0, 0.0) }
     return a / len
 }
 
-@pure fn vec3_lerp(a: Vec3, b: Vec3, t: float) -> Vec3 {
+@pure fn Vec3.lerp(a, b: Vec3, t: float) -> Vec3 {
     return v(
         a.x + (b.x - a.x) * t,
         a.y + (b.y - a.y) * t,
@@ -251,19 +228,7 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     )
 }
 
-@pure fn Vec3.dot(a, b: Vec3) -> float { return vec3_dot(a, b) }
-@pure fn Vec3.cross(a, b: Vec3) -> Vec3 { return vec3_cross(a, b) }
-@pure fn Vec3.length(a) -> float { return vec3_length(a) }
-@pure fn Vec3.distance(a, b: Vec3) -> float { return vec3_distance(a, b) }
-@pure fn Vec3.normalize(a) -> Vec3 { return vec3_normalize(a) }
-@pure fn Vec3.lerp(a, b: Vec3, t: float) -> Vec3 { return vec3_lerp(a, b, t) }
-
 @inline
 @pure fn Vec3.xy(a) -> Vec2 {
     return v(a.x, a.y)
-}
-
-@inline
-@pure fn vec3_from_ground(ground: Vec2, z: float) -> Vec3 {
-    return v(ground.x, ground.y, z)
 }

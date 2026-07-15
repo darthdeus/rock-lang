@@ -60,8 +60,8 @@ fn callee_before_caller() {
 fn vec_returning_and_intrinsics() {
     let src = r#"
         @pure fn random2(p: Vec2) -> Vec2 {
-            let da = vec2_dot(p, v(127.32, 231.4))
-            let db = vec2_dot(p, v(12.3, 146.3))
+            let da = p.dot(v(127.32, 231.4))
+            let db = p.dot(v(12.3, 146.3))
             return v(fract(sin(da)), fract(sin(db)))
         }
     "#;
@@ -85,7 +85,7 @@ fn nested_counted_loops() {
                 for x in -1..2 {
                     let n = v(int_to_float(x), int_to_float(y))
                     let diff = n + random2(i_p + n) - f_p
-                    dist = min(dist, vec2_length(diff))
+                    dist = min(dist, diff.length())
                 }
             }
             return dist
@@ -121,30 +121,36 @@ fn if_branch_pick() {
     );
 }
 
-/// The motivating fn: `vec2_normalize`'s zero-guard body emits (NOT the GLSL
+/// The motivating fn: `Vec2.normalize`'s zero-guard body emits (NOT the GLSL
 /// `normalize` builtin, which is undefined at 0). The `&&` becomes a bool temp
-/// diamond; the outer `if` splits the guard from the normalize.
+/// diamond; the outer `if` splits the guard from the normalize. `normalize` is
+/// deliberately absent from the intrinsic table, so the method's mangled fn def
+/// emits.
 #[test]
 fn vec2_normalize_body() {
-    let src = r#"@pure fn root(v: Vec2) -> Vec2 { return vec2_normalize(v) }"#;
-    let glsl = emit(src, &["vec2_normalize"]).expect("emit");
-    assert_eq!(
-        glsl.trim(),
-        "vec2 vec2_normalize(vec2 v) {\n  \
-         bool t2;\n  \
-         float len;\n  \
-         if ((v.x == 0.0)) {\n    \
-           t2 = (v.y == 0.0);\n  \
-         } else {\n    \
-           t2 = false;\n  \
-         }\n  \
-         if (t2) {\n    \
-           return vec2(0.0);\n  \
-         } else {\n    \
-           len = sqrt(((v.x * v.x) + (v.y * v.y)));\n    \
-           return vec2((v.x / len), (v.y / len));\n  \
-         }\n}"
+    let src = r#"@pure fn root(v: Vec2) -> Vec2 { return v.normalize() }"#;
+    let glsl = emit(src, &["root"]).expect("emit");
+    assert!(
+        glsl.contains(
+            "vec2 normalize__Vec2_ret_Vec2(vec2 v) {\n  \
+             bool t2;\n  \
+             float len;\n  \
+             if ((v.x == 0.0)) {\n    \
+               t2 = (v.y == 0.0);\n  \
+             } else {\n    \
+               t2 = false;\n  \
+             }\n  \
+             if (t2) {\n    \
+               return vec2(0.0);\n  \
+             } else {\n    \
+               len = sqrt(((v.x * v.x) + (v.y * v.y)));\n    \
+               return vec2((v.x / len), (v.y / len));\n  \
+             }\n}"
+        ),
+        "got:\n{glsl}"
     );
+    // The native GLSL builtin must NOT be used (undefined at 0).
+    assert!(!glsl.contains("= normalize(v)"), "must not use native normalize:\n{glsl}");
 }
 
 /// Statement `if` with no else: the empty else block is suppressed.
@@ -599,7 +605,7 @@ fn fragment_entry_scaffold() {
 
         @shader(fragment)
         fn glow(u: GlowU, scene: Sampler2D, tc: Vec2) -> Vec4 {
-            let m = falloff(vec2_distance(tc, u.center), u.radius)
+            let m = falloff(tc.distance(u.center), u.radius)
             let t = texture(scene, tc)
             let k = 1.0 + u.strength * m
             return Vec4 { x: t.x * k, y: t.y * k, z: t.z * k, w: t.w }

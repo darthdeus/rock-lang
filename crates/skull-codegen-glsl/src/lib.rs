@@ -274,10 +274,13 @@ fn intrinsic_template(f: &Function) -> Option<&'static str> {
         ("smoothstep", 3) => Some("smoothstep($1, $2, $3)"),
         // int<->float identity casts.
         ("int_to_float" | "float" | "to_float", 1) => Some("float($1)"),
-        // Vec2 helpers (the field-math bodies never emit).
-        ("vec2_dot", 2) => Some("dot($1, $2)"),
-        ("vec2_length", 1) => Some("length($1)"),
-        ("vec2_distance", 2) => Some("distance($1, $2)"),
+        // Vec method helpers (the field-math bodies never emit). Keyed by the
+        // base method name, which mangling strips the receiver-type prefix from
+        // (`Vec2.dot` -> `dot`); GLSL `dot`/`length`/`distance` are overloaded
+        // across vecN, so one entry covers Vec2/Vec3/Vec4.
+        ("dot", 2) => Some("dot($1, $2)"),
+        ("length", 1) => Some("length($1)"),
+        ("distance", 2) => Some("distance($1, $2)"),
         ("v", 2) => Some("vec2($1, $2)"),
         ("v", 1) => Some("vec2($1)"),
         ("v", 0) | ("zero", 0) => Some("vec2(0.0)"),
