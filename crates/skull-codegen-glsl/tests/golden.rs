@@ -186,7 +186,9 @@ fn if_else_if_ladder() {
     );
 }
 
-/// Expression-position `if` into a cell: both arms store the result cell.
+/// Expression-position `if` into a cell folds to a ternary (cosmetic tier,
+/// `docs/glsl-relooper-plan.md` item 2): both arms single-store the single-use
+/// result cell -> `(cond ? a : b)` at the use.
 #[test]
 fn expression_if_into_cell() {
     let src = r#"@pure fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#;
@@ -194,14 +196,24 @@ fn expression_if_into_cell() {
     assert_eq!(
         glsl.trim(),
         "float f(float x) {\n  \
-         float t1;\n  \
          float r;\n  \
-         if ((x > 0.0)) {\n    \
-           t1 = x;\n  \
-         } else {\n    \
-           t1 = (0.0 - x);\n  \
-         }\n  \
-         r = t1;\n  \
+         r = ((x > 0.0) ? x : (0.0 - x));\n  \
+         return r;\n}"
+    );
+}
+
+/// A ternary over an int-typed if-expr keeps the outer `float(...)` coercion
+/// (both arms unify to int; the `let r: float` subsumption wraps the whole
+/// ternary, exactly as the diamond's `r = float(t1)` store did).
+#[test]
+fn ternary_int_result_outer_coercion() {
+    let src = r#"@pure fn f(x: float) -> float { let r: float = if x > 0.0 { 1 } else { 2 } return r }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert_eq!(
+        glsl.trim(),
+        "float f(float x) {\n  \
+         float r;\n  \
+         r = float(((x > 0.0) ? 1 : 2));\n  \
          return r;\n}"
     );
 }

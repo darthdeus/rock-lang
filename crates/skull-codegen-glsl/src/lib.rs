@@ -324,6 +324,9 @@ struct FoldedDiamond {
     then_val: Idx<Inst>,
     else_val: Idx<Inst>,
     kind: FoldKind,
+    /// The result cell's GLSL type -- ternary arms render at this type so an
+    /// int-in-float-context arm keeps the coercion the diamond's store applied.
+    result_ty: GlslTy,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -332,6 +335,8 @@ enum FoldKind {
     And,
     /// `if a then true else b` == `(a || b)`.
     Or,
+    /// `if a then b else c` == `(a ? b : c)`.
+    Ternary,
 }
 
 struct FnEmit<'a> {
@@ -609,22 +614,42 @@ impl FnEmit<'_> {
             if load_count.get(&rcell).copied().unwrap_or(0) != 1 {
                 continue;
             }
-            if self.cell_ty.get(&rcell) != Some(&GlslTy::Bool) {
+            let Some(&result_ty) = self.cell_ty.get(&rcell) else { continue };
+            // Soundness: the fold moves the expression to the cell's use site, so
+            // its inputs must be unchanged there. The arms go straight to `join`
+            // and store only `rcell`, so the only place an input could be mutated
+            // between the diamond and the use is `join` before the use -- require
+            // the use to be in `join` with no store preceding it.
+            if !self.use_hoistable_to(rcell, join) {
                 continue;
             }
-            let kind = if self.is_const_bool(eval, false) {
+            let kind = if result_ty == GlslTy::Bool && self.is_const_bool(eval, false) {
                 FoldKind::And
-            } else if self.is_const_bool(tval, true) {
+            } else if result_ty == GlslTy::Bool && self.is_const_bool(tval, true) {
                 FoldKind::Or
             } else {
-                continue;
+                FoldKind::Ternary
             };
             self.folded_cond.insert(
                 rcell,
-                FoldedDiamond { cond, then_val: tval, else_val: eval, kind },
+                FoldedDiamond { cond, then_val: tval, else_val: eval, kind, result_ty },
             );
             self.folded_block.insert(b, rcell);
         }
+    }
+
+    /// Whether `rcell`'s single use is in `join` with no `Store` preceding it
+    /// there -- the condition that makes hoisting the folded expression to the
+    /// use site sound (no input can be mutated between the diamond and the use).
+    fn use_hoistable_to(&self, rcell: Idx<Cell>, join: Idx<Block>) -> bool {
+        for &iid in &self.f.blocks[join].insts {
+            match self.f.insts[iid] {
+                Inst::Load(c) if c == rcell => return true,
+                Inst::Store { .. } => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// If `arm` is a single-store block (exactly one `Store`, any number of pure
@@ -655,6 +680,12 @@ impl FnEmit<'_> {
         Ok(match fd.kind {
             FoldKind::And => format!("({} && {})", cond, self.render_val(fd.then_val)?),
             FoldKind::Or => format!("({} || {})", cond, self.render_val(fd.else_val)?),
+            FoldKind::Ternary => format!(
+                "({} ? {} : {})",
+                cond,
+                self.render_val_t(fd.then_val, fd.result_ty)?,
+                self.render_val_t(fd.else_val, fd.result_ty)?
+            ),
         })
     }
 
