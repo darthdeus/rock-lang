@@ -477,6 +477,15 @@ pub fn scalarize_struct_cells(func: &mut MirFunc) {
 /// One SROA round; returns whether it rewrote anything (drives the fixpoint).
 fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     let nc = func.cells.len();
+    // Escape-site rematerialization (item 8): a whole-value load of a
+    // `nonnull_value_struct` binding that would otherwise ESCAPE (disqualifying
+    // its family) is instead rebuilt from the ctor's per-field cells AT the use
+    // site. `value_order` keeps each value ctor's declared field order (the
+    // rebuilt `MakeValueStruct` is positional); `escape_loads` are the loads to
+    // rewrite. The flag -- set at lowering only for non-null value bindings --
+    // is the ONLY license: no store/CFG heuristic (both proven unsound/too weak).
+    let mut value_order: HashMap<usize, Vec<ustr::Ustr>> = HashMap::default();
+    let mut escape_loads: Vec<(Idx<Inst>, Idx<Cell>)> = Vec::new();
     // A cell is a candidate iff every store to it is a struct ctor of one
     // consistent type. `cand[c]`: None = not yet seen / disqualified, Some(id) =
     // all stores so far are that struct. `cand_fields[c]` is its declared field
@@ -588,6 +597,11 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                             disq[ck] = true;
                         } else {
                             cand[ck] = Some(id);
+                            if matches!(id, StructId::Value(_)) {
+                                value_order
+                                    .entry(ck)
+                                    .or_insert_with(|| fields.iter().map(|(n, _)| *n).collect());
+                            }
                             cand_fields[ck]
                                 .get_or_insert_with(HashSet::default)
                                 .extend(fields.iter().map(|(n, _)| *n));
@@ -614,6 +628,15 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                 Some(o) if steps <= nc => {
                     cur = raw(o) as usize;
                     steps += 1;
+                    // An alias THROUGH a disqualified cell must not resolve past it:
+                    // a disqualified intermediate stays a whole aggregate whose value
+                    // is not its first alias's (e.g. a mixed-alias `if`-result cell,
+                    // stored `a` on one arm and `b` on the other). Following its stale
+                    // `alias[]` to that first root would unify this member with the
+                    // wrong value -- latent until escape-remat actually reads the rep.
+                    if disq[cur] {
+                        break None;
+                    }
                 }
                 Some(_) => break None, // cycle
                 None => break Some(cur),
@@ -672,14 +695,24 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                         _ => false,
                     };
                     if !ok {
-                        disq[raw(c) as usize] = true;
+                        // A flagged (non-null value-struct) binding rebuilds at the
+                        // use instead of pinning the family as an escaping aggregate.
+                        if func.cells[c].nonnull_value_struct {
+                            escape_loads.push((op, c));
+                        } else {
+                            disq[raw(c) as usize] = true;
+                        }
                     }
                 }
             });
         }
         term_uses_each(&b.term, &mut |op| {
             if let Some(&c) = load_cell.get(&op) {
-                disq[raw(c) as usize] = true; // a load used by a terminator escapes
+                if func.cells[c].nonnull_value_struct {
+                    escape_loads.push((op, c)); // rebuild at the terminator use
+                } else {
+                    disq[raw(c) as usize] = true; // a load used by a terminator escapes
+                }
             }
         });
     }
@@ -866,6 +899,34 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             news.push(func.insts.alloc(Inst::Store { cell: fc, value: fval }));
         }
         replacement.insert(store_i, news);
+    }
+    // Rematerialize each escaping value-struct load L in place: `Load(cell)` ->
+    // `MakeValueStruct{name, [(field, Load(field_cell))..]}`, with the field loads
+    // spliced before it. Reads the same field cells the ctor store now writes;
+    // a load only reached on a non-materializing path (an arena-scan MISS) runs
+    // no ctor. The escaping cell is flagged non-null, so its family root is a
+    // value ctor candidate carrying `value_order` -- else the family stayed whole
+    // and the load is untouched (a boxed read of the intact aggregate).
+    escape_loads.sort_by_key(|(l, _)| raw(*l));
+    escape_loads.dedup_by_key(|(l, _)| *l);
+    for (l, c) in escape_loads {
+        if !is_cand(c) {
+            continue;
+        }
+        let root = to_rep(c);
+        let Some(StructId::Value(name)) = cand[raw(root) as usize] else { continue };
+        let Some(order) = value_order.get(&(raw(root) as usize)).cloned() else { continue };
+        let mut news = Vec::with_capacity(order.len() + 1);
+        let mut mvs_fields = Vec::with_capacity(order.len());
+        for fname in order {
+            let fc = get_field_cell(func, root, fname);
+            let fl = func.insts.alloc(Inst::Load(fc));
+            news.push(fl);
+            mvs_fields.push((fname, fl));
+        }
+        func.insts[l] = Inst::MakeValueStruct { name, fields: mvs_fields };
+        news.push(l);
+        replacement.insert(l, news);
     }
     if !replacement.is_empty() {
         let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();

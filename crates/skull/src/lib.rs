@@ -343,53 +343,13 @@ if not _G.__rock_rng_next then
 end
 "#;
 
-/// Map a value-struct field type to a C type for `ffi.cdef`. Mirrors rock's
-/// `rock_type_to_c_type` (int/float/bool); a field that is itself a value
-/// struct uses its name. `None` for anything else (skull can't lay it out).
+/// Map a value-struct field type to a C type for `ffi.cdef`, or `None` when the
+/// field is not C-layout-mappable. Delegates to the single mappability oracle
+/// `skull_mir::lower::value_field_c_type` (shared with the GC-tier
+/// classification `value_struct_is_gc`, so the cdef view and the pack-site
+/// `_ct`/`_vt` choice can never diverge).
 fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
-    let te = match ty {
-        bone_semantic::prelude::TyId::Static(mid, idx) => ws.modules.get(mid.index())?.ty_arena[idx],
-        bone_semantic::prelude::TyId::Local(_) => return None,
-    };
-    match te {
-        TypeExpr::Builtin(BuiltinTy::Int) => Some("int".into()),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some("float".into()),
-        TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } if is_value_struct(ws, name) => Some(name.as_str().to_string()),
-        // A payload-free enum field is stored as its int tag (dual representation:
-        // table/singleton everywhere else, int only in C-layout). See
-        // docs/skull-enum-scalarization-plan.md.
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } if is_payload_free_enum(ws, name) => Some("int".into()),
-        // A cdata-eligible PAYLOAD enum field nests its own `{__tag, _0}` ctype
-        // inline (its cdef is emitted before value structs). The lever-2 storage
-        // win: an enum stored in a value struct / NativeBuffer pays 0 alloc.
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } if skull_mir::lower::enum_value_shape(ws, name).is_some() => Some(name.as_str().to_string()),
-        _ => None,
-    }
-}
-
-/// Whether `name` is a payload-free enum (every variant `Unit`) — the tier-1
-/// value-layout-eligible case (it scalarizes to its int tag).
-fn is_payload_free_enum(ws: &Workspace, name: ustr::Ustr) -> bool {
-    use bone_semantic::hir::VariantPayload;
-    match ws.enums_by_name.get(&name) {
-        Some(eid) => {
-            let ed = &ws.modules[eid.module.index()].enums[eid.def];
-            !ed.variants.is_empty()
-                && ed.variants.iter().all(|v| matches!(v.payload, VariantPayload::Unit))
-        }
-        None => false,
-    }
+    skull_mir::lower::value_field_c_type(ws, ty)
 }
 
 /// Whether a struct named `name` is declared `value` (C-layout cdata).
@@ -417,60 +377,69 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
 }
 
 /// Emit the `ffi.cdef` typedefs + `<Name>_ct = ffi.typeof(...)` constructors for
-/// every `value` struct, so value-struct construction (`V2_ct(x, y)`) and
-/// `NativeBuffer<V2>` (`ffi.new("V2[?]", n)`) work — rock's codegen emits this
-/// automatically. Also returns the set of struct names a typedef was emitted
-/// for, the single gate `value_struct_metatypes` / `c_struct_inspect_defs`
-/// must share (an `ffi.metatype`/`ffi.istype` on an undeclared ctype errors).
+/// every FFI-clean `value` struct, so value-struct construction (`V2_ct(x, y)`)
+/// and `NativeBuffer<V2>` (`ffi.new("V2[?]", n)`) work. Returns
+/// `(lua, ffi_emitted, gc_emitted)`:
+/// - `ffi_emitted` -- names a cdef typedef was emitted for (the gate
+///   `value_struct_metatypes` / `c_struct_inspect_defs` share: an
+///   `ffi.metatype`/`ffi.istype` on an undeclared ctype errors).
+/// - `gc_emitted` -- the GC-carrying (table-repr) names, materialized by
+///   `value_struct_gc_defs` as `<Name>_vt` table ctors (the tier is decided by
+///   `skull_mir::lower::value_struct_is_gc`; this replaces the old silent
+///   skip-then-`Name_ct`-nil-crash, unfuck backlog #51).
 ///
-/// C requires a nested struct's typedef to precede its use, so emission is
-/// dependency-ordered (mirrors rock-codegen/src/backend/lua/structs.rs):
-/// each round emits the structs whose value-struct fields are all emitted; a
-/// struct with a non-C-mappable field — or a field of a skipped struct — is
-/// skipped (its uses fail at runtime; the chunk stays loadable). A round
-/// with no progress is a definition cycle: rejected, not emitted broken.
+/// C requires a nested struct's typedef to precede its use, so FFI-clean
+/// emission is dependency-ordered (mirrors rock-codegen/src/backend/lua/
+/// structs.rs): each round emits the structs whose value-struct fields are all
+/// emitted. A round with no progress is a definition cycle: rejected, not
+/// emitted broken. A GC-carrying struct never enters the cdef ordering (a table
+/// has no C layout to sequence).
 fn value_struct_defs(
     ws: &Workspace,
-) -> Result<(String, rustc_hash::FxHashSet<ustr::Ustr>), CompilerError> {
+) -> Result<(String, rustc_hash::FxHashSet<ustr::Ustr>, rustc_hash::FxHashSet<ustr::Ustr>), CompilerError>
+{
     let vstructs = canonical_value_structs(ws);
-    let vnames: rustc_hash::FxHashSet<ustr::Ustr> = vstructs.iter().map(|s| s.name).collect();
     let mut emitted: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
+    let mut gc: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     if vstructs.is_empty() {
-        return Ok((String::new(), emitted));
+        return Ok((String::new(), emitted, gc));
     }
 
-    let mut skipped: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
+    // Partition by tier. GC-carrying value structs materialize as Lua tables
+    // (`_vt`), never as cdef, so only FFI-clean structs enter the ordering.
+    let mut ffi_structs = Vec::new();
+    for s in vstructs {
+        if skull_mir::lower::value_struct_is_gc(ws, s.name) {
+            gc.insert(s.name);
+        } else {
+            ffi_structs.push(s);
+        }
+    }
+    let ffi_names: rustc_hash::FxHashSet<ustr::Ustr> = ffi_structs.iter().map(|s| s.name).collect();
+
     let mut typedefs = String::new();
     let mut ctors = String::new();
-    let mut remaining = vstructs;
+    let mut remaining = ffi_structs;
 
     while !remaining.is_empty() {
         let mut next = Vec::new();
         let mut progress = false;
         for s in remaining {
             let mut body = String::new();
-            let mut unmappable = false;
             let mut blocked = false;
             for f in &s.fields {
-                match c_field_type(ws, f.ty) {
-                    Some(ct) => {
-                        let dep = ustr::Ustr::from(ct.as_str());
-                        if vnames.contains(&dep) {
-                            if skipped.contains(&dep) {
-                                unmappable = true;
-                            } else if !emitted.contains(&dep) {
-                                blocked = true;
-                            }
-                        }
-                        body.push_str(&format!("  {} {};\n", ct, f.name));
-                    }
-                    None => unmappable = true,
+                // An FFI-clean struct has every field C-mappable by construction
+                // (that is what `value_struct_is_gc == false` means).
+                let ct = c_field_type(ws, f.ty).expect(
+                    "FFI-clean value-struct field must be C-mappable (value_struct_is_gc invariant)",
+                );
+                let dep = ustr::Ustr::from(ct.as_str());
+                if ffi_names.contains(&dep) && !emitted.contains(&dep) {
+                    blocked = true;
                 }
+                body.push_str(&format!("  {} {};\n", ct, f.name));
             }
-            if unmappable {
-                skipped.insert(s.name);
-                progress = true;
-            } else if blocked {
+            if blocked {
                 next.push(s);
             } else {
                 typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, s.name));
@@ -491,12 +460,108 @@ fn value_struct_defs(
     }
 
     if typedefs.is_empty() {
-        return Ok((String::new(), emitted));
+        return Ok((String::new(), emitted, gc));
     }
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    Ok((format!("ffi.cdef[[\n{}]]\n{}", typedefs, ctors), emitted))
+    Ok((format!("ffi.cdef[[\n{}]]\n{}", typedefs, ctors), emitted, gc))
+}
+
+/// Whether a value-struct field is compared STRUCTURALLY in a GC-tier `__eq`
+/// (`==`, which for scalars/enums is value-equality and for a nested value
+/// struct fires that struct's own metatable), versus BY REFERENCE (`rawequal`).
+/// Scalars, enums, and nested value structs (either tier) are structural; a true
+/// GC-ref field (`[T]`, `Arena<T>`, `Map`, a generic `T`, `string`) is by
+/// reference -- `string` gives the same answer either way (Lua interns), and the
+/// contract fixes GC-refs to identity.
+fn gc_eq_is_structural(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    if c_field_type(ws, ty).is_some() {
+        return true;
+    }
+    let te = match ty {
+        bone_semantic::prelude::TyId::Static(mid, idx) => match ws.modules.get(mid.index()) {
+            Some(m) => m.ty_arena[idx],
+            None => return false,
+        },
+        bone_semantic::prelude::TyId::Local(_) => return false,
+    };
+    matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_value_struct(ws, name))
+}
+
+/// Emit the table-repr materialization defs for every GC-carrying value struct:
+/// a `<Name>_vt(...)` ctor building an immutable Lua table tagged `__ty`, plus a
+/// shared per-type metatable (`__rock_vt_<Name>`) carrying value `__eq`
+/// (scalar/value fields structural, GC-ref fields by reference) and
+/// `__tostring`. The single-call wire shape matches `<Name>_ct`, so pack sites
+/// choose a ctor NAME by tier, not a new code path.
+///
+/// The metatable table is preserved across hot reloads (`= X or {}`, then its
+/// fields reassigned) so tables built before a reload keep the SAME metatable
+/// identity -- LuaJIT only fires `__eq` when both operands share the metamethod.
+/// Rendering is handled by the generic table `inspect` path (a `__ty`-tagged
+/// table), so no `__ROCK_C_STRUCT` (ffi.istype) entry is needed.
+fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+    let mut out = String::new();
+    for s in canonical_value_structs(ws) {
+        if !gc.contains(&s.name) {
+            continue;
+        }
+        let n = s.name;
+        let mt = format!("__rock_vt_{n}");
+        out.push_str(&format!("{mt} = {mt} or {{}}\n"));
+        // value __eq
+        out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
+        out.push_str("  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n");
+        if s.fields.is_empty() {
+            out.push_str("  return true\n");
+        } else {
+            let cmps: Vec<String> = s
+                .fields
+                .iter()
+                .map(|f| {
+                    if gc_eq_is_structural(ws, f.ty) {
+                        format!("a.{n} == b.{n}", n = f.name)
+                    } else {
+                        format!("rawequal(a.{n}, b.{n})", n = f.name)
+                    }
+                })
+                .collect();
+            out.push_str(&format!("  return {}\n", cmps.join(" and ")));
+        }
+        out.push_str("end\n");
+        // __tostring: field-wise, mirroring the cdata tier's `Name { f: v, .. }`.
+        out.push_str(&format!("{mt}.__tostring = function(v)\n"));
+        if s.fields.is_empty() {
+            out.push_str(&format!("  return \"{n} {{ }}\"\n"));
+        } else {
+            let ts: Vec<String> = s
+                .fields
+                .iter()
+                .map(|f| format!("\"{}: \" .. tostring(v.{})", f.name, f.name))
+                .collect();
+            out.push_str(&format!(
+                "  return \"{n} {{ \" .. {} .. \" }}\"\n",
+                ts.join(" .. \", \" .. ")
+            ));
+        }
+        out.push_str("end\n");
+        // `<Name>_vt(...)` positional ctor in declared field order.
+        let params: Vec<String> = s.fields.iter().map(|f| f.name.as_str().to_string()).collect();
+        let assigns: Vec<String> =
+            s.fields.iter().map(|f| format!("{n} = {n}", n = f.name)).collect();
+        let mut body = assigns.join(", ");
+        if !body.is_empty() {
+            body.push_str(", ");
+        }
+        out.push_str(&format!(
+            "{n}_vt = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+            p = params.join(", "),
+            b = body,
+        ));
+    }
+    out
 }
 
 /// Emit the `ffi.cdef` typedef + `<Enum>_ct` ctor for every cdata-eligible enum
@@ -797,12 +862,21 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 /// value's metadata from its `__ty` tag. Mirrors
 /// rock-codegen/src/codegen_pass.rs. The prelude already seeds the table empty,
 /// so this only adds entries. No metatables: type tagging is the direct `__ty`.
-fn type_table_defs(ws: &Workspace) -> String {
+fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
     let mut out = String::new();
     let mut type_id = 100i64;
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            let kind = if s.is_value { "c_struct" } else { "struct" };
+            // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
+            // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
+            // immutable Lua tables (`value_table`).
+            let kind = if !s.is_value {
+                "struct"
+            } else if gc.contains(&s.name) {
+                "value_table"
+            } else {
+                "c_struct"
+            };
             let fields: Vec<String> = s
                 .fields
                 .iter()

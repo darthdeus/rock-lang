@@ -158,6 +158,60 @@ fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Opti
     Some(ValueShape { name, fields })
 }
 
+/// The scalar-ABI shape of a GC-CARRYING value struct (`value_struct_is_gc`):
+/// every declared field is ONE leaf -- a `Prim` for a scalar, generic `T`,
+/// array/arena/map, or string (a single boxed slot), or `Nested` for a nested
+/// value struct / cdata enum field (which threads its own leaves). Uniform
+/// per-field slotting: the field COUNT is fixed by the declaration, so a generic
+/// `T` field is one slot regardless of the instantiation -- one classification,
+/// one slot shape. `None` unless `name` is a GC-carrying value struct.
+///
+/// Materialization uses the table `<Name>_vt` ctor (chosen at the pack site by
+/// tier), never `<Name>_ct`; the leaf threading is repr-agnostic (`pack` builds
+/// an `Inst::MakeValueStruct` that codegen renders per tier).
+fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
+    value_shape_gc_rec(ws, name, &mut Vec::new())
+}
+
+fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
+    if !value_struct_is_gc(ws, name) {
+        return None;
+    }
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
+    let mut fields = Vec::with_capacity(sd.fields.len());
+    for f in &sd.fields {
+        let fs = match static_ty(ws, f.ty) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
+                if payload_free_enum_variants(ws, n).is_some() {
+                    FieldShape::Prim
+                } else if let Some(es) = enum_value_shape(ws, n) {
+                    FieldShape::Nested(es.value_shape())
+                } else if map_is_value_struct(ws, n) {
+                    // Nested value struct (either tier): thread its own leaves; a
+                    // cyclic/odd shape falls back to one boxed slot.
+                    match value_shape(ws, n).or_else(|| value_shape_gc_rec(ws, n, visiting)) {
+                        Some(sub) => FieldShape::Nested(sub),
+                        None => FieldShape::Prim,
+                    }
+                } else {
+                    // Array / Arena / Map / other nominal collection -> one slot.
+                    FieldShape::Prim
+                }
+            }
+            // Builtin scalar, generic `T`, nullable, tuple -> one slot.
+            _ => FieldShape::Prim,
+        };
+        fields.push((f.name, fs));
+    }
+    visiting.pop();
+    Some(ValueShape { name, fields })
+}
+
 /// Declared field names of struct `name`, in declaration order (the positional
 /// `<name>_ct` ctor order). A cdata-eligible enum is `[__tag, _0]` (it rides the
 /// value-struct `<Enum>_ct` path). Empty if `name` is neither.
@@ -183,9 +237,9 @@ fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
 /// the single-cdata ABI (cdata has no spare field for a nil discriminator).
 fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-            value_shape(ws, n).or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape()))
-        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => value_shape(ws, n)
+            .or_else(|| value_shape_gc(ws, n))
+            .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape())),
         TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
                 flat_enum_shape(ws, n).map(|s| s.value_shape())
@@ -311,6 +365,80 @@ pub fn enum_value_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
         return None; // payload-free -> int (increment 1)
     }
     Some(EnumCdataShape { name, slots, variants })
+}
+
+/// The C type for a `value`-struct field, or `None` when the field is NOT
+/// C-layout-mappable (`[T]`, `Arena<T>`, `Map`, `string`, a generic `T`, or a
+/// GC-carrying nested value struct). This is the single mappability oracle:
+/// skull's cdef emission uses the string, and [`value_struct_is_gc`] classifies
+/// a struct GC-carrying when any field maps to `None`. Mirrors rock's
+/// `rock_type_to_c_type`. A nested payload-free enum stores as its int tag; a
+/// cdata-eligible payload enum nests its own `{__tag, _0}` ctype.
+pub fn value_field_c_type(ws: &Workspace, ty: TyId) -> Option<String> {
+    value_field_c_type_guarded(ws, ty, &mut Vec::new())
+}
+
+fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut Vec<Ustr>) -> Option<String> {
+    match static_ty(ws, ty)? {
+        TypeExpr::Builtin(BuiltinTy::Int) => Some("int".into()),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some("float".into()),
+        TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
+        // A nested value struct is C-mappable iff it is itself FFI-clean; a
+        // GC-carrying nested value struct makes this field (and its parent)
+        // GC-carrying too.
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
+            if value_struct_is_gc_guarded(ws, name, stack) {
+                None
+            } else {
+                Some(name.as_str().to_string())
+            }
+        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
+            if payload_free_enum_variants(ws, name).is_some() =>
+        {
+            Some("int".into())
+        }
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
+            if enum_value_shape(ws, name).is_some() =>
+        {
+            Some(name.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a `value` struct is GC-CARRYING (table-repr tier): it is generic, or
+/// any field is not C-layout-mappable (transitively). FFI-clean is the negation:
+/// non-generic AND every field C-mappable. `false` for a non-value / unknown
+/// name. The tier is static per type and decided once here -- every pack site
+/// (`Name_ct` vs `Name_vt`) and the prelude emission consult this one oracle.
+pub fn value_struct_is_gc(ws: &Workspace, name: Ustr) -> bool {
+    value_struct_is_gc_guarded(ws, name, &mut Vec::new())
+}
+
+fn value_struct_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut Vec<Ustr>) -> bool {
+    let Some(sid) = ws.struct_by_name.get(&name) else {
+        return false;
+    };
+    let s = &ws.modules[sid.module.index()].structs[sid.def];
+    if !s.is_value {
+        return false;
+    }
+    if !s.generics.is_empty() {
+        return true;
+    }
+    // A definition cycle among value-struct fields is not C-mappable (an
+    // infinite C layout); value_struct_defs rejects genuine cycles separately.
+    if stack.contains(&name) {
+        return true;
+    }
+    stack.push(name);
+    let field_tys: Vec<TyId> = s.fields.iter().map(|f| f.ty).collect();
+    let gc = field_tys
+        .iter()
+        .any(|ty| value_field_c_type_guarded(ws, *ty, stack).is_none());
+    stack.pop();
+    gc
 }
 
 /// The flatten shape of an enum that boxes today and is eligible to be inlined
@@ -1659,6 +1787,9 @@ impl Builder<'_> {
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);
                         let cell = self.f.new_cell_typed(Some(self.body.binding_arena[name].name), cty);
+                        if self.binding_is_nonnull_value_struct(name) {
+                            self.f.mark_nonnull_value_struct(cell);
+                        }
                         self.emit_cur(Inst::Store { cell, value: v });
                         self.binds.insert(raw(name), cell);
                     }
@@ -4575,10 +4706,17 @@ impl Builder<'_> {
         self.cur = do_bb;
         // `entry` is an `ArenaEntry` (fields `index`/`generation`); the built
         // value is an `Entity` whose fields are `_`-prefixed (soft-private).
+        // `Entity` is a `value` struct (GC-carrying tier): build it as a
+        // `MakeValueStruct` so it scalarizes (a non-escaping `for (e, _)` scan
+        // builds no table) and, where it escapes, materializes through
+        // `Entity_vt` -- carrying the `__ty` tag + the value-`__eq` metatable.
+        // A raw `MakeStruct` here would leak an un-tagged, metatable-less table
+        // whose `==` silently mis-compares (arena-scan entities not equal to
+        // pairs-scan entities).
         let e_index = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("index") });
         let e_gen = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("generation") });
-        let entity = self.emit_cur(Inst::MakeStruct {
-            ty: None,
+        let entity = self.emit_cur(Inst::MakeValueStruct {
+            name: Ustr::from("Entity"),
             fields: vec![
                 (Ustr::from("_arena"), arena),
                 (Ustr::from("_index"), e_index),
@@ -4931,6 +5069,9 @@ impl Builder<'_> {
         match vars {
             BindingPattern::Leaf(b) => {
                 let cell = self.f.new_cell(Some(self.body.binding_arena[*b].name));
+                if self.binding_is_nonnull_value_struct(*b) {
+                    self.f.mark_nonnull_value_struct(cell);
+                }
                 self.emit_cur(Inst::Store { cell, value });
                 self.binds.insert(raw(*b), cell);
             }
@@ -5637,6 +5778,20 @@ impl Builder<'_> {
             .get(&name)
             .map(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
             .unwrap_or(false)
+    }
+
+    /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
+    /// license for SROA to rematerialize an escaping load of its cell (item 8).
+    /// `resolve_tyid` chases `Infer` but keeps `Nullable`, so a `V?` binding is a
+    /// `Nullable` node here and returns false; only a bare value-struct `App`
+    /// qualifies. Unsolved inference / non-value types return false (conservative).
+    fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
+        let Some(ty) = self.binding_ty(b) else { return false };
+        let Some(rt) = self.resolve_tyid(ty) else { return false };
+        matches!(
+            self.ty_node(rt),
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if self.is_value_struct(name)
+        )
     }
 
     /// Whether `recv`'s static type is a struct with a fn-typed field named
@@ -6544,6 +6699,79 @@ pub fn value_struct_map_key(ws: &Workspace, mid: ModuleId) -> Option<(Ustr, Span
         for (e, tyid) in inf.expr_types.iter() {
             if let Some(name) = map_key_value_struct(ws, inf, *tyid) {
                 return Some((name, body.expr_spans[e]));
+            }
+        }
+    }
+    None
+}
+
+/// A GC-carrying `value` struct (table repr, no C layout) named at a nominal
+/// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
+/// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
+fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
+    map_is_value_struct(ws, name) && value_struct_is_gc(ws, name)
+}
+
+/// When `ty` resolves to `NativeBuffer<E>` with `E` a GC-carrying value struct,
+/// returns E's name -- `ffi.new("E[?]")` would name a non-existent ctype.
+fn native_buffer_gc_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, ty)?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    if nb.as_str() != "NativeBuffer" {
+        return None;
+    }
+    let elem = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match ty_node(ws, inf, elem)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if nominal_is_gc_value(ws, name) => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// Reject a GC-carrying value struct used at a genuine C boundary (an `extern`
+/// signature, or a `NativeBuffer<T>` element) -- a spanned emit-time error, since
+/// the cdef the boundary needs was never emitted for this tier. Replaces the old
+/// silent skip-then-crash (unfuck #51). Returns `(message, span)` for the first
+/// offender, scanning externs then body types. FFI-clean value structs are
+/// unaffected (they have a cdef and stay boundary-legal).
+pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
+    let module = ws.module(mid);
+    // 1. extern signatures: a param/return that is a GC-carrying value struct.
+    for (_, f) in module.functions.iter() {
+        if !f.is_extern {
+            continue;
+        }
+        let tys = f.param_decls.iter().map(|p| p.ty).chain(f.return_ty);
+        for ty in tys {
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) = static_ty(ws, ty) {
+                if nominal_is_gc_value(ws, n) {
+                    return Some((format!(
+                        "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
+                         cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
+                         value struct (fields int/float/bool or nested FFI-clean value structs), \
+                         or pass the fields individually."
+                    ), f.name_span));
+                }
+            }
+        }
+    }
+    // 2. NativeBuffer<GcValue> element anywhere in a body's inferred types.
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else {
+            continue;
+        };
+        for (e, tyid) in inf.expr_types.iter() {
+            if let Some(n) = native_buffer_gc_elem(ws, inf, *tyid) {
+                return Some((format!(
+                    "`NativeBuffer<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
+                     (immutable Lua table) with no C layout, so `ffi.new(\"{n}[?]\")` names no \
+                     ctype. Only FFI-clean value structs (C-mappable fields) are NativeBuffer \
+                     elements."
+                ), body.expr_spans[e]));
             }
         }
     }

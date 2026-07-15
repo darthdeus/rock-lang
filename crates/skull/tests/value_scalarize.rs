@@ -213,3 +213,35 @@ fn native_buffer_single_field_store_is_block_scoped() {
         "single-field NativeBuffer store must also be block-scoped:\n{body}"
     );
 }
+
+/// A GENERIC value struct (`Pair<T>`, GC-carrying tier) must ride the scalar
+/// ABI just like an FFI-clean value struct: per-field leaf params, a
+/// destructured multi-return, and NO `_vt` table materialization in a
+/// non-escaping caller. Pins item 4 of docs/value-two-tier-plan.md -- the
+/// mechanism the Entity<T> flip depends on for its per-iteration-table win.
+const GENERIC_VALUE_SCALARIZE: &str = r#"
+value Pair<T> { a: T, b: T }
+fn pair_sum(p: Pair<int>) -> int { return p.a + p.b }
+fn mk(x: int, y: int) -> Pair<int> { return Pair { a: x, b: y } }
+fn drive(x: int, y: int) -> int {
+    let p = mk(x, y)
+    return pair_sum(p)
+}
+fn main() { let _ = drive(3, 4) }
+"#;
+
+#[test]
+fn generic_value_struct_rides_scalar_abi() {
+    let lua = emit_module(GENERIC_VALUE_SCALARIZE);
+    let sum = function_body(&lua, "pair_sum");
+    // Scalarized params: two leaf args, not a single boxed table.
+    assert!(
+        !sum.contains("Pair_vt") && !sum.contains("Pair_ct"),
+        "pair_sum must scalarize its generic value param (no materialization):\n{sum}"
+    );
+    let drive = function_body(&lua, "drive");
+    assert!(
+        !drive.contains("Pair_vt") && !drive.contains("Pair_ct"),
+        "a non-escaping generic value chain must not materialize a table:\n{drive}"
+    );
+}
