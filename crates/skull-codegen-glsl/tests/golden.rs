@@ -647,3 +647,18 @@ fn fragment_entry_sampler_only() {
     assert!(glsl.contains("vec4 blit(vec2 tc)"), "got:\n{glsl}");
     assert!(glsl.contains("return texture(scene, tc);"), "got:\n{glsl}");
 }
+
+/// Mat4 * Vec4 and Mat4 * Mat4 render as native GLSL `*` (the vec/mat operator
+/// keying -- any 2-arg `__op_mul` is a native infix). `Mat4` maps to `mat4`.
+#[test]
+fn mat4_native_multiply() {
+    let src = r#"
+        @pure fn xform(m: Mat4, p: Vec4) -> Vec4 { return m * p }
+        @pure fn compose(a: Mat4, b: Mat4) -> Mat4 { return a * b }
+    "#;
+    let glsl = emit(src, &["xform", "compose"]).expect("emit");
+    assert!(glsl.contains("vec4 xform(mat4 m, vec4 p) {"), "got:\n{glsl}");
+    assert!(glsl.contains("return (m * p);"), "got:\n{glsl}");
+    assert!(glsl.contains("mat4 compose(mat4 a, mat4 b) {"), "got:\n{glsl}");
+    assert!(glsl.contains("return (a * b);"), "got:\n{glsl}");
+}

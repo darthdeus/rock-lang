@@ -40,6 +40,7 @@ enum GlslTy {
     Vec2,
     Vec3,
     Vec4,
+    Mat4,
     /// Opaque; param/uniform position only (GLSL forbids sampler locals/returns).
     Sampler2D,
 }
@@ -53,6 +54,7 @@ impl GlslTy {
             GlslTy::Vec2 => "vec2",
             GlslTy::Vec3 => "vec3",
             GlslTy::Vec4 => "vec4",
+            GlslTy::Mat4 => "mat4",
             GlslTy::Sampler2D => "sampler2D",
         }
     }
@@ -80,6 +82,7 @@ fn glsl_ty(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<GlslTy, C
             "Vec2" => Ok(GlslTy::Vec2),
             "Vec3" => Ok(GlslTy::Vec3),
             "Vec4" => Ok(GlslTy::Vec4),
+            "Mat4" => Ok(GlslTy::Mat4),
             "Sampler2D" => Ok(GlslTy::Sampler2D),
             other => Err(err(span, format!("shader profile: {what} type `{other}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
         },
@@ -562,6 +565,7 @@ impl FnEmit<'_> {
                 "Vec2" => GlslTy::Vec2,
                 "Vec3" => GlslTy::Vec3,
                 "Vec4" => GlslTy::Vec4,
+                "Mat4" => GlslTy::Mat4,
                 _ => GlslTy::Float,
             },
             Inst::Call { func, .. } => {
