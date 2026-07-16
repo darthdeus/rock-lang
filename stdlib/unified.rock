@@ -148,11 +148,11 @@ fn native_buffer_int(n: int) -> NativeBuffer<int> {
 // Safe accessor matching the unified `.get(i) -> T?` surface used across
 // all collection types. Returns null on out-of-range; `buf[i]` is the
 // direct-access counterpart.
-inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
