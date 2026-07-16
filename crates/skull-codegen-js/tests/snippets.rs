@@ -30,14 +30,46 @@ fn math_snippets_render() {
     assert_eq!(fill_template(template("atan2", 2), &["y", "x"]), "Math.atan2(y, x)");
 }
 
-// The plan's ~10 math entries, each a distinct (name, arity).
+// The conformance differential set (docs/intrinsics-plan.md slice 5): mappings
+// that are algorithmically distinct from the Rock fallback bodies where a second
+// implementation exists (clamp/lerp/sign), coincident where none does
+// (round/fract).
 #[test]
-fn table_is_the_ten_math_entries() {
-    assert_eq!(JS_INTRINSICS.len(), 10);
+fn differential_set_snippets_render() {
+    assert_eq!(
+        fill_template(template("clamp", 3), &["x", "lo", "hi"]),
+        "Math.min(Math.max(x, lo), hi)"
+    );
+    assert_eq!(
+        fill_template(template("lerp", 3), &["a", "b", "t"]),
+        "(a * (1 - t) + b * t)"
+    );
+    assert_eq!(fill_template(template("round", 1), &["x"]), "Math.floor(x + 0.5)");
+    assert_eq!(fill_template(template("sign", 1), &["n"]), "Math.sign(n)");
+    assert_eq!(fill_template(template("fract", 1), &["x"]), "(x - Math.floor(x))");
+    // smoothstep has no builtin; an IIFE binds the clamped t once.
+    assert_eq!(
+        fill_template(template("smoothstep", 3), &["e0", "e1", "v"]),
+        "(function(e0,e1,x){var t=Math.min(Math.max((x-e0)/(e1-e0),0),1);return t*t*(3-2*t);})(e0, e1, v)"
+    );
+}
+
+// Every entry is a distinct (name, arity); covers the base math set + the eight
+// conformance differential intrinsics.
+#[test]
+fn table_entries_are_distinct_keys() {
     let mut keys: Vec<_> = JS_INTRINSICS.iter().map(|(n, a, _)| (*n, *a)).collect();
+    let total = keys.len();
     keys.sort();
     keys.dedup();
-    assert_eq!(keys.len(), 10, "duplicate (name, arity) in JS table");
+    assert_eq!(keys.len(), total, "duplicate (name, arity) in JS table");
+    // the eight fallback+mapping intrinsics must all be present.
+    for name in ["min", "max", "clamp", "lerp", "smoothstep", "round", "sign", "fract"] {
+        assert!(
+            JS_INTRINSICS.iter().any(|(n, _, _)| *n == name),
+            "differential intrinsic `{name}` missing from JS table"
+        );
+    }
 }
 
 // Fail-closed, END TO END: the toy table is math-only and every entry is

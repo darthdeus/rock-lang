@@ -1,20 +1,28 @@
-//! A TOY, math-only JS intrinsic table (docs/intrinsics-plan.md, slice 4): the
-//! THIRD [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies)
-//! and GLSL. Its only job is to keep the registry trait honest against more than
-//! one real consumer -- an abstraction designed against exactly one consumer
-//! fits exactly one consumer.
+//! The JS intrinsic table (docs/js-backend-plan.md): the THIRD
+//! [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies) and
+//! GLSL. Covers the eight scalar fallback+mapping intrinsics of the conformance
+//! differential (`tests/intrinsics/fallback_reference.rock`) plus the base math
+//! set. Still table-only -- the MIR->JS emitter and the node execution harness
+//! are S2/S3; this crate does not yet emit programs.
 //!
-//! NOT a backend: no runtime, no node, no program emission -- just the mapping
-//! table + the call-site render primitive, exercised by snippet unit tests. The
-//! seed of a future JS backend.
+//! **Mappings are algorithmically distinct from the Rock fallbacks** where a
+//! second implementation exists (`min`/`max` -> `Math.min`/`max` vs the
+//! fallback's comparisons; `clamp` -> nested min/max; `lerp` -> `a(1-t)+bt` vs
+//! the fallback's `a+(b-a)t`; `sign` -> `Math.sign` vs the comparison chain), so
+//! the S4 diff compares two implementations, not a thing to itself. `round`
+//! (floor(x+0.5)) and `fract` (x-floor(x)) coincide with their fallback math --
+//! the diff there only proves both emit paths produce runnable JS (logged in
+//! js-backend-plan Risks).
 
 use bone_semantic::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 
-/// (name, arity) -> `$1..$n` JS expression template. Math-only (the ten in
-/// docs/intrinsics-plan.md); a real JS backend grows this. Single source for
-/// both [`JsIntrinsics::lookup`] and [`JsIntrinsics::entries`].
+/// (name, arity) -> `$1..$n` JS expression template. Single source for both
+/// [`JsIntrinsics::lookup`] and [`JsIntrinsics::entries`]. Every entry is backed
+/// by an `@intrinsic` stdlib declaration (pinned by
+/// `every_js_entry_is_backed_by_a_stdlib_intrinsic`).
 pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
+    // base math
     ("sin", 1, "Math.sin($1)"),
     ("cos", 1, "Math.cos($1)"),
     ("sqrt", 1, "Math.sqrt($1)"),
@@ -22,9 +30,16 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("floor", 1, "Math.floor($1)"),
     ("ceil", 1, "Math.ceil($1)"),
     ("pow", 2, "Math.pow($1, $2)"),
+    ("atan2", 2, "Math.atan2($1, $2)"),
+    // conformance differential set (docs/intrinsics-plan.md slice 5)
     ("min", 2, "Math.min($1, $2)"),
     ("max", 2, "Math.max($1, $2)"),
-    ("atan2", 2, "Math.atan2($1, $2)"),
+    ("clamp", 3, "Math.min(Math.max($1, $2), $3)"),
+    ("lerp", 3, "($1 * (1 - $3) + $2 * $3)"),
+    ("smoothstep", 3, "(function(e0,e1,x){var t=Math.min(Math.max((x-e0)/(e1-e0),0),1);return t*t*(3-2*t);})($1, $2, $3)"),
+    ("round", 1, "Math.floor($1 + 0.5)"),
+    ("sign", 1, "Math.sign($1)"),
+    ("fract", 1, "($1 - Math.floor($1))"),
 ];
 
 /// The toy JS backend's [`IntrinsicTable`].
