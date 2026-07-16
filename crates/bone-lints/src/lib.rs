@@ -69,8 +69,8 @@ fn candidate_bindings(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<Idx<Bindin
 /// Every enum-variant name across user modules. A bare variant in pattern
 /// position (`None =>`) lowers to a `Let` binding of that name; the lint must
 /// not report those as unused variables.
-pub fn enum_variant_names(ws: &Workspace) -> FxHashSet<Ustr> {
-    user_modules(ws)
+pub fn enum_variant_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
+    user_modules(ws, warm)
         .flat_map(|m| m.enums.iter())
         .flat_map(|(_, e)| e.variants.iter().map(|v| v.name))
         .collect()
@@ -222,18 +222,21 @@ pub const UNUSED_FN: &str = "unused_fn";
 /// The lint is only meaningful closed-world: a library's public API has no
 /// in-project caller yet isn't dead. Callers gate it to `bin` packages.
 pub fn unused_fns(ws: &Workspace) -> Vec<UnusedFn> {
-    unused_fns_by_file(ws).into_values().flatten().collect()
+    unused_fns_by_file(ws, &FxHashSet::default()).into_values().flatten().collect()
 }
 
 /// Same as [`unused_fns`], but grouped by the source file each dead function
 /// lives in (`Module.file`). The LSP publishes per file, so it distributes the
 /// whole-project result this way; a file with no dead functions is absent.
-pub fn unused_fns_by_file(ws: &Workspace) -> FxHashMap<Ustr, Vec<UnusedFn>> {
-    let name_map = user_fn_names(ws);
+pub fn unused_fns_by_file(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+) -> FxHashMap<Ustr, Vec<UnusedFn>> {
+    let name_map = user_fn_names(ws, warm);
 
     let mut reachable: FxHashSet<(ModuleId, Idx<Function>)> = FxHashSet::default();
     let mut stack: Vec<(ModuleId, Idx<Function>)> = Vec::new();
-    for module in user_modules(ws) {
+    for module in user_modules(ws, warm) {
         for (fid, f) in module.functions.iter() {
             if is_root(f) && reachable.insert((module.id, fid)) {
                 stack.push((module.id, fid));
@@ -267,7 +270,7 @@ pub fn unused_fns_by_file(ws: &Workspace) -> FxHashMap<Ustr, Vec<UnusedFn>> {
     }
 
     let mut out: FxHashMap<Ustr, Vec<UnusedFn>> = FxHashMap::default();
-    for module in user_modules(ws) {
+    for module in user_modules(ws, warm) {
         for (fid, f) in module.functions.iter() {
             if !reachable.contains(&(module.id, fid)) {
                 out.entry(module.file)
@@ -351,9 +354,12 @@ fn collect_bound_next(bn: &BoundNext, out: &mut Vec<(ModuleId, Idx<Function>)>) 
 
 /// Every user function keyed by name (single namespace, so a name can map to
 /// several overloads across modules -- all are marked reachable together).
-fn user_fn_names(ws: &Workspace) -> FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>)>> {
+fn user_fn_names(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+) -> FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>)>> {
     let mut map: FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>)>> = FxHashMap::default();
-    for module in user_modules(ws) {
+    for module in user_modules(ws, warm) {
         for (fid, f) in module.functions.iter() {
             map.entry(f.name).or_default().push((module.id, fid));
         }
@@ -361,18 +367,26 @@ fn user_fn_names(ws: &Workspace) -> FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>
     map
 }
 
-fn user_modules(ws: &Workspace) -> impl Iterator<Item = &Module> {
+/// The workspace's user modules -- everything except the builtin module and the
+/// warm stdlib (`warm`, the session's `warm_mids`). Warm modules carry real
+/// paths now, so they can't be told apart by file id; `warm` is the authoritative
+/// signal. Passing an empty set (tests / whole-workspace CLI) lints every module.
+fn user_modules<'a>(
+    ws: &'a Workspace,
+    warm: &'a FxHashSet<ModuleId>,
+) -> impl Iterator<Item = &'a Module> {
     ws.modules
         .iter()
-        .filter(|m| m.id != ModuleId::builtin() && !m.file.as_str().starts_with("<bone-stdlib"))
+        .filter(move |m| m.id != ModuleId::builtin() && !warm.contains(&m.id))
 }
 
 /// Unused-var findings across every non-stdlib body in the workspace. A
 /// convenience for tests and whole-workspace CLI runs; the LSP path lints a
 /// single file's bodies instead.
 pub fn unused_vars(ws: &Workspace) -> Vec<UnusedVar> {
-    let variants = enum_variant_names(ws);
-    user_modules(ws)
+    let warm = FxHashSet::default();
+    let variants = enum_variant_names(ws, &warm);
+    user_modules(ws, &warm)
         .flat_map(|m| m.bodies.values())
         .flat_map(|b| unused_vars_in_body(b, &variants))
         .collect()
