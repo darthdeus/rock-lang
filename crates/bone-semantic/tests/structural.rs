@@ -1500,3 +1500,30 @@ fn main() {
         "the bound-conformance rejection reason must be surfaced: {msgs:?}"
     );
 }
+
+// An operator desugar (`!x` -> `__not`, unary `-x` -> `__unm`) reaching an
+// EMPTY overload set reads as an operator error naming the operand type, not
+// as a missing internal function ("Function `__not` doesn't exist").
+#[test]
+fn operator_miss_reads_as_operator_error() {
+    let msgs = main_body_error_messages("fn main() { let xs = [1, 2]\n let y = !xs }");
+    assert!(
+        msgs.iter().any(|m| m.contains("operator `!` is not defined for")),
+        "expected an operator-shaped message, got: {msgs:?}"
+    );
+    assert!(
+        !msgs.iter().any(|m| m.contains("__not")),
+        "the internal desugar name must not leak: {msgs:?}"
+    );
+}
+
+#[test]
+fn unary_minus_miss_reads_as_operator_error() {
+    let msgs = main_body_error_messages(
+        "struct P { x: int }\nfn main() { let p = P { x: 1 }\n let q = -p }",
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("operator `-` is not defined for")),
+        "expected an operator-shaped message, got: {msgs:?}"
+    );
+}

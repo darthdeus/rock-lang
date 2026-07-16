@@ -869,6 +869,33 @@ pub(crate) fn resolve_named_call_inner(
             }
         }
 
+        // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with an
+        // empty overload set read as operator errors naming the operand type,
+        // not as a missing internal function.
+        let op_symbol = match name.as_str() {
+            "__not" => Some("!"),
+            "__unm" => Some("-"),
+            _ => None,
+        };
+        if let Some(sym) = op_symbol {
+            let operand = args
+                .into_iter()
+                .next()
+                .map(|a| -> Result<String, CompilerError> {
+                    let t = infer_expr(c, gamma, a)?;
+                    let t = resolve(gamma, t, span);
+                    Ok(gamma.workspace.render(Some(&gamma.out), t))
+                })
+                .transpose()?
+                .unwrap_or_else(|| "<no operand>".to_string());
+            comp_error!(
+                span,
+                "operator `{}` is not defined for `{}`",
+                sym,
+                operand
+            );
+        }
+
         comp_error!(span, "Function `{}` doesn't exist", name);
     }
 
