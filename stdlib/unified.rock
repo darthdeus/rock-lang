@@ -938,10 +938,30 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 }
 
 @nomangle fn vec_set<T>(vec: [T], index: int, value: T) {
-    if index >= 0 && index < vec.len {
-        table_set(vec._data, index + 1, value)
+    if index < 0 || index >= vec.len {
+        error("Vec.set index out of bounds: index {index} is outside [0, {vec.len})")
     }
+    table_set(vec._data, index + 1, value)
 }
+
+// Bounds-checked indexing helpers, emitted by codegen for `xs[i]` reads and
+// stores (the __nb_checked_* pattern; release stripping is the same future
+// release-mode work). `.get(i)` above is the null-returning form.
+@nomangle inline(lua) fn __vec_checked_get(vec: any, i: int) -> any = """
+    if i < 0 or i >= vec.len then
+        error("Vec index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(vec.len) .. ")")
+    end
+    return vec._data[i + 1]
+"""
+
+@nomangle inline(lua) fn __vec_checked_set(vec: any, i: int, v: any) = """
+    if i < 0 or i >= vec.len then
+        error("Vec index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(vec.len) .. ")")
+    end
+    vec._data[i + 1] = v
+"""
 
 @nomangle fn vec_len<T>(vec: [T]) -> int {
     return vec.len

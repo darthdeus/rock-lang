@@ -988,7 +988,14 @@ mod tests {
     /// text-mode translation (`\n` -> `\r\n`), so without this every
     /// multi-line `assert_eq!` expectation would spuriously mismatch.
     fn run(src: &str, driver: &str) -> Option<String> {
-        let lua = format!("{}\n{}", emit(src), driver);
+        // Stdlib-free harness: codegen emits calls to the checked Vec helpers
+        // the stdlib normally provides -- prepend the canonical shims.
+        let lua = format!(
+            "{}\n{}\n{}",
+            emit(src),
+            skull_codegen_lua::VEC_CHECK_SHIMS,
+            driver
+        );
         let out = std::process::Command::new("luajit")
             .arg("-e")
             .arg(&lua)

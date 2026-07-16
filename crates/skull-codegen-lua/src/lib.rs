@@ -44,6 +44,20 @@ pub use mangle::{compute_overloaded_names, mangle_fn};
 pub const FN_MT_PRELUDE: &str =
     "if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end";
 
+/// Lua shims for the checked Vec indexing helpers codegen emits
+/// (`__vec_checked_get`/`__vec_checked_set`). In real builds the stdlib
+/// provides them (`stdlib/unified.rock`); stdlib-free test harnesses prepend
+/// this so emitted chunks stay self-contained.
+pub const VEC_CHECK_SHIMS: &str = "\
+function __vec_checked_get(vec, i)\n\
+  if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
+  return vec._data[i + 1]\n\
+end\n\
+function __vec_checked_set(vec, i, v)\n\
+  if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
+  vec._data[i + 1] = v\n\
+end";
+
 /// The env-record parameter name of a hoisted capturing lambda body
 /// (`function <name>__lambda<k>(<ENV_PARAM>, <params>)`). A reserved
 /// double-underscore rock name so a user global/fn read inside the body
@@ -2158,17 +2172,19 @@ impl Emitter<'_> {
         out.push(')');
     }
 
-    /// READ index `base[index]`. NativeBuffer goes through the debug-mode
-    /// bounds-checked stdlib helper (`__nb_checked_get`) — matching the old
-    /// backend (skull runs debug; release stripping is future release-mode
-    /// work). Vec/Map index raw.
+    /// READ index `base[index]`. NativeBuffer and Vec go through the
+    /// debug-mode bounds-checked stdlib helpers (`__nb_checked_get` /
+    /// `__vec_checked_get`) — skull runs debug; release stripping is future
+    /// release-mode work. Map indexes raw (miss returns nil; `.get` is the
+    /// checked form).
     fn write_index(&self, out: &mut String, base: Idx<Inst>, index: Idx<Inst>, kind: ContainerKind) {
         match kind {
             ContainerKind::Vec => {
+                out.push_str("__vec_checked_get(");
                 self.write_opnd(out, base);
-                out.push_str("._data[");
+                out.push_str(", ");
                 self.write_opnd(out, index);
-                out.push_str(" + 1]");
+                out.push(')');
             }
             ContainerKind::NativeBuffer => {
                 out.push_str("__nb_checked_get(");
@@ -2220,13 +2236,13 @@ impl Emitter<'_> {
                         out.push_str(")\n");
                     }
                     ContainerKind::Vec => {
-                        out.push_str("  ");
+                        out.push_str("  __vec_checked_set(");
                         self.write_opnd(out, *base);
-                        out.push_str("._data[");
+                        out.push_str(", ");
                         self.write_opnd(out, *index);
-                        out.push_str(" + 1] = ");
+                        out.push_str(", ");
                         self.write_opnd(out, *value);
-                        out.push('\n');
+                        out.push_str(")\n");
                     }
                     ContainerKind::Map => {
                         out.push_str("  ");

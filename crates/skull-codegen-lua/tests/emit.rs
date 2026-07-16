@@ -99,7 +99,11 @@ fn run(src: &str, driver: &str) -> String {
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
     // canonical definition (one copy, shared with `skull::runtime_prelude`).
-    let mut lua = format!("local bit = require('bit')\n{}\n", skull_codegen_lua::FN_MT_PRELUDE);
+    let mut lua = format!(
+        "local bit = require('bit')\n{}\n{}\n",
+        skull_codegen_lua::FN_MT_PRELUDE,
+        skull_codegen_lua::VEC_CHECK_SHIMS
+    );
     let mut cache = skull_transform::InlineCache::default();
     for (fid, _) in ws.module(mid).functions.iter() {
         let fref = FuncRef { module: mid, func: fid };
