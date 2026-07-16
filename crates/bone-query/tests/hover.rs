@@ -202,6 +202,47 @@ fn body_keywords_do_not_leak_the_fn_signature() {
     }
 }
 
+// == Overload hover: hovering a call's fn name lists every overload ===========
+
+/// Hover text at the first occurrence of `needle`'s last char.
+fn hover_on(bone: &BoneWorkspace, src: &str, needle: &str) -> String {
+    hover_at(bone, pos_of(src, needle))
+}
+
+#[test]
+fn hover_on_resolved_overloaded_call_lists_all_overloads_selected_first() {
+    // Two overloads; the call resolves to `foo(a: A)`. Hovering the callee name
+    // shows BOTH signatures, with the resolved one first.
+    let src = "struct A {}\nstruct B {}\n\
+               fn foo(a: A) -> int { 1 }\n\
+               fn foo(b: B) -> int { 2 }\n\
+               fn main() {\n  let x = A {}\n  let r = foo(x)\n}\n";
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let h = hover_on(&bone, src, "= foo");
+    assert!(h.contains("fn foo(a: A) -> int"), "missing overload 1: {h:?}");
+    assert!(h.contains("fn foo(b: B) -> int"), "missing overload 2: {h:?}");
+    let i1 = h.find("fn foo(a: A)").unwrap();
+    let i2 = h.find("fn foo(b: B)").unwrap();
+    assert!(i1 < i2, "resolved overload `foo(a: A)` should come first: {h:?}");
+}
+
+#[test]
+fn hover_on_unresolvable_overloaded_call_still_lists_overloads() {
+    // The call `foo(c)` matches NO overload (wrong arg type), so bone records no
+    // resolution -- but hovering the name must still surface every overload so
+    // the user can see what shapes exist.
+    let src = "struct A {}\nstruct B {}\nstruct C {}\n\
+               fn foo(a: A) -> int { 1 }\n\
+               fn foo(b: B) -> int { 2 }\n\
+               fn main() {\n  let c = C {}\n  let r = foo(c)\n}\n";
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src.to_string());
+    let h = hover_on(&bone, src, "= foo");
+    assert!(h.contains("fn foo(a: A) -> int"), "missing overload 1: {h:?}");
+    assert!(h.contains("fn foo(b: B) -> int"), "missing overload 2: {h:?}");
+}
+
 #[test]
 fn whitespace_hovers_nothing() {
     let b = fresh();

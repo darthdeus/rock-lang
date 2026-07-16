@@ -790,8 +790,8 @@ impl BoneWorkspace {
         // signature tokens no node covers (`fn`/parens/`->`), bounded by `src`
         // so body keywords (`let`/`for`) past the brace aren't swallowed.
         let (contents, span) = pat_hover
-            .or_else(|| crate::query::hover_at(ws, mid, inf, offset))
-            .or_else(|| crate::query::fn_signature_hover(ws, mid, src, offset))?;
+            .or_else(|| crate::query::hover_at(ws, mid, inf, offset, Some(&proj.texts)))
+            .or_else(|| crate::query::fn_signature_hover(ws, mid, src, offset, Some(&proj.texts)))?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -2352,7 +2352,7 @@ impl BoneWorkspace {
         // Inference is optional: tiers 2/3 (by-name overload list, struct ctor)
         // serve a signature even when the file doesn't fully type-check.
         let inf = ws.inference(mid);
-        let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset)?;
+        let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
         // Active argument = top-level commas between the call's `(` and the cursor.
         let active = active_param(src, call_span.offset_range.0, offset);
         Some(SignatureHelp {
