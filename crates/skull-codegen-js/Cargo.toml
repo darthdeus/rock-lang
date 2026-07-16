@@ -13,6 +13,8 @@ edition = "2024"
 [dependencies]
 skull-mir = { path = "../skull-mir" }
 bone-semantic = { path = "../bone-semantic" }
+skull-parser = { path = "../skull-parser" }
+comfy-la-arena = { workspace = true }
 
 [dev-dependencies]
 rock-host = { path = "../rock-host" }

@@ -2,8 +2,8 @@
 //! [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies) and
 //! GLSL. Covers the eight scalar fallback+mapping intrinsics of the conformance
 //! differential (`tests/intrinsics/fallback_reference.rock`) plus the base math
-//! set. Still table-only -- the MIR->JS emitter and the node execution harness
-//! are S2/S3; this crate does not yet emit programs.
+//! set. The [`emit`] module lowers the intrinsics' Rock fallback bodies to JS
+//! (the differential's fallback side); the node execution harness is S3.
 //!
 //! **Mappings are algorithmically distinct from the Rock fallbacks** where a
 //! second implementation exists (`min`/`max` -> `Math.min`/`max` vs the
@@ -16,6 +16,8 @@
 
 use bone_semantic::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
+
+pub mod emit;
 
 /// (name, arity) -> `$1..$n` JS expression template. Single source for both
 /// [`JsIntrinsics::lookup`] and [`JsIntrinsics::entries`]. Every entry is backed
