@@ -2554,7 +2554,6 @@ mod overlay_runtime_tests {
             "tests/adversarial_functions_lambdas.rock",
             "tests/adversarial_coroutines.rock",
             "tests/adversarial_nullable_refinement.rock",
-            "tests/adversarial_native_arrays.rock",
         ];
         let present: Vec<String> = curated.iter().map(|s| ws_path(s)).filter(|f| std::path::Path::new(f).exists()).collect();
         assert!(present.len() >= 8, "curated corpus files missing: only {} present", present.len());

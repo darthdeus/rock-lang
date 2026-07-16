@@ -306,9 +306,6 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
             compound_op: *compound_op,
         },
         ExprKind::ArrayLiteral(xs) => ExprKind::ArrayLiteral(xs.iter().map(|x| ge(dst, *x)).collect()),
-        ExprKind::NativeArrayLiteral(xs) => {
-            ExprKind::NativeArrayLiteral(xs.iter().map(|x| ge(dst, *x)).collect())
-        }
         ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| ge(dst, *x)).collect()),
         ExprKind::StructLiteral { name, bases, fields } => ExprKind::StructLiteral {
             name: name.clone(),

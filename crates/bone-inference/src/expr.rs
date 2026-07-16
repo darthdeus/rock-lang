@@ -533,7 +533,7 @@ pub fn infer_expr_used(
                     )?;
 
                     let elem = match name.as_str() {
-                        "NativeBuffer" | "NativeArray" => {
+                        "NativeBuffer" => {
                             let p = params.into_iter().next().ok_or_else(|| {
                                 CompilerError::new_with_label(
                                     expr_span,
@@ -958,7 +958,7 @@ pub fn infer_expr_used(
             tuple_or_newtype_index_ty(gamma, tuple_ty, *index, expr_span)?
         }
 
-        Expr::Array(elements) | Expr::NativeArray(elements) => {
+        Expr::Array(elements) => {
             let mut elem_ty: Option<TyId> = None;
 
             for elem in *elements {
@@ -987,13 +987,10 @@ pub fn infer_expr_used(
             let elem_texp = *gamma.get(TyId::Local(elem_idx));
             let params = alloc_contiguous(&mut gamma.out.ty_arena, [elem_texp]);
 
-            let ctor = match &c.body.expr_arena[e] {
-                Expr::NativeArray(_) => TypeCtor::Nominal(*NATIVE_ARRAY),
-                Expr::Array(_) => TypeCtor::Array,
-                _ => comp_error!(expr_span, "expected array expression"),
-            };
-
-            let arr_ty = gamma.out.ty_arena.alloc(TypeExpr::App { ctor, params });
+            let arr_ty = gamma
+                .out
+                .ty_arena
+                .alloc(TypeExpr::App { ctor: TypeCtor::Array, params });
 
             let ret_ty = TyId::Local(arr_ty);
 
@@ -1595,7 +1592,7 @@ pub(crate) fn check_expr(
         }
     }
 
-    if let Expr::Array(elements) | Expr::NativeArray(elements) = c.body.expr_arena[e] {
+    if let Expr::Array(elements) = c.body.expr_arena[e] {
         let exp_r = resolve(gamma, expected, span);
         let has_spread = elements
             .into_iter()

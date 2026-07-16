@@ -172,7 +172,6 @@ pub enum ExprKind {
     },
 
     ArrayLiteral(Vec<Idx<ExprData>>),
-    NativeArrayLiteral(Vec<Idx<ExprData>>),
 
     /// Non-overloadable infix operators (`== < && ?? ::` ...). Overloadable
     /// ops (`+ - * / %`) are lowered to a `FunctionCall` with

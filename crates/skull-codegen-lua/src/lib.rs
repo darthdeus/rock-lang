@@ -1240,7 +1240,7 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::ToString(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
-            | Inst::MakeTuple(_) | Inst::MakeArray(_) | Inst::MakeVec(_)
+            | Inst::MakeTuple(_) | Inst::MakeVec(_)
             | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. }
             | Inst::MakeEnumDyn { .. }
     )
@@ -2012,7 +2012,7 @@ impl Emitter<'_> {
                 render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.home, self.plan, None, self.frame, self.cell_colors, self.boxed, self.hoist, self.hoist_names, out);
             }
 
-            Inst::MakeTuple(vs) | Inst::MakeArray(vs) => {
+            Inst::MakeTuple(vs) => {
                 out.push('{');
                 self.write_csv(out, vs);
                 out.push('}');
@@ -2112,10 +2112,6 @@ impl Emitter<'_> {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
                 }
-                ContainerKind::NativeArray => {
-                    out.push('#');
-                    self.write_opnd(out, *base);
-                }
                 ContainerKind::Map => {
                     // No O(1) length on a Map; lowering shouldn't emit this kind.
                     out.push('#');
@@ -2162,10 +2158,10 @@ impl Emitter<'_> {
         out.push(')');
     }
 
-    /// READ index `base[index]`. NativeArray/NativeBuffer go through the
-    /// debug-mode bounds-checked stdlib helpers (`__narr_get_checked` /
-    /// `__nb_checked_get`) — matching the old backend (skull runs debug; release
-    /// stripping is future release-mode work). Vec/Map index raw.
+    /// READ index `base[index]`. NativeBuffer goes through the debug-mode
+    /// bounds-checked stdlib helper (`__nb_checked_get`) — matching the old
+    /// backend (skull runs debug; release stripping is future release-mode
+    /// work). Vec/Map index raw.
     fn write_index(&self, out: &mut String, base: Idx<Inst>, index: Idx<Inst>, kind: ContainerKind) {
         match kind {
             ContainerKind::Vec => {
@@ -2173,13 +2169,6 @@ impl Emitter<'_> {
                 out.push_str("._data[");
                 self.write_opnd(out, index);
                 out.push_str(" + 1]");
-            }
-            ContainerKind::NativeArray => {
-                out.push_str("__narr_get_checked(");
-                self.write_opnd(out, base);
-                out.push_str(", ");
-                self.write_opnd(out, index);
-                out.push(')');
             }
             ContainerKind::NativeBuffer => {
                 out.push_str("__nb_checked_get(");
@@ -2239,15 +2228,6 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
-                    ContainerKind::NativeArray => {
-                        out.push_str("  ");
-                        self.write_opnd(out, *base);
-                        out.push('[');
-                        self.write_opnd(out, *index);
-                        out.push_str(" + 1] = ");
-                        self.write_opnd(out, *value);
-                        out.push('\n');
-                    }
                     ContainerKind::Map => {
                         out.push_str("  ");
                         self.write_opnd(out, *base);
@@ -2275,10 +2255,8 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
-                    _ => {
-                        let _ = write!(out, "  {a}[#{a} + 1] = ");
-                        self.write_opnd(out, *value);
-                        out.push('\n');
+                    ContainerKind::NativeBuffer | ContainerKind::Map => {
+                        unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }
                 }
             }

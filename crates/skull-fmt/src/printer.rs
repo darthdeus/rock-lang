@@ -1427,7 +1427,6 @@ impl<'a> Printer<'a> {
             },
 
             ExprKind::ArrayLiteral(items) => self.list("[", "]", items, data.span),
-            ExprKind::NativeArrayLiteral(items) => self.list("![", "]", items, data.span),
             ExprKind::Tuple(items) => self.tuple(items, data.span),
 
             ExprKind::StructLiteral { name, bases, fields } => {
@@ -1917,7 +1916,6 @@ impl<'a> Printer<'a> {
         matches!(
             &self.ast.e(&e).kind,
             ExprKind::ArrayLiteral(_)
-                | ExprKind::NativeArrayLiteral(_)
                 | ExprKind::StructLiteral { .. }
                 | ExprKind::EnumVariantRecord { .. }
         )

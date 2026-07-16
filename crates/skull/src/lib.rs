@@ -1144,34 +1144,6 @@ mod tests {
         exec_eq("fn w(x: int) -> float { x as float }", "print(w(5))", "5");
     }
 
-    #[test]
-    fn exec_for_over_array() {
-        // `last` returns the final element; `firsts` destructures a tuple
-        // element. NATIVE arrays keep the builtin counted template (0-based
-        // `i < #arr`, element `arr[i+1]`); `[T]` iterates via the stdlib
-        // VecIter protocol, which this stdlib-free harness cannot compile --
-        // Vec iteration is covered by tests/*.rock + the emit.rs exec tests.
-        let src = "fn last(xs: ![int]) -> int {\n\
-                       let r = 0\n\
-                       for x in xs { r = x }\n\
-                       r\n\
-                   }\n\
-                   fn firsts(ps: ![(int, string)]) -> int {\n\
-                       let r = 0\n\
-                       for (a, b) in ps { r = a }\n\
-                       r\n\
-                   }";
-        // A `![T]` is a plain Lua list. The debug bounds-check helper is
-        // stdlib inline(lua) (`__narr_get_checked`), absent from this
-        // stdlib-free chunk -- shim its access shape.
-        let driver = "__narr_get_checked = function(a, i) return a[i + 1] end \
-                      print(last({10, 20, 30})); \
-                      print(firsts({{1, \"a\"}, {2, \"b\"}, {7, \"z\"}}))";
-        let Some(out) = run(src, driver) else {
-            return;
-        };
-        assert_eq!(out, "30\n7");
-    }
 
     #[test]
     fn exec_coroutine_yield() {
@@ -1714,22 +1686,6 @@ mod tests {
         );
         let Some(out) = run(src, "print(grid(5, 3))") else { return };
         assert_eq!(out, "4");
-    }
-
-    #[test]
-    fn for_over_array_emits_for_and_correct() {
-        // Native array keeps the builtin counted template; `[T]` routes
-        // through the stdlib VecIter protocol (covered in emit.rs).
-        let src = "fn last_of(xs: ![int]) -> int {\n\
-                   let last = 0\n\
-                   for v in xs { last = v }\n\
-                   last\n\
-                   }";
-        let lua = emit(src);
-        assert!(lua.contains("for c"), "expected a numeric for-loop, got:\n{lua}");
-        let driver = "__narr_get_checked = function(a, i) return a[i + 1] end \
-                      print(last_of({3, 4, 5}))";
-        exec_eq(src, driver, "5");
     }
 
     /// Guard: an array spread (`[...a, ...b]`) builds via a loop whose increment

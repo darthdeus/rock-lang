@@ -233,7 +233,7 @@ fn inst_kind(inst: &Inst) -> &'static str {
         Inst::CallMulti { .. } | Inst::CallValue { .. } | Inst::CallValueMulti { .. } | Inst::CallBoundMulti { .. } => "indirect/multi-value call",
         Inst::Lambda { .. } => "closure",
         Inst::MakeTuple(_) => "tuple",
-        Inst::MakeArray(_) | Inst::MakeVec(_) => "array/Vec",
+        Inst::MakeVec(_) => "Vec",
         Inst::MakeStruct { .. } => "heap struct",
         Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => "enum",
         Inst::Index { .. } | Inst::Len { .. } | Inst::ArrayPush { .. } | Inst::StoreIndex { .. } => "container op",

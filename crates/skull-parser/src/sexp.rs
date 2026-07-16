@@ -317,9 +317,6 @@ impl Ast {
             ExprKind::ArrayLiteral(items) => {
                 format!("[{}]", self.array_items_sexp(items))
             }
-            ExprKind::NativeArrayLiteral(items) => {
-                format!("![{}]", self.array_items_sexp(items))
-            }
 
             ExprKind::FieldAccess(obj, field) => {
                 format!("(. {} {})", self.expr_sexp(*obj), field.name)

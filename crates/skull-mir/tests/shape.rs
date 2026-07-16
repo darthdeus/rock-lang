@@ -99,7 +99,6 @@ fn dump_covers_aggregates_and_containers() {
     let b = f.emit(bb, Inst::Const(Lit::Int(2)));
     let tup = f.emit(bb, Inst::MakeTuple(vec![a, b]));
     let vec = f.emit(bb, Inst::MakeVec(vec![a, b]));
-    f.emit(bb, Inst::MakeArray(vec![a]));
     let st = f.emit(
         bb,
         Inst::MakeStruct {
@@ -131,16 +130,15 @@ fn probe() {
     v1 = const 2
     v2 = tuple [v0, v1]
     v3 = vec [v0, v1]
-    v4 = array [v0]
-    v5 = struct Foo {a=v0, b=v1}
-    v6 = enum E::Some(v0)
-    v7 = field v5.a
-    v8 = tuple_index v2.0
-    v9 = index.Vec v3[v0]
-    v10 = len.Vec v3
-    store_field v5.a, v1
+    v4 = struct Foo {a=v0, b=v1}
+    v5 = enum E::Some(v0)
+    v6 = field v4.a
+    v7 = tuple_index v2.0
+    v8 = index.Vec v3[v0]
+    v9 = len.Vec v3
+    store_field v4.a, v1
     store_index.Vec v3[v0], v1
-    return v7
+    return v6
 }";
     assert_eq!(f.to_string(), expected);
 }

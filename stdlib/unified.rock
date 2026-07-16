@@ -31,31 +31,6 @@ fn is_nan(value: float) -> bool {
     return value != value
 }
 
-// Native arrays in Rock are denoted with ![...] syntax. These are plain Lua
-// tables (1-indexed). Generic over T so value-typed elements (e.g. ![V2])
-// flow without going through `any` (value types refuse `any` boxing).
-inline(lua) fn array_len<T>(arr: ![T]) -> int = "return #arr"
-inline(lua) fn array_push<T>(arr: ![T], value: T) = "arr[#arr + 1] = value"
-@inline inline(lua) fn array_pop<T>(arr: ![T]) -> T = "table.remove(arr)"
-inline(lua) fn array_clear<T>(arr: ![T]) = "for i = #arr, 1, -1 do arr[i] = nil end"
-
-// Bounds-checked native-array read. `arr[i]` on native arrays (![T])
-// compiles to this helper so it returns T (not T?) with an error on
-// out-of-range. Matches the unified `x[i] -> T / x.get(i) -> T?`
-// surface across collection types.
-@nomangle inline(lua) fn __narr_get_checked(arr: any, i: int) -> any = """
-    local v = arr[i + 1]
-    if v == nil then
-        error("Native array index out of bounds: index " .. tostring(i) ..
-              " is outside [0, " .. tostring(#arr) .. ")")
-    end
-    return v
-"""
-
-// Native arrays don't need a dedicated `.get()` — `arr[i]` already
-// returns `T?` (Lua table miss = nil), which matches the unified
-// `.get() -> T?` contract from the other collection types.
-
 // ============================================================================
 // FFI out-parameter buffers
 // ============================================================================

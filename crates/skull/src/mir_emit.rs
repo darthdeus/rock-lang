@@ -1159,14 +1159,6 @@ fn validate_on_reload_nomangle(ws: &Workspace) -> Result<(), CompilerError> {
 
 pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     validate_on_reload_nomangle(ws)?;
-    if let Some(span) = skull_mir::lower::native_array_optional_elem(ws, user_mid) {
-        return Err(CompilerError::new_with_label(
-            span,
-            "`![T?]` is unsound: Lua `#` / `ipairs` stop at the first `nil`, so an embedded \
-             `null` silently truncates iteration. Use `[T?]` (Vec, tracked `.len`) instead."
-                .to_string(),
-        ));
-    }
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,

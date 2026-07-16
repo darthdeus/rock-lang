@@ -1137,23 +1137,6 @@ fn duplicate_newtype_rejected() {
 // false-greens on a spurious collision rather than a real duplicate-symbol
 // diagnostic. `backend-diff tests/errors` covers that case as the live oracle.)
 
-// ─── ![T?] is unsound: NativeArray of nullable T (RED) ───────────────────────
-//
-// `![T?]` is a bare Lua table; an embedded `null` makes `#arr` / `ipairs` stop
-// at the first nil, silently truncating iteration -- use `[T?]` (Vec, tracked
-// `.len`) instead. rock rejects the type; bone accepts today (LEAD). The bad
-// type alone triggers it -- no literal/loop needed (keeps the no-stdlib harness
-// from false-greening on `print`/`for`/interpolation). RED now; green when bone
-// rejects a nullable NativeArray element type.
-
-#[test]
-fn native_array_of_nullable_rejected() {
-    assert!(
-        bone_rejects("fn f(xs: ![int?]) -> int { return 0 }"),
-        "a NativeArray element type may not be nullable (![T?] is unsound)"
-    );
-}
-
 // ─── Control-flow placement (RED until bone validates it) ────────────────────
 //
 // `break`/`continue` are only meaningful inside a loop; `return` only in

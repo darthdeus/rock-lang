@@ -1085,7 +1085,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             tag!(9);
             n.hash(h);
         }
-        Expr::Tuple(es) | Expr::Array(es) | Expr::NativeArray(es) => {
+        Expr::Tuple(es) | Expr::Array(es) => {
             tag!(10);
             for x in es {
                 go!(x);
@@ -2224,8 +2224,7 @@ impl Builder<'_> {
                 let vs = self.lower_exprs(elems)?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
-            Expr::Array(elems) => self.lower_array_literal(elems, ContainerKind::Vec),
-            Expr::NativeArray(elems) => self.lower_array_literal(elems, ContainerKind::NativeArray),
+            Expr::Array(elems) => self.lower_array_literal(elems),
             Expr::Index { base, index } => {
                 let kind = self.coll_kind(base);
                 let b = self.lower_expr(base)?;
@@ -2824,36 +2823,26 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    /// `[..]` / `![..]`, with spread support. No spread -> a single
-    /// `MakeVec`/`MakeArray`. With a `..x` element, build the empty array then
-    /// push each element / splice each spread (`ArrayPush`), so spreads of
-    /// tuples/structs/arrays splice element-wise.
-    fn lower_array_literal(
-        &mut self,
-        elems: IdxRange<Expr>,
-        kind: ContainerKind,
-    ) -> Result<Idx<Inst>, CompilerError> {
+    /// `[..]`, with spread support. No spread -> a single `MakeVec`. With a
+    /// `..x` element, build the empty Vec then push each element / splice each
+    /// spread (`ArrayPush`), so spreads of tuples/structs/arrays splice
+    /// element-wise.
+    fn lower_array_literal(&mut self, elems: IdxRange<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let idxs: Vec<Idx<Expr>> = elems.into_iter().collect();
         let has_spread = idxs
             .iter()
             .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
         if !has_spread {
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
-            return Ok(self.emit_cur(match kind {
-                ContainerKind::Vec => Inst::MakeVec(vs),
-                _ => Inst::MakeArray(vs),
-            }));
+            return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        let arr = self.emit_cur(match kind {
-            ContainerKind::Vec => Inst::MakeVec(vec![]),
-            _ => Inst::MakeArray(vec![]),
-        });
+        let arr = self.emit_cur(Inst::MakeVec(vec![]));
         for &e in &idxs {
             if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                self.spread_into(arr, inner, kind)?;
+                self.spread_into(arr, inner, ContainerKind::Vec)?;
             } else {
                 let v = self.lower_expr(e)?;
-                self.emit_cur(Inst::ArrayPush { arr, value: v, kind });
+                self.emit_cur(Inst::ArrayPush { arr, value: v, kind: ContainerKind::Vec });
             }
         }
         Ok(arr)
@@ -4574,9 +4563,7 @@ impl Builder<'_> {
             ContainerKind::Vec => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
             )),
-            ContainerKind::NativeArray | ContainerKind::NativeBuffer => {
-                self.lower_for_array(vars, iter, body)
-            }
+            ContainerKind::NativeBuffer => self.lower_for_array(vars, iter, body),
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
         }
     }
@@ -6447,7 +6434,9 @@ impl Builder<'_> {
     }
 
     /// The collection kind of a base expression, from its inferred type — drives
-    /// the index/length shape (decision 9). Defaults to `NativeArray`.
+    /// the index/length shape (decision 9). bone's index/iter whitelist is closed
+    /// (`Vec`/`Map`/`NativeBuffer`+sized), so any other type reaching here is a
+    /// front-end/back-end disagreement, not a program the user could write.
     fn coll_kind(&self, base: Idx<Expr>) -> ContainerKind {
         match self.expr_ty(base) {
             Some(TypeExpr::App {
@@ -6462,7 +6451,17 @@ impl Builder<'_> {
                 ctor: TypeCtor::Nominal(name),
                 ..
             }) if is_native_buffer(name.as_str()) => ContainerKind::NativeBuffer,
-            _ => ContainerKind::NativeArray,
+            _ => {
+                let rendered = self
+                    .inf
+                    .and_then(|i| i.expr_types.get(base).copied())
+                    .map(|t| self.ws.render(self.inf, t))
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                unreachable!(
+                    "coll_kind: expected an indexable container (Vec/Map/NativeBuffer); \
+                     bone admitted an index/iter on `{rendered}`"
+                )
+            }
         }
     }
 
@@ -6991,41 +6990,6 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
     None
 }
 
-/// When `ty` resolves to `NativeArray<E>` with `E` a nullable type, returns true.
-fn na_optional_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> bool {
-    let Some(ty) = resolve_tyid(ws, inf, ty) else { return false };
-    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), params }) = ty_node(ws, inf, ty)
-    else {
-        return false;
-    };
-    if name.as_str() != "NativeArray" {
-        return false;
-    }
-    let Some(elem_idx) = params.into_iter().next() else { return false };
-    let Some(elem) = resolve_tyid(ws, inf, ty.with_idx(elem_idx)) else { return false };
-    matches!(ty_node(ws, inf, elem), Some(TypeExpr::Nullable(..)))
-}
-
-/// Scan module `mid`'s bodies for an expression whose inferred type is
-/// `NativeArray<T?>`. `![T?]` is a bare Lua table; `#` / `ipairs` stop at the
-/// first nil, so an embedded `null` silently truncates iteration -- use `[T?]`
-/// (Vec, tracked `.len`) instead. bone rejects the annotated forms; an inferred
-/// literal (`![1, null]`) slips through, so this is the emit-time gate. Returns
-/// the first offending expression's span.
-pub fn native_array_optional_elem(ws: &Workspace, mid: ModuleId) -> Option<Span> {
-    let module = ws.module(mid);
-    let ir = ws.inference(mid)?;
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (e, tyid) in inf.expr_types.iter() {
-            if na_optional_elem(ws, inf, *tyid) {
-                return Some(body.expr_spans[e]);
-            }
-        }
-    }
-    None
-}
-
 // -- `@struct_expand` emit-time rejection (docs/pass-uniforms-design.md, Layer 2).
 // The lowering expander replaces a valid call; this pass is the FATAL gate that
 // rejects an invalid one, since a per-fn lowering error would only be recorded as
@@ -7257,9 +7221,9 @@ mod tests {
     }
 
     #[test]
-    fn compound_assign_to_native_array_index() {
+    fn compound_assign_to_vec_index() {
         let dump = mir_std(
-            "fn f() -> int { let arr = ![10, 20, 30]\n arr[1] += 5\n arr[1] }",
+            "fn f() -> int { let arr = [10, 20, 30]\n arr[1] += 5\n arr[1] }",
             "f",
         );
         assert!(dump.contains("store_index"), "expected a store_index, got:\n{dump}");
@@ -7583,21 +7547,6 @@ fn f() {
     }
 
     #[test]
-    fn native_array_literal_builds_an_array() {
-        assert_eq!(
-            mir("fn f() -> ![int] { ![1, 2] }", "f"),
-            "\
-fn f() {
-  bb0:
-    v0 = const 1
-    v1 = const 2
-    v2 = array [v0, v1]
-    return v2
-}"
-        );
-    }
-
-    #[test]
     fn tuple_return_splats_multi_value() {
         // A tuple-return fn splats its N elements (multi-return ABI) instead of
         // returning one heap table. The `tuple` inst here is dead (elided from the
@@ -7736,16 +7685,16 @@ fn f(c0) {
     }
 
     #[test]
-    fn for_over_array_indexes_each_element() {
-        // Native array: the builtin counted template. (`[T]` routes through
+    fn for_over_native_buffer_indexes_each_element() {
+        // NativeBuffer: the builtin counted template. (`[T]` routes through
         // the stdlib VecIter protocol instead and never reaches this path.)
         assert_eq!(
-            mir("fn f(xs: ![int]) { for x in xs { } }", "f"),
+            mir("fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f"),
             "\
 fn f(c0) {
   bb0:
     v0 = load c0
-    v1 = len.NativeArray v0
+    v1 = len.NativeBuffer v0
     v2 = const 0
     store c1, v2
     goto bb1
@@ -7755,7 +7704,7 @@ fn f(c0) {
     branch v4 -> bb2, bb4
   bb2:
     v5 = load c1
-    v6 = index.NativeArray v0[v5]
+    v6 = index.NativeBuffer v0[v5]
     store c2, v6
     goto bb3
   bb3:

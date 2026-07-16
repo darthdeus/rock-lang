@@ -443,14 +443,8 @@ pub fn lower_type_expr_in(
                 }
             }
 
-            if ctor.name.as_str() == "NativeArray"
-                && matches!(lowered.first(), Some(TypeExpr::Nullable(..)))
-            {
-                comp_error!(te.span, "`![T?]` is not allowed - NativeArray uses `#` for length which stops at first `nil`")
-            }
-
             // Wrong generic-argument count for a user nominal (`G<int, int>` for
-            // `struct G<T>`, or too few). Builtins (Coroutine, NativeArray, Map,
+            // `struct G<T>`, or too few). Builtins (Coroutine, Map,
             // Vec/Array) aren't in `type_generic_arity`, so they keep their own
             // arity logic. Cross-module via the workspace map. The bare (0-arg)
             // case is handled in the Ident arm.
@@ -1039,11 +1033,6 @@ pub fn lower_expr_value(
         ExprKind::ArrayLiteral(elems) => {
             let elems = lower_exprs(ctx, a, body, scope, elems.iter())?;
             Expr::Array(elems)
-        }
-
-        ExprKind::NativeArrayLiteral(elems) => {
-            let elems = lower_exprs(ctx, a, body, scope, elems.iter())?;
-            Expr::NativeArray(elems)
         }
 
         ExprKind::If {

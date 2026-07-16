@@ -508,7 +508,6 @@ mod tests {
     #[test]
     fn literals_and_arrays() {
         check("[1, 2, 3]", "(block [1 2 3])");
-        check("![1, 2]", "(block ![1 2])");
         check("\"hi\"", "(block \"hi\")");
         check("true", "(block true)");
         check("null", "(block null)");
@@ -692,11 +691,6 @@ mod tests {
     fn stdlib_surface_forms() {
         // Forms the games don't exercise but stdlib does (caught by the
         // skull-cook-diff stdlib oracle):
-        // `![T]` native-array type -> `(NativeArray T)` (rock's App encoding).
-        assert_eq!(
-            item_sexp("inline(lua) fn array_len<T>(arr: ![T]) -> int = \"return #arr\""),
-            "(fn array_len <T> ((arr (NativeArray T))) int (lua))"
-        );
         // Leading-variadic param `...any` (stdlib spelling) + extern(lua) body.
         assert_eq!(
             item_sexp("extern(lua) fn print(args: ...any)"),

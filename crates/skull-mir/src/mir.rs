@@ -55,8 +55,6 @@ pub enum Lit {
 pub enum ContainerKind {
     /// `[T]` — stdlib `{ data = {..1-indexed..}, len = N }`.
     Vec,
-    /// `![T]` — a plain 1-indexed table.
-    NativeArray,
     /// `NativeBuffer<T>` — `{ ptr, len }`; `.ptr` is a 0-based C array.
     NativeBuffer,
     /// `Map<K,V>` — keyed directly by K, no `+1`.
@@ -232,9 +230,6 @@ pub enum Inst {
     // --- aggregate constructors ---
     /// A tuple `{v0, v1, ...}` (1-indexed positional Lua table).
     MakeTuple(Vec<Idx<Inst>>),
-    /// A native array `![..]` -> a plain 1-indexed Lua table `{v0, ...}`. Also
-    /// used for newtype payloads and other positional tables.
-    MakeArray(Vec<Idx<Inst>>),
     /// A `Vec`/`[T]` literal -> `{ data = {v0, ...}, len = N }` (the stdlib rep).
     MakeVec(Vec<Idx<Inst>>),
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field
@@ -288,15 +283,13 @@ pub enum Inst {
 
     // --- container reads (0-based IR; emit adds `+1` on sequence access) ---
     /// `base[index]`, shape per `kind`: `Vec` -> `base.data[index+1]`,
-    /// `NativeArray` -> `base[index+1]`, `NativeBuffer` -> `base.ptr[index]`,
-    /// `Map` -> `base[index]`.
+    /// `NativeBuffer` -> `base.ptr[index]`, `Map` -> `base[index]`.
     Index {
         base: Idx<Inst>,
         index: Idx<Inst>,
         kind: ContainerKind,
     },
-    /// Element count: `Vec` -> `base.len`, `NativeArray` -> `#base`,
-    /// `NativeBuffer` -> `base.len`.
+    /// Element count: `Vec` -> `base.len`, `NativeBuffer` -> `base.len`.
     Len {
         base: Idx<Inst>,
         kind: ContainerKind,
@@ -321,8 +314,8 @@ pub enum Inst {
     /// `NAME = value` — assign a module-level global (a Lua global).
     StoreGlobal { name: Ustr, value: Idx<Inst> },
     /// Append `value` to the array under construction `arr` (spread literals
-    /// `[..a, b]`). `Vec`: `arr.len = arr.len + 1; arr.data[arr.len] = value`;
-    /// `NativeArray`: `arr[#arr + 1] = value`. An effect.
+    /// `[..a, b]`). `Vec`: `arr.len = arr.len + 1; arr.data[arr.len] = value`.
+    /// An effect.
     ArrayPush {
         arr: Idx<Inst>,
         value: Idx<Inst>,

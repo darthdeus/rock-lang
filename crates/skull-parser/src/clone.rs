@@ -190,9 +190,6 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
             compound_op,
         },
         ExprKind::ArrayLiteral(xs) => ExprKind::ArrayLiteral(xs.into_iter().map(|x| ce(ast, x)).collect()),
-        ExprKind::NativeArrayLiteral(xs) => {
-            ExprKind::NativeArrayLiteral(xs.into_iter().map(|x| ce(ast, x)).collect())
-        }
         ExprKind::Tuple(xs) => ExprKind::Tuple(xs.into_iter().map(|x| ce(ast, x)).collect()),
         ExprKind::StructLiteral { name, bases, fields } => ExprKind::StructLiteral {
             name,

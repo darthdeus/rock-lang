@@ -648,7 +648,6 @@ pub enum Expr {
     },
 
     Array(IdxRange<Expr>),
-    NativeArray(IdxRange<Expr>),
 
     StructLiteral {
         name: Ustr,
