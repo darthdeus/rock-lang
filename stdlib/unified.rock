@@ -1178,8 +1178,8 @@ fn expect<T>(value: T?, message: string) -> T {
 // Historical aliases for `float(int)`. All three — `float`, `int_to_float`,
 // `to_float` — are `@expand("$1")` identities, substituted at call sites
 // with zero runtime cost. `float(int)` is the canonical name.
-@pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
-@pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
+@intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
+@intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
 
 inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
@@ -1241,7 +1241,7 @@ inline(lua) fn float_to_int(value: float) -> int = """
 // `@expand("$1")` substitutes the argument expression at the call site with
 // zero function-call overhead. Confirmed in tmp/codegen_expand.lua: calls
 // vanish entirely in the generated Lua.
-@pure @inline inline(lua) fn float(value: int) -> float = "return value"
+@intrinsic @pure @inline inline(lua) fn float(value: int) -> float = "return value"
 
 // Coroutine support functions
 // Global resume function for method call rewrite - will be overridden by coroutine object methods
@@ -1644,6 +1644,7 @@ inline(lua) fn random_seed(seed: int) = """
 """
 @intrinsic @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
 @intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
+@intrinsic @pure @inline inline(lua) fn tan(x: float) -> float = "math.tan(x)"
 @intrinsic @pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
 @intrinsic @pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
 @intrinsic @pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"

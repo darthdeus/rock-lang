@@ -16,7 +16,9 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 use skull_codegen_glsl::GlslIntrinsics;
-use skull_mir::intrinsics::{is_intrinsic, is_native_required, IntrinsicTable};
+use skull_mir::intrinsics::{
+    declared_intrinsics, is_intrinsic, is_native_required, unbacked_entries, IntrinsicTable,
+};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -73,4 +75,21 @@ fn fallback_plus_mapping_intrinsics_satisfy_the_differential_precondition() {
             "`{name}`/{arity} must have a GLSL native mapping (the differential's other side)"
         );
     }
+}
+
+// Fail-closed, END TO END against the REAL GLSL table: every GLSL entry is
+// backed by a stdlib `@intrinsic` declaration, so `unbacked_entries` is empty.
+// The JS sibling (skull-codegen-js) pins the same invariant on the toy table;
+// this pins it on the shipping one -- the Vec-method/ctor/cast/texture entries
+// too, not just the scalar proving set. Goes RED the moment a GLSL key drifts
+// from its stdlib signature or an entry loses its `@intrinsic` annotation.
+#[test]
+fn every_glsl_entry_is_backed_by_a_stdlib_intrinsic() {
+    let ws = stdlib_ws();
+    let declared = declared_intrinsics(&ws);
+    let unbacked = unbacked_entries(&GlslIntrinsics, &declared);
+    assert!(
+        unbacked.is_empty(),
+        "GLSL table has entries no stdlib @intrinsic declaration backs (drift): {unbacked:?}"
+    );
 }
