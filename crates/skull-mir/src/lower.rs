@@ -7110,6 +7110,48 @@ pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
     None
 }
 
+/// Reject a CPU-side (Lua-emission) DIRECT call to a `@gpu_only` intrinsic
+/// (`texture()`, stdlib/shader.rock). Allowed only when the calling fn is itself
+/// GPU-side (`@shader(...)` or `@gpu_only`) -- shader bodies compile through the
+/// Lua backend (bitgun's `heat_shimmer_frag`) and must keep working. Only DIRECT
+/// calls are rejected: taking the fn as a value and calling it indirectly is out
+/// of scope and keeps hitting the runtime-error body (the never-silent-stub
+/// defense, CLAUDE.md "NEVER swallow errors"). Returns the first spanned reject.
+pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        let caller_is_gpu = match owner {
+            BodyOwner::Function(fid) => crate::intrinsics::is_gpu_context(&module.functions[*fid]),
+            _ => false,
+        };
+        if caller_is_gpu {
+            continue;
+        }
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let f = &ws.module(fmod).functions[fid];
+            if !crate::intrinsics::is_gpu_only(f) {
+                continue;
+            }
+            let fname = f.name;
+            return Some(CompilerError::new_with_label(
+                body.expr_spans[e],
+                format!(
+                    "`{fname}` is GPU-only and cannot be called from CPU (Lua) code. \
+                     Shader helper code that calls `{fname}` must annotate its fn `@shader(...)` \
+                     or `@gpu_only`."
+                ),
+            ));
+        }
+    }
+    None
+}
+
 fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
     match body.expr_arena[e] {
         Expr::Int(v) => Some(v),

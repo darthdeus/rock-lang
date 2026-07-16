@@ -7,6 +7,6 @@ struct Sampler2D {
     __handle: int,
 }
 
-@intrinsic inline(lua) fn texture(s: Sampler2D, uv: Vec2) -> Vec4 = """
+@intrinsic @gpu_only inline(lua) fn texture(s: Sampler2D, uv: Vec2) -> Vec4 = """
     error("texture() is GPU-only (shader fns are not CPU-callable)")
 """

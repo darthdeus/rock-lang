@@ -1180,6 +1180,9 @@ pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEm
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
         return Err(err);
     }
+    if let Some(err) = skull_mir::lower::gpu_only_call_rejection(ws, user_mid) {
+        return Err(err);
+    }
     if let Some((key, span)) = skull_mir::lower::value_struct_map_key(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,

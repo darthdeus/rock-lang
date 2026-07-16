@@ -64,6 +64,20 @@ pub fn is_native_required(f: &Function) -> bool {
     has_anno(f, "native_required")
 }
 
+/// True iff `f` is `@gpu_only`: it maps only on GPU backends, so a direct call
+/// from CPU (Lua) code is rejected at emit ([`crate::lower::gpu_only_call_rejection`]).
+/// The one in-tree consumer is `texture()` (stdlib/shader.rock).
+pub fn is_gpu_only(f: &Function) -> bool {
+    has_anno(f, "gpu_only")
+}
+
+/// True iff `f` is GPU-side code that may reach a `@gpu_only` intrinsic: a
+/// `@shader(...)` entry or another `@gpu_only` fn. Shader bodies pass through the
+/// Lua backend (bitgun's `heat_shimmer_frag`), so the marker exempts them.
+pub fn is_gpu_context(f: &Function) -> bool {
+    is_gpu_only(f) || has_anno(f, "shader")
+}
+
 /// The luajit mapping is the `inline(lua)` body; a Rock body is the fallback.
 fn has_luajit_mapping(f: &Function) -> bool {
     f.lua_body.is_some()
@@ -132,6 +146,8 @@ pub fn unbacked_entries(
 ///
 /// - a `@native_required` fn that is not also `@intrinsic` -- the marker only
 ///   means "backends must map this intrinsic natively", meaningless alone;
+/// - a `@gpu_only` fn that is not also `@intrinsic` -- likewise meaningless
+///   alone: the marker only names an intrinsic that CPU backends do not map;
 /// - a `@native_required @intrinsic` fn with no luajit mapping (its only body is
 ///   a Rock body): native-required skips the fallback rung, so there is nothing
 ///   for luajit to fall back to.
@@ -142,6 +158,16 @@ pub fn unbacked_entries(
 pub fn intrinsic_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     for (_, f) in module.functions.iter() {
+        if is_gpu_only(f) && !has_anno(f, "intrinsic") {
+            return Some(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "`@gpu_only` marks an `@intrinsic` fn that only GPU backends map; \
+                     `{}` is `@gpu_only` but not `@intrinsic`",
+                    f.name
+                ),
+            ));
+        }
         if !is_native_required(f) {
             continue;
         }
