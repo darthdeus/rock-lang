@@ -182,3 +182,22 @@ fn reject_entry_not_fragment() {
     "#;
     reject_entry(src, "f", "fragment");
 }
+
+// `pass_uniforms` (docs/pass-uniforms-design.md) returns `[(string, <enum>)]` --
+// a CPU-side value, not a GPU-expressible type. The GLSL profile rejects it as
+// non-tier-0 before any expansion, so the intrinsic can never leak into shader
+// source (its `@struct_expand` annotation is inert here).
+#[test]
+fn reject_struct_expand_pairs_in_shader() {
+    let src = r#"
+        value SU { a: float }
+        enum SE { A(float) }
+        @struct_expand inline(lua) fn su_pairs<T>(u: T) -> [(string, SE)] = """
+            error("expanded")
+        """
+        @pure fn shader_uses_pairs(u: SU) -> [(string, SE)] {
+            return su_pairs(u)
+        }
+    "#;
+    reject(src, &["shader_uses_pairs"], "not tier 0");
+}

@@ -394,6 +394,15 @@ pub struct Cell {
     /// compiler-minted temp (if-result, loop counter, call dest), whose type the
     /// backend infers from its first store. codegen-lua ignores it (untyped Lua).
     pub ty: Option<TyId>,
+    /// Set ONLY at lowering, ONLY for a source binding (local / loop variable)
+    /// whose bone type is a NON-nullable value struct. It licenses SROA to
+    /// rematerialize an escaping whole-value load of this cell at the use site
+    /// (immutable value + statically non-null == rebuild is observationally
+    /// identical, the same guarantee that makes `v.field` legal). Any doubt about
+    /// what a cell represents leaves it unset -- unset is always today's boxed
+    /// emission; only a wrongly-set flag can miscompile, so all conservatism
+    /// lands here (`docs/value-two-tier-plan.md` item 8).
+    pub nonnull_value_struct: bool,
 }
 
 /// How a block ends. Control flow lives ONLY here.
@@ -548,18 +557,24 @@ impl MirFunc {
     /// first store). Use [`Self::new_cell_typed`] at a binding site with a
     /// declared/inferred type.
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name, loop_binding: false, ty: None })
+        self.cells.alloc(Cell { name, loop_binding: false, ty: None, nonnull_value_struct: false })
     }
 
     /// Allocate a fresh variable cell carrying bone's type for the binding.
     pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
-        self.cells.alloc(Cell { name, loop_binding: false, ty })
+        self.cells.alloc(Cell { name, loop_binding: false, ty, nonnull_value_struct: false })
     }
 
     /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
     /// [`Cell::loop_binding`]).
     pub fn mark_loop_binding(&mut self, cell: Idx<Cell>) {
         self.cells[cell].loop_binding = true;
+    }
+
+    /// Tag a source-binding cell as holding a non-nullable value struct (licenses
+    /// SROA escape-rematerialization; see [`Cell::nonnull_value_struct`]).
+    pub fn mark_nonnull_value_struct(&mut self, cell: Idx<Cell>) {
+        self.cells[cell].nonnull_value_struct = true;
     }
 
     /// Allocate a fresh (empty, `Unreachable`-terminated) block.

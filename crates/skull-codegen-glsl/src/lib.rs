@@ -314,6 +314,31 @@ fn vec_op_symbol(name: &str) -> Option<&'static str> {
 
 // --- per-function emission ---------------------------------------------------
 
+/// A cosmetic-tier fold of a lowered `&&`/`||`/expression-`if` diamond back into
+/// one GLSL expression (`docs/glsl-relooper-plan.md`). The diamond stored its
+/// result into a single-use cell across two single-store arms; instead of
+/// emitting the diamond we render this expression at the cell's one use.
+#[derive(Clone, Copy)]
+struct FoldedDiamond {
+    cond: Idx<Inst>,
+    then_val: Idx<Inst>,
+    else_val: Idx<Inst>,
+    kind: FoldKind,
+    /// The result cell's GLSL type -- ternary arms render at this type so an
+    /// int-in-float-context arm keeps the coercion the diamond's store applied.
+    result_ty: GlslTy,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FoldKind {
+    /// `if a then b else false` == `(a && b)`.
+    And,
+    /// `if a then true else b` == `(a || b)`.
+    Or,
+    /// `if a then b else c` == `(a ? b : c)`.
+    Ternary,
+}
+
 struct FnEmit<'a> {
     ws: &'a Workspace,
     overloaded: &'a HashSet<Ustr>,
@@ -342,6 +367,15 @@ struct FnEmit<'a> {
     uniform_cell: Option<Idx<Cell>>,
     /// Entry mode: uniform field name -> GLSL type (for `ty_of` on those reads).
     uniform_fields: HashMap<Ustr, GlslTy>,
+    /// Cosmetic folds (`docs/glsl-relooper-plan.md`, cosmetic tier). A diamond's
+    /// single-use result cell -> the expression it renders as; the diamond itself
+    /// is skipped, its declaration + stores suppressed.
+    folded_cond: HashMap<Idx<Cell>, FoldedDiamond>,
+    /// The branch block a `folded_cond` diamond starts at -> its result cell
+    /// (so `emit_seq` skips the diamond and jumps to its join).
+    folded_block: HashMap<Idx<Block>, Idx<Cell>>,
+    /// A counted-loop bound temp folded into the for-header -> its const value.
+    folded_bound: HashMap<Idx<Cell>, Idx<Inst>>,
 }
 
 #[derive(Clone, Copy)]
@@ -427,6 +461,9 @@ fn emit_fn_def_with(
         visited: HashSet::default(),
         uniform_cell: entry.and_then(|s| s.uniform_param.map(|i| mf.params[i])),
         uniform_fields: entry.map(|s| s.uniform_fields.iter().copied().collect()).unwrap_or_default(),
+        folded_cond: HashMap::default(),
+        folded_block: HashMap::default(),
+        folded_bound: HashMap::default(),
     };
     e.assign_cell_names();
     let dropped: HashSet<usize> = entry
@@ -445,6 +482,7 @@ fn emit_fn_def_with(
         e.cell_ty.insert(c, ty);
     }
     e.compute_cell_types();
+    e.compute_folds();
 
     // Parameter list (entry mode drops uniform-struct + sampler params).
     let params: Vec<String> = mf
@@ -464,6 +502,10 @@ fn emit_fn_def_with(
     let mut decls = String::new();
     for (cid, _) in mf.cells.iter() {
         if param_set.contains(&cid) {
+            continue;
+        }
+        // A folded diamond result / bound temp has no storage -- it renders inline.
+        if e.folded_cond.contains_key(&cid) || e.folded_bound.contains_key(&cid) {
             continue;
         }
         if let Some(ty) = e.cell_ty.get(&cid) {
@@ -536,6 +578,150 @@ impl FnEmit<'_> {
                 }
             }
         }
+    }
+
+    /// Detect the cosmetic-tier folds (`docs/glsl-relooper-plan.md`): `&&`/`||`
+    /// short-circuit diamonds collapse back to infix boolean expressions.
+    fn compute_folds(&mut self) {
+        let reach: HashSet<Idx<Block>> =
+            reverse_postorder(self.f, self.f.entry).into_iter().collect();
+        // Cell load-counts over reachable code -- a fold is only sound when the
+        // diamond's result cell has exactly one use.
+        let mut load_count: HashMap<Idx<Cell>, usize> = HashMap::default();
+        for &b in &reach {
+            for &iid in &self.f.blocks[b].insts {
+                if let Inst::Load(c) = self.f.insts[iid] {
+                    *load_count.entry(c).or_default() += 1;
+                }
+            }
+        }
+
+        // Short-circuit diamonds: a `Branch` whose two arms each single-store the
+        // same single-use bool cell, one arm storing the `&&`/`||` const identity.
+        // `a && b` lowers to `if a then b else false`; `a || b` to
+        // `if a then true else b` (`lower_and`/`lower_or`, no And/Or inst).
+        for b in reach.iter().copied() {
+            let Term::Branch { cond, then_bb, else_bb } = self.f.blocks[b].term else {
+                continue;
+            };
+            let Some(join) = self.structure.ipdom(b) else { continue };
+            let Some((tcell, tval)) = self.single_store_arm(then_bb, join) else { continue };
+            let Some((ecell, eval)) = self.single_store_arm(else_bb, join) else { continue };
+            if tcell != ecell {
+                continue;
+            }
+            let rcell = tcell;
+            if load_count.get(&rcell).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(&result_ty) = self.cell_ty.get(&rcell) else { continue };
+            // Soundness: the fold moves the expression to the cell's use site, so
+            // its inputs must be unchanged there. The arms go straight to `join`
+            // and store only `rcell`, so the only place an input could be mutated
+            // between the diamond and the use is `join` before the use -- require
+            // the use to be in `join` with no store preceding it.
+            if !self.use_hoistable_to(rcell, join) {
+                continue;
+            }
+            let kind = if result_ty == GlslTy::Bool && self.is_const_bool(eval, false) {
+                FoldKind::And
+            } else if result_ty == GlslTy::Bool && self.is_const_bool(tval, true) {
+                FoldKind::Or
+            } else {
+                FoldKind::Ternary
+            };
+            self.folded_cond.insert(
+                rcell,
+                FoldedDiamond { cond, then_val: tval, else_val: eval, kind, result_ty },
+            );
+            self.folded_block.insert(b, rcell);
+        }
+
+        // Bound temps (item 3): a counted loop's bound `t = <const>; for (; i < t;
+        // ..)` folds to `for (; i < <const>; ..)`, dropping the single-use temp.
+        // Only a CONST bound is provably loop-invariant -- a param/expr bound
+        // could be reassigned in the body, changing the count if re-read.
+        let bounds: Vec<Idx<Inst>> = self.counted.values().map(|li| li.bound).collect();
+        for bound in bounds {
+            let Inst::Load(bcell) = self.f.insts[bound] else { continue };
+            if load_count.get(&bcell).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let Some(v) = self.single_store_value(bcell) else { continue };
+            if matches!(self.f.insts[v], Inst::Const(_)) {
+                self.folded_bound.insert(bcell, v);
+            }
+        }
+    }
+
+    /// The single value stored to `cell`, or `None` if it is stored zero or more
+    /// than once anywhere in the fn.
+    fn single_store_value(&self, cell: Idx<Cell>) -> Option<Idx<Inst>> {
+        let mut found = None;
+        for (_, blk) in self.f.blocks.iter() {
+            for &iid in &blk.insts {
+                if let Inst::Store { cell: c, value } = self.f.insts[iid] {
+                    if c == cell {
+                        if found.is_some() {
+                            return None;
+                        }
+                        found = Some(value);
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// Whether `rcell`'s single use is in `join` with no `Store` preceding it
+    /// there -- the condition that makes hoisting the folded expression to the
+    /// use site sound (no input can be mutated between the diamond and the use).
+    fn use_hoistable_to(&self, rcell: Idx<Cell>, join: Idx<Block>) -> bool {
+        for &iid in &self.f.blocks[join].insts {
+            match self.f.insts[iid] {
+                Inst::Load(c) if c == rcell => return true,
+                Inst::Store { .. } => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// If `arm` is a single-store block (exactly one `Store`, any number of pure
+    /// value insts) ending `Goto(join)`, return its `(cell, stored value)`.
+    fn single_store_arm(&self, arm: Idx<Block>, join: Idx<Block>) -> Option<(Idx<Cell>, Idx<Inst>)> {
+        if self.f.blocks[arm].term != Term::Goto(join) {
+            return None;
+        }
+        let mut store = None;
+        for &iid in &self.f.blocks[arm].insts {
+            if let Inst::Store { cell, value } = self.f.insts[iid] {
+                if store.is_some() {
+                    return None;
+                }
+                store = Some((cell, value));
+            }
+        }
+        store
+    }
+
+    fn is_const_bool(&self, iid: Idx<Inst>, want: bool) -> bool {
+        matches!(self.f.insts[iid], Inst::Const(Lit::Bool(b)) if b == want)
+    }
+
+    /// Render a folded diamond as one GLSL expression.
+    fn render_folded(&self, fd: &FoldedDiamond) -> Result<String, CompilerError> {
+        let cond = self.render_val(fd.cond)?;
+        Ok(match fd.kind {
+            FoldKind::And => format!("({} && {})", cond, self.render_val(fd.then_val)?),
+            FoldKind::Or => format!("({} || {})", cond, self.render_val(fd.else_val)?),
+            FoldKind::Ternary => format!(
+                "({} ? {} : {})",
+                cond,
+                self.render_val_t(fd.then_val, fd.result_ty)?,
+                self.render_val_t(fd.else_val, fd.result_ty)?
+            ),
+        })
     }
 
     /// The GLSL type of a value instruction.
@@ -617,7 +803,15 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => return Err(err(self.span(), "shader profile: null literal is not tier 0")),
             Inst::Const(Lit::Str(_)) => return Err(err(self.span(), "shader profile: string literal is not tier 0")),
-            Inst::Load(c) => self.cell_name[c].clone(),
+            Inst::Load(c) => {
+                if let Some(fd) = self.folded_cond.get(c) {
+                    self.render_folded(fd)?
+                } else if let Some(&v) = self.folded_bound.get(c) {
+                    self.render_val(v)?
+                } else {
+                    self.cell_name[c].clone()
+                }
+            }
             Inst::IntAdd(a, b) => bin(a, "+", b, self)?,
             Inst::FloatAdd(a, b) => fbin(a, "+", b, self)?,
             Inst::IntSub(a, b) => bin(a, "-", b, self)?,
@@ -768,9 +962,19 @@ impl FnEmit<'_> {
                     cur = t;
                 }
                 Term::Branch { cond, then_bb, else_bb } => {
-                    match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
-                        Some(m) => cur = m,
-                        None => return Ok(()),
+                    // A folded short-circuit / ternary diamond emits nothing here --
+                    // its expression renders at the result cell's one use. Skip to
+                    // the join (ipdom); both arms are absorbed.
+                    if self.folded_block.contains_key(&cur) {
+                        match self.structure.ipdom(cur) {
+                            Some(join) => cur = join,
+                            None => return Ok(()),
+                        }
+                    } else {
+                        match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
+                            Some(m) => cur = m,
+                            None => return Ok(()),
+                        }
                     }
                 }
                 Term::Switch { .. } => {
@@ -855,6 +1059,10 @@ impl FnEmit<'_> {
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.f.blocks[b].insts.clone() {
             if let Inst::Store { cell, value } = self.f.insts[iid] {
+                // Folded diamond result / bound temp: no storage, renders inline.
+                if self.folded_cond.contains_key(&cell) || self.folded_bound.contains_key(&cell) {
+                    continue;
+                }
                 let rhs = match self.cell_ty.get(&cell) {
                     Some(&want) => self.render_val_t(value, want)?,
                     None => self.render_val(value)?,

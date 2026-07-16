@@ -473,7 +473,14 @@ struct Arena<T> {
     occupied_count: int = 0,
 }
 
-struct Entity<T> {
+// GC-carrying `value` struct (generic + an `Arena<T>` field): immutable,
+// scalarized through calls/loops so a non-escaping arena `for (e, d)` pair-scan
+// builds no per-iteration Entity table; materializes as an immutable Lua table
+// (`Entity_vt`) only where it escapes (stored in a Vec / enum payload / global).
+// `==` is the metatable value eq: `_arena` by reference, `_index`/`_generation`
+// structural -- so entities from the SAME arena with equal slot+generation are
+// equal (a superset of `.equals`, which ignores the arena).
+value Entity<T> {
     // `_`-prefixed: implementation details, hidden from member completion. Use
     // the method API (`get`/`remove`/`equals`/...), not the fields.
     _arena: Arena<T>,
@@ -656,6 +663,17 @@ deco init on_reload {
 
     -- Different Rock types are never equal
     if type_a and type_b and type_a ~= type_b then
+        return false
+    end
+
+    -- A GC-carrying value struct (table repr) carries a per-type `__eq`
+    -- metatable that is the AUTHORITY: scalar/value fields structural, GC-ref
+    -- fields BY REFERENCE. The `a == b` reference check above already invoked it
+    -- (LuaJIT fires `__eq` on two same-metamethod tables); reaching here means it
+    -- returned false, so they are unequal -- do NOT fall through to the generic
+    -- structural walk (which would compare a GC-ref field by contents).
+    local mt = getmetatable(a)
+    if mt and mt.__eq then
         return false
     end
 
@@ -2295,6 +2313,33 @@ fn ease_in_out_circ(t: float) -> float {
     } else {
         return (sqrt(1.0 - (2.0 - 2.0 * t) * (2.0 - 2.0 * t)) + 1.0) / 2.0
     }
+}
+
+// Envelope -- goal-chasing follower with asymmetric rates (audio AR).
+// Unlike a tween (event-triggered playback of a known from/to journey),
+// an envelope has no timeline: pass the goal every step and it chases,
+// retargeting mid-flight for free. Linear rate-limited, so `value`
+// reaches the goal EXACTLY (no asymptotic tail); shaping (env^2,
+// ease_out_quad, ...) is applied by consumers at the read site.
+// Engine sugar stepping against the frame clock: Envelope.step (stone).
+
+struct Envelope {
+    value: float = 0,
+    attack: float,
+    release: float,
+}
+
+fn envelope(attack: float, release: float) -> Envelope {
+    return Envelope { value: 0, attack: attack, release: release }
+}
+
+fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
+    if e.value < goal {
+        e.value = min(goal, e.value + step_dt / e.attack)
+    } else {
+        e.value = max(goal, e.value - step_dt / e.release)
+    }
+    return e.value
 }
 
 // String manipulation functions

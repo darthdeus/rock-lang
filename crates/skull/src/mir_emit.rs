@@ -915,12 +915,13 @@ fn assemble(
     let ts = Instant::now();
     let mut out = String::from(crate::runtime_prelude());
     out.push_str(&crate::enum_cdata_defs(ws));
-    let (vdefs, value_emitted) = crate::value_struct_defs(ws)?;
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws)?;
     out.push_str(&vdefs);
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc));
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws));
+    out.push_str(&crate::type_table_defs(ws, &value_gc));
     out.push_str(&crate::enum_runtime_defs(ws));
     t_scaffold += ts.elapsed();
 
@@ -1173,6 +1174,9 @@ pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEm
                 .to_string(),
         ));
     }
+    if let Some(err) = skull_mir::lower::struct_expand_rejection(ws, user_mid) {
+        return Err(err);
+    }
     if let Some((key, span)) = skull_mir::lower::value_struct_map_key(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,
@@ -1183,6 +1187,9 @@ pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEm
                  string key derived from the struct's fields."
             ),
         ));
+    }
+    if let Some((msg, span)) = skull_mir::lower::gc_value_c_boundary(ws, user_mid) {
+        return Err(CompilerError::new_with_label(span, msg));
     }
     let cg = CodegenCtx::new(ws);
     // The overload set lives in `cg` (computed once there); borrow it rather than
