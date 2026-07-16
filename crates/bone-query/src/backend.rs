@@ -1224,6 +1224,28 @@ impl BoneWorkspace {
         pos: Position,
         space_triggered: bool,
     ) -> Vec<CompletionItem> {
+        let mut items = self.completion_with_trigger_impl(path, pos, space_triggered);
+        // Reconcile every insert with the buffer text after the cursor: a dotted
+        // reach insert (`PANEL.rect()`) accepted over an existing `.rect()` tail
+        // must not double it. Done once here so it covers every return path
+        // (member/enum/struct/reach), off the same canon path + offset the impl used.
+        let path_c = self.canon(path);
+        if let Some(proj) = self.projects.get(&Self::root_for(path_c.as_str())) {
+            if let Some(src) = proj.texts.get(path_c.as_str()) {
+                let offset = offset_at_line_col(src, pos.line, pos.character);
+                let tail = member_tail(src, offset);
+                reconcile_suffix(&mut items, tail);
+            }
+        }
+        items
+    }
+
+    fn completion_with_trigger_impl(
+        &mut self,
+        path: &str,
+        pos: Position,
+        space_triggered: bool,
+    ) -> Vec<CompletionItem> {
         // `&mut self`: the context-triggered paths (member/enum/struct/field-ref)
         // analyze the completion munge as a speculative Session variant
         // (`with_file_variant`), which mutates and restores the live session.
