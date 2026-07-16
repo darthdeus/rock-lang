@@ -8,6 +8,8 @@
 
 use std::process::Command;
 
+use skull_codegen_js::{fill_template, JS_INTRINSICS};
+
 mod common;
 use common::{emit_scalar, stdlib_ws};
 
@@ -54,6 +56,20 @@ fn eval_fallback(
     node_eval_number(&format!("{js}\nconsole.log({name}_fb({call}));"))
 }
 
+/// Evaluate `name`'s JS TABLE MAPPING on `args` under node (`fill_template` +
+/// eval). The native side of the differential -- no emitter involved.
+fn eval_mapping(name: &str, arity: usize, args: &[f64]) -> f64 {
+    let tmpl = JS_INTRINSICS
+        .iter()
+        .find(|(n, a, _)| *n == name && *a == arity)
+        .map(|(_, _, t)| *t)
+        .unwrap_or_else(|| panic!("no JS mapping for `{name}`/{arity}"));
+    let lits: Vec<String> = args.iter().map(|a| arg_lit(*a)).collect();
+    let refs: Vec<&str> = lits.iter().map(|s| s.as_str()).collect();
+    node_eval_number(&format!("console.log({});", fill_template(tmpl, &refs)))
+}
+
+
 /// (name, arity, args, reference) from `tests/intrinsics/fallback_reference.rock`
 /// -- the values the luajit fallback body produces. min/max are generic (no
 /// emittable monomorphic body), so they are mapping-only and excluded here.
@@ -74,6 +90,14 @@ const CASES: &[(&str, usize, &[f64], f64)] = &[
     ("fract", 1, &[-0.25], 0.75),
 ];
 
+/// Mapping-only cases: min/max are generic (`fn max<T>`), so no monomorphic
+/// MirFunc and no emittable fallback -- their differential is the JS mapping vs
+/// the luajit reference (the fallback side runs on luajit as that reference).
+const MAPPING_ONLY_CASES: &[(&str, usize, &[f64], f64)] = &[
+    ("min", 2, &[3.0, 5.0], 3.0),
+    ("max", 2, &[3.0, 5.0], 5.0),
+];
+
 // The emitted JS fallback bodies EXECUTE under node and reproduce the luajit
 // reference values -- proving the S2 emitter produces runnable, correct JS.
 #[test]
@@ -88,6 +112,40 @@ fn fallback_bodies_execute_under_node() {
         assert!(
             (got - reference).abs() < 1e-9,
             "{name}({args:?}) fallback = {got}, reference = {reference}"
+        );
+    }
+}
+
+// The native-vs-fallback numeric differential the intrinsics arc was built for
+// and slice 5 walled as "not achievable in-arc" (one body per fn on luajit).
+// With node as the second executing backend, each intrinsic runs BOTH ways --
+// its JS table mapping and its Rock fallback lowered to JS -- and they agree
+// with each other AND the luajit reference. min/max are mapping-only (generic,
+// no emittable fallback); their fallback side is the luajit reference.
+#[test]
+fn mapping_vs_fallback_differential() {
+    if !node_available() {
+        eprintln!("SKIP mapping_vs_fallback_differential: `node` not on PATH");
+        return;
+    }
+    let ws = stdlib_ws();
+    for &(name, arity, args, reference) in CASES {
+        let mapping = eval_mapping(name, arity, args);
+        let fallback = eval_fallback(&ws, name, arity, args);
+        assert!(
+            (mapping - reference).abs() < 1e-9,
+            "{name}({args:?}) mapping = {mapping}, reference = {reference}"
+        );
+        assert!(
+            (mapping - fallback).abs() < 1e-9,
+            "{name}({args:?}) mapping = {mapping} disagrees with fallback = {fallback}"
+        );
+    }
+    for &(name, arity, args, reference) in MAPPING_ONLY_CASES {
+        let mapping = eval_mapping(name, arity, args);
+        assert!(
+            (mapping - reference).abs() < 1e-9,
+            "{name}({args:?}) mapping = {mapping}, reference = {reference}"
         );
     }
 }
