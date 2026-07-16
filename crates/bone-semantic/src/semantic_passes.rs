@@ -87,8 +87,17 @@ pub fn lower_modules(
         let _span = tracing::info_span!("name_reg").entered();
         let timer = Instant::now();
 
-        for item in items.iter() {
+        for item in items.iter_mut() {
             let mid = item.module.module_id();
+
+            // Cross-module duplicate names are a recoverable INTERFACE error, not a
+            // fail-fast: record it in the offending module's `interface_errors` (the
+            // same channel `lower_type_expr_in` uses for "Unknown type name") and
+            // keep going, so the LSP/editor still gets partial results AND a
+            // persistent squiggle. A `comp_error!` here aborted the whole pass, so
+            // the error never reached `session.diagnostics()` -- it only surfaced
+            // transiently as `update_file`'s `Err`, invisible to `diagnostics_for`.
+            let mut dup_errs: Vec<CompilerError> = Vec::new();
 
             for (name, def) in item.module.struct_by_name.iter() {
                 if ws
@@ -103,7 +112,10 @@ pub fn lower_modules(
                     .is_some()
                 {
                     let span = item.module.structs[*def].span;
-                    comp_error!(span, "duplicate struct `{}` across modules", name);
+                    dup_errs.push(CompilerError::new_with_label(
+                        span,
+                        format!("duplicate struct `{}` across modules", name),
+                    ));
                 }
             }
 
@@ -120,7 +132,10 @@ pub fn lower_modules(
                     .is_some()
                 {
                     let span = item.module.enums[*def].span;
-                    comp_error!(span, "duplicate enum `{}` across modules", name);
+                    dup_errs.push(CompilerError::new_with_label(
+                        span,
+                        format!("duplicate enum `{}` across modules", name),
+                    ));
                 }
             }
 
@@ -137,9 +152,14 @@ pub fn lower_modules(
                     .is_some()
                 {
                     let span = item.module.newtypes[*def].span;
-                    comp_error!(span, "duplicate enum `{}` across modules", name);
+                    dup_errs.push(CompilerError::new_with_label(
+                        span,
+                        format!("duplicate newtype `{}` across modules", name),
+                    ));
                 }
             }
+
+            item.module.interface_errors.extend(dup_errs);
         }
 
         ws.log_time("register names", timer);
@@ -208,15 +228,20 @@ pub fn lower_modules(
         let _span = tracing::info_span!("register_globals").entered();
         let timer = Instant::now();
 
-        for module in modules.iter() {
+        for module in modules.iter_mut() {
+            let mut dup_errs: Vec<CompilerError> = Vec::new();
             for (_, g) in module.globals.iter() {
                 if ws.globals_by_name.insert(g.name, g.ty).is_some() {
-                    comp_error!(g.span, "duplicate global `{}` across modules", g.name);
+                    dup_errs.push(CompilerError::new_with_label(
+                        g.span,
+                        format!("duplicate global `{}` across modules", g.name),
+                    ));
                 }
                 if g.is_const {
                     ws.const_globals.insert(g.name);
                 }
             }
+            module.interface_errors.extend(dup_errs);
         }
 
         ws.log_time("register global names", timer);
