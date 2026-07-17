@@ -289,6 +289,12 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("v", 0, "vec2(0.0)"),
     ("zero", 0, "vec2(0.0)"),
     ("texture", 2, "texture($1, $2)"),
+    // GPU builtins (docs/glsl-a2-plan.md decision 5). frag_coord/discard take no
+    // args -> bare builtins (discard renders as the statement `discard;`, see
+    // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
+    ("frag_coord", 0, "gl_FragCoord"),
+    ("fwidth", 1, "fwidth($1)"),
+    ("discard", 0, "discard"),
 ];
 
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
@@ -1085,20 +1091,38 @@ impl FnEmit<'_> {
         Ok(merge)
     }
 
-    /// Emit the straight-line effect statements of a block (Stores). Value insts
-    /// are inlined at use, so only effects produce statements here.
+    /// Emit the straight-line effect statements of a block: Stores (assignments)
+    /// and void (effect-only) calls like `discard()`. Value-returning insts are
+    /// inlined at their use, so they produce no statement here.
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.f.blocks[b].insts.clone() {
-            if let Inst::Store { cell, value } = self.f.insts[iid] {
-                // Folded diamond result / bound temp: no storage, renders inline.
-                if self.folded_cond.contains_key(&cell) || self.folded_bound.contains_key(&cell) {
-                    continue;
+            let line: Option<String> = match &self.f.insts[iid] {
+                Inst::Store { cell, value } => {
+                    let (cell, value) = (*cell, *value);
+                    // Folded diamond result / bound temp: no storage, inlined.
+                    if self.folded_cond.contains_key(&cell) || self.folded_bound.contains_key(&cell) {
+                        None
+                    } else {
+                        let rhs = match self.cell_ty.get(&cell) {
+                            Some(&want) => self.render_val_t(value, want)?,
+                            None => self.render_val(value)?,
+                        };
+                        Some(format!("{} = {};", self.cell_name[&cell], rhs))
+                    }
                 }
-                let rhs = match self.cell_ty.get(&cell) {
-                    Some(&want) => self.render_val_t(value, want)?,
-                    None => self.render_val(value)?,
-                };
-                let line = format!("{} = {};", self.cell_name[&cell], rhs);
+                // A void call in statement position (discard()): its result is
+                // never consumed, so it never gets inlined at a use -- emit it here.
+                Inst::Call { func, args } => {
+                    let cf = &self.ws.module(func.module).functions[func.func];
+                    if cf.return_ty.is_none() {
+                        Some(format!("{};", self.render_call(*func, args)?))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(line) = line {
                 self.push(&line);
             }
         }
@@ -1573,6 +1597,34 @@ pub fn emit_shader_entry(
     Ok(format!(
         "#version 330 core\n\n#ifdef PIXEL\n\n{px}\n#endif\n\n#ifdef VERTEX\n\n{FULLSCREEN_VERTEX}\n#endif\n"
     ))
+}
+
+/// Emission profile (docs/glsl-a2-plan.md decision 6): the `#version` line and
+/// any builtin/precision differences. `Core330` is the desktop default; `Es300`
+/// is the mobile GLES target. Threaded through every A2 emission path.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum GlslProfile {
+    #[default]
+    Core330,
+    Es300,
+}
+
+/// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
+/// `#ifdef VERTEX`/`#ifdef PIXEL` file (docs/glsl-a2-plan.md). The vertex entry's
+/// return type (the varyings value struct) must be exactly the fragment entry's
+/// first param type. Vertex params are classified by annotation: `@attr` (per-
+/// vertex attribute struct), `@instance` (per-instance attribute divisor), and
+/// `@uniform` (uniform block); the varyings `position: Vec4` field drives
+/// `gl_Position` and is suppressed as a varying.
+pub fn emit_shader_pipeline(
+    _ws: &Workspace,
+    _mid: ModuleId,
+    _vert_root: &str,
+    _frag_root: &str,
+    _profile: GlslProfile,
+) -> Result<String, CompilerError> {
+    // RED scaffold: the A2a vertex+fragment emitter is not implemented yet.
+    Err(err(Span::default(), "A2 shader pipeline not implemented yet"))
 }
 
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated

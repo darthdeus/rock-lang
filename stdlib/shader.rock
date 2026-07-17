@@ -10,3 +10,17 @@ struct Sampler2D {
 @intrinsic @gpu_only inline(lua) fn texture(s: Sampler2D, uv: Vec2) -> Vec4 = """
     error("texture() is GPU-only (shader fns are not CPU-callable)")
 """
+
+// GPU builtins (docs/glsl-a2-plan.md decision 5). Fragment-stage only; the
+// emitter whitelists them per stage. CPU bodies error -- never a silent stub.
+@intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """
+    error("frag_coord() is GPU-only (fragment-stage builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn fwidth(x: float) -> float = """
+    error("fwidth() is GPU-only (fragment-stage builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn discard() = """
+    error("discard() is GPU-only (fragment-stage builtin)")
+"""

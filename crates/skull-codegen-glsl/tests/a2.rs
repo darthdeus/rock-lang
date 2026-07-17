@@ -1,0 +1,269 @@
+//! A2 vertex+fragment pipeline (docs/glsl-a2-plan.md): whole-program shader
+//! compilation. RED-first scaffold -- these pin the A2a target behavior and go
+//! green as the emitter lands.
+//!
+//! Two harnesses:
+//!   - `emit_entry`  : A1 fragment entry, reused to exercise the new GPU builtins
+//!                     (frag_coord/fwidth/discard) in isolation.
+//!   - `emit_pipeline`: the A2 vertex+fragment pair -> one #ifdef file.
+
+use skull_codegen_glsl::GlslProfile;
+use std::sync::LazyLock;
+use ustr::Ustr;
+
+static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| {
+            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
+fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    (ws, mid)
+}
+
+/// A1 fragment entry -- for the GPU-builtin goldens.
+fn emit_entry(src: &str, root: &str) -> Result<String, String> {
+    let (ws, mid) = workspace(src);
+    skull_codegen_glsl::emit_shader_entry(&ws, mid, root).map_err(|e| e.message)
+}
+
+/// The A2 vertex+fragment pipeline.
+fn emit_pipeline(src: &str, vert: &str, frag: &str) -> Result<String, String> {
+    let (ws, mid) = workspace(src);
+    skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, GlslProfile::Core330)
+        .map_err(|e| e.message)
+}
+
+fn emit_pipeline_profile(src: &str, vert: &str, frag: &str, p: GlslProfile) -> Result<String, String> {
+    let (ws, mid) = workspace(src);
+    skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, p).map_err(|e| e.message)
+}
+
+// --- GPU builtins (decision 5): frag_coord / fwidth / discard ----------------
+// Fragment-stage GPU-only intrinsics. Exercised through the A1 fragment entry
+// (they add no params, so the A1 contract still holds). RED until the
+// GLSL_INTRINSICS table backs them (today: "no emittable body and no GLSL
+// intrinsic mapping").
+
+#[test]
+fn builtin_fwidth_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let w = fwidth(tc.x)
+            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("fwidth(tc.x)"), "got:\n{glsl}");
+}
+
+#[test]
+fn builtin_frag_coord_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let c = frag_coord()
+            return Vec4 { x: c.x, y: c.y, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("gl_FragCoord"), "got:\n{glsl}");
+    // frag_coord() takes no args -- the template is a bare builtin, not a call.
+    assert!(!glsl.contains("frag_coord("), "must not emit a fn call:\n{glsl}");
+}
+
+#[test]
+fn builtin_discard_is_a_statement() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            if tc.x < 0.5 { discard() }
+            return Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    // discard is a control-flow statement, not an expression: `discard;`, never
+    // `discard()` or an assignment to a temp.
+    assert!(glsl.contains("discard;"), "got:\n{glsl}");
+    assert!(!glsl.contains("discard()"), "discard must not render as a call:\n{glsl}");
+}
+
+// --- the vertex+fragment pipeline scaffold (A2a) -----------------------------
+
+/// The mag-UI-shaped port (ui_sdf_bar): a per-vertex attribute struct, a Mat4
+/// uniform block, and a varyings struct whose `position` field drives
+/// gl_Position and is NOT emitted as a varying.
+const UI_SRC: &str = r#"
+    value QuadVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4 }
+    value UiVertU  { uProjection: Mat4, uView: Mat4, uTransform: Mat4 }
+    value UiVary   { position: Vec4, TexCoord: Vec2, Color: Vec4 }
+    value UiFragU  { uSize: Vec2, uRatio: float }
+
+    @shader(vertex)
+    fn ui_vert(@attr a: QuadVert, @uniform u: UiVertU) -> UiVary {
+        let clip = u.uProjection * u.uView * u.uTransform * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
+        return UiVary { position: clip, TexCoord: a.aTexCoord, Color: a.aColor }
+    }
+
+    @shader(fragment)
+    fn ui_frag(vary: UiVary, @uniform u: UiFragU) -> Vec4 {
+        let fe = fwidth(vary.TexCoord.x)
+        return Vec4 { x: vary.Color.x, y: fe, z: u.uRatio, w: vary.Color.w }
+    }
+"#;
+
+#[test]
+fn pipeline_scaffold_vertex_block() {
+    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
+    assert!(glsl.starts_with("#version 330 core\n"), "got:\n{glsl}");
+    assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
+    // Attribute struct fields -> `in` with declaration-order locations.
+    assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout (location = 2) in vec4 aColor;"), "got:\n{glsl}");
+    // Uniform block fields -> `uniform`, declaration order.
+    assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
+    assert!(glsl.contains("uniform mat4 uView;"), "got:\n{glsl}");
+    assert!(glsl.contains("uniform mat4 uTransform;"), "got:\n{glsl}");
+    // Varyings out -- position is suppressed (it is gl_Position, not a varying).
+    assert!(glsl.contains("out vec2 TexCoord;"), "got:\n{glsl}");
+    assert!(glsl.contains("out vec4 Color;"), "got:\n{glsl}");
+    assert!(!glsl.contains("out vec4 position;"), "position must not be a varying:\n{glsl}");
+    // main writes gl_Position from the position field + the varying outs.
+    assert!(glsl.contains("gl_Position ="), "got:\n{glsl}");
+    assert!(glsl.contains("TexCoord = "), "got:\n{glsl}");
+}
+
+#[test]
+fn pipeline_scaffold_pixel_block() {
+    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
+    assert!(glsl.contains("#ifdef PIXEL"), "got:\n{glsl}");
+    // Varyings arrive as `in`, matching the vertex `out` (position excluded).
+    assert!(glsl.contains("in vec2 TexCoord;"), "got:\n{glsl}");
+    assert!(glsl.contains("in vec4 Color;"), "got:\n{glsl}");
+    assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
+    // Fragment uniform block.
+    assert!(glsl.contains("uniform vec2 uSize;"), "got:\n{glsl}");
+    assert!(glsl.contains("uniform float uRatio;"), "got:\n{glsl}");
+    assert!(glsl.contains("void main()"), "got:\n{glsl}");
+    assert!(glsl.contains("FragColor = ui_frag("), "got:\n{glsl}");
+}
+
+/// Both profiles emit; only the version line (and precision preamble) differ.
+#[test]
+fn pipeline_es300_profile() {
+    let glsl = emit_pipeline_profile(UI_SRC, "ui_vert", "ui_frag", GlslProfile::Es300).expect("emit");
+    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
+    assert!(glsl.contains("precision highp float;"), "got:\n{glsl}");
+}
+
+// --- pipeline rejects (spanned emit CompilerError) ---------------------------
+
+fn reject_pipeline(src: &str, vert: &str, frag: &str, needle: &str) {
+    match emit_pipeline(src, vert, frag) {
+        Ok(glsl) => panic!("expected rejection ({needle}) but emitted:\n{glsl}"),
+        Err(msg) => assert!(msg.contains(needle), "rejection should mention `{needle}`, got: {msg}"),
+    }
+}
+
+/// The varyings struct MUST carry a `position: Vec4` field (-> gl_Position).
+#[test]
+fn reject_varyings_missing_position() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { TexCoord: Vec2 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { TexCoord: a.aPos } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: vary.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "position");
+}
+
+/// `position` is gl_Position, not a varying -- reading it in the fragment stage
+/// is a spanned reject.
+#[test]
+fn reject_fragment_reads_position() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4, TexCoord: Vec2 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "position");
+}
+
+/// The fragment's first param type MUST equal the vertex's return type.
+#[test]
+fn reject_varyings_type_mismatch() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value VaryA { position: Vec4, TexCoord: Vec2 }
+        value VaryB { position: Vec4, Other: Vec2 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> VaryA { return VaryA { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos } }
+        @shader(fragment)
+        fn fr(vary: VaryB) -> Vec4 { return Vec4 { x: vary.Other.x, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "varyings");
+}
+
+/// A value-struct vertex param with no `@attr`/`@uniform`/`@instance` role is
+/// ambiguous -- reject (the "never mixed" guarantee).
+#[test]
+fn reject_unmarked_vertex_struct_param() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    // (fragment reads position too, but the unmarked-param reject fires first.)
+    reject_pipeline(src, "vt", "fr", "@attr");
+}
+
+/// An int-typed varying without `@flat` is a spanned reject (GLSL mandates flat
+/// integer interpolation). This check lives in the emitter, not the registry.
+#[test]
+fn reject_int_varying_without_flat() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4, kind: int }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, kind: 3 } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "flat");
+}
+
+// --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
+
+#[test]
+fn reject_fwidth_in_vertex() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let w = fwidth(a.aPos.x)
+            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "fragment");
+}
