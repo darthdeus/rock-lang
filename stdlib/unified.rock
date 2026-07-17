@@ -130,6 +130,14 @@ struct NativeBuffer<T> {
 @nomangle inline(lua) fn __nb_alloc_float(n: int) -> Ptr<float> = 'return ffi.new("float[?]", n)'
 @nomangle inline(lua) fn __nb_alloc_int(n: int) -> Ptr<int> = 'return ffi.new("int[?]", n)'
 
+// Compiler intrinsic: every call is expanded by skull to `NativeBuffer { ptr =
+// ffi.new("<ctype>[?]", n), len = n }` with the concrete element cdef name
+// resolved at the call site (skull owns the value-struct ct names). Legal only
+// where `T` resolves to an FFI-clean value struct or int/float/bool; a
+// GC-carrying or opaque-generic `T` is a spanned emit-time error. The body is a
+// never-reached guard (all calls are intercepted before resolution).
+inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('native_buffer_alloc is a skull compiler intrinsic; a call reached runtime unexpanded')"
+
 fn native_buffer_float(n: int) -> NativeBuffer<float> {
     return NativeBuffer { ptr: __nb_alloc_float(n), len: n }
 }

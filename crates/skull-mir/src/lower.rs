@@ -2970,6 +2970,27 @@ impl Builder<'_> {
                 }
             }
         }
+        // `native_buffer_alloc<T>(n)` intrinsic: allocate a flat ffi array of the
+        // concrete element type and wrap it in a `NativeBuffer`. Resolving the
+        // ctype here (not in a generic inline(lua) body) is the whole point -- it
+        // gives value-struct-typed NativeBuffers a boilerplate-free ctor. Non-value
+        // / GC / opaque-generic elements reject spanned.
+        if let Callee::Unresolved { name, .. } = callee {
+            if name.as_str() == "native_buffer_alloc" {
+                let [n_arg] = arg_idxs[..] else {
+                    return Err(gap("`native_buffer_alloc` takes exactly one argument (count)"));
+                };
+                let span = self.body.expr_spans[e];
+                let ctype = self.native_buffer_alloc_ctype(e, span)?;
+                let count = self.lower_expr(n_arg)?;
+                let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count });
+                let nb = self.emit_cur(Inst::MakeStruct {
+                    ty: Some(Ustr::from("NativeBuffer")),
+                    fields: vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)],
+                });
+                return Ok(ValueRepr::Scalar(nb));
+            }
+        }
         // `on_killed(f)` / `on_resume(f)` inside a `co fn` register a lifecycle
         // hook. bone desugars `on_killed { body }` to a call of an `on_killed`
         // stub (which errors at runtime) with a `() => body` lambda. We capture
@@ -6790,6 +6811,23 @@ impl Builder<'_> {
         }
     }
 
+    /// The C-array element type name for a `native_buffer_alloc<T>()` call whose
+    /// result type is `NativeBuffer<T>` -- an FFI-clean value struct's cdef name,
+    /// or `int`/`float`/`bool`. A GC-carrying value struct, an unresolved (opaque
+    /// generic `T`), or any other element rejects with a spanned emit-time error:
+    /// the intrinsic can only emit `ffi.new("<ctype>[?]")` when the concrete
+    /// element type is known here. `span` labels the call expression.
+    fn native_buffer_alloc_ctype(&self, e: Idx<Expr>, span: Span) -> Result<Ustr, CompilerError> {
+        let inf = self.inf.ok_or_else(|| {
+            CompilerError::new_with_label(span, "`native_buffer_alloc` needs inference".into())
+        })?;
+        let ret = *inf.expr_types.get(e).ok_or_else(|| {
+            CompilerError::new_with_label(span, "`native_buffer_alloc` call is untyped".into())
+        })?;
+        native_buffer_alloc_elem_ctype(self.ws, inf, ret)
+            .map_err(|msg| CompilerError::new_with_label(span, msg))
+    }
+
     /// `Some(n)` iff `e`'s type is a tuple OR a `(tuple)?` of arity `n` -- the
     /// nil-peeled form for safe-nav calls, whose result type is nullable but whose
     /// callee still splats the inner tuple.
@@ -6942,6 +6980,94 @@ fn native_buffer_gc_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Optio
         }
         _ => None,
     }
+}
+
+/// The C-array element type name for a `native_buffer_alloc<T>` call whose
+/// result type `ret` is `NativeBuffer<T>`. `Ok` is an FFI-clean value struct's
+/// cdef name, or `int`/`float`/`bool`. `Err(reason)` when `T` is a GC-carrying
+/// value struct, an unresolved generic (opaque `T`), or any non-C-array type --
+/// the intrinsic can only emit `ffi.new("<ctype>[?]")` when the concrete element
+/// is known at the call site. The single source for both the lowering
+/// interception and the hard emit-time [`native_buffer_alloc_reject`] pass.
+fn native_buffer_alloc_elem_ctype(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ret: TyId,
+) -> Result<Ustr, String> {
+    let ret = resolve_tyid(ws, inf, ret)
+        .ok_or_else(|| "`native_buffer_alloc` result type could not be resolved".to_string())?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ret)
+        .ok_or_else(|| "`native_buffer_alloc` result is not a `NativeBuffer<T>`".to_string())?
+    else {
+        return Err("`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string());
+    };
+    if nb.as_str() != "NativeBuffer" {
+        return Err(format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"));
+    }
+    let elem = params
+        .into_iter()
+        .next()
+        .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
+        .ok_or_else(|| "`NativeBuffer` element type is missing".to_string())?;
+    match ty_node(ws, inf, elem) {
+        Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(Ustr::from("int")),
+        Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(Ustr::from("float")),
+        Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(Ustr::from("bool")),
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name) => {
+            if value_struct_is_gc(ws, name) {
+                Err(format!(
+                    "`native_buffer_alloc<{name}>` is invalid: `{name}` is a GC-carrying `value` \
+                     struct (immutable Lua table) with no C layout, so `ffi.new(\"{name}[?]\")` \
+                     names no ctype. Only FFI-clean value structs (C-mappable fields) and \
+                     `int`/`float`/`bool` are allocatable."
+                ))
+            } else {
+                Ok(name)
+            }
+        }
+        Some(TypeExpr::Generic(..)) | Some(TypeExpr::Infer(..)) => Err(
+            "`native_buffer_alloc<T>` needs a concrete element type here, but `T` is an \
+             unresolved generic. skull emits generic bodies once with `T` opaque, so it cannot \
+             name the ffi ctype -- call it where the element type is concrete (a per-type \
+             wrapper fn), not inside a generic body."
+                .to_string(),
+        ),
+        _ => Err(
+            "`native_buffer_alloc<T>` requires `T` to be an FFI-clean `value` struct or \
+             `int`/`float`/`bool` -- a heap struct / non-C-array type has no flat layout."
+                .to_string(),
+        ),
+    }
+}
+
+/// Hard emit-time rejection for every `native_buffer_alloc<T>` call in module
+/// `mid` whose element type is not allocatable ([`native_buffer_alloc_elem_ctype`]
+/// returns `Err`). Runs as a dedicated pass in `emit_full` (beside
+/// [`gc_value_c_boundary`]) so the error is SURFACED, not swallowed by the
+/// lenient per-body lowering-gap skip. Returns the first offender `(message, span)`.
+pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else {
+            continue;
+        };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+                continue;
+            };
+            if name.as_str() != "native_buffer_alloc" {
+                continue;
+            }
+            let Some(&ret) = inf.expr_types.get(e) else {
+                continue;
+            };
+            if let Err(msg) = native_buffer_alloc_elem_ctype(ws, inf, ret) {
+                return Some((msg, body.expr_spans[e]));
+            }
+        }
+    }
+    None
 }
 
 /// Reject a GC-carrying value struct used at a genuine C boundary (an `extern`

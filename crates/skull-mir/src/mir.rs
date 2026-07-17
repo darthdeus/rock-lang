@@ -280,6 +280,12 @@ pub enum Inst {
         named: Vec<(Ustr, Idx<Inst>)>,
     },
 
+    /// `ffi.new("<ctype>[?]", count)` -- a contiguous flat ffi array of `count`
+    /// elements of C type `ctype` (an FFI-clean value struct's cdef name, or
+    /// `int`/`float`). Emitted only by the `native_buffer_alloc<T>` intrinsic,
+    /// which resolves `ctype` from the concrete element type at the call site.
+    FfiNewArray { ctype: Ustr, count: Idx<Inst> },
+
     // --- projections ---
     /// `base.field` (struct field, or an enum record-payload field).
     Field { base: Idx<Inst>, field: Ustr },
