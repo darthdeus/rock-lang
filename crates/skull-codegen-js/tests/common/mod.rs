@@ -5,6 +5,11 @@ use skull_mir::lower::{lower_function, ScalarCtx};
 
 /// Build the stdlib workspace (parse + semantic pass).
 pub fn stdlib_ws() -> bone_semantic::inference::Workspace {
+    ws_with("fn main() {}")
+}
+
+/// Stdlib workspace plus `src` as the `<test>` module.
+pub fn ws_with(src: &str) -> bone_semantic::inference::Workspace {
     let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
         .iter()
         .map(|f| {
@@ -12,10 +17,24 @@ pub fn stdlib_ws() -> bone_semantic::inference::Workspace {
             skull_parser::parse_module(f.contents, id).expect("stdlib parse")
         })
         .collect();
-    modules.push(
-        skull_parser::parse_module("fn main() {}", ustr::Ustr::from("<test>")).expect("parse"),
-    );
+    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+}
+
+/// Lower the fn named `name` in the `<test>` module (must be unique there).
+pub fn lower_test_fn(
+    ws: &bone_semantic::inference::Workspace,
+    name: &str,
+) -> skull_mir::mir::MirFunc {
+    let scx = ScalarCtx::new(ws);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    for (fid, f) in ws.module(mid).functions.iter() {
+        if f.name.as_str() == name {
+            return lower_function(ws, &scx, mid, fid)
+                .unwrap_or_else(|e| panic!("lower `{name}`: {}", e.message));
+        }
+    }
+    panic!("no fn `{name}` in <test> module");
 }
 
 /// Lower + emit the `@intrinsic` Rock-fallback overload of `name` with `arity`

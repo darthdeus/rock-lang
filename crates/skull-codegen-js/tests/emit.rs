@@ -8,10 +8,12 @@
 //! structure. Vec overloads (multi-value return) reject -- the reject-don't-
 //! fallback discipline that keeps the emitter honest as the subset grows.
 
+use std::collections::HashMap;
+
 use skull_mir::lower::{lower_function, ScalarCtx};
 
 mod common;
-use common::{emit_scalar, stdlib_ws};
+use common::{emit_scalar, lower_test_fn, stdlib_ws, ws_with};
 
 // clamp: the returning-arms diamond -- every branch arm `return`s, so the
 // post-dominator is the virtual exit and the `if` has no fall-through.
@@ -92,28 +94,136 @@ function smoothstep_fb(c0, c1, c2) {
     );
 }
 
-// A Vec overload (scalarized multi-value return) is outside the subset and
-// rejects -- reject, don't emit-and-hope. `Vec2.lerp` lowers to a fn returning
-// two leaves (`return v0, v1`); its HIR still has 3 typed params (a, b: Vec2, t)
-// so it can't be told apart by param count -- it's identified by its rejection.
+// A Vec overload (scalarized value-struct ops) is outside the subset and
+// EVERY one rejects -- reject, don't emit-and-hope. `Vec2.lerp` lowers to
+// `CallMulti` value-struct calls feeding a multi-leaf return; its HIR still has
+// 3 typed params (a, b: Vec2, t) so it can't be told apart by param count --
+// it's identified by its rejection.
 #[test]
 fn vec_overload_rejects() {
     let ws = stdlib_ws();
     let scx = ScalarCtx::new(&ws);
+    let mut lowered = 0;
     let mut reject_msgs: Vec<String> = Vec::new();
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
         for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == "lerp" && f.lua_body.is_none() {
+            // Vec overloads only: skip the 3-float scalar fallback (it emits).
+            if f.name.as_str() == "lerp"
+                && f.lua_body.is_none()
+                && !f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
+            {
                 let Ok(mf) = lower_function(&ws, &scx, mid, fid) else { continue };
-                if let Err(e) = skull_codegen_js::emit::emit_fn(&ws, &mf, "lerp_vec") {
-                    reject_msgs.push(e.message);
+                lowered += 1;
+                match skull_codegen_js::emit::emit_fn(&ws, &mf, "lerp_vec") {
+                    Err(e) => reject_msgs.push(e.message),
+                    Ok(js) => panic!("a Vec `lerp` overload emitted instead of rejecting:\n{js}"),
                 }
             }
         }
     }
+    assert!(lowered > 0, "no Vec `lerp` overload lowered");
     assert!(
-        reject_msgs.iter().any(|m| m.contains("multi-value return")),
-        "expected a Vec `lerp` overload to reject with multi-value return; saw: {reject_msgs:?}"
+        reject_msgs.iter().all(|m| m.contains("JS subset:")),
+        "expected JS-subset rejections; saw: {reject_msgs:?}"
+    );
+}
+
+// NativeBuffer subset pins: struct construction (`{ptr, len}` object literal),
+// the checked `buf[i]` sugar routing through the `__nb_checked_*` shim names
+// (JS_NB_CHECK_SHIMS provides the bodies), and a statement-position intrinsic
+// call. Semantics are covered by the nb_differential cross-backend tests;
+// these pin the emitted structure.
+#[test]
+fn native_buffer_subset_emits() {
+    let ws = ws_with(
+        "fn checked(b: NativeBuffer<float>) -> float { b[0] = 1.5; return b[0] }\n\
+         fn stmt_call(b: NativeBuffer<float>) { nb_set(b, 0, 2.5); nb_set(b, 1, 3.5) }\n\
+         fn nb_len(b: NativeBuffer<float>) -> int { return b.len }\n",
+    );
+    let checked = lower_test_fn(&ws, "checked");
+    assert_eq!(
+        skull_codegen_js::emit::emit_fn(&ws, &checked, "checked").unwrap(),
+        "\
+function checked(c0) {
+  __nb_checked_set(c0, 0, 1.5);
+  return __nb_checked_get(c0, 0);
+}
+"
+    );
+    // The first call is statement-position (value unused); the trailing one is
+    // bone's tail-expression return shape.
+    let stmt_call = lower_test_fn(&ws, "stmt_call");
+    assert_eq!(
+        skull_codegen_js::emit::emit_fn(&ws, &stmt_call, "stmt_call").unwrap(),
+        "function stmt_call(c0) {\n  (c0.ptr[0] = 2.5);\n  return (c0.ptr[1] = 3.5);\n}\n"
+    );
+    let nb_len = lower_test_fn(&ws, "nb_len");
+    assert_eq!(
+        skull_codegen_js::emit::emit_fn(&ws, &nb_len, "nb_len").unwrap(),
+        "function nb_len(c0) {\n  return c0.len;\n}\n"
+    );
+}
+
+// The stdlib `native_buffer_float` ctor (a plain Rock fn) emits through the
+// MakeStruct subset: an object literal whose `ptr` is the TypedArray alloc.
+#[test]
+fn native_buffer_ctor_emits_object_literal() {
+    let ws = stdlib_ws();
+    let scx = ScalarCtx::new(&ws);
+    for (_, &mid) in ws.module_ids.iter() {
+        for (fid, f) in ws.module(mid).functions.iter() {
+            if f.name.as_str() == "native_buffer_float" {
+                let mf = lower_function(&ws, &scx, mid, fid).expect("lower");
+                assert_eq!(
+                    skull_codegen_js::emit::emit_fn(&ws, &mf, "native_buffer_float").unwrap(),
+                    "function native_buffer_float(c0) {\n  return ({ptr: new Float32Array(c0), len: c0});\n}\n"
+                );
+                return;
+            }
+        }
+    }
+    panic!("no native_buffer_float in stdlib");
+}
+
+// Reject-don't-fallback on the overloaded `get`/2 key: a Vec receiver must NOT
+// pick up the NativeBuffer template. Vec indexing likewise rejects.
+#[test]
+fn vec_get_and_index_reject() {
+    let ws = ws_with(
+        "fn vget(xs: [int]) -> int? { return xs.get(0) }\n\
+         fn vidx(xs: [int]) -> int { return xs[0] }\n",
+    );
+    let vget = lower_test_fn(&ws, "vget");
+    let e = skull_codegen_js::emit::emit_fn(&ws, &vget, "vget").unwrap_err();
+    assert!(
+        e.message.contains("only for NativeBuffer receivers"),
+        "wrong reject: {}",
+        e.message
+    );
+    let vidx = lower_test_fn(&ws, "vidx");
+    let e = skull_codegen_js::emit::emit_fn(&ws, &vidx, "vidx").unwrap_err();
+    assert!(
+        e.message.contains("Vec indexing not supported"),
+        "wrong reject: {}",
+        e.message
+    );
+}
+
+// A struct outside the NativeBuffer family rejects at construction -- the
+// subset gate that keeps arbitrary structs from kinda-working as bare object
+// literals (no metatable/__ty semantics on JS).
+#[test]
+fn non_native_buffer_struct_rejects() {
+    let ws = ws_with(
+        "struct P { x: int, y: int }\n\
+         fn mk() -> P { return P { x: 1, y: 2 } }\n",
+    );
+    let mk = lower_test_fn(&ws, "mk");
+    let e = skull_codegen_js::emit::emit_fn(&ws, &mk, "mk").unwrap_err();
+    assert!(
+        e.message.contains("struct construction only supported for NativeBuffer"),
+        "wrong reject: {}",
+        e.message
     );
 }

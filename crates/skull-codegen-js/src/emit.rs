@@ -1,6 +1,8 @@
-//! Minimal MIR->JS emitter (docs/js-backend-plan.md S2) for the scalar
-//! conformance subset: the fallback bodies of the eight differential
-//! intrinsics. Structured (goto-free) output modeled on the GLSL backend's
+//! Minimal MIR->JS emitter (docs/js-backend-plan.md S2) for the conformance
+//! subset: the scalar fallback bodies of the eight differential intrinsics,
+//! plus the NativeBuffer four-fn surface (TypedArray-backed `{ptr, len}`
+//! structs, checked `buf[i]` via the `__nb_checked_*` shim names --
+//! `crate::JS_NB_CHECK_SHIMS` supplies the bodies). Structured (goto-free) output modeled on the GLSL backend's
 //! `emit_seq`/`emit_branch`, NOT the goto-linear Lua backend -- JS, like GLSL,
 //! has no goto, so a `Branch` recovers into `if/else` and its arms rejoin at the
 //! block's immediate post-dominator. Any MIR op outside the subset is a spanned
@@ -12,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
-use skull_mir::mir::{Block, Inst, Lit, MirFunc, Term};
+use skull_mir::mir::{Block, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_parser::{CompilerError, Span};
 
 use crate::{fill_template, JsIntrinsics};
@@ -45,12 +47,27 @@ fn js_number(f: f64) -> Result<String, CompilerError> {
 /// Emit `mf` as `function <js_name>(...) { ... }`. `js_name` is the caller's
 /// chosen JS identity (the S3/S4 harness names each fallback fn).
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {
+    emit_fn_with_callees(ws, mf, js_name, &HashMap::new())
+}
+
+/// [`emit_fn`] with a set of known co-emitted plain-Rock callees: a call whose
+/// `FuncRef` is in `callees` renders as `<js name>(args)` (the caller promises
+/// to emit that fn under that name in the same program). Anything neither a
+/// mapped intrinsic nor a known callee still rejects.
+pub fn emit_fn_with_callees(
+    ws: &Workspace,
+    mf: &MirFunc,
+    js_name: &str,
+    callees: &HashMap<FuncRef, String>,
+) -> Result<String, CompilerError> {
     if mf.is_coroutine {
         return Err(err("JS subset: coroutine fn not supported"));
     }
     let mut em = Emitter {
         ws,
         mf,
+        callees,
+        used: used_values(mf),
         ipdom: post_doms(mf),
         visited: HashSet::new(),
         out: String::new(),
@@ -91,6 +108,12 @@ pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, Co
 struct Emitter<'a> {
     ws: &'a Workspace,
     mf: &'a MirFunc,
+    /// Known co-emitted plain-Rock callees (`FuncRef` -> emitted JS name).
+    callees: &'a HashMap<FuncRef, String>,
+    /// Insts referenced as an operand somewhere (another inst or a terminator).
+    /// An `Inst::Call` NOT in here is a statement-position call (`nb_set(..)`)
+    /// and emits as an expression statement.
+    used: HashSet<Idx<Inst>>,
     /// Block -> its immediate post-dominator (`None` == the virtual exit: the
     /// block's arms all diverge, so the `if` has no fall-through).
     ipdom: HashMap<Idx<Block>, Option<Idx<Block>>>,
@@ -202,10 +225,50 @@ impl Emitter<'_> {
 
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.mf.blocks[b].insts.clone() {
-            if let Inst::Store { cell, value } = self.mf.insts[iid] {
-                let rhs = self.render_val(value)?;
-                let line = format!("{} = {};", cell_name(cell), rhs);
-                self.push(&line);
+            match &self.mf.insts[iid] {
+                Inst::Store { cell, value } => {
+                    let rhs = self.render_val(*value)?;
+                    let line = format!("{} = {};", cell_name(*cell), rhs);
+                    self.push(&line);
+                }
+                Inst::StoreIndex { base, index, value, kind } => match kind {
+                    ContainerKind::NativeBuffer => {
+                        let line = format!(
+                            "__nb_checked_set({}, {}, {});",
+                            self.render_val(*base)?,
+                            self.render_val(*index)?,
+                            self.render_val(*value)?
+                        );
+                        self.push(&line);
+                    }
+                    other => {
+                        return Err(err(format!(
+                            "JS subset: {other:?} index store not supported"
+                        )))
+                    }
+                },
+                // A call in statement position (value unused): `nb_set(b, i, v)`.
+                Inst::Call { .. } if !self.used.contains(&iid) => {
+                    let Inst::Call { func, args } = self.mf.insts[iid].clone() else {
+                        unreachable!()
+                    };
+                    let line = format!("{};", self.render_call(func, &args)?);
+                    self.push(&line);
+                }
+                // An unused indirect call would be a silently-dropped effect.
+                Inst::CallValue { .. } if !self.used.contains(&iid) => {
+                    return Err(err("JS subset: indirect call not supported"));
+                }
+                // Any other unused value inst is pure and dead -- skip. Used
+                // value insts render inline at their use site. Remaining
+                // EFFECT insts (StoreField, StoreGlobal, ArrayPush, MapNext,
+                // CallMulti, coroutine ops, ...) are outside the subset.
+                other if other.produces_value() => {}
+                other => {
+                    return Err(err(format!(
+                        "JS subset: unsupported effect {other:?}"
+                    )))
+                }
             }
         }
         Ok(())
@@ -234,7 +297,7 @@ impl Emitter<'_> {
             Inst::Const(Lit::Int(i)) => i.to_string(),
             Inst::Const(Lit::Float(f)) => js_number(*f)?,
             Inst::Const(Lit::Bool(b)) => b.to_string(),
-            Inst::Const(Lit::Nil) => return Err(err("JS subset: null literal not supported")),
+            Inst::Const(Lit::Nil) => "null".to_string(),
             Inst::Const(Lit::Str(_)) => return Err(err("JS subset: string literal not supported")),
             Inst::Load(c) => cell_name(*c),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
@@ -256,6 +319,43 @@ impl Emitter<'_> {
             // Rock float->int truncates toward -inf == floor.
             Inst::FloatToInt(x) => format!("Math.floor({})", self.render_val(*x)?),
             Inst::Call { func, args } => self.render_call(*func, args)?,
+            // NativeBuffer surface: `{ptr, len}` object literal; `buf[i]` via
+            // the bounds-checked shim (JS_NB_CHECK_SHIMS preamble, matching
+            // the stdlib `__nb_checked_get` luajit emits); `.len`/`.ptr` are
+            // plain property reads.
+            Inst::MakeStruct { ty, fields } => {
+                let name = ty.map(|t| t.to_string()).unwrap_or_default();
+                if !is_native_buffer(&name) {
+                    return Err(err(format!(
+                        "JS subset: struct construction only supported for NativeBuffer types, got `{name}`"
+                    )));
+                }
+                let rendered: Result<Vec<String>, CompilerError> = fields
+                    .iter()
+                    .map(|(f, v)| Ok(format!("{f}: {}", self.render_val(*v)?)))
+                    .collect();
+                format!("({{{}}})", rendered?.join(", "))
+            }
+            Inst::Index { base, index, kind } => match kind {
+                ContainerKind::NativeBuffer => format!(
+                    "__nb_checked_get({}, {})",
+                    self.render_val(*base)?,
+                    self.render_val(*index)?
+                ),
+                other => return Err(err(format!("JS subset: {other:?} indexing not supported"))),
+            },
+            Inst::Len { base, kind } => match kind {
+                ContainerKind::NativeBuffer => format!("{}.len", self.render_val(*base)?),
+                other => return Err(err(format!("JS subset: {other:?} length not supported"))),
+            },
+            Inst::Field { base, field } => match field.as_str() {
+                "ptr" | "len" => format!("{}.{field}", self.render_val(*base)?),
+                _ => {
+                    return Err(err(format!(
+                        "JS subset: field read `.{field}` not supported (only NativeBuffer `.ptr`/`.len`)"
+                    )))
+                }
+            },
             other => {
                 return Err(err(format!(
                     "JS subset: cannot render {other:?} as a JS expression"
@@ -264,26 +364,166 @@ impl Emitter<'_> {
         })
     }
 
-    fn render_call(
-        &self,
-        func: skull_mir::mir::FuncRef,
-        args: &[Idx<Inst>],
-    ) -> Result<String, CompilerError> {
+    fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
+        // The table keys on (name, arity); `get`/2 is also Vec/Map/Arena
+        // surface, so the NativeBuffer template only applies to a NativeBuffer
+        // receiver -- anything else rejects rather than kinda-working.
+        if cf.name.as_str() == "get" && !first_param_is_native_buffer(self.ws, cf) {
+            return Err(err(
+                "JS subset: `get` is mapped only for NativeBuffer receivers",
+            ));
+        }
+        let rargs: Result<Vec<String>, CompilerError> =
+            args.iter().map(|a| self.render_val(*a)).collect();
+        let rargs = rargs?;
         match JsIntrinsics.lookup(cf) {
             Some(Emission::Template(tmpl)) => {
-                let rargs: Result<Vec<String>, CompilerError> =
-                    args.iter().map(|a| self.render_val(*a)).collect();
-                let rargs = rargs?;
                 let refs: Vec<&str> = rargs.iter().map(|s| s.as_str()).collect();
                 Ok(fill_template(tmpl, &refs))
             }
-            _ => Err(err(format!(
-                "JS subset: call to `{}` is not a mapped JS intrinsic",
-                cf.name
-            ))),
+            _ => match self.callees.get(&func) {
+                Some(name) => Ok(format!("{name}({})", rargs.join(", "))),
+                None => Err(err(format!(
+                    "JS subset: call to `{}` is not a mapped JS intrinsic",
+                    cf.name
+                ))),
+            },
         }
     }
+}
+
+/// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
+/// same set skull-mir's lowering recognizes as `ContainerKind::NativeBuffer`.
+fn is_native_buffer(name: &str) -> bool {
+    matches!(
+        name,
+        "NativeBuffer"
+            | "NativeBufferU8"
+            | "NativeBufferI8"
+            | "NativeBufferU16"
+            | "NativeBufferI16"
+            | "NativeBufferU32"
+            | "NativeBufferI32"
+    )
+}
+
+/// Whether `f`'s first declared param is a `NativeBuffer*` nominal -- the
+/// receiver gate for the overloaded `get`/2 table entry. Top-level fn param
+/// types are always `TyId::Static`.
+fn first_param_is_native_buffer(ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
+    use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
+    let Some(pd) = f.param_decls.first() else {
+        return false;
+    };
+    let TyId::Static(mid, idx) = pd.ty else {
+        return false;
+    };
+    matches!(
+        ws.module(mid).ty_arena[idx],
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_native_buffer(name.as_str())
+    )
+}
+
+/// Every inst referenced as an operand by another inst or a terminator. The
+/// match is EXHAUSTIVE on purpose: a new Inst variant must decide its operands
+/// here or the compiler errors, so the statement-position-call detection in
+/// `emit_block_effects` can never silently rot.
+fn used_values(mf: &MirFunc) -> HashSet<Idx<Inst>> {
+    let mut used = HashSet::new();
+    let mut mark = |ids: &[Idx<Inst>], used: &mut HashSet<Idx<Inst>>| {
+        for &i in ids {
+            used.insert(i);
+        }
+    };
+    for (_, inst) in mf.insts.iter() {
+        match inst {
+            Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. } => {}
+            Inst::IntAdd(a, b)
+            | Inst::IntSub(a, b)
+            | Inst::IntMul(a, b)
+            | Inst::IntDiv(a, b)
+            | Inst::IntMod(a, b)
+            | Inst::FloatAdd(a, b)
+            | Inst::FloatSub(a, b)
+            | Inst::FloatMul(a, b)
+            | Inst::FloatDiv(a, b)
+            | Inst::FloatMod(a, b)
+            | Inst::StringConcat(a, b)
+            | Inst::IntLt(a, b)
+            | Inst::IntLeq(a, b)
+            | Inst::IntGt(a, b)
+            | Inst::IntGeq(a, b)
+            | Inst::FloatLt(a, b)
+            | Inst::FloatLeq(a, b)
+            | Inst::FloatGt(a, b)
+            | Inst::FloatGeq(a, b)
+            | Inst::Eq(a, b)
+            | Inst::NotEq(a, b)
+            | Inst::BitAnd(a, b)
+            | Inst::BitOr(a, b)
+            | Inst::BitXor(a, b)
+            | Inst::Shl(a, b)
+            | Inst::Shr(a, b) => mark(&[*a, *b], &mut used),
+            Inst::ToString(x)
+            | Inst::FloatToInt(x)
+            | Inst::IntToFloat(x)
+            | Inst::Neg(x)
+            | Inst::Not(x)
+            | Inst::BitNot(x)
+            | Inst::CoroSetInner(x) => mark(&[*x], &mut used),
+            Inst::Format { value, .. } => mark(&[*value], &mut used),
+            Inst::FormatDyn { value, fmt } => mark(&[*value, *fmt], &mut used),
+            Inst::Call { args, .. } | Inst::CallBoundMulti { args, .. } => mark(args, &mut used),
+            Inst::CallMulti { args, .. } => mark(args, &mut used),
+            Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
+                mark(&[*callee], &mut used);
+                mark(args, &mut used);
+            }
+            Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems, &mut used),
+            Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => {
+                for (_, v) in fields {
+                    used.insert(*v);
+                }
+            }
+            Inst::MakeEnum { positional, named, .. } => {
+                mark(positional, &mut used);
+                for (_, v) in named {
+                    used.insert(*v);
+                }
+            }
+            Inst::MakeEnumDyn { tag, positional, named, .. } => {
+                mark(&[*tag], &mut used);
+                mark(positional, &mut used);
+                for (_, v) in named {
+                    used.insert(*v);
+                }
+            }
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => mark(&[*base], &mut used),
+            Inst::Index { base, index, .. } => mark(&[*base, *index], &mut used),
+            Inst::Len { base, .. } => mark(&[*base], &mut used),
+            Inst::Store { value, .. } => mark(&[*value], &mut used),
+            Inst::StoreField { base, value, .. } => mark(&[*base, *value], &mut used),
+            Inst::StoreIndex { base, index, value, .. } => {
+                mark(&[*base, *index, *value], &mut used)
+            }
+            Inst::StoreGlobal { value, .. } => mark(&[*value], &mut used),
+            Inst::ArrayPush { arr, value, .. } => mark(&[*arr, *value], &mut used),
+            Inst::CoroHook { lambda, .. } => mark(&[*lambda], &mut used),
+            Inst::MapNext { table, .. } => mark(&[*table], &mut used),
+        }
+    }
+    for (_, block) in mf.blocks.iter() {
+        match &block.term {
+            Term::Return(vs) => mark(vs, &mut used),
+            Term::Unreachable => {}
+            Term::Goto(_) => {}
+            Term::Branch { cond, .. } => mark(&[*cond], &mut used),
+            Term::Switch { discr, .. } => mark(&[*discr], &mut used),
+            Term::Yield { values, .. } => mark(values, &mut used),
+        }
+    }
+    used
 }
 
 /// Successor blocks of `b` (`None` == the virtual exit).
