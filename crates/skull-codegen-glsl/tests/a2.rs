@@ -250,6 +250,91 @@ fn reject_int_varying_without_flat() {
     reject_pipeline(src, "vt", "fr", "flat");
 }
 
+/// Decision 7: BOTH stages' names share ONE collision namespace (the linked GL
+/// program has one uniform namespace) -- a vertex uniform and a fragment
+/// uniform with the same name reject at emit, not at link.
+#[test]
+fn reject_cross_stage_name_collision() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        value VU { uShared: float }
+        value FU { uShared: float }
+        @shader(vertex)
+        fn vt(@attr a: QV, @uniform u: VU) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: u.uShared, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary, @uniform u: FU) -> Vec4 { return Vec4 { x: u.uShared, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "collide");
+}
+
+/// A global-base struct param (attrs/uniforms/varyings) reads field-by-field --
+/// its fields are GLSL globals; the struct itself has no GLSL identity. Copying
+/// it into a local must reject, not emit a dangling reference to the dropped
+/// param name.
+#[test]
+fn reject_global_struct_param_alias() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4, TexCoord: Vec2 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 {
+            let v = vary
+            return Vec4 { x: v.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    reject_pipeline(src, "vt", "fr", "field-by-field");
+}
+
+/// `in bool` / `out bool` are illegal GLSL: bool attributes and bool varyings
+/// reject at classification (uniform bool stays legal).
+#[test]
+fn reject_bool_varying() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4, ok: bool }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, ok: true } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "bool");
+}
+
+#[test]
+fn reject_bool_attribute() {
+    let src = r#"
+        value QV { aPos: Vec2, flag: bool }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "bool");
+}
+
+/// `uniform bool` IS legal GLSL -- the bool restriction is attrs/varyings only.
+#[test]
+fn bool_uniform_is_allowed() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        value FU { uEnabled: bool }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary, @uniform u: FU) -> Vec4 {
+            if u.uEnabled { return Vec4 { x: 1.0, y: 1.0, z: 1.0, w: 1.0 } }
+            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
+    assert!(glsl.contains("uniform bool uEnabled;"), "got:\n{glsl}");
+}
+
 // --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
 
 #[test]

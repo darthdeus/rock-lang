@@ -419,6 +419,9 @@ struct FnEmit<'a> {
     /// emitted as `void main()` and its terminal `return <MakeValueStruct>`
     /// becomes `gl_Position = <position>;` plus a `<varying> = <val>;` per field.
     vertex_out: Option<HashMap<Ustr, GlslTy>>,
+    /// The fn's name span -- body-level emit errors anchor here (MIR insts carry
+    /// no spans, so per-expression precision is not available).
+    fn_span: Span,
 }
 
 #[derive(Clone, Copy)]
@@ -520,6 +523,7 @@ fn emit_fn_def_with(
         folded_block: HashMap::default(),
         folded_bound: HashMap::default(),
         vertex_out: entry.and_then(|s| s.vertex_out.as_ref().map(|v| v.iter().copied().collect())),
+        fn_span: f.name_span,
     };
     e.assign_cell_names();
     // Global-base struct params + samplers are dropped from the GLSL signature.
@@ -869,6 +873,16 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Nil) => return Err(err(self.span(), "shader profile: null literal is not tier 0")),
             Inst::Const(Lit::Str(_)) => return Err(err(self.span(), "shader profile: string literal is not tier 0")),
             Inst::Load(c) => {
+                // A global-base struct param has no GLSL identity -- its fields
+                // are bare globals, read via `Field` (which never renders the
+                // base). A `Load` reaching expression position is a copy/alias
+                // (`let v = vary`) that would reference the dropped param name.
+                if self.global_cells.contains(c) {
+                    return Err(err(self.span(), format!(
+                        "shader profile: the struct param `{}` can only be read field-by-field (its fields are GLSL globals) -- it cannot be copied or aliased",
+                        self.cell_name[c]
+                    )));
+                }
                 if let Some(fd) = self.folded_cond.get(c) {
                     self.render_folded(fd)?
                 } else if let Some(&v) = self.folded_bound.get(c) {
@@ -974,7 +988,7 @@ impl FnEmit<'_> {
     }
 
     fn span(&self) -> Span {
-        Span::default()
+        self.fn_span
     }
 
     /// Emit a structured sequence of blocks starting at `start`, stopping before
@@ -1781,7 +1795,14 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let mut attrs = Vec::new();
     for &i in per_vertex.iter().chain(instanced.iter()) {
         attr_params.push(i);
-        attrs.extend(struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?);
+        let fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
+        // GLSL forbids `in bool` -- bool is legal only as a uniform.
+        if let Some((n, _)) = fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
+            return Err(err(span, format!(
+                "shader vertex: attribute `{n}` cannot be bool (GLSL forbids bool vertex inputs) -- use int or float"
+            )));
+        }
+        attrs.extend(fields);
     }
     let mut uniforms = Vec::new();
     for &i in &uniform_params {
@@ -1814,6 +1835,13 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
         if fty == GlslTy::Int && !flat {
             return Err(err(span, format!(
                 "shader: int-typed varying `{}` needs @flat (GLSL requires flat integer interpolation)",
+                fd.name
+            )));
+        }
+        // GLSL forbids bool in/out variables entirely (even flat).
+        if fty == GlslTy::Bool {
+            return Err(err(span, format!(
+                "shader: varying `{}` cannot be bool (GLSL forbids bool varyings) -- use float or int + @flat",
                 fd.name
             )));
         }
@@ -2030,26 +2058,25 @@ fn emit_fragment_stage(
     Ok(out)
 }
 
-/// Reject duplicate global names within a stage (attributes, uniforms, varyings,
-/// samplers, and the reserved gl_Position/FragColor share the GLSL namespace).
+/// Reject duplicate global names across BOTH stages (decision 7): attributes,
+/// uniforms, varyings, samplers and the reserved gl_Position/FragColor share
+/// one GLSL namespace -- the linked program has a single uniform namespace, so
+/// a vertex/fragment same-name pair is a link error (or a silent alias), never
+/// two distinct bindings. Varyings are one name in both stages (inserted once).
 fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &FragShape, span: Span) -> Result<(), CompilerError> {
-    let check = |names: &mut dyn Iterator<Item = Ustr>, reserved: &str| -> Result<(), CompilerError> {
-        let mut seen: HashSet<Ustr> = [Ustr::from(reserved)].into_iter().collect();
-        for n in names {
-            if !seen.insert(n) {
-                return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and the reserved name share the GLSL namespace)")));
-            }
-        }
-        Ok(())
-    };
-    let mut vnames = v.attrs.iter().map(|&(n, _)| n)
+    let mut seen: HashSet<Ustr> =
+        [Ustr::from("gl_Position"), Ustr::from("FragColor")].into_iter().collect();
+    let names = v.attrs.iter().map(|&(n, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
-        .chain(varyings.varyings.iter().map(|&(n, _, _)| n));
-    check(&mut vnames, "gl_Position")?;
-    let mut fnames = varyings.varyings.iter().map(|&(n, _, _)| n)
+        .chain(v.samplers.iter().map(|&(_, n)| n))
+        .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
         .chain(fs.samplers.iter().map(|&(_, n)| n));
-    check(&mut fnames, "FragColor")?;
+    for n in names {
+        if !seen.insert(n) {
+            return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
+        }
+    }
     Ok(())
 }
 
