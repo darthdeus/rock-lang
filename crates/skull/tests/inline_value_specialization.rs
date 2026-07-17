@@ -60,20 +60,17 @@ fn generic_inline_at_value_type_splices_zero_box() {
 }
 
 // A generic `@inline` fn calling `native_buffer_alloc<T>` -- the intrinsic the
-// shared (opaque-`T`) body cannot lower. Specialized at `V2`, the ctype resolves
-// to `V2` and the body emits the `ffi.new("V2[?]", ..)` it could not name generically.
+// shared (opaque-`T`) body cannot lower. Uses the stdlib `flat_vec_new<T>` /
+// `push`; specialized at `V2`, the ctype resolves and the body emits the
+// `ffi.new("V2[?]", ..)` it could not name generically. `nb_alloc` is a local
+// generic wrapper exercising the intrinsic directly too.
 const INTRINSIC_INST: &str = r#"
 value V2 { x: float, y: float }
-struct FlatVec<T> { buf: NativeBuffer<T>, len: int }
-
-@inline fn flat_vec_new<T>(cap: int) -> FlatVec<T> {
-    return FlatVec { buf: native_buffer_alloc(cap), len: 0 }
-}
 
 fn make() -> float {
     let fv: FlatVec<V2> = flat_vec_new(8)
-    fv.buf[0] = V2 { x: 3.0, y: 4.0 }
-    return fv.buf[0].x
+    fv.push(V2 { x: 3.0, y: 4.0 })
+    return fv.get(0).x
 }
 
 fn main() { let _ = make() }

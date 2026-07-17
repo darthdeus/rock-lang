@@ -411,6 +411,7 @@ fn compute_call_spec(
     inf: &BodyInference,
     e: Idx<Expr>,
     func: FuncRef,
+    enclosing: &SpecSubst,
 ) -> Option<(SpecKey, SpecSubst)> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() || f.is_extern || f.lua_body.is_some() || f.is_coroutine {
@@ -431,7 +432,14 @@ fn compute_call_spec(
             key.push(None);
             continue;
         };
-        match reify_leaf(ws, inf, *b) {
+        // Reify the binding; if it is itself one of the ENCLOSING body's generics
+        // (a nested call `push -> grow` inside an already-specialized `push`),
+        // resolve it through the enclosing substitution.
+        let leaf = reify_leaf(ws, inf, *b).or_else(|| match resolve_tyid(ws, inf, *b).and_then(|t| ty_node(ws, inf, t)) {
+            Some(TypeExpr::Generic(ev, _)) => enclosing.get(&ev).copied(),
+            _ => None,
+        });
+        match leaf {
             Some(leaf) => {
                 if matches!(leaf, ReifiedLeaf::Nominal(n) if map_is_value_struct(ws, n)) {
                     any_value = true;
@@ -3347,7 +3355,7 @@ impl Builder<'_> {
     /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
     /// splice always resolves; a residual case falls to the site-aware rejection.
     fn call_spec(&self, e: Idx<Expr>, func: FuncRef) -> Option<(SpecKey, SpecSubst)> {
-        compute_call_spec(self.ws, self.inf?, e, func)
+        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst)
     }
 
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar
@@ -7299,67 +7307,31 @@ fn native_buffer_elem_is_generic(ws: &Workspace, inf: &BodyInference, ret: TyId)
 
 /// The verdict of scanning every workspace call to an intrinsic-bearing generic
 /// `F`: whether its standalone (opaque-`T`) body is reachable un-specialized.
-enum CallerSurvey {
-    /// A call to `F` that does NOT specialize -- the standalone body would serve
-    /// it, but it cannot name the ffi ctype. Its span + a naming message.
-    Surviving(Span, String),
-    /// `F` has at least one caller and every one specializes: the standalone body
-    /// is never reached, so its unresolved intrinsic is exempt (silently skipped).
-    AllSpecialized,
-    /// `F` has no callers at all -- a dead generic intrinsic body.
-    NoCallers,
-}
-
-/// Scan the whole workspace for calls to `fref` and classify how its standalone
-/// intrinsic-bearing body is reached (see [`CallerSurvey`]). `intrinsic_ret` is the
-/// `NativeBuffer<T>` result type of the intrinsic call inside `fref` (in `fref`'s
-/// own inference `fref_inf`) -- each specializing caller is checked to actually
-/// RESOLVE that element's ctype under its substitution, not merely be eligible (a
-/// value binding whose leaf is a GC value struct specializes but still cannot name
-/// a ctype, so it too is a surviving un-allocatable use).
-fn survey_intrinsic_generic_callers(
-    ws: &Workspace,
-    fref: FuncRef,
-    fref_inf: &BodyInference,
-    intrinsic_ret: TyId,
-) -> CallerSurvey {
-    let fname = ws.module(fref.module).functions[fref.func].name;
-    let mut any_caller = false;
-    for module in ws.modules.iter() {
-        let Some(ir) = ws.inference(module.id) else { continue };
-        for (owner, body) in module.bodies.iter() {
-            let Some(inf) = ir.per_fn.get(owner) else { continue };
-            for (c, resolved) in inf.resolved_overload_calls.iter() {
-                let c = *c;
-                if *resolved != (fref.module, fref.func) {
-                    continue;
-                }
-                any_caller = true;
-                // Resolves iff the call specializes AND its subst makes the
-                // intrinsic element a nameable ctype in `fref`'s body.
-                let resolves = compute_call_spec(ws, inf, c, fref).is_some_and(|(_, subst)| {
-                    native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intrinsic_ret, &subst).is_ok()
-                });
-                if !resolves {
-                    let msg = format!(
-                        "`{fname}` allocates via `native_buffer_alloc<T>`, which needs a concrete, \
-                         FFI-clean element type. This call does not specialize `{fname}` to an \
-                         allocatable `value`-struct element (its generic binds to a primitive, a \
-                         GC-carrying value struct, a nested generic, or nothing inferrable), so it \
-                         would reach the shared generic body that cannot name the ffi ctype. Call \
-                         it at a concrete FFI-clean `value`-struct instantiation, or use a per-type \
-                         buffer (`native_buffer_int`/`_float`) for primitive elements."
-                    );
-                    return CallerSurvey::Surviving(body.expr_spans[c], msg);
-                }
+/// If `fref` is a generic fn whose body DIRECTLY calls `native_buffer_alloc<T>`
+/// with an opaque-generic element (the FlatVec-storage shape), return that call's
+/// `NativeBuffer<T>` result type (in `fref`'s own inference) so a call site can
+/// check its specialization resolves the element ctype. `None` otherwise.
+fn fn_opaque_intrinsic_ret(ws: &Workspace, fref: FuncRef) -> Option<TyId> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.generics.is_empty() || f.lua_body.is_some() {
+        return None;
+    }
+    let body = ws.module(fref.module).bodies.get(&BodyOwner::Function(fref.func))?;
+    let inf = ws.inference(fref.module)?.per_fn.get(&BodyOwner::Function(fref.func))?;
+    for (e, expr) in body.expr_arena.iter() {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            continue;
+        };
+        if name.as_str() != "native_buffer_alloc" {
+            continue;
+        }
+        if let Some(&ret) = inf.expr_types.get(e) {
+            if native_buffer_elem_is_generic(ws, inf, ret) {
+                return Some(ret);
             }
         }
     }
-    if any_caller {
-        CallerSurvey::AllSpecialized
-    } else {
-        CallerSurvey::NoCallers
-    }
+    None
 }
 
 /// [`native_buffer_alloc_elem_ctype`] under a specialization `subst`: a
@@ -7407,30 +7379,29 @@ fn native_buffer_alloc_elem_ctype_spec(
     }
 }
 
-/// Hard emit-time rejection for every `native_buffer_alloc<T>` call in module
-/// `mid` whose element type is not allocatable ([`native_buffer_alloc_elem_ctype`]
-/// returns `Err`). Runs as a dedicated pass in `emit_full` (beside
+/// Hard emit-time rejection for `native_buffer_alloc<T>` uses that would emit
+/// broken / dropped code. Runs as a dedicated pass in `emit_full` (beside
 /// [`gc_value_c_boundary`]) so the error is SURFACED, not swallowed by the lenient
-/// per-body lowering-gap skip.
+/// per-body lowering-gap skip. Two scans over `mid`:
 ///
-/// SITE-AWARE (docs/flatvec-plan.md P2): an opaque-`T` intrinsic inside a generic
-/// `@inline`/`@pure` fn is LEGAL when every call to that fn specializes it to a
-/// concrete value-struct element -- the specialized splices name the ctype and the
-/// standalone body is never reached (its lowering-gap skip is then correct). What
-/// rejects is a SURVIVING un-specialized use (the call's span is named), a dead
-/// generic intrinsic body, or a concrete-but-unallocatable element (heap / GC value
-/// struct -- the P1 cases). Returns the first offender `(message, span)`.
+/// 1. A DIRECT intrinsic call in this module whose element is a CONCRETE
+///    unallocatable type (a heap struct / GC value struct -- the P1 cases).
+/// 2. SITE-AWARE (docs/flatvec-plan.md P2): a call to a generic fn whose body
+///    allocates via an opaque-`T` intrinsic (e.g. `flat_vec_new<T>`, possibly in
+///    the stdlib), where THIS call does not specialize the element to an FFI-clean
+///    value struct -- so it would reach the shared generic body that cannot name
+///    the ctype (a primitive, GC-value, or nested-generic instantiation). The call
+///    site is named.
+///
+/// An opaque-generic intrinsic that is never called un-specialized (all callers
+/// specialize, or -- a library fn -- has no callers at all) is exempt: its
+/// standalone body's lowering-gap skip is then correct. Returns the first offender.
 pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
+    // 1. Direct intrinsic calls with a concrete unallocatable element.
     for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else {
-            continue;
-        };
-        let self_fref = match owner {
-            BodyOwner::Function(fid) => Some(FuncRef { module: mid, func: *fid }),
-            _ => None,
-        };
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
         for (e, expr) in body.expr_arena.iter() {
             let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
                 continue;
@@ -7438,22 +7409,58 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             if name.as_str() != "native_buffer_alloc" {
                 continue;
             }
-            let Some(&ret) = inf.expr_types.get(e) else {
+            let Some(&ret) = inf.expr_types.get(e) else { continue };
+            // Opaque-generic elements are a per-CALL-SITE property (scan 2), never
+            // rejected on the definition body -- specialization may resolve them.
+            if native_buffer_elem_is_generic(ws, inf, ret) {
                 continue;
-            };
-            let Err(msg) = native_buffer_alloc_elem_ctype(ws, inf, ret) else {
-                continue;
-            };
-            // An opaque generic element inside a fn: the standalone body is exempt
-            // iff every use specializes it (the splices resolve the ctype).
-            if let Some(fref) = self_fref.filter(|_| native_buffer_elem_is_generic(ws, inf, ret)) {
-                match survey_intrinsic_generic_callers(ws, fref, inf, ret) {
-                    CallerSurvey::AllSpecialized => continue,
-                    CallerSurvey::Surviving(span, m) => return Some((m, span)),
-                    CallerSurvey::NoCallers => {} // dead body -> fall through to reject.
-                }
             }
-            return Some((msg, body.expr_spans[e]));
+            if let Err(msg) = native_buffer_alloc_elem_ctype(ws, inf, ret) {
+                return Some((msg, body.expr_spans[e]));
+            }
+        }
+    }
+    // 2. Calls to an opaque-`T`-intrinsic-bearing generic fn that this site does
+    //    not specialize to an allocatable element.
+    for (owner, body) in module.bodies.iter() {
+        // A call INSIDE a generic body (e.g. the stdlib `push`'s own `fv.grow()`)
+        // is not an independent surviving use: it specializes when the enclosing
+        // generic is specialized, and is dead in the enclosing fn's standalone body
+        // otherwise. Its fate is decided at the ENCLOSING fn's call sites, which
+        // are scanned as their own (eventually non-generic) roots. Only root calls
+        // from a concrete (non-generic) context must resolve here.
+        if let BodyOwner::Function(fid) = owner {
+            if !ws.module(mid).functions[*fid].generics.is_empty() {
+                continue;
+            }
+        }
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (c, resolved) in inf.resolved_overload_calls.iter() {
+            let c = *c;
+            let fref = FuncRef { module: resolved.0, func: resolved.1 };
+            let Some(intr_ret) = fn_opaque_intrinsic_ret(ws, fref) else { continue };
+            let Some(fref_inf) = ws
+                .inference(fref.module)
+                .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fref.func)))
+            else {
+                continue;
+            };
+            let resolves = compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(|(_, subst)| {
+                native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst).is_ok()
+            });
+            if !resolves {
+                let fname = ws.module(fref.module).functions[fref.func].name;
+                let msg = format!(
+                    "`{fname}` allocates via `native_buffer_alloc<T>`, which needs a concrete, \
+                     FFI-clean element type. This call does not specialize `{fname}` to an \
+                     allocatable `value`-struct element (its generic binds to a primitive, a \
+                     GC-carrying value struct, a nested generic, or nothing inferrable), so it \
+                     would reach the shared generic body that cannot name the ffi ctype. Call it \
+                     at a concrete FFI-clean `value`-struct instantiation, or use a per-type \
+                     buffer (`native_buffer_int`/`_float`) for primitive elements."
+                );
+                return Some((msg, body.expr_spans[c]));
+            }
         }
     }
     None
