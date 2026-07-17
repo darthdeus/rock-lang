@@ -370,7 +370,15 @@ fn build_test_harness(tests: &[skull::SkullTest]) -> String {
         };
         // `f` is the global test fn by name; `out` is the expected stdout (or nil).
         // `name` labels the FAIL line (a package unit runs many tests together).
-        h.push_str(&format!("  {{ f = {}, out = {}, name = {} }},\n", t.name, out, lua_str(&t.name)));
+        // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
+        // line carrying the serialized return value; the HOST compares it.
+        h.push_str(&format!(
+            "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
+            t.name,
+            out,
+            lua_str(&t.name),
+            t.returns.is_some()
+        ));
     }
     h.push_str("}\n");
     h.push_str(
@@ -390,14 +398,20 @@ for _, t in ipairs(__skull_T) do
   io.write = function(...)
     for i = 1, select('#', ...) do buf[#buf + 1] = tostring((select(i, ...))) end
   end
-  local ok, err = pcall(t.f)
+  local ok, ret = pcall(t.f)
   print = rp
   io.write = rw
   local got = table.concat(buf, ""):gsub("^%s+", ""):gsub("%s+$", "")
   if not ok then
-    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(err)), "\n")
+    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(ret)), "\n")
   elseif t.out ~= nil and got ~= t.out then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": output mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
+  elseif t.val then
+    -- %.17g round-trips any f64; booleans via tostring. The host does the
+    -- comparison (test_protocol::compare_value), never this harness.
+    local s
+    if type(ret) == "number" then s = string.format("%.17g", ret) else s = tostring(ret) end
+    io.write("\n__SKULL__\tVALUE\t", t.name, "\t", s, "\n")
   else
     io.write("\n__SKULL__\tPASS\t\n")
   end
@@ -428,6 +442,7 @@ fn no_user_module(e: CompilerError) -> anyhow::Error {
 }
 
 /// A skull failure: a short bucketed reason + the full rendered detail.
+#[derive(Debug)]
 struct SkullFailure {
     reason: String,
     rendered: String,
@@ -439,6 +454,7 @@ struct SkullFailure {
 /// toward "emit valid Lua" but not toward execution. Both variants carry the
 /// number of individual `@test` functions involved so the runner can report
 /// per-`@test` totals, not just per-file ones.
+#[derive(Debug)]
 enum SkullOutcome {
     /// All `@test`s passed (or the file had none). `tests` = number that ran
     /// green (0 for a load-only file with no `@test`s).
@@ -548,10 +564,32 @@ fn run_emitted_tests(
         });
     };
 
-    if markers.fails.is_empty() {
-        Ok(SkullOutcome::Pass { tests: markers.passed })
+    // VALUE lines: compare the serialized return value HOST-side against the
+    // pinned `@test(returns = ...)` literal.
+    let mut passed = markers.passed;
+    let mut fails = markers.fails;
+    let expects: HashMap<&str, &skull::ValueExpect> = tests
+        .iter()
+        .filter_map(|t| t.returns.as_ref().map(|v| (t.name.as_str(), v)))
+        .collect();
+    for (name, val) in &markers.values {
+        let Some(expect) = expects.get(name.as_str()) else {
+            return Err(SkullFailure {
+                reason: "harness invariant breach (skull bug)".to_string(),
+                rendered: format!("VALUE line for `{name}` without a returns expectation"),
+            });
+        };
+        match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
+        {
+            Ok(()) => passed += 1,
+            Err(detail) => fails.push(format!("{name}: {detail}")),
+        }
+    }
+
+    if fails.is_empty() {
+        Ok(SkullOutcome::Pass { tests: passed })
     } else {
-        Ok(SkullOutcome::TestFail { passed: markers.passed, fails: markers.fails })
+        Ok(SkullOutcome::TestFail { passed, fails })
     }
 }
 
@@ -4995,6 +5033,63 @@ mod force_full_tests {
             std::fs::read_to_string(&main_lua).unwrap(),
             main_v1,
             "force_full must leave the last-good main.lua untouched, not overwrite with a partial build"
+        );
+    }
+}
+
+#[cfg(test)]
+mod value_test_exec {
+    //! `@test(returns = <literal>)` end-to-end on the luajit executor: the
+    //! harness emits a VALUE marker, the host compares
+    //! (`test_protocol::compare_value`). Discovery rejections (the
+    //! returns+expect_failure contradiction) must fail the unit, never route
+    //! through the expect-compile-failure escape.
+
+    use super::*;
+
+    #[test]
+    fn value_mismatch_fails_with_detail() {
+        let src = "@test(returns = 43)\nfn r() -> int { return 42 }\n";
+        match skull_build("val.rock", src).expect("build ok") {
+            SkullOutcome::TestFail { passed, fails } => {
+                assert_eq!(passed, 0);
+                assert_eq!(fails, vec!["r: value mismatch: expected <43> got <42>".to_string()]);
+            }
+            SkullOutcome::Pass { .. } => panic!("mismatching value test must FAIL"),
+        }
+    }
+
+    #[test]
+    fn value_tests_pass_int_float_bool_and_with_output() {
+        let src = "@test(returns = 42)\nfn a() -> int { return 42 }\n\
+                   @test(returns = -1.5)\nfn b() -> float { return -1.5 }\n\
+                   @test(returns = true)\nfn c() -> bool { return true }\n\
+                   @test(returns = 6, output = \"hi\")\nfn d() -> int { print(\"hi\")\n return 6 }\n";
+        match skull_build("val.rock", src).expect("build ok") {
+            SkullOutcome::Pass { tests } => assert_eq!(tests, 4),
+            SkullOutcome::TestFail { fails, .. } => panic!("expected all pass, got {fails:?}"),
+        }
+    }
+
+    #[test]
+    fn value_test_error_still_fails() {
+        let src = "@test(returns = 1)\nfn e() -> int { error(\"boom\")\n return 1 }\n";
+        match skull_build("val.rock", src).expect("build ok") {
+            SkullOutcome::TestFail { fails, .. } => {
+                assert!(fails[0].contains("error:"), "got {fails:?}");
+            }
+            SkullOutcome::Pass { .. } => panic!("erroring value test must FAIL"),
+        }
+    }
+
+    #[test]
+    fn returns_plus_expect_failure_is_a_unit_failure_not_expected_pass() {
+        let src = "@test(expect_failure = true, returns = 42)\nfn contra() -> int { return 42 }\n";
+        let err = skull_build("val.rock", src).expect_err("contradiction must reject the unit");
+        assert!(
+            err.reason.contains("contradictory"),
+            "unexpected reason: {}",
+            err.reason
         );
     }
 }
