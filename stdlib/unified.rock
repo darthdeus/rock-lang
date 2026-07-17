@@ -400,19 +400,19 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 
 // Safe `.get(i) -> int?` per variant. Codegen for `buf[i]` emits the
 // bounds-checked helper `__nb_checked_get` (type-agnostic on struct).
-inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
 
