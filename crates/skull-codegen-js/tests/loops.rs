@@ -270,3 +270,4 @@ fn shared_tail_rejects() {
         "JS subset: unstructured control flow (shared branch tail)"
     );
 }
+

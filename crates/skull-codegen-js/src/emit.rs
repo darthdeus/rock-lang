@@ -842,6 +842,15 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
     match (cf.name.as_str(), cf.param_decls.len()) {
         ("tostring", 1) => Some("lua_tostring($1)"),
         ("__rock_format_float", 1) => Some("__rock_format_float($1)"),
+        // `error(msg)` diverges; the message is already a string. Wrapped in a
+        // throwing IIFE so it is a valid EXPRESSION -- the lowering stores a
+        // diverging call's (dead) result into an if-result cell, and a bare
+        // `throw` is a statement, not an expression. The node harness catch turns
+        // the throw into a FAIL carrying the message -- Lua's behavior for an
+        // errored test. luajit prepends a `file:line:` position; no in-scope test
+        // compares that (it is on the error object, not stdout), so JS reproduces
+        // only the message. `assert` is pure Rock over `error`.
+        ("error", 1) => Some("(() => { throw new Error($1); })()"),
         _ => None,
     }
 }
