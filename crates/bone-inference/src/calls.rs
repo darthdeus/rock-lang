@@ -1197,6 +1197,19 @@ pub(crate) fn commit_selected_call(
         }
     }
 
+    // Persist the instantiation for skull's inliner call-site specialization
+    // (docs/flatvec-plan.md). After arg unification, so `subs` points at the
+    // concrete types; a still-unbound var stays a var and readers resolve
+    // through `substitutions` like `expr_types`.
+    if !function.generics.is_empty() {
+        let mut bindings = Vec::with_capacity(function.generics.len());
+        for &g in function.generics.iter() {
+            let inst = substitute(gamma, g, &subs, span)?;
+            bindings.push(resolve(gamma, inst, span));
+        }
+        gamma.out.call_generic_bindings.insert(call_expr, bindings);
+    }
+
     // A non-`@pure` callee may reassign a global, so its call invalidates every
     // global refinement. Args + receiver above were checked while the
     // refinements still held (the call's effect is sequenced after them); a

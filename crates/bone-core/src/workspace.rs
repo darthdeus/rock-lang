@@ -311,6 +311,12 @@ pub struct BodyInference {
     pub expr_types: ArenaMap<Idx<Expr>, TyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, TyId>,
     pub resolved_overload_calls: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
+    /// Calls to GENERIC fns: the winning candidate's instantiated generics in
+    /// declaration order, keyed like `resolved_overload_calls`. Entries may
+    /// still be inference vars at record time -- readers resolve through
+    /// `substitutions` like `expr_types`. skull's inliner reads this to
+    /// specialize value-instantiated `@inline` splices (docs/flatvec-plan.md).
+    pub call_generic_bindings: FxHashMap<Idx<Expr>, Vec<TyId>>,
     /// `for x in <coll>` over a user type: the resolved iter/next protocol for
     /// the desugar, keyed by the For's iter `Idx<Expr>`. Separate from
     /// `resolved_overload_calls` so it can't collide with the collection
