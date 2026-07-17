@@ -685,17 +685,21 @@ impl Emitter<'_> {
 
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
-        // The table keys on (name, arity); `get`/2 is also Vec/Map/Arena
-        // surface, so the NativeBuffer template only applies to a NativeBuffer
-        // receiver -- anything else rejects rather than kinda-working.
-        if cf.name.as_str() == "get" && !first_param_is_native_buffer(self.ws, cf) {
-            return Err(err(
-                "JS subset: `get` is mapped only for NativeBuffer receivers",
-            ));
-        }
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().map(|a| self.render_val(*a)).collect();
         let rargs = rargs?;
+        // The overloaded `get`/2 dispatches on its receiver: NativeBuffer via the
+        // intrinsic template (below), Map via the JS `Map.get` (miss -> undefined,
+        // which `== null` reads as nil), Vec co-emits its pure-Rock body. Any
+        // other receiver rejects rather than kinda-working.
+        if cf.name.as_str() == "get" && cf.param_decls.len() == 2 {
+            match first_param_nominal(self.ws, cf).as_deref() {
+                Some(n) if is_native_buffer(n) => {} // intrinsic template path below
+                Some("Map") => return Ok(format!("{}.get({})", rargs[0], rargs[1])),
+                Some("Vec") => {} // co-emit path below
+                _ => return Err(err("JS subset: `get` receiver not supported")),
+            }
+        }
         // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
         // binding: `print` (variadic -> the harness global), the fixed-arity
         // templates (`tostring`, `__rock_format_float`).
@@ -820,8 +824,16 @@ pub fn emit_with_closure(
             // Mirror `render_call`'s decision exactly: the `get`/2 receiver
             // gate, then the intrinsic table (stdlib @intrinsic decls only),
             // then co-emit for plain-Rock bodies.
-            if cf.name.as_str() == "get" && !first_param_is_native_buffer(ws, cf) {
-                return Err(err("JS subset: `get` is mapped only for NativeBuffer receivers"));
+            if cf.name.as_str() == "get" && cf.param_decls.len() == 2 {
+                match first_param_nominal(ws, cf).as_deref() {
+                    // NativeBuffer via the intrinsic table (handled below); Map
+                    // rendered inline in `render_call` (skip co-emission); Vec
+                    // co-emits its pure-Rock body (falls through).
+                    Some(n) if is_native_buffer(n) => {}
+                    Some("Map") => continue,
+                    Some("Vec") => {}
+                    _ => return Err(err("JS subset: `get` receiver not supported")),
+                }
             }
             if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
                 continue;
@@ -952,21 +964,24 @@ fn is_native_buffer(name: &str) -> bool {
     )
 }
 
-/// Whether `f`'s first declared param is a `NativeBuffer*` nominal -- the
-/// receiver gate for the overloaded `get`/2 table entry. Top-level fn param
-/// types are always `TyId::Static`.
-fn first_param_is_native_buffer(ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
+
+/// The nominal type name of `f`'s first declared param (`Vec`, `Map`,
+/// `NativeBuffer*`, ...), for receiver-based dispatch of the overloaded
+/// `get`/2. `None` if there is no first param or it is not a nominal App.
+fn first_param_nominal(ws: &Workspace, f: &bone_semantic::hir::Function) -> Option<String> {
     use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
-    let Some(pd) = f.param_decls.first() else {
-        return false;
-    };
+    let pd = f.param_decls.first()?;
     let TyId::Static(mid, idx) = pd.ty else {
-        return false;
+        return None;
     };
-    matches!(
-        ws.module(mid).ty_arena[idx],
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_native_buffer(name.as_str())
-    )
+    // `[T]` and `Map<K,V>` are distinct ctors (`Array`/`Map`), not `Nominal` --
+    // canonicalize them to the receiver-dispatch names the emitter keys on.
+    match &ws.module(mid).ty_arena[idx] {
+        TypeExpr::App { ctor: TypeCtor::Array, .. } => Some("Vec".to_string()),
+        TypeExpr::App { ctor: TypeCtor::Map, .. } => Some("Map".to_string()),
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name.as_str().to_string()),
+        _ => None,
+    }
 }
 
 /// Invoke `f` for each inst used as an operand by `inst`. The match is

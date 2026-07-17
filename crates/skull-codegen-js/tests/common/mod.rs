@@ -82,3 +82,4 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
     }
     panic!("no emittable scalar `{name}`/{arity} overload");
 }
+

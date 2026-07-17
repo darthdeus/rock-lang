@@ -248,16 +248,10 @@ function native_buffer_float(c0) {
     panic!("no native_buffer_float in stdlib");
 }
 
-// Vec indexing (`xs[i]`) emits the bounds-checked shim (T4). The overloaded
-// `get`/2 key still rejects for a Vec receiver -- reject-don't-fallback keeps a
-// Vec `.get` from picking up the NativeBuffer template (co-emitting `vec_get` is
-// future work).
+// Vec indexing (`xs[i]`) emits the bounds-checked shim (T4).
 #[test]
-fn vec_index_emits_get_still_rejects() {
-    let ws = ws_with(
-        "fn vidx(xs: [int]) -> int { return xs[0] }\n\
-         fn vget(xs: [int]) -> int? { return xs.get(0) }\n",
-    );
+fn vec_index_emits_checked_get() {
+    let ws = ws_with("fn vidx(xs: [int]) -> int { return xs[0] }\n");
     let vidx = lower_test_fn(&ws, "vidx");
     assert_eq!(
         skull_codegen_js::emit::emit_fn(&ws, &vidx, "vidx").unwrap(),
@@ -268,13 +262,6 @@ function vidx(c0) {
   return v2;
 }
 "
-    );
-    let vget = lower_test_fn(&ws, "vget");
-    let e = skull_codegen_js::emit::emit_fn(&ws, &vget, "vget").unwrap_err();
-    assert!(
-        e.message.contains("only for NativeBuffer receivers"),
-        "wrong reject: {}",
-        e.message
     );
 }
 
