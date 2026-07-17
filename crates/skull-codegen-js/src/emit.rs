@@ -44,6 +44,32 @@ fn js_number(f: f64) -> Result<String, CompilerError> {
     }
 }
 
+/// A JS double-quoted string literal escaping the control chars a JS lexer
+/// needs. Non-ASCII-printable bytes reject rather than guessing an encoding
+/// (the Lua backend passes UTF-8 through verbatim; JS source is UTF-16, so a
+/// raw copy would diverge -- out of the T2 subset).
+fn js_string_lit(s: &str) -> Result<String, CompilerError> {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if c.is_ascii() && !c.is_ascii_control() => o.push(c),
+            _ => {
+                return Err(err(format!(
+                    "JS subset: non-ASCII-printable char in string literal (U+{:04X})",
+                    c as u32
+                )))
+            }
+        }
+    }
+    o.push('"');
+    Ok(o)
+}
+
 /// Emit `mf` as `function <js_name>(...) { ... }`. `js_name` is the caller's
 /// chosen JS identity (the S3/S4 harness names each fallback fn).
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {
@@ -298,7 +324,7 @@ impl Emitter<'_> {
             Inst::Const(Lit::Float(f)) => js_number(*f)?,
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => "null".to_string(),
-            Inst::Const(Lit::Str(_)) => return Err(err("JS subset: string literal not supported")),
+            Inst::Const(Lit::Str(s)) => js_string_lit(s.as_str())?,
             Inst::Load(c) => cell_name(*c),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => bin(a, "-", b, self)?,
@@ -318,6 +344,23 @@ impl Emitter<'_> {
             Inst::IntToFloat(x) => self.render_val(*x)?,
             // Rock float->int truncates toward -inf == floor.
             Inst::FloatToInt(x) => format!("Math.floor({})", self.render_val(*x)?),
+            // Lua `..` coerces each operand via `tostring` (number formatting is
+            // `%.14g`); JS `+` does not, so every leaf routes through
+            // `lua_tostring` for parity. Emitted as one flat `+` run over the
+            // whole concat tree (mirrors the Lua backend's flat `..`).
+            Inst::StringConcat(a, b) => {
+                let mut parts = Vec::new();
+                self.collect_concat(&mut parts, *a);
+                self.collect_concat(&mut parts, *b);
+                let rendered: Result<Vec<String>, CompilerError> = parts
+                    .iter()
+                    .map(|p| Ok(format!("lua_tostring({})", self.render_val(*p)?)))
+                    .collect();
+                format!("({})", rendered?.join(" + "))
+            }
+            // The scalar `{x}` interpolation stringify (int/bool/string) -- same
+            // `%.14g`-parity path as a concat leaf.
+            Inst::ToString(x) => format!("lua_tostring({})", self.render_val(*x)?),
             Inst::Call { func, args } => self.render_call(*func, args)?,
             // NativeBuffer surface: `{ptr, len}` object literal; `buf[i]` via
             // the bounds-checked shim (JS_NB_CHECK_SHIMS preamble, matching
@@ -364,6 +407,17 @@ impl Emitter<'_> {
         })
     }
 
+    /// Flatten a `StringConcat` tree into its leaf operands (descending into
+    /// child `StringConcat`s), mirroring the Lua backend's flat-`..` collection.
+    fn collect_concat(&self, parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
+        if let Inst::StringConcat(a, b) = &self.mf.insts[id] {
+            self.collect_concat(parts, *a);
+            self.collect_concat(parts, *b);
+        } else {
+            parts.push(id);
+        }
+    }
+
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
         // The table keys on (name, arity); `get`/2 is also Vec/Map/Arena
@@ -377,6 +431,16 @@ impl Emitter<'_> {
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().map(|a| self.render_val(*a)).collect();
         let rargs = rargs?;
+        // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
+        // binding: `print` (variadic -> the harness global), the fixed-arity
+        // templates (`tostring`, `__rock_format_float`).
+        if is_host_print(cf) {
+            return Ok(format!("print({})", rargs.join(", ")));
+        }
+        if let Some(tmpl) = host_fn_template(cf) {
+            let refs: Vec<&str> = rargs.iter().map(|s| s.as_str()).collect();
+            return Ok(fill_template(tmpl, &refs));
+        }
         // Templates apply only to stdlib @intrinsic decls (`is_mapped_intrinsic`):
         // a user fn sharing an entry's (name, arity) must co-emit, not become
         // `Math.abs`.
@@ -429,7 +493,7 @@ pub fn emit_with_closure(
             if cf.name.as_str() == "get" && !first_param_is_native_buffer(ws, cf) {
                 return Err(err("JS subset: `get` is mapped only for NativeBuffer receivers"));
             }
-            if is_mapped_intrinsic(cf) {
+            if is_mapped_intrinsic(cf) || is_host_mapped(cf) {
                 continue;
             }
             if cf.lua_body.is_some() || cf.is_extern {
@@ -471,6 +535,34 @@ fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
 fn is_mapped_intrinsic(cf: &bone_semantic::hir::Function) -> bool {
     cf.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
         && JsIntrinsics.lookup(cf).is_some()
+}
+
+/// The variadic `print` extern: rendered as the harness-provided `print`
+/// global (Lua-parity stdout capture), not co-emitted.
+fn is_host_print(cf: &bone_semantic::hir::Function) -> bool {
+    cf.is_extern && cf.name.as_str() == "print"
+}
+
+/// A fixed-arity, host-bodied stdlib fn (extern or inline(lua)) with a
+/// hand-written JS binding the emitter substitutes for the Lua body. The gate
+/// is the host-body flag PLUS the (name, arity) match, so a plain-Rock user fn
+/// of the same name co-emits normally and is never captured here.
+fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
+    if !(cf.is_extern || cf.lua_body.is_some()) {
+        return None;
+    }
+    match (cf.name.as_str(), cf.param_decls.len()) {
+        ("tostring", 1) => Some("lua_tostring($1)"),
+        ("__rock_format_float", 1) => Some("__rock_format_float($1)"),
+        _ => None,
+    }
+}
+
+/// A host-bodied fn the emitter renders directly (bypassing co-emission): the
+/// `print` global or one of the fixed-arity templates. Shared by `render_call`
+/// and the `emit_with_closure` callee walk so both agree on what NOT to reject.
+fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
+    is_host_print(cf) || host_fn_template(cf).is_some()
 }
 
 /// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
