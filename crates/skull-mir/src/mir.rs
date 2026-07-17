@@ -528,6 +528,12 @@ pub struct MirFunc {
     /// itself spliced at a concrete root.
     pub bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, bone_semantic::prelude::BoundTree>,
+    /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI: the
+    /// callee's per-generic instantiation key (`docs/flatvec-plan.md` call-site
+    /// specialization). The inliner reads it to splice the matching specialized
+    /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
+    /// (its args are splatted, so the shared generic body cannot serve it).
+    pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::SpecKey>,
     /// Nested `fn`s declared in this fn's body, each lowered to its own MirFunc
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
@@ -551,6 +557,7 @@ impl MirFunc {
             coro_defers: Vec::new(),
             for_iter_headers: Vec::new(),
             bound_trees: Default::default(),
+            spec_bindings: Default::default(),
             nested_fns: Vec::new(),
         }
     }

@@ -341,6 +341,141 @@ fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     }
 }
 
+/// The value shape of a `name` nominal (value struct or flat enum), or `None`.
+fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
+    value_shape(ws, name)
+        .or_else(|| value_shape_gc(ws, name))
+        .or_else(|| flat_enum_shape(ws, name).map(|s| s.value_shape()))
+}
+
+/// An arena-free concrete binding for a generic param at a specialized call site:
+/// a nominal type with no params (a value struct / enum) or a scalar primitive
+/// (carried as its C type name). A binding that reifies to one of these
+/// specializes; a nested generic, a `string`, or an unresolved var does not (v0
+/// leaf-only scope). Arena-free so it keys the cross-body snapshot cache and
+/// threads into the callee lowering without a caller-arena `TyId`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ReifiedLeaf {
+    Nominal(Ustr),
+    Prim(&'static str),
+}
+
+/// A callee's per-generic instantiation at one call site, in declaration order.
+/// `None` = that generic did not reify to a leaf (no specialization for it).
+/// The snapshot cache key alongside the `FuncRef`.
+pub type SpecKey = Vec<Option<ReifiedLeaf>>;
+
+/// Callee generic `VarId` -> its concrete leaf, for the specialized lowering.
+/// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
+pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, ReifiedLeaf>;
+
+/// The synthesized `TypeExpr` a substituted generic resolves to. A `Nominal`
+/// leaf carries an EMPTY param range (v0 leaf-only scope), so no consumer indexes
+/// into it; a `Prim` maps to its builtin.
+fn reified_leaf_node(leaf: ReifiedLeaf) -> TypeExpr {
+    match leaf {
+        ReifiedLeaf::Nominal(n) => TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            params: IdxRange::new_empty(),
+        },
+        ReifiedLeaf::Prim("int") => TypeExpr::Builtin(BuiltinTy::Int),
+        ReifiedLeaf::Prim("float") => TypeExpr::Builtin(BuiltinTy::Float),
+        ReifiedLeaf::Prim("bool") => TypeExpr::Builtin(BuiltinTy::Bool),
+        ReifiedLeaf::Prim(_) => TypeExpr::Builtin(BuiltinTy::Error),
+    }
+}
+
+/// Reify a `call_generic_bindings` `TyId` (caller-arena, possibly an unbound var)
+/// to an arena-free leaf, or `None` if it is not a v0-specializable leaf.
+fn reify_leaf(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<ReifiedLeaf> {
+    let ty = resolve_tyid(ws, inf, ty)?;
+    match ty_node(ws, inf, ty)? {
+        TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedLeaf::Prim("int")),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedLeaf::Prim("float")),
+        TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedLeaf::Prim("bool")),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), params } if params.into_iter().next().is_none() => {
+            Some(ReifiedLeaf::Nominal(n))
+        }
+        _ => None,
+    }
+}
+
+/// The specialization decision for a call `e` (in a body with inference `inf`) to
+/// `func`: `Some((key, subst))` iff `func` is a splice-able generic `@inline`/
+/// `@pure` callee whose per-site bindings (`call_generic_bindings[e]`) include at
+/// least one VALUE-struct leaf. The single source consulted by both the caller
+/// lowering ([`Builder::call_spec`]) and the site-aware rejection pass, so the two
+/// never disagree on which calls specialize.
+fn compute_call_spec(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+    func: FuncRef,
+) -> Option<(SpecKey, SpecSubst)> {
+    let f = &ws.module(func.module).functions[func.func];
+    if f.generics.is_empty() || f.is_extern || f.lua_body.is_some() || f.is_coroutine {
+        return None;
+    }
+    if !f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure")) {
+        return None;
+    }
+    let bindings = inf.call_generic_bindings.get(&e)?;
+    if bindings.len() != f.generics.len() {
+        return None;
+    }
+    let mut key: SpecKey = Vec::with_capacity(bindings.len());
+    let mut subst = SpecSubst::new();
+    let mut any_value = false;
+    for (g, b) in f.generics.iter().zip(bindings) {
+        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
+            key.push(None);
+            continue;
+        };
+        match reify_leaf(ws, inf, *b) {
+            Some(leaf) => {
+                if matches!(leaf, ReifiedLeaf::Nominal(n) if map_is_value_struct(ws, n)) {
+                    any_value = true;
+                }
+                subst.insert(var, leaf);
+                key.push(Some(leaf));
+            }
+            None => key.push(None),
+        }
+    }
+    any_value.then_some((key, subst))
+}
+
+/// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete leaf) for `fref`
+/// from a [`SpecKey`] (leaves in declaration order). The inliner holds only the
+/// arena-free key in its cache; this re-pairs it with the callee's generic
+/// `VarId`s to drive [`lower_function_spec`]. An empty / all-`None` key yields an
+/// empty subst (the shared snapshot).
+pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mut subst = SpecSubst::new();
+    for (g, leaf) in f.generics.iter().zip(key) {
+        if let (Some(TypeExpr::Generic(var, _)), Some(l)) = (static_ty(ws, *g), leaf) {
+            subst.insert(var, *l);
+        }
+    }
+    subst
+}
+
+/// [`sig_value_shape`] under a specialization substitution: a param/return type
+/// that is a generic bound to a value-struct leaf resolves to that leaf's shape.
+/// Every non-generic type falls through to the plain [`sig_value_shape`].
+fn sig_value_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
+    if let TyId::Static(m, idx) = ty {
+        if let TypeExpr::Generic(var, _) = ws.module(m).ty_arena[idx] {
+            return match subst.get(&var) {
+                Some(ReifiedLeaf::Nominal(n)) => value_shape_of_nominal(ws, *n),
+                _ => None,
+            };
+        }
+    }
+    sig_value_shape(ws, ty)
+}
+
 /// Arity of a tuple RETURN type -- `Some(n)` iff `ty` is a (non-nullable) tuple
 /// `(A, B, ...)`. Drives the multi-return ABI: a tuple-returning fn returns its N
 /// elements as N Lua values instead of one heap table (slice 1,
@@ -812,6 +947,15 @@ impl ScalarCtx {
 /// (`@nomangle` / `@test` / `main`) and NOT taken by reference (an indirect callee
 /// can't splat). A non-scalar callee receives/returns a single cdata.
 fn fn_uses_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> bool {
+    fn_uses_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+}
+
+/// [`fn_uses_scalar_abi`] under a specialization substitution: a generic param /
+/// return bound to a value leaf at this instantiation joins the scalar ABI
+/// (`sig_value_shape_spec`). Empty `subst` is exactly [`fn_uses_scalar_abi`].
+/// Both the specialized callee body ([`lower_function_spec`]) and the specialized
+/// call site consult this with the SAME `subst`, so the two ABIs never drift.
+fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst: &SpecSubst) -> bool {
     if scx.values_first_class {
         return false;
     }
@@ -831,8 +975,8 @@ fn fn_uses_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> bool {
             return false;
         }
     }
-    f.param_decls.iter().any(|pd| sig_value_shape(ws, pd.ty).is_some())
-        || f.return_ty.is_some_and(|t| sig_value_shape(ws, t).is_some())
+    f.param_decls.iter().any(|pd| sig_value_shape_spec(ws, subst, pd.ty).is_some())
+        || f.return_ty.is_some_and(|t| sig_value_shape_spec(ws, subst, t).is_some())
 }
 
 /// The Lua parameter-name list for a scalar-ABI `inline(lua)` fn (`@scalar_abi`):
@@ -1326,6 +1470,22 @@ pub fn lower_function(
     mid: ModuleId,
     fid: Idx<Function>,
 ) -> Result<MirFunc, CompilerError> {
+    lower_function_spec(ws, scx, mid, fid, &SpecSubst::new())
+}
+
+/// Lower `fref` with a per-instantiation generic substitution (`docs/flatvec-plan.md`,
+/// call-site specialization). `subst` maps the callee's generic `VarId`s to concrete
+/// leaves so a value-instantiated body lowers as if hand-written for that type: value
+/// params explode field-wise, `buf[i]=v` scalarizes, `native_buffer_alloc<T>` resolves
+/// its ctype. An EMPTY `subst` is exactly [`lower_function`] (the shared generic /
+/// non-generic snapshot), byte-identical.
+pub fn lower_function_spec(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mid: ModuleId,
+    fid: Idx<Function>,
+    subst: &SpecSubst,
+) -> Result<MirFunc, CompilerError> {
     let module = ws.module(mid);
     let func = &module.functions[fid];
     if func.lua_body.is_some() {
@@ -1350,11 +1510,13 @@ pub fn lower_function(
     f.resume_arg = resume_arg;
     let cur = f.entry();
     // Scalar value ABI: when this fn participates, each value param expands to
-    // leaf cells and a value return becomes a multi-value `Return`.
+    // leaf cells and a value return becomes a multi-value `Return`. A specialized
+    // instantiation additionally treats a generic param/return bound to a value
+    // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
     let self_ref = FuncRef { module: mid, func: fid };
-    let (param_shapes, ret_shape) = if fn_uses_scalar_abi(ws, scx, self_ref) {
-        let ps = func.param_decls.iter().map(|pd| sig_value_shape(ws, pd.ty)).collect();
-        let rs = func.return_ty.and_then(|t| sig_value_shape(ws, t));
+    let (param_shapes, ret_shape) = if fn_uses_scalar_abi_spec(ws, scx, self_ref, subst) {
+        let ps = func.param_decls.iter().map(|pd| sig_value_shape_spec(ws, subst, pd.ty)).collect();
+        let rs = func.return_ty.and_then(|t| sig_value_shape_spec(ws, subst, t));
         (ps, rs)
     } else {
         (Vec::new(), None)
@@ -1362,6 +1524,7 @@ pub fn lower_function(
     let mut b = Builder {
         ws,
         scx,
+        spec_subst: subst,
         body,
         inf,
         f,
@@ -1423,9 +1586,11 @@ pub fn lower_global(
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
     let f = MirFunc::new(name);
     let cur = f.entry();
+    let empty_subst = SpecSubst::new();
     let mut b = Builder {
         ws,
         scx,
+        spec_subst: &empty_subst,
         body,
         inf,
         f,
@@ -1475,9 +1640,11 @@ pub fn lower_decorator(
         .ok_or_else(|| gap("decorator body has no target binding"))?;
     let f = MirFunc::new(name);
     let cur = f.entry();
+    let empty_subst = SpecSubst::new();
     let mut b = Builder {
         ws,
         scx,
+        spec_subst: &empty_subst,
         body,
         inf,
         f,
@@ -1511,6 +1678,12 @@ pub fn lower_decorator(
 struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
+    /// Per-instantiation generic substitution (`docs/flatvec-plan.md` call-site
+    /// specialization). Empty for the shared generic / non-generic snapshot; a
+    /// value-instantiated splice carries `callee generic VarId -> concrete leaf`
+    /// so type resolution (`type_of`/`native_buffer_alloc_ctype`/param shapes)
+    /// sees the concrete type and the body scalarizes.
+    spec_subst: &'a SpecSubst,
     body: &'a Body,
     inf: Option<&'a BodyInference>,
     f: MirFunc,
@@ -1799,6 +1972,7 @@ impl Builder<'_> {
         let mut child = Builder {
             ws: self.ws,
             scx: self.scx,
+            spec_subst: self.spec_subst,
             body: self.body,
             inf: self.inf,
             f: mf,
@@ -3165,6 +3339,25 @@ impl Builder<'_> {
     /// A call of an `Iterator`-bounded callee carries bone's resolution tree
     /// (keyed by the call expr `e`); it is re-recorded against the emitted call
     /// inst so the inliner can substitute the placeholders inside the callee.
+    /// The specialization decision for a call `e` to `func`: `Some((key, subst))`
+    /// iff `func` is a splice-able generic `@inline`/`@pure` callee whose per-site
+    /// bindings (`call_generic_bindings[e]`) include at least one VALUE-struct
+    /// leaf. A primitive-only / non-leaf instantiation, or a non-inline generic,
+    /// keeps the shared generic snapshot (byte-identical). Eligibility is a subset
+    /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
+    /// splice always resolves; a residual case falls to the site-aware rejection.
+    fn call_spec(&self, e: Idx<Expr>, func: FuncRef) -> Option<(SpecKey, SpecSubst)> {
+        compute_call_spec(self.ws, self.inf?, e, func)
+    }
+
+    /// Lower a direct (statically-resolved) call. When the callee uses the scalar
+    /// value ABI, value args splat to leaves and a value return arrives as N
+    /// leaves via [`Inst::CallMulti`] (rebuilt into a `Group`); otherwise it is a
+    /// plain boxed [`Inst::Call`].
+    ///
+    /// A call of an `Iterator`-bounded callee carries bone's resolution tree
+    /// (keyed by the call expr `e`); it is re-recorded against the emitted call
+    /// inst so the inliner can substitute the placeholders inside the callee.
     fn lower_direct_call_repr(
         &mut self,
         e: Idx<Expr>,
@@ -3177,10 +3370,22 @@ impl Builder<'_> {
             .and_then(|i| i.bound_call_trees.get(&e))
             .filter(|t| !t.is_empty())
             .cloned();
+        // A value-instantiated `@inline` generic call takes the specialized scalar
+        // ABI: value args splat, the return arrives as leaves, and the emitted call
+        // is tagged so the inliner splices the matching specialized snapshot. Empty
+        // `subst` = the shared (unspecialized) path, byte-identical.
+        let spec = self.call_spec(e, func);
+        let empty = SpecSubst::new();
+        let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
+        // The instantiation key is recorded on the emitted call inst whenever this
+        // is a specialized call -- even on the boxed (non-scalar-ABI) path, because
+        // the specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
+        // resolves) though the param/return ABI is unchanged.
+        let key = spec.as_ref().map(|(k, _)| k.clone());
         let ret_tuple = self.ws.module(func.module).functions[func.func]
             .return_ty
             .and_then(|t| tuple_arity(self.ws, t));
-        if !fn_uses_scalar_abi(self.ws, self.scx, func) {
+        if !fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst) {
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
@@ -3197,18 +3402,26 @@ impl Builder<'_> {
                     .collect::<Result<_, CompilerError>>()?
             };
             if let Some(n) = ret_tuple {
+                // A specialized generic returning a tuple is out of v0 scope: the
+                // call inst is buried inside the MakeTuple, so no key is attached
+                // and it falls back to the shared snapshot (still correct, just not
+                // specialized). `key` is intentionally unused here.
                 return Ok(self.emit_tuple_call_tree(func, args, n, tree));
             }
             let call = self.emit_cur(Inst::Call { func, args });
             if let Some(t) = tree {
                 self.f.bound_trees.insert(call, t);
             }
+            if let Some(k) = key {
+                self.f.spec_bindings.insert(call, k);
+            }
             return Ok(ValueRepr::Scalar(call));
         }
-        let args = self.scalar_call_args(func, arg_idxs, any_named)?;
+        let args = self.scalar_call_args(func, arg_idxs, any_named, subst)?;
         let ret_shape = self.ws.module(func.module).functions[func.func]
             .return_ty
-            .and_then(|t| sig_value_shape(self.ws, t));
+            .and_then(|t| sig_value_shape_spec(self.ws, subst, t));
+        let key = spec.map(|(k, _)| k);
         match ret_shape {
             Some(shape) => {
                 let n = shape.leaf_count();
@@ -3216,6 +3429,9 @@ impl Builder<'_> {
                 let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
                 if let Some(t) = tree {
                     self.f.bound_trees.insert(call, t);
+                }
+                if let Some(k) = key {
+                    self.f.spec_bindings.insert(call, k);
                 }
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
@@ -3228,6 +3444,9 @@ impl Builder<'_> {
                     let call = self.emit_cur(Inst::Call { func, args });
                     if let Some(t) = tree {
                         self.f.bound_trees.insert(call, t);
+                    }
+                    if let Some(k) = key {
+                        self.f.spec_bindings.insert(call, k);
                     }
                     Ok(ValueRepr::Scalar(call))
                 }
@@ -3345,11 +3564,12 @@ impl Builder<'_> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
+        subst: &SpecSubst,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let param_shapes: Vec<Option<ValueShape>> = self.ws.module(func.module).functions[func.func]
             .param_decls
             .iter()
-            .map(|pd| sig_value_shape(self.ws, pd.ty))
+            .map(|pd| sig_value_shape_spec(self.ws, subst, pd.ty))
             .collect();
         if !any_named {
             let mut out = Vec::new();
@@ -6824,8 +7044,15 @@ impl Builder<'_> {
         let ret = *inf.expr_types.get(e).ok_or_else(|| {
             CompilerError::new_with_label(span, "`native_buffer_alloc` call is untyped".into())
         })?;
-        native_buffer_alloc_elem_ctype(self.ws, inf, ret)
-            .map_err(|msg| CompilerError::new_with_label(span, msg))
+        // In a specialized splice the `NativeBuffer<T>` element resolves through
+        // `spec_subst` to a concrete leaf, so the intrinsic can name the ctype the
+        // shared generic body could not. An empty subst is exactly the shared path.
+        let r = if self.spec_subst.is_empty() {
+            native_buffer_alloc_elem_ctype(self.ws, inf, ret)
+        } else {
+            native_buffer_alloc_elem_ctype_spec(self.ws, inf, ret, self.spec_subst)
+        };
+        r.map_err(|msg| CompilerError::new_with_label(span, msg))
     }
 
     /// `Some(n)` iff `e`'s type is a tuple OR a `(tuple)?` of arity `n` -- the
@@ -6853,10 +7080,21 @@ impl Builder<'_> {
     }
 
     fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        match ty {
-            TyId::Static(mid, idx) => Some(self.ws.module(mid).ty_arena[idx]),
-            TyId::Local(idx) => Some(self.inf?.ty_arena[idx]),
+        let node = match ty {
+            TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
+            TyId::Local(idx) => self.inf?.ty_arena[idx],
+        };
+        // In a specialized instantiation, a generic param resolves to its concrete
+        // leaf so all downstream type-driven lowering (field projection, container
+        // element, scalar shape) sees the real type. Synthesized leaves carry no
+        // App params -- v0 specializes leaf types only -- so no consumer indexes
+        // into `new_empty()`.
+        if let TypeExpr::Generic(var, _) = node {
+            if let Some(leaf) = self.spec_subst.get(&var) {
+                return Some(reified_leaf_node(*leaf));
+            }
         }
+        Some(node)
     }
 
     /// The final `TyId` after chasing `Infer` substitutions (NOT peeling
@@ -7040,17 +7278,158 @@ fn native_buffer_alloc_elem_ctype(
     }
 }
 
+/// Whether a `NativeBuffer<E>` result type's element `E` is an unresolved generic
+/// param (in `inf`) -- the opaque-`T` case that call-site specialization resolves,
+/// distinct from a concrete-but-unallocatable element (heap / GC value struct).
+fn native_buffer_elem_is_generic(ws: &Workspace, inf: &BodyInference, ret: TyId) -> bool {
+    let Some(ret) = resolve_tyid(ws, inf, ret) else { return false };
+    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(nb), params }) = ty_node(ws, inf, ret) else {
+        return false;
+    };
+    if nb.as_str() != "NativeBuffer" {
+        return false;
+    }
+    let Some(elem) = params.into_iter().next().map(|p| ret.with_idx(p)) else {
+        return false;
+    };
+    // Peel Infer chains but NOT a Generic -- a Generic is the opaque case.
+    let Some(elem) = resolve_tyid(ws, inf, elem) else { return false };
+    matches!(ty_node(ws, inf, elem), Some(TypeExpr::Generic(..)))
+}
+
+/// The verdict of scanning every workspace call to an intrinsic-bearing generic
+/// `F`: whether its standalone (opaque-`T`) body is reachable un-specialized.
+enum CallerSurvey {
+    /// A call to `F` that does NOT specialize -- the standalone body would serve
+    /// it, but it cannot name the ffi ctype. Its span + a naming message.
+    Surviving(Span, String),
+    /// `F` has at least one caller and every one specializes: the standalone body
+    /// is never reached, so its unresolved intrinsic is exempt (silently skipped).
+    AllSpecialized,
+    /// `F` has no callers at all -- a dead generic intrinsic body.
+    NoCallers,
+}
+
+/// Scan the whole workspace for calls to `fref` and classify how its standalone
+/// intrinsic-bearing body is reached (see [`CallerSurvey`]). `intrinsic_ret` is the
+/// `NativeBuffer<T>` result type of the intrinsic call inside `fref` (in `fref`'s
+/// own inference `fref_inf`) -- each specializing caller is checked to actually
+/// RESOLVE that element's ctype under its substitution, not merely be eligible (a
+/// value binding whose leaf is a GC value struct specializes but still cannot name
+/// a ctype, so it too is a surviving un-allocatable use).
+fn survey_intrinsic_generic_callers(
+    ws: &Workspace,
+    fref: FuncRef,
+    fref_inf: &BodyInference,
+    intrinsic_ret: TyId,
+) -> CallerSurvey {
+    let fname = ws.module(fref.module).functions[fref.func].name;
+    let mut any_caller = false;
+    for module in ws.modules.iter() {
+        let Some(ir) = ws.inference(module.id) else { continue };
+        for (owner, body) in module.bodies.iter() {
+            let Some(inf) = ir.per_fn.get(owner) else { continue };
+            for (c, resolved) in inf.resolved_overload_calls.iter() {
+                let c = *c;
+                if *resolved != (fref.module, fref.func) {
+                    continue;
+                }
+                any_caller = true;
+                // Resolves iff the call specializes AND its subst makes the
+                // intrinsic element a nameable ctype in `fref`'s body.
+                let resolves = compute_call_spec(ws, inf, c, fref).is_some_and(|(_, subst)| {
+                    native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intrinsic_ret, &subst).is_ok()
+                });
+                if !resolves {
+                    let msg = format!(
+                        "`{fname}` allocates via `native_buffer_alloc<T>`, which needs a concrete, \
+                         FFI-clean element type. This call does not specialize `{fname}` to an \
+                         allocatable `value`-struct element (its generic binds to a primitive, a \
+                         GC-carrying value struct, a nested generic, or nothing inferrable), so it \
+                         would reach the shared generic body that cannot name the ffi ctype. Call \
+                         it at a concrete FFI-clean `value`-struct instantiation, or use a per-type \
+                         buffer (`native_buffer_int`/`_float`) for primitive elements."
+                    );
+                    return CallerSurvey::Surviving(body.expr_spans[c], msg);
+                }
+            }
+        }
+    }
+    if any_caller {
+        CallerSurvey::AllSpecialized
+    } else {
+        CallerSurvey::NoCallers
+    }
+}
+
+/// [`native_buffer_alloc_elem_ctype`] under a specialization `subst`: a
+/// `NativeBuffer<T>` element that is a generic bound in `subst` resolves to its
+/// concrete leaf's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
+/// if that concrete leaf still is not allocatable (a GC-carrying value struct).
+/// A non-substituted element defers to the concrete [`native_buffer_alloc_elem_ctype`].
+fn native_buffer_alloc_elem_ctype_spec(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ret: TyId,
+    subst: &SpecSubst,
+) -> Result<Ustr, String> {
+    let Some(ret) = resolve_tyid(ws, inf, ret) else {
+        return native_buffer_alloc_elem_ctype(ws, inf, ret);
+    };
+    let leaf = match ty_node(ws, inf, ret) {
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(nb), params }) if nb.as_str() == "NativeBuffer" => {
+            params
+                .into_iter()
+                .next()
+                .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
+                .and_then(|e| match ty_node(ws, inf, e) {
+                    Some(TypeExpr::Generic(var, _)) => subst.get(&var).copied(),
+                    _ => None,
+                })
+        }
+        _ => None,
+    };
+    match leaf {
+        Some(ReifiedLeaf::Prim(p)) => Ok(Ustr::from(p)),
+        Some(ReifiedLeaf::Nominal(n)) => {
+            if !map_is_value_struct(ws, n) {
+                Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
+            } else if value_struct_is_gc(ws, n) {
+                Err(format!(
+                    "`native_buffer_alloc<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
+                     (no C layout), so `ffi.new(\"{n}[?]\")` names no ctype."
+                ))
+            } else {
+                Ok(n)
+            }
+        }
+        None => native_buffer_alloc_elem_ctype(ws, inf, ret),
+    }
+}
+
 /// Hard emit-time rejection for every `native_buffer_alloc<T>` call in module
 /// `mid` whose element type is not allocatable ([`native_buffer_alloc_elem_ctype`]
 /// returns `Err`). Runs as a dedicated pass in `emit_full` (beside
-/// [`gc_value_c_boundary`]) so the error is SURFACED, not swallowed by the
-/// lenient per-body lowering-gap skip. Returns the first offender `(message, span)`.
+/// [`gc_value_c_boundary`]) so the error is SURFACED, not swallowed by the lenient
+/// per-body lowering-gap skip.
+///
+/// SITE-AWARE (docs/flatvec-plan.md P2): an opaque-`T` intrinsic inside a generic
+/// `@inline`/`@pure` fn is LEGAL when every call to that fn specializes it to a
+/// concrete value-struct element -- the specialized splices name the ctype and the
+/// standalone body is never reached (its lowering-gap skip is then correct). What
+/// rejects is a SURVIVING un-specialized use (the call's span is named), a dead
+/// generic intrinsic body, or a concrete-but-unallocatable element (heap / GC value
+/// struct -- the P1 cases). Returns the first offender `(message, span)`.
 pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
     for (owner, body) in module.bodies.iter() {
         let Some(inf) = ir.per_fn.get(owner) else {
             continue;
+        };
+        let self_fref = match owner {
+            BodyOwner::Function(fid) => Some(FuncRef { module: mid, func: *fid }),
+            _ => None,
         };
         for (e, expr) in body.expr_arena.iter() {
             let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
@@ -7062,9 +7441,19 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             let Some(&ret) = inf.expr_types.get(e) else {
                 continue;
             };
-            if let Err(msg) = native_buffer_alloc_elem_ctype(ws, inf, ret) {
-                return Some((msg, body.expr_spans[e]));
+            let Err(msg) = native_buffer_alloc_elem_ctype(ws, inf, ret) else {
+                continue;
+            };
+            // An opaque generic element inside a fn: the standalone body is exempt
+            // iff every use specializes it (the splices resolve the ctype).
+            if let Some(fref) = self_fref.filter(|_| native_buffer_elem_is_generic(ws, inf, ret)) {
+                match survey_intrinsic_generic_callers(ws, fref, inf, ret) {
+                    CallerSurvey::AllSpecialized => continue,
+                    CallerSurvey::Surviving(span, m) => return Some((m, span)),
+                    CallerSurvey::NoCallers => {} // dead body -> fall through to reject.
+                }
             }
+            return Some((msg, body.expr_spans[e]));
         }
     }
     None

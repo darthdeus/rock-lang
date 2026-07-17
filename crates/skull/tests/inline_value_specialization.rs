@@ -1,15 +1,14 @@
-//! P2 premise oracle (docs/flatvec-plan.md "Mechanism: call-site specialization
-//! via the inliner"). An `@inline` generic fn whose param/return bind to a VALUE
-//! struct at the call site is spliced today as OPAQUE code: the generic body
-//! lowers once with `T` erased, so a value flowing through it is BOXED (`V2_ct(..)`)
-//! and indexed through the generic `__nb_checked_{set,get}` helpers -- the value
-//! never scalarizes into field-wise cdata slot stores.
+//! P2 exit oracle (docs/flatvec-plan.md "Mechanism: call-site specialization via
+//! the inliner"). An `@inline` generic fn whose param/return bind to a VALUE
+//! struct at the call site is spliced as a PER-INSTANTIATION specialized snapshot:
+//! the body lowers as if hand-written for `V2`, so the value flows field-wise (no
+//! `V2_ct(..)` box, no boxed `__nb_checked_set` store). The bounds-checked slot
+//! accessor `__nb_checked_get` REMAINS -- it is how a scalarized store reaches the
+//! flat slot to write its fields in place; only the box + the boxed store vanish.
 //!
-//! This pins that boxed status quo. When P2's per-instantiation specialization
-//! lands, the spliced body must lower as if hand-written for `V2`: the `V2_ct`
-//! box and the `__nb_checked_*` boxed accessors both DISAPPEAR, replaced by
-//! direct field-wise slot stores/loads. Flip the assertions (see the FLIP-ON-P2
-//! block below) in the same commit that lands the feature.
+//! Pre-P2 this test pinned the BOXED status quo (`V2_ct(..)` + `__nb_checked_set`);
+//! landing the feature flipped it to the zero-box assertions below (git `c42bd06ce`
+//! is the boxed-premise revision, for the before/after diff).
 
 mod common;
 use common::{emit_module, function_body};
@@ -34,29 +33,66 @@ fn main() { let r = use_buf(V2 { x: 1.0, y: 2.0 }); print("{r.x}") }
 "#;
 
 #[test]
-fn generic_inline_at_value_type_splices_boxed_status_quo() {
+fn generic_inline_at_value_type_splices_zero_box() {
     let lua = emit_module(VALUE_INST);
     let body = function_body(&lua, "use_buf");
 
-    // -- STATUS QUO (pre-P2): the spliced generic body is type-opaque. --
-    // The value struct is BOXED to pass through the opaque-`T` store boundary.
+    // The value never boxes: the specialized splice threads it as scalar leaves.
     assert!(
-        body.contains("V2_ct("),
-        "premise: an opaque-`T` generic splice BOXES the value (`V2_ct(..)`); got:\n{body}"
+        !body.contains("V2_ct("),
+        "specialized splice must not box the value (`V2_ct(..)`); got:\n{body}"
     );
-    // The store/load route through the generic (boxed-cdata) accessors, not
-    // field-wise slot ops.
+    // The boxed whole-value store is gone -- the store scalarizes to field writes.
     assert!(
-        body.contains("__nb_checked_set") && body.contains("__nb_checked_get"),
-        "premise: the opaque splice indexes via the boxed `__nb_checked_*` helpers; got:\n{body}"
+        !body.contains("__nb_checked_set"),
+        "specialized store must be field-wise, not the boxed `__nb_checked_set`; got:\n{body}"
     );
+    // Positive: the slot is fetched once (`__nb_checked_get`) and its fields are
+    // written in place -- the scalarized native-buffer store shape.
+    assert!(
+        body.contains("__nb_checked_get"),
+        "specialized store fetches the flat slot via `__nb_checked_get`; got:\n{body}"
+    );
+    assert!(
+        body.contains(".x = ") && body.contains(".y = "),
+        "specialized store writes the fields in place (`slot.x = ..; slot.y = ..`); got:\n{body}"
+    );
+}
 
-    // -- FLIP-ON-P2 --------------------------------------------------------
-    // When call-site specialization lands, replace the two asserts above with:
-    //   assert!(!body.contains("V2_ct("),          "specialized splice must not box the value");
-    //   assert!(!body.contains("__nb_checked_set"), "specialized store must be field-wise, not boxed");
-    //   assert!(!body.contains("__nb_checked_get"), "specialized load must be field-wise, not boxed");
-    // and add a positive assert on the field-wise slot store shape the
-    // specialized body emits (e.g. `.ptr[0].x =` / `.ptr[0].y =`).
-    // ----------------------------------------------------------------------
+// A generic `@inline` fn calling `native_buffer_alloc<T>` -- the intrinsic the
+// shared (opaque-`T`) body cannot lower. Specialized at `V2`, the ctype resolves
+// to `V2` and the body emits the `ffi.new("V2[?]", ..)` it could not name generically.
+const INTRINSIC_INST: &str = r#"
+value V2 { x: float, y: float }
+struct FlatVec<T> { buf: NativeBuffer<T>, len: int }
+
+@inline fn flat_vec_new<T>(cap: int) -> FlatVec<T> {
+    return FlatVec { buf: native_buffer_alloc(cap), len: 0 }
+}
+
+fn make() -> float {
+    let fv: FlatVec<V2> = flat_vec_new(8)
+    fv.buf[0] = V2 { x: 3.0, y: 4.0 }
+    return fv.buf[0].x
+}
+
+fn main() { let _ = make() }
+"#;
+
+#[test]
+fn generic_inline_intrinsic_resolves_ctype_at_value_instantiation() {
+    let lua = emit_module(INTRINSIC_INST);
+    let body = function_body(&lua, "make");
+    // The specialized `native_buffer_alloc<T>` names the concrete element ctype --
+    // the whole point of P2 for the alloc intrinsic (P1 could only do it at a
+    // concrete, non-generic call site).
+    assert!(
+        body.contains(r#"ffi.new("V2[?]","#),
+        "specialized intrinsic must emit `ffi.new(\"V2[?]\", ..)`; got:\n{body}"
+    );
+    // No dangling call to the shared generic `flat_vec_new` survives.
+    assert!(
+        !body.contains("flat_vec_new"),
+        "the specialized `flat_vec_new` must be spliced, not left as a call; got:\n{body}"
+    );
 }
