@@ -392,6 +392,24 @@ impl CommandContext {
         }
     }
 
+    /// Dispatch through the `js` test executor (bone type-check + JS-subset
+    /// per-test emission, run under node). Serves `test` only -- the `serves`
+    /// table gates everything else before this switch.
+    fn run_command_js(&self) -> Result<()> {
+        match self.args.command {
+            CliCommand::Test => {
+                let files = self.get_test_files()?;
+                crate::js_test::js_test(&files)
+            }
+            other => unreachable!(
+                "js dispatch reached unsupported command {:?}; the capability \
+                 gate should have rejected it — Backend::supported_commands and \
+                 run_command_js have diverged",
+                other
+            ),
+        }
+    }
+
     /// Dispatch through the `skull` backend (bone type-check + skull codegen ->
     /// Lua, executed via luajit). Only the codegen-capable commands route here;
     /// anything else is rejected, like the bone path.
@@ -605,6 +623,10 @@ impl CommandContext {
         if self.args.backend == crate::Backend::Bone {
             self.require_backend_support()?;
             return self.run_command_bone();
+        }
+        if self.args.backend == crate::Backend::Js {
+            self.require_backend_support()?;
+            return self.run_command_js();
         }
         self.require_backend_support()?;
         self.run_command_skull()
