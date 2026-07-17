@@ -168,11 +168,20 @@ fn unescape_expected(s: &str) -> String {
 
 /// The `@test` functions in `mid`, with their expected outputs (if any).
 pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Vec<SkullTest> {
+    module_tests_with_ids(ws, mid).into_iter().map(|(_, t)| t).collect()
+}
+
+/// [`module_tests`] carrying each test's `Idx<Function>` too -- the JS test
+/// executor needs the `FuncRef` to lower/emit the fn, not just its Lua name.
+pub fn module_tests_with_ids(
+    ws: &Workspace,
+    mid: ModuleId,
+) -> Vec<(bone_semantic::prelude::Idx<bone_semantic::hir::Function>, SkullTest)> {
     let Some(module) = ws.modules.get(mid.index()) else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for (_, f) in module.functions.iter() {
+    for (fid, f) in module.functions.iter() {
         let Some(test_ann) = f.annotations.iter().find(|a| a.name.name.as_str() == "test") else {
             continue;
         };
@@ -199,10 +208,13 @@ pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Vec<SkullTest> {
                 bone_semantic::hir::AnnoValue::String(s) => Some(unescape_expected(s.as_str())),
                 _ => None,
             });
-        out.push(SkullTest {
-            name: f.name.as_str().to_string(),
-            output,
-        });
+        out.push((
+            fid,
+            SkullTest {
+                name: f.name.as_str().to_string(),
+                output,
+            },
+        ));
     }
     out
 }

@@ -10,12 +10,11 @@
 //!
 //! Gated on `node` AND `luajit` being present -- absent, skip WITH A LOG.
 
-use std::collections::HashMap;
 use std::process::Command;
 
 use bone_semantic::inference::Workspace;
 use skull_codegen_js::JS_NB_CHECK_SHIMS;
-use skull_mir::lower::{lower_function, ScalarCtx};
+use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
 mod common;
@@ -109,19 +108,6 @@ const VALUE_CASES: &[(&str, Tok)] = &[
 /// "out of bounds" (stdlib `__nb_checked_*` / the JS shim preamble).
 const ERROR_CASES: &[&str] = &["test_nb_oob_read", "test_nb_oob_read_neg", "test_nb_oob_write"];
 
-/// The plain-Rock ctor helpers the JS side must co-emit (each is
-/// `NativeBuffer { ptr: __nb_alloc_*(n), len: n }` -- the struct-construction
-/// subset).
-const CTORS: &[&str] = &[
-    "native_buffer_float",
-    "native_buffer_int",
-    "native_buffer_u8",
-    "native_buffer_i8",
-    "native_buffer_u16",
-    "native_buffer_i16",
-    "native_buffer_u32",
-];
-
 fn tool_available(tool: &str, arg: &str) -> bool {
     Command::new(tool).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -164,35 +150,20 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
     found.unwrap_or_else(|| panic!("no fn `{name}` in workspace"))
 }
 
-/// Emit `names` to JS (ctors first so case fns can call them), preceded by the
-/// checked-access shim preamble.
+/// Emit `names` to JS via the shared callee-closure helper (the plain-Rock
+/// `native_buffer_*` ctors are co-emitted automatically as reachable callees),
+/// preceded by the checked-access shim preamble.
 fn emit_js_program(ws: &Workspace, names: &[&str]) -> String {
     let scx = ScalarCtx::new(ws);
-    let mut env: HashMap<FuncRef, String> = HashMap::new();
-    for &c in CTORS {
-        env.insert(find_fn(ws, c), c.to_string());
-    }
+    let roots: Vec<(FuncRef, String)> =
+        names.iter().map(|&n| (find_fn(ws, n), n.to_string())).collect();
     let mut out = String::new();
     out.push_str(JS_NB_CHECK_SHIMS);
     out.push('\n');
-    for &c in CTORS {
-        let fr = find_fn(ws, c);
-        let mf = lower_function(ws, &scx, fr.module, fr.func)
-            .unwrap_or_else(|e| panic!("lower `{c}`: {}", e.message));
-        out.push_str(
-            &skull_codegen_js::emit::emit_fn_with_callees(ws, &mf, c, &env)
-                .unwrap_or_else(|e| panic!("emit `{c}`: {}", e.message)),
-        );
-    }
-    for &name in names {
-        let fr = find_fn(ws, name);
-        let mf = lower_function(ws, &scx, fr.module, fr.func)
-            .unwrap_or_else(|e| panic!("lower `{name}`: {}", e.message));
-        out.push_str(
-            &skull_codegen_js::emit::emit_fn_with_callees(ws, &mf, name, &env)
-                .unwrap_or_else(|e| panic!("emit `{name}`: {}", e.message)),
-        );
-    }
+    out.push_str(
+        &skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
+            .unwrap_or_else(|e| panic!("closure emit: {}", e.message)),
+    );
     out
 }
 

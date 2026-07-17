@@ -377,7 +377,10 @@ impl Emitter<'_> {
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().map(|a| self.render_val(*a)).collect();
         let rargs = rargs?;
-        match JsIntrinsics.lookup(cf) {
+        // Templates apply only to stdlib @intrinsic decls (`is_mapped_intrinsic`):
+        // a user fn sharing an entry's (name, arity) must co-emit, not become
+        // `Math.abs`.
+        match if is_mapped_intrinsic(cf) { JsIntrinsics.lookup(cf) } else { None } {
             Some(Emission::Template(tmpl)) => {
                 let refs: Vec<&str> = rargs.iter().map(|s| s.as_str()).collect();
                 Ok(fill_template(tmpl, &refs))
@@ -391,6 +394,83 @@ impl Emitter<'_> {
             },
         }
     }
+}
+
+/// Deterministic JS name for a co-emitted callee, unique per `FuncRef`
+/// (`<name>__m<module>_f<fn>`): concatenating independently emitted closure
+/// programs can only ever collide on byte-identical definitions.
+pub fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
+    let f = &ws.module(fr.module).functions[fr.func];
+    format!("{}__m{}_f{}", f.name, fr.module.index(), raw(fr.func))
+}
+
+/// Emit `roots` (each under its given JS name) plus the transitive plain-Rock
+/// callee closure of each root, callees under [`callee_js_name`]s. Mapped
+/// intrinsics stay call-site templates. Any callee that is neither (inline(lua)
+/// without a mapping, extern) and any op outside the emitter subset rejects
+/// with the emitter's `CompilerError` -- the caller turns that into SKIP(reason).
+/// Function declarations hoist in JS, so definition order is irrelevant.
+pub fn emit_with_closure(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    roots: &[(FuncRef, String)],
+) -> Result<String, CompilerError> {
+    let mut names: HashMap<FuncRef, String> = roots.iter().cloned().collect();
+    let mut queue: Vec<FuncRef> = roots.iter().map(|(fr, _)| *fr).collect();
+    let mut seen: HashSet<FuncRef> = queue.iter().copied().collect();
+    let mut lowered: Vec<(FuncRef, MirFunc)> = Vec::new();
+    while let Some(fr) = queue.pop() {
+        let mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
+        for callee in call_targets(&mf) {
+            let cf = &ws.module(callee.module).functions[callee.func];
+            // Mirror `render_call`'s decision exactly: the `get`/2 receiver
+            // gate, then the intrinsic table (stdlib @intrinsic decls only),
+            // then co-emit for plain-Rock bodies.
+            if cf.name.as_str() == "get" && !first_param_is_native_buffer(ws, cf) {
+                return Err(err("JS subset: `get` is mapped only for NativeBuffer receivers"));
+            }
+            if is_mapped_intrinsic(cf) {
+                continue;
+            }
+            if cf.lua_body.is_some() || cf.is_extern {
+                return Err(err(format!(
+                    "JS subset: call to `{}` is not a mapped JS intrinsic",
+                    cf.name
+                )));
+            }
+            if seen.insert(callee) {
+                names.insert(callee, callee_js_name(ws, callee));
+                queue.push(callee);
+            }
+        }
+        lowered.push((fr, mf));
+    }
+    let mut out = String::new();
+    for (fr, mf) in &lowered {
+        out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names)?);
+    }
+    Ok(out)
+}
+
+/// Every statically-resolved call target in `mf` (incl. lambda sub-CFGs --
+/// the inst arena is shared).
+fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
+    let mut out = Vec::new();
+    for (_, inst) in mf.insts.iter() {
+        match inst {
+            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether `cf` renders via the JS template table: it must both HAVE a table
+/// entry and be a stdlib `@intrinsic` declaration -- a user fn that merely
+/// shares an entry's (name, arity) must not silently become `Math.min`.
+fn is_mapped_intrinsic(cf: &bone_semantic::hir::Function) -> bool {
+    cf.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
+        && JsIntrinsics.lookup(cf).is_some()
 }
 
 /// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
