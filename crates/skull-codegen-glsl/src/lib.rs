@@ -1554,9 +1554,17 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
                 )));
             }
             Err(e) => {
-                // Not a tier-0 leaf: a value struct here is the uniform struct.
+                // Not a tier-0 leaf: a value struct here is the uniform struct,
+                // which must carry @uniform (one rule everywhere with the A2
+                // pipeline -- attributes/uniforms are never silently inferred).
                 let Some(sname) = nominal_name(ws, pd.ty) else { return Err(e) };
                 let Some(&sid) = ws.struct_by_name.get(&sname) else { return Err(e) };
+                if !has_anno(&pd.annotations, "uniform") {
+                    return Err(err(span, format!(
+                        "shader entry: value-struct param `{}` needs @uniform (the uniform block marker)",
+                        pd.name
+                    )));
+                }
                 if uniform_param.is_some() {
                     return Err(err(span, "shader entry: at most one uniform struct param is allowed"));
                 }
@@ -2144,6 +2152,14 @@ pub fn emit_shader(ws: &Workspace, mid: ModuleId, roots: &[String]) -> Result<St
             "rock shader: a @shader(fragment) entry compiles alone -- pass exactly one root fn",
         )),
     }
+}
+
+/// True iff `root` resolves to a `@shader(vertex)` fn -- the CLI routes to the
+/// two-root vertex+fragment pipeline form when any root is a vertex entry.
+pub fn is_vertex_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool {
+    resolve_root(ws, mid, root)
+        .ok()
+        .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("vertex"))
 }
 
 /// The `@shader(<stage>)` annotation's stage argument, if the fn carries one.

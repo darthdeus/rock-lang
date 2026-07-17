@@ -473,7 +473,11 @@ impl CommandContext {
         // file against the stdlib and emits GLSL, so it's backend-agnostic and
         // dispatches before the backend switch like fmt/completions.
         if self.args.command == CliCommand::Shader {
-            return crate::skull_backend::skull_shader(&self.args.files, self.args.output.clone());
+            return crate::skull_backend::skull_shader(
+                &self.args.files,
+                self.args.output.clone(),
+                self.args.profile.clone(),
+            );
         }
         // iter-parse is a front-end (tokenize+parse) profiling loop; the
         // front-end is backend-independent, so dispatch before the backend switch.

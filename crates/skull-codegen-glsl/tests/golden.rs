@@ -634,7 +634,7 @@ fn fragment_entry_scaffold() {
         }
 
         @shader(fragment)
-        fn glow(u: GlowU, scene: Sampler2D, tc: Vec2) -> Vec4 {
+        fn glow(@uniform u: GlowU, scene: Sampler2D, tc: Vec2) -> Vec4 {
             let m = falloff(tc.distance(u.center), u.radius)
             let t = texture(scene, tc)
             let k = 1.0 + u.strength * m

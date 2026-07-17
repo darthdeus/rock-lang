@@ -422,6 +422,9 @@ pub struct Args {
     pub command: CliCommand,
     pub files: Vec<String>,
     pub output: Option<String>,
+    /// For `rock shader` two-root pipeline form: GLSL profile (`330core` |
+    /// `300es`). Default `330core`. See `skull_backend::skull_shader`.
+    pub profile: Option<String>,
     pub no_stdlib: bool,
     pub stdout: bool,
     pub check: bool,
@@ -524,6 +527,7 @@ impl Args {
             )
             .arg(Arg::new("files").num_args(0..))
             .arg(Arg::new("output").long("output"))
+            .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
                 .help("Compile without the standard library"))
             .arg(Arg::new("stdout").long("stdout").action(ArgAction::SetTrue)
@@ -620,6 +624,7 @@ impl Args {
             command,
             files: many_str("files"),
             output: m.get_one::<String>("output").cloned(),
+            profile: m.get_one::<String>("profile").cloned(),
             no_stdlib: m.get_flag("no-stdlib"),
             stdout: m.get_flag("stdout"),
             check: m.get_flag("check"),
