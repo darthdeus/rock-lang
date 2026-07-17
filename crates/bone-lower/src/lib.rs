@@ -2636,12 +2636,14 @@ fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
 
     match &a.e(&e).kind {
         ExprKind::Int(i, _) => hir::AnnoValue::Int(*i),
+        ExprKind::Float(f) => hir::AnnoValue::Float(f.0),
         ExprKind::Bool(b) => hir::AnnoValue::Bool(*b),
         ExprKind::String(s) => hir::AnnoValue::String(*s),
         ExprKind::Ident(id) => hir::AnnoValue::Ident(id.clone()),
 
         ExprKind::UnaryMinus(inner) => match &a.e(inner).kind {
             ExprKind::Int(i, _) => hir::AnnoValue::Int(-*i),
+            ExprKind::Float(f) => hir::AnnoValue::Float(-f.0),
             _ => hir::AnnoValue::Other,
         },
 

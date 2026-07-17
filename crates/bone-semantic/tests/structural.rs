@@ -1527,3 +1527,35 @@ fn unary_minus_miss_reads_as_operator_error() {
         "expected an operator-shaped message, got: {msgs:?}"
     );
 }
+
+// Float literals in annotation args must survive lowering as
+// `AnnoValue::Float` (incl. the unary-minus form) -- the value-test
+// expectation surface (`@test(returns = 1.5)`,
+// docs/multi-backend-testing-plan.md V1) reads them; `Other` would make
+// float expectations silently unreadable.
+#[test]
+fn annotation_float_args_lower_as_float() {
+    let ws = check(
+        "@test(returns = 1.5)\nfn a() -> float { return 1.5 }\n\
+         @test(returns = -2.5)\nfn b() -> float { return -2.5 }\n",
+    )
+    .unwrap();
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let mut got = vec![];
+    for (_, f) in ws.module(mid).functions.iter() {
+        for ann in &f.annotations {
+            if ann.name.name.as_str() == "test" {
+                for arg in &ann.args {
+                    got.push(format!("{:?}", arg.value));
+                }
+            }
+        }
+    }
+    got.sort();
+    assert_eq!(got, vec!["Float(-2.5)", "Float(1.5)"], "float annotation args must not lower to Other");
+}

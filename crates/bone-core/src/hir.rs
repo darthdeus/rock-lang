@@ -488,6 +488,7 @@ pub struct AnnoArg {
 #[derive(Clone, Debug)]
 pub enum AnnoValue {
     Int(i64),
+    Float(f64),
     String(Ustr),
     Ident(Ident),
     Bool(bool),

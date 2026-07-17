@@ -246,6 +246,7 @@ pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String>
     use bone_semantic::hir::AnnoValue as A;
     Some(match v {
         A::Int(i) => i.to_string(),
+        A::Float(f) => f.to_string(),
         A::Bool(b) => b.to_string(),
         A::String(s) => format!("{:?}", s.as_str()),
         A::Ident(id) => id.name.as_str().to_string(),
