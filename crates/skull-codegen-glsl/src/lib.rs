@@ -284,6 +284,8 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("dot", 2, "dot($1, $2)"),
     ("length", 1, "length($1)"),
     ("distance", 2, "distance($1, $2)"),
+    ("v", 4, "vec4($1, $2, $3, $4)"),
+    ("v", 3, "vec3($1, $2, $3)"),
     ("v", 2, "vec2($1, $2)"),
     ("v", 1, "vec2($1)"),
     ("v", 0, "vec2(0.0)"),
