@@ -7429,11 +7429,21 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
         // otherwise. Its fate is decided at the ENCLOSING fn's call sites, which
         // are scanned as their own (eventually non-generic) roots. Only root calls
         // from a concrete (non-generic) context must resolve here.
-        if let BodyOwner::Function(fid) = owner {
-            if !ws.module(mid).functions[*fid].generics.is_empty() {
-                continue;
+        // Whether the inliner processes this body -- specialization only happens
+        // via inlining. An ordinary (non-coroutine) function is inlined; a generic
+        // one has its calls decided at ITS OWN call sites (skip, per above); a
+        // global initializer / decorator / `co fn` is NOT inlined, so a specialized
+        // call there would SURVIVE un-inlined (dangling nil) and must reject.
+        let owner_inlined = match owner {
+            BodyOwner::Function(fid) => {
+                let f = &ws.module(mid).functions[*fid];
+                if !f.generics.is_empty() {
+                    continue;
+                }
+                !f.is_coroutine
             }
-        }
+            _ => false,
+        };
         let Some(inf) = ir.per_fn.get(owner) else { continue };
         for (c, resolved) in inf.resolved_overload_calls.iter() {
             let c = *c;
@@ -7445,9 +7455,10 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             else {
                 continue;
             };
-            let resolves = compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(|(_, subst)| {
-                native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst).is_ok()
-            });
+            let resolves = owner_inlined
+                && compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(|(_, subst)| {
+                    native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst).is_ok()
+                });
             if !resolves {
                 let fname = ws.module(fref.module).functions[fref.func].name;
                 let msg = format!(
