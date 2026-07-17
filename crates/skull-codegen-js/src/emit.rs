@@ -431,7 +431,7 @@ fn first_param_is_native_buffer(ws: &Workspace, f: &bone_semantic::hir::Function
 /// `emit_block_effects` can never silently rot.
 fn used_values(mf: &MirFunc) -> HashSet<Idx<Inst>> {
     let mut used = HashSet::new();
-    let mut mark = |ids: &[Idx<Inst>], used: &mut HashSet<Idx<Inst>>| {
+    let mark = |ids: &[Idx<Inst>], used: &mut HashSet<Idx<Inst>>| {
         for &i in ids {
             used.insert(i);
         }

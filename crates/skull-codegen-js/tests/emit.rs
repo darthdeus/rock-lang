@@ -8,8 +8,6 @@
 //! structure. Vec overloads (multi-value return) reject -- the reject-don't-
 //! fallback discipline that keeps the emitter honest as the subset grows.
 
-use std::collections::HashMap;
-
 use skull_mir::lower::{lower_function, ScalarCtx};
 
 mod common;
