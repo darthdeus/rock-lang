@@ -10,8 +10,7 @@ pub struct StickConfig {
     /// Optional engine-side requirements for this game (cdylibs that the
     /// runner must stage into `tmp/` before luajit boots). Recognised
     /// entries: `"video"` gates the stone-video crate (ffmpeg-the-third +
-    /// bindgen — slow, only anvil needs it); `"3d"` gates the stone-3d crate
-    /// (gltf/ufbx model rendering — slow, only pac needs it). Default: empty
+    /// bindgen — slow, only anvil needs it). Default: empty
     /// list = stone-rs only.
     pub engine: Option<EngineConfig>,
     pub dependencies: HashMap<String, Dependency>,
@@ -344,7 +343,7 @@ impl StickConfig {
 
     /// Recognised values for `[engine] needs = [...]`. Keep in sync with
     /// `build_engine_libs` in `cli/stone.rs`.
-    pub const KNOWN_ENGINE_NEEDS: &'static [&'static str] = &["video", "3d"];
+    pub const KNOWN_ENGINE_NEEDS: &'static [&'static str] = &["video"];
 
     /// Reject typos in `[engine] needs = [...]` (e.g. "vidoe") so the
     /// build doesn't silently skip an optional cdylib the user asked for.
