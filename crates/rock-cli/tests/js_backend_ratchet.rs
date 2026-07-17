@@ -45,8 +45,9 @@ fn js_runnable_coverage_ratchet() {
 
     // The ratchet floor: node-executed green tests over this corpus. RAISE this
     // when emitter growth (T2+) makes more tests runnable; a drop below it is a
-    // silent-coverage regression.
-    const FLOOR: usize = 4;
+    // silent-coverage regression. T2 (strings + print + number formatting)
+    // raised it from 4 to 55.
+    const FLOOR: usize = 55;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
