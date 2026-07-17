@@ -313,7 +313,7 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 ///
 /// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
 /// `discover_sources` — bone supplies its own via `bone_stdlib_modules()`.
-fn skull_assemble_project(
+pub(crate) fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
@@ -391,7 +391,7 @@ end
 /// real `file` path as the span file id, so the source must be registered under
 /// that same id -- registering under a placeholder makes every span lookup fail
 /// ("Unable to fetch source") and silently drops the snippet + labels.
-fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
+pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -440,17 +440,8 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             // A file whose `@test`s ALL expect failure is supposed to fail to
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
-            let mut sf = SourceFiles { files: vec![] };
-            sf.add_or_update_file(source_file_from_path_and_contents(
-                file.to_string(),
-                file.to_string(),
-                src.to_string(),
-            ));
-            let test_fns = crate::test::find_test_functions_from_sources(&sf);
-            if !test_fns.is_empty() && test_fns.iter().all(|t| t.expect_failure || t.ignored) {
-                // Every `@test` expected the compile to fail, and it did: each
-                // counts as a passing test.
-                return Ok(SkullOutcome::Pass { tests: test_fns.len() });
+            if let Some(tests) = all_tests_expect_compile_failure(file, src) {
+                return Ok(SkullOutcome::Pass { tests });
             }
             return Err(SkullFailure {
                 reason: categorize(&errs[0].message),
@@ -460,6 +451,25 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
     };
 
     run_emitted_tests(&lua, &tests)
+}
+
+/// `Some(count)` when `file` declares `@test` fns and EVERY one carries
+/// `expect_failure`/`@ignore` -- a compile rejection is then the expected
+/// (passing) outcome and each counts as a passing test. Shared by the luajit
+/// and JS executors (both bone-type-check first, so the rule is identical).
+pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
+    let mut sf = SourceFiles { files: vec![] };
+    sf.add_or_update_file(source_file_from_path_and_contents(
+        file.to_string(),
+        file.to_string(),
+        src.to_string(),
+    ));
+    let test_fns = crate::test::find_test_functions_from_sources(&sf);
+    if !test_fns.is_empty() && test_fns.iter().all(|t| t.expect_failure || t.ignored) {
+        Some(test_fns.len())
+    } else {
+        None
+    }
 }
 
 /// Given emitted workspace Lua and the `@test` fns discovered in it, run them
@@ -503,31 +513,19 @@ fn run_emitted_tests(
         }
     };
 
-    let results: Vec<&str> = stdout
-        .lines()
-        .filter(|l| l.starts_with("__SKULL__\t"))
-        .collect();
-
     // No result lines at all => the module didn't even load (a skull bug),
     // not a test failure.
-    if results.is_empty() {
+    let Some(markers) = crate::test_protocol::parse_skull_markers(&stdout) else {
         return Err(SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: format!("{stdout}\n\n--- emitted lua (truncated) ---\n{}", truncate(&program)),
         });
-    }
+    };
 
-    let fails: Vec<String> = results
-        .iter()
-        .filter(|l| l.contains("\tFAIL\t"))
-        .map(|l| l.splitn(3, '\t').nth(2).unwrap_or("").to_string())
-        .collect();
-
-    let passed = results.len() - fails.len();
-    if fails.is_empty() {
-        Ok(SkullOutcome::Pass { tests: passed })
+    if markers.fails.is_empty() {
+        Ok(SkullOutcome::Pass { tests: markers.passed })
     } else {
-        Ok(SkullOutcome::TestFail { passed, fails })
+        Ok(SkullOutcome::TestFail { passed: markers.passed, fails: markers.fails })
     }
 }
 
@@ -583,6 +581,15 @@ fn collect_package_tests(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
 ) -> Vec<skull::SkullTest> {
+    collect_package_test_fns(ws, dir).into_iter().map(|(_, t)| t).collect()
+}
+
+/// [`collect_package_tests`] carrying each test's `FuncRef` (the JS executor
+/// lowers/emits per test fn).
+pub(crate) fn collect_package_test_fns(
+    ws: &bone_semantic::inference::Workspace,
+    dir: &str,
+) -> Vec<(skull_mir::mir::FuncRef, skull::SkullTest)> {
     use bone_semantic::prelude::ModuleId;
     let root = std::path::Path::new(dir)
         .canonicalize()
@@ -597,7 +604,11 @@ fn collect_package_tests(
             .map(|c| c.starts_with(&root))
             .unwrap_or(false);
         if under {
-            out.extend(skull::module_tests(ws, m.id));
+            out.extend(
+                skull::module_tests_with_ids(ws, m.id)
+                    .into_iter()
+                    .map(|(fid, t)| (skull_mir::mir::FuncRef { module: m.id, func: fid }, t)),
+            );
         }
     }
     out
@@ -928,7 +939,7 @@ fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
 
 /// [`render_project_err`] over every collected diagnostic, joined into one
 /// report — the CLI prints ALL of them, matching the LSP.
-fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
+pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     for file in &sources.files {
         let f = file.borrow();
@@ -1249,14 +1260,12 @@ fn skull_run_project(dir: &str) -> Result<()> {
 /// `rock test <paths> --backend skull` — for every `.rock` file, run the skull
 /// pipeline and the luajit validity gate; report pass/fail + a bucketed
 /// failure-reason histogram (the skull analogue of the bone test histogram).
-pub fn skull_test(paths: &[String]) -> Result<()> {
-    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
-
-    // A test UNIT is either an isolated file (root `tests/`: independent
-    // programs that would collide in one workspace) or a whole `stick.toml`
-    // package built as ONE workspace. A cross-file lib can only be tested the
-    // second way -- per-file, any file referencing a sibling's symbol fails to
-    // compile. Package dirs go the workspace route; everything else per-file.
+/// Split `paths` into test UNITS: isolated files (root `tests/`: independent
+/// programs that would collide in one workspace) and whole `stick.toml`
+/// packages built as ONE workspace each. A cross-file lib can only be tested
+/// the second way -- per-file, any file referencing a sibling's symbol fails to
+/// compile. Shared by every test executor (luajit + JS).
+pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut files = Vec::new();
     let mut package_dirs = Vec::new();
     for path in paths {
@@ -1270,6 +1279,13 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     files.dedup();
     package_dirs.sort();
     package_dirs.dedup();
+    Ok((files, package_dirs))
+}
+
+pub fn skull_test(paths: &[String]) -> Result<()> {
+    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
+
+    let (files, package_dirs) = collect_test_units(paths)?;
 
     let start = Instant::now();
     let mut emit_ok = 0usize; // units: emit valid Lua (passes or test-fails)
