@@ -1,5 +1,8 @@
 use skull_parser::{Ast, ItemKind};
 
+use bone_core::annotations::{validate_annotations, AnnoPos};
+use bone_lower::lower_annotations;
+
 use crate::{hir::Module, prelude::*};
 
 struct LowerItem<'a> {
@@ -56,6 +59,9 @@ pub fn lower_modules(
                 ItemKind::Newtype(n) => {
                     ws.type_generic_arity.insert(n.name.name, n.generics.len());
                 }
+                ItemKind::Decorator(d) => {
+                    ws.decorator_names.insert(d.name.name);
+                }
                 _ => {}
             }
         }
@@ -81,6 +87,30 @@ pub fn lower_modules(
             .collect::<Result<Vec<()>, CompilerError>>()?;
 
         ws.log_time("register decls", timer);
+    }
+
+    // Annotation registry validation for NON-fn item positions
+    // (docs/annotations-design.md). Fn items, params, and fields validate
+    // during lowering (build_function + the field/variant loops), which also
+    // covers nested/grafted fns. Runs AFTER forward decls so the more
+    // specific rejections there (retired `@value`) fire first.
+    for rock_mod in rock_modules.iter() {
+        for item in rock_mod.items.iter() {
+            if item.annotations.is_empty() {
+                continue;
+            }
+            let pos = match &item.kind {
+                ItemKind::Function(_) => continue,
+                ItemKind::Struct(_) => AnnoPos::StructItem,
+                ItemKind::Enum(_) => AnnoPos::EnumItem,
+                ItemKind::Newtype(_) => AnnoPos::NewtypeItem,
+                ItemKind::Global(_) => AnnoPos::GlobalItem,
+                ItemKind::Decorator(_) => AnnoPos::DecoItem,
+                ItemKind::CompilerDirective(_) | ItemKind::Comment(_) | ItemKind::MacroInvocation { .. } => continue,
+            };
+            let lowered = lower_annotations(rock_mod, &item.annotations);
+            validate_annotations(pos, &lowered, &ws.decorator_names)?;
+        }
     }
 
     {
