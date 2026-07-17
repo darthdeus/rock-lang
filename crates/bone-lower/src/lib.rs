@@ -1632,6 +1632,7 @@ pub fn build_function(
             name: p.name.name,
             ty: ty_ref,
             has_default: p.default.is_some(),
+            annotations: lower_annotations(a, &p.annotations),
         });
     }
 
@@ -1953,6 +1954,7 @@ pub fn lower_struct_def(
             ty,
             span: field.name.span,
             has_default: field.default.is_some(),
+            annotations: lower_annotations(a, &field.annotations),
         });
 
         if let Some(default) = default {
@@ -2005,6 +2007,7 @@ pub fn lower_enum_def(
                             ty: lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?,
                             span: f.name.span,
                             has_default: false,
+                            annotations: lower_annotations(a, &f.annotations),
                         })
                     })
                     .try_vec()?;
@@ -2541,6 +2544,7 @@ pub fn lower_decorator_def(
             name: p.name.name,
             ty: ty_ref,
             has_default: p.default.is_some(),
+            annotations: lower_annotations(a, &p.annotations),
         });
     }
 

@@ -1559,3 +1559,55 @@ fn annotation_float_args_lower_as_float() {
     got.sort();
     assert_eq!(got, vec!["Float(-2.5)", "Float(1.5)"], "float annotation args must not lower to Other");
 }
+
+// Lossless lowering of param/field annotations (docs/annotations-design.md
+// S3): skull-side consumers (@size/@instance/@flat) read these from HIR, so
+// dropping them at lowering is a silent-drop hole.
+#[test]
+fn param_annotations_survive_lowering() {
+    let ws = check("fn f(@size(32) xs: int, plain: int) -> int { return xs + plain }\n").unwrap();
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let (_, f) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "f")
+        .expect("fn f");
+    let annotated = &f.param_decls[0];
+    assert_eq!(annotated.annotations.len(), 1, "param annotation must survive lowering");
+    assert_eq!(annotated.annotations[0].name.name.as_str(), "size");
+    assert!(
+        matches!(annotated.annotations[0].args[0].value, bone_semantic::hir::AnnoValue::Int(32)),
+        "annotation arg must lower with its value, got {:?}",
+        annotated.annotations[0].args[0].value
+    );
+    assert!(f.param_decls[1].annotations.is_empty(), "unannotated param stays empty");
+}
+
+#[test]
+fn field_annotations_survive_lowering() {
+    let ws = check("value V { @flat id: int, pos: float }\n").unwrap();
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let s = ws
+        .module(mid)
+        .structs
+        .iter()
+        .map(|(_, s)| s)
+        .find(|s| s.name.as_str() == "V")
+        .expect("struct V");
+    let annotated = &s.fields[0];
+    assert_eq!(annotated.annotations.len(), 1, "field annotation must survive lowering");
+    assert_eq!(annotated.annotations[0].name.name.as_str(), "flat");
+    assert!(annotated.annotations[0].args.is_empty());
+    assert!(s.fields[1].annotations.is_empty(), "unannotated field stays empty");
+}

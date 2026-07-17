@@ -495,11 +495,12 @@ pub enum AnnoValue {
     Other,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct ParamDecl {
     pub name: Ustr,
     pub ty: TyId,
     pub has_default: bool,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug)]
@@ -803,12 +804,13 @@ pub struct StructDef {
     pub fields: Vec<StructFieldDef>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct StructFieldDef {
     pub name: Ustr,
     pub ty: TyId,
     pub span: Span,
     pub has_default: bool,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Copy, Clone, Debug)]
