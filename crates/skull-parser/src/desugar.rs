@@ -102,6 +102,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
                 ty,
                 default: None,
                 is_variadic: false,
+                annotations: Vec::new(),
             };
             let mk_anno = |nm: &str| Annotation {
                 span: sp,

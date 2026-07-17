@@ -491,6 +491,9 @@ pub struct Param {
     pub ty: Idx<TypeExprData>,
     pub default: Option<Idx<ExprData>>,
     pub is_variadic: bool,
+    /// Leading `@name` / `@name(args)` on the parameter. Preserved for the
+    /// bone-side registry pass; no skull consumer reads it yet.
+    pub annotations: Vec<Annotation>,
 }
 
 /// A generic parameter `T`, `T = Default`, or `I: Iterator<T>`. Mirrors rock's
@@ -573,6 +576,9 @@ pub struct Field {
     pub name: Ident,
     pub ty: Idx<TypeExprData>,
     pub default: Option<Idx<ExprData>>,
+    /// Leading `@name` / `@name(args)` on the field. Preserved for the
+    /// bone-side registry pass; no skull consumer reads it yet.
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

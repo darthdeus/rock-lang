@@ -65,6 +65,7 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
                     ty: clone_type(ast, p.ty),
                     default: p.default.map(|d| clone_expr(ast, d)),
                     is_variadic: p.is_variadic,
+                    annotations: p.annotations.clone(),
                 })
                 .collect(),
             return_ty: f.return_ty.map(|t| clone_type(ast, t)),

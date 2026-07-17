@@ -1038,7 +1038,7 @@ impl Parser {
                 ));
             }
             let span = name.span;
-            params.push(Param { span, name, ty, default: None, is_variadic: false });
+            params.push(Param { span, name, ty, default: None, is_variadic: false, annotations: Vec::new() });
             self.skip_comments();
             self.eat(TokenKind::Comma);
         }
@@ -1047,6 +1047,7 @@ impl Parser {
             if self.kind() == TokenKind::CloseParen {
                 break;
             }
+            let annotations = self.parse_item_annotations()?;
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             // Variadic spelled either leading (`...T`, the stdlib form e.g.
@@ -1060,7 +1061,7 @@ impl Parser {
                 None
             };
             let span = self.span_from(name.span);
-            params.push(Param { span, name, ty, default, is_variadic });
+            params.push(Param { span, name, ty, default, is_variadic, annotations });
             self.skip_comments();
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -1098,6 +1099,7 @@ impl Parser {
             if self.kind() == TokenKind::CloseCurly || self.at_end() {
                 break;
             }
+            let annotations = self.parse_item_annotations()?;
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_type()?;
@@ -1107,7 +1109,7 @@ impl Parser {
                 None
             };
             let span = self.span_from(name.span);
-            fields.push(Field { span, name, ty, default });
+            fields.push(Field { span, name, ty, default, annotations });
             self.skip_comments();
             // Item separator: comma or newline (both allowed).
             self.eat(TokenKind::Comma);
