@@ -21,6 +21,7 @@ use bone_semantic::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 
 pub mod emit;
+mod structure;
 
 /// (name, arity) -> `$1..$n` JS expression template. Single source for both
 /// [`JsIntrinsics::lookup`] and [`JsIntrinsics::entries`]. Every entry is backed

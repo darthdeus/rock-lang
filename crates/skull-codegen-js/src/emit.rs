@@ -14,9 +14,10 @@ use std::collections::{HashMap, HashSet};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
-use skull_mir::mir::{Block, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
+use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_parser::{CompilerError, Span};
 
+use crate::structure::{self, LoopRegion, Structure};
 use crate::{fill_template, JsIntrinsics};
 
 fn raw<T>(idx: Idx<T>) -> u32 {
@@ -90,13 +91,36 @@ pub fn emit_fn_with_callees(
         return Err(err("JS subset: coroutine fn not supported"));
     }
     let (use_count, inlinable) = compute_inlinable(mf);
+    let st = structure::analyze(mf);
+    // A range-`for` (`loop_binding` slot + pure-increment latch) emits as a real
+    // JS `for (; slot < bound; slot = slot + 1)`: `continue` there re-runs the
+    // increment, which a `while (true)` shape cannot express (a bare `continue`
+    // would skip it) -- and multiple `continue`s share the latch, so a while
+    // shape would walk into it repeatedly. Every other natural loop takes the
+    // general `while (true)` path, whose header effects re-materialize through
+    // the value model so a cell read+written across the back-edge does not fold.
+    let mut counted: HashMap<Idx<Block>, LoopInfo> = HashMap::new();
+    let mut general: HashMap<Idx<Block>, LoopRegion> = HashMap::new();
+    for (&h, region) in &st.loops {
+        match match_counted_loop(mf, h) {
+            Some(li) if li.exit == region.exit && region.body.contains(&li.latch) => {
+                counted.insert(h, li);
+            }
+            _ => {
+                general.insert(h, region.clone());
+            }
+        }
+    }
     let mut em = Emitter {
         ws,
         mf,
         callees,
         use_count,
         inlinable,
-        ipdom: post_doms(mf),
+        structure: st,
+        counted,
+        general,
+        active: HashSet::new(),
         visited: HashSet::new(),
         out: String::new(),
         indent: 1,
@@ -129,7 +153,7 @@ pub fn emit_fn_with_callees(
         header.push_str(&format!("  let {};\n", names.join(", ")));
     }
 
-    em.emit_seq(mf.entry, None)?;
+    em.emit_seq(mf.entry, None, LoopCtx::default())?;
     Ok(format!("{header}{}}}\n", em.out))
 }
 
@@ -148,12 +172,38 @@ struct Emitter<'a> {
     /// effectful `Call` keeps its order (the defer/increment miscompiles the
     /// all-inline model produced). Mirrors codegen-lua's `compute_inlinable`.
     inlinable: Vec<bool>,
-    /// Block -> its immediate post-dominator (`None` == the virtual exit: the
-    /// block's arms all diverge, so the `if` has no fall-through).
-    ipdom: HashMap<Idx<Block>, Option<Idx<Block>>>,
+    /// Dominators / immediate post-dominators / natural loops.
+    structure: Structure,
+    /// Range-`for` headers -> their counted-loop info (the `for (;;)` fast path).
+    counted: HashMap<Idx<Block>, LoopInfo>,
+    /// Other natural-loop headers -> their region (general `while (true)` path).
+    general: HashMap<Idx<Block>, LoopRegion>,
+    /// Loop headers currently being emitted, so the header-region walk (a
+    /// compound `while a && b` condition) does not re-wrap the header as a fresh
+    /// loop.
+    active: HashSet<Idx<Block>>,
     visited: HashSet<Idx<Block>>,
     out: String,
     indent: usize,
+}
+
+/// The enclosing loop's jump targets, mirroring skull-mir's `loop_targets`:
+/// `Goto(cont)` -> `continue`, `Goto(brk)` -> `break`.
+#[derive(Clone, Copy, Default)]
+struct LoopCtx {
+    cont: Option<Idx<Block>>,
+    brk: Option<Idx<Block>>,
+}
+
+/// A recognized range-`for` loop (the shape `lower_for_range` emits).
+#[derive(Clone, Copy)]
+struct LoopInfo {
+    slot: Idx<Cell>,
+    bound: Idx<Inst>,
+    inclusive: bool,
+    body_entry: Idx<Block>,
+    latch: Idx<Block>,
+    exit: Idx<Block>,
 }
 
 impl Emitter<'_> {
@@ -198,14 +248,38 @@ impl Emitter<'_> {
         matches!(self.mf.insts[iid], Inst::Const(Lit::Nil))
     }
 
-    fn emit_seq(&mut self, start: Idx<Block>, stop: Option<Idx<Block>>) -> Result<(), CompilerError> {
+    fn emit_seq(
+        &mut self,
+        start: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Result<(), CompilerError> {
         let mut cur = start;
         loop {
             if Some(cur) == stop {
                 return Ok(());
             }
+            // A natural-loop header is dispatched structurally (before the
+            // visited guard): `emit_general` re-enters `emit_seq` on the header
+            // for its condition region, so the header must not be pre-marked.
+            if !self.active.contains(&cur) {
+                if let Some(li) = self.counted.get(&cur).copied() {
+                    self.emit_counted(li)?;
+                    cur = li.exit;
+                    continue;
+                }
+                if let Some(region) = self.general.get(&cur).cloned() {
+                    self.emit_general(&region, ctx)?;
+                    cur = region.exit;
+                    continue;
+                }
+            }
             if !self.visited.insert(cur) {
-                return Err(err("JS subset: unstructured control flow (revisited block -- loop?)"));
+                // Natural loops are dispatched above, so a revisit here is a
+                // reducible-but-unstructured shape: a branch whose arms share a
+                // tail (a control-flow short-circuit, e.g. a `match` range/tuple
+                // pattern) that this emitter does not yet recover. Reject cleanly.
+                return Err(err("JS subset: unstructured control flow (shared branch tail)"));
             }
             self.emit_block_effects(cur)?;
             match self.mf.blocks[cur].term.clone() {
@@ -215,13 +289,21 @@ impl Emitter<'_> {
                 }
                 Term::Unreachable => return Ok(()),
                 Term::Goto(t) => {
+                    if Some(t) == ctx.cont {
+                        self.push("continue;");
+                        return Ok(());
+                    }
+                    if Some(t) == ctx.brk {
+                        self.push("break;");
+                        return Ok(());
+                    }
                     if Some(t) == stop {
                         return Ok(());
                     }
                     cur = t;
                 }
                 Term::Branch { cond, then_bb, else_bb } => {
-                    match self.emit_branch(cur, cond, then_bb, else_bb, stop)? {
+                    match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
                         Some(m) => cur = m,
                         None => return Ok(()),
                     }
@@ -241,13 +323,14 @@ impl Emitter<'_> {
         then_bb: Idx<Block>,
         else_bb: Idx<Block>,
         stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
     ) -> Result<Option<Idx<Block>>, CompilerError> {
         let cond_s = self.render_val(cond)?;
         // Empty else -> then-only `if`; continue at the else target.
         if let Some(j) = self.empty_forward(else_bb) {
             self.push(&format!("if ({cond_s}) {{"));
             self.indent += 1;
-            self.emit_seq(then_bb, Some(j))?;
+            self.emit_seq(then_bb, Some(j), ctx)?;
             self.indent -= 1;
             self.push("}");
             return Ok(Some(j));
@@ -256,23 +339,117 @@ impl Emitter<'_> {
         if let Some(j) = self.empty_forward(then_bb) {
             self.push(&format!("if (!({cond_s})) {{"));
             self.indent += 1;
-            self.emit_seq(else_bb, Some(j))?;
+            self.emit_seq(else_bb, Some(j), ctx)?;
             self.indent -= 1;
             self.push("}");
             return Ok(Some(j));
         }
-        let merge = self.ipdom.get(&blk).copied().flatten();
+        // Full diamond. The merge is ipdom, unless an arm diverges (ipdom
+        // collapses to the virtual exit or a loop target) -- then the arms absorb
+        // the continuation up to the enclosing stop and there is no fall-through.
+        let merge = self
+            .structure
+            .ipdom(blk)
+            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
         let arm_stop = merge.map(Some).unwrap_or(stop);
         self.push(&format!("if ({cond_s}) {{"));
         self.indent += 1;
-        self.emit_seq(then_bb, arm_stop)?;
+        self.emit_seq(then_bb, arm_stop, ctx)?;
         self.indent -= 1;
         self.push("} else {");
         self.indent += 1;
-        self.emit_seq(else_bb, arm_stop)?;
+        self.emit_seq(else_bb, arm_stop, ctx)?;
         self.indent -= 1;
         self.push("}");
         Ok(merge)
+    }
+
+    /// A range-`for`: `for (; slot < bound; slot = slot + 1) { body }`. The slot
+    /// and bound were initialized in the preheader (hoisted cells), so the `for`
+    /// init clause is empty. `continue` targets the latch (the `for` increment
+    /// runs it); `break` targets the exit.
+    fn emit_counted(&mut self, li: LoopInfo) -> Result<(), CompilerError> {
+        let slot = cell_name(li.slot);
+        // The bound is a `Load` of a hoisted preheader cell (or a const),
+        // rendered inline so it never depends on a header-block temp we skip.
+        let bound = self.render_inst_expr(li.bound)?;
+        let cmp = if li.inclusive { "<=" } else { "<" };
+        self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
+        self.indent += 1;
+        let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
+        let body_len = self.out.len();
+        self.emit_seq(li.body_entry, None, ctx)?;
+        self.trim_trailing_continue(body_len);
+        self.indent -= 1;
+        self.push("}");
+        Ok(())
+    }
+
+    /// A general loop: `while (true) { <cond region>; if (!(cond)) break; <body> }`.
+    /// The condition region may be a multi-block diamond (`while a && b`), so it
+    /// goes through the structurizer recursively. A range-`for` is just this shape
+    /// whose test IS the header `Branch` (its else is the exit) and whose latch is
+    /// the increment block -- `continue` runs the increment before re-testing.
+    fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
+        let h = region.header;
+        let exit = region.exit;
+        let (test, cond, body_start, break_when_true) = self.find_test(region)?;
+
+        self.active.insert(h);
+        self.push("while (true) {");
+        self.indent += 1;
+
+        self.emit_seq(h, Some(test), outer)?;
+        self.emit_block_effects(test)?;
+        self.visited.insert(test);
+
+        let cond_s = self.render_val(cond)?;
+        if break_when_true {
+            self.push(&format!("if ({cond_s}) {{ break; }}"));
+        } else {
+            self.push(&format!("if (!({cond_s})) {{ break; }}"));
+        }
+
+        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
+        let body_len = self.out.len();
+        self.emit_seq(body_start, None, ctx)?;
+        self.trim_trailing_continue(body_len);
+
+        self.indent -= 1;
+        self.push("}");
+        self.active.remove(&h);
+        Ok(())
+    }
+
+    /// The loop's condition test: the unique body `Branch` with a direct successor
+    /// to the exit. Returns `(test block, cond, body entry, break-when-cond-true)`.
+    fn find_test(
+        &self,
+        region: &LoopRegion,
+    ) -> Result<(Idx<Block>, Idx<Inst>, Idx<Block>, bool), CompilerError> {
+        for &b in &region.body {
+            if let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[b].term {
+                if then_bb == region.exit {
+                    return Ok((b, cond, else_bb, true));
+                }
+                if else_bb == region.exit {
+                    return Ok((b, cond, then_bb, false));
+                }
+            }
+        }
+        Err(err("JS subset: unstructured loop (no single condition test)"))
+    }
+
+    /// Drop a redundant trailing `continue;` that is the loop body's natural
+    /// back-edge fall-through (indented exactly at the body level).
+    fn trim_trailing_continue(&mut self, start: usize) {
+        let line = format!("{}continue;\n", "  ".repeat(self.indent));
+        if self.out.len() >= start + line.len() && self.out.ends_with(&line) {
+            let cut = self.out.len() - line.len();
+            if cut >= start && (cut == 0 || self.out.as_bytes()[cut - 1] == b'\n') {
+                self.out.truncate(cut);
+            }
+        }
     }
 
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
@@ -511,6 +688,64 @@ impl Emitter<'_> {
             },
         }
     }
+}
+
+// --- counted-loop recognition (mirrors skull-codegen-glsl's / -lua's, for the
+// range-for shape `lower_for_range` emits) -------------------------------------
+
+/// `Some(LoopInfo)` iff `h` is a `for i in lo..hi` header: a `Branch` on
+/// `IntLt/IntLeq(load slot, bound)` where the `slot` cell is `loop_binding`
+/// (desugar provenance only `lower_for_range` sets, so a manual
+/// `while i < n { ..; i = i + 1 }` is NOT mistaken for a range-for) and `h` has a
+/// pure-increment latch. The bound must render inline (a `Load` of a hoisted
+/// preheader cell, or a const) since the counted path skips the header block.
+fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
+    let Term::Branch { cond, then_bb, else_bb } = f.blocks[h].term else {
+        return None;
+    };
+    let (slot, bound, inclusive) = match &f.insts[cond] {
+        Inst::IntLt(a, b) => (load_cell(f, *a)?, *b, false),
+        Inst::IntLeq(a, b) => (load_cell(f, *a)?, *b, true),
+        _ => return None,
+    };
+    if !f.cells[slot].loop_binding {
+        return None;
+    }
+    if !matches!(f.insts[bound], Inst::Load(_) | Inst::Const(_)) {
+        return None; // non-inline bound would reference a skipped header temp
+    }
+    let mut latch = None;
+    for (bid, blk) in f.blocks.iter() {
+        if blk.term == Term::Goto(h) && is_incr_latch(f, bid, slot) {
+            latch = Some(bid);
+        }
+    }
+    let latch = latch?;
+    Some(LoopInfo { slot, bound, inclusive, body_entry: then_bb, latch, exit: else_bb })
+}
+
+fn load_cell(f: &MirFunc, iid: Idx<Inst>) -> Option<Idx<Cell>> {
+    match f.insts[iid] {
+        Inst::Load(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// `p`: `load slot; 1; slot + 1; store slot; goto h` -- a pure `slot += 1` latch.
+fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
+    for &iid in &f.blocks[p].insts {
+        if let Inst::Store { cell, value } = f.insts[iid] {
+            if cell == slot {
+                if let Inst::IntAdd(a, b) = f.insts[value] {
+                    let is_one = |x: Idx<Inst>| matches!(f.insts[x], Inst::Const(Lit::Int(1)));
+                    let loads_slot = |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
+                    return (loads_slot(a) && is_one(b)) || (loads_slot(b) && is_one(a));
+                }
+                return false;
+            }
+        }
+    }
+    false
 }
 
 /// Deterministic JS name for a co-emitted callee, unique per `FuncRef`
@@ -821,16 +1056,6 @@ fn succ(mf: &MirFunc, b: Idx<Block>) -> Vec<Option<Idx<Block>>> {
     }
 }
 
-fn dfs_post(u: usize, preds: &[Vec<usize>], visited: &mut [bool], order: &mut Vec<usize>) {
-    visited[u] = true;
-    for &v in &preds[u] {
-        if !visited[v] {
-            dfs_post(v, preds, visited, order);
-        }
-    }
-    order.push(u);
-}
-
 /// Blocks reachable from the entry, in discovery order.
 fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
     let mut reachable = Vec::new();
@@ -846,88 +1071,4 @@ fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
         }
     }
     reachable
-}
-
-/// Immediate post-dominators (Cooper-Harvey-Kennedy on the reversed CFG rooted
-/// at a virtual exit). Value `None` == the block's ipdom is the virtual exit.
-/// The conformance subset is acyclic; the algorithm is general.
-fn post_doms(mf: &MirFunc) -> HashMap<Idx<Block>, Option<Idx<Block>>> {
-    let reachable = reachable_blocks(mf);
-    let n = reachable.len();
-    let exit = n; // virtual exit node
-    let idx_of: HashMap<Idx<Block>, usize> =
-        reachable.iter().enumerate().map(|(i, &b)| (b, i)).collect();
-
-    // Forward successors in dense indices (exit for return/unreachable).
-    let mut fsucc: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
-    for (i, &b) in reachable.iter().enumerate() {
-        for s in succ(mf, b) {
-            fsucc[i].push(s.map_or(exit, |t| idx_of[&t]));
-        }
-    }
-    // Forward predecessors (== successors in the reversed graph G').
-    let mut fpred: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
-    for i in 0..n {
-        for &d in &fsucc[i] {
-            fpred[d].push(i);
-        }
-    }
-
-    // Postorder of G' from exit; G' successors of x are fpred[x].
-    let mut po_order = Vec::new();
-    let mut visited = vec![false; n + 1];
-    dfs_post(exit, &fpred, &mut visited, &mut po_order);
-    let mut po_num = vec![0usize; n + 1];
-    for (num, &node) in po_order.iter().enumerate() {
-        po_num[node] = num;
-    }
-
-    let intersect = |mut a: usize, mut b: usize, idom: &[Option<usize>]| -> usize {
-        while a != b {
-            while po_num[a] < po_num[b] {
-                a = idom[a].expect("post-idom finger");
-            }
-            while po_num[b] < po_num[a] {
-                b = idom[b].expect("post-idom finger");
-            }
-        }
-        a
-    };
-
-    let mut idom: Vec<Option<usize>> = vec![None; n + 1];
-    idom[exit] = Some(exit);
-    let rpo: Vec<usize> = po_order.iter().rev().copied().collect();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in &rpo {
-            if b == exit {
-                continue;
-            }
-            // Preds of b in G' are its forward successors.
-            let mut new_idom: Option<usize> = None;
-            for &p in &fsucc[b] {
-                if idom[p].is_some() {
-                    new_idom = Some(match new_idom {
-                        None => p,
-                        Some(cur) => intersect(p, cur, &idom),
-                    });
-                }
-            }
-            if idom[b] != new_idom {
-                idom[b] = new_idom;
-                changed = true;
-            }
-        }
-    }
-
-    let mut out = HashMap::new();
-    for (i, &b) in reachable.iter().enumerate() {
-        let ip = match idom[i] {
-            Some(d) if d != exit => Some(reachable[d]),
-            _ => None,
-        };
-        out.insert(b, ip);
-    }
-    out
 }
