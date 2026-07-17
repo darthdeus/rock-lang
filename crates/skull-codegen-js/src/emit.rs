@@ -89,11 +89,13 @@ pub fn emit_fn_with_callees(
     if mf.is_coroutine {
         return Err(err("JS subset: coroutine fn not supported"));
     }
+    let (use_count, inlinable) = compute_inlinable(mf);
     let mut em = Emitter {
         ws,
         mf,
         callees,
-        used: used_values(mf),
+        use_count,
+        inlinable,
         ipdom: post_doms(mf),
         visited: HashSet::new(),
         out: String::new(),
@@ -136,10 +138,16 @@ struct Emitter<'a> {
     mf: &'a MirFunc,
     /// Known co-emitted plain-Rock callees (`FuncRef` -> emitted JS name).
     callees: &'a HashMap<FuncRef, String>,
-    /// Insts referenced as an operand somewhere (another inst or a terminator).
-    /// An `Inst::Call` NOT in here is a statement-position call (`nb_set(..)`)
-    /// and emits as an expression statement.
-    used: HashSet<Idx<Inst>>,
+    /// Times each inst is used as an operand (by an inst or terminator), dense
+    /// by raw inst id. 0 == statement-position (an effectful `Call`) or dead.
+    use_count: Vec<u32>,
+    /// Whether each inst folds into its single use site (dense by raw id):
+    /// pure, single-use, same-block. A non-inlinable USED value inst is bound to
+    /// a `v<raw>` temp at its program position instead -- so a cell read (`Load`)
+    /// captures the cell's value THEN, not at the (possibly-later) use, and an
+    /// effectful `Call` keeps its order (the defer/increment miscompiles the
+    /// all-inline model produced). Mirrors codegen-lua's `compute_inlinable`.
+    inlinable: Vec<bool>,
     /// Block -> its immediate post-dominator (`None` == the virtual exit: the
     /// block's arms all diverge, so the `if` has no fall-through).
     ipdom: HashMap<Idx<Block>, Option<Idx<Block>>>,
@@ -157,19 +165,37 @@ impl Emitter<'_> {
         self.out.push('\n');
     }
 
-    /// A block that produces no statement and just forwards (`Some(target)`): an
+    /// A block that emits no statement and just forwards (`Some(target)`): an
     /// empty `if`/`else` arm.
     fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
         if let Term::Goto(t) = self.mf.blocks[b].term {
-            let has_store = self.mf.blocks[b]
-                .insts
-                .iter()
-                .any(|&i| matches!(self.mf.insts[i], Inst::Store { .. }));
-            if !has_store {
+            if !self.mf.blocks[b].insts.iter().any(|&i| self.inst_emits(i)) {
                 return Some(t);
             }
         }
         None
+    }
+
+    /// Whether inst `iid` produces a statement in [`Self::emit_block_effects`]:
+    /// a store, a materialized (bound) value, or a statement-position call.
+    /// Inlinable and dead-pure insts emit nothing.
+    fn inst_emits(&self, iid: Idx<Inst>) -> bool {
+        let inst = &self.mf.insts[iid];
+        if matches!(inst, Inst::Store { .. } | Inst::StoreIndex { .. }) {
+            return true;
+        }
+        let k = raw(iid) as usize;
+        if inst.produces_value() {
+            (!self.inlinable[k] && self.use_count[k] > 0)
+                || (matches!(inst, Inst::Call { .. } | Inst::CallValue { .. })
+                    && self.use_count[k] == 0)
+        } else {
+            true // a non-value effect inst (rejected at emit if unsupported)
+        }
+    }
+
+    fn is_nil(&self, iid: Idx<Inst>) -> bool {
+        matches!(self.mf.insts[iid], Inst::Const(Lit::Nil))
     }
 
     fn emit_seq(&mut self, start: Idx<Block>, stop: Option<Idx<Block>>) -> Result<(), CompilerError> {
@@ -274,19 +300,27 @@ impl Emitter<'_> {
                     }
                 },
                 // A call in statement position (value unused): `nb_set(b, i, v)`.
-                Inst::Call { .. } if !self.used.contains(&iid) => {
-                    let Inst::Call { func, args } = self.mf.insts[iid].clone() else {
-                        unreachable!()
-                    };
-                    let line = format!("{};", self.render_call(func, &args)?);
+                Inst::Call { .. } if self.use_count[raw(iid) as usize] == 0 => {
+                    let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
                 // An unused indirect call would be a silently-dropped effect.
-                Inst::CallValue { .. } if !self.used.contains(&iid) => {
+                Inst::CallValue { .. } if self.use_count[raw(iid) as usize] == 0 => {
                     return Err(err("JS subset: indirect call not supported"));
                 }
-                // Any other unused value inst is pure and dead -- skip. Used
-                // value insts render inline at their use site. Remaining
+                // A used, non-inlinable value inst: materialize it at its
+                // program position as `let v<raw> = <expr>` so cell reads capture
+                // their value here and effectful calls keep their order. Its use
+                // sites read the temp via `render_val`.
+                other if other.produces_value()
+                    && !self.inlinable[raw(iid) as usize]
+                    && self.use_count[raw(iid) as usize] > 0 =>
+                {
+                    let expr = self.render_inst_expr(iid)?;
+                    self.push(&format!("let v{} = {};", raw(iid), expr));
+                }
+                // An inlinable value inst renders at its use; an unused pure inst
+                // (dead `Load`/`Index`/`Field`/`Len`) is dropped. Remaining
                 // EFFECT insts (StoreField, StoreGlobal, ArrayPush, MapNext,
                 // CallMulti, coroutine ops, ...) are outside the subset.
                 other if other.produces_value() => {}
@@ -312,10 +346,21 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Render a value instruction as a JS expression (inlined; MIR values are
-    /// single-use, so no CSE duplication). JS is untyped, so the int/float split
-    /// collapses to one operator and `IntToFloat` is identity.
+    /// The JS expression for a value operand: the bound `v<raw>` temp if the
+    /// inst was materialized at its position, else its expression folded inline.
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
+        if self.inlinable[raw(iid) as usize] {
+            self.render_inst_expr(iid)
+        } else {
+            Ok(format!("v{}", raw(iid)))
+        }
+    }
+
+    /// Render an inst's own JS expression (its operands routed through
+    /// [`Self::render_val`], so a non-inlinable operand reads its temp). JS is
+    /// untyped, so the int/float split collapses to one operator and
+    /// `IntToFloat` is identity.
+    fn render_inst_expr(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         let bin = |a: &Idx<Inst>, op: &str, b: &Idx<Inst>, s: &Self| -> Result<String, CompilerError> {
             Ok(format!("({} {} {})", s.render_val(*a)?, op, s.render_val(*b)?))
         };
@@ -336,9 +381,17 @@ impl Emitter<'_> {
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => bin(a, "<=", b, self)?,
             Inst::IntGt(a, b) | Inst::FloatGt(a, b) => bin(a, ">", b, self)?,
             Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => bin(a, ">=", b, self)?,
+            // Loose `== null` / `!= null` when either side is `nil`: it matches
+            // JS `undefined` too, so an OMITTED defaulted arg (JS passes nothing
+            // -> `undefined`, not `null`) still trips the callee's `x == nil`
+            // default-fill guard, exactly as Lua's absent-arg `nil` does.
+            Inst::Eq(a, b) if self.is_nil(*a) || self.is_nil(*b) => bin(a, "==", b, self)?,
+            Inst::NotEq(a, b) if self.is_nil(*a) || self.is_nil(*b) => bin(a, "!=", b, self)?,
             Inst::Eq(a, b) => bin(a, "===", b, self)?,
             Inst::NotEq(a, b) => bin(a, "!==", b, self)?,
-            Inst::Neg(x) => format!("(-{})", self.render_val(*x)?),
+            // Space after `-`: `Neg` of a negative literal would otherwise emit
+            // `(--1.5)`, which JS lexes as the `--` decrement operator.
+            Inst::Neg(x) => format!("(- {})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
             // Identity on JS (all doubles), like codegen-lua on luajit.
             Inst::IntToFloat(x) => self.render_val(*x)?,
@@ -597,105 +650,160 @@ fn first_param_is_native_buffer(ws: &Workspace, f: &bone_semantic::hir::Function
     )
 }
 
-/// Every inst referenced as an operand by another inst or a terminator. The
-/// match is EXHAUSTIVE on purpose: a new Inst variant must decide its operands
-/// here or the compiler errors, so the statement-position-call detection in
-/// `emit_block_effects` can never silently rot.
-fn used_values(mf: &MirFunc) -> HashSet<Idx<Inst>> {
-    let mut used = HashSet::new();
-    let mark = |ids: &[Idx<Inst>], used: &mut HashSet<Idx<Inst>>| {
-        for &i in ids {
-            used.insert(i);
+/// Invoke `f` for each inst used as an operand by `inst`. The match is
+/// EXHAUSTIVE on purpose: a new Inst variant must decide its operands here or
+/// the compiler errors, so use-counting can never silently rot.
+fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
+    let mut mark = |ids: &[Idx<Inst>]| ids.iter().for_each(|&i| f(i));
+    match inst {
+        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. } => {}
+        Inst::IntAdd(a, b)
+        | Inst::IntSub(a, b)
+        | Inst::IntMul(a, b)
+        | Inst::IntDiv(a, b)
+        | Inst::IntMod(a, b)
+        | Inst::FloatAdd(a, b)
+        | Inst::FloatSub(a, b)
+        | Inst::FloatMul(a, b)
+        | Inst::FloatDiv(a, b)
+        | Inst::FloatMod(a, b)
+        | Inst::StringConcat(a, b)
+        | Inst::IntLt(a, b)
+        | Inst::IntLeq(a, b)
+        | Inst::IntGt(a, b)
+        | Inst::IntGeq(a, b)
+        | Inst::FloatLt(a, b)
+        | Inst::FloatLeq(a, b)
+        | Inst::FloatGt(a, b)
+        | Inst::FloatGeq(a, b)
+        | Inst::Eq(a, b)
+        | Inst::NotEq(a, b)
+        | Inst::BitAnd(a, b)
+        | Inst::BitOr(a, b)
+        | Inst::BitXor(a, b)
+        | Inst::Shl(a, b)
+        | Inst::Shr(a, b) => mark(&[*a, *b]),
+        Inst::ToString(x)
+        | Inst::FloatToInt(x)
+        | Inst::IntToFloat(x)
+        | Inst::Neg(x)
+        | Inst::Not(x)
+        | Inst::BitNot(x)
+        | Inst::CoroSetInner(x) => mark(&[*x]),
+        Inst::Format { value, .. } => mark(&[*value]),
+        Inst::FormatDyn { value, fmt } => mark(&[*value, *fmt]),
+        Inst::Call { args, .. } | Inst::CallBoundMulti { args, .. } => mark(args),
+        Inst::CallMulti { args, .. } => mark(args),
+        Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
+            mark(&[*callee]);
+            mark(args);
         }
-    };
-    for (_, inst) in mf.insts.iter() {
-        match inst {
-            Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. } => {}
-            Inst::IntAdd(a, b)
-            | Inst::IntSub(a, b)
-            | Inst::IntMul(a, b)
-            | Inst::IntDiv(a, b)
-            | Inst::IntMod(a, b)
-            | Inst::FloatAdd(a, b)
-            | Inst::FloatSub(a, b)
-            | Inst::FloatMul(a, b)
-            | Inst::FloatDiv(a, b)
-            | Inst::FloatMod(a, b)
-            | Inst::StringConcat(a, b)
-            | Inst::IntLt(a, b)
-            | Inst::IntLeq(a, b)
-            | Inst::IntGt(a, b)
-            | Inst::IntGeq(a, b)
-            | Inst::FloatLt(a, b)
-            | Inst::FloatLeq(a, b)
-            | Inst::FloatGt(a, b)
-            | Inst::FloatGeq(a, b)
-            | Inst::Eq(a, b)
-            | Inst::NotEq(a, b)
-            | Inst::BitAnd(a, b)
-            | Inst::BitOr(a, b)
-            | Inst::BitXor(a, b)
-            | Inst::Shl(a, b)
-            | Inst::Shr(a, b) => mark(&[*a, *b], &mut used),
-            Inst::ToString(x)
-            | Inst::FloatToInt(x)
-            | Inst::IntToFloat(x)
-            | Inst::Neg(x)
-            | Inst::Not(x)
-            | Inst::BitNot(x)
-            | Inst::CoroSetInner(x) => mark(&[*x], &mut used),
-            Inst::Format { value, .. } => mark(&[*value], &mut used),
-            Inst::FormatDyn { value, fmt } => mark(&[*value, *fmt], &mut used),
-            Inst::Call { args, .. } | Inst::CallBoundMulti { args, .. } => mark(args, &mut used),
-            Inst::CallMulti { args, .. } => mark(args, &mut used),
-            Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
-                mark(&[*callee], &mut used);
-                mark(args, &mut used);
+        Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems),
+        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => {
+            for (_, v) in fields {
+                f(*v);
             }
-            Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems, &mut used),
-            Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => {
-                for (_, v) in fields {
-                    used.insert(*v);
-                }
+        }
+        Inst::MakeEnum { positional, named, .. } => {
+            mark(positional);
+            for (_, v) in named {
+                f(*v);
             }
-            Inst::MakeEnum { positional, named, .. } => {
-                mark(positional, &mut used);
-                for (_, v) in named {
-                    used.insert(*v);
-                }
+        }
+        Inst::MakeEnumDyn { tag, positional, named, .. } => {
+            mark(&[*tag]);
+            mark(positional);
+            for (_, v) in named {
+                f(*v);
             }
-            Inst::MakeEnumDyn { tag, positional, named, .. } => {
-                mark(&[*tag], &mut used);
-                mark(positional, &mut used);
-                for (_, v) in named {
-                    used.insert(*v);
-                }
+        }
+        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => mark(&[*base]),
+        Inst::Index { base, index, .. } => mark(&[*base, *index]),
+        Inst::Len { base, .. } => mark(&[*base]),
+        Inst::Store { value, .. } => mark(&[*value]),
+        Inst::StoreField { base, value, .. } => mark(&[*base, *value]),
+        Inst::StoreIndex { base, index, value, .. } => mark(&[*base, *index, *value]),
+        Inst::StoreGlobal { value, .. } => mark(&[*value]),
+        Inst::ArrayPush { arr, value, .. } => mark(&[*arr, *value]),
+        Inst::CoroHook { lambda, .. } => mark(&[*lambda]),
+        Inst::MapNext { table, .. } => mark(&[*table]),
+    }
+}
+
+fn for_each_term_operand(term: &Term, f: &mut impl FnMut(Idx<Inst>)) {
+    match term {
+        Term::Return(vs) => vs.iter().for_each(|&i| f(i)),
+        Term::Branch { cond, .. } => f(*cond),
+        Term::Switch { discr, .. } => f(*discr),
+        Term::Yield { values, .. } => values.iter().for_each(|&i| f(i)),
+        Term::Unreachable | Term::Goto(_) => {}
+    }
+}
+
+/// A pure, position-independent value inst that folds into its single use site.
+/// EXCLUDES `Load`/`Call`/`Index`/`Field`/`Len` (impure or cell-order-sensitive)
+/// -- those materialize at their program position. Mirrors codegen-lua's
+/// `always_inlinable`.
+fn always_inlinable(inst: &Inst) -> bool {
+    matches!(
+        inst,
+        Inst::Const(_)
+            | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
+            | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
+            | Inst::StringConcat(..)
+            | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+            | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
+            | Inst::Eq(..) | Inst::NotEq(..)
+            | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::ToString(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
+            | Inst::Format { .. } | Inst::FormatDyn { .. }
+            | Inst::MakeTuple(_) | Inst::MakeVec(_)
+            | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }
+    )
+}
+
+/// Use counts (dense by raw inst id, over reachable blocks) + the inlinable
+/// mask: an `always_inlinable` value used EXACTLY ONCE with def and use in the
+/// SAME block folds into that use; everything else materializes at its program
+/// position. Same-block + single-use makes the fold order-safe.
+fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
+    const NONE: u32 = u32::MAX;
+    let ni = mf.insts.len();
+    let mut use_count = vec![0u32; ni];
+    let mut use_block = vec![NONE; ni];
+    let mut def_block = vec![NONE; ni];
+    for b in reachable_blocks(mf) {
+        let br = raw(b);
+        for &id in &mf.blocks[b].insts {
+            if mf.insts[id].produces_value() {
+                def_block[raw(id) as usize] = br;
             }
-            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => mark(&[*base], &mut used),
-            Inst::Index { base, index, .. } => mark(&[*base, *index], &mut used),
-            Inst::Len { base, .. } => mark(&[*base], &mut used),
-            Inst::Store { value, .. } => mark(&[*value], &mut used),
-            Inst::StoreField { base, value, .. } => mark(&[*base, *value], &mut used),
-            Inst::StoreIndex { base, index, value, .. } => {
-                mark(&[*base, *index, *value], &mut used)
+            for_each_operand(&mf.insts[id], &mut |u| {
+                let k = raw(u) as usize;
+                use_count[k] += 1;
+                use_block[k] = br;
+            });
+        }
+        for_each_term_operand(&mf.blocks[b].term, &mut |u| {
+            let k = raw(u) as usize;
+            use_count[k] += 1;
+            use_block[k] = br;
+        });
+    }
+    let mut inl = vec![false; ni];
+    for b in reachable_blocks(mf) {
+        for &id in &mf.blocks[b].insts {
+            let k = raw(id) as usize;
+            if use_count[k] == 1
+                && def_block[k] != NONE
+                && def_block[k] == use_block[k]
+                && always_inlinable(&mf.insts[id])
+            {
+                inl[k] = true;
             }
-            Inst::StoreGlobal { value, .. } => mark(&[*value], &mut used),
-            Inst::ArrayPush { arr, value, .. } => mark(&[*arr, *value], &mut used),
-            Inst::CoroHook { lambda, .. } => mark(&[*lambda], &mut used),
-            Inst::MapNext { table, .. } => mark(&[*table], &mut used),
         }
     }
-    for (_, block) in mf.blocks.iter() {
-        match &block.term {
-            Term::Return(vs) => mark(vs, &mut used),
-            Term::Unreachable => {}
-            Term::Goto(_) => {}
-            Term::Branch { cond, .. } => mark(&[*cond], &mut used),
-            Term::Switch { discr, .. } => mark(&[*discr], &mut used),
-            Term::Yield { values, .. } => mark(values, &mut used),
-        }
-    }
-    used
+    (use_count, inl)
 }
 
 /// Successor blocks of `b` (`None` == the virtual exit).

@@ -22,13 +22,20 @@ fn clamp_emits_returning_arms_diamond() {
         emit_scalar(&ws, "clamp", 3),
         "\
 function clamp_fb(c0, c1, c2) {
-  if ((c0 < c1)) {
-    return c1;
+  let v0 = c0;
+  let v1 = c1;
+  if ((v0 < v1)) {
+    let v3 = c1;
+    return v3;
   } else {
-    if ((c0 > c2)) {
-      return c2;
+    let v5 = c0;
+    let v6 = c2;
+    if ((v5 > v6)) {
+      let v8 = c2;
+      return v8;
     } else {
-      return c0;
+      let v10 = c0;
+      return v10;
     }
   }
 }
@@ -47,17 +54,21 @@ fn sign_emits_store_then_merge() {
         "\
 function sign_fb(c0) {
   let c1, c2;
-  if ((c0 > 0)) {
+  let v0 = c0;
+  if ((v0 > 0)) {
     c1 = 1;
   } else {
-    if ((c0 < 0)) {
+    let v5 = c0;
+    if ((v5 < 0)) {
       c2 = -1;
     } else {
       c2 = 0;
     }
-    c1 = c2;
+    let v12 = c2;
+    c1 = v12;
   }
-  return c1;
+  let v14 = c1;
+  return v14;
 }
 "
     );
@@ -70,23 +81,52 @@ fn expression_bodies_emit() {
     let ws = stdlib_ws();
     assert_eq!(
         emit_scalar(&ws, "lerp", 3),
-        "function lerp_fb(c0, c1, c2) {\n  return (c0 + ((c1 - c0) * c2));\n}\n"
+        "\
+function lerp_fb(c0, c1, c2) {
+  let v0 = c0;
+  let v1 = c1;
+  let v2 = c0;
+  let v4 = c2;
+  return (v0 + ((v1 - v2) * v4));
+}
+"
     );
     assert_eq!(
         emit_scalar(&ws, "round", 1),
-        "function round_fb(c0) {\n  return Math.floor((c0 + 0.5));\n}\n"
+        "\
+function round_fb(c0) {
+  let v0 = c0;
+  let v3 = Math.floor((v0 + 0.5));
+  return v3;
+}
+"
     );
     assert_eq!(
         emit_scalar(&ws, "fract", 1),
-        "function fract_fb(c0) {\n  return (c0 - Math.floor(c0));\n}\n"
+        "\
+function fract_fb(c0) {
+  let v0 = c0;
+  let v1 = c0;
+  let v2 = Math.floor(v1);
+  return (v0 - v2);
+}
+"
     );
     assert_eq!(
         emit_scalar(&ws, "smoothstep", 3),
         "\
 function smoothstep_fb(c0, c1, c2) {
   let c3;
-  c3 = Math.min(Math.max(((c2 - c0) / (c1 - c0)), 0), 1);
-  return ((c3 * c3) * (3 - (2 * c3)));
+  let v0 = c2;
+  let v1 = c0;
+  let v3 = c1;
+  let v4 = c0;
+  let v9 = Math.min(Math.max(((v0 - v1) / (v3 - v4)), 0), 1);
+  c3 = v9;
+  let v11 = c3;
+  let v12 = c3;
+  let v16 = c3;
+  return ((v11 * v12) * (3 - (2 * v16)));
 }
 "
     );
@@ -144,8 +184,11 @@ fn native_buffer_subset_emits() {
         skull_codegen_js::emit::emit_fn(&ws, &checked, "checked").unwrap(),
         "\
 function checked(c0) {
-  __nb_checked_set(c0, 0, 1.5);
-  return __nb_checked_get(c0, 0);
+  let v0 = c0;
+  __nb_checked_set(v0, 0, 1.5);
+  let v4 = c0;
+  let v6 = __nb_checked_get(v4, 0);
+  return v6;
 }
 "
     );
@@ -154,12 +197,26 @@ function checked(c0) {
     let stmt_call = lower_test_fn(&ws, "stmt_call");
     assert_eq!(
         skull_codegen_js::emit::emit_fn(&ws, &stmt_call, "stmt_call").unwrap(),
-        "function stmt_call(c0) {\n  (c0.ptr[0] = 2.5);\n  return (c0.ptr[1] = 3.5);\n}\n"
+        "\
+function stmt_call(c0) {
+  let v0 = c0;
+  (v0.ptr[0] = 2.5);
+  let v4 = c0;
+  let v7 = (v4.ptr[1] = 3.5);
+  return v7;
+}
+"
     );
     let nb_len = lower_test_fn(&ws, "nb_len");
     assert_eq!(
         skull_codegen_js::emit::emit_fn(&ws, &nb_len, "nb_len").unwrap(),
-        "function nb_len(c0) {\n  return c0.len;\n}\n"
+        "\
+function nb_len(c0) {
+  let v0 = c0;
+  let v1 = v0.len;
+  return v1;
+}
+"
     );
 }
 
@@ -175,7 +232,14 @@ fn native_buffer_ctor_emits_object_literal() {
                 let mf = lower_function(&ws, &scx, mid, fid).expect("lower");
                 assert_eq!(
                     skull_codegen_js::emit::emit_fn(&ws, &mf, "native_buffer_float").unwrap(),
-                    "function native_buffer_float(c0) {\n  return ({ptr: new Float32Array(c0), len: c0});\n}\n"
+                    "\
+function native_buffer_float(c0) {
+  let v0 = c0;
+  let v1 = new Float32Array(v0);
+  let v2 = c0;
+  return ({ptr: v1, len: v2});
+}
+"
                 );
                 return;
             }
