@@ -9,9 +9,14 @@ pub(crate) struct SkullMarkers {
     pub passed: usize,
     /// The `<detail>` of every `FAIL` line.
     pub fails: Vec<String>,
+    /// `(test name, serialized value)` of every `VALUE` line -- a
+    /// `@test(returns = ...)` fn that ran without error; the HOST compares the
+    /// value ([`compare_value`]) and turns it into pass/fail accounting.
+    pub values: Vec<(String, String)>,
 }
 
-/// Parse the `__SKULL__\tPASS|FAIL\t<detail>` marker lines out of a test
+/// Parse the `__SKULL__\tPASS|FAIL\t<detail>` and
+/// `__SKULL__\tVALUE\t<name>\t<serialized>` marker lines out of a test
 /// program's stdout. `None` = no marker lines at all: the program never reached
 /// the harness (an emit/load bug, not a test failure).
 pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
@@ -27,7 +32,79 @@ pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
         .filter(|l| l.contains("\tFAIL\t"))
         .map(|l| l.splitn(3, '\t').nth(2).unwrap_or("").to_string())
         .collect();
-    Some(SkullMarkers { passed: results.len() - fails.len(), fails })
+    let values: Vec<(String, String)> = results
+        .iter()
+        .filter(|l| l.contains("\tVALUE\t"))
+        .map(|l| {
+            let mut parts = l.splitn(4, '\t').skip(2);
+            let name = parts.next().unwrap_or("").to_string();
+            let val = parts.next().unwrap_or("").to_string();
+            (name, val)
+        })
+        .collect();
+    Some(SkullMarkers {
+        passed: results.len() - fails.len() - values.len(),
+        fails,
+        values,
+    })
+}
+
+/// Default relative tolerance for `@test(returns = <float>)` comparison. An
+/// explicit parameter on [`compare_value`] so a future executor with laxer
+/// arithmetic (GLSL) can widen it; int/bool stay exact regardless.
+pub(crate) const FLOAT_REL_TOL: f64 = 1e-12;
+
+/// Compare a `VALUE` marker's serialized return value against the pinned
+/// `@test(returns = ...)` literal. Backend-neutral: the host parses the
+/// serialized value as f64 (or `true`/`false`) and compares numbers, so the
+/// executors' serializations need not be byte-identical. Int expectations are
+/// exact f64 equality (42 == 42.0); floats pass within `float_rel_tol`
+/// relative tolerance; bools are exact. `Err` carries the FAIL detail.
+pub(crate) fn compare_value(
+    expect: &skull::ValueExpect,
+    got: &str,
+    float_rel_tol: f64,
+) -> Result<(), String> {
+    use skull::ValueExpect::*;
+    match expect {
+        Bool(b) => {
+            let g = match got {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(format!(
+                        "value mismatch: expected <{b}> got unparseable <{got}>"
+                    ))
+                }
+            };
+            if g == *b {
+                Ok(())
+            } else {
+                Err(format!("value mismatch: expected <{b}> got <{got}>"))
+            }
+        }
+        Int(i) => {
+            let g: f64 = got
+                .parse()
+                .map_err(|_| format!("value mismatch: expected <{i}> got unparseable <{got}>"))?;
+            if g == *i as f64 {
+                Ok(())
+            } else {
+                Err(format!("value mismatch: expected <{i}> got <{got}>"))
+            }
+        }
+        Float(x) => {
+            let g: f64 = got
+                .parse()
+                .map_err(|_| format!("value mismatch: expected <{x}> got unparseable <{got}>"))?;
+            let within = g == *x || (g - x).abs() <= float_rel_tol * g.abs().max(x.abs());
+            if within {
+                Ok(())
+            } else {
+                Err(format!("value mismatch: expected <{x}> got <{got}>"))
+            }
+        }
+    }
 }
 
 /// Bucket reason strings into a histogram sorted by count desc, ties by reason
@@ -104,5 +181,62 @@ mod tests {
     #[test]
     fn histogram_of_nothing_is_empty() {
         assert!(reason_histogram([]).is_empty());
+    }
+
+    #[test]
+    fn parses_value_lines_alongside_pass_and_fail() {
+        let stdout = "__SKULL__\tPASS\t\n\
+                      __SKULL__\tVALUE\tt_a\t42\n\
+                      __SKULL__\tFAIL\tt_b: error: boom\n\
+                      __SKULL__\tVALUE\tt_c\t-1.5\n";
+        let m = parse_skull_markers(stdout).expect("markers present");
+        assert_eq!(m.passed, 1);
+        assert_eq!(m.fails, vec!["t_b: error: boom".to_string()]);
+        assert_eq!(
+            m.values,
+            vec![
+                ("t_a".to_string(), "42".to_string()),
+                ("t_c".to_string(), "-1.5".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn compare_int_exact_and_across_serializations() {
+        use skull::ValueExpect::*;
+        assert!(compare_value(&Int(42), "42", FLOAT_REL_TOL).is_ok());
+        // A backend may serialize an int-typed 42 as 42.0 (or 17-digit form);
+        // the host compares parsed f64s, not strings.
+        assert!(compare_value(&Int(42), "42.000000000000000", FLOAT_REL_TOL).is_ok());
+        let err = compare_value(&Int(43), "42", FLOAT_REL_TOL).unwrap_err();
+        assert_eq!(err, "value mismatch: expected <43> got <42>");
+    }
+
+    #[test]
+    fn compare_float_relative_tolerance() {
+        use skull::ValueExpect::*;
+        assert!(compare_value(&Float(1.0), "1.0000000000001", FLOAT_REL_TOL).is_ok());
+        assert!(compare_value(&Float(0.0), "0", FLOAT_REL_TOL).is_ok());
+        assert!(compare_value(&Float(-2.5), "-2.5", FLOAT_REL_TOL).is_ok());
+        // Relative diff 1e-10 is OUTSIDE the default 1e-12 tolerance.
+        assert!(compare_value(&Float(1.0), "1.0000000001", FLOAT_REL_TOL).is_err());
+        // A widened tolerance (the future GLSL executor) admits it.
+        assert!(compare_value(&Float(1.0), "1.0000000001", 1e-8).is_ok());
+    }
+
+    #[test]
+    fn compare_bool_exact() {
+        use skull::ValueExpect::*;
+        assert!(compare_value(&Bool(true), "true", FLOAT_REL_TOL).is_ok());
+        assert!(compare_value(&Bool(false), "false", FLOAT_REL_TOL).is_ok());
+        assert!(compare_value(&Bool(true), "false", FLOAT_REL_TOL).is_err());
+    }
+
+    #[test]
+    fn compare_unparseable_value_is_an_error() {
+        use skull::ValueExpect::*;
+        let err = compare_value(&Int(1), "abc", FLOAT_REL_TOL).unwrap_err();
+        assert!(err.contains("unparseable <abc>"), "got: {err}");
+        assert!(compare_value(&Bool(true), "1", FLOAT_REL_TOL).is_err());
     }
 }
