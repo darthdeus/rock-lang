@@ -1,9 +1,12 @@
 //! The JS intrinsic table (docs/js-backend-plan.md): the THIRD
 //! [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies) and
 //! GLSL. Covers the eight scalar fallback+mapping intrinsics of the conformance
-//! differential (`tests/intrinsics/fallback_reference.rock`) plus the base math
-//! set. The [`emit`] module lowers the intrinsics' Rock fallback bodies to JS
-//! (the differential's fallback side); the node execution harness is S3.
+//! differential (`tests/intrinsics/fallback_reference.rock`), the base math
+//! set, and the `@native_required` NativeBuffer four-fn surface
+//! (`docs/nativebuffer-portability-design.md`: TypedArrays as `Ptr<T>`,
+//! cross-backend-verified by `tests/nb_differential.rs`). The [`emit`] module
+//! lowers Rock bodies in the supported subset to JS; the node execution
+//! harness runs both differentials.
 //!
 //! **Mappings are algorithmically distinct from the Rock fallbacks** where a
 //! second implementation exists (`min`/`max` -> `Math.min`/`max` vs the
@@ -42,7 +45,51 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // NativeBuffer four-fn surface (docs/nativebuffer-portability-design.md):
+    // `Ptr<T>` IS the TypedArray on JS, so `.ptr` indexes with brackets exactly
+    // like the luajit cdata. `NativeBuffer<int>` is pinned 32-bit -> Int32Array;
+    // TypedArray store conversion wraps mod 2^n, matching LuaJIT's native
+    // truncation (differentially verified by tests/nb_differential.rs).
+    ("__nb_alloc_float", 1, "new Float32Array($1)"),
+    ("__nb_alloc_int", 1, "new Int32Array($1)"),
+    ("__nb_alloc_u8", 1, "new Uint8Array($1)"),
+    ("__nb_alloc_i8", 1, "new Int8Array($1)"),
+    ("__nb_alloc_u16", 1, "new Uint16Array($1)"),
+    ("__nb_alloc_i16", 1, "new Int16Array($1)"),
+    ("__nb_alloc_u32", 1, "new Uint32Array($1)"),
+    ("nb_get", 2, "$1.ptr[$2]"),
+    ("nb_set", 3, "($1.ptr[$2] = $3)"),
+    // The safe accessor: an IIFE so the receiver/index evaluate exactly once
+    // (the template reads each twice), mirroring the inline(lua) body's
+    // param-binding. Null on miss = Rock `T?` null.
+    ("get", 2, "(function(b, i) { return (i >= 0 && i < b.len) ? b.ptr[i] : null; })($1, $2)"),
 ];
+
+/// JS bodies for the debug-mode bounds-checked NativeBuffer access the
+/// emitter's `Index`/`StoreIndex` lowering calls (`__nb_checked_get` /
+/// `__nb_checked_set`) -- the JS analog of the stdlib inline(lua) helpers
+/// (`stdlib/unified.rock`) that back the same calls on luajit, and of
+/// `skull_codegen_lua::VEC_CHECK_SHIMS` in shape. Prepend to any emitted JS
+/// program that indexes a buffer. The NaN-into-integer-buffer rejection is the
+/// pinned store-edge debug check (`docs/nativebuffer-portability-design.md`,
+/// decision 2); it is unconditional here -- the JS harness has no release mode.
+pub const JS_NB_CHECK_SHIMS: &str = "\
+function __nb_checked_get(buf, i) {
+  if (i < 0 || i >= buf.len) {
+    throw new Error(\"NativeBuffer index out of bounds: index \" + i + \" is outside [0, \" + buf.len + \")\");
+  }
+  return buf.ptr[i];
+}
+function __nb_checked_set(buf, i, v) {
+  if (i < 0 || i >= buf.len) {
+    throw new Error(\"NativeBuffer index out of bounds: index \" + i + \" is outside [0, \" + buf.len + \")\");
+  }
+  if (v !== v && !(buf.ptr instanceof Float32Array)) {
+    throw new Error(\"NativeBuffer store: NaN into integer buffer\");
+  }
+  buf.ptr[i] = v;
+}
+";
 
 /// The toy JS backend's [`IntrinsicTable`].
 pub struct JsIntrinsics;

@@ -54,6 +54,32 @@ fn differential_set_snippets_render() {
     );
 }
 
+// The NativeBuffer four-fn surface (docs/nativebuffer-portability-design.md):
+// 7 per-type TypedArray allocs, the shared nb_get/nb_set index templates, and
+// the bounds-checked `get` accessor (IIFE so receiver/index evaluate once).
+// Cross-backend semantics live in tests/nb_differential.rs; these pin the
+// rendered shapes.
+#[test]
+fn native_buffer_snippets_render() {
+    for (name, ctor) in [
+        ("__nb_alloc_float", "Float32Array"),
+        ("__nb_alloc_int", "Int32Array"),
+        ("__nb_alloc_u8", "Uint8Array"),
+        ("__nb_alloc_i8", "Int8Array"),
+        ("__nb_alloc_u16", "Uint16Array"),
+        ("__nb_alloc_i16", "Int16Array"),
+        ("__nb_alloc_u32", "Uint32Array"),
+    ] {
+        assert_eq!(fill_template(template(name, 1), &["n"]), format!("new {ctor}(n)"));
+    }
+    assert_eq!(fill_template(template("nb_get", 2), &["b", "i"]), "b.ptr[i]");
+    assert_eq!(fill_template(template("nb_set", 3), &["b", "i", "v"]), "(b.ptr[i] = v)");
+    assert_eq!(
+        fill_template(template("get", 2), &["buf", "k"]),
+        "(function(b, i) { return (i >= 0 && i < b.len) ? b.ptr[i] : null; })(buf, k)"
+    );
+}
+
 // Every entry is a distinct (name, arity); covers the base math set + the eight
 // conformance differential intrinsics.
 #[test]
