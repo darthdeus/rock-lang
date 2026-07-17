@@ -785,7 +785,19 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
                 profile_flag,
                 out
             );
-            rock_host::project::write_atomic(&out, &format!("{header}{glsl}"))?;
+            // A `#version` output puts the header AFTER the version line: the ES
+            // profile requires `#version` to be the very first token (a leading
+            // comment is a hard error), and the engine loader keeps the header
+            // in-source, so a header-before-#version breaks the mobile profile.
+            let file = if let Some(rest) = glsl.strip_prefix("#version") {
+                let nl = rest.find('\n').map(|p| p + 1).unwrap_or(rest.len());
+                let (version_tail, body) = rest.split_at(nl);
+                let body = body.strip_prefix('\n').unwrap_or(body);
+                format!("#version{version_tail}{header}{body}")
+            } else {
+                format!("{header}{glsl}")
+            };
+            rock_host::project::write_atomic(&out, &file)?;
             log::info!(target: "SHADER", "{} [{}] -> {}", path, roots.join(", "), out);
         }
         None => print!("{glsl}"),

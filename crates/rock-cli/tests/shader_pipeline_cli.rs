@@ -63,8 +63,10 @@ fn two_root_form_emits_pipeline() {
         String::from_utf8_lossy(&status.stderr)
     );
     let glsl = std::fs::read_to_string(&out).expect("output written");
-    assert!(glsl.starts_with("// GENERATED"), "GENERATED header:\n{glsl}");
-    assert!(glsl.contains("#version 330 core"), "default profile:\n{glsl}");
+    // #version must be the very first token (ES-profile requirement); the
+    // GENERATED header follows it.
+    assert!(glsl.starts_with("#version 330 core"), "version first:\n{glsl}");
+    assert!(glsl.contains("// GENERATED"), "GENERATED header:\n{glsl}");
     assert!(glsl.contains("#ifdef VERTEX"), "vertex block:\n{glsl}");
     assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "attrs:\n{glsl}");
     assert!(glsl.contains("#ifdef PIXEL"), "pixel block:\n{glsl}");
