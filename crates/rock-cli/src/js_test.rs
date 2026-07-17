@@ -299,8 +299,8 @@ fn js_run_tests(
 ) -> JsUnitOutcome {
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, String)> = Vec::new();
-    // (display name, root JS name, emitted defs, expected output)
-    let mut runnable: Vec<(String, String, String, Option<String>)> = Vec::new();
+    // (display name, root JS name, emitted defs, expected output, value test?)
+    let mut runnable: Vec<(String, String, String, Option<String>, bool)> = Vec::new();
 
     let scx = ScalarCtx::new(ws);
     for (i, (fr, t)) in tests.iter().enumerate() {
@@ -310,7 +310,9 @@ fn js_run_tests(
             skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
         }));
         match emitted {
-            Ok(Ok(js)) => runnable.push((t.name.clone(), js_name, js, t.output.clone())),
+            Ok(Ok(js)) => {
+                runnable.push((t.name.clone(), js_name, js, t.output.clone(), t.returns.is_some()))
+            }
             Ok(Err(e)) => skips.push((t.name.clone(), e.message.clone())),
             Err(panic) => {
                 let msg = panic
@@ -343,7 +345,7 @@ fn js_run_tests(
     // loaded. Missing/short markers = the emitted JS itself is bad (a backend
     // bug), surfaced with the program for diagnosis -- never silently absorbed.
     let markers = match parse_skull_markers(&run.stdout) {
-        Some(m) if m.passed + m.fails.len() == runnable.len() => m,
+        Some(m) if m.passed + m.fails.len() + m.values.len() == runnable.len() => m,
         _ => {
             return JsUnitOutcome::UnitFail {
                 reason: "invalid JS emitted (js backend bug)".to_string(),
@@ -357,7 +359,29 @@ fn js_run_tests(
         }
     };
     fails.extend(markers.fails);
-    JsUnitOutcome::Ran { passed: markers.passed, fails, skips }
+    let mut passed = markers.passed;
+
+    // VALUE lines: compare the serialized return value HOST-side against the
+    // pinned `@test(returns = ...)` literal -- same policy as the luajit path
+    // (test_protocol::compare_value is the single comparison site).
+    let expects: std::collections::HashMap<&str, &skull::ValueExpect> = tests
+        .iter()
+        .filter_map(|(_, t)| t.returns.as_ref().map(|v| (t.name.as_str(), v)))
+        .collect();
+    for (name, val) in &markers.values {
+        let Some(expect) = expects.get(name.as_str()) else {
+            return JsUnitOutcome::UnitFail {
+                reason: "harness invariant breach (js backend bug)".to_string(),
+                rendered: format!("VALUE line for `{name}` without a returns expectation"),
+            };
+        };
+        match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
+        {
+            Ok(()) => passed += 1,
+            Err(detail) => fails.push(format!("{name}: {detail}")),
+        }
+    }
+    JsUnitOutcome::Ran { passed, fails, skips }
 }
 
 /// A JS double-quoted string literal for a Rust string, escaping the control
@@ -391,7 +415,7 @@ fn js_str(s: &str) -> String {
 /// tests are byte-identical and redefinition is harmless), then the harness
 /// running each test with its buffer reset and comparing the captured stdout
 /// (trimmed) against the `output=` expectation -- one `__SKULL__` line per test.
-fn build_node_program(runnable: &[(String, String, String, Option<String>)]) -> String {
+fn build_node_program(runnable: &[(String, String, String, Option<String>, bool)]) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(
@@ -404,31 +428,39 @@ function print() {
 }
 "#,
     );
-    for (_, _, defs, _) in runnable {
+    for (_, _, defs, _, _) in runnable {
         p.push_str(defs);
     }
     p.push_str("var __tests = [\n");
-    for (name, js_name, _, out) in runnable {
+    for (name, js_name, _, out, is_value) in runnable {
         let out_js = match out {
             Some(s) => js_str(s),
             None => "null".to_string(),
         };
         p.push_str(&format!(
-            "  {{ f: {js_name}, name: {}, out: {out_js} }},\n",
+            "  {{ f: {js_name}, name: {}, out: {out_js}, val: {is_value} }},\n",
             js_str(name)
         ));
     }
     p.push_str("];\n");
+    // __fmtval: toPrecision(17) round-trips any f64 (the host compares parsed
+    // f64s, so it need not match luajit's %.17g byte-for-byte); bools as-is.
     p.push_str(
         r#"function __esc(s) { return String(s).replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t"); }
+function __fmtval(v) {
+  if (typeof v === "boolean") return v ? "true" : "false";
+  return Number(v).toPrecision(17);
+}
 for (var i = 0; i < __tests.length; i++) {
   var t = __tests[i];
   __buf = [];
   try {
-    t.f();
+    var ret = t.f();
     var got = __buf.join("").replace(/^\s+/, "").replace(/\s+$/, "");
     if (t.out !== null && got !== t.out) {
       process.stdout.write("\n__SKULL__\tFAIL\t" + t.name + ": output mismatch: expected <" + __esc(t.out) + "> got <" + __esc(got) + ">\n");
+    } else if (t.val) {
+      process.stdout.write("\n__SKULL__\tVALUE\t" + t.name + "\t" + __fmtval(ret) + "\n");
     } else {
       process.stdout.write("\n__SKULL__\tPASS\t\n");
     }
