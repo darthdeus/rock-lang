@@ -923,6 +923,10 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("__op_ne", 2) => Some("(!__op_eq($1, $2))"),
         // Lua `//` floored integer division.
         ("__op_idiv", 2) => Some("Math.floor($1 / $2)"),
+        // `string.len` counts bytes; in the ASCII-only string subset that equals
+        // JS `.length` (UTF-16 units). `float(int)` is an identity (all doubles).
+        ("len", 1) => Some("$1.length"),
+        ("float", 1) => Some("$1"),
         // `error(msg)` diverges; the message is already a string. Wrapped in a
         // throwing IIFE so it is a valid EXPRESSION -- the lowering stores a
         // diverging call's (dead) result into an if-result cell, and a bare
