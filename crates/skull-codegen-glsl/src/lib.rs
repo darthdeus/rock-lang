@@ -19,7 +19,7 @@
 
 mod structure;
 
-use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, TyId, TypeCtor, TypeExpr};
+use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, StructDef, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
@@ -399,10 +399,12 @@ struct FnEmit<'a> {
     indent: usize,
     /// Guard against unstructured control flow / infinite walks.
     visited: HashSet<Idx<Block>>,
-    /// Entry mode: the uniform-struct param's cell -- a field read off it
-    /// renders as the bare field name (GLSL uniforms are globals).
-    uniform_cell: Option<Idx<Cell>>,
-    /// Entry mode: uniform field name -> GLSL type (for `ty_of` on those reads).
+    /// Entry mode: the cells of the "global-base" struct params -- attribute,
+    /// uniform, and varyings structs, whose field reads render as bare GLSL
+    /// globals (attributes/uniforms/varyings are globals, not struct members).
+    global_cells: HashSet<Idx<Cell>>,
+    /// Entry mode: global field name -> GLSL type (for `ty_of` on those reads).
+    /// Names are collision-checked unique, so one combined map covers all bases.
     uniform_fields: HashMap<Ustr, GlslTy>,
     /// Cosmetic folds (`docs/glsl-relooper-plan.md`, cosmetic tier). A diamond's
     /// single-use result cell -> the expression it renders as; the diamond itself
@@ -413,6 +415,10 @@ struct FnEmit<'a> {
     folded_block: HashMap<Idx<Block>, Idx<Cell>>,
     /// A counted-loop bound temp folded into the for-header -> its const value.
     folded_bound: HashMap<Idx<Cell>, Idx<Inst>>,
+    /// Vertex-entry mode: varyings field name -> GLSL type. When set, the fn is
+    /// emitted as `void main()` and its terminal `return <MakeValueStruct>`
+    /// becomes `gl_Position = <position>;` plus a `<varying> = <val>;` per field.
+    vertex_out: Option<HashMap<Ustr, GlslTy>>,
 }
 
 #[derive(Clone, Copy)]
@@ -454,13 +460,23 @@ fn emit_fn_def_with(
     entry: Option<&EntryShape>,
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
-    let name = match entry {
-        Some(_) => f.name.as_str().to_string(),
-        None => mangle_fn(ws, f, overloaded),
+    let is_vertex = entry.is_some_and(|s| s.vertex_out.is_some());
+    let name = if is_vertex {
+        "main".to_string()
+    } else if entry.is_some() {
+        f.name.as_str().to_string()
+    } else {
+        mangle_fn(ws, f, overloaded)
     };
-    let ret_ty = match f.return_ty {
-        Some(rt) => Some(glsl_ty(ws, rt, f.name_span, "return")?),
-        None => None,
+    // A vertex entry returns the (non-tier-0) varyings struct, destructured into
+    // gl_Position + varying outs -- its GLSL fn is `void main()`, no signature ret.
+    let ret_ty = if is_vertex {
+        None
+    } else {
+        match f.return_ty {
+            Some(rt) => Some(glsl_ty(ws, rt, f.name_span, "return")?),
+            None => None,
+        }
     };
     let ret = ret_ty.map_or("void", |t| t.name());
 
@@ -496,24 +512,34 @@ fn emit_fn_def_with(
         out: String::new(),
         indent: 1,
         visited: HashSet::default(),
-        uniform_cell: entry.and_then(|s| s.uniform_param.map(|i| mf.params[i])),
+        global_cells: entry
+            .map(|s| s.global_params.iter().map(|&i| mf.params[i]).collect())
+            .unwrap_or_default(),
         uniform_fields: entry.map(|s| s.uniform_fields.iter().copied().collect()).unwrap_or_default(),
         folded_cond: HashMap::default(),
         folded_block: HashMap::default(),
         folded_bound: HashMap::default(),
+        vertex_out: entry.and_then(|s| s.vertex_out.as_ref().map(|v| v.iter().copied().collect())),
     };
     e.assign_cell_names();
+    // Global-base struct params + samplers are dropped from the GLSL signature.
     let dropped: HashSet<usize> = entry
         .map(|s| {
-            s.uniform_param
-                .into_iter()
+            s.global_params
+                .iter()
+                .copied()
                 .chain(s.samplers.iter().map(|&(i, _)| i))
                 .collect()
         })
         .unwrap_or_default();
+    // A global-base struct param is not a tier-0 GLSL leaf (glsl_ty would reject
+    // it); its reads render as bare globals. Samplers DO map (`sampler2D`), so
+    // they still get a cell type.
+    let struct_params: HashSet<usize> =
+        entry.map(|s| s.global_params.iter().copied().collect()).unwrap_or_default();
     for (i, &c) in mf.params.iter().enumerate() {
-        if entry.is_some_and(|s| s.uniform_param == Some(i)) {
-            continue; // not a tier-0 GLSL leaf; reads render as bare globals
+        if struct_params.contains(&i) {
+            continue;
         }
         let ty = glsl_ty(ws, f.param_decls[i].ty, f.name_span, "parameter")?;
         e.cell_ty.insert(c, ty);
@@ -584,9 +610,11 @@ impl FnEmit<'_> {
         }
     }
 
-    /// Whether `iid` is a `Load` of the entry-mode uniform-struct param cell.
+    /// Whether `iid` is a `Load` of an entry-mode global-base struct param cell
+    /// (attribute/uniform/varyings) -- a field read off it renders as a bare
+    /// global, not a struct member.
     fn is_uniform_base(&self, iid: Idx<Inst>) -> bool {
-        matches!(self.f.insts[iid], Inst::Load(c) if Some(c) == self.uniform_cell)
+        matches!(self.f.insts[iid], Inst::Load(c) if self.global_cells.contains(&c))
     }
 
     /// Type every non-param cell: prefer bone's binding type ([`Cell::ty`]) where
@@ -1130,6 +1158,33 @@ impl FnEmit<'_> {
     }
 
     fn emit_return(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
+        // Vertex entry: `return <VaryingsStruct { position, ... }>` destructures
+        // into `gl_Position = <position>;` + a `<varying> = <val>;` per field.
+        if self.vertex_out.is_some() {
+            let varyings = self.vertex_out.clone().unwrap();
+            let [v] = vs else {
+                return Err(err(self.span(), "shader vertex: entry must return the varyings struct"));
+            };
+            let fields: Vec<(Ustr, Idx<Inst>)> = match &self.f.insts[*v] {
+                Inst::MakeValueStruct { fields, .. } => fields.iter().map(|&(n, x)| (n, x)).collect(),
+                _ => {
+                    return Err(err(
+                        self.span(),
+                        "shader vertex: entry must return a varyings struct literal",
+                    ))
+                }
+            };
+            for (name, val) in fields {
+                let (target, want) = if name.as_str() == "position" {
+                    ("gl_Position".to_string(), GlslTy::Vec4)
+                } else {
+                    (name.to_string(), varyings.get(&name).copied().unwrap_or(GlslTy::Float))
+                };
+                let s = self.render_val_t(val, want)?;
+                self.push(&format!("{target} = {s};"));
+            }
+            return Ok(());
+        }
         match vs {
             [] => self.push("return;"),
             [v] => {
@@ -1422,14 +1477,20 @@ pub fn emit_shader_library(
 
 // --- A1: fragment-entry compilation (docs/glsl-a1-plan.md) --------------------
 
-/// A classified `@shader(fragment)` entry signature.
+/// A classified shader entry signature (A1 fragment, or an A2 pipeline stage).
 struct EntryShape {
-    /// Index of the uniform value-struct param, if any.
-    uniform_param: Option<usize>,
-    /// The uniform struct's fields, declaration order: (name, GLSL type).
+    /// Param indices whose field reads render as bare GLSL globals and which are
+    /// dropped from the emitted signature: the A1 uniform struct, or a pipeline
+    /// stage's attribute / uniform / varyings structs.
+    global_params: Vec<usize>,
+    /// Combined global field name -> GLSL type (for `ty_of` on bare-global
+    /// reads). Names are collision-checked unique across all global structs.
     uniform_fields: Vec<(Ustr, GlslTy)>,
-    /// Sampler params: (param index, name).
+    /// Sampler params: (param index, name). Also dropped, read as bare globals.
     samplers: Vec<(usize, Ustr)>,
+    /// Vertex-entry mode: varyings field name -> GLSL type (position included).
+    /// Presence switches emission to `void main()` with return-destructure.
+    vertex_out: Option<Vec<(Ustr, GlslTy)>>,
 }
 
 /// The default fullscreen vertex stage -- identical to the hand-written
@@ -1512,7 +1573,12 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
             return Err(err(span, format!("shader entry: uniform name `{name}` would collide (fields, samplers, TexCoord and FragColor share the GLSL global namespace)")));
         }
     }
-    Ok(EntryShape { uniform_param, uniform_fields, samplers })
+    Ok(EntryShape {
+        global_params: uniform_param.into_iter().collect(),
+        uniform_fields,
+        samplers,
+        vertex_out: None,
+    })
 }
 
 /// Emit a COMPLETE single-file shader for one `@shader(fragment)` root: the
@@ -1609,6 +1675,384 @@ pub enum GlslProfile {
     Es300,
 }
 
+// --- A2: vertex+fragment pipeline (docs/glsl-a2-plan.md) ---------------------
+
+/// The vertex stage: which shader stage a reachability walk is emitting (drives
+/// per-stage builtin gating).
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Stage {
+    Vertex,
+    Fragment,
+}
+
+/// A classified `@shader(vertex)` entry.
+struct VertexShape {
+    /// Attribute struct param indices, in location-assignment order (per-vertex
+    /// `@attr` first, then `@instance` -- the numbering continues).
+    attr_params: Vec<usize>,
+    /// Attribute fields in location order: (name, GLSL type).
+    attrs: Vec<(Ustr, GlslTy)>,
+    /// `@uniform` struct param indices (at most one).
+    uniform_params: Vec<usize>,
+    /// Uniform fields, declaration order.
+    uniforms: Vec<(Ustr, GlslTy)>,
+    /// Sampler params (rare in vertex, but legal).
+    samplers: Vec<(usize, Ustr)>,
+    /// The varyings value-struct return type.
+    varyings_ty: TyId,
+}
+
+/// A classified varyings value struct.
+struct VaryingsShape {
+    /// Varyings EXCLUDING `position`: (name, type, `@flat`).
+    varyings: Vec<(Ustr, GlslTy, bool)>,
+}
+
+/// A classified pipeline `@shader(fragment)` entry (varyings-consuming form).
+struct FragShape {
+    /// The varyings-struct param index (always 0 -- the first param).
+    varyings_param: usize,
+    uniform_params: Vec<usize>,
+    uniforms: Vec<(Ustr, GlslTy)>,
+    samplers: Vec<(usize, Ustr)>,
+}
+
+fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
+    annos.iter().any(|a| a.name.name.as_str() == name)
+}
+
+/// The [`StructDef`] behind a nominal type, if any.
+fn struct_def_of(ws: &Workspace, ty: TyId) -> Option<&StructDef> {
+    let sname = nominal_name(ws, ty)?;
+    let &sid = ws.struct_by_name.get(&sname)?;
+    Some(&ws.modules[sid.module.index()].structs[sid.def])
+}
+
+/// Attribute/uniform fields of a struct param, GLSL-typed (a sampler-typed field
+/// rejects -- samplers are params, not struct fields).
+fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<Vec<(Ustr, GlslTy)>, CompilerError> {
+    let sd = struct_def_of(ws, ty)
+        .ok_or_else(|| err(span, format!("shader: {what} must be a value struct")))?;
+    let mut out = Vec::new();
+    for fd in &sd.fields {
+        let fty = glsl_ty(ws, fd.ty, span, &format!("{what} field `{}`", fd.name))?;
+        if fty == GlslTy::Sampler2D {
+            return Err(err(span, format!("shader: {what} field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
+        }
+        out.push((fd.name, fty));
+    }
+    Ok(out)
+}
+
+/// Classify a `@shader(vertex)` entry: value-struct params carry a role marker
+/// (`@attr` / `@instance` / `@uniform`); samplers are type-distinguished; the
+/// return type is the varyings struct.
+fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, CompilerError> {
+    let span = f.name_span;
+    let (mut per_vertex, mut instanced, mut uniform_params, mut samplers) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (i, pd) in f.param_decls.iter().enumerate() {
+        match glsl_ty(ws, pd.ty, span, "parameter") {
+            Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
+            Ok(other) => {
+                return Err(err(span, format!(
+                    "shader vertex: param `{}` ({}) must be an @attr/@instance/@uniform value struct or a Sampler2D",
+                    pd.name, other.name()
+                )));
+            }
+            Err(_) => match (has_anno(&pd.annotations, "attr"), has_anno(&pd.annotations, "instance"), has_anno(&pd.annotations, "uniform")) {
+                (true, false, false) => per_vertex.push(i),
+                (false, true, false) => instanced.push(i),
+                (false, false, true) => uniform_params.push(i),
+                (false, false, false) => {
+                    return Err(err(span, format!(
+                        "shader vertex: value-struct param `{}` needs a role marker -- @attr (per-vertex attributes), @instance (per-instance attributes), or @uniform (uniform block)",
+                        pd.name
+                    )));
+                }
+                _ => return Err(err(span, format!("shader vertex: param `{}` has conflicting role markers", pd.name))),
+            },
+        }
+    }
+    if uniform_params.len() > 1 {
+        return Err(err(span, "shader vertex: at most one @uniform struct param is allowed"));
+    }
+    let mut attr_params = Vec::new();
+    let mut attrs = Vec::new();
+    for &i in per_vertex.iter().chain(instanced.iter()) {
+        attr_params.push(i);
+        attrs.extend(struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?);
+    }
+    let mut uniforms = Vec::new();
+    for &i in &uniform_params {
+        uniforms.extend(struct_gl_fields(ws, f.param_decls[i].ty, span, "uniform")?);
+    }
+    let varyings_ty = f
+        .return_ty
+        .ok_or_else(|| err(span, "shader vertex: entry must return a varyings value struct"))?;
+    Ok(VertexShape { attr_params, attrs, uniform_params, uniforms, samplers, varyings_ty })
+}
+
+/// Classify the varyings struct: a required `position: Vec4` field (-> gl_Position,
+/// suppressed as a varying), plus the other fields as varyings. An int-typed
+/// varying without `@flat` rejects (GLSL mandates flat integer interpolation).
+fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsShape, CompilerError> {
+    let sd = struct_def_of(ws, ty)
+        .ok_or_else(|| err(span, "shader: the varyings type must be a value struct"))?;
+    let mut has_position = false;
+    let mut varyings = Vec::new();
+    for fd in &sd.fields {
+        let fty = glsl_ty(ws, fd.ty, span, &format!("varying `{}`", fd.name))?;
+        if fd.name.as_str() == "position" {
+            if fty != GlslTy::Vec4 {
+                return Err(err(span, "shader: the varyings `position` field must be Vec4 (it becomes gl_Position)"));
+            }
+            has_position = true;
+            continue;
+        }
+        let flat = has_anno(&fd.annotations, "flat");
+        if fty == GlslTy::Int && !flat {
+            return Err(err(span, format!(
+                "shader: int-typed varying `{}` needs @flat (GLSL requires flat integer interpolation)",
+                fd.name
+            )));
+        }
+        varyings.push((fd.name, fty, flat));
+    }
+    if !has_position {
+        return Err(err(span, "shader: the varyings struct must have a `position: Vec4` field (it becomes gl_Position)"));
+    }
+    Ok(VaryingsShape { varyings })
+}
+
+/// Classify a pipeline `@shader(fragment)` entry: the first param is the varyings
+/// struct (its type must equal the vertex entry's return type); the rest are
+/// `@uniform` structs and samplers.
+fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: TyId) -> Result<FragShape, CompilerError> {
+    let span = f.name_span;
+    let Some(first) = f.param_decls.first() else {
+        return Err(err(span, "shader fragment: the entry must take the varyings struct as its first param"));
+    };
+    if nominal_name(ws, first.ty).is_none() || nominal_name(ws, first.ty) != nominal_name(ws, vert_varyings_ty) {
+        return Err(err(span, "shader fragment: the first param must be the varyings struct (the vertex entry's return type) -- the pair's varyings types do not match"));
+    }
+    let (mut uniform_params, mut uniforms, mut samplers) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
+        match glsl_ty(ws, pd.ty, span, "parameter") {
+            Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
+            Ok(other) => {
+                return Err(err(span, format!("shader fragment: param `{}` ({}) must be @uniform or a Sampler2D", pd.name, other.name())));
+            }
+            Err(_) => {
+                if !has_anno(&pd.annotations, "uniform") {
+                    return Err(err(span, format!("shader fragment: value-struct param `{}` needs @uniform", pd.name)));
+                }
+                uniforms.extend(struct_gl_fields(ws, pd.ty, span, "uniform")?);
+                uniform_params.push(i);
+            }
+        }
+    }
+    if uniform_params.len() > 1 {
+        return Err(err(span, "shader fragment: at most one @uniform struct param is allowed"));
+    }
+    match f.return_ty.map(|rt| glsl_ty(ws, rt, span, "return")) {
+        Some(Ok(GlslTy::Vec4)) => {}
+        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor)")),
+    }
+    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers })
+}
+
+/// Reject fragment-only GPU builtins (frag_coord/fwidth/discard) reached from the
+/// vertex stage.
+fn reject_stage_violations<'a>(
+    ws: &Workspace,
+    stage: Stage,
+    bodies: impl Iterator<Item = &'a MirFunc>,
+    span: Span,
+) -> Result<(), CompilerError> {
+    if stage != Stage::Vertex {
+        return Ok(());
+    }
+    for mf in bodies {
+        for (_, inst) in mf.insts.iter() {
+            if let Inst::Call { func, .. } = inst {
+                let n = ws.module(func.module).functions[func.func].name;
+                if matches!(n.as_str(), "fwidth" | "frag_coord" | "discard") {
+                    return Err(err(span, format!("shader vertex: `{n}()` is a fragment-stage builtin, not available in the vertex stage")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Lower a shader entry, profile it (strict tier-0 + per-stage builtin gating),
+/// and emit its reachable helper fns + the floored-int prelude. Returns the
+/// entry's own MIR plus the concatenated helper GLSL.
+fn lower_reach_helpers(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    overloaded: &HashSet<Ustr>,
+    fref: FuncRef,
+    stage: Stage,
+) -> Result<(MirFunc, String), CompilerError> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mf = lower_function(ws, scx, fref.module, fref.func)
+        .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
+    let mut callees: Vec<FuncRef> = Vec::new();
+    profile_body(f, &mf, &mut callees)?;
+
+    let mut reach = Reach {
+        ws,
+        scx,
+        bodies: HashMap::default(),
+        gray: HashSet::default(),
+        black: HashSet::default(),
+        order: Vec::new(),
+    };
+    reach.gray.insert(fref);
+    for c in callees {
+        reach.visit(c)?;
+    }
+    reach.gray.remove(&fref);
+
+    reject_stage_violations(ws, stage, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
+
+    let (mut uses_idiv, mut uses_imod) = (false, false);
+    for body in reach.bodies.values().chain(std::iter::once(&mf)) {
+        for (_, inst) in body.insts.iter() {
+            match inst {
+                Inst::IntDiv(..) => uses_idiv = true,
+                Inst::IntMod(..) => uses_imod = true,
+                _ => {}
+            }
+        }
+    }
+    let mut helpers = String::new();
+    let prelude = helper_prelude(uses_idiv, uses_imod);
+    if !prelude.is_empty() {
+        helpers.push_str(&prelude);
+        helpers.push('\n');
+    }
+    for &href in &reach.order {
+        helpers.push_str(&emit_fn_def(ws, overloaded, href, &reach.bodies[&href])?);
+        helpers.push('\n');
+    }
+    Ok((mf, helpers))
+}
+
+/// Reject a fragment-stage read of the varyings `position` field: it is
+/// gl_Position (vertex-only), not a fragment input.
+fn reject_position_read(ws: &Workspace, mf: &MirFunc, varyings_cell: Idx<Cell>, span: Span) -> Result<(), CompilerError> {
+    let _ = ws;
+    for (_, inst) in mf.insts.iter() {
+        if let Inst::Field { base, field } = inst {
+            if field.as_str() == "position" && matches!(mf.insts[*base], Inst::Load(c) if c == varyings_cell) {
+                return Err(err(span, "shader fragment: `position` is gl_Position (vertex-only) and is not emitted as a varying -- it cannot be read in the fragment stage"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit_vertex_stage(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    overloaded: &HashSet<Ustr>,
+    fref: FuncRef,
+    v: &VertexShape,
+    varyings: &VaryingsShape,
+) -> Result<String, CompilerError> {
+    let shape = EntryShape {
+        global_params: v.attr_params.iter().copied().chain(v.uniform_params.iter().copied()).collect(),
+        uniform_fields: v.attrs.iter().copied().chain(v.uniforms.iter().copied()).collect(),
+        samplers: v.samplers.clone(),
+        vertex_out: Some(varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect()),
+    };
+    let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Vertex)?;
+
+    let mut out = String::new();
+    for (loc, (n, t)) in v.attrs.iter().enumerate() {
+        out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
+    }
+    out.push('\n');
+    if !v.uniforms.is_empty() {
+        for (n, t) in &v.uniforms {
+            out.push_str(&format!("uniform {} {};\n", t.name(), n));
+        }
+        out.push('\n');
+    }
+    for (n, t, flat) in &varyings.varyings {
+        let q = if *flat { "flat " } else { "" };
+        out.push_str(&format!("{q}out {} {};\n", t.name(), n));
+    }
+    out.push('\n');
+    out.push_str(&helpers);
+    out.push_str(&emit_fn_def_with(ws, overloaded, fref, &mf, Some(&shape))?);
+    Ok(out)
+}
+
+fn emit_fragment_stage(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    overloaded: &HashSet<Ustr>,
+    fref: FuncRef,
+    fs: &FragShape,
+    varyings: &VaryingsShape,
+) -> Result<String, CompilerError> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let shape = EntryShape {
+        global_params: std::iter::once(fs.varyings_param).chain(fs.uniform_params.iter().copied()).collect(),
+        uniform_fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).chain(fs.uniforms.iter().copied()).collect(),
+        samplers: fs.samplers.clone(),
+        vertex_out: None,
+    };
+    let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Fragment)?;
+    reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
+
+    let mut out = String::new();
+    for (n, t, flat) in &varyings.varyings {
+        let q = if *flat { "flat " } else { "" };
+        out.push_str(&format!("{q}in {} {};\n", t.name(), n));
+    }
+    out.push_str("out vec4 FragColor;\n\n");
+    for (n, t) in &fs.uniforms {
+        out.push_str(&format!("uniform {} {};\n", t.name(), n));
+    }
+    for (_, n) in &fs.samplers {
+        out.push_str(&format!("uniform sampler2D {};\n", n));
+    }
+    out.push('\n');
+    out.push_str(&helpers);
+    out.push_str(&emit_fn_def_with(ws, overloaded, fref, &mf, Some(&shape))?);
+    out.push('\n');
+    out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
+    Ok(out)
+}
+
+/// Reject duplicate global names within a stage (attributes, uniforms, varyings,
+/// samplers, and the reserved gl_Position/FragColor share the GLSL namespace).
+fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &FragShape, span: Span) -> Result<(), CompilerError> {
+    let check = |names: &mut dyn Iterator<Item = Ustr>, reserved: &str| -> Result<(), CompilerError> {
+        let mut seen: HashSet<Ustr> = [Ustr::from(reserved)].into_iter().collect();
+        for n in names {
+            if !seen.insert(n) {
+                return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and the reserved name share the GLSL namespace)")));
+            }
+        }
+        Ok(())
+    };
+    let mut vnames = v.attrs.iter().map(|&(n, _)| n)
+        .chain(v.uniforms.iter().map(|&(n, _)| n))
+        .chain(varyings.varyings.iter().map(|&(n, _, _)| n));
+    check(&mut vnames, "gl_Position")?;
+    let mut fnames = varyings.varyings.iter().map(|&(n, _, _)| n)
+        .chain(fs.uniforms.iter().map(|&(n, _)| n))
+        .chain(fs.samplers.iter().map(|&(_, n)| n));
+    check(&mut fnames, "FragColor")?;
+    Ok(())
+}
+
 /// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
 /// `#ifdef VERTEX`/`#ifdef PIXEL` file (docs/glsl-a2-plan.md). The vertex entry's
 /// return type (the varyings value struct) must be exactly the fragment entry's
@@ -1617,14 +2061,40 @@ pub enum GlslProfile {
 /// `@uniform` (uniform block); the varyings `position: Vec4` field drives
 /// `gl_Position` and is suppressed as a varying.
 pub fn emit_shader_pipeline(
-    _ws: &Workspace,
-    _mid: ModuleId,
-    _vert_root: &str,
-    _frag_root: &str,
-    _profile: GlslProfile,
+    ws: &Workspace,
+    mid: ModuleId,
+    vert_root: &str,
+    frag_root: &str,
+    profile: GlslProfile,
 ) -> Result<String, CompilerError> {
-    // RED scaffold: the A2a vertex+fragment emitter is not implemented yet.
-    Err(err(Span::default(), "A2 shader pipeline not implemented yet"))
+    let scx = ScalarCtx::new_values_first_class(ws);
+    let overloaded = compute_overloaded_names(ws);
+    let vfref = resolve_root(ws, mid, vert_root)?;
+    let ffref = resolve_root(ws, mid, frag_root)?;
+    let vf = &ws.module(vfref.module).functions[vfref.func];
+    let ff = &ws.module(ffref.module).functions[ffref.func];
+    if shader_stage(vf) != Some("vertex") {
+        return Err(err(vf.name_span, format!("shader pipeline: the vertex root `{vert_root}` must carry @shader(vertex)")));
+    }
+    if shader_stage(ff) != Some("fragment") {
+        return Err(err(ff.name_span, format!("shader pipeline: the fragment root `{frag_root}` must carry @shader(fragment)")));
+    }
+
+    let vshape = classify_vertex(ws, vf)?;
+    let varyings = classify_varyings(ws, vshape.varyings_ty, vf.name_span)?;
+    let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
+    check_pipeline_collisions(&vshape, &varyings, &fshape, vf.name_span)?;
+
+    let vertex_block = emit_vertex_stage(ws, &scx, &overloaded, vfref, &vshape, &varyings)?;
+    let pixel_block = emit_fragment_stage(ws, &scx, &overloaded, ffref, &fshape, &varyings)?;
+
+    let (version, precision) = match profile {
+        GlslProfile::Core330 => ("#version 330 core", ""),
+        GlslProfile::Es300 => ("#version 300 es", "precision highp float;\n\n"),
+    };
+    Ok(format!(
+        "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
+    ))
 }
 
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
