@@ -212,10 +212,22 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
         Err(errs) => return js_compile_failure(file, &src, &errs),
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let tests: Vec<(FuncRef, skull::SkullTest)> = skull::module_tests_with_ids(&ws, user_mid)
-        .into_iter()
-        .map(|(fid, t)| (FuncRef { module: user_mid, func: fid }, t))
-        .collect();
+    // A discovery error (malformed `@test` annotation on a bone-accepted file)
+    // is a rejection, never an expected compile failure -- so it does NOT route
+    // through `js_compile_failure`'s expect-failure escape.
+    let tests: Vec<(FuncRef, skull::SkullTest)> = match skull::module_tests_with_ids(&ws, user_mid)
+    {
+        Ok(tests) => tests
+            .into_iter()
+            .map(|(fid, t)| (FuncRef { module: user_mid, func: fid }, t))
+            .collect(),
+        Err(e) => {
+            return JsUnitOutcome::UnitFail {
+                reason: categorize(&e.message),
+                rendered: crate::skull_backend::render_file_errs(file, &src, &[e]),
+            }
+        }
+    };
     js_run_tests(&ws, &tests)
 }
 
@@ -250,7 +262,15 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
-    let tests = crate::skull_backend::collect_package_test_fns(&ws, dir);
+    let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
+        Ok(tests) => tests,
+        Err(e) => {
+            return JsUnitOutcome::UnitFail {
+                reason: categorize(&e.message),
+                rendered: e.message,
+            }
+        }
+    };
     js_run_tests(&ws, &tests)
 }
 

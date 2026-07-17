@@ -26,7 +26,25 @@ use std::time::{Duration, Instant};
 /// symbols are referenced by name (resolved at runtime by a real stdlib
 /// prelude, or simply not called under the load-only validity gate).
 fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<CompilerError>> {
-    Ok(skull_emit_full(file, src)?.0)
+    Ok(skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?.0)
+}
+
+/// A [`skull_emit_full`] failure. `Discovery` (a malformed `@test` annotation on
+/// a file bone ACCEPTED) is split from `Compile` so the expect-compile-failure
+/// escape in [`skull_build`] never absorbs it -- `@test(expect_failure = true,
+/// returns = 42)` must reject, not count as an expected compile failure.
+enum EmitFullErr {
+    Compile(Vec<CompilerError>),
+    Discovery(CompilerError),
+}
+
+impl EmitFullErr {
+    fn into_errs(self) -> Vec<CompilerError> {
+        match self {
+            EmitFullErr::Compile(errs) => errs,
+            EmitFullErr::Discovery(e) => vec![e],
+        }
+    }
 }
 
 /// Emit the workspace and also discover the user module's `@test` functions
@@ -35,12 +53,14 @@ fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<Compiler
 fn skull_emit_full(
     file: &str,
     src: &str,
-) -> std::result::Result<(String, Vec<skull::SkullTest>), Vec<CompilerError>> {
-    let user = skull_parser::parse_module(src, ustr::Ustr::from(file)).map_err(|e| vec![e])?;
+) -> std::result::Result<(String, Vec<skull::SkullTest>), EmitFullErr> {
+    let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
+        .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
-    let ws = crate::bone_backend::check_with_stdlib([user])?;
+    let ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid).map_err(|e| vec![e])?;
+    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
+        .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let (lua, skipped) = (emit.lua, emit.skipped);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
         eprintln!("skull: {} stdlib fns skipped", skipped.len());
@@ -48,7 +68,7 @@ fn skull_emit_full(
             eprintln!("  {name}: {reason}");
         }
     }
-    let tests = skull::module_tests(&ws, user_mid);
+    let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
     Ok((lua, tests))
 }
 
@@ -436,7 +456,7 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
     // skull codegen gap; both carry a `CompilerError`.
     let (lua, tests) = match skull_emit_full(file, src) {
         Ok(v) => v,
-        Err(errs) => {
+        Err(EmitFullErr::Compile(errs)) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
@@ -446,6 +466,12 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
             return Err(SkullFailure {
                 reason: categorize(&errs[0].message),
                 rendered: render_file_errs(file, src, &errs),
+            });
+        }
+        Err(EmitFullErr::Discovery(e)) => {
+            return Err(SkullFailure {
+                reason: categorize(&e.message),
+                rendered: render_file_errs(file, src, &[e]),
             });
         }
     };
@@ -569,7 +595,10 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
             });
         }
     };
-    let tests = collect_package_tests(&ws, dir);
+    let tests = collect_package_tests(&ws, dir).map_err(|e| SkullFailure {
+        reason: categorize(&e.message),
+        rendered: render_project_err(&sources, &e),
+    })?;
     run_emitted_tests(&lua, &tests)
 }
 
@@ -580,8 +609,8 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
 fn collect_package_tests(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
-) -> Vec<skull::SkullTest> {
-    collect_package_test_fns(ws, dir).into_iter().map(|(_, t)| t).collect()
+) -> std::result::Result<Vec<skull::SkullTest>, CompilerError> {
+    Ok(collect_package_test_fns(ws, dir)?.into_iter().map(|(_, t)| t).collect())
 }
 
 /// [`collect_package_tests`] carrying each test's `FuncRef` (the JS executor
@@ -589,7 +618,7 @@ fn collect_package_tests(
 pub(crate) fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
-) -> Vec<(skull_mir::mir::FuncRef, skull::SkullTest)> {
+) -> std::result::Result<Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>, CompilerError> {
     use bone_semantic::prelude::ModuleId;
     let root = std::path::Path::new(dir)
         .canonicalize()
@@ -605,13 +634,13 @@ pub(crate) fn collect_package_test_fns(
             .unwrap_or(false);
         if under {
             out.extend(
-                skull::module_tests_with_ids(ws, m.id)
+                skull::module_tests_with_ids(ws, m.id)?
                     .into_iter()
                     .map(|(fid, t)| (skull_mir::mir::FuncRef { module: m.id, func: fid }, t)),
             );
         }
     }
-    out
+    Ok(out)
 }
 
 /// Keep emitted-Lua dumps in error reports manageable.
@@ -2473,7 +2502,7 @@ mod overlay_runtime_tests {
         let Ok(ws) = crate::bone_backend::check_with_stdlib([user]) else { return r };
         let mid = crate::bone_backend::entry_module_id(&ws, user_file);
         let Ok((full, mut cache)) = skull::mir_emit::emit_full(&ws, mid) else { return r };
-        let tests = skull::module_tests(&ws, mid);
+        let Ok(tests) = skull::module_tests(&ws, mid) else { return r };
         if tests.is_empty() {
             return r;
         }

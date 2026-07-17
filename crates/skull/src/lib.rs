@@ -133,9 +133,23 @@ pub fn user_module_id(ws: &Workspace) -> Result<ModuleId, CompilerError> {
 }
 /// A `@test` function discovered in a module: the Lua name to call (a `@test`
 /// fn is never mangled) and the expected stdout of `@test(output = "...")`.
+#[derive(Clone, Debug)]
 pub struct SkullTest {
     pub name: String,
     pub output: Option<String>,
+    /// `@test(returns = <literal>)`: the fn's return value is captured by the
+    /// backend harness and compared HOST-side against this pinned literal.
+    pub returns: Option<ValueExpect>,
+}
+
+/// The pinned literal of a `@test(returns = ...)` value test. Comparison policy
+/// (int/bool exact, float relative tolerance) lives host-side in
+/// `rock-cli/src/test_protocol.rs`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ValueExpect {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
 }
 
 /// Unescape a `@test(output = "...")` string the way rock's test runner does:
@@ -167,8 +181,11 @@ fn unescape_expected(s: &str) -> String {
 }
 
 /// The `@test` functions in `mid`, with their expected outputs (if any).
-pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Vec<SkullTest> {
-    module_tests_with_ids(ws, mid).into_iter().map(|(_, t)| t).collect()
+/// `Err` = a malformed `@test` annotation (bad `returns` literal, or
+/// `returns` + `expect_failure` together) -- a spanned rejection, never a
+/// silently-ignored annotation.
+pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Result<Vec<SkullTest>, CompilerError> {
+    Ok(module_tests_with_ids(ws, mid)?.into_iter().map(|(_, t)| t).collect())
 }
 
 /// [`module_tests`] carrying each test's `Idx<Function>` too -- the JS test
@@ -176,9 +193,10 @@ pub fn module_tests(ws: &Workspace, mid: ModuleId) -> Vec<SkullTest> {
 pub fn module_tests_with_ids(
     ws: &Workspace,
     mid: ModuleId,
-) -> Vec<(bone_semantic::prelude::Idx<bone_semantic::hir::Function>, SkullTest)> {
+) -> Result<Vec<(bone_semantic::prelude::Idx<bone_semantic::hir::Function>, SkullTest)>, CompilerError>
+{
     let Some(module) = ws.modules.get(mid.index()) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut out = Vec::new();
     for (fid, f) in module.functions.iter() {
@@ -190,14 +208,46 @@ pub fn module_tests_with_ids(
         if f.annotations.iter().any(|a| a.name.name.as_str() == "ignore") {
             continue;
         }
+        let returns = match test_ann
+            .args
+            .iter()
+            .find(|arg| arg.name.as_ref().map_or(false, |n| n.name.as_str() == "returns"))
+        {
+            Some(arg) => Some(match &arg.value {
+                bone_semantic::hir::AnnoValue::Int(i) => ValueExpect::Int(*i),
+                bone_semantic::hir::AnnoValue::Float(f) => ValueExpect::Float(*f),
+                bone_semantic::hir::AnnoValue::Bool(b) => ValueExpect::Bool(*b),
+                _ => {
+                    return Err(CompilerError::new_with_label(
+                        test_ann.span,
+                        format!(
+                            "@test on `{}`: returns expects an int/float/bool literal",
+                            f.name.as_str()
+                        ),
+                    ));
+                }
+            }),
+            None => None,
+        };
         // A `@test(expect_failure = true)` asserts a COMPILE error, not runtime
         // output — the execution oracle can't verify rejection (and an accepted
         // one is a type-checker gap, not a codegen issue). Skip it here; the
-        // compile-fail / backend-diff harnesses cover rejection.
+        // compile-fail / backend-diff harnesses cover rejection. Combining it
+        // with `returns` (a runtime-value assertion) is contradictory.
         if test_ann.args.iter().any(|arg| {
             arg.name.as_ref().map_or(false, |n| n.name.as_str() == "expect_failure")
                 && matches!(arg.value, bone_semantic::hir::AnnoValue::Bool(true))
         }) {
+            if returns.is_some() {
+                return Err(CompilerError::new_with_label(
+                    test_ann.span,
+                    format!(
+                        "@test on `{}`: returns and expect_failure are contradictory \
+                         (expect_failure asserts a compile error; the fn never runs)",
+                        f.name.as_str()
+                    ),
+                ));
+            }
             continue;
         }
         let output = test_ann
@@ -213,10 +263,11 @@ pub fn module_tests_with_ids(
             SkullTest {
                 name: f.name.as_str().to_string(),
                 output,
+                returns,
             },
         ));
     }
-    out
+    Ok(out)
 }
 
 /// Emit the whole workspace: every stdlib module (leniently) followed by the
