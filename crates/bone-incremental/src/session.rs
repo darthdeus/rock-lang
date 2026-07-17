@@ -341,11 +341,10 @@ impl Session {
 
             let mid = session.ws.intern_module(module.file);
             if session.warm_mids.contains(&mid) {
-                comp_error!(
-                    Span::unknown(),
-                    "bone session: `{}` collides with a warm module id",
-                    path
-                );
+                // A stdlib file present in the initial set IS the warm module --
+                // skip the user copy (adding it would self-collide on every
+                // stdlib type); the warm build already covers it.
+                continue;
             }
 
             let prints = item_prints(&module, &text);
@@ -465,11 +464,15 @@ impl Session {
         let syntax_errors = module.recovery_errors.clone();
         let mid = self.ws.intern_module(module.file);
         if self.warm_mids.contains(&mid) {
-            comp_error!(
-                Span::unknown(),
-                "bone session: `{}` collides with a warm module id",
-                path
-            );
+            // Opening a warm (stdlib) file: it IS the warm module, not a second
+            // copy. No-op rather than adding a duplicate that would self-collide
+            // on every stdlib type. Queries on this path resolve to the warm
+            // module; its real diagnostics (if any) come from the warm build.
+            return Ok(UpdateResult {
+                tier: UpdateTier::NoChange,
+                reinferred: Vec::new(),
+                relowered: Vec::new(),
+            });
         }
 
         let new_prints = item_prints(&module, text);

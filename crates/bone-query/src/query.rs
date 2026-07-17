@@ -294,6 +294,7 @@ pub fn hover_at(
     mid: ModuleId,
     inf: &InferenceResult,
     offset: usize,
+    sources: Option<&SourceMap>,
 ) -> Option<(String, Span)> {
     let module = ws.modules.get(mid.index())?;
 
@@ -346,12 +347,15 @@ pub fn hover_at(
                                     return Some((def, span));
                                 }
                             }
-                            hir::Expr::Call { callee: hir::Callee::Unresolved { .. }, .. } => {
-                                if let Some((cmid, fid)) = bi.resolved_overload_calls.get(&e) {
-                                    let f = &ws.modules.get(cmid.index())?.functions[*fid];
-                                    let sig =
-                                        render_fn_signature(ws, f.name, f);
-                                    return Some((fenced(&sig), span));
+                            hir::Expr::Call {
+                                callee: hir::Callee::Unresolved { name, name_span },
+                                ..
+                            } => {
+                                let selected = bi.resolved_overload_calls.get(&e).copied();
+                                if let Some(h) =
+                                    render_call_overloads_hover(ws, *name, selected, sources)
+                                {
+                                    return Some((h, *name_span));
                                 }
                             }
                             // Variant construction (`Enum::Variant(..)`): the
@@ -412,7 +416,7 @@ pub fn hover_at(
     }
 
     // Item-level: a declaration name not present in any body.
-    for f in module.functions.values() {
+    for (fid, f) in module.functions.iter() {
         // Skip compiler-generated ops (e.g. a newtype's `__op_add`): their
         // name_span is the newtype/decl name, so they'd shadow the real
         // declaration's hover. Users never hover these.
@@ -421,7 +425,7 @@ pub fn hover_at(
         }
         let (s, e) = f.name_span.offset_range;
         if s <= offset && offset < e {
-            let sig = render_fn_signature(ws, f.name, f);
+            let sig = render_fn_signature_with_defaults(ws, mid, fid, sources);
             return Some((fenced(&sig), f.name_span));
         }
     }
@@ -486,6 +490,63 @@ fn fenced(body: &str) -> String {
     format!("```rock\n{}\n```", body)
 }
 
+/// Hover markup for a call to `name`: every overload's signature, fenced. When
+/// bone resolved the call to one overload (`selected`), that signature leads and
+/// the rest follow under a labeled fence; an unresolved/ambiguous call lists all
+/// of them. `None` if no function by that name exists. A lone overload renders
+/// as the bare fenced signature (unchanged single-fn hover).
+fn render_call_overloads_hover(
+    ws: &Workspace,
+    name: Ustr,
+    selected: Option<(ModuleId, Idx<Function>)>,
+    sources: Option<&SourceMap>,
+) -> Option<String> {
+    let mut all: Vec<(ModuleId, Idx<Function>)> = Vec::new();
+    for m in ws.modules.iter() {
+        if let Some(fns) = m.functions_by_name.get(&name) {
+            all.extend(fns.iter().copied());
+        }
+    }
+    if all.is_empty() {
+        return None;
+    }
+
+    // Selected overload first, then the rest in discovery order.
+    let mut ordered = Vec::with_capacity(all.len());
+    if let Some(sel) = selected.filter(|s| all.contains(s)) {
+        ordered.push(sel);
+        ordered.extend(all.iter().copied().filter(|&fq| fq != sel));
+    } else {
+        ordered = all;
+    }
+
+    let sig = |(m, fid): (ModuleId, Idx<Function>)| {
+        render_fn_signature_with_defaults(ws, m, fid, sources)
+    };
+
+    if ordered.len() == 1 {
+        return Some(fenced(&sig(ordered[0])));
+    }
+
+    let others = ordered.len() - 1;
+    let mut out = String::new();
+    if selected.is_some() {
+        out.push_str(&fenced(&sig(ordered[0])));
+        out.push_str(&format!(
+            "\n\n*+{} other overload{}:*\n",
+            others,
+            if others == 1 { "" } else { "s" }
+        ));
+        out.push_str(&fenced(
+            &ordered[1..].iter().map(|&fq| sig(fq)).collect::<Vec<_>>().join("\n"),
+        ));
+    } else {
+        out.push_str(&format!("*{} overloads:*\n", ordered.len()));
+        out.push_str(&fenced(&ordered.iter().map(|&fq| sig(fq)).collect::<Vec<_>>().join("\n")));
+    }
+    Some(out)
+}
+
 /// Hover for a function's SIGNATURE region -- `fn` keyword, name, param parens,
 /// `->`, return type -- i.e. anything in the function's span before its body's
 /// opening `{`. Needs `src` to locate that brace (no `{` appears in a Rock
@@ -497,9 +558,10 @@ pub fn fn_signature_hover(
     mid: ModuleId,
     src: &str,
     offset: usize,
+    sources: Option<&SourceMap>,
 ) -> Option<(String, Span)> {
     let module = ws.modules.get(mid.index())?;
-    for f in module.functions.values() {
+    for (fid, f) in module.functions.iter() {
         if f.name.as_str().starts_with("__") {
             continue;
         }
@@ -511,7 +573,7 @@ pub fn fn_signature_hover(
         // extern/abstract fn with no body).
         let body_open = src.get(s..e).and_then(|seg| seg.find('{')).map_or(e, |i| s + i);
         if offset < body_open {
-            let sig = render_fn_signature(ws, f.name, f);
+            let sig = render_fn_signature_with_defaults(ws, mid, fid, sources);
             return Some((fenced(&sig), f.name_span));
         }
     }
@@ -4546,6 +4608,65 @@ pub(crate) fn render_fn_signature(ws: &Workspace, name: ustr::Ustr, f: &bone_sem
     format!("fn {}({}){}", name, params.join(", "), ret)
 }
 
+/// File-path-keyed source map (the LSP's per-project `texts`), threaded into the
+/// signature renderers so a param's default *value* can be sliced from its
+/// defining module.
+pub type SourceMap = std::collections::HashMap<String, String>;
+
+/// Like [`render_fn_signature`] but shows optional params as `name: T = <default>`.
+/// The default's exact source text is sliced from the defining module via
+/// `sources`; an optional param whose default source can't be reached (no
+/// `sources`, or an inline(lua) fn with no lowered body) renders `name: T = ..`,
+/// which still marks it optional rather than hiding it.
+pub(crate) fn render_fn_signature_with_defaults(
+    ws: &Workspace,
+    fmid: ModuleId,
+    fid: Idx<Function>,
+    sources: Option<&SourceMap>,
+) -> String {
+    let module = &ws.modules[fmid.index()];
+    let f = &module.functions[fid];
+    let body = module.bodies.get(&bone_semantic::hir::BodyOwner::Function(fid));
+    let params: Vec<String> = f
+        .param_decls
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let base = format!("{}: {}", p.name, ws.render(None, p.ty));
+            if !p.has_default {
+                return base;
+            }
+            match param_default_src(ws, fmid, body, i, sources) {
+                Some(v) => format!("{base} = {v}"),
+                None => format!("{base} = .."),
+            }
+        })
+        .collect();
+    let ret = f
+        .return_ty
+        .map(|t| format!(" -> {}", ws.render(None, t)))
+        .unwrap_or_default();
+    format!("fn {}({}){}", f.name, params.join(", "), ret)
+}
+
+/// Source text of param `param_idx`'s default expression, sliced from the
+/// defining module. `None` if no default expr is recorded or the module's source
+/// isn't in `sources`.
+fn param_default_src(
+    ws: &Workspace,
+    fmid: ModuleId,
+    body: Option<&bone_semantic::hir::Body>,
+    param_idx: usize,
+    sources: Option<&SourceMap>,
+) -> Option<String> {
+    let body = body?;
+    let dexpr = (*body.param_defaults.get(param_idx)?)?;
+    let (s, e) = body.expr_spans.get(dexpr)?.offset_range;
+    let file = ws.modules[fmid.index()].file;
+    let src = sources?.get(file.as_str())?;
+    src.get(s..e).map(|t| t.trim().to_string())
+}
+
 /// Per-function ctags signature pieces, keyed by declaration-span start:
 /// `(params, returns)` where `params` is `"(a: int, b: int)"` and `returns` is
 /// the rendered return type (None for a unit/no-return fn). Split form -- not
@@ -4635,6 +4756,7 @@ pub fn signature_help(
     mid: ModuleId,
     inf: Option<&InferenceResult>,
     offset: usize,
+    sources: Option<&SourceMap>,
 ) -> Option<(Vec<SignatureEntry>, Span)> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
@@ -4665,14 +4787,13 @@ pub fn signature_help(
                 .and_then(|inf| inf.per_fn.get(&owner))
                 .and_then(|bi| bi.resolved_overload_calls.get(&e))
             {
-                let f = &ws.modules.get(cmid.index())?.functions[*fid];
-                return Some((vec![fn_sig_entry(ws, f.name, f)], call_span));
+                return Some((vec![fn_sig_entry(ws, *cmid, *fid, sources)], call_span));
             }
             // Tier 2: by-name overload list (resolution was ambiguous/absent).
             let hir::Callee::Unresolved { name, .. } = callee else {
                 return None;
             };
-            let sigs = functions_named(ws, *name);
+            let sigs = functions_named(ws, *name, sources);
             (!sigs.is_empty()).then_some((sigs, call_span))
         }
         hir::Expr::StructLiteral { name, .. } => {
@@ -4682,25 +4803,35 @@ pub fn signature_help(
     }
 }
 
-/// Render one function as a `SignatureEntry` (label + per-param labels).
-fn fn_sig_entry(ws: &Workspace, name: Ustr, f: &Function) -> SignatureEntry {
+/// Render one function as a `SignatureEntry`: the label shows optional params'
+/// defaults (`= <value>`), while the per-param labels stay bare `name: T` so the
+/// client's active-param highlight still finds each as a substring of the label.
+fn fn_sig_entry(
+    ws: &Workspace,
+    fmid: ModuleId,
+    fid: Idx<Function>,
+    sources: Option<&SourceMap>,
+) -> SignatureEntry {
+    let f = &ws.modules[fmid.index()].functions[fid];
     let params = f
         .param_decls
         .iter()
         .map(|p| format!("{}: {}", p.name, ws.render(None, p.ty)))
         .collect();
-    SignatureEntry { label: render_fn_signature(ws, name, f), params }
+    SignatureEntry {
+        label: render_fn_signature_with_defaults(ws, fmid, fid, sources),
+        params,
+    }
 }
 
 /// Every function in the workspace named `name` (user code + stdlib), as the
 /// overload list a signature-help popup shows when resolution is ambiguous.
-fn functions_named(ws: &Workspace, name: Ustr) -> Vec<SignatureEntry> {
+fn functions_named(ws: &Workspace, name: Ustr, sources: Option<&SourceMap>) -> Vec<SignatureEntry> {
     let mut out = Vec::new();
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
             for (fmid, fid) in fns {
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                out.push(fn_sig_entry(ws, name, f));
+                out.push(fn_sig_entry(ws, *fmid, *fid, sources));
             }
         }
     }

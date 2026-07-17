@@ -634,6 +634,34 @@ fn signature_help_renders_callee_and_active_param() {
 }
 
 #[test]
+fn signature_help_shows_param_defaults() {
+    // Optional params render `name: T = <default>` (value sliced from source), so
+    // the popup doesn't make defaulted params look required.
+    let src = "fn plot(x: int, y: int = 0, label: string = \"pt\") {\n}\nfn main() {\n  plot(1)\n}\n";
+    let bone = fresh(src);
+    // cursor inside `plot(1)` args.
+    let sh = bone
+        .signature_help(PATH, Position::new(3, 7))
+        .expect("signature help resolves plot(...)");
+    let label = &sh.signatures[0].label;
+    assert!(label.contains("y: int = 0"), "default value missing: {label:?}");
+    assert!(label.contains("label: string = \"pt\""), "string default missing: {label:?}");
+    assert!(!label.contains("y: int,"), "optional param rendered as required: {label:?}");
+}
+
+#[test]
+fn hover_on_call_shows_param_defaults() {
+    // Hovering the callee also surfaces defaults, matching signature help.
+    let src = "fn plot(x: int, y: int = 0) {\n}\nfn main() {\n  plot(1)\n}\n";
+    let bone = fresh(src);
+    let h = match bone.hover(PATH, Position::new(3, 3)).map(|h| h.contents) {
+        Some(lsp_types::HoverContents::Markup(m)) => m.value,
+        _ => String::new(),
+    };
+    assert!(h.contains("y: int = 0"), "hover default value missing: {h:?}");
+}
+
+#[test]
 fn definition_jumps_to_local_binding() {
     // Via bone_query::query::definition_at: a local-variable use resolves to its decl.
     let src = "fn f() -> int {\n  let count = 1\n  return count\n}\n";

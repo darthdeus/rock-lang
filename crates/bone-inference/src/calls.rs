@@ -81,6 +81,21 @@ impl From<SelectError> for CompilerError {
     }
 }
 
+/// One candidate's signature for the "No overload" error list: `name(p: T, ..) -> R`.
+fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
+    let f = &gamma.workspace.module(mid).functions[fid];
+    let params = f
+        .param_decls
+        .iter()
+        .map(|p| format!("{}: {}", p.name, gamma.workspace.render(None, p.ty)))
+        .join(", ");
+    let ret = f
+        .return_ty
+        .map(|t| format!(" -> {}", gamma.workspace.render(None, t)))
+        .unwrap_or_default();
+    format!("{}({}){}", f.name, params, ret)
+}
+
 pub(crate) fn select_overload(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -139,15 +154,19 @@ pub(crate) fn select_overload(
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
                 .join(", ");
+            let overloads = candidates
+                .iter()
+                .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
+                .join("\n");
             Err(SelectError::NoFit(CompilerError::new_with_label(
                 span,
                 match bound_fail {
                     Some(be) => format!(
-                        "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}",
+                        "No overload for `{name}` with argument types ({args_msg}); the `Iterator`-bounded candidate was rejected: {}\navailable overloads:\n{overloads}",
                         be.message
                     ),
                     None => format!(
-                        "No overload for `{name}` with argument types ({args_msg})"
+                        "No overload for `{name}` with argument types ({args_msg})\navailable overloads:\n{overloads}"
                     ),
                 },
             )))

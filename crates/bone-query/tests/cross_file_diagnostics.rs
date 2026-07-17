@@ -192,3 +192,40 @@ fn multi_label_hint_publishes_a_diagnostic_per_line() {
         diags.iter().map(|d| (d.range.start.line, d.message.as_str())).collect::<Vec<_>>()
     );
 }
+
+/// An interface-level error that only the whole-project (batch) pass can see --
+/// two files declaring `struct Foo` -> "duplicate struct `Foo` across modules" --
+/// must reach the editor. Regression: `batch_load_for_file` logged the batch
+/// error and fell back to per-file loading, silently DROPPING it, so the LSP
+/// showed nothing while `rock compile` rejected the same program.
+#[test]
+fn duplicate_struct_across_modules_surfaces_in_lsp() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"xp\"\n").unwrap();
+    std::fs::write(dir.path().join("a.rock"), "struct Foo { x: int }\nfn main() -> int { 0 }\n").unwrap();
+    std::fs::write(dir.path().join("b.rock"), "struct Foo { y: int }\nfn helper() -> int { 1 }\n").unwrap();
+    let a = bone_query::canonicalize_lenient(&dir.path().join("a.rock").to_string_lossy());
+
+    let has_dup = |per: &[(String, Vec<lsp_types::Diagnostic>)]| {
+        per.iter().flat_map(|(_, d)| d).any(|d| d.message.contains("duplicate struct `Foo`"))
+    };
+
+    let mut bone = BoneWorkspace::new();
+    let d0 = bone.update(&a, std::fs::read_to_string(&a).unwrap());
+    assert!(has_dup(&d0), "duplicate struct across modules must surface: {d0:?}");
+    // `diagnostics_for` (the one-shot CLI path) must agree with `update`.
+    assert!(
+        bone.diagnostics_for(&a).iter().any(|d| d.message.contains("duplicate struct `Foo`")),
+        "diagnostics_for must also surface the duplicate: {:?}",
+        bone.diagnostics_for(&a)
+    );
+
+    // Fix b.rock (rename its Foo): the duplicate must CLEAR, not stick stale.
+    let b = bone_query::canonicalize_lenient(&dir.path().join("b.rock").to_string_lossy());
+    let d1 = bone.update(&b, "struct Bar { y: int }\nfn helper() -> int { 1 }\n".to_string());
+    assert!(!has_dup(&d1), "renaming b.rock's struct must clear the duplicate: {d1:?}");
+    assert!(
+        !bone.diagnostics_for(&a).iter().any(|d| d.message.contains("duplicate struct")),
+        "duplicate must be gone from diagnostics_for after the fix"
+    );
+}
