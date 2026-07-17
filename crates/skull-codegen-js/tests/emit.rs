@@ -248,13 +248,26 @@ function native_buffer_float(c0) {
     panic!("no native_buffer_float in stdlib");
 }
 
-// Reject-don't-fallback on the overloaded `get`/2 key: a Vec receiver must NOT
-// pick up the NativeBuffer template. Vec indexing likewise rejects.
+// Vec indexing (`xs[i]`) emits the bounds-checked shim (T4). The overloaded
+// `get`/2 key still rejects for a Vec receiver -- reject-don't-fallback keeps a
+// Vec `.get` from picking up the NativeBuffer template (co-emitting `vec_get` is
+// future work).
 #[test]
-fn vec_get_and_index_reject() {
+fn vec_index_emits_get_still_rejects() {
     let ws = ws_with(
-        "fn vget(xs: [int]) -> int? { return xs.get(0) }\n\
-         fn vidx(xs: [int]) -> int { return xs[0] }\n",
+        "fn vidx(xs: [int]) -> int { return xs[0] }\n\
+         fn vget(xs: [int]) -> int? { return xs.get(0) }\n",
+    );
+    let vidx = lower_test_fn(&ws, "vidx");
+    assert_eq!(
+        skull_codegen_js::emit::emit_fn(&ws, &vidx, "vidx").unwrap(),
+        "\
+function vidx(c0) {
+  let v0 = c0;
+  let v2 = __vec_checked_get(v0, 0);
+  return v2;
+}
+"
     );
     let vget = lower_test_fn(&ws, "vget");
     let e = skull_codegen_js::emit::emit_fn(&ws, &vget, "vget").unwrap_err();
@@ -263,29 +276,28 @@ fn vec_get_and_index_reject() {
         "wrong reject: {}",
         e.message
     );
-    let vidx = lower_test_fn(&ws, "vidx");
-    let e = skull_codegen_js::emit::emit_fn(&ws, &vidx, "vidx").unwrap_err();
-    assert!(
-        e.message.contains("Vec indexing not supported"),
-        "wrong reject: {}",
-        e.message
-    );
 }
 
-// A struct outside the NativeBuffer family rejects at construction -- the
-// subset gate that keeps arbitrary structs from kinda-working as bare object
-// literals (no metatable/__ty semantics on JS).
+// A general (non-NativeBuffer) struct constructs as a `{__ty: "Name", ...}`
+// plain object -- the `__rock_create_struct` shape (a `__ty` string tag, no
+// metatable) -- and a field read is JS property access (T4).
 #[test]
-fn non_native_buffer_struct_rejects() {
+fn general_struct_emits_tagged_object() {
     let ws = ws_with(
         "struct P { x: int, y: int }\n\
-         fn mk() -> P { return P { x: 1, y: 2 } }\n",
+         fn mk() -> int { let p = P { x: 1, y: 2 }\n return p.x }\n",
     );
     let mk = lower_test_fn(&ws, "mk");
-    let e = skull_codegen_js::emit::emit_fn(&ws, &mk, "mk").unwrap_err();
-    assert!(
-        e.message.contains("struct construction only supported for NativeBuffer"),
-        "wrong reject: {}",
-        e.message
+    assert_eq!(
+        skull_codegen_js::emit::emit_fn(&ws, &mk, "mk").unwrap(),
+        "\
+function mk() {
+  let c0;
+  c0 = ({__ty: \"P\", x: 1, y: 2});
+  let v4 = c0;
+  let v5 = v4.x;
+  return v5;
+}
+"
     );
 }

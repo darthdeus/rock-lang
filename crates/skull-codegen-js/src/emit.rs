@@ -460,22 +460,28 @@ impl Emitter<'_> {
                     let line = format!("{} = {};", cell_name(*cell), rhs);
                     self.push(&line);
                 }
-                Inst::StoreIndex { base, index, value, kind } => match kind {
-                    ContainerKind::NativeBuffer => {
-                        let line = format!(
-                            "__nb_checked_set({}, {}, {});",
-                            self.render_val(*base)?,
-                            self.render_val(*index)?,
-                            self.render_val(*value)?
-                        );
-                        self.push(&line);
-                    }
-                    other => {
-                        return Err(err(format!(
-                            "JS subset: {other:?} index store not supported"
-                        )))
-                    }
-                },
+                Inst::StoreIndex { base, index, value, kind } => {
+                    let (b, i, v) = (
+                        self.render_val(*base)?,
+                        self.render_val(*index)?,
+                        self.render_val(*value)?,
+                    );
+                    let line = match kind {
+                        ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
+                        ContainerKind::Vec => format!("__vec_checked_set({b}, {i}, {v});"),
+                        ContainerKind::Map => format!("{b}.set({i}, {v});"),
+                    };
+                    self.push(&line);
+                }
+                // `base.field = value` (struct field / cursor mutation).
+                Inst::StoreField { base, field, value } => {
+                    let line = format!(
+                        "{}.{field} = {};",
+                        self.render_val(*base)?,
+                        self.render_val(*value)?
+                    );
+                    self.push(&line);
+                }
                 // A call in statement position (value unused): `nb_set(b, i, v)`.
                 Inst::Call { .. } if self.use_count[raw(iid) as usize] == 0 => {
                     let line = format!("{};", self.render_inst_expr(iid)?);
@@ -591,44 +597,73 @@ impl Emitter<'_> {
             // The scalar `{x}` interpolation stringify (int/bool/string) -- same
             // `%.14g`-parity path as a concat leaf.
             Inst::ToString(x) => format!("lua_tostring({})", self.render_val(*x)?),
+            // Rock `%` is Lua floored modulo; JS `%` is truncated remainder
+            // (differs for mixed signs). `((a % b) + b) % b` is the floored form.
+            Inst::IntMod(a, b) | Inst::FloatMod(a, b) => {
+                let (a, b) = (self.render_val(*a)?, self.render_val(*b)?);
+                format!("((({a} % {b}) + {b}) % {b})")
+            }
             Inst::Call { func, args } => self.render_call(*func, args)?,
-            // NativeBuffer surface: `{ptr, len}` object literal; `buf[i]` via
-            // the bounds-checked shim (JS_NB_CHECK_SHIMS preamble, matching
-            // the stdlib `__nb_checked_get` luajit emits); `.len`/`.ptr` are
-            // plain property reads.
+            // Structs are plain objects tagged with `__ty` (mirrors the Lua
+            // `__rock_create_struct`: sets `obj.__ty`, no metatable). NativeBuffer
+            // keeps its bespoke `{ptr, len}` (no `__ty`) so the nb differential's
+            // pins hold; every other named struct gets `{__ty: "Name", ...}`.
             Inst::MakeStruct { ty, fields } => {
                 let name = ty.map(|t| t.to_string()).unwrap_or_default();
-                if !is_native_buffer(&name) {
-                    return Err(err(format!(
-                        "JS subset: struct construction only supported for NativeBuffer types, got `{name}`"
-                    )));
+                let mut parts: Vec<String> = Vec::new();
+                if !name.is_empty() && !is_native_buffer(&name) {
+                    parts.push(format!("__ty: {}", js_string_lit(&name)?));
                 }
-                let rendered: Result<Vec<String>, CompilerError> = fields
-                    .iter()
-                    .map(|(f, v)| Ok(format!("{f}: {}", self.render_val(*v)?)))
-                    .collect();
-                format!("({{{}}})", rendered?.join(", "))
+                for (f, v) in fields {
+                    parts.push(format!("{f}: {}", self.render_val(*v)?));
+                }
+                format!("({{{}}})", parts.join(", "))
             }
-            Inst::Index { base, index, kind } => match kind {
-                ContainerKind::NativeBuffer => format!(
-                    "__nb_checked_get({}, {})",
-                    self.render_val(*base)?,
-                    self.render_val(*index)?
-                ),
-                other => return Err(err(format!("JS subset: {other:?} indexing not supported"))),
-            },
-            Inst::Len { base, kind } => match kind {
-                ContainerKind::NativeBuffer => format!("{}.len", self.render_val(*base)?),
-                other => return Err(err(format!("JS subset: {other:?} length not supported"))),
-            },
-            Inst::Field { base, field } => match field.as_str() {
-                "ptr" | "len" => format!("{}.{field}", self.render_val(*base)?),
-                _ => {
-                    return Err(err(format!(
-                        "JS subset: field read `.{field}` not supported (only NativeBuffer `.ptr`/`.len`)"
-                    )))
+            // A tuple is a plain JS array; `.N` reads index N. (Most tuples are
+            // scalarized by SROA before emission; these cover the residue.)
+            Inst::MakeTuple(elems) => {
+                let rendered: Result<Vec<String>, CompilerError> =
+                    elems.iter().map(|e| self.render_val(*e)).collect();
+                format!("[{}]", rendered?.join(", "))
+            }
+            Inst::TupleIndex { base, index } => {
+                format!("{}[{index}]", self.render_val(*base)?)
+            }
+            // A Vec literal: `{_data, len, __ty}` with `_data` used 1-indexed
+            // (index 0 is an unused placeholder, matching the Lua 1-indexed
+            // backing table -- the stdlib helpers read `_data[i + 1]`).
+            Inst::MakeVec(elems) => {
+                let rendered: Result<Vec<String>, CompilerError> =
+                    elems.iter().map(|e| self.render_val(*e)).collect();
+                let rendered = rendered?;
+                let data = if rendered.is_empty() {
+                    "[]".to_string()
+                } else {
+                    format!("[null, {}]", rendered.join(", "))
+                };
+                format!("({{_data: {data}, len: {}, __ty: \"Vec\"}})", elems.len())
+            }
+            Inst::Index { base, index, kind } => {
+                let (b, i) = (self.render_val(*base)?, self.render_val(*index)?);
+                match kind {
+                    ContainerKind::NativeBuffer => format!("__nb_checked_get({b}, {i})"),
+                    ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
+                    // Map miss returns nil (raw VM op in Lua); JS Map.get returns
+                    // undefined on miss, which `== null` treats as nil.
+                    ContainerKind::Map => format!("{b}.get({i})"),
                 }
+            }
+            Inst::Len { base, kind } => match kind {
+                ContainerKind::NativeBuffer | ContainerKind::Vec => {
+                    format!("{}.len", self.render_val(*base)?)
+                }
+                ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
             },
+            // A general field read is JS property access. NativeBuffer `.ptr`/
+            // `.len` and Vec `._data`/`.len` are the same shape.
+            Inst::Field { base, field } => {
+                format!("{}.{field}", self.render_val(*base)?)
+            }
             other => {
                 return Err(err(format!(
                     "JS subset: cannot render {other:?} as a JS expression"
@@ -670,6 +705,13 @@ impl Emitter<'_> {
         if let Some(tmpl) = host_fn_template(cf) {
             let refs: Vec<&str> = rargs.iter().map(|s| s.as_str()).collect();
             return Ok(fill_template(tmpl, &refs));
+        }
+        // `map_new` is pure Rock (`transmute(table_new())`) but must be a real JS
+        // `Map`, not a plain object -- a plain object coerces keys to strings, so
+        // Lua's 1 vs "1" distinction would be lost. Intercept it (and skip its
+        // co-emission in the closure walk).
+        if is_map_new(cf) {
+            return Ok("new Map()".to_string());
         }
         // Templates apply only to stdlib @intrinsic decls (`is_mapped_intrinsic`):
         // a user fn sharing an entry's (name, arity) must co-emit, not become
@@ -781,7 +823,7 @@ pub fn emit_with_closure(
             if cf.name.as_str() == "get" && !first_param_is_native_buffer(ws, cf) {
                 return Err(err("JS subset: `get` is mapped only for NativeBuffer receivers"));
             }
-            if is_mapped_intrinsic(cf) || is_host_mapped(cf) {
+            if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
                 continue;
             }
             if cf.lua_body.is_some() || cf.is_extern {
@@ -842,6 +884,33 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
     match (cf.name.as_str(), cf.param_decls.len()) {
         ("tostring", 1) => Some("lua_tostring($1)"),
         ("__rock_format_float", 1) => Some("__rock_format_float($1)"),
+        // `phantom<T>()` is a nil placeholder (iterator `done`, post-`error`
+        // unreachable). `__debug_traceback` is error-message-only (never on
+        // stdout, so an empty string suffices). `is_null` mirrors `== nil`.
+        ("phantom", 0) => Some("null"),
+        ("__debug_traceback", 0) => Some("\"\""),
+        ("is_null", 1) => Some("($1 == null)"),
+        // `cast`/`transmute` are runtime identities (type recovery only).
+        ("cast", 1) | ("transmute", 1) => Some("$1"),
+        // Untyped table primitives, runtime-polymorphic: in Lua a Map IS a raw
+        // table, so `table_get(m, k)` and `m[k]` must agree -- but on JS a Map is
+        // a real `Map` (`.get`/`.set`) while an array/object indexes directly.
+        // `__table_get`/`__table_set` dispatch on `instanceof Map`.
+        ("table_get", 2) => Some("__table_get($1, $2)"),
+        ("table_set", 3) => Some("__table_set($1, $2, $3)"),
+        ("table_new", 0) => Some("({})"),
+        // Vec: `{_data, len, __ty}` 1-indexed. `vec_new` builds it; `vec_push`
+        // increments `len` then writes `_data[len]` (comma operator so it stays
+        // an expression; `$1` is a cell load, safe to re-evaluate).
+        ("vec_new", 0) => Some("({_data: [], len: 0, __ty: \"Vec\"})"),
+        ("vec_push", 2) => Some("($1.len = $1.len + 1, $1._data[$1.len] = $2)"),
+        // Structural equality (deep, matching Rock's `__op_eq`: structs, enums,
+        // newtypes, tuples by contents; primitives by value). Runtime helper in
+        // JS_STRUCTURAL_EQ.
+        ("__op_eq", 2) => Some("__op_eq($1, $2)"),
+        ("__op_ne", 2) => Some("(!__op_eq($1, $2))"),
+        // Lua `//` floored integer division.
+        ("__op_idiv", 2) => Some("Math.floor($1 / $2)"),
         // `error(msg)` diverges; the message is already a string. Wrapped in a
         // throwing IIFE so it is a valid EXPRESSION -- the lowering stores a
         // diverging call's (dead) result into an if-result cell, and a bare
@@ -860,6 +929,12 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
 /// and the `emit_with_closure` callee walk so both agree on what NOT to reject.
 fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
     is_host_print(cf) || host_fn_template(cf).is_some()
+}
+
+/// `map_new()`: pure Rock (`transmute(table_new())`), but intercepted to a real
+/// JS `Map` rather than co-emitted to a plain object (which coerces keys).
+fn is_map_new(cf: &bone_semantic::hir::Function) -> bool {
+    cf.name.as_str() == "map_new" && cf.param_decls.is_empty()
 }
 
 /// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
