@@ -279,8 +279,8 @@ fn js_run_tests(
 ) -> JsUnitOutcome {
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, String)> = Vec::new();
-    // (display name, root JS name, emitted defs)
-    let mut runnable: Vec<(String, String, String)> = Vec::new();
+    // (display name, root JS name, emitted defs, expected output)
+    let mut runnable: Vec<(String, String, String, Option<String>)> = Vec::new();
 
     let scx = ScalarCtx::new(ws);
     for (i, (fr, t)) in tests.iter().enumerate() {
@@ -290,22 +290,7 @@ fn js_run_tests(
             skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
         }));
         match emitted {
-            Ok(Ok(js)) => {
-                // Harness invariant: the JS subset has no print, so a runnable
-                // test cannot produce stdout. A non-empty `output=` expectation
-                // on a test that still emitted is a harness/emitter bug -- FAIL
-                // loudly rather than compare "" and mislabel it. Empty
-                // expectations compare against the empty string and hold.
-                if t.output.as_deref().map_or(false, |o| !o.is_empty()) {
-                    fails.push(format!(
-                        "{}: harness invariant violated: test emitted under the JS subset \
-                         but expects non-empty output (the subset cannot print -- emitter bug)",
-                        t.name
-                    ));
-                } else {
-                    runnable.push((t.name.clone(), js_name, js));
-                }
-            }
+            Ok(Ok(js)) => runnable.push((t.name.clone(), js_name, js, t.output.clone())),
             Ok(Err(e)) => skips.push((t.name.clone(), e.message.clone())),
             Err(panic) => {
                 let msg = panic
@@ -355,28 +340,78 @@ fn js_run_tests(
     JsUnitOutcome::Ran { passed: markers.passed, fails, skips }
 }
 
-/// Assemble the per-file node program: shim preamble, each runnable test's
-/// closure-emitted defs (callee names are FuncRef-deterministic, so duplicate
-/// definitions across tests are byte-identical and redefinition is harmless),
-/// then the harness emitting one `__SKULL__` line per test.
-fn build_node_program(runnable: &[(String, String, String)]) -> String {
+/// A JS double-quoted string literal for a Rust string, escaping the control
+/// and non-ASCII chars a JS lexer needs (test output can carry arbitrary
+/// bytes). `{:?}` would emit Rust's `\u{XXXX}`, which JS rejects.
+fn js_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                for u in c.encode_utf16(&mut [0u16; 2]) {
+                    o.push_str(&format!("\\u{:04x}", u));
+                }
+            }
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// Assemble the per-file node program: shim + string-runtime preamble, a
+/// buffer-capturing `print` (Lua-parity: args `lua_tostring`-joined by TAB, one
+/// trailing newline per call), each runnable test's closure-emitted defs
+/// (callee names are FuncRef-deterministic, so duplicate definitions across
+/// tests are byte-identical and redefinition is harmless), then the harness
+/// running each test with its buffer reset and comparing the captured stdout
+/// (trimmed) against the `output=` expectation -- one `__SKULL__` line per test.
+fn build_node_program(runnable: &[(String, String, String, Option<String>)]) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
-    p.push('\n');
-    for (_, _, defs) in runnable {
+    p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
+    p.push_str(
+        r#"
+var __buf = [];
+function print() {
+  var p = [];
+  for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));
+  __buf.push(p.join("\t") + "\n");
+}
+"#,
+    );
+    for (_, _, defs, _) in runnable {
         p.push_str(defs);
     }
     p.push_str("var __tests = [\n");
-    for (name, js_name, _) in runnable {
-        p.push_str(&format!("  {{ f: {js_name}, name: {name:?} }},\n"));
+    for (name, js_name, _, out) in runnable {
+        let out_js = match out {
+            Some(s) => js_str(s),
+            None => "null".to_string(),
+        };
+        p.push_str(&format!(
+            "  {{ f: {js_name}, name: {}, out: {out_js} }},\n",
+            js_str(name)
+        ));
     }
     p.push_str("];\n");
     p.push_str(
         r#"function __esc(s) { return String(s).replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t"); }
 for (var i = 0; i < __tests.length; i++) {
   var t = __tests[i];
+  __buf = [];
   try {
     t.f();
-    process.stdout.write("\n__SKULL__\tPASS\t\n");
+    var got = __buf.join("").replace(/^\s+/, "").replace(/\s+$/, "");
+    if (t.out !== null && got !== t.out) {
+      process.stdout.write("\n__SKULL__\tFAIL\t" + t.name + ": output mismatch: expected <" + __esc(t.out) + "> got <" + __esc(got) + ">\n");
+    } else {
+      process.stdout.write("\n__SKULL__\tPASS\t\n");
+    }
   } catch (e) {
     var m = (e && e.message !== undefined) ? e.message : e;
     process.stdout.write("\n__SKULL__\tFAIL\t" + t.name + ": error: " + __esc(m) + "\n");

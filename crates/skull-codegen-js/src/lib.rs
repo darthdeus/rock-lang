@@ -91,6 +91,94 @@ function __nb_checked_set(buf, i, v) {
 }
 ";
 
+/// JS runtime preamble for the string subset (T2): `lua_tostring` reproduces
+/// Lua's `tostring`/`..` number formatting (`%.14g`), and `__rock_format_float`
+/// ports the stdlib `@nomangle inline(lua)` helper (`stdlib/unified.rock`,
+/// `%.2g` for tiny/huge magnitudes else `%.4f` trailing-zero-trimmed) that
+/// backs the default float `{x}` interpolation hole. `__c_g` is C `printf`
+/// `%.Pg`, reconstructed from a properly-rounded `toExponential` digit string
+/// (no double-rounding). Prepend to any emitted program that touches strings;
+/// the harness's `print` uses `lua_tostring` for the same parity.
+pub const JS_STRING_RUNTIME: &str = r#"
+// P significant decimal digits of a positive finite double, rounded
+// half-to-EVEN like C printf (JS toExponential rounds half-UP -- diverges on
+// exact ties, e.g. 123456789012345 -> ...234 not ...235). Exact via BigInt on
+// the IEEE mantissa/exponent, so no double-rounding. Returns {digits, E} with
+// value ~= digits[0].digits[1..] x 10^E.
+function __bigdigits(ax, P) {
+  var dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, ax);
+  var hi = dv.getUint32(0), lo = dv.getUint32(4);
+  var expBits = (hi >>> 20) & 0x7ff, mantHi = hi & 0xfffff, f, e;
+  if (expBits === 0) { f = (BigInt(mantHi) << 32n) | BigInt(lo >>> 0); e = -1074; }
+  else { f = (BigInt(mantHi | 0x100000) << 32n) | BigInt(lo >>> 0); e = expBits - 1075; }
+  var num = e >= 0 ? f << BigInt(e) : f;
+  var den = e >= 0 ? 1n : 1n << BigInt(-e);
+  function roundHalfEven(k) {
+    var n2 = num, d2 = den;
+    if (k >= 0) d2 = d2 * (10n ** BigInt(k)); else n2 = n2 * (10n ** BigInt(-k));
+    var q = n2 / d2, twice = (n2 - q * d2) * 2n;
+    if (twice > d2 || (twice === d2 && q % 2n === 1n)) q += 1n;
+    return q;
+  }
+  var D = Math.floor(Math.log10(ax));
+  var N = roundHalfEven(D - P + 1), s = N.toString();
+  // A wrong log10 estimate or a carry (999->1000) yields P+/-1 digits; re-round
+  // at the corrected exponent.
+  if (s.length !== P) { D += s.length - P; N = roundHalfEven(D - P + 1); s = N.toString(); }
+  while (s.length < P) s = "0" + s;
+  return { digits: s, E: D };
+}
+function __c_g(x, P) {
+  // C printf %.Pg on a finite, already-sign-split magnitude reconstruction.
+  var neg = x < 0 || (x === 0 && 1 / x === -Infinity);
+  var ax = Math.abs(x);
+  if (ax === 0) return neg ? "-0" : "0";
+  var r = __bigdigits(ax, P);
+  var digits = r.digits, E = r.E;
+  var out;
+  if (E < -4 || E >= P) {
+    var frac = digits.slice(1).replace(/0+$/, "");
+    var mant = digits.slice(0, 1) + (frac ? "." + frac : "");
+    var esign = E < 0 ? "-" : "+";
+    var eabs = Math.abs(E).toString();
+    if (eabs.length < 2) eabs = "0" + eabs;
+    out = mant + "e" + esign + eabs;
+  } else if (E >= 0) {
+    var intp = digits.slice(0, E + 1);
+    var f2 = digits.slice(E + 1).replace(/0+$/, "");
+    out = intp + (f2 ? "." + f2 : "");
+  } else {
+    var zeros = "";
+    for (var k = 0; k < -E - 1; k++) zeros += "0";
+    var f3 = (zeros + digits).replace(/0+$/, "");
+    out = "0." + f3;
+  }
+  return neg ? "-" + out : out;
+}
+function lua_tostring(x) {
+  if (typeof x === "number") {
+    if (x !== x) return "nan";
+    if (x === Infinity) return "inf";
+    if (x === -Infinity) return "-inf";
+    return __c_g(x, 14);
+  }
+  if (x === true) return "true";
+  if (x === false) return "false";
+  if (x === null || x === undefined) return "nil";
+  return String(x);
+}
+function __rock_format_float(v) {
+  var av = Math.abs(v);
+  if (av !== 0 && (av < 0.0001 || av >= 1000000)) {
+    return __c_g(v, 2);
+  }
+  var s = v.toFixed(4);
+  s = s.replace(/0+$/, "").replace(/\.$/, "");
+  return s;
+}
+"#;
+
 /// The toy JS backend's [`IntrinsicTable`].
 pub struct JsIntrinsics;
 
