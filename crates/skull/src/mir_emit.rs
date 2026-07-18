@@ -922,15 +922,23 @@ fn shader_registration_lines(ws: &Workspace) -> Result<String, CompilerError> {
     }
     let mut out = String::new();
     for pair in pairs {
-        let vname = ws.module(pair.vert.module).functions[pair.vert.func].name;
         let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
-        let glsl = skull_codegen_glsl::emit_shader_pipeline(
-            ws,
-            pair.vert.module,
-            vname.as_str(),
-            fname.as_str(),
-            skull_codegen_glsl::GlslProfile::Core330,
-        )?;
+        // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
+        // emitter (PIXEL body + fullscreen VERTEX passthrough). Core330 only
+        // (locked A3 decision; emit_shader_entry has no profile param).
+        let glsl = match pair.vert {
+            Some(vert) => {
+                let vname = ws.module(vert.module).functions[vert.func].name;
+                skull_codegen_glsl::emit_shader_pipeline(
+                    ws,
+                    vert.module,
+                    vname.as_str(),
+                    fname.as_str(),
+                    skull_codegen_glsl::GlslProfile::Core330,
+                )?
+            }
+            None => skull_codegen_glsl::emit_shader_entry(ws, pair.frag.module, fname.as_str())?,
+        };
         let _ = writeln!(out, "__rock_shader_register({:?}, {})", pair.key, lua_long_bracket(&glsl));
     }
     Ok(out)

@@ -7752,13 +7752,17 @@ pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
 // through `resolve_shader_pair`, so they never diverge. skull-mir stays free of
 // GLSL emission (the layering constraint): only FuncRefs + the key cross up. --
 
-/// A resolved `rock_shader(vert, frag)` pair. `key` is `"<vert>+<frag>"` (the
-/// pipeline name const `pipeline()` looks up); `vert`/`frag` are the resolved
-/// `@shader` fn refs the driver hands to `emit_shader_pipeline`.
+/// A resolved `rock_shader(...)` pipeline. Two forms:
+/// - two-arg `rock_shader(vert, frag)`: `vert = Some(..)`, `key = "<vert>+<frag>"`;
+///   the driver runs `emit_shader_pipeline`.
+/// - one-arg fullscreen `rock_shader(frag)`: `vert = None`, `key = "<frag>"` (a
+///   bare name, never containing '+', so it can never collide with a pair key);
+///   the driver runs `emit_shader_entry`.
+/// `key` is the pipeline name const `pipeline()` looks up.
 #[derive(Clone, Debug)]
 pub struct ShaderPair {
     pub key: String,
-    pub vert: FuncRef,
+    pub vert: Option<FuncRef>,
     pub frag: FuncRef,
 }
 
@@ -7814,29 +7818,40 @@ fn resolve_shader_arg(
     }
 }
 
-/// Resolve a `rock_shader(vert, frag)` call's args to a [`ShaderPair`], or the
-/// first spanned rejection. Shared by the lowering expander
-/// ([`Builder::expand_shader_pipeline`]), the fatal gate
+/// Resolve a `rock_shader(...)` call's args to a [`ShaderPair`], or the first
+/// spanned rejection. Arity dispatches the form: one arg -> fullscreen
+/// (`vert = None`, key = bare frag name), two args -> pair (key = `"<vert>+<frag>"`).
+/// Any other arity rejects, naming BOTH legal forms. Shared by the lowering
+/// expander ([`Builder::expand_shader_pipeline`]), the fatal gate
 /// ([`shader_expand_rejection`]), and the driver collector
-/// ([`collect_shader_pairs`]).
+/// ([`collect_shader_pairs`]) -- one resolver, never forked.
 pub fn resolve_shader_pair(
     ws: &Workspace,
     body: &Body,
     call_expr: Idx<Expr>,
     args: &[Idx<Expr>],
 ) -> Result<ShaderPair, CompilerError> {
-    let [vert_arg, frag_arg] = args else {
-        return Err(CompilerError::new_with_label(
+    match args {
+        [frag_arg] => {
+            let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
+            let fname = ws.module(frag.module).functions[frag.func].name;
+            // Bare frag name -- no '+', so it can never collide with a pair key.
+            Ok(ShaderPair { key: fname.to_string(), vert: None, frag })
+        }
+        [vert_arg, frag_arg] => {
+            let vert = resolve_shader_arg(ws, body, *vert_arg, "vertex")?;
+            let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
+            let vname = ws.module(vert.module).functions[vert.func].name;
+            let fname = ws.module(frag.module).functions[frag.func].name;
+            Ok(ShaderPair { key: format!("{vname}+{fname}"), vert: Some(vert), frag })
+        }
+        _ => Err(CompilerError::new_with_label(
             body.expr_spans[call_expr],
-            "`rock_shader` takes exactly two arguments: rock_shader(vertex_fn, fragment_fn)"
+            "`rock_shader` takes either one argument -- rock_shader(fragment_fn) \
+             (fullscreen) -- or two -- rock_shader(vertex_fn, fragment_fn)"
                 .to_string(),
-        ));
-    };
-    let vert = resolve_shader_arg(ws, body, *vert_arg, "vertex")?;
-    let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
-    let vname = ws.module(vert.module).functions[vert.func].name;
-    let fname = ws.module(frag.module).functions[frag.func].name;
-    Ok(ShaderPair { key: format!("{vname}+{fname}"), vert, frag })
+        )),
+    }
 }
 
 /// Scan module `mid`'s bodies for a `rock_shader` call the lowering expander

@@ -35,3 +35,12 @@ struct Sampler2D {
 @shader_expand inline(lua) fn rock_shader<V, F>(vert: V, frag: F) -> string = """
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
+
+// Single-arg fullscreen form (docs/glsl-a3-integration-plan.md A3c): a direct
+// reference to a top-level @shader(fragment) fn. Expands to the bare frag-name
+// key (never contains '+', so it cannot collide with a pair key); the driver
+// routes it to the A1 single-entry emitter (PIXEL body + fullscreen VERTEX
+// passthrough). Same @shader_expand, so resolution stays annotation-keyed.
+@shader_expand inline(lua) fn rock_shader<F>(frag: F) -> string = """
+    error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
+"""
