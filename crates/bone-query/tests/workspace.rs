@@ -634,6 +634,35 @@ fn signature_help_renders_callee_and_active_param() {
 }
 
 #[test]
+fn signature_help_filters_overloads_by_ufcs_receiver_type() {
+    // `r.add(` on a `Ring<int>` receiver must offer only the `Ring` overload,
+    // not the same-named `Bag` one -- the receiver type fills the first param
+    // slot even when the call is arity-incomplete (Tier-2 by-name overloads).
+    let src = "struct Ring<T> { data: [T] }\n\
+               struct Bag<T> { stuff: [T] }\n\
+               fn Ring<T>.add(r, x: T) { }\n\
+               fn Bag<T>.add(b, y: T) { }\n\
+               fn main() {\n\
+                 let r: Ring<int> = Ring { data: [] }\n\
+                 r.add()\n\
+               }\n";
+    let bone = fresh(src);
+    // line 6 "r.add()" (continuation collapses indent): cursor inside the parens.
+    let sh = bone
+        .signature_help(PATH, Position::new(6, 6))
+        .expect("signature help resolves the r.add(...) call");
+    let labels: Vec<&str> = sh.signatures.iter().map(|s| s.label.as_str()).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("Ring<T>")),
+        "the Ring overload must be present: {labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.contains("Bag<T>")),
+        "the Bag overload doesn't accept a Ring receiver and must be filtered: {labels:?}"
+    );
+}
+
+#[test]
 fn signature_help_shows_param_defaults() {
     // Optional params render `name: T = <default>` (value sliced from source), so
     // the popup doesn't make defaulted params look required.

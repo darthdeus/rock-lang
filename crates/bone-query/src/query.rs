@@ -4318,6 +4318,7 @@ pub struct SymbolEntry {
     pub span: Span,
 }
 
+#[derive(Clone)]
 pub struct SignatureEntry {
     pub label: String,
     pub params: Vec<String>,
@@ -4781,7 +4782,7 @@ pub fn signature_help(
     let call_span = *body.expr_spans.get(e)?;
 
     match &body.expr_arena[e] {
-        hir::Expr::Call { callee, .. } => {
+        hir::Expr::Call { callee, args } => {
             // Tier 1: the overload bone nailed down.
             if let Some((cmid, fid)) = inf
                 .and_then(|inf| inf.per_fn.get(&owner))
@@ -4793,7 +4794,18 @@ pub fn signature_help(
             let hir::Callee::Unresolved { name, .. } = callee else {
                 return None;
             };
-            let sigs = functions_named(ws, *name, sources);
+            // UFCS / first-arg receiver: when the leading argument has a known
+            // nominal type, drop overloads whose first param is a DIFFERENT
+            // concrete nominal (`rb.push()` on RingBuffer must not offer the
+            // FlatVec/Vec `push`). Overloads with a generic/builtin first param
+            // are kept -- they can still accept the receiver.
+            let recv_nominal = inf
+                .and_then(|inf| inf.per_fn.get(&owner))
+                .and_then(|bi| {
+                    let first = args.clone().next()?;
+                    nominal_name_of_ty(ws, Some(bi), *bi.expr_types.get(first)?)
+                });
+            let sigs = functions_named(ws, *name, sources, recv_nominal);
             (!sigs.is_empty()).then_some((sigs, call_span))
         }
         hir::Expr::StructLiteral { name, .. } => {
@@ -4826,16 +4838,39 @@ fn fn_sig_entry(
 
 /// Every function in the workspace named `name` (user code + stdlib), as the
 /// overload list a signature-help popup shows when resolution is ambiguous.
-fn functions_named(ws: &Workspace, name: Ustr, sources: Option<&SourceMap>) -> Vec<SignatureEntry> {
-    let mut out = Vec::new();
+/// When `recv_nominal` is set (a UFCS receiver / typed first arg), overloads
+/// whose first param is a DIFFERENT concrete nominal are dropped; if that
+/// filters everything out, the unfiltered list is returned (never hide all).
+fn functions_named(
+    ws: &Workspace,
+    name: Ustr,
+    sources: Option<&SourceMap>,
+    recv_nominal: Option<Ustr>,
+) -> Vec<SignatureEntry> {
+    let mut all = Vec::new();
+    let mut matched = Vec::new();
     for m in ws.modules.iter() {
         if let Some(fns) = m.functions_by_name.get(&name) {
             for (fmid, fid) in fns {
-                out.push(fn_sig_entry(ws, *fmid, *fid, sources));
+                let entry = fn_sig_entry(ws, *fmid, *fid, sources);
+                if let Some(recv) = recv_nominal {
+                    let p0 = ws.modules[fmid.index()].functions[*fid].param_decls.first();
+                    let keep = p0
+                        .and_then(|p| nominal_name_of_ty(ws, None, p.ty))
+                        .map_or(true, |pn| pn == recv);
+                    if keep {
+                        matched.push(entry.clone());
+                    }
+                }
+                all.push(entry);
             }
         }
     }
-    out
+    if recv_nominal.is_some() && !matched.is_empty() {
+        matched
+    } else {
+        all
+    }
 }
 
 /// `Name { f: T, .. }` constructor signature for struct literal `name`, or None.
