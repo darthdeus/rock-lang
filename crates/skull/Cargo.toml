@@ -17,6 +17,10 @@ sequential = []
 bone-semantic = { path = "../bone-semantic" }
 skull-mir = { path = "../skull-mir" }
 skull-codegen-lua = { path = "../skull-codegen-lua" }
+# Driver-layer GLSL emission for `rock_shader` top-level registration
+# (docs/glsl-a3a-implementation.md). skull (the driver) may depend on the GLSL
+# backend; skull-mir must not -- the layering constraint.
+skull-codegen-glsl = { path = "../skull-codegen-glsl" }
 skull-transform = { path = "../skull-transform" }
 skull-parser = { path = "../skull-parser" }
 ustr = { workspace = true }

@@ -3070,6 +3070,11 @@ impl Builder<'_> {
                 Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::StructPairs)) => {
                     self.expand_struct_pairs(e, func, &arg_idxs)
                 }
+                Ok(func)
+                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) =>
+                {
+                    self.expand_shader_pipeline(e, &arg_idxs)
+                }
                 Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
                     if !any_named {
@@ -6080,6 +6085,22 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeVec(tuples))))
     }
 
+    /// Expand a `rock_shader(vert, frag)` call to its pipeline key const
+    /// `"<vert>+<frag>"` (docs/glsl-a3a-implementation.md). The driver
+    /// (`skull::mir_emit`) emits the matching top-level `__rock_shader_register`;
+    /// this side produces only the key -- no GLSL, so skull-mir stays free of the
+    /// GLSL backend. Rejections flow through the shared `resolve_shader_pair`; the
+    /// fatal gate is `shader_expand_rejection`.
+    fn expand_shader_pipeline(
+        &mut self,
+        call: Idx<Expr>,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let pair = resolve_shader_pair(self.ws, self.body, call, arg_idxs)?;
+        let key = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(pair.key.as_str()))));
+        Ok(ValueRepr::Scalar(key))
+    }
+
     /// Construct `enum_name::variant(payload)` for a variant with a single
     /// positional payload, mirroring [`Self::lower_enum_variant`]'s
     /// representation choice (cdata `<Enum>_ct` when the enum is cdata-eligible,
@@ -7072,6 +7093,170 @@ pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         }
     }
     None
+}
+
+// -- `@shader_expand` (`rock_shader`) expansion + rejection
+// (docs/glsl-a3a-implementation.md). A call collapses to the pipeline key const
+// `"<vert>+<frag>"`; the driver (skull::mir_emit) emits one top-level
+// `__rock_shader_register(key, glsl)` per distinct pair. The lowering expander,
+// the fatal rejection gate, and the driver's pair collector all resolve args
+// through `resolve_shader_pair`, so they never diverge. skull-mir stays free of
+// GLSL emission (the layering constraint): only FuncRefs + the key cross up. --
+
+/// A resolved `rock_shader(vert, frag)` pair. `key` is `"<vert>+<frag>"` (the
+/// pipeline name const `pipeline()` looks up); `vert`/`frag` are the resolved
+/// `@shader` fn refs the driver hands to `emit_shader_pipeline`.
+#[derive(Clone, Debug)]
+pub struct ShaderPair {
+    pub key: String,
+    pub vert: FuncRef,
+    pub frag: FuncRef,
+}
+
+/// The `@shader(<stage>)` stage of `f` (`"vertex"`/`"fragment"`), else `None`.
+/// A local read of the annotation (skull-codegen-glsl has the same helper, but
+/// skull-mir must not depend on it -- the layering constraint).
+fn shader_stage_of(f: &Function) -> Option<&'static str> {
+    let ann = f.annotations.iter().find(|a| a.name.name.as_str() == "shader")?;
+    match ann.args.first().map(|a| &a.value) {
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
+            Some("fragment")
+        }
+        _ => None,
+    }
+}
+
+/// Resolve one `rock_shader` argument to a direct reference to a top-level
+/// `@shader(<want_stage>)` fn. Rejects (spanned) a non-`Expr::Global` arg (a
+/// local, lambda, literal, call -- anything that is not a bare top-level fn
+/// name), a name that is not a unique top-level fn, a non-`@shader` fn, or a
+/// stage mismatch.
+fn resolve_shader_arg(
+    ws: &Workspace,
+    body: &Body,
+    arg: Idx<Expr>,
+    want_stage: &str,
+) -> Result<FuncRef, CompilerError> {
+    let span = body.expr_spans[arg];
+    let reject = |msg: String| CompilerError::new_with_label(span, msg);
+    let Expr::Global(name) = body.expr_arena[arg] else {
+        return Err(reject(format!(
+            "`rock_shader` argument must be a direct reference to a top-level `@shader({want_stage})` fn"
+        )));
+    };
+    let fref = match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
+        Some([(module, func)]) => FuncRef { module: *module, func: *func },
+        _ => {
+            return Err(reject(format!(
+                "`rock_shader` argument `{name}` is not a unique top-level fn"
+            )))
+        }
+    };
+    let f = &ws.module(fref.module).functions[fref.func];
+    match shader_stage_of(f) {
+        Some(stage) if stage == want_stage => Ok(fref),
+        Some(other) => Err(reject(format!(
+            "`rock_shader` expects a `@shader({want_stage})` fn here, but `{name}` is `@shader({other})`"
+        ))),
+        None => Err(reject(format!(
+            "`rock_shader` argument `{name}` is not a `@shader` fn"
+        ))),
+    }
+}
+
+/// Resolve a `rock_shader(vert, frag)` call's args to a [`ShaderPair`], or the
+/// first spanned rejection. Shared by the lowering expander
+/// ([`Builder::expand_shader_pipeline`]), the fatal gate
+/// ([`shader_expand_rejection`]), and the driver collector
+/// ([`collect_shader_pairs`]).
+pub fn resolve_shader_pair(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+) -> Result<ShaderPair, CompilerError> {
+    let [vert_arg, frag_arg] = args else {
+        return Err(CompilerError::new_with_label(
+            body.expr_spans[call_expr],
+            "`rock_shader` takes exactly two arguments: rock_shader(vertex_fn, fragment_fn)"
+                .to_string(),
+        ));
+    };
+    let vert = resolve_shader_arg(ws, body, *vert_arg, "vertex")?;
+    let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
+    let vname = ws.module(vert.module).functions[vert.func].name;
+    let fname = ws.module(frag.module).functions[frag.func].name;
+    Ok(ShaderPair { key: format!("{vname}+{fname}"), vert, frag })
+}
+
+/// Scan module `mid`'s bodies for a `rock_shader` call the lowering expander
+/// could not honor (bad arity, a non-`@shader` / non-direct-reference arg, a
+/// stage mismatch). Returns the first spanned rejection. FATAL gate: a per-fn
+/// lowering error is only a lenient skip, so validation lives here.
+pub fn shader_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            if !matches!(
+                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                Some(ExpandKind::ShaderPipeline)
+            ) {
+                continue;
+            }
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Err(err) = resolve_shader_pair(ws, body, e, &arg_idxs) {
+                return Some(err);
+            }
+        }
+    }
+    None
+}
+
+/// Every distinct `rock_shader` pair across the workspace, deduped by key and
+/// sorted by key (deterministic registration order -> byte-stable re-emission).
+/// The driver ([`skull::mir_emit`]) turns each into one top-level
+/// `__rock_shader_register`. Any resolution failure surfaces as `Err` (the fatal
+/// [`shader_expand_rejection`] gate runs first, so this is normally infallible).
+pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerError> {
+    let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
+        std::collections::BTreeMap::new();
+    for (_, &mid) in ws.module_ids.iter() {
+        let module = ws.module(mid);
+        let ir = ws.inference(mid);
+        for (owner, body) in module.bodies.iter() {
+            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
+            for (e, expr) in body.expr_arena.iter() {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                    continue;
+                };
+                let resolved = match inf {
+                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
+                    None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
+                        Some([single]) => Some(*single),
+                        _ => None,
+                    },
+                };
+                let Some((fmod, fid)) = resolved else { continue };
+                if !matches!(
+                    crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                    Some(ExpandKind::ShaderPipeline)
+                ) {
+                    continue;
+                }
+                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+                let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
+                by_key.entry(pair.key.clone()).or_insert(pair);
+            }
+        }
+    }
+    Ok(by_key.into_values().collect())
 }
 
 /// Reject a CPU-side (Lua-emission) DIRECT call to a `@gpu_only` intrinsic

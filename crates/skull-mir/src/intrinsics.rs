@@ -42,6 +42,11 @@ pub enum ExpandKind {
     /// `@struct_expand fn f<T>(u: T) -> [(string, E)]` -> the literal pairs list
     /// (docs/pass-uniforms-design.md, Layer 2).
     StructPairs,
+    /// `@shader_expand fn rock_shader<V, F>(vert: V, frag: F) -> string` -> the
+    /// pipeline key const `"<vert>+<frag>"`; the driver emits one top-level
+    /// `__rock_shader_register(key, glsl)` per distinct pair
+    /// (docs/glsl-a3a-implementation.md).
+    ShaderPipeline,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -55,7 +60,13 @@ pub fn is_intrinsic(f: &Function) -> bool {
 /// intrinsic. THE ONE recognizer -- `lower_call_repr` routes through it instead
 /// of a bespoke annotation check, so there is no second ad-hoc registry.
 pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
-    has_anno(f, "struct_expand").then_some(ExpandKind::StructPairs)
+    if has_anno(f, "struct_expand") {
+        return Some(ExpandKind::StructPairs);
+    }
+    if has_anno(f, "shader_expand") {
+        return Some(ExpandKind::ShaderPipeline);
+    }
+    None
 }
 
 /// True iff `f` is `@native_required`: every backend must map it natively; the
