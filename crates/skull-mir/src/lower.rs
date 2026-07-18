@@ -7334,6 +7334,48 @@ fn fn_opaque_intrinsic_ret(ws: &Workspace, fref: FuncRef) -> Option<TyId> {
     None
 }
 
+/// Whether calls to `fref` can reach an opaque-`T` `native_buffer_alloc`
+/// whose element depends on `fref`'s own instantiation: directly
+/// ([`fn_opaque_intrinsic_ret`]) or TRANSITIVELY through a nested generic
+/// call whose bindings do not all reify to concrete leaves (i.e. the nested
+/// call passes `fref`'s generics through -- `push` -> `grow` -> intrinsic).
+/// A nested call whose every binding reifies concrete specializes at any
+/// lowering of this body and is not a pass-through. Cycle-safe; conservative
+/// (does not track WHICH generic flows to the intrinsic).
+fn fn_opaque_intrinsic_transitive(
+    ws: &Workspace,
+    fref: FuncRef,
+    seen: &mut HashSet<FuncRef>,
+) -> bool {
+    if !seen.insert(fref) {
+        return false;
+    }
+    if fn_opaque_intrinsic_ret(ws, fref).is_some() {
+        return true;
+    }
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.generics.is_empty() || f.lua_body.is_some() {
+        return false;
+    }
+    let Some(inf) = ws
+        .inference(fref.module)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fref.func)))
+    else {
+        return false;
+    };
+    for (c, resolved) in inf.resolved_overload_calls.iter() {
+        let callee = FuncRef { module: resolved.0, func: resolved.1 };
+        let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
+        if bindings.iter().all(|&b| reify_leaf(ws, inf, b).is_some()) {
+            continue;
+        }
+        if fn_opaque_intrinsic_transitive(ws, callee, seen) {
+            return true;
+        }
+    }
+    false
+}
+
 /// [`native_buffer_alloc_elem_ctype`] under a specialization `subst`: a
 /// `NativeBuffer<T>` element that is a generic bound in `subst` resolves to its
 /// concrete leaf's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
@@ -7423,24 +7465,34 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
     // 2. Calls to an opaque-`T`-intrinsic-bearing generic fn that this site does
     //    not specialize to an allocatable element.
     for (owner, body) in module.bodies.iter() {
-        // A call INSIDE a generic body (e.g. the stdlib `push`'s own `fv.grow()`)
-        // is not an independent surviving use: it specializes when the enclosing
-        // generic is specialized, and is dead in the enclosing fn's standalone body
-        // otherwise. Its fate is decided at the ENCLOSING fn's call sites, which
-        // are scanned as their own (eventually non-generic) roots. Only root calls
-        // from a concrete (non-generic) context must resolve here.
+        // A call INSIDE an @inline/@pure generic body (e.g. the stdlib `push`'s
+        // own `fv.grow()`) is not an independent surviving use: it specializes
+        // when the enclosing generic is specialized, and is dead in the enclosing
+        // fn's standalone body otherwise. Its fate is decided at the ENCLOSING
+        // fn's call sites, which are scanned as their own (eventually
+        // non-generic) roots -- skip. A NON-eligible generic is NEVER
+        // specialized (the inliner only splices @inline/@pure), so its standalone
+        // body is the only emission and an intrinsic-bearing call inside it
+        // survives -- gate it like a non-inlined context.
         // Whether the inliner processes this body -- specialization only happens
-        // via inlining. An ordinary (non-coroutine) function is inlined; a generic
-        // one has its calls decided at ITS OWN call sites (skip, per above); a
-        // global initializer / decorator / `co fn` is NOT inlined, so a specialized
-        // call there would SURVIVE un-inlined (dangling nil) and must reject.
+        // via inlining. An ordinary (non-coroutine) function is inlined; a
+        // global initializer / decorator / `co fn` is NOT inlined, so a
+        // specialized call there would SURVIVE un-inlined (dangling nil) and
+        // must reject.
         let owner_inlined = match owner {
             BodyOwner::Function(fid) => {
                 let f = &ws.module(mid).functions[*fid];
                 if !f.generics.is_empty() {
-                    continue;
+                    if f.annotations
+                        .iter()
+                        .any(|a| matches!(a.name.name.as_str(), "inline" | "pure"))
+                    {
+                        continue;
+                    }
+                    false
+                } else {
+                    !f.is_coroutine
                 }
-                !f.is_coroutine
             }
             _ => false,
         };
@@ -7448,7 +7500,12 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
         for (c, resolved) in inf.resolved_overload_calls.iter() {
             let c = *c;
             let fref = FuncRef { module: resolved.0, func: resolved.1 };
-            let Some(intr_ret) = fn_opaque_intrinsic_ret(ws, fref) else { continue };
+            let intr_ret = fn_opaque_intrinsic_ret(ws, fref);
+            if intr_ret.is_none()
+                && !fn_opaque_intrinsic_transitive(ws, fref, &mut HashSet::new())
+            {
+                continue;
+            }
             let Some(fref_inf) = ws
                 .inference(fref.module)
                 .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fref.func)))
@@ -7456,19 +7513,41 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
                 continue;
             };
             let resolves = owner_inlined
-                && compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(|(_, subst)| {
-                    native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst).is_ok()
-                });
+                && match intr_ret {
+                    // Direct: validate the intrinsic's element under this site's subst.
+                    Some(intr_ret) => compute_call_spec(ws, inf, c, fref, &SpecSubst::new())
+                        .is_some_and(|(_, subst)| {
+                            native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst)
+                                .is_ok()
+                        }),
+                    // Transitive (the intrinsic lives deeper in the chain): the
+                    // site must specialize, and conservatively every reified
+                    // leaf must be allocatable (a GC-value leaf reaching the
+                    // intrinsic would fail cdef resolution inside the splice,
+                    // which lowering swallows -- reject it loudly here).
+                    None => compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(
+                        |(key, _)| {
+                            key.iter().all(|l| match l {
+                                Some(ReifiedLeaf::Prim(_)) => true,
+                                Some(ReifiedLeaf::Nominal(n)) => !nominal_is_gc_value(ws, *n),
+                                None => false,
+                            })
+                        },
+                    ),
+                };
             if !resolves {
                 let fname = ws.module(fref.module).functions[fref.func].name;
                 let msg = format!(
-                    "`{fname}` allocates via `native_buffer_alloc<T>`, which needs a concrete, \
-                     FFI-clean element type. This call does not specialize `{fname}` to an \
-                     allocatable `value`-struct element (its generic binds to a primitive, a \
-                     GC-carrying value struct, a nested generic, or nothing inferrable), so it \
-                     would reach the shared generic body that cannot name the ffi ctype. Call it \
-                     at a concrete FFI-clean `value`-struct instantiation, or use a per-type \
-                     buffer (`native_buffer_int`/`_float`) for primitive elements."
+                    "`{fname}` allocates via `native_buffer_alloc<T>` (directly or through \
+                     nested generic calls), which needs a concrete, FFI-clean element type. \
+                     This call does not specialize `{fname}` to an allocatable `value`-struct \
+                     element (its generic binds to a primitive, a GC-carrying value struct, a \
+                     nested generic, or nothing inferrable), so it would reach the shared \
+                     generic body that cannot name the ffi ctype. Call it at a concrete \
+                     FFI-clean `value`-struct instantiation, or use a per-type buffer \
+                     (`native_buffer_int`/`_float`) for primitive elements. If this call is \
+                     inside a generic fn, mark that fn `@inline` so it specializes at its own \
+                     call sites -- a plain generic fn is never specialized."
                 );
                 return Some((msg, body.expr_spans[c]));
             }
