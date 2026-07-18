@@ -179,6 +179,7 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             positional.iter().for_each(|a| push(*a));
             named.iter().for_each(|(_, a)| push(*a));
         }
+        Inst::FfiNewArray { count, .. } => push(*count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => push(*base),
         Inst::Index { base, index, .. } => {
             push(*base);

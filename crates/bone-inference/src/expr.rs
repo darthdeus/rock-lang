@@ -533,7 +533,7 @@ pub fn infer_expr_used(
                     )?;
 
                     let elem = match name.as_str() {
-                        "NativeBuffer" | "NativeArray" => {
+                        "NativeBuffer" | "NativeArray" | "FlatVec" => {
                             let p = params.into_iter().next().ok_or_else(|| {
                                 CompilerError::new_with_label(
                                     expr_span,

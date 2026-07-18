@@ -1,0 +1,95 @@
+//! P2 exit oracle (docs/flatvec-plan.md "Mechanism: call-site specialization via
+//! the inliner"). An `@inline` generic fn whose param/return bind to a VALUE
+//! struct at the call site is spliced as a PER-INSTANTIATION specialized snapshot:
+//! the body lowers as if hand-written for `V2`, so the value flows field-wise (no
+//! `V2_ct(..)` box, no boxed `__nb_checked_set` store). The bounds-checked slot
+//! accessor `__nb_checked_get` REMAINS -- it is how a scalarized store reaches the
+//! flat slot to write its fields in place; only the box + the boxed store vanish.
+//!
+//! Pre-P2 this test pinned the BOXED status quo (`V2_ct(..)` + `__nb_checked_set`);
+//! landing the feature flipped it to the zero-box assertions below (git `c42bd06ce`
+//! is the boxed-premise revision, for the before/after diff).
+
+mod common;
+use common::{emit_module, function_body};
+
+// A generic `@inline` set/get over a `NativeBuffer<T>`, instantiated at the value
+// struct `V2`. Mirrors the FlatVec push/get shape (`buf[len] = v` / `return buf[i]`).
+const VALUE_INST: &str = r#"
+value V2 { x: float, y: float }
+
+@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
+
+@inline fn gset<T>(b: NativeBuffer<T>, i: int, v: T) { b[i] = v }
+@inline fn gget<T>(b: NativeBuffer<T>, i: int) -> T { return b[i] }
+
+fn use_buf(a: V2) -> V2 {
+    let b: NativeBuffer<V2> = NativeBuffer { ptr: __nb_alloc_V2(4), len: 4 }
+    gset(b, 0, a)
+    return gget(b, 0)
+}
+
+fn main() { let r = use_buf(V2 { x: 1.0, y: 2.0 }); print("{r.x}") }
+"#;
+
+#[test]
+fn generic_inline_at_value_type_splices_zero_box() {
+    let lua = emit_module(VALUE_INST);
+    let body = function_body(&lua, "use_buf");
+
+    // The value never boxes: the specialized splice threads it as scalar leaves.
+    assert!(
+        !body.contains("V2_ct("),
+        "specialized splice must not box the value (`V2_ct(..)`); got:\n{body}"
+    );
+    // The boxed whole-value store is gone -- the store scalarizes to field writes.
+    assert!(
+        !body.contains("__nb_checked_set"),
+        "specialized store must be field-wise, not the boxed `__nb_checked_set`; got:\n{body}"
+    );
+    // Positive: the slot is fetched once (`__nb_checked_get`) and its fields are
+    // written in place -- the scalarized native-buffer store shape.
+    assert!(
+        body.contains("__nb_checked_get"),
+        "specialized store fetches the flat slot via `__nb_checked_get`; got:\n{body}"
+    );
+    assert!(
+        body.contains(".x = ") && body.contains(".y = "),
+        "specialized store writes the fields in place (`slot.x = ..; slot.y = ..`); got:\n{body}"
+    );
+}
+
+// A generic `@inline` fn calling `native_buffer_alloc<T>` -- the intrinsic the
+// shared (opaque-`T`) body cannot lower. Uses the stdlib `flat_vec_new<T>` /
+// `push`; specialized at `V2`, the ctype resolves and the body emits the
+// `ffi.new("V2[?]", ..)` it could not name generically. `nb_alloc` is a local
+// generic wrapper exercising the intrinsic directly too.
+const INTRINSIC_INST: &str = r#"
+value V2 { x: float, y: float }
+
+fn make() -> float {
+    let fv: FlatVec<V2> = flat_vec_new(8)
+    fv.push(V2 { x: 3.0, y: 4.0 })
+    return fv.get(0).x
+}
+
+fn main() { let _ = make() }
+"#;
+
+#[test]
+fn generic_inline_intrinsic_resolves_ctype_at_value_instantiation() {
+    let lua = emit_module(INTRINSIC_INST);
+    let body = function_body(&lua, "make");
+    // The specialized `native_buffer_alloc<T>` names the concrete element ctype --
+    // the whole point of P2 for the alloc intrinsic (P1 could only do it at a
+    // concrete, non-generic call site).
+    assert!(
+        body.contains(r#"ffi.new("V2[?]","#),
+        "specialized intrinsic must emit `ffi.new(\"V2[?]\", ..)`; got:\n{body}"
+    );
+    // No dangling call to the shared generic `flat_vec_new` survives.
+    assert!(
+        !body.contains("flat_vec_new"),
+        "the specialized `flat_vec_new` must be spliced, not left as a call; got:\n{body}"
+    );
+}

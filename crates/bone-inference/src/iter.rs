@@ -18,7 +18,7 @@ pub(crate) fn for_elem_ty(gamma: &mut Gamma, iter_ty: TyId, span: Span) -> Resul
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } if matches!(name.as_str(), "NativeArray" | "NativeBuffer") => {
+        } if matches!(name.as_str(), "NativeArray" | "NativeBuffer" | "FlatVec") => {
             let elem = or_fail!(
                 params.into_iter().next(),
                 span,
