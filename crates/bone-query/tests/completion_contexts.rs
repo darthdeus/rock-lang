@@ -2219,3 +2219,28 @@ fn member_completion_recovers_a_missing_comma_in_a_struct_literal() {
     assert!(l.iter().any(|x| x.starts_with("hp")), "St.hp must be offered: {l:?}");
     assert!(l.iter().any(|x| x.starts_with("mp")), "St.mp must be offered: {l:?}");
 }
+
+#[test]
+fn reach_insert_does_not_duplicate_an_existing_member_tail() {
+    // `push(0, PANE|.rect(),` -- a reach candidate `PANEL.rect()` inserted over
+    // the existing `.rect()` tail must not double it into `PANEL.rect().rect()`.
+    // The insert drops the shared trailing `.rect()`, leaving `PANEL` before the
+    // buffer's `.rect()`. (mag shop.rock capture 1784164491.)
+    let src = "struct UiRect {}\n\
+               struct Panel {}\n\
+               fn rect(self: Panel) -> UiRect { UiRect {} }\n\
+               global PANEL: Panel = Panel {}\n\
+               fn push(a: int, r: UiRect) {}\n\
+               fn caller() {\n\
+               \x20   push(0, PANE.rect(),\n\
+               \x20       1)\n\
+               }\n";
+    // line 6 (0-indexed) = `    push(0, PANE.rect(),`, cursor after `PANE` (char 16).
+    let it = item(src, 6, 16, "PANEL.rect() -> UiRect");
+    assert_eq!(
+        it.insert_text.as_deref(),
+        Some("PANEL"),
+        "reach insert must strip the shared `.rect()` tail, not re-emit it: {:?}",
+        it.insert_text
+    );
+}

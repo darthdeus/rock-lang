@@ -102,14 +102,21 @@ struct NativeBuffer<T> {
     len: int,
 }
 
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_float(n: int) -> Ptr<float> = 'return ffi.new("float[?]", n)'
-@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_int(n: int) -> Ptr<int> = 'return ffi.new("int[?]", n)'
+// Compiler intrinsic: every call is expanded by skull to `NativeBuffer { ptr =
+// ffi.new("<ctype>[?]", n), len = n }` with the concrete element cdef name
+// resolved at the call site (skull owns the value-struct ct names). Legal only
+// where `T` resolves to an FFI-clean value struct or int/float/bool; a
+// GC-carrying or opaque-generic `T` is a spanned emit-time error. The body is a
+// never-reached guard (all calls are intercepted before resolution).
+inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('native_buffer_alloc is a skull compiler intrinsic; a call reached runtime unexpanded')"
 
-fn native_buffer_float(n: int) -> NativeBuffer<float> {
-    return NativeBuffer { ptr: __nb_alloc_float(n), len: n }
+// The primitive ctors are thin wrappers over the intrinsic (T binds concretely
+// here, so the intrinsic resolves at this site -- no per-type `__nb_alloc_*`).
+@inline fn native_buffer_float(n: int) -> NativeBuffer<float> {
+    return native_buffer_alloc(n)
 }
-fn native_buffer_int(n: int) -> NativeBuffer<int> {
-    return NativeBuffer { ptr: __nb_alloc_int(n), len: n }
+@inline fn native_buffer_int(n: int) -> NativeBuffer<int> {
+    return native_buffer_alloc(n)
 }
 
 // Single-hop accessors: the inline(lua) body reaches into the Rock struct's
@@ -315,31 +322,118 @@ fn metric_recent(m: Metric, i: int) -> float {
     return nb_get(m.ring, idx)
 }
 
-// NativeBuffer<T: value> — user-supplied allocator pattern
-// --------------------------------------------------------
+// NativeBuffer<T: value> — value-struct elements
+// ----------------------------------------------
 // The ffi.cdef for every `value` struct is emitted automatically, so
-// `ffi.new("Vec2[?]", n)` is a valid LuaJIT allocation. There's no
-// generic `native_buffer_value<T: value>(n)` in the stdlib because
-// Rock doesn't (yet) have compile-time access to a type's cdef name
-// from within a generic body; instead, each value struct that wants
-// native-buffer storage declares its own alloc+accessors:
+// `ffi.new("Vec2[?]", n)` is a valid LuaJIT allocation. `native_buffer_alloc<T>`
+// (above) is the generic-body-legal allocator: skull resolves the concrete
+// element cdef name at each call site, so `NativeBuffer { ptr:
+// native_buffer_alloc(n), len: n }` works for any FFI-clean value struct with no
+// per-type boilerplate. At runtime elements are stored contiguously as `T` cdata
+// (AoS); `buf[i]` returns a cdata ref (no copy) and `buf[i] = v` copies the struct
+// field-wise. See tests/native_buffer_value.rock and FlatVec<T> below.
+
+// ============================================================================
+// FlatVec<T> — growable flat storage for FFI-clean value structs
+// ============================================================================
 //
-//     value Vec2 { x: float, y: float }
+// `NativeBuffer<T>` + a tracked `len` + amortized 2x growth, wearing Vec's API.
+// Elements live inline in one ffi array (C-struct layout), so push/index lower to
+// field-wise scalar stores/loads with zero steady-state allocation -- the boxed
+// `[Vec2]` (Lua-table cell) cost a value struct pays escaping into a Vec.
 //
-//     @nomangle inline(lua)
-//     fn __nb_alloc_Vec2(n: int) -> Ptr<Vec2> = 'return ffi.new("Vec2[?]", n)'
+// Every op is `@inline` and specializes per element type at its call site (the
+// inliner's call-site specialization, docs/flatvec-plan.md P2): `buf[len] = v`
+// scalarizes and `native_buffer_alloc<T>` names the ctype inside the spliced body.
+// `T` MUST be an FFI-clean value struct -- a primitive or GC-carrying element is a
+// spanned emit-time error at the `flat_vec_new` call (use `native_buffer_int`/
+// `_float` for primitive buffers).
 //
-//     fn native_buffer_vec2(n: int) -> NativeBuffer<Vec2> {
-//         return NativeBuffer { ptr: __nb_alloc_Vec2(n), len: n }
-//     }
-//
-//     inline(lua) fn nb_get(b: NativeBuffer<Vec2>, i: int) -> Vec2 = "return b.ptr[i]"
-//     inline(lua) fn nb_set(b: NativeBuffer<Vec2>, i: int, v: Vec2) = "b.ptr[i] = v"
-//
-// At runtime: elements are stored contiguously as Vec2 cdata (AoS).
-// `buf[i]` returns a cdata ref to the element (no copy); field reads
-// go through LuaJIT's ffi indexing. `buf[i] = v` copies the struct
-// field-wise. See tests/native_buffer_value.rock for the exercise.
+//     value RayTarget { angle: float, x: float, y: float }
+//     let rays = flat_vec_new<RayTarget>(16)
+//     rays.push(RayTarget { angle: a, x: px, y: py })   // zero-alloc
+//     rays.sort((t) => t.angle)                          // by precomputed field
+//     for i in 0..rays.len { let t = rays.get(i); ... }
+
+struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
+
+// Constructor (no receiver -> a free fn, not the `Type.method` D-form).
+@inline fn flat_vec_new<T>(cap: int = 8) -> FlatVec<T> {
+    return FlatVec { buf: native_buffer_alloc(cap), len: 0 }
+}
+
+// Grow to 2x (>= 4) capacity via a fresh alloc + a scalar element-copy loop; the
+// copy JIT-compiles at these sizes (docs/flatvec-plan.md P3 bench: scalar loop).
+@inline fn FlatVec<T>.grow(fv) {
+    let old = fv.buf
+    let cap = old.len
+    let new_cap = if cap < 2 { 4 } else { cap * 2 }
+    let grown: NativeBuffer<T> = native_buffer_alloc(new_cap)
+    for i in 0..fv.len {
+        grown[i] = old[i]
+    }
+    fv.buf = grown
+}
+
+@inline fn FlatVec<T>.push(fv, v: T) {
+    if fv.len == fv.buf.len {
+        fv.grow()
+    }
+    fv.buf[fv.len] = v
+    fv.len = fv.len + 1
+}
+
+// Debug-checked index (release strips the check -- inherits the NativeBuffer
+// compile-mode gate, docs/compile-modes.md). `fv.get(i)` / `fv.set(i, v)`.
+@inline fn FlatVec<T>.get(fv, i: int) -> T {
+    if !is_release_mode() {
+        if i < 0 || i >= fv.len {
+            error("FlatVec.get: index {i} out of range (len {fv.len})")
+        }
+    }
+    return fv.buf[i]
+}
+
+@inline fn FlatVec<T>.set(fv, i: int, v: T) {
+    if !is_release_mode() {
+        if i < 0 || i >= fv.len {
+            error("FlatVec.set: index {i} out of range (len {fv.len})")
+        }
+    }
+    fv.buf[i] = v
+}
+
+// clear keeps the allocated capacity; a later push reuses it (zero-alloc reset).
+@inline fn FlatVec<T>.clear(fv) {
+    fv.len = 0
+}
+
+// The typed staging pointer for the flat FFI upload path (shader_set_vec4_array
+// _flat etc.): the first `len` elements are contiguous C-layout.
+@inline fn FlatVec<T>.ptr(fv) -> Ptr<T> {
+    return fv.buf.ptr
+}
+
+// In-place insertion sort by a `(T) -> float` key. The key fn must be capture-free
+// (a capturing lambda allocates per call); a `(t) => t.field` projection compiles
+// to one shared fn, no per-call closure. O(n^2); the pilot's n is small and the
+// key is a single precomputed field read.
+@inline fn FlatVec<T>.sort(fv, key_fn: (T) -> float) {
+    for i in 1..fv.len {
+        // `fv.get(i)` returns a VALUE copy (the scalar return ABI reads the fields
+        // into leaves) -- a direct `fv.buf[i]` binds a cdata ref that the shift
+        // below would alias and corrupt. The key reads the buffer ref directly
+        // (already a cdata -> no pack) BEFORE any shift, so no per-pivot box.
+        let x = fv.get(i)
+        let kx = key_fn(fv.buf[i])
+        let j = i - 1
+        while j >= 0 && key_fn(fv.buf[j]) > kx {
+            fv.buf[j + 1] = fv.buf[j]
+            j = j - 1
+        }
+        fv.buf[j + 1] = x
+    }
+}
 
 // ----------------------------------------------------------------------------
 // Sized-storage NativeBuffer variants (distinct-struct phantoms)

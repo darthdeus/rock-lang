@@ -48,11 +48,11 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("fract", 1, "($1 - Math.floor($1))"),
     // NativeBuffer four-fn surface (docs/nativebuffer-portability-design.md):
     // `Ptr<T>` IS the TypedArray on JS, so `.ptr` indexes with brackets exactly
-    // like the luajit cdata. `NativeBuffer<int>` is pinned 32-bit -> Int32Array;
-    // TypedArray store conversion wraps mod 2^n, matching LuaJIT's native
-    // truncation (differentially verified by tests/nb_differential.rs).
-    ("__nb_alloc_float", 1, "new Float32Array($1)"),
-    ("__nb_alloc_int", 1, "new Int32Array($1)"),
+    // like the luajit cdata. TypedArray store conversion wraps mod 2^n, matching
+    // LuaJIT's native truncation (differentially verified by tests/nb_differential.rs).
+    // `int`/`float` allocs no longer route through a named intrinsic -- they lower
+    // to the `FfiNewArray` MIR node (`native_buffer_alloc<T>`), rendered in
+    // `emit.rs`; only the phantom-width variants keep a per-type template here.
     ("__nb_alloc_u8", 1, "new Uint8Array($1)"),
     ("__nb_alloc_i8", 1, "new Int8Array($1)"),
     ("__nb_alloc_u16", 1, "new Uint16Array($1)"),

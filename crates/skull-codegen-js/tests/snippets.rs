@@ -55,15 +55,14 @@ fn differential_set_snippets_render() {
 }
 
 // The NativeBuffer four-fn surface (docs/nativebuffer-portability-design.md):
-// 7 per-type TypedArray allocs, the shared nb_get/nb_set index templates, and
-// the bounds-checked `get` accessor (IIFE so receiver/index evaluate once).
-// Cross-backend semantics live in tests/nb_differential.rs; these pin the
-// rendered shapes.
+// the 5 phantom-width per-type TypedArray allocs (int/float now lower to the
+// `FfiNewArray` MIR node, not a named template -- see emit.rs), the shared
+// nb_get/nb_set index templates, and the bounds-checked `get` accessor (IIFE so
+// receiver/index evaluate once). Cross-backend semantics live in
+// tests/nb_differential.rs; these pin the rendered shapes.
 #[test]
 fn native_buffer_snippets_render() {
     for (name, ctor) in [
-        ("__nb_alloc_float", "Float32Array"),
-        ("__nb_alloc_int", "Int32Array"),
         ("__nb_alloc_u8", "Uint8Array"),
         ("__nb_alloc_i8", "Int8Array"),
         ("__nb_alloc_u16", "Uint16Array"),

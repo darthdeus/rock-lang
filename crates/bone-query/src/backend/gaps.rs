@@ -32,8 +32,8 @@ pub struct HintEntry {
 ///
 /// Delegates to `crate::query::definition_at`, which resolves all identifier
 /// kinds (local/param uses, function calls, struct literals, enum variants,
-/// globals). (A callee in the warm stdlib resolves here but the facade drops it,
-/// since `<bone-stdlib:...>` isn't a navigable path.)
+/// globals). A callee in the warm stdlib resolves to the stdlib's real on-disk
+/// path (warm modules carry real paths), so goto-def into the stdlib works.
 pub fn definition(
     ws: &Workspace,
     mid: ModuleId,

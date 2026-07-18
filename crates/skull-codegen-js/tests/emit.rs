@@ -236,8 +236,7 @@ fn native_buffer_ctor_emits_object_literal() {
 function native_buffer_float(c0) {
   let v0 = c0;
   let v1 = new Float32Array(v0);
-  let v2 = c0;
-  return ({ptr: v1, len: v2});
+  return ({ptr: v1, len: v0});
 }
 "
                 );

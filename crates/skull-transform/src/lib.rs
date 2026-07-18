@@ -1193,6 +1193,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
         }
+        Inst::FfiNewArray { count, .. } => p(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => p(base),
         Inst::Index { base, index, .. } => { p(base); p(index); }
         Inst::Len { base, .. } => p(base),
@@ -1236,6 +1237,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));
         }
+        Inst::FfiNewArray { count, .. } => f(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => f(base),
         Inst::Index { base, index, .. } => { f(base); f(index); }
         Inst::Len { base, .. } => f(base),

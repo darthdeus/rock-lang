@@ -659,6 +659,19 @@ impl Emitter<'_> {
                 }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
             },
+            // The `native_buffer_alloc<T>` primitive lowers to this MIR node
+            // (skull-mir intercepts the call and resolves the element ctype).
+            // `Ptr<T>` IS a TypedArray on JS, matching the luajit `ffi.new` cdata;
+            // value-struct / bool element ctypes have no TypedArray, so reject.
+            Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
+                "float" => format!("new Float32Array({})", self.render_val(*count)?),
+                "int" => format!("new Int32Array({})", self.render_val(*count)?),
+                other => {
+                    return Err(err(format!(
+                        "JS subset: native_buffer_alloc element ctype `{other}` has no TypedArray"
+                    )))
+                }
+            },
             // A general field read is JS property access. NativeBuffer `.ptr`/
             // `.len` and Vec `._data`/`.len` are the same shape.
             Inst::Field { base, field } => {
@@ -1058,6 +1071,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => mark(&[*base]),
         Inst::Index { base, index, .. } => mark(&[*base, *index]),
         Inst::Len { base, .. } => mark(&[*base]),
+        Inst::FfiNewArray { count, .. } => mark(&[*count]),
         Inst::Store { value, .. } => mark(&[*value]),
         Inst::StoreField { base, value, .. } => mark(&[*base, *value]),
         Inst::StoreIndex { base, index, value, .. } => mark(&[*base, *index, *value]),

@@ -1461,6 +1461,51 @@ fn redundant_safe_nav_field_rejected() {
     );
 }
 
+/// When a call matches no overload, the "No overload" error must LIST the
+/// available candidate signatures -- otherwise the user has no way to see what
+/// shapes exist and has to go hunt the definitions. (Hover/signature-help cover
+/// the IDE; this covers the compiler error itself.)
+#[test]
+fn no_overload_error_lists_candidate_signatures() {
+    let src = r#"
+struct A { i: int }
+struct B { i: int }
+struct C { i: int }
+fn draw(a: A, tag: int) -> int { return 0 }
+fn draw(b: B) -> int { return 0 }
+fn main() {
+    let c = C { i: 0 }
+    let _ = draw(c)
+}
+"#;
+    let ws = check(src).expect("body errors are collected, not aborted");
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let inf = ws.inference(mid).expect("user module inferred");
+    let msgs: Vec<&str> = inf
+        .errors
+        .values()
+        .flatten()
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("No overload for `draw`")),
+        "the call must reject: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("draw(a: A, tag: int) -> int")),
+        "candidate 1 signature must be listed: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("draw(b: B) -> int")),
+        "candidate 2 signature must be listed: {msgs:?}"
+    );
+}
+
 /// Unfuck #32: when every overload is rejected and the only near-miss is an
 /// `Iterator`-bounded candidate that failed CONFORMANCE (params fit, bounds
 /// did not), the error surfaces `check_iterator_bounds`' precise reason
@@ -1610,4 +1655,57 @@ fn field_annotations_survive_lowering() {
     assert_eq!(annotated.annotations[0].name.name.as_str(), "flat");
     assert!(annotated.annotations[0].args.is_empty());
     assert!(s.fields[1].annotations.is_empty(), "unannotated field stays empty");
+}
+
+// A resolved call to a generic fn persists the winning candidate's
+// instantiated generics (declaration order) in `call_generic_bindings` --
+// the binding source for skull's inliner call-site specialization
+// (docs/flatvec-plan.md, Mechanism).
+#[test]
+fn generic_call_records_instantiation_bindings() {
+    let src = r#"value V2 { x: float, y: float }
+fn pick<T>(a: T, b: T) -> T { return a }
+fn main() {
+    let v = pick(V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 })
+    let i = pick(1, 2)
+}"#;
+    let ws = check(src).expect("clean check");
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let hir = ws.module(mid);
+    let (main_idx, _) = hir
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "main")
+        .expect("main exists");
+    let inf = ws.inference(mid).expect("user module inferred");
+    let body = inf
+        .per_fn
+        .get(&BodyOwner::Function(main_idx))
+        .expect("main inferred");
+
+    assert_eq!(
+        body.call_generic_bindings.len(),
+        2,
+        "both pick() calls must record bindings; got {:?}",
+        body.call_generic_bindings
+    );
+    let mut rendered: Vec<String> = body
+        .call_generic_bindings
+        .values()
+        .map(|bindings| {
+            assert_eq!(bindings.len(), 1, "pick has one generic param");
+            ws.render(Some(body), bindings[0])
+        })
+        .collect();
+    rendered.sort();
+    assert_eq!(
+        rendered,
+        vec!["V2".to_string(), "int".to_string()],
+        "T must resolve to the concrete instantiation per call site"
+    );
 }

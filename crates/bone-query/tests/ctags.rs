@@ -316,3 +316,29 @@ fn write_ctags_covers_whole_project_not_just_opened_file() {
     assert!(tags.lines().any(|l| l.starts_with("alpha\t")), "alpha (opened file) tag missing:\n{tags}");
     assert!(tags.lines().any(|l| l.starts_with("beta\t")), "beta (unopened sibling) tag missing:\n{tags}");
 }
+
+#[test]
+fn write_ctags_includes_stdlib_symbols() {
+    // The stdlib is part of the workspace, so its symbols must land in the
+    // project's tags file (jump-to-stdlib-by-name), pointing at the real stdlib
+    // file. `vec_push` is a stable stdlib function.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"ct\"\n").unwrap();
+    let file = dir.path().join("main.rock");
+    std::fs::write(&file, "fn main() -> int {\n  let xs = [1]\n  xs.push(2)\n  xs.len()\n}\n").unwrap();
+    let path = file.to_string_lossy().to_string();
+
+    let mut bone = BoneWorkspace::new();
+    bone.update(&path, std::fs::read_to_string(&file).unwrap());
+    bone.write_ctags(&path).expect("write_ctags should succeed");
+
+    let tags = std::fs::read_to_string(dir.path().join(".rock.tags")).expect(".rock.tags written");
+    let push_tag = tags.lines().find(|l| l.starts_with("vec_push\t"));
+    assert!(push_tag.is_some(), "stdlib `vec_push` tag missing:\n(first 20 lines)\n{}",
+        tags.lines().take(20).collect::<Vec<_>>().join("\n"));
+    assert!(
+        push_tag.unwrap().contains("unified.rock"),
+        "vec_push tag must point at the stdlib file: {}",
+        push_tag.unwrap()
+    );
+}

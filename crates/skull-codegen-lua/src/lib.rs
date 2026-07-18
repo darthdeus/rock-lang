@@ -2109,6 +2109,11 @@ impl Emitter<'_> {
                 out.push('}');
             }
 
+            Inst::FfiNewArray { ctype, count } => {
+                let _ = write!(out, "ffi.new(\"{ctype}[?]\", ");
+                self.write_opnd(out, *count);
+                out.push(')');
+            }
             Inst::Field { base, field } => {
                 self.write_opnd(out, *base);
                 let _ = write!(out, ".{field}");

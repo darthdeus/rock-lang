@@ -31,6 +31,44 @@ pub(crate) fn strip_call_template(items: &mut [CompletionItem]) {
     }
 }
 
+/// The member-access/call run immediately after the cursor: identifier chars,
+/// `.`, parens, and `?`/`!`, stopping at the first char that can't continue a
+/// postfix expression (whitespace, `,`, operators, EOL). `PANE|.rect(),` -> `.rect()`.
+pub(crate) fn member_tail(src: &str, offset: usize) -> &str {
+    let rest = src.get(offset..).unwrap_or("");
+    let end = rest
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '(' | ')' | '?' | '!')))
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// Drop the part of each item's `insertText` that the buffer already has to the
+/// right of the cursor, so a dotted reach insert (`PANEL.rect()`) accepted over
+/// an existing `.rect()` tail doesn't double it (`PANEL.rect().rect()`). Strips
+/// the LONGEST leading run of `tail` that is a suffix of the insert text -- only
+/// when that run starts at a `.`/`(` structural boundary, so an identifier the
+/// cursor sits inside (`foo|bar`) is never coincidentally eaten. Snippet inserts
+/// are skipped: their `$0` placeholders aren't literal buffer text.
+pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
+    if !tail.starts_with(['.', '(']) {
+        return;
+    }
+    for it in items.iter_mut() {
+        if matches!(it.insert_text_format, Some(InsertTextFormat::SNIPPET)) {
+            continue;
+        }
+        let Some(t) = it.insert_text.as_deref() else { continue };
+        let mut k = tail.len();
+        while k > 0 {
+            if tail.is_char_boundary(k) && t.ends_with(&tail[..k]) {
+                it.insert_text = Some(t[..t.len() - k].to_string());
+                break;
+            }
+            k -= 1;
+        }
+    }
+}
+
 // === Completion tuning (docs/completion-v2-design.md) =======================
 // Every cap/threshold the ranking pipeline exposes, in one block. The fuzzy
 // score weights (FZ_*) live next to the DP above; the RankKey field order is

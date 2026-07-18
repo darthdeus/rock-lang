@@ -153,7 +153,7 @@ fn stdlib_layer0_proving_set_is_declared_intrinsic() {
     has("table_set", 3);
     has("nb_get", 2);
     has("nb_set", 3);
-    has("__nb_alloc_float", 1);
+    has("__nb_alloc_u8", 1);
     has("sb_new", 0);
 }
 
@@ -172,7 +172,7 @@ fn stdlib_fn<'a>(ws: &'a bone_semantic::inference::Workspace, name: &str) -> &'a
 #[test]
 fn stdlib_native_required_set_has_luajit_mapping() {
     let ws = ws_with_stdlib("fn main() {}");
-    for n in ["table_get", "table_set", "nb_get", "nb_set", "__nb_alloc_float", "__nb_alloc_int"] {
+    for n in ["table_get", "table_set", "nb_get", "nb_set", "__nb_alloc_u8", "__nb_alloc_i8"] {
         let f = stdlib_fn(&ws, n);
         assert!(is_native_required(f), "`{n}` must be @native_required");
         assert!(is_intrinsic(f), "`{n}` must be @intrinsic");

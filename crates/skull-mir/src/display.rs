@@ -182,6 +182,7 @@ fn fmt_inst(
             format!("index.{kind:?} v{}[v{}]", v(*base), v(*index))
         }
         Inst::Len { base, kind } => format!("len.{kind:?} v{}", v(*base)),
+        Inst::FfiNewArray { ctype, count } => format!("ffi_new_array {ctype}[?], v{}", v(*count)),
 
         Inst::Store { cell, value } => format!("store c{}, v{}", raw(*cell), v(*value)),
         Inst::StoreField { base, field, value } => {

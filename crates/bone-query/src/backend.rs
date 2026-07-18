@@ -58,18 +58,37 @@ fn reparse_user_file(uf: &bone_incremental::session::UserFile, path: &str) -> Op
 // Warm stdlib (parsed once, cloned into every session)
 // ---------------------------------------------------------------------------
 
-/// The real stdlib, parsed through skull-parser (bone's front end) with a
-/// per-file id (`<bone-stdlib:NAME>`), so warm modules never collide with user
-/// module ids and are visibly distinguishable in diagnostics. Parsing with the
-/// id stamps every span, so bone's `ModuleId` (the first item's `span.file`)
-/// lands on it directly. Parsed once per process.
+/// Canonical on-disk path of a stdlib file, keyed exactly like a project file
+/// (`canon`/`root_for` produce the same form), so the warm module a user opens
+/// resolves to the SAME `ModuleId` -- no duplicate, no self-collision -- and
+/// source-based queries find the stdlib in `texts`.
+fn stdlib_path(name: &str) -> String {
+    canonicalize_lenient(&rock_host::stdlib_loader::stdlib_dir().join(name).to_string_lossy())
+}
+
+/// Stdlib sources keyed by canonical path, seeded into every project's `texts`
+/// so default-value slicing, `workspace_symbols`, and span->text see the stdlib
+/// like any other file.
+fn stdlib_texts() -> Vec<(String, String)> {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| (stdlib_path(f.name), f.contents.to_string()))
+        .collect()
+}
+
+/// The real stdlib, parsed through skull-parser (bone's front end) keyed by each
+/// file's REAL canonical path. Opening a stdlib buffer then interns to the same
+/// `ModuleId` as the warm copy (`warm_mids` still distinguishes warm from user
+/// code for lints/ctags policy), so it's navigable and diagnosable without a
+/// second colliding module. Parsing with the path stamps every span, so bone's
+/// `ModuleId` (the first item's `span.file`) lands on it directly. Parsed once.
 fn warm_stdlib() -> Vec<skull_parser::Ast> {
     static WARM: OnceLock<Vec<skull_parser::Ast>> = OnceLock::new();
     WARM.get_or_init(|| {
         rock_host::stdlib_loader::stdlib_files()
             .iter()
             .filter_map(|f| {
-                let id = Ustr::from(format!("<bone-stdlib:{}>", f.name).as_str());
+                let id = Ustr::from(stdlib_path(f.name).as_str());
                 match skull_parser::parse_module(f.contents, id) {
                     Ok(m) => Some(m),
                     Err(e) => {
@@ -350,7 +369,7 @@ impl BoneWorkspace {
                 // doesn't parse; the file is added by the update_file below.
                 session: Session::new(warm_stdlib(), Vec::new())
                     .expect("bone session warm-init (stdlib) must succeed"),
-                texts: HashMap::new(),
+                texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(),
                 reach: None,
                 fn_sigs: None,
@@ -423,7 +442,8 @@ impl BoneWorkspace {
         let is_bin = stick_is_bin(&root);
         match Session::new(warm_stdlib(), files.clone()) {
             Ok(session) => {
-                let texts: HashMap<String, String> = files.into_iter().collect();
+                let texts: HashMap<String, String> =
+                    stdlib_texts().into_iter().chain(files).collect();
                 // Baseline every loaded file at load time, so `ago_ms` is
                 // meaningful for modules not yet re-inferred by an edit.
                 let now = std::time::Instant::now();
@@ -680,7 +700,10 @@ impl BoneWorkspace {
         // distribute by file. A `lib`'s public API has external callers we can't
         // see, so the lint would false-flag it; hence the `is_bin` gate.
         if proj.is_bin {
-            let by_fn = bone_lints::unused_fns_by_file(proj.session.workspace());
+            let by_fn = bone_lints::unused_fns_by_file(
+                proj.session.workspace(),
+                &proj.session.warm_mids,
+            );
             for (p, diags) in by_file.iter_mut() {
                 if p == path && this_file_parse_err.is_some() {
                     continue;
@@ -790,8 +813,8 @@ impl BoneWorkspace {
         // signature tokens no node covers (`fn`/parens/`->`), bounded by `src`
         // so body keywords (`let`/`for`) past the brace aren't swallowed.
         let (contents, span) = pat_hover
-            .or_else(|| crate::query::hover_at(ws, mid, inf, offset))
-            .or_else(|| crate::query::fn_signature_hover(ws, mid, src, offset))?;
+            .or_else(|| crate::query::hover_at(ws, mid, inf, offset, Some(&proj.texts)))
+            .or_else(|| crate::query::fn_signature_hover(ws, mid, src, offset, Some(&proj.texts)))?;
         Some(Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
@@ -1196,6 +1219,28 @@ impl BoneWorkspace {
     /// newline doesn't pop the menu (and `<CR><CR>` doesn't accept item 1).
     /// Manual invokes / identifier typing pass `false` and are never suppressed.
     pub fn completion_with_trigger(
+        &mut self,
+        path: &str,
+        pos: Position,
+        space_triggered: bool,
+    ) -> Vec<CompletionItem> {
+        let mut items = self.completion_with_trigger_impl(path, pos, space_triggered);
+        // Reconcile every insert with the buffer text after the cursor: a dotted
+        // reach insert (`PANEL.rect()`) accepted over an existing `.rect()` tail
+        // must not double it. Done once here so it covers every return path
+        // (member/enum/struct/reach), off the same canon path + offset the impl used.
+        let path_c = self.canon(path);
+        if let Some(proj) = self.projects.get(&Self::root_for(path_c.as_str())) {
+            if let Some(src) = proj.texts.get(path_c.as_str()) {
+                let offset = offset_at_line_col(src, pos.line, pos.character);
+                let tail = member_tail(src, offset);
+                reconcile_suffix(&mut items, tail);
+            }
+        }
+        items
+    }
+
+    fn completion_with_trigger_impl(
         &mut self,
         path: &str,
         pos: Position,
@@ -2175,9 +2220,10 @@ impl BoneWorkspace {
     /// top-level symbol (functions, structs, enums, newtypes, globals) across the
     /// project's tracked files from bone's HIR -- the same `document_symbols`
     /// walk `workspace_symbols` uses -- so the tags match the live program. The
-    /// LSP calls this on `textDocument/didSave`; the stdlib is excluded (it isn't
-    /// in `texts`), keeping the file project-scoped. A path with no session yet
-    /// writes nothing and returns 0. Returns the number of symbols written.
+    /// LSP calls this on `textDocument/didSave`; the stdlib IS included (warm
+    /// modules carry real paths), so its symbols are jump-to-by-name. A path with
+    /// no session yet writes nothing and returns 0. Returns the number of symbols
+    /// written.
     pub fn write_ctags(&self, path: &str) -> std::io::Result<usize> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -2213,10 +2259,11 @@ impl BoneWorkspace {
         // (project + stick.toml deps), NOT just the files open in the editor.
         // Iterating the workspace modules directly (vs `texts.keys()` +
         // `user_module_for_path`) can't silently drop a file on a path mismatch
-        // and needs no canonicalization round-trip. Excludes the builtin module
-        // and the warm stdlib (`warm_mids`).
+        // and needs no canonicalization round-trip. The warm stdlib is included
+        // (its modules carry real canonical paths), so `vec_push` & co. are
+        // jump-to-by-name; only the builtin (pathless) module is excluded.
         for m in ws.modules.iter() {
-            if m.id == ModuleId::builtin() || proj.session.warm_mids.contains(&m.id) {
+            if m.id == ModuleId::builtin() {
                 continue;
             }
             let mid = m.id;
@@ -2352,7 +2399,7 @@ impl BoneWorkspace {
         // Inference is optional: tiers 2/3 (by-name overload list, struct ctor)
         // serve a signature even when the file doesn't fully type-check.
         let inf = ws.inference(mid);
-        let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset)?;
+        let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
         // Active argument = top-level commas between the call's `(` and the cursor.
         let active = active_param(src, call_span.offset_range.0, offset);
         Some(SignatureHelp {
@@ -2455,35 +2502,16 @@ impl BoneWorkspace {
 
     // -- Shared span -> LSP conversion --------------------------------------
 
-    /// Resolve a span's file to its LSP [`Uri`] and source text: embedded stdlib
-    /// sources for a synthetic `<bone-stdlib:NAME>` id, the session buffer for a
-    /// tracked file, else a disk read (untracked sibling). `Cow` borrows in the
-    /// common (tracked/stdlib) cases and only owns on the disk read.
+    /// Resolve a span's file to its LSP [`Uri`] and source text: the session
+    /// buffer for a tracked file (incl. the stdlib, whose sources are seeded into
+    /// `texts`), else a disk read (untracked sibling). `Cow` borrows in the common
+    /// (tracked) case and only owns on the disk read.
     fn span_uri_and_text<'a>(
         &self,
         proj: &'a BoneProject,
         span: &Span,
     ) -> Option<(Uri, Cow<'a, str>)> {
         let file = span.file.as_str();
-        if let Some(name) = file
-            .strip_prefix("<bone-stdlib:")
-            .and_then(|s| s.strip_suffix('>'))
-        {
-            let text = rock_host::stdlib_loader::stdlib_files()
-                .iter()
-                .find(|f| f.name == name)?
-                .contents;
-            // Resolve to the stdlib's REAL on-disk path so the editor can open it
-            // and the span's offsets (valid against `text`, which IS that file's
-            // contents) land on the right line. A bare `file://{name}` is a
-            // malformed URI -- `name` becomes the host, the path is empty -- so
-            // the editor opens an empty buffer and applies a stdlib-relative line
-            // to it (nvim: "Invalid cursor line: out of range").
-            let path = rock_host::stdlib_loader::stdlib_dir().join(name);
-            let path = path.canonicalize().unwrap_or(path);
-            let uri = <Uri as std::str::FromStr>::from_str(&format!("file://{}", path.display())).ok()?;
-            return Some((uri, Cow::Borrowed(text)));
-        }
         let uri = <Uri as std::str::FromStr>::from_str(&format!("file://{file}")).ok()?;
         match proj.texts.get(file) {
             Some(t) => Some((uri, Cow::Borrowed(t))),
@@ -3953,8 +3981,13 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     let Some(mid) = user_module_for_path(ws, path) else {
         return Vec::new();
     };
+    // A warm (stdlib) file the user opened is a read-only reference: don't lint
+    // it (every stdlib helper would false-flag as an unused var).
+    if proj.session.warm_mids.contains(&mid) {
+        return Vec::new();
+    }
     let module = &ws.modules[mid.index()];
-    let variants = bone_lints::enum_variant_names(ws);
+    let variants = bone_lints::enum_variant_names(ws, &proj.session.warm_mids);
     let findings: Vec<_> = module
         .bodies
         .values()
@@ -3972,7 +4005,8 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
 /// caller gates it to `bin` projects. The one-shot CLI path -- the `update`
 /// path distributes the same by-file result across every tracked file.
 fn fn_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
-    let by_fn = bone_lints::unused_fns_by_file(proj.session.workspace());
+    let by_fn =
+        bone_lints::unused_fns_by_file(proj.session.workspace(), &proj.session.warm_mids);
     let Some(findings) = by_fn.get(&Ustr::from(path)) else {
         return Vec::new();
     };
