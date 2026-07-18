@@ -2408,8 +2408,7 @@ impl Builder<'_> {
             Expr::Array(elems) => self.lower_array_literal(elems, ContainerKind::Vec),
             Expr::NativeArray(elems) => self.lower_array_literal(elems, ContainerKind::NativeArray),
             Expr::Index { base, index } => {
-                let kind = self.coll_kind(base);
-                let b = self.lower_expr(base)?;
+                let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 Ok(self.emit_cur(Inst::Index {
                     base: b,
@@ -2690,8 +2689,7 @@ impl Builder<'_> {
                 });
             }
             Expr::Index { base, index } => {
-                let kind = self.coll_kind(base);
-                let b = self.lower_expr(base)?;
+                let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreIndex {
@@ -2783,8 +2781,7 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreField { base: b, field, value: new_v });
             }
             Expr::Index { base, index } => {
-                let kind = self.coll_kind(base);
-                let b = self.lower_expr(base)?;
+                let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 let cur = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 let rv = self.lower_expr(value)?;
@@ -2896,8 +2893,7 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::Index { base, index } => {
-                let kind = self.coll_kind(base);
-                let b = self.lower_expr(base)?;
+                let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 let old = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 let new = bump(self, old);
@@ -5352,9 +5348,19 @@ impl Builder<'_> {
         iter: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let kind = self.coll_kind(iter);
-        let arr_v = self.lower_expr(iter)?;
-        let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
+        // `for v in fv` over FlatVec: numeric loop bounded by the `len` FIELD
+        // (not the buffer capacity), elements via the `buf` NativeBuffer.
+        let (kind, arr_v, len_v) = if self.expr_is_flat_vec(iter) {
+            let fv = self.lower_expr(iter)?;
+            let buf = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("buf") });
+            let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
+            (ContainerKind::NativeBuffer, buf, len)
+        } else {
+            let kind = self.coll_kind(iter);
+            let arr_v = self.lower_expr(iter)?;
+            let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
+            (kind, arr_v, len_v)
+        };
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -6693,6 +6699,31 @@ impl Builder<'_> {
             out.push((flat_named_slot(field, rf), v));
         }
         out
+    }
+
+    fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
+        matches!(self.expr_ty(e),
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "FlatVec")
+    }
+
+    /// Lower an index-expr base to `(base inst, container kind)`. A
+    /// `FlatVec<T>` base indexes its `buf` NativeBuffer storage -- project the
+    /// field and index with NativeBuffer semantics, so the value-element slot
+    /// machinery and debug bounds check apply unchanged. Note `fv[i]` is
+    /// therefore CAPACITY-checked in debug; `fv.get(i)` is the len-checked
+    /// accessor.
+    fn lower_index_base(
+        &mut self,
+        base: Idx<Expr>,
+    ) -> Result<(Idx<Inst>, ContainerKind), CompilerError> {
+        if self.expr_is_flat_vec(base) {
+            let b = self.lower_expr(base)?;
+            let buf = self.emit_cur(Inst::Field { base: b, field: Ustr::from("buf") });
+            return Ok((buf, ContainerKind::NativeBuffer));
+        }
+        let kind = self.coll_kind(base);
+        let b = self.lower_expr(base)?;
+        Ok((b, kind))
     }
 
     /// The collection kind of a base expression, from its inferred type — drives
