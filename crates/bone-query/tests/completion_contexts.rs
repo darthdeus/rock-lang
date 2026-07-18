@@ -383,6 +383,71 @@ fn ufcs_method_completion_reuses_existing_open_paren() {
     assert_ne!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
 }
 
+// -- One-shot field-ref method pre-fill (docs/fieldof-method-completion-plan.md).
+// A UFCS method with a `FieldOf<recv, V>` param fills the field arg at method-
+// selection time: `mob.kil` -> `mob.kill_co(.attack_co)`. The receiver is a
+// bare generic (`o: T`), so `ufcs_methods` never surfaces it -- these items are
+// enumerated separately, gated on the receiver having a matching field.
+
+#[test]
+fn field_ref_method_prefills_single_field() {
+    // `Mob` has exactly one `int?` field -> `mob.kil` completes to
+    // `kill_co(.attack_co)` as a snippet, filling the FieldOf arg in one step.
+    let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
+               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r(mob: Mob) {\n  mob.kil\n}\n";
+    let it = item(src, 3, 9, "kill_co");
+    assert_eq!(it.insert_text.as_deref(), Some("kill_co(.attack_co)"), "{it:?}");
+    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
+#[test]
+fn field_ref_method_prefills_choice_on_multiple_fields() {
+    // Two `int?` fields -> a snippet CHOICE placeholder, in declaration order.
+    let src = "struct Mob { health: int, attack_co: int?, cast_co: int?, name: string }\n\
+               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r(mob: Mob) {\n  mob.kil\n}\n";
+    let it = item(src, 3, 9, "kill_co");
+    assert_eq!(it.insert_text.as_deref(), Some("kill_co(${1|.attack_co,.cast_co|})"), "{it:?}");
+    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
+#[test]
+fn field_ref_method_absent_when_no_matching_field() {
+    // No `int?` field -> the generic-receiver method never surfaces (it isn't
+    // callable: there's no field to pass). `min`/`max`-class generics likewise
+    // never leak into member completion.
+    let src = "struct Mob { health: int, name: string }\n\
+               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r(mob: Mob) {\n  mob.kil\n}\n";
+    let l = labels(src, 3, 9);
+    assert!(!l.iter().any(|s| s == "kill_co"), "kill_co must not surface without a matching field: {l:?}");
+}
+
+#[test]
+fn field_ref_method_reuses_existing_open_paren() {
+    // A `(` already follows -> insert the bare name (the arg-position path fills
+    // the field once the cursor is inside the parens); no doubled parens.
+    let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
+               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r(mob: Mob) {\n  mob.kil()\n}\n";
+    let it = item(src, 3, 9, "kill_co");
+    assert_eq!(it.insert_text.as_deref(), Some("kill_co"), "{it:?}");
+    assert_ne!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
+#[test]
+fn field_ref_method_prefills_nontrailing_fieldof_arg() {
+    // `set_co`'s FieldOf is arg 0 of `(field, next)`, not the trailing param --
+    // the field lands in slot 0 and `next` becomes a numbered placeholder.
+    let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
+               fn set_co<T>(o: T, f: FieldOf<T, int?>, next: int?) {}\n\
+               fn r(mob: Mob) {\n  mob.se\n}\n";
+    let it = item(src, 3, 8, "set_co");
+    assert_eq!(it.insert_text.as_deref(), Some("set_co(.attack_co, ${1:next})"), "{it:?}");
+    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
 #[test]
 fn member_completion_resolves_a_cross_file_receiver_type() {
     // a.rock defines IVec2; b.rock has a param of that type. Completing `g.` in

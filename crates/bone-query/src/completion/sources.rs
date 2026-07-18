@@ -45,6 +45,29 @@ pub(crate) fn callee_param_names(ws: &Workspace, callee: &str) -> Vec<(Ustr, Str
     out
 }
 
+/// Struct `t_name`'s field names whose declared type renders exactly as
+/// `v_str` -- the field-set a `FieldOf<t_name, V>` slot admits (typechecker
+/// invariance). Deduped, first-seen order. Shared by the arg-position field-ref
+/// path and the method-selection-time pre-fill in `build_member_items`.
+pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v_str: &str) -> Vec<Ustr> {
+    let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for m in ws.modules.iter() {
+        let Some(&idx) = m.struct_by_name.get(&t_name) else {
+            continue;
+        };
+        for fld in &m.structs[idx].fields {
+            if ws.render(None, fld.ty) != v_str {
+                continue;
+            }
+            if seen.insert(fld.name) {
+                out.push(fld.name);
+            }
+        }
+    }
+    out
+}
+
 /// Field-ref completions for a call-arg slot. `None` if the slot's expected
 /// param isn't `FieldOf<Struct, V>` (caller falls through to normal
 /// completion); `Some(items)` when it is -- offering the struct's fields whose
@@ -110,43 +133,30 @@ pub(crate) fn field_ref_arg_completions(
     };
 
     let pfx = prefix.as_bytes();
-    let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for m in ws.modules.iter() {
-        let Some(&idx) = m.struct_by_name.get(&t_name) else {
+    for fld_name in fields_of_type(ws, t_name, &v_str) {
+        if !(prefix.is_empty() || admit(fld_name.as_bytes(), pfx)) {
             continue;
-        };
-        for fld in &m.structs[idx].fields {
-            let fty = ws.render(None, fld.ty);
-            if fty != v_str {
-                continue;
-            }
-            if !(prefix.is_empty() || admit(fld.name.as_bytes(), pfx)) {
-                continue;
-            }
-            if !seen.insert(fld.name) {
-                continue;
-            }
-            // Dot already typed -> insert the bare name; otherwise add it.
-            let insert = if lead_dot {
-                fld.name.to_string()
-            } else {
-                format!(".{}", fld.name)
-            };
-            out.push(CompletionItem {
-                sort_text: Some(arg_sort_text(0, 0, fld.name.as_str(), pfx, 1, 0, 0)),
-                // The label carries the leading `.` -- a field ref IS `.co` (no
-                // receiver), unlike member completion where the `recv.` is
-                // already typed. `filter_text` stays the bare name so typing
-                // `co` (with or without the dot) still matches.
-                label: format!(".{}: {}", fld.name, fty),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(fty),
-                insert_text: Some(insert),
-                filter_text: Some(fld.name.to_string()),
-                ..Default::default()
-            });
         }
+        // Dot already typed -> insert the bare name; otherwise add it.
+        let insert = if lead_dot {
+            fld_name.to_string()
+        } else {
+            format!(".{}", fld_name)
+        };
+        out.push(CompletionItem {
+            sort_text: Some(arg_sort_text(0, 0, fld_name.as_str(), pfx, 1, 0, 0)),
+            // The label carries the leading `.` -- a field ref IS `.co` (no
+            // receiver), unlike member completion where the `recv.` is
+            // already typed. `filter_text` stays the bare name so typing
+            // `co` (with or without the dot) still matches.
+            label: format!(".{}: {}", fld_name, v_str),
+            kind: Some(CompletionItemKind::FIELD),
+            detail: Some(v_str.clone()),
+            insert_text: Some(insert),
+            filter_text: Some(fld_name.to_string()),
+            ..Default::default()
+        });
     }
     out.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     Some(out)
@@ -1105,6 +1115,104 @@ pub(crate) fn member_completion_items(
     )
 }
 
+/// If UFCS fn `f` (receiver bound to `recv_struct`) has a `FieldOf<recv, V>`
+/// param and `recv_struct` has >=1 field of type `V`, returns `(arg_idx, field
+/// names)` -- `arg_idx` is the FieldOf's position among the *non-receiver* args,
+/// so the pre-fill lands the field in the right slot (`set_co`'s FieldOf is
+/// arg 0 of `(field, next)`, not the trailing param). `None` otherwise (leave
+/// the item untouched). Receiver binding: `T` is `Generic` on `fn kill_co<T>(o:
+/// T, f: FieldOf<T, V>)`, so the FieldOf's `T` must be that same generic var --
+/// or, rarely, a literal `FieldOf<SomeStruct, V>` whose struct is `recv_struct`.
+fn field_ref_slot(ws: &Workspace, recv_struct: Ustr, f: &bone_semantic::hir::Function) -> Option<(usize, Vec<Ustr>)> {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    let p0 = f.param_decls.first()?;
+    let recv_var = match ty_of(ws, None, p0.ty) {
+        TypeExpr::Generic(v, _) => Some(v),
+        _ => None,
+    };
+    for (i, p) in f.param_decls.iter().enumerate().skip(1) {
+        let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
+                if n.as_str() == "FieldOf" && params.len() == 2 =>
+            {
+                let mut it = params.into_iter();
+                (it.next().unwrap(), it.next().unwrap())
+            }
+            _ => continue,
+        };
+        let t_ok = match ty_of(ws, None, p.ty.with_idx(t_idx)) {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n == recv_struct,
+            TypeExpr::Generic(tv, _) => recv_var == Some(tv),
+            _ => false,
+        };
+        if !t_ok {
+            continue;
+        }
+        let v_str = ws.render(None, p.ty.with_idx(v_idx));
+        let fields = fields_of_type(ws, recv_struct, &v_str);
+        if !fields.is_empty() {
+            return Some((i - 1, fields));
+        }
+    }
+    None
+}
+
+/// Snippet `insert_text` for a field-ref method: the FieldOf arg pre-filled with
+/// the field (a `${1|.a,.b|}` choice when >1 field), every other arg a numbered
+/// placeholder named after its param. `mob.kill_co` -> `kill_co(.attack_co)`;
+/// `mob.set_co` -> `set_co(.attack_co, ${1:next})`.
+fn field_ref_insert(name: &str, f: &bone_semantic::hir::Function, field_arg_idx: usize, fields: &[Ustr]) -> String {
+    let mut stop = if fields.len() > 1 { 2 } else { 1 };
+    let mut parts = Vec::new();
+    for (j, p) in f.param_decls.iter().skip(1).enumerate() {
+        if j == field_arg_idx {
+            if fields.len() == 1 {
+                parts.push(format!(".{}", fields[0]));
+            } else {
+                let joined = fields.iter().map(|x| format!(".{x}")).collect::<Vec<_>>().join(",");
+                parts.push(format!("${{1|{joined}|}}"));
+            }
+        } else {
+            parts.push(format!("${{{stop}:{}}}", p.name));
+            stop += 1;
+        }
+    }
+    format!("{name}({})", parts.join(", "))
+}
+
+/// Generic-receiver UFCS field-ref methods applicable to `recv_struct`: a fn
+/// whose first param is a bare generic `T` with a `FieldOf<T, V>` param, where
+/// `recv_struct` has a field of type `V`. `mob.kill_co(.attack_co)` is UFCS-
+/// legal, but the receiver is generic so `ufcs_methods` (nominal-match) never
+/// surfaces it -- this fills that gap. Gated on a matching field existing, so a
+/// struct with no `PolledCo?` field never sees `kill_co` (and generic helpers
+/// like `min`/`max`, which carry no FieldOf param, never leak in). Deduped by
+/// name, first-wins. Returns `(fn, arg_idx, field names)`.
+fn field_ref_methods<'a>(
+    ws: &'a Workspace,
+    recv_struct: Ustr,
+) -> Vec<(&'a bone_semantic::hir::Function, usize, Vec<Ustr>)> {
+    use bone_semantic::hir::TypeExpr;
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
+    for m in ws.modules.iter() {
+        for f in m.functions.values() {
+            if f.name.as_str().starts_with("__") {
+                continue;
+            }
+            let Some(p0) = f.param_decls.first() else { continue };
+            if !matches!(ty_of(ws, None, p0.ty), TypeExpr::Generic(..)) {
+                continue;
+            }
+            let Some((arg_idx, fields)) = field_ref_slot(ws, recv_struct, f) else { continue };
+            if seen.insert(f.name) {
+                out.push((f, arg_idx, fields));
+            }
+        }
+    }
+    out
+}
+
 /// Shared item-builder for both receiver-resolution strategies (structural
 /// name-walk and inferred receiver type): UFCS methods, type-directed
 /// field/method ordering, Entity `get` boost, arg-position transitive reach.
@@ -1249,6 +1357,45 @@ fn build_member_items(
             })
         });
         let mut items: Vec<CompletionItem> = field_items.chain(method_items).collect();
+        // Generic-receiver UFCS field-ref methods (`mob.kill_co(.attack_co)`):
+        // `ufcs_methods` skips them (their receiver is a bare generic, not
+        // nominal), so surface them here, pre-filling the field arg. Gated on a
+        // matching field existing, so `min`/`max`/`expect` (no FieldOf param)
+        // never leak in and a struct without the field never sees the method.
+        if let Some(rs) = recv_struct {
+            for (fdef, arg_idx, fields) in field_ref_methods(ws, rs) {
+                let name = fdef.name;
+                if !(prefix.is_empty() || admit(name.as_bytes(), pfx)) {
+                    continue;
+                }
+                let (insert_text, insert_text_format) = if paren_follows {
+                    (Some(name.to_string()), None)
+                } else {
+                    (
+                        Some(field_ref_insert(name.as_str(), fdef, arg_idx, &fields)),
+                        Some(InsertTextFormat::SNIPPET),
+                    )
+                };
+                let sort_text = if bool_ctx {
+                    member_bool_sort_text(name.as_str(), pfx, false, 0, 0)
+                } else if arg_ctx {
+                    member_arg_sort_text(name.as_str(), pfx, false, 0, 1, 0)
+                } else {
+                    arg_sort_text(0, 0, name.as_str(), pfx, 1, 0, 0)
+                };
+                let signature = crate::query::render_fn_signature(ws, name, fdef);
+                items.push(CompletionItem {
+                    sort_text: Some(sort_text),
+                    label: name.to_string(),
+                    label_details: fn_or_type_label_details(SymCat::Function, Some(&signature)),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(signature),
+                    insert_text,
+                    insert_text_format,
+                    ..Default::default()
+                });
+            }
+        }
         // Entity receiver: `.get()` (-> T?) is the dominant accessor, almost
         // always followed by `.unwrap()`. Rank `get` first, and offer the whole
         // `get().unwrap()` chain (matches a `getu`/`getunwrap` prefix, which the
