@@ -1265,6 +1265,12 @@ impl BoneWorkspace {
             return Vec::new();
         }
         let prefix_raw = ident_prefix(src, offset).to_string();
+        // A token starting with a digit is a numeric literal, never an identifier
+        // being typed (Rock idents are `[A-Za-z_][A-Za-z0-9_]*`) -- don't
+        // subsequence-match it against symbols (`0` -> `remap_to_01`).
+        if prefix_raw.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            return Vec::new();
+        }
         let prefix = prefix_raw.to_lowercase();
         // Every early-return path below reports its total under BONE_LSP_PROFILE;
         // the fall-through path has its own phase breakdown further down.
