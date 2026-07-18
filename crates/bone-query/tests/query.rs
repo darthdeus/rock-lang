@@ -107,6 +107,18 @@ fn definition_of_global() {
     assert_defines(src, use_off, decl_off);
 }
 
+#[test]
+fn definition_of_field_ref_resolves_to_the_struct_field() {
+    // `.attack_co` in a `FieldOf<Mob, int?>` slot -> the `attack_co` field decl
+    // on `Mob` (mirrors `mob.attack_co` field access, which already resolves).
+    let src = "struct Mob { health: int, attack_co: int? }\n\
+               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r(mob: Mob) {\n    kill_co(mob, .attack_co)\n}\n";
+    let use_off = nth_offset(src, ".attack_co", 1) + ".".len();
+    let decl_off = nth_offset(src, "attack_co: int?", 1);
+    assert_defines(src, use_off, decl_off);
+}
+
 // ---------------------------------------------------------------------------
 // references: every use site of the symbol under the cursor, INCLUDING the
 // declaration (so find-references and rename share it). Covers locals/params,
