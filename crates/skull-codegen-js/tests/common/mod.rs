@@ -39,6 +39,25 @@ pub fn lower_test_fn(
     panic!("no fn `{name}` in <test> module");
 }
 
+/// Lower the fn named `name` in the `<test>` module and emit it to JS under its
+/// own name. Panics if the fn is missing or emit rejects (the reject message is
+/// surfaced so a red test records it).
+pub fn emit_user(ws: &bone_semantic::inference::Workspace, name: &str) -> String {
+    let mf = lower_test_fn(ws, name);
+    skull_codegen_js::emit::emit_fn(ws, &mf, name)
+        .unwrap_or_else(|e| panic!("emit `{name}`: {}", e.message))
+}
+
+/// [`emit_user`] but returns the reject message instead of panicking (for
+/// red-first observation and reject-shape pins).
+pub fn emit_user_err(ws: &bone_semantic::inference::Workspace, name: &str) -> String {
+    let mf = lower_test_fn(ws, name);
+    match skull_codegen_js::emit::emit_fn(ws, &mf, name) {
+        Ok(js) => panic!("expected `{name}` to reject, got:\n{js}"),
+        Err(e) => e.message,
+    }
+}
+
 /// Lower + emit the `@intrinsic` Rock-fallback overload of `name` with `arity`
 /// params, under the JS name `<name>_fb`. Panics if none matches or emit fails.
 /// The Vec overloads (multi-value return) reject, so the first that emits is the
@@ -63,3 +82,4 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
     }
     panic!("no emittable scalar `{name}`/{arity} overload");
 }
+

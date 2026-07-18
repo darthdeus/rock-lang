@@ -417,6 +417,9 @@ fn js_str(s: &str) -> String {
 /// (trimmed) against the `output=` expectation -- one `__SKULL__` line per test.
 fn build_node_program(runnable: &[(String, String, String, Option<String>, bool)]) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
+    p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
+    p.push_str(skull_codegen_js::JS_TABLE_PRIM);
+    p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(
         r#"

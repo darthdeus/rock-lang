@@ -21,6 +21,7 @@ use bone_semantic::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 
 pub mod emit;
+mod structure;
 
 /// (name, arity) -> `$1..$n` JS expression template. Single source for both
 /// [`JsIntrinsics::lookup`] and [`JsIntrinsics::entries`]. Every entry is backed
@@ -90,6 +91,60 @@ function __nb_checked_set(buf, i, v) {
   buf.ptr[i] = v;
 }
 ";
+
+/// JS shims for the checked Vec indexing helpers codegen emits
+/// (`__vec_checked_get`/`__vec_checked_set`), mirroring the stdlib `inline(lua)`
+/// bodies: `_data` is 1-indexed (`_data[i + 1]`), bounds-erroring on miss. The
+/// error message shape follows the luajit stdlib (`f5efe7604`); it is not
+/// compared in-scope (an OOB index throws -> the harness reports FAIL, matching
+/// luajit -- `try_call` catching is out of scope).
+pub const JS_VEC_CHECK_SHIMS: &str = "\
+function __vec_checked_get(vec, i) {
+  if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
+  return vec._data[i + 1];
+}
+function __vec_checked_set(vec, i, v) {
+  if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
+  vec._data[i + 1] = v;
+}
+";
+
+/// Runtime-polymorphic untyped table primitives. In Lua a `Map` IS a raw table,
+/// so `table_get(m, k)` and `m[k]` are the same op; on JS a `Map` is a real
+/// `Map` (keys not string-coerced) while arrays/objects index directly, so these
+/// dispatch on `instanceof Map` to keep the two access paths consistent.
+pub const JS_TABLE_PRIM: &str = r#"
+function __table_get(t, k) { return (t instanceof Map) ? t.get(k) : t[k]; }
+function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v; }
+"#;
+
+/// The `__op_eq` runtime: deep structural equality matching Rock's stdlib
+/// `__op_eq` (verified on luajit: reference structs, value structs, tuples,
+/// enums, newtypes all compare BY CONTENTS; primitives by value). Lua `nil` maps
+/// to both JS `null` and `undefined` (an absent arg / an array hole), so both
+/// count as nil -- this also reconciles a Vec's index-0 placeholder (`null` in a
+/// literal vs a hole after `push`). Structs are `{__ty, ...}` plain objects (the
+/// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
+/// key-walk that includes `__ty` covers the type check for free. Capturing
+/// lambdas (compared by identity in Rock) are out of the emitter subset.
+pub const JS_STRUCTURAL_EQ: &str = r#"
+function __op_eq(a, b) {
+  var an = (a === null || a === undefined), bn = (b === null || b === undefined);
+  if (an || bn) return an && bn;
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object") return a === b;
+  var aa = Array.isArray(a), ab = Array.isArray(b);
+  if (aa || ab) {
+    if (!aa || !ab || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (!__op_eq(a[i], b[i])) return false;
+    return true;
+  }
+  var ka = Object.keys(a), kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (var i = 0; i < ka.length; i++) { var k = ka[i]; if (!__op_eq(a[k], b[k])) return false; }
+  return true;
+}
+"#;
 
 /// JS runtime preamble for the string subset (T2): `lua_tostring` reproduces
 /// Lua's `tostring`/`..` number formatting (`%.14g`), and `__rock_format_float`

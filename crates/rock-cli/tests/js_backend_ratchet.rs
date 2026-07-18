@@ -26,6 +26,8 @@ fn corpus() -> Vec<String> {
         "tests/generics_advanced.rock",
         "tests/type_holes_essential.rock",
         "tests/type_inference_core.rock",
+        "tests/js_loops_valuemodel.rock",
+        "tests/js_collections.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -47,8 +49,11 @@ fn js_runnable_coverage_ratchet() {
     // when emitter growth (T2+) makes more tests runnable; a drop below it is a
     // silent-coverage regression. T2 (strings + print + number formatting)
     // raised it from 4 to 55; V1's value-test corpus
-    // (tests/intrinsics/value_reference.rock) raised it to 67.
-    const FLOOR: usize = 67;
+    // (tests/intrinsics/value_reference.rock) raised it to 67; T3 (loops) added
+    // tests/js_loops_valuemodel.rock to the corpus, raising it to 74; T4
+    // (error/assert, Vec, structs, Map, equality) added tests/js_collections.rock
+    // and lifted the whole corpus to 91.
+    const FLOOR: usize = 91;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
