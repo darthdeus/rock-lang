@@ -127,9 +127,6 @@ struct NativeBuffer<T> {
     len: int,
 }
 
-@nomangle inline(lua) fn __nb_alloc_float(n: int) -> Ptr<float> = 'return ffi.new("float[?]", n)'
-@nomangle inline(lua) fn __nb_alloc_int(n: int) -> Ptr<int> = 'return ffi.new("int[?]", n)'
-
 // Compiler intrinsic: every call is expanded by skull to `NativeBuffer { ptr =
 // ffi.new("<ctype>[?]", n), len = n }` with the concrete element cdef name
 // resolved at the call site (skull owns the value-struct ct names). Legal only
@@ -138,11 +135,13 @@ struct NativeBuffer<T> {
 // never-reached guard (all calls are intercepted before resolution).
 inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('native_buffer_alloc is a skull compiler intrinsic; a call reached runtime unexpanded')"
 
-fn native_buffer_float(n: int) -> NativeBuffer<float> {
-    return NativeBuffer { ptr: __nb_alloc_float(n), len: n }
+// The primitive ctors are thin wrappers over the intrinsic (T binds concretely
+// here, so the intrinsic resolves at this site -- no per-type `__nb_alloc_*`).
+@inline fn native_buffer_float(n: int) -> NativeBuffer<float> {
+    return native_buffer_alloc(n)
 }
-fn native_buffer_int(n: int) -> NativeBuffer<int> {
-    return NativeBuffer { ptr: __nb_alloc_int(n), len: n }
+@inline fn native_buffer_int(n: int) -> NativeBuffer<int> {
+    return native_buffer_alloc(n)
 }
 
 // Single-hop accessors: the inline(lua) body reaches into the Rock struct's
