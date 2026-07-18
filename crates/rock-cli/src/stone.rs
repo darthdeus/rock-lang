@@ -907,6 +907,15 @@ pub fn do_perf(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Pin the RNG so the measured scene is byte-identical run-to-run: the
+    // prelude otherwise seeds `random()` from os.time() (whole-second
+    // granularity), which drifts any RNG-driven content (mag's torch embers)
+    // across runs and made graphics.draw_calls a non-gateable metric. Matches
+    // the sim runner's default (run_sim.rs); an explicit env still overrides.
+    if std::env::var_os("ROCK_TEST_SEED").is_none() {
+        cmd.env("ROCK_TEST_SEED", "42");
+    }
+
     // Pass both caps when set. Runner exits on whichever hits first (min).
     if let Some(n) = frame_cap {
         cmd.env("FRAME_COUNT", n.to_string());
