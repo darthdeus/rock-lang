@@ -410,6 +410,24 @@ impl CommandContext {
         }
     }
 
+    /// Dispatch through the `glsl` value-test executor (bone type-check + GLSL
+    /// per-value-test emission, run headlessly on the GPU under both profiles).
+    /// Serves `test` only -- the `serves` table gates everything else.
+    fn run_command_glsl(&self) -> Result<()> {
+        match self.args.command {
+            CliCommand::Test => {
+                let files = self.get_test_files()?;
+                crate::glsl_test::glsl_test(&files)
+            }
+            other => unreachable!(
+                "glsl dispatch reached unsupported command {:?}; the capability \
+                 gate should have rejected it — Backend::supported_commands and \
+                 run_command_glsl have diverged",
+                other
+            ),
+        }
+    }
+
     /// Dispatch through the `skull` backend (bone type-check + skull codegen ->
     /// Lua, executed via luajit). Only the codegen-capable commands route here;
     /// anything else is rejected, like the bone path.
@@ -631,6 +649,10 @@ impl CommandContext {
         if self.args.backend == crate::Backend::Js {
             self.require_backend_support()?;
             return self.run_command_js();
+        }
+        if self.args.backend == crate::Backend::Glsl {
+            self.require_backend_support()?;
+            return self.run_command_glsl();
         }
         self.require_backend_support()?;
         self.run_command_skull()
