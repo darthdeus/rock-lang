@@ -149,8 +149,10 @@ fn transitive(x: int) -> fn() -> int {
 fn main() { let g = transitive(7) print("{g()}") }
 "#;
     let lua = emit_module(src);
+    // Both lambdas capture the root param `x`, so both hoist to env-carrying bodies
+    // (a colored `c<N>` env param, not the old magic `__rock_env` local).
     assert!(
-        lua.contains("function transitive__lambda0(__rock_env") && lua.contains("function transitive__lambda1(__rock_env"),
+        lua.contains("function transitive__lambda0(c") && lua.contains("function transitive__lambda1(c"),
         "both lambdas hoist to env bodies (both capture the root param `x`):\n{lua}"
     );
     // and it still behaves (the inner reads x threaded through both envs).

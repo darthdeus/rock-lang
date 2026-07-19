@@ -2161,12 +2161,40 @@ impl Emitter<'_> {
             }
 
             // The shared closure-conversion pass (`skull_transform::convert_closures`)
-            // is JS-consumed only until the S2 Lua cutover; the Lua path still
-            // converts closures at codegen (`HoistPlan`/`EnvCtx`), so a MakeEnv
-            // must never reach here.
-            Inst::MakeEnv { .. } => {
-                unreachable!("MakeEnv reaches Lua codegen before the S2 cutover")
-            }
+            // materializes a capturing lambda as an env record and a shared mutable
+            // capture as a box, both as `MakeEnv`. `fn_ref = Some(name)` is a
+            // callable record `setmetatable({ __fn = name, c<raw> = .., .. },
+            // __rock_fn_mt)` (invoked via `__call`); `fn_ref = None` is a box `{}`
+            // / `{ v = <seed> }`. Field access (`e.c<raw>`, `.v`) already flows
+            // through `Inst::Field`/`Inst::StoreField`. Ordinary fns route through
+            // the pass (S2 cutover); the coroutine step still converts at codegen
+            // (`HoistPlan`/`EnvCtx`), so its `Inst::Lambda` arm stays live -- but its
+            // records go through the arm above, never here.
+            Inst::MakeEnv { fn_ref, fields } => match fn_ref {
+                Some(name) => {
+                    out.push_str("setmetatable({ __fn = ");
+                    out.push_str(name.as_str());
+                    for (f, v) in fields {
+                        out.push_str(", ");
+                        out.push_str(f.as_str());
+                        out.push_str(" = ");
+                        self.write_opnd(out, *v);
+                    }
+                    out.push_str(" }, __rock_fn_mt)");
+                }
+                None => {
+                    out.push('{');
+                    for (i, (f, v)) in fields.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        out.push_str(f.as_str());
+                        out.push_str(" = ");
+                        self.write_opnd(out, *v);
+                    }
+                    out.push('}');
+                }
+            },
         }
     }
 

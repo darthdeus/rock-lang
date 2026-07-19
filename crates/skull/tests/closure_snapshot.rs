@@ -14,8 +14,15 @@ use common::{emit_module, function_body, run_luajit};
 /// empty vec/map literal or a prelude table also produces.
 fn declares_box(body: &str) -> bool {
     body.lines().any(|l| {
-        l.trim()
-            .strip_prefix("local c")
+        // The empty box table literal `{}`. The shared closure-conversion pass
+        // materializes it at the owner scope entry, and regalloc may route it
+        // through a temp (`r<N> = {}` then stored into the box cell) or assign the
+        // cell directly; pre-cutover codegen wrote it inline as `local c<N> = {}`.
+        // The caller's `.v = ` assertion confirms it is a box (not an empty
+        // map/tuple literal).
+        let t = l.trim();
+        let t = t.strip_prefix("local ").unwrap_or(t);
+        t.strip_prefix(['c', 'r'])
             .and_then(|r| r.strip_suffix(" = {}"))
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     })

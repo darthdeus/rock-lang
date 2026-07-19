@@ -210,18 +210,25 @@ fn duplicate_struct_across_modules_surfaces_in_lsp() {
         per.iter().flat_map(|(_, d)| d).any(|d| d.message.contains("duplicate struct `Foo`"))
     };
 
+    let b = bone_query::canonicalize_lenient(&dir.path().join("b.rock").to_string_lossy());
     let mut bone = BoneWorkspace::new();
     let d0 = bone.update(&a, std::fs::read_to_string(&a).unwrap());
     assert!(has_dup(&d0), "duplicate struct across modules must surface: {d0:?}");
-    // `diagnostics_for` (the one-shot CLI path) must agree with `update`.
+    // `diagnostics_for` (the one-shot CLI path) must agree with `update`. The
+    // "duplicate across modules" error is symmetric; which file carries it depends
+    // on module order, and with deterministic sorted discovery it attaches to the
+    // second-declared struct (b.rock) -- so require it on either file rather than
+    // pin one to the (now-changed) discovery order.
+    let a_dup = bone.diagnostics_for(&a).iter().any(|d| d.message.contains("duplicate struct `Foo`"));
+    let b_dup = bone.diagnostics_for(&b).iter().any(|d| d.message.contains("duplicate struct `Foo`"));
     assert!(
-        bone.diagnostics_for(&a).iter().any(|d| d.message.contains("duplicate struct `Foo`")),
-        "diagnostics_for must also surface the duplicate: {:?}",
-        bone.diagnostics_for(&a)
+        a_dup || b_dup,
+        "diagnostics_for must also surface the duplicate: a={:?} b={:?}",
+        bone.diagnostics_for(&a),
+        bone.diagnostics_for(&b)
     );
 
     // Fix b.rock (rename its Foo): the duplicate must CLEAR, not stick stale.
-    let b = bone_query::canonicalize_lenient(&dir.path().join("b.rock").to_string_lossy());
     let d1 = bone.update(&b, "struct Bar { y: int }\nfn helper() -> int { 1 }\n".to_string());
     assert!(!has_dup(&d1), "renaming b.rock's struct must clear the duplicate: {d1:?}");
     assert!(

@@ -40,7 +40,8 @@ fn field_of(c: Idx<Cell>) -> Ustr {
 /// slice; the mangled Lua name at S2): hoisted bodies are `<name_base>__lambda<k>`
 /// (`k` = the `Inst::Lambda`'s inst-arena order). Post-pass no `Inst::Lambda`
 /// survives (asserted); the enclosing region keeps its blocks (lambda regions go
-/// unreachable in it) and gains `nested_fns`, one per live lambda.
+/// unreachable in it) and APPENDS one `nested_fn` per live lambda (preserving any
+/// named nested `fn`s lowering already hoisted there).
 ///
 /// DEVIATION from the plan's `convert_closures(mf)` signature: the unique name is
 /// passed IN (the pass is MirFunc-local and has no name-mangling context of its
@@ -257,7 +258,13 @@ pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
             nested_fns: Vec::new(),
         });
     }
-    mf.nested_fns = nested;
+    // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named
+    // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
+    // definitions from the chunk (a real bug for the Lua path, where a fn can hold
+    // both a named nested `fn` and a lambda). The named siblings keep their own
+    // `Inst::Lambda`s, which the emitter converts on their own emission -- the pass
+    // only splits THIS fn's direct lambdas.
+    mf.nested_fns.extend(nested);
 }
 
 /// The inst yielding cell `cc`'s SLOT (helper used by the record-field lowering). (the box TABLE if boxed, else the plain

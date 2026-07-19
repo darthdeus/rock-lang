@@ -658,6 +658,22 @@ fn emit_body_chunk(
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
     skull_transform::cleanup(&mut mf); // drop dead values + dead-cell stores
+    // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
+    // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
+    // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
+    // BEFORE FORL recovery (matching the JS pipeline) so a loop lifted into a
+    // lambda body is FORL-recovered in the split fn. Coroutines skip this (their
+    // `Inst::Lambda`s convert at codegen via `FrameCtx`/`HoistPlan` -- S3).
+    let name = mangle_fn(ws, f, overloaded);
+    let pre_nested = mf.nested_fns.len();
+    skull_transform::convert_closures(&mut mf, &name);
+    // Route each pass-hoisted `<name>__lambda<k>` through the synthetic-name
+    // collision guard now that they enter the Lua global namespace (a user fn
+    // named `foo__lambda0` must reject, not silently clobber). The pass appends
+    // its lambda bodies after any named nested `fn`s, so guard only the new tail.
+    for nf in &mf.nested_fns[pre_nested..] {
+        cg.mint_synthetic(nf.name.to_string());
+    }
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;

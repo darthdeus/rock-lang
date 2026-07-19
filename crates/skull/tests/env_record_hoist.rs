@@ -22,9 +22,12 @@ fn mk_cap(x: int) -> fn() -> int { return () => x }
 fn main() { let f = mk_cap(5) print("{f()}") }
 "#;
     let lua = emit_module(src);
+    // The capturing lambda hoists to an env-carrying body. Post-cutover the env
+    // param is a normal (colored `c<N>`) cell materialized by the pass, not the
+    // magic `__rock_env` local the old codegen path named it.
     assert!(
-        lua.contains("function mk_cap__lambda0(__rock_env"),
-        "the capturing lambda hoists to an `(__rock_env, ..)` body:\n{lua}"
+        lua.contains("function mk_cap__lambda0(c"),
+        "the capturing lambda hoists to an env-carrying body:\n{lua}"
     );
     let body = function_body(&lua, "mk_cap");
     assert!(
@@ -92,15 +95,17 @@ fn main() {
     let lua = emit_module(src);
     // Both lambdas hoist (the outer captures `x` transitively, threading it in);
     // inst-arena order fixes which k is inner vs outer, so assert order-agnostically.
-    assert!(lua.contains("function outer_cap__lambda0(__rock_env"), "one nested lambda hoists to an env body:\n{lua}");
-    assert!(lua.contains("function outer_cap__lambda1(__rock_env"), "the other nested lambda hoists to an env body:\n{lua}");
-    // The OUTER hoisted body constructs the INNER record, seeding a field from its
-    // OWN env (the transitive capture threaded inward): `<field> = __rock_env.c<N>`.
+    // Post-cutover the env param is a colored `c<N>` cell, not the magic `__rock_env`.
+    assert!(lua.contains("function outer_cap__lambda0(c"), "one nested lambda hoists to an env body:\n{lua}");
+    assert!(lua.contains("function outer_cap__lambda1(c"), "the other nested lambda hoists to an env body:\n{lua}");
+    // The OUTER hoisted body constructs the INNER record, seeding the capture from
+    // its OWN env (the transitive thread). The exact env-field render is a colored
+    // `c<N>.c<M>`; the behavior below proves the thread, so pin only the record.
     let outer_builds_inner = (0..2).any(|k| {
         let body = function_body(&lua, &format!("outer_cap__lambda{k}"));
-        body.contains("setmetatable({ __fn = outer_cap__lambda") && body.contains("= __rock_env.")
+        body.contains("setmetatable({ __fn = outer_cap__lambda")
     });
-    assert!(outer_builds_inner, "the outer hoisted body must build the inner record from its own env:\n{lua}");
+    assert!(outer_builds_inner, "the outer hoisted body must build the inner record:\n{lua}");
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_nested");
     assert_eq!(out, "9", "the nested capture must thread through both envs; got: {out}");
 }
@@ -124,8 +129,11 @@ fn drive() -> int {
 fn main() { print("{drive()}") }
 "#;
     let lua = emit_module(src);
+    // The mutated lambda param rebinds to a box seeded from the param. The pass
+    // materializes the box as `c<N> = {v = <param>}` (an assignment at the hoisted
+    // body entry); the old codegen path wrote `local c<N> = { v = c<N> }`.
     assert!(
-        lua.contains("= { v = "),
+        lua.contains("{v = "),
         "the mutated lambda param must rebind to a box seeded from the param:\n{lua}"
     );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_boxparam");
