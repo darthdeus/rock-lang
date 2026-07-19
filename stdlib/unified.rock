@@ -2147,6 +2147,138 @@ fn TakeWhileIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     return (true, x)
 }
 
+struct SkipIter<I, T> {
+    __inner: I,
+    __n: int,
+}
+
+@inline
+fn skip<I: Iterator<T>, T>(it: I, n: int) -> SkipIter<I, T> {
+    return SkipIter { __inner: it, __n: n }
+}
+
+// Same shape as FilterIter: single fetch at the loop head, a skip edge
+// back to it while the counter is live, one return edge -- so forl.rs
+// peels it identically.
+@inline
+fn SkipIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
+    loop {
+        let (ok, x) = next(it.__inner)
+        if !ok { return (false, phantom()) }
+        if it.__n <= 0 { return (true, x) }
+        it.__n = it.__n - 1
+    }
+    return (false, phantom())
+}
+
+struct StepByIter<I, T> {
+    __inner: I,
+    __n: int,
+    __skip: int,
+}
+
+// Yields the first element, then every nth after it (indices 0, n, 2n, ...).
+@inline
+fn step_by<I: Iterator<T>, T>(it: I, n: int) -> StepByIter<I, T> {
+    if n < 1 { error("step_by: n must be >= 1, got {n}") }
+    return StepByIter { __inner: it, __n: n, __skip: 0 }
+}
+
+// Same peelable shape as SkipIter: single fetch at the head, a drop edge
+// back to it while __skip is live, one return edge. __skip re-arms to n-1
+// after each yield.
+@inline
+fn StepByIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
+    loop {
+        let (ok, x) = next(it.__inner)
+        if !ok { return (false, phantom()) }
+        if it.__skip <= 0 {
+            it.__skip = it.__n - 1
+            return (true, x)
+        }
+        it.__skip = it.__skip - 1
+    }
+    return (false, phantom())
+}
+
+struct TakeIter<I, T> {
+    __inner: I,
+    __n: int,
+}
+
+// Yields at most n elements, then stops (the count-bounded dual of take_while).
+@inline
+fn take<I: Iterator<T>, T>(it: I, n: int) -> TakeIter<I, T> {
+    return TakeIter { __inner: it, __n: n }
+}
+
+@inline
+fn TakeIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
+    if it.__n <= 0 { return (false, phantom()) }
+    let (ok, x) = next(it.__inner)
+    if !ok { return (false, phantom()) }
+    it.__n = it.__n - 1
+    return (true, x)
+}
+
+struct ChainIter<I1, I2, T> {
+    __a: I1,
+    __b: I2,
+    __first: bool,
+}
+
+// Concatenate two iterators of the same element type: all of a, then all of b.
+@inline
+fn chain<I1: Iterator<T>, I2: Iterator<T>, T>(a: I1, b: I2) -> ChainIter<I1, I2, T> {
+    return ChainIter { __a: a, __b: b, __first: true }
+}
+
+@inline
+fn ChainIter<I1: Iterator<T>, I2: Iterator<T>, T>.next(it) -> (bool, T) {
+    if it.__first {
+        let (ok, x) = next(it.__a)
+        if ok { return (true, x) }
+        it.__first = false
+    }
+    return next(it.__b)
+}
+
+// The current inner iterator is a real field (not II?) so `next(it.__cur)`
+// advances its stored cursor -- a nullable would mutate a throwaway copy.
+// __has gates the phantom initial before the first outer pull.
+struct FlattenIter<IO, II, T> {
+    __outer: IO,
+    __cur: II,
+    __has: bool,
+}
+
+@inline
+fn flatten<IO: Iterator<II>, II: Iterator<T>, T>(outer: IO) -> FlattenIter<IO, II, T> {
+    return FlattenIter { __outer: outer, __cur: phantom(), __has: false }
+}
+
+@inline
+fn FlattenIter<IO: Iterator<II>, II: Iterator<T>, T>.next(it) -> (bool, T) {
+    loop {
+        if !it.__has {
+            let (ok, inner) = next(it.__outer)
+            if !ok { return (false, phantom()) }
+            it.__cur = inner
+            it.__has = true
+        }
+        let (ok2, x) = next(it.__cur)
+        if ok2 { return (true, x) }
+        it.__has = false
+    }
+    return (false, phantom())
+}
+
+// map each element to an iterator, then concatenate them all.
+@inline
+fn flat_map<IO: Iterator<T>, T, II: Iterator<U>, U>(it: IO, f: fn(T) -> II) -> FlattenIter<MapIter<IO, T, II>, II, U> {
+    return flatten(map(it, f))
+}
+
 // Iterator terminal ops -- consume any `I: Iterator<T>` into a materialized
 // value or scalar. The lazy combinators above are intermediate (iterator ->
 // iterator); these are the other half of the API. Bounded, so they fully
@@ -2192,6 +2324,55 @@ fn all<I: Iterator<T>, T>(it: I, pred: fn(T) -> bool) -> bool {
         if !pred(x) { return false }
     }
     return true
+}
+
+@inline
+fn count<I: Iterator<T>, T>(it: I) -> int {
+    let n = 0
+    for x in it { n = n + 1 }
+    return n
+}
+
+@inline
+fn min_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
+    let best: T? = null
+    let best_k = 0.0
+    for x in it {
+        let k = key(x)
+        if best == null || k < best_k {
+            best = x
+            best_k = k
+        }
+    }
+    return best
+}
+
+@inline
+fn max_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
+    let best: T? = null
+    let best_k = 0.0
+    for x in it {
+        let k = key(x)
+        if best == null || k > best_k {
+            best = x
+            best_k = k
+        }
+    }
+    return best
+}
+
+@inline
+fn sum<I: Iterator<int>>(it: I) -> int {
+    let acc = 0
+    for x in it { acc = acc + x }
+    return acc
+}
+
+@inline
+fn sum_f<I: Iterator<float>>(it: I) -> float {
+    let acc = 0.0
+    for x in it { acc = acc + x }
+    return acc
 }
 
 // RingBuffer<T> -- fixed-capacity history buffer (trails, position history,

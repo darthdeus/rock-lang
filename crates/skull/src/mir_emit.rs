@@ -715,6 +715,15 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
+/// Whether a module file id names a stdlib module (`<bone-stdlib:...>` from the
+/// CLI, `<stdlib:...>` from test harnesses). Stdlib emit gaps are the known
+/// parity list and stay lenient skips; a USER fn that cannot emit is a hard
+/// error — the lenient channel shipped callers of bounded fns as missing
+/// globals that died as runtime nil calls.
+fn is_stdlib_module_file(file: &str) -> bool {
+    file.starts_with("<bone-stdlib:") || file.starts_with("<stdlib")
+}
+
 /// Post-inline gate: a body about to be emitted must contain no placeholder
 /// bound-call and no residual call to a bounded fn. Either residue means the
 /// mono-by-inlining contract broke -- most commonly a combinator chain in a
@@ -1045,8 +1054,26 @@ fn assemble(
                     out.push_str(&chunk.lua);
                     all_statics.extend(chunk.statics.iter().cloned());
                 }
-                Some(Err(msg)) => skipped.push((mangle_fn(ws, f, overloaded), msg.clone())),
-                None => skipped.push((mangle_fn(ws, f, overloaded), "not emitted (no cached chunk)".to_string())),
+                Some(Err(msg)) => {
+                    if is_stdlib_module_file(module.file.as_str()) {
+                        skipped.push((mangle_fn(ws, f, overloaded), msg.clone()));
+                    } else {
+                        return Err(CompilerError::new_with_label(
+                            f.name_span,
+                            format!("cannot emit `{}`: {msg}", f.name),
+                        ));
+                    }
+                }
+                None => {
+                    if is_stdlib_module_file(module.file.as_str()) {
+                        skipped.push((mangle_fn(ws, f, overloaded), "not emitted (no cached chunk)".to_string()));
+                    } else {
+                        return Err(CompilerError::new_with_label(
+                            f.name_span,
+                            format!("internal: `{}` has no emitted chunk", f.name),
+                        ));
+                    }
+                }
             }
         }
     }

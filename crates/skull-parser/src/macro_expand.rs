@@ -271,14 +271,17 @@ fn expand_item_macro(ast: &mut Ast, name: Ident, args: &[Idx<ExprData>], reg: &R
 }
 
 fn expand_in_ast(ast: &mut Ast, reg: &Registry) {
-    let mut blocks: Vec<Idx<BlockData>> = Vec::new();
+    let mut blocks: Vec<(Idx<BlockData>, ShadowScope)> = Vec::new();
     let mut exprs: Vec<Idx<ExprData>> = Vec::new();
     for item in &ast.items {
         match &item.kind {
             ItemKind::Function(f) if !f.is_macro => {
-                blocks.extend(f.body.rock_block())
+                let params: ShadowScope = f.params.iter().map(|p| p.name.name).collect();
+                blocks.extend(f.body.rock_block().map(|b| (b, params)));
             }
-            ItemKind::Decorator(d) => blocks.push(d.body),
+            ItemKind::Decorator(d) => {
+                blocks.push((d.body, d.params.iter().map(|p| p.name.name).collect()))
+            }
             ItemKind::Global(g) => {
                 if let Some(v) = g.value {
                     exprs.push(v);
@@ -294,41 +297,270 @@ fn expand_in_ast(ast: &mut Ast, reg: &Registry) {
             _ => {}
         }
     }
-    for b in blocks {
-        expand_block(ast, b, reg, 0);
+    for (b, params) in blocks {
+        let mut stack = vec![params];
+        expand_block(ast, b, reg, 0, &mut stack);
     }
     for e in exprs {
-        expand_expr(ast, e, reg, 0);
+        expand_expr(ast, e, reg, 0, &mut Vec::new());
     }
 }
 
-fn expand_block(ast: &mut Ast, b: Idx<BlockData>, reg: &Registry, depth: usize) {
-    let stmts = ast.blocks[b].statements.clone();
-    for s in stmts {
-        for e in stmt_exprs(ast, s) {
-            expand_expr(ast, e, reg, depth);
+/// Names bound by enclosing user scopes at the current point of the expansion
+/// walk. A call whose callee is shadowed is a real call to that binding (a
+/// fn-typed param, a local fn value, a nested `fn`), never a macro invocation —
+/// without this, `macro key(..)` captures the stdlib's `min_by(it, key: ..)`
+/// body call `key(x)` and splices itself into the stdlib AST.
+type ShadowScope = std::collections::HashSet<Ustr>;
+
+fn is_shadowed(stack: &[ShadowScope], name: Ustr) -> bool {
+    stack.iter().any(|s| s.contains(&name))
+}
+
+/// Collect the names a `let`/`for` target binds (shadow-side twin of
+/// `rename_binding`).
+fn shadow_binding(b: &Binding, scope: &mut ShadowScope) {
+    match b {
+        Binding::Ident(id) => {
+            scope.insert(id.name);
         }
-        for bl in stmt_blocks(ast, s) {
-            expand_block(ast, bl, reg, depth);
+        Binding::Tuple(bs) => {
+            for b in bs {
+                shadow_binding(b, scope);
+            }
+        }
+        Binding::Newtype { binding, .. } => {
+            scope.insert(binding.name);
+        }
+    }
+}
+
+/// Collect the names a match/if-let/while-let pattern binds (shadow-side twin
+/// of `rename_pattern`).
+fn shadow_pattern(p: &Pattern, scope: &mut ShadowScope) {
+    match p {
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
+        Pattern::Ident(id) => {
+            scope.insert(id.name);
+        }
+        Pattern::Tuple(ps) | Pattern::Or(ps) => {
+            for p in ps {
+                shadow_pattern(p, scope);
+            }
+        }
+        Pattern::EnumVariant { args, .. } => {
+            if let Some(ps) = args {
+                for p in ps {
+                    shadow_pattern(p, scope);
+                }
+            }
+        }
+        Pattern::Record { fields, .. } => {
+            for (_, sub) in fields {
+                shadow_pattern(sub, scope);
+            }
+        }
+    }
+}
+
+fn expand_block(ast: &mut Ast, b: Idx<BlockData>, reg: &Registry, depth: usize, stack: &mut Vec<ShadowScope>) {
+    let stmts = ast.blocks[b].statements.clone();
+    // Nested fns are hoisted: their names bind for the whole block.
+    let mut scope = ShadowScope::new();
+    for &s in &stmts {
+        if let StatementKind::NestedFn(f) = &ast.stmts[s].kind {
+            scope.insert(f.name.name);
+        }
+    }
+    stack.push(scope);
+    for s in stmts {
+        expand_stmt(ast, s, reg, depth, stack);
+    }
+    stack.pop();
+}
+
+fn expand_stmt(ast: &mut Ast, s: Idx<StatementData>, reg: &Registry, depth: usize, stack: &mut Vec<ShadowScope>) {
+    match &ast.stmts[s].kind {
+        StatementKind::Let(l) => {
+            // RHS sees the outer scope; the binding shadows for the rest of the
+            // current block (the top scope frame).
+            let (value, binding) = (l.value, l.binding.clone());
+            if let Some(v) = value {
+                expand_expr(ast, v, reg, depth, stack);
+            }
+            let top = stack.last_mut().expect("expand_stmt: block scope present");
+            shadow_binding(&binding, top);
+        }
+        StatementKind::Static(st) => {
+            let (value, name) = (st.value, st.name.name);
+            expand_expr(ast, value, reg, depth, stack);
+            let top = stack.last_mut().expect("expand_stmt: block scope present");
+            top.insert(name);
+        }
+        StatementKind::For(f) => {
+            let (iter, body, var) = (f.iter, f.body, f.var.clone());
+            expand_expr(ast, iter, reg, depth, stack);
+            let mut scope = ShadowScope::new();
+            shadow_binding(&var, &mut scope);
+            stack.push(scope);
+            expand_block(ast, body, reg, depth, stack);
+            stack.pop();
+        }
+        StatementKind::WhileLet(w) => {
+            let (value, body, pattern) = (w.value, w.body, w.pattern.clone());
+            expand_expr(ast, value, reg, depth, stack);
+            let mut scope = ShadowScope::new();
+            shadow_pattern(&pattern, &mut scope);
+            stack.push(scope);
+            expand_block(ast, body, reg, depth, stack);
+            stack.pop();
+        }
+        StatementKind::NestedFn(f) => {
+            // The fn NAME is already bound at block entry (hoisted); its params
+            // scope only the body. Param defaults see the outer scope.
+            let params: ShadowScope = f.params.iter().map(|p| p.name.name).collect();
+            let defaults: Vec<Idx<ExprData>> = f.params.iter().filter_map(|p| p.default).collect();
+            let body = f.body;
+            for d in defaults {
+                expand_expr(ast, d, reg, depth, stack);
+            }
+            stack.push(params);
+            expand_block(ast, body, reg, depth, stack);
+            stack.pop();
+        }
+        _ => {
+            for e in stmt_exprs(ast, s) {
+                expand_expr(ast, e, reg, depth, stack);
+            }
+            for bl in stmt_blocks(ast, s) {
+                expand_block(ast, bl, reg, depth, stack);
+            }
         }
     }
 }
 
 /// Post-order (bone parity): expand inner calls before the enclosing one, so a
 /// macro argument that is itself a macro call is expanded first.
-fn expand_expr(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize) {
+/// Binding-introducing exprs mirror `rename_expr`: the pattern/params scope only
+/// the body, with the scrutinee/value walked in the outer scope.
+fn expand_expr(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, stack: &mut Vec<ShadowScope>) {
+    match &ast.exprs[e].kind {
+        ExprKind::Lambda { .. } => {
+            let (params, body) = match &ast.exprs[e].kind {
+                ExprKind::Lambda { params, body, .. } => {
+                    (params.iter().map(|p| p.name.name).collect::<ShadowScope>(), *body)
+                }
+                _ => unreachable!(),
+            };
+            stack.push(params);
+            expand_block(ast, body, reg, depth, stack);
+            stack.pop();
+            return;
+        }
+        ExprKind::IfLet { .. } => {
+            let (value, then_b, else_b, mut scope) = match &ast.exprs[e].kind {
+                ExprKind::IfLet { value, then_block, else_block, pattern, .. } => {
+                    let mut scope = ShadowScope::new();
+                    shadow_pattern(pattern, &mut scope);
+                    (*value, *then_block, *else_block, scope)
+                }
+                _ => unreachable!(),
+            };
+            expand_expr(ast, value, reg, depth, stack);
+            stack.push(std::mem::take(&mut scope));
+            expand_block(ast, then_b, reg, depth, stack);
+            stack.pop();
+            if let Some(eb) = else_b {
+                expand_block(ast, eb, reg, depth, stack);
+            }
+            return;
+        }
+        ExprKind::IfLetChain { .. } => {
+            let (n_clauses, then_b, else_b) = match &ast.exprs[e].kind {
+                ExprKind::IfLetChain { clauses, then_block, else_block } => {
+                    (clauses.len(), *then_block, *else_block)
+                }
+                _ => unreachable!(),
+            };
+            // Bindings accumulate left-to-right: a later clause's value sees the
+            // earlier clauses' bindings.
+            stack.push(ShadowScope::new());
+            for i in 0..n_clauses {
+                let (value, pat_scope) = match &ast.exprs[e].kind {
+                    ExprKind::IfLetChain { clauses, .. } => match &clauses[i] {
+                        IfLetClause::Binding { value, pattern } => {
+                            let mut scope = ShadowScope::new();
+                            shadow_pattern(pattern, &mut scope);
+                            (*value, Some(scope))
+                        }
+                        IfLetClause::Condition(c) => (*c, None),
+                    },
+                    _ => unreachable!(),
+                };
+                expand_expr(ast, value, reg, depth, stack);
+                if let Some(scope) = pat_scope {
+                    let top = stack.last_mut().expect("expand_expr: chain scope present");
+                    top.extend(scope);
+                }
+            }
+            expand_block(ast, then_b, reg, depth, stack);
+            stack.pop();
+            if let Some(eb) = else_b {
+                expand_block(ast, eb, reg, depth, stack);
+            }
+            return;
+        }
+        ExprKind::Match { .. } => {
+            let (scrutinee, n_arms) = match &ast.exprs[e].kind {
+                ExprKind::Match { scrutinee, arms } => (*scrutinee, arms.len()),
+                _ => unreachable!(),
+            };
+            expand_expr(ast, scrutinee, reg, depth, stack);
+            for i in 0..n_arms {
+                let (guard, body, mut scope) = match &ast.exprs[e].kind {
+                    ExprKind::Match { arms, .. } => {
+                        let mut scope = ShadowScope::new();
+                        shadow_pattern(&arms[i].pattern, &mut scope);
+                        (arms[i].guard, arms[i].body, scope)
+                    }
+                    _ => unreachable!(),
+                };
+                stack.push(std::mem::take(&mut scope));
+                if let Some(g) = guard {
+                    expand_expr(ast, g, reg, depth, stack);
+                }
+                expand_block(ast, body, reg, depth, stack);
+                stack.pop();
+            }
+            return;
+        }
+        ExprKind::SafeNavigationLet { .. } => {
+            let (receiver, body, name) = match &ast.exprs[e].kind {
+                ExprKind::SafeNavigationLet { receiver, body, binding, .. } => {
+                    (*receiver, *body, binding.name)
+                }
+                _ => unreachable!(),
+            };
+            expand_expr(ast, receiver, reg, depth, stack);
+            stack.push(ShadowScope::from_iter([name]));
+            expand_block(ast, body, reg, depth, stack);
+            stack.pop();
+            return;
+        }
+        _ => {}
+    }
     for child in child_exprs(ast, e) {
-        expand_expr(ast, child, reg, depth);
+        expand_expr(ast, child, reg, depth, stack);
     }
     for blk in child_blocks(ast, e) {
-        expand_block(ast, blk, reg, depth);
+        expand_block(ast, blk, reg, depth, stack);
     }
-    try_expand(ast, e, reg, depth);
+    try_expand(ast, e, reg, depth, stack);
 }
 
 /// If `e` is a `name(args)` call where `name` is a registered macro, splice the
 /// substituted body in as a `Block`.
-fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize) {
+fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, stack: &mut Vec<ShadowScope>) {
     let ExprKind::FunctionCall { func, args, .. } = &ast.exprs[e].kind else {
         return;
     };
@@ -337,6 +569,11 @@ fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize) {
     };
     let name = id.name;
     if !reg.contains_key(&name) {
+        return;
+    }
+    // A locally-bound callee (fn-typed param, local fn value, nested fn, loop
+    // binding) shadows any same-named macro — this is a real call.
+    if is_shadowed(stack, name) {
         return;
     }
     let arg_values: Vec<Idx<ExprData>> = args.iter().map(|a| a.value).collect();
@@ -395,7 +632,7 @@ fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize) {
     }
     substitute_block(ast, body, &subs);
     // Expand macros that appear inside the spliced body (macros calling macros).
-    expand_block(ast, body, reg, depth + 1);
+    expand_block(ast, body, reg, depth + 1, stack);
 
     // Reduce the body to its yielded value (rock's `extract_body_expr`): a lone
     // statement collapses to its bare trailing expr, a multi-statement body stays
@@ -1406,6 +1643,61 @@ mod tests {
             user_only.module_sexp().contains("(+ 21 21)"),
             "macro should have expanded: {}",
             user_only.module_sexp()
+        );
+    }
+
+    /// Expand `user` against a workspace that also defines `macro key(x: expr) { x }`,
+    /// returning the user module's s-expr. The macro body is the identity, so a
+    /// CAPTURED call `key(a)` collapses to `a` (the call vanishes), while a
+    /// correctly-shadowed call keeps its `(call key ...)` shape.
+    fn expand_with_key_macro(user: &str) -> String {
+        let mut mods = vec![parse("macro key(x: expr) { x }", "defs.rock"), parse(user, "user.rock")];
+        expand_macros(&mut mods);
+        mods[1].module_sexp()
+    }
+
+    #[track_caller]
+    fn assert_call_survives(user: &str) {
+        let sexp = expand_with_key_macro(user);
+        assert!(sexp.contains("key"), "shadowed callee `key` must not expand as a macro: {sexp}");
+    }
+
+    /// A callee bound by an enclosing scope is a real call, never a macro
+    /// invocation — one case per binding form.
+    #[test]
+    fn shadowed_callee_is_not_expanded() {
+        // fn param (the stdlib `min_by(it, key: fn(T) -> float)` capture).
+        assert_call_survives("fn f(x: int, key: fn(int) -> int) -> int { return key(x) }");
+        // let-bound local.
+        assert_call_survives("fn f() -> int { let key = (v: int) => v\n return key(1) }");
+        // lambda param.
+        assert_call_survives("fn f() -> int { let g = (key: fn(int) -> int) => key(1)\n return g((v: int) => v) }");
+        // nested fn (hoisted: the call BEFORE the def is also shadowed).
+        assert_call_survives("fn f() -> int { let a = key(1)\n fn key(v: int) -> int { return v }\n return a }");
+        // for-loop binding.
+        assert_call_survives("fn f(fs: [fn(int) -> int]) -> int { for key in fs { return key(1) }\n return 0 }");
+        // match-arm pattern binding.
+        assert_call_survives(
+            "enum E { A(fn(int) -> int) }\nfn f(e: E) -> int { match e { E::A(key) => { return key(1) } }\n return 0 }",
+        );
+        // if-let pattern binding.
+        assert_call_survives("fn f(k: fn(int) -> int?) -> int { if let key = k { return key(1) }\n return 0 }");
+    }
+
+    /// The shadow ends with its scope; sibling and outer positions still expand.
+    #[test]
+    fn unshadowed_callee_still_expands() {
+        // No binding anywhere: the identity macro erases the call.
+        let sexp = expand_with_key_macro("fn f() -> int { return key(1) }");
+        assert!(!sexp.contains("key"), "unshadowed call must expand: {sexp}");
+        // Call before the `let` refers to the macro; only the later call is the local.
+        let sexp = expand_with_key_macro(
+            "fn f() -> int { let a = key(1)\n let key = (v: int) => v + v\n return a + key(2) }",
+        );
+        assert_eq!(
+            sexp.matches("(call key").count(),
+            1,
+            "pre-let call expands, post-let call survives: {sexp}"
         );
     }
 

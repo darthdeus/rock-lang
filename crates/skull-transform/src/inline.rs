@@ -181,9 +181,21 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
     crate::cleanup(&mut mf);
 
     // Structural exclusions over the whole arena.
+    let mut has_lambda = false;
     for (_, inst) in mf.insts.iter() {
         match inst {
-            Inst::Lambda { .. } => return None, // captured-cell cloning deferred (v0)
+            Inst::Lambda { .. } => {
+                // A lambda's sub-CFG + captured cells only clone through the
+                // block-cloning General splice. A bounded fn has no standalone
+                // emission, so refusing it would leave the caller a residual
+                // bounded call (an emit error); force it through General below.
+                // Non-bounded fns keep the v0 refusal (they have a real
+                // emission to fall back on).
+                if !has_bounds {
+                    return None;
+                }
+                has_lambda = true;
+            }
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } if *func == fref => {
                 return None; // self-recursive
             }
@@ -228,7 +240,10 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
     let coalescable_params: Vec<bool> =
         mf.params.iter().map(|p| !rebound.contains(p)).collect();
 
-    if matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
+    // A lambda-bearing body must take the General splice even when its entry
+    // ends in Return: the straight path clones no blocks, so the lambda's
+    // sub-CFG (referenced by `Inst::Lambda { entry }`) would dangle.
+    if !has_lambda && matches!(mf.blocks[mf.entry].term, Term::Return(_)) {
         // Straight: entry ends in Return, so it is the only reachable block.
         if !force && reachable_insts > STRAIGHT_INSTS {
             return None;
@@ -838,8 +853,10 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<V
     func.blocks[bid].insts = prefix;
     func.blocks[bid].term = Term::Goto(entry_clone);
 
-    // Route each cloned Return to the continuation, binding return values.
-    let cloned_blocks: Vec<Idx<Block>> = callee.blocks.iter().map(|(b, _)| block_map[&b]).collect();
+    // Route each cloned TOP-LEVEL Return to the continuation, binding return
+    // values. Only the callee's reachable blocks: a lambda sub-CFG's Return is
+    // the LAMBDA's return, not the callee's, and must stay put.
+    let cloned_blocks: Vec<Idx<Block>> = cand.reachable.iter().map(|b| block_map[b]).collect();
     for nb in cloned_blocks {
         let vs = match &func.blocks[nb].term {
             Term::Return(vs) => vs.clone(),

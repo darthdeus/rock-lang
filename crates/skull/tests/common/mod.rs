@@ -19,6 +19,24 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Panic if bone recorded any type/lowering/interface error. `semantic_pass`
+/// returns `Ok` with per-body diagnostics recorded on the workspace, so a
+/// fixture that stops typechecking (e.g. its helper name goes ambiguous
+/// against a new stdlib overload) would otherwise flow on with missing
+/// resolutions and turn shape assertions vacuously green.
+fn assert_no_bone_errors(ws: &Workspace) {
+    let errs: Vec<String> = ws
+        .inferences
+        .iter()
+        .flatten()
+        .flat_map(|inf| inf.errors.values().flatten())
+        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
+        .map(|e| e.message.clone())
+        .collect();
+    assert!(errs.is_empty(), "bone recorded errors: {errs:#?}");
+}
+
 /// Full MIR emit for `src` (the `<test>` module) through the skull pipeline
 /// (lower -> inline -> cleanup -> emit). Stdlib is loaded so int/float casts and
 /// `%`/arithmetic ops resolve to their stdlib helpers -- else the using fns fail
@@ -27,6 +45,7 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
@@ -43,6 +62,7 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }

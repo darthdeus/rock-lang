@@ -53,10 +53,10 @@ fn pair_iter_tuple_scalarizes() {
 // SROA's every-store-is-a-ctor consistency check must tolerate the nil store,
 // not bail on the whole cell.
 const SKIP_PAIR_ITER_LOOP: &str = r#"
-struct SkipIter { cur: int, limit: int }
+struct SkipShapeIter { cur: int, limit: int }
 
 @inline
-fn next(it: SkipIter) -> (bool, (int, int)) {
+fn next(it: SkipShapeIter) -> (bool, (int, int)) {
     let i = it.cur
     if i >= it.limit { return (false, phantom()) }
     while i % 3 == 0 {
@@ -69,7 +69,7 @@ fn next(it: SkipIter) -> (bool, (int, int)) {
 
 fn hot(n: int) -> int {
     let total = 0
-    let it = SkipIter { cur: 0, limit: n }
+    let it = SkipShapeIter { cur: 0, limit: n }
     for (a, b) in it {
         total += a + b
     }
