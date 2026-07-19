@@ -6,7 +6,7 @@
 //! test-fn scale.
 
 use comfy_la_arena::{Idx, RawIdx};
-use skull_mir::mir::{Block, Inst, MirFunc, Term};
+use skull_mir::mir::{Block, MirFunc, Term};
 use std::collections::{HashMap, HashSet};
 
 fn bx(b: Idx<Block>) -> usize {
@@ -69,21 +69,13 @@ pub(crate) fn analyze(f: &MirFunc) -> Structure {
     let succ = succ_list(f);
     let preds = pred_list(n, &succ);
 
-    // Forward dominators are rooted at a synthetic super-entry (node `n`) that
-    // edges to the fn entry AND every lambda body entry: a lambda sub-CFG is
-    // unreachable from `f.entry` (only its `Inst::Lambda` references it), so
-    // without seeding its entry here its loops go undetected and the emitter
-    // walks them flat into the shared-branch-tail reject. `idom[n]` is `None`
-    // (the super-root), which terminates the `dominates` chain-walk.
+    // Forward dominators are rooted at a synthetic super-entry (node `n`) edging
+    // to the fn entry. `idom[n]` is `None` (the super-root), which terminates the
+    // `dominates` chain-walk. Closure bodies are separate `MirFunc`s post-
+    // `convert_closures`, so there are no in-arena lambda sub-CFGs to seed.
     let sup = n;
     let mut succ_aug = succ.clone();
-    let mut roots = vec![bx(f.entry)];
-    for (_, inst) in f.insts.iter() {
-        if let Inst::Lambda { entry, .. } = inst {
-            roots.push(bx(*entry));
-        }
-    }
-    succ_aug.push(roots);
+    succ_aug.push(vec![bx(f.entry)]);
     let preds_aug = pred_list(n + 1, &succ_aug);
     let fwd_rpo = rpo(n + 1, sup, &succ_aug);
     let idom = idoms(n + 1, sup, &preds_aug, &fwd_rpo);

@@ -118,6 +118,22 @@ function __table_get(t, k) { return (t instanceof Map) ? t.get(k) : t[k]; }
 function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v; }
 "#;
 
+/// The uniform indirect-call dispatch helper (`docs/closure-conversion-mir-plan.md`):
+/// a fn value is either a raw JS function (a named fn / capture-free hoisted
+/// lambda, referenced by global name) or a closure ENV RECORD `{ __fn, .. }`
+/// (a capturing lambda, built by `convert_closures`). `__rock_call` invokes both
+/// -- a function directly, a record through its `__fn(record, ...)` -- so every
+/// `CallValue` emits `__rock_call(f, ...args)`. Prepend to any emitted program
+/// that calls a fn value. (The Lua path uses a `__call` metatable instead; JS
+/// objects carry no metatable, so the dispatch is explicit here.)
+pub const JS_CALL_HELPER: &str = r#"
+function __rock_call(f) {
+  var a = Array.prototype.slice.call(arguments, 1);
+  if (typeof f === "function") return f.apply(null, a);
+  return f.__fn.apply(null, [f].concat(a));
+}
+"#;
+
 /// The `__op_eq` runtime: deep structural equality matching Rock's stdlib
 /// `__op_eq` (verified on luajit: reference structs, value structs, tuples,
 /// enums, newtypes all compare BY CONTENTS; primitives by value). Lua `nil` maps
@@ -125,14 +141,18 @@ function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v
 /// count as nil -- this also reconciles a Vec's index-0 placeholder (`null` in a
 /// literal vs a hole after `push`). Structs are `{__ty, ...}` plain objects (the
 /// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
-/// key-walk that includes `__ty` covers the type check for free. Capturing
-/// lambdas (compared by identity in Rock) are out of the emitter subset.
+/// key-walk that includes `__ty` covers the type check for free. A capturing
+/// lambda is a closure ENV RECORD `{ __fn, .. }` (`convert_closures`): a callable
+/// value, so -- like a raw fn -- it compares by IDENTITY, never by walking its
+/// captures (matching luajit's `__rock_fn_mt` identity-leaf rule and pre-arc
+/// arrow `===`).
 pub const JS_STRUCTURAL_EQ: &str = r#"
 function __op_eq(a, b) {
   var an = (a === null || a === undefined), bn = (b === null || b === undefined);
   if (an || bn) return an && bn;
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object") return a === b;
+  if (a.__fn !== undefined || b.__fn !== undefined) return a === b;
   var aa = Array.isArray(a), ab = Array.isArray(b);
   if (aa || ab) {
     if (!aa || !ab || a.length !== b.length) return false;

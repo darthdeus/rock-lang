@@ -74,7 +74,7 @@ fn js_string_lit(s: &str) -> Result<String, CompilerError> {
 /// Emit `mf` as `function <js_name>(...) { ... }`. `js_name` is the caller's
 /// chosen JS identity (the S3/S4 harness names each fallback fn).
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {
-    emit_fn_with_callees(ws, mf, js_name, &HashMap::new())
+    emit_fn_with_callees(ws, mf, js_name, &HashMap::new(), &HashSet::new())
 }
 
 /// [`emit_fn`] with a set of known co-emitted plain-Rock callees: a call whose
@@ -86,6 +86,7 @@ pub fn emit_fn_with_callees(
     mf: &MirFunc,
     js_name: &str,
     callees: &HashMap<FuncRef, String>,
+    hoisted: &HashSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
     if mf.is_coroutine {
         return Err(err("JS subset: coroutine fn not supported"));
@@ -111,11 +112,11 @@ pub fn emit_fn_with_callees(
             }
         }
     }
-    let (loop_iter, loop_iter_cells) = loop_capture_plan(mf, &st.loops)?;
     let mut em = Emitter {
         ws,
         mf,
         callees,
+        hoisted,
         use_count,
         inlinable,
         structure: st,
@@ -123,41 +124,12 @@ pub fn emit_fn_with_callees(
         general,
         active: HashSet::new(),
         visited: HashSet::new(),
-        lambdas: HashMap::new(),
-        lambda_owned: compute_lambda_owned(mf),
-        loop_iter,
         loop_stack: Vec::new(),
         loop_markers: Vec::new(),
         labels_used: HashSet::new(),
         out: String::new(),
         indent: 1,
     };
-
-    // Pre-render every lambda body to a JS arrow, inner-first: a nested lambda's
-    // `Inst::Lambda` is lowered before its enclosing one, so ascending inst order
-    // renders inner arrows before an outer arrow that references them.
-    let mut lambda_insts: Vec<Idx<Inst>> = mf
-        .insts
-        .iter()
-        .filter(|(_, i)| matches!(i, Inst::Lambda { .. }))
-        .map(|(id, _)| id)
-        .collect();
-    lambda_insts.sort_by_key(|&i| raw(i));
-    let hoistable = hoistable_lambdas(mf, &em.lambda_owned);
-    let mut hoisted: Vec<String> = Vec::new();
-    for iid in lambda_insts {
-        let arrow = em.render_lambda(iid)?;
-        if hoistable.contains(&iid) {
-            // A shared module-level value: same-site references are `==` (matches
-            // luajit P3). The name is unique (`js_name` is program-unique, inst
-            // ids are fn-unique).
-            let name = format!("{js_name}__lam{}", raw(iid));
-            hoisted.push(format!("const {name} = {arrow};\n"));
-            em.lambdas.insert(iid, name);
-        } else {
-            em.lambdas.insert(iid, arrow);
-        }
-    }
 
     let params: Vec<String> = mf.params.iter().map(|&c| cell_name(c)).collect();
     let mut header = format!("function {js_name}({}) {{\n", params.join(", "));
@@ -173,12 +145,6 @@ pub fn emit_fn_with_callees(
     for &b in &reachable_blocks(mf) {
         for &iid in &mf.blocks[b].insts {
             for &cell in inst_writes(&mf.insts[iid]) {
-                // Loop-captured cells are declared per-iteration inside their loop
-                // body (below), not at the fn top -- a fn-top `let` would be shared
-                // across iterations and defeat per-iteration capture.
-                if loop_iter_cells.contains(&raw(cell)) {
-                    continue;
-                }
                 if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
                     declared.push(raw(cell));
                 }
@@ -193,7 +159,7 @@ pub fn emit_fn_with_callees(
     }
 
     em.emit_seq(mf.entry, None, LoopCtx::default())?;
-    let body = format!("{}{header}{}}}\n", hoisted.concat(), em.out);
+    let body = format!("{header}{}}}\n", em.out);
     Ok(finalize_labels(body, &em.loop_markers, &em.labels_used))
 }
 
@@ -220,6 +186,11 @@ struct Emitter<'a> {
     mf: &'a MirFunc,
     /// Known co-emitted plain-Rock callees (`FuncRef` -> emitted JS name).
     callees: &'a HashMap<FuncRef, String>,
+    /// Names of hoisted closure bodies (`convert_closures`' `<base>__lambda<k>`)
+    /// emitted somewhere in this program: the ONLY `Inst::Global` a capture-free
+    /// lambda creation site legitimately references. Any other global read (a
+    /// module `let`, an enum name table, a named fn as a value) is out of subset.
+    hoisted: &'a HashSet<ustr::Ustr>,
     /// Times each inst is used as an operand (by an inst or terminator), dense
     /// by raw inst id. 0 == statement-position (an effectful `Call`) or dead.
     use_count: Vec<u32>,
@@ -241,15 +212,6 @@ struct Emitter<'a> {
     /// loop.
     active: HashSet<Idx<Block>>,
     visited: HashSet<Idx<Block>>,
-    /// Each `Lambda` inst -> its pre-rendered JS arrow expression. Populated
-    /// inner-first (ascending inst id) before the main walk, so a `render_val`
-    /// of a `Lambda` operand is a map lookup even for nested lambdas.
-    lambdas: HashMap<Idx<Inst>, String>,
-    /// Each `Lambda` inst -> the cells its arrow body must `let`-declare.
-    lambda_owned: HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
-    /// Loop header -> cells to `let`-declare per-iteration inside that loop body
-    /// (a closure capturing a loop variable must see its iteration's value).
-    loop_iter: HashMap<Idx<Block>, Vec<Idx<Cell>>>,
     /// The stack of enclosing loops (innermost last), for multi-level `continue`/
     /// `break` to a non-innermost loop (`labeled_jump`).
     loop_stack: Vec<LoopFrame>,
@@ -439,8 +401,6 @@ impl Emitter<'_> {
     /// - larger than 8 blocks / 32 insts (a pathological blow-up),
     /// - a block that is a registered loop header (a back-edge -> non-terminating
     ///   re-walk),
-    /// - a block carrying an `Inst::Lambda` (rendering it twice collides with the
-    ///   `lambdas`/`lambda_owned` identity/hoist maps keyed by `Idx<Inst>`),
     /// - a materialized (`let v<N>`) region value read from OUTSIDE the region
     ///   (a temp that would be undefined in the second copy's scope).
     fn dup_region(
@@ -465,12 +425,7 @@ impl Emitter<'_> {
             if self.counted.contains_key(&b) || self.general.contains_key(&b) {
                 return None;
             }
-            for &iid in &self.mf.blocks[b].insts {
-                if matches!(self.mf.insts[iid], Inst::Lambda { .. }) {
-                    return None;
-                }
-                insts += 1;
-            }
+            insts += self.mf.blocks[b].insts.len();
             if insts > MAX_INSTS {
                 return None;
             }
@@ -727,15 +682,6 @@ impl Emitter<'_> {
         Ok(merge)
     }
 
-    /// `let <cells>;` for the cells this loop declares per-iteration (a captured
-    /// loop variable). Emitted at the loop body top so each iteration binds fresh.
-    fn emit_loop_iter_decls(&mut self, header: Idx<Block>) {
-        if let Some(cells) = self.loop_iter.get(&header) {
-            let names: Vec<String> = cells.iter().map(|&c| cell_name(c)).collect();
-            let line = format!("let {};", names.join(", "));
-            self.push(&line);
-        }
-    }
 
     /// A range-`for`: `for (; slot < bound; slot = slot + 1) { body }`. The slot
     /// and bound were initialized in the preheader (hoisted cells), so the `for`
@@ -751,7 +697,6 @@ impl Emitter<'_> {
         let mark = loop_marker(header);
         self.push(&format!("{mark}for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
         self.indent += 1;
-        self.emit_loop_iter_decls(header);
         let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
         self.loop_stack.push(LoopFrame { cont: li.latch, brk: li.exit, header });
         let body_len = self.out.len();
@@ -807,7 +752,6 @@ impl Emitter<'_> {
         let mark = loop_marker(h);
         self.push(&format!("{mark}while (true) {{"));
         self.indent += 1;
-        self.emit_loop_iter_decls(h);
         self.loop_stack.push(LoopFrame { cont: h, brk: exit, header: h });
 
         if let Some(test) = region.test {
@@ -928,10 +872,11 @@ impl Emitter<'_> {
                     self.push(&self.multi_assign(dests, &call));
                 }
                 Inst::CallValueMulti { dests, callee, args } => {
-                    let c = self.render_val(*callee)?;
-                    let rendered: Result<Vec<String>, CompilerError> =
-                        args.iter().map(|a| self.render_val(*a)).collect();
-                    let call = format!("({c})({})", rendered?.join(", "));
+                    let mut rendered = vec![self.render_val(*callee)?];
+                    for a in args {
+                        rendered.push(self.render_val(*a)?);
+                    }
+                    let call = format!("__rock_call({})", rendered.join(", "));
                     self.push(&self.multi_assign(dests, &call));
                 }
                 // A used, non-inlinable value inst: materialize it at its
@@ -977,34 +922,6 @@ impl Emitter<'_> {
             }
         }
         Ok(())
-    }
-
-    /// Render a `Lambda` inst as a JS arrow `(<params>) => { <body> }`. The body
-    /// is the lambda's sub-CFG (rooted at `entry`, in the same arenas): captured
-    /// cells render to the same `c<N>` name they carry in the enclosing scope, so
-    /// JS lexical capture stands in for the Lua upvalue. Emits into a scratch
-    /// buffer so `render_inst_expr` (immutable) can look the string up later.
-    fn render_lambda(&mut self, iid: Idx<Inst>) -> Result<String, CompilerError> {
-        let Inst::Lambda { params, entry } = &self.mf.insts[iid] else {
-            unreachable!("render_lambda on a non-Lambda inst");
-        };
-        let param_names: Vec<String> = params.iter().map(|&c| cell_name(c)).collect();
-        let entry = *entry;
-        let owned = self.lambda_owned.get(&iid).cloned().unwrap_or_default();
-
-        let saved_out = std::mem::take(&mut self.out);
-        let saved_indent = self.indent;
-        self.indent = saved_indent + 1;
-        if !owned.is_empty() {
-            let names: Vec<String> = owned.iter().map(|&c| cell_name(c)).collect();
-            self.push(&format!("let {};", names.join(", ")));
-        }
-        self.emit_seq(entry, None, LoopCtx::default())?;
-        let body = std::mem::replace(&mut self.out, saved_out);
-        self.indent = saved_indent;
-
-        let close = "  ".repeat(saved_indent);
-        Ok(format!("({}) => {{\n{body}{close}}}", param_names.join(", ")))
     }
 
     /// The JS expression for a value operand: the bound `v<raw>` temp if the
@@ -1082,20 +999,35 @@ impl Emitter<'_> {
                 format!("((({a} % {b}) + {b}) % {b})")
             }
             Inst::Call { func, args } => self.render_call(*func, args)?,
-            // A closure value: the arrow was pre-rendered inner-first before the
-            // main walk. Parenthesized so a `CallValue` of it (`(<arrow>)(args)`)
-            // is a valid IIFE.
-            Inst::Lambda { .. } => match self.lambdas.get(&iid) {
-                Some(arrow) => format!("({arrow})"),
-                None => return Err(err("JS subset: lambda not pre-rendered")),
-            },
-            // An indirect call `callee(args)`: the callee is parenthesized so an
-            // inline arrow callee still parses as a call target.
+            // A capture-free hoisted closure: a bare reference to its top-level
+            // fn (`convert_closures` emits `Inst::Global(<name>__lambda<k>)`).
+            // Same-site references share one value -> `==` (P3 identity parity).
+            // Any OTHER global read (module `let`, enum name table, named fn as a
+            // value) is not emitted, so it stays out of subset.
+            Inst::Global(name) if self.hoisted.contains(name) => name.to_string(),
+            Inst::Global(name) => {
+                return Err(err(format!("JS subset: global read `{name}` not supported")))
+            }
+            // A closure ENV record `{ __fn, c<A>.. }` (capturing lambda) or a box
+            // `{ v }` (a shared mutable capture) -- built by `convert_closures`.
+            Inst::MakeEnv { fn_ref, fields } => {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(name) = fn_ref {
+                    parts.push(format!("__fn: {name}"));
+                }
+                for (f, v) in fields {
+                    parts.push(format!("{f}: {}", self.render_val(*v)?));
+                }
+                format!("({{{}}})", parts.join(", "))
+            }
+            // An indirect call: a raw fn value calls directly, an env record routes
+            // through its `__fn` -- the `__rock_call` dispatch helper handles both.
             Inst::CallValue { callee, args } => {
-                let c = self.render_val(*callee)?;
-                let rendered: Result<Vec<String>, CompilerError> =
-                    args.iter().map(|a| self.render_val(*a)).collect();
-                format!("({c})({})", rendered?.join(", "))
+                let mut rendered = vec![self.render_val(*callee)?];
+                for a in args {
+                    rendered.push(self.render_val(*a)?);
+                }
+                format!("__rock_call({})", rendered.join(", "))
             }
             // Structs are plain objects tagged with `__ty` (mirrors the Lua
             // `__rock_create_struct`: sets `obj.__ty`, no metatable). NativeBuffer
@@ -1365,7 +1297,16 @@ pub fn emit_with_closure(
         } else {
             skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut cache)?;
             skull_transform::cleanup(&mut mf);
+            // Shared closure conversion: every `Inst::Lambda` becomes an env
+            // record / bare global + a hoisted sibling fn in `nested_fns`. Runs
+            // BEFORE FORL recovery so a loop lifted into a lambda body is a plain
+            // fn loop the emitter structures normally. `names[&fr]` is the unique
+            // JS name -> collision-free `<name>__lambda<k>` hoisted names.
+            skull_transform::convert_closures(&mut mf, &names[&fr]);
             skull_transform::recover_counted_loops(ws, &mut mf);
+            for nf in &mut mf.nested_fns {
+                skull_transform::recover_counted_loops(ws, nf);
+            }
         }
         skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
         // Discover co-emit callees from the POST-inline residual calls only, so a
@@ -1433,27 +1374,43 @@ pub fn emit_with_closure(
             }
         }
     }
+    // Program-wide hoisted closure-body names -- the only globals a capture-free
+    // lambda creation site may reference (every other `Inst::Global` read stays
+    // out of subset). Flat: nesting is one level (all lambdas are siblings).
+    let hoisted: HashSet<ustr::Ustr> =
+        lowered.iter().flat_map(|(_, mf)| mf.nested_fns.iter().map(|nf| nf.name)).collect();
     let mut out = String::new();
     for (fr, mf) in &lowered {
-        out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names)?);
+        out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names, &hoisted)?);
+        // Hoisted closure bodies (`convert_closures`): each is a normal fn named
+        // by its `MakeEnv`/`Global` `__fn` reference, emitted as a sibling.
+        for nf in &mf.nested_fns {
+            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &names, &hoisted)?);
+        }
     }
     Ok(out)
 }
 
 /// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
 /// the raw arena) so a spliced-away call's stale arena inst is not re-discovered
-/// -- only the calls that survive inlining co-emit. Lambda sub-CFG blocks live in
-/// the same block arena, so their calls are covered too.
+/// -- only the calls that survive inlining co-emit. Hoisted closure bodies are
+/// separate `nested_fns` after `convert_closures`, so their calls are walked too.
 fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
-    let mut out = Vec::new();
-    for (_, block) in mf.blocks.iter() {
-        for &iid in &block.insts {
-            match &mf.insts[iid] {
-                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
-                _ => {}
+    fn walk(mf: &MirFunc, out: &mut Vec<FuncRef>) {
+        for (_, block) in mf.blocks.iter() {
+            for &iid in &block.insts {
+                match &mf.insts[iid] {
+                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
+                    _ => {}
+                }
             }
         }
+        for nf in &mf.nested_fns {
+            walk(nf, out);
+        }
     }
+    let mut out = Vec::new();
+    walk(mf, &mut out);
     out
 }
 
@@ -1557,143 +1514,6 @@ fn is_map_new(cf: &bone_semantic::hir::Function) -> bool {
     cf.name.as_str() == "map_new" && cf.param_decls.is_empty()
 }
 
-/// Every cell a lambda's sub-CFG references (loads or writes) -- a superset of
-/// its captures (also includes its own params/locals, harmless for the loop
-/// checks below, which additionally require the cell to be loop-stored).
-/// Each lambda's GENUINE upvalues: cells referenced in its body but owned by an
-/// enclosing scope (not this lambda's own local or param). A cell a lambda both
-/// owns and uses -- e.g. its own loop counter -- is NOT a capture. Keyed by the
-/// `Lambda` inst.
-fn lambda_upvalues(mf: &MirFunc) -> HashMap<Idx<Inst>, HashSet<u32>> {
-    let owned = compute_lambda_owned(mf);
-    let mut out = HashMap::new();
-    for (id, inst) in mf.insts.iter() {
-        if let Inst::Lambda { params, entry } = inst {
-            let own: HashSet<u32> = owned
-                .get(&id)
-                .map(|v| v.iter().map(|&c| raw(c)).collect())
-                .unwrap_or_default();
-            let plocal: HashSet<u32> = params.iter().map(|&c| raw(c)).collect();
-            let mut ups = HashSet::new();
-            for b in reachable_from(mf, *entry) {
-                for &iid in &mf.blocks[b].insts {
-                    let mut consider = |c: u32| {
-                        if !own.contains(&c) && !plocal.contains(&c) {
-                            ups.insert(c);
-                        }
-                    };
-                    if let Inst::Load(c) = &mf.insts[iid] {
-                        consider(raw(*c));
-                    }
-                    for &c in inst_writes(&mf.insts[iid]) {
-                        consider(raw(c));
-                    }
-                }
-            }
-            out.insert(id, ups);
-        }
-    }
-    out
-}
-
-/// The block that lexically DEFINES each `Lambda` inst (the block holding it).
-fn lambda_def_blocks(mf: &MirFunc) -> HashMap<Idx<Inst>, Idx<Block>> {
-    let mut out = HashMap::new();
-    for (b, blk) in mf.blocks.iter() {
-        for &iid in &blk.insts {
-            if matches!(mf.insts[iid], Inst::Lambda { .. }) {
-                out.insert(iid, b);
-            }
-        }
-    }
-    out
-}
-
-/// Plan per-iteration cell bindings for closures created in loops. A closure
-/// capturing a loop variable must see THAT iteration's value (Lua/Rock rebind
-/// loop bodies fresh; skull snapshots such a cell by value). In JS a `let`
-/// declared inside the loop body IS per-iteration, so a captured cell whose every
-/// store is within one loop's body is relocated there (returned keyed by loop
-/// header, plus the flat exclusion set for the fn-top declaration). A captured
-/// cell that a loop mutates but also assigns OUTSIDE the body -- a range counter
-/// (init in the preheader) or an `enumerate` cursor -- cannot be block-scoped
-/// without rewriting the closure's reference, so it is REJECTED rather than
-/// miscompiled to the shared final value.
-fn loop_capture_plan(
-    mf: &MirFunc,
-    loops: &HashMap<Idx<Block>, LoopRegion>,
-) -> Result<(HashMap<Idx<Block>, Vec<Idx<Cell>>>, HashSet<u32>), CompilerError> {
-    // Per loop: the cells captured by a lambda DEFINED inside its body. Only such
-    // a cell -- a loop variable a closure created in the loop captures -- needs a
-    // per-iteration snapshot. A loop merely sitting inside a closure (whose own
-    // counter the closure owns, or whose enclosing accumulator the closure shares
-    // by reference) is NOT a per-iteration site and must not be flagged.
-    let upvals = lambda_upvalues(mf);
-    let def_block = lambda_def_blocks(mf);
-    let mut loop_cands: HashMap<Idx<Block>, HashSet<u32>> = HashMap::new();
-    for (h, region) in loops {
-        let mut cand: HashSet<u32> = HashSet::new();
-        for (lid, dblk) in &def_block {
-            if region.body.contains(dblk) {
-                if let Some(ups) = upvals.get(lid) {
-                    cand.extend(ups.iter().copied());
-                }
-            }
-        }
-        loop_cands.insert(*h, cand);
-    }
-    // A reassigned PARAM captured in a loop is function-scoped on purpose -- all
-    // closures share one box (`test_param_reassigned_in_loop_shares_one_box`), so
-    // it is never relocated per-iteration.
-    let params: HashSet<u32> = mf.params.iter().map(|&c| raw(c)).collect();
-    let mut store_blocks: HashMap<u32, (Idx<Cell>, HashSet<Idx<Block>>)> = HashMap::new();
-    for (b, blk) in mf.blocks.iter() {
-        for &iid in &blk.insts {
-            for &cell in inst_writes(&mf.insts[iid]) {
-                store_blocks.entry(raw(cell)).or_insert_with(|| (cell, HashSet::new())).1.insert(b);
-            }
-        }
-    }
-    let mut per_loop: HashMap<Idx<Block>, Vec<Idx<Cell>>> = HashMap::new();
-    let mut relocated: HashSet<u32> = HashSet::new();
-    for (craw, (cell, blocks)) in &store_blocks {
-        if params.contains(craw) {
-            continue;
-        }
-        // A captured cell that its capturing loop stores INSIDE its body but also
-        // OUTSIDE it is loop-varying-but-not-iteration-local (counter/cursor):
-        // reject. One stored entirely within a loop body is iteration-local.
-        for (h, region) in loops {
-            if !loop_cands.get(h).is_some_and(|c| c.contains(craw)) {
-                continue;
-            }
-            let inside = blocks.iter().any(|b| region.body.contains(b));
-            let outside = blocks.iter().any(|b| !region.body.contains(b));
-            if inside && outside {
-                return Err(err(
-                    "JS subset: closure captures a loop counter / cursor (per-iteration \
-                     snapshot not yet supported)",
-                ));
-            }
-        }
-        let innermost = loops
-            .iter()
-            .filter(|(h, region)| {
-                loop_cands.get(*h).is_some_and(|c| c.contains(craw))
-                    && blocks.iter().all(|b| region.body.contains(b))
-            })
-            .min_by_key(|(_, region)| region.body.len());
-        if let Some((header, _)) = innermost {
-            per_loop.entry(*header).or_default().push(*cell);
-            relocated.insert(*craw);
-        }
-    }
-    for v in per_loop.values_mut() {
-        v.sort_by_key(|&c| raw(c));
-    }
-    Ok((per_loop, relocated))
-}
-
 /// The cells an inst writes: a `Store`'s target, or a multi-value call's dests.
 /// These are the cells that need a hoisted `let` (the multi-assign / store binds
 /// them, and a later block may read them across a branch merge).
@@ -1789,7 +1609,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             mark(args);
         }
         Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems),
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => {
+        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => {
             for (_, v) in fields {
                 f(*v);
             }
@@ -1850,6 +1670,7 @@ fn always_inlinable(inst: &Inst) -> bool {
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
             | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }
+            | Inst::MakeEnv { .. }
     )
 }
 
@@ -1863,7 +1684,7 @@ fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
     let mut use_count = vec![0u32; ni];
     let mut use_block = vec![NONE; ni];
     let mut def_block = vec![NONE; ni];
-    let blocks = emitted_blocks(mf);
+    let blocks = reachable_blocks(mf);
     for &b in &blocks {
         let br = raw(b);
         for &id in &mf.blocks[b].insts {
@@ -1935,107 +1756,3 @@ fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
     reachable
 }
 
-/// Every block the emitter walks: the fn's entry component plus each `Lambda`'s
-/// sub-CFG. A lambda body is unreachable from `mf.entry` (only its `Inst::Lambda`
-/// operand references it), so `reachable_blocks` alone misses it -- and the value
-/// model would then leave a lambda-body temp unmaterialized. Order is
-/// deterministic (entry component first, then lambdas in inst order).
-fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
-    let mut out = reachable_blocks(mf);
-    let mut seen: HashSet<Idx<Block>> = out.iter().copied().collect();
-    for (_, inst) in mf.insts.iter() {
-        if let Inst::Lambda { entry, .. } = inst {
-            for b in reachable_from(mf, *entry) {
-                if seen.insert(b) {
-                    out.push(b);
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Cells that a lambda arrow must `let`-declare itself, keyed by the `Lambda`
-/// inst. A stored (non-param) cell belongs to the INNERMOST scope whose body
-/// contains all its store sites: a cell stored only inside one lambda's body is
-/// arrow-local; a captured-then-mutated cell (stored in the enclosing scope too)
-/// stays owned by the enclosing scope and is declared there, so a single JS
-/// binding is shared -- closure capture by reference, exactly like a Lua upvalue.
-fn compute_lambda_owned(mf: &MirFunc) -> HashMap<Idx<Inst>, Vec<Idx<Cell>>> {
-    let mut params: HashSet<u32> = mf.params.iter().map(|&c| raw(c)).collect();
-    let mut lambdas: Vec<(Idx<Inst>, HashSet<Idx<Block>>)> = Vec::new();
-    for (id, inst) in mf.insts.iter() {
-        if let Inst::Lambda { params: ps, entry } = inst {
-            params.extend(ps.iter().map(|&c| raw(c)));
-            lambdas.push((id, reachable_from(mf, *entry).into_iter().collect()));
-        }
-    }
-    let mut store_blocks: HashMap<u32, (Idx<Cell>, HashSet<Idx<Block>>)> = HashMap::new();
-    for (b, blk) in mf.blocks.iter() {
-        for &iid in &blk.insts {
-            for &cell in inst_writes(&mf.insts[iid]) {
-                store_blocks.entry(raw(cell)).or_insert_with(|| (cell, HashSet::new())).1.insert(b);
-            }
-        }
-    }
-    let mut owned: HashMap<Idx<Inst>, Vec<Idx<Cell>>> = HashMap::new();
-    for (craw, (cell, blocks)) in &store_blocks {
-        if params.contains(craw) {
-            continue;
-        }
-        // Innermost (smallest-body) lambda whose body contains every store site.
-        // A cell whose stores span the enclosing scope is owned there (declared
-        // at the fn top by the reachable-from-entry pass), so it lands in no
-        // lambda here.
-        let best = lambdas
-            .iter()
-            .filter(|(_, body)| blocks.iter().all(|b| body.contains(b)))
-            .min_by_key(|(_, body)| body.len());
-        if let Some((lid, _)) = best {
-            owned.entry(*lid).or_default().push(*cell);
-        }
-    }
-    for v in owned.values_mut() {
-        v.sort_by_key(|&c| raw(c));
-    }
-    owned
-}
-
-/// Lambdas that carry NO capture and can be hoisted to a single module-level
-/// value. luajit shares one hoisted fn per capture-free site (P3), so two
-/// references to the same-site lambda are `==` (identity leaf); an inline arrow
-/// would mint a fresh value per call and diverge. A lambda is hoistable iff every
-/// cell it references is its own param or arrow-local AND it nests no lambda (a
-/// nested capture would reach an enclosing cell not in module scope). `owned` is
-/// [`compute_lambda_owned`]'s result.
-fn hoistable_lambdas(
-    mf: &MirFunc,
-    owned: &HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
-) -> HashSet<Idx<Inst>> {
-    let mut out = HashSet::new();
-    for (id, inst) in mf.insts.iter() {
-        let Inst::Lambda { params, entry } = inst else { continue };
-        let body: HashSet<Idx<Block>> = reachable_from(mf, *entry).into_iter().collect();
-        let mut local: HashSet<u32> = params.iter().map(|&c| raw(c)).collect();
-        local.extend(owned.get(&id).into_iter().flatten().map(|&c| raw(c)));
-        let mut hoistable = true;
-        for &b in &body {
-            for &iid in &mf.blocks[b].insts {
-                if matches!(&mf.insts[iid], Inst::Lambda { .. }) {
-                    hoistable = false;
-                }
-                let refs = match &mf.insts[iid] {
-                    Inst::Load(c) => std::slice::from_ref(c),
-                    other => inst_writes(other),
-                };
-                if refs.iter().any(|c| !local.contains(&raw(*c))) {
-                    hoistable = false;
-                }
-            }
-        }
-        if hoistable {
-            out.insert(id);
-        }
-    }
-    out
-}

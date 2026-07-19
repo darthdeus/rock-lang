@@ -159,6 +159,17 @@ fn fmt_inst(
             let tyn = ty.map(|t| format!("{t} ")).unwrap_or_default();
             format!("struct {tyn}{{{fs}}}")
         }
+        Inst::MakeEnv { fn_ref, fields } => {
+            let fs = fields
+                .iter()
+                .map(|(n, id)| format!("{n}=v{}", num[id]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            match fn_ref {
+                Some(name) => format!("env {{__fn={name}, {fs}}}"),
+                None => format!("box {{{fs}}}"),
+            }
+        }
         Inst::MakeEnum {
             tag,
             ty,

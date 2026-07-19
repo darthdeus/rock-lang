@@ -27,8 +27,10 @@ use comfy_la_arena::{Idx, RawIdx};
 use skull_codegen_lua::{emit_named_framed, mangled, CodegenCtx, FrameCtx};
 use skull_mir::mir::*;
 
+mod closure;
 mod forl;
 mod inline;
+pub use closure::convert_closures;
 pub use forl::recover_counted_loops;
 pub use inline::{
     fn_has_bounds, inline_functions, validate_no_residual_bound_calls, InlineCache, SpliceRecord,
@@ -1185,7 +1187,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
         Inst::CallValueMulti { callee, args, .. } => { p(callee); args.iter().for_each(&mut p); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
+        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
@@ -1229,7 +1231,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::CallValueMulti { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
+        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));

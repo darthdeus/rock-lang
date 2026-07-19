@@ -272,7 +272,7 @@ fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
 /// no dangling `goto` reaches the printer. (RPO returns once counted-loop
 /// recovery lands — a real `for` needs its preheader emitted just before the
 /// header, which id order doesn't guarantee.)
-pub(crate) fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
+pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut visited: HashSet<Idx<Block>> = HashSet::default();
     let mut stack = vec![entry];
     visited.insert(entry);
@@ -439,7 +439,11 @@ fn build_hoist_plan(ctx: &CodegenCtx, func: &MirFunc, tree: &scope::ScopeTree, o
 /// dominate the creation block; a non-dominating shape (a transform artifact,
 /// never seen for well-formed lowering) falls back to a box. Returns the extra
 /// cells to box.
-fn non_dominating_by_value_captures(
+///
+/// `pub` so the shared closure-conversion pass (`skull_transform::convert_closures`)
+/// reuses the EXACT classification the Lua codegen path uses -- one mechanism, no
+/// divergence (the JS path passes `frame = None`).
+pub fn non_dominating_by_value_captures(
     func: &MirFunc,
     tree: &scope::ScopeTree,
     own: &scope::Ownership,
@@ -2154,6 +2158,14 @@ impl Emitter<'_> {
             // check) long before codegen.
             Inst::CallBoundMulti { .. } => {
                 unreachable!("placeholder bound-call must be substituted before emit")
+            }
+
+            // The shared closure-conversion pass (`skull_transform::convert_closures`)
+            // is JS-consumed only until the S2 Lua cutover; the Lua path still
+            // converts closures at codegen (`HoistPlan`/`EnvCtx`), so a MakeEnv
+            // must never reach here.
+            Inst::MakeEnv { .. } => {
+                unreachable!("MakeEnv reaches Lua codegen before the S2 cutover")
             }
         }
     }

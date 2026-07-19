@@ -15,6 +15,7 @@ skull-transform = { path = "../skull-transform" }
 bone-semantic = { path = "../bone-semantic" }
 skull-parser = { path = "../skull-parser" }
 comfy-la-arena = { workspace = true }
+ustr = { workspace = true }
 
 [dev-dependencies]
 rock-host = { path = "../rock-host" }

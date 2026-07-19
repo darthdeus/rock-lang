@@ -34,6 +34,8 @@ fn corpus() -> Vec<String> {
         "tests/js_inline.rock",
         "tests/js_value_structs.rock",
         "tests/js_shared_tail.rock",
+        "tests/closure_semantics.rock",
+        "tests/closure_capture_semantics.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -69,8 +71,12 @@ fn js_runnable_coverage_ratchet() {
     // tests/js_value_structs.rock -> 118 (full-suite 2568 -> 2650). T8c
     // (shared-branch-tail structuring: lambda-body loop analysis, tail
     // duplication, labeled loops for multi-level jumps) added
-    // tests/js_shared_tail.rock -> 122 (full-suite 2650 -> 2738).
-    const FLOOR: usize = 122;
+    // tests/js_shared_tail.rock -> 122 (full-suite 2650 -> 2738). S1 (shared
+    // closure-conversion MIR pass: env records + hoisted siblings, deleting the
+    // T5/T7/T8c native-arrow path) added tests/closure_semantics.rock +
+    // tests/closure_capture_semantics.rock -> 134; the loop-counter/enumerate
+    // captures the deleted T7 path skipped now emit (full-suite 2743 -> 2756).
+    const FLOOR: usize = 134;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

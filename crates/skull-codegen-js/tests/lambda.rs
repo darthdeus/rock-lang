@@ -27,9 +27,12 @@ fn node_available() -> bool {
     Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-/// Run `<defs>; console.log(<call>)` under node and parse the printed int.
+/// Run `<defs>; console.log(<call>)` under node and parse the printed int. The
+/// `__rock_call` dispatch helper is prepended (every indirect call routes
+/// through it after `convert_closures`).
 fn node_eval_int(defs: &str, call: &str) -> i64 {
-    let program = format!("{defs}\nconsole.log({call});");
+    let program =
+        format!("{}{defs}\nconsole.log({call});", skull_codegen_js::JS_CALL_HELPER);
     let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
@@ -48,73 +51,46 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> String 
         .unwrap_or_else(|e| panic!("closure emit `{root}`: {}", e.message))
 }
 
-// --- structural pins ---
+// --- structural pins (post-`convert_closures`: records + hoisted siblings) ---
 
-// `CallValue`: an indirect call through a fn-typed param is `(callee)(args)`.
+// `CallValue`: an indirect call through a fn-typed param routes through the
+// `__rock_call` dispatch helper (handles both a raw fn and an env record).
 #[test]
 fn callvalue_through_fn_param() {
     let ws = ws_with("fn apply(f: (int) -> int, x: int) -> int { f(x) }");
-    assert_eq!(
-        emit_user(&ws, "apply"),
-        "\
-function apply(c0, c1) {
-  let v0 = c0;
-  let v1 = c1;
-  let v2 = (v0)(v1);
-  return v2;
-}
-"
-    );
+    let js = emit_user(&ws, "apply");
+    assert!(js.contains("__rock_call(v0, v1)"), "indirect call via __rock_call:\n{js}");
 }
 
-// A capturing lambda: `c0` (the enclosing param `n`) is read inside the arrow
-// under its own name -- lexical capture, no env record. The arrow body declares
-// no cells (it only reads).
+// A capturing lambda becomes an env RECORD `{ __fn: <name>, c<A>: .. }` at its
+// creation site plus a hoisted sibling fn reading the capture from its env.
 #[test]
-fn capturing_arrow_reads_enclosing_cell() {
+fn capturing_lambda_builds_env_record() {
     let ws = ws_with(
         "fn capture(n: int) -> int {\n\
              let g = (x: int) => x + n\n\
              g(10)\n\
          }",
     );
-    assert_eq!(
-        emit_user(&ws, "capture"),
-        "\
-function capture(c0) {
-  let c2;
-  let v4 = ((c1) => {
-    let v0 = c1;
-    let v1 = c0;
-    return (v0 + v1);
-  });
-  c2 = v4;
-  let v6 = c2;
-  let v8 = (v6)(10);
-  return v8;
-}
-"
-    );
+    let js = emit_closure(&ws, "capture");
+    assert!(js.contains("__fn: capture__lambda0"), "creation site builds the record:\n{js}");
+    assert!(js.contains("function capture__lambda0("), "hoisted sibling body:\n{js}");
 }
 
-// A capture-free lambda is hoisted to a single module-level `const` (luajit P3
-// parity): same-site references share one value, so `==` on a fn-valued field
-// holds. A capturing lambda stays an inline arrow (fresh per call).
+// A capture-free lambda is a bare reference to its hoisted top-level fn (no
+// record, no alloc): same-site references share one value -> `==` (luajit P3).
 #[test]
 fn capture_free_lambda_is_hoisted() {
     let ws = ws_with("fn mk() -> fn() -> int { () => 42 }");
-    let js = emit_user(&ws, "mk");
-    assert!(
-        js.starts_with("const mk__lam"),
-        "capture-free lambda hoisted to a module const:\n{js}"
-    );
-    assert!(js.contains("() => {") && js.contains("return 42;"), "hoisted body:\n{js}");
-    // The fn body references the shared hoisted value, not a fresh inline arrow.
-    assert!(js.contains("(mk__lam"), "references the shared value:\n{js}");
-    assert_eq!(js.matches("=>").count(), 1, "exactly one arrow (the hoisted def):\n{js}");
+    let js = emit_closure(&ws, "mk");
+    assert!(js.contains("function mk__lambda0("), "hoisted top-level fn:\n{js}");
+    assert!(js.contains("return 42;"), "hoisted body:\n{js}");
+    // Capture-free -> a bare global reference, NOT a `{ __fn }` record.
+    assert!(!js.contains("__fn: mk__lambda0"), "no record for a capture-free lambda:\n{js}");
 }
 
-// --- behavioral (node) oracle ---
+// --- behavioral (node) oracle: emit through the full pipeline (the pass runs
+// only in `emit_with_closure`, not the raw `emit_fn`). ---
 
 #[test]
 fn capturing_arrow_executes() {
@@ -128,7 +104,7 @@ fn capturing_arrow_executes() {
              g(10)\n\
          }",
     );
-    assert_eq!(node_eval_int(&emit_user(&ws, "capture"), "capture(7)"), 17);
+    assert_eq!(node_eval_int(&emit_closure(&ws, "capture"), "capture(7)"), 17);
 }
 
 #[test]
@@ -158,12 +134,11 @@ fn lambda_reentrant_across_calls() {
              f(3) + f(4)\n\
          }",
     );
-    assert_eq!(node_eval_int(&emit_user(&ws, "twice"), "twice()"), 25);
+    assert_eq!(node_eval_int(&emit_closure(&ws, "twice"), "twice()"), 25);
 }
 
-// Capturing + MUTATING an enclosing cell: `sum` is owned by the enclosing scope
-// (stored there too), so a single JS binding is shared -- the arrow's writes
-// accumulate into it (upvalue mutation).
+// Capturing + MUTATING an enclosing cell: `sum` is a shared box, so the closure's
+// writes accumulate into the one binding the enclosing scope also reads.
 #[test]
 fn lambda_mutates_captured_cell() {
     if !node_available() {
@@ -179,5 +154,5 @@ fn lambda_mutates_captured_cell() {
              sum\n\
          }",
     );
-    assert_eq!(node_eval_int(&emit_user(&ws, "accum"), "accum()"), 7);
+    assert_eq!(node_eval_int(&emit_closure(&ws, "accum"), "accum()"), 7);
 }

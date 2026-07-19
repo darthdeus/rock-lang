@@ -36,11 +36,12 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         return;
     }
     let program = format!(
-        "{}{}{}{}\n{defs}\nconsole.log({root}());",
+        "{}{}{}{}{}\n{defs}\nconsole.log({root}());",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
         skull_codegen_js::JS_TABLE_PRIM,
         skull_codegen_js::JS_STRUCTURAL_EQ,
+        skull_codegen_js::JS_CALL_HELPER,
     );
     let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
     assert!(

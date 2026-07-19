@@ -10,7 +10,7 @@ use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
 mod common;
-use common::{emit_user, emit_user_err, ws_with};
+use common::{emit_user, ws_with};
 
 /// Co-emit `root` + its plain-Rock callees (needed for `push`), returning the JS.
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -34,10 +34,12 @@ fn tuple_return_packs_array() {
     assert!(js.contains("return [v"), "multi-return packs an array:\n{js}");
 }
 
-// A closure capturing an iteration-local `let` copy gets a per-iteration `let`
-// INSIDE the loop body (not a shared fn-top declaration).
+// A closure capturing an iteration-local `let` copy snapshots THAT iteration's
+// value into a fresh env record built inside the loop body (`convert_closures`
+// classifies the copy as a by-value capture). Per-iteration correctness is pinned
+// behaviorally in tests/js_multivalue.rock on both backends.
 #[test]
-fn loop_capture_declares_per_iteration() {
+fn loop_capture_snapshots_per_iteration() {
     let ws = ws_with(
         "fn f() {\n\
              let fns: [fn() -> int] = []\n\
@@ -45,29 +47,25 @@ fn loop_capture_declares_per_iteration() {
          }",
     );
     let js = emit_closure(&ws, "f").expect("emits");
-    // A `let c<N>;` appears INSIDE the `for` body (per-iteration), after `for (`.
-    let for_pos = js.find("for (").expect("a for loop");
-    assert!(
-        js[for_pos..].contains("{\n    let c"),
-        "captured cell declared inside the loop body:\n{js}"
-    );
+    assert!(js.contains("__fn: f__lambda0"), "per-iteration capture record:\n{js}");
+    assert!(js.contains("function f__lambda0("), "hoisted body:\n{js}");
 }
 
-// A closure capturing the loop COUNTER directly cannot be block-scoped without
-// rewriting the closure reference -> reject (skip), never the shared final value.
+// A closure capturing the loop COUNTER directly now EMITS -- the shared
+// closure-conversion pass classifies the counter as a per-iteration by-value
+// capture (the fresh record each iteration snapshots the counter's value),
+// where the deleted T7 path rejected it as out of subset. Per-iteration
+// correctness is pinned in tests/closure_capture_semantics.rock on both backends.
 #[test]
-fn loop_counter_capture_rejects() {
+fn loop_counter_capture_now_emits() {
     let ws = ws_with(
         "fn f() {\n\
              let fns: [fn() -> int] = []\n\
              for i in 0..3 { fns.push(() => i) }\n\
          }",
     );
-    assert!(
-        emit_user_err(&ws, "f").contains("loop counter"),
-        "counter capture rejects: {}",
-        emit_user_err(&ws, "f")
-    );
+    let js = emit_closure(&ws, "f").expect("counter capture now emits");
+    assert!(js.contains("__fn: f__lambda0"), "counter snapshotted into a record:\n{js}");
 }
 
 // A reassigned param captured in a loop stays function-scoped (shared box), NOT

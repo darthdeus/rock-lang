@@ -275,6 +275,25 @@ pub enum Inst {
         named: Vec<(Ustr, Idx<Inst>)>,
     },
 
+    /// A closure environment record (defunctionalized closure) or a box.
+    /// Produced by `skull_transform::convert_closures` (the shared
+    /// closure-conversion pass), NEVER by lowering. Two shapes:
+    ///   - `fn_ref = Some(name)` is a callable RECORD -- a capturing lambda's
+    ///     value: `{ __fn = <name>, c<A> = .. }`, invoked through the target's
+    ///     `__call` convention (Lua `setmetatable({..}, __rock_fn_mt)`, JS the
+    ///     `__rock_call` dispatch helper). A capture-FREE lambda is a bare
+    ///     [`Inst::Global`] instead (no record, no alloc).
+    ///   - `fn_ref = None` is a fn-less 1-field env used to BOX a mutable shared
+    ///     capture (`{ v = .. }`): the box TABLE is the cell's value, the variable
+    ///     is `.v` on it. An empty `fields` is the `{}` init of a fresh box.
+    /// `fields` carry captured cell values by field name (`c<raw>`); env
+    /// reads/writes reuse [`Inst::Field`]/[`Inst::StoreField`] (no dedicated
+    /// EnvGet/EnvSet -- they express it cleanly).
+    MakeEnv {
+        fn_ref: Option<Ustr>,
+        fields: Vec<(Ustr, Idx<Inst>)>,
+    },
+
     /// `ffi.new("<ctype>[?]", count)` -- a contiguous flat ffi array of `count`
     /// elements of C type `ctype` (an FFI-clean value struct's cdef name, or
     /// `int`/`float`). Emitted only by the `native_buffer_alloc<T>` intrinsic,
