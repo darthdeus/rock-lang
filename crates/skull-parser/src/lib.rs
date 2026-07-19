@@ -183,6 +183,114 @@ mod tests {
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
     }
 
+    fn first_fn(ast: &Ast) -> &FunctionDef {
+        match &ast.items[0].kind {
+            ItemKind::Function(f) => f,
+            other => panic!("expected fn, got {other:?}"),
+        }
+    }
+
+    fn first_struct(ast: &Ast) -> &StructDef {
+        match &ast.items[0].kind {
+            ItemKind::Struct(s) => s,
+            other => panic!("expected struct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn param_annotation_parses_with_arg_and_span() {
+        // `@size(4)` on the first param; the second is unannotated. Name, arg
+        // value, and the annotation's own span must all survive.
+        let src = "fn f(@size(4) a: int, b: float) {}";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let f = first_fn(&ast);
+        assert_eq!(f.params[0].annotations.len(), 1, "param 0 annotated");
+        assert_eq!(f.params[1].annotations.len(), 0, "param 1 unannotated");
+        let a = &f.params[0].annotations[0];
+        assert_eq!(a.name.name, "size");
+        assert_eq!(a.args.len(), 1, "one arg");
+        assert!(a.args[0].name.is_none(), "positional arg");
+        assert!(
+            matches!(&ast.exprs[a.args[0].value].kind, ExprKind::Int(4, _)),
+            "arg value is int 4, got {:?}",
+            ast.exprs[a.args[0].value].kind
+        );
+        // The annotation span is a real, non-empty source range distinct from
+        // the param name's.
+        assert!(a.span.offset_range.0 < a.span.offset_range.1, "anno span non-empty");
+        assert_ne!(a.span.offset_range, f.params[0].name.span.offset_range, "anno span != name span");
+    }
+
+    #[test]
+    fn multiple_annotations_on_one_param() {
+        let src = "fn f(@instance @size(2) x: int) {}";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let anns = &first_fn(&ast).params[0].annotations;
+        assert_eq!(anns.len(), 2, "two annotations");
+        assert_eq!(anns[0].name.name, "instance");
+        assert!(anns[0].args.is_empty());
+        assert_eq!(anns[1].name.name, "size");
+        assert_eq!(anns[1].args.len(), 1);
+    }
+
+    #[test]
+    fn field_annotation_parses_with_arg() {
+        // `@flat` bare and `@w(3)` with an arg on struct fields.
+        let src = "struct S { @flat a: int, @w(3) b: float, c: bool }";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let s = first_struct(&ast);
+        assert_eq!(s.fields[0].annotations.len(), 1, "field 0 annotated");
+        assert_eq!(s.fields[0].annotations[0].name.name, "flat");
+        assert!(s.fields[0].annotations[0].args.is_empty());
+        assert_eq!(s.fields[1].annotations.len(), 1, "field 1 annotated");
+        assert_eq!(s.fields[1].annotations[0].name.name, "w");
+        assert_eq!(s.fields[1].annotations[0].args.len(), 1);
+        assert_eq!(s.fields[2].annotations.len(), 0, "field 2 unannotated");
+    }
+
+    #[test]
+    fn multiple_annotations_on_value_field() {
+        let src = "value V { @flat @w c: int }";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let s = first_struct(&ast);
+        assert!(s.is_value, "value struct");
+        let anns = &s.fields[0].annotations;
+        assert_eq!(anns.len(), 2, "two field annotations");
+        assert_eq!(anns[0].name.name, "flat");
+        assert_eq!(anns[1].name.name, "w");
+    }
+
+    #[test]
+    fn item_and_param_annotations_coexist() {
+        // An item-level annotation on the fn plus a param annotation must both
+        // land -- existing item-annotation parsing is untouched.
+        let src = "@pure fn f(@size(1) a: int) {}";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        assert_eq!(ast.items[0].annotations.len(), 1, "item annotation preserved");
+        assert_eq!(ast.items[0].annotations[0].name.name, "pure");
+        assert_eq!(first_fn(&ast).params[0].annotations.len(), 1, "param annotation preserved");
+    }
+
+    #[test]
+    fn unannotated_params_and_fields_stay_empty() {
+        // Regression guard: the new slots default empty for ordinary decls.
+        let src = "fn f(a: int, b: float) {} struct S { x: int } value V { y: float }";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let f = first_fn(&ast);
+        assert!(f.params.iter().all(|p| p.annotations.is_empty()), "no param annotations");
+        for it in &ast.items[1..] {
+            if let ItemKind::Struct(s) = &it.kind {
+                assert!(s.fields.iter().all(|fl| fl.annotations.is_empty()), "no field annotations");
+            }
+        }
+    }
+
     #[test]
     fn interpolation_keeps_static_format_spec() {
         // `"{v:.3}"` is a single embedded expr — must carry precision=3.
@@ -508,7 +616,6 @@ mod tests {
     #[test]
     fn literals_and_arrays() {
         check("[1, 2, 3]", "(block [1 2 3])");
-        check("![1, 2]", "(block ![1 2])");
         check("\"hi\"", "(block \"hi\")");
         check("true", "(block true)");
         check("null", "(block null)");
@@ -692,11 +799,6 @@ mod tests {
     fn stdlib_surface_forms() {
         // Forms the games don't exercise but stdlib does (caught by the
         // skull-cook-diff stdlib oracle):
-        // `![T]` native-array type -> `(NativeArray T)` (rock's App encoding).
-        assert_eq!(
-            item_sexp("inline(lua) fn array_len<T>(arr: ![T]) -> int = \"return #arr\""),
-            "(fn array_len <T> ((arr (NativeArray T))) int (lua))"
-        );
         // Leading-variadic param `...any` (stdlib spelling) + extern(lua) body.
         assert_eq!(
             item_sexp("extern(lua) fn print(args: ...any)"),

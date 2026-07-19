@@ -86,6 +86,7 @@ fn graft_param(src: &Ast, dst: &mut Ast, p: &Param) -> Param {
         ty: graft_type(src, dst, p.ty),
         default: p.default.map(|e| graft_expr(src, dst, e)),
         is_variadic: p.is_variadic,
+        annotations: p.annotations.clone(),
     }
 }
 
@@ -105,6 +106,7 @@ fn graft_field(src: &Ast, dst: &mut Ast, fl: &Field) -> Field {
         name: fl.name.clone(),
         ty: graft_type(src, dst, fl.ty),
         default: fl.default.map(|e| graft_expr(src, dst, e)),
+        annotations: fl.annotations.clone(),
     }
 }
 
@@ -180,6 +182,7 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
                     ty: graft_type(src, dst, p.ty),
                     default: p.default.map(|d| graft_expr(src, dst, d)),
                     is_variadic: p.is_variadic,
+                    annotations: p.annotations.clone(),
                 })
                 .collect(),
             return_ty: f.return_ty.map(|t| graft_type(src, dst, t)),
@@ -306,9 +309,6 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
             compound_op: *compound_op,
         },
         ExprKind::ArrayLiteral(xs) => ExprKind::ArrayLiteral(xs.iter().map(|x| ge(dst, *x)).collect()),
-        ExprKind::NativeArrayLiteral(xs) => {
-            ExprKind::NativeArrayLiteral(xs.iter().map(|x| ge(dst, *x)).collect())
-        }
         ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| ge(dst, *x)).collect()),
         ExprKind::StructLiteral { name, bases, fields } => ExprKind::StructLiteral {
             name: name.clone(),

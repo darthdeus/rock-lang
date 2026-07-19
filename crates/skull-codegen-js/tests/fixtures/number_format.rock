@@ -1,0 +1,26 @@
+// Number-formatting parity battery (docs/multi-backend-testing-plan.md T2,
+// Stage 3): `print(<number>)` stringifies via Lua `tostring` (%.14g) on luajit
+// and via the JS `lua_tostring` runtime port under node. The `test_` prefix
+// keeps the fn name unmangled so both backends invoke it by the same name.
+fn test_number_battery() {
+  print(42)
+  print(-7)
+  print(0.5)
+  print(1.0 / 3.0)
+  print(1e20)
+  print(1e-7)
+  print(9007199254740992.0)
+  print(-0.0)
+  print(123456789012345.0)
+  print(3.14159)
+  print(0.1)
+  print(1234567.0)
+  print(100.0)
+  print(0.0001)
+  print(0.00001)
+  print(1e300)
+  print(1e-300)
+  print(2.5)
+  print(0.125)
+  print(-3.5)
+}

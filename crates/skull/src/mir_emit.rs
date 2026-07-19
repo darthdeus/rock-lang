@@ -933,6 +933,60 @@ fn sim_registration_lines(
     Ok(out)
 }
 
+/// A Lua long-bracket string literal (`[==[ ... ]==]`) holding `s`, at the
+/// smallest `=` level whose closing bracket does not occur in `s` (never does
+/// for generated GLSL, but the guard keeps a `]]` in shader source from
+/// terminating early). The leading newline is elided by Lua's long-string rule.
+fn lua_long_bracket(s: &str) -> String {
+    let mut level = 0usize;
+    loop {
+        let close = format!("]{}]", "=".repeat(level));
+        if !s.contains(&close) {
+            let eqs = "=".repeat(level);
+            return format!("[{eqs}[\n{s}]{eqs}]");
+        }
+        level += 1;
+    }
+}
+
+/// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
+/// pair (docs/glsl-a3a-implementation.md A3a). Emitted at module-init time after
+/// the `@sim` registrations, at chunk top level, so a reload re-`dofile`s them
+/// with the new source (the hot-reload-parity invariant). Deterministic
+/// sorted-by-key order (from `collect_shader_pairs`) keeps re-emission
+/// byte-identical. GLSL emission lives HERE, in the driver -- skull-mir surfaces
+/// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
+/// violation, stage/collision) is a spanned `CompilerError` failing the compile,
+/// never skip-and-continue.
+fn shader_registration_lines(ws: &Workspace) -> Result<String, CompilerError> {
+    let pairs = skull_mir::lower::collect_shader_pairs(ws)?;
+    if pairs.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    for pair in pairs {
+        let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+        // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
+        // emitter (PIXEL body + fullscreen VERTEX passthrough). Core330 only
+        // (locked A3 decision; emit_shader_entry has no profile param).
+        let glsl = match pair.vert {
+            Some(vert) => {
+                let vname = ws.module(vert.module).functions[vert.func].name;
+                skull_codegen_glsl::emit_shader_pipeline(
+                    ws,
+                    vert.module,
+                    vname.as_str(),
+                    fname.as_str(),
+                    skull_codegen_glsl::GlslProfile::Core330,
+                )?
+            }
+            None => skull_codegen_glsl::emit_shader_entry(ws, pair.frag.module, fname.as_str())?,
+        };
+        let _ = writeln!(out, "__rock_shader_register({:?}, {})", pair.key, lua_long_bracket(&glsl));
+    }
+    Ok(out)
+}
+
 fn assemble(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -1151,6 +1205,10 @@ fn assemble(
     out.push_str(&decorator_application_lines(ws, overloaded, &deco_map, &mut skipped));
     // `@sim` registrations (after fn + global defs; same init slot as rock).
     out.push_str(&sim_registration_lines(ws, overloaded)?);
+    // `rock_shader` pipeline registrations (docs/glsl-a3a-implementation.md):
+    // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
+    // reload re-`dofile`s them with the new source (hot-reload parity).
+    out.push_str(&shader_registration_lines(ws)?);
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -1220,14 +1278,6 @@ fn validate_on_reload_nomangle(ws: &Workspace) -> Result<(), CompilerError> {
 
 pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     validate_on_reload_nomangle(ws)?;
-    if let Some(span) = skull_mir::lower::native_array_optional_elem(ws, user_mid) {
-        return Err(CompilerError::new_with_label(
-            span,
-            "`![T?]` is unsound: Lua `#` / `ipairs` stop at the first `nil`, so an embedded \
-             `null` silently truncates iteration. Use `[T?]` (Vec, tracked `.len`) instead."
-                .to_string(),
-        ));
-    }
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,
@@ -1236,6 +1286,15 @@ pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEm
         ));
     }
     if let Some(err) = skull_mir::lower::struct_expand_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::lower::shader_expand_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::lower::gpu_only_call_rejection(ws, user_mid) {
         return Err(err);
     }
     if let Some((key, span)) = skull_mir::lower::value_struct_map_key(ws, user_mid) {
@@ -1618,6 +1677,19 @@ fn assemble_overlay(
     // emits no rebind at all. (`docs/skull-incremental-emit-split.md`.)
     let (deco_map, _) = build_deco_map(ws);
     out.push_str(&decorator_rebind_lines(ws, overloaded, &deco_map, &order));
+
+    // Re-run ALL `rock_shader` registrations on a body-edit reload too (decision 2:
+    // top-level registrations re-run on reload; the plan sanctions conservative
+    // re-emit-all at this corpus size). The engine's hash-idempotent register
+    // no-ops unchanged pairs and recompiles an edited shader body in place. A GLSL
+    // emit error can't return Err here (the overlay's `MirEmit` is baked into the
+    // watch fast path), so warn loudly (never-swallow) -- the next full rebuild
+    // rejects it authoritatively via `assemble` (same pattern as the collision
+    // warning above).
+    match shader_registration_lines(ws) {
+        Ok(lines) => out.push_str(&lines),
+        Err(err) => eprintln!("skull overlay emit: rock_shader registration -- {}", err.message),
+    }
 
     MirEmit { lua: out, skipped, phases: Vec::new() }
 }

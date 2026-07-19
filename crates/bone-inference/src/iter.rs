@@ -18,7 +18,7 @@ pub(crate) fn for_elem_ty(gamma: &mut Gamma, iter_ty: TyId, span: Span) -> Resul
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } if matches!(name.as_str(), "NativeArray" | "NativeBuffer" | "FlatVec") => {
+        } if matches!(name.as_str(), "NativeBuffer" | "FlatVec") => {
             let elem = or_fail!(
                 params.into_iter().next(),
                 span,
@@ -89,7 +89,6 @@ pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
         TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
             n.as_str(),
             "Arena"
-                | "NativeArray"
                 | "NativeBuffer"
                 | "NativeBufferU8"
                 | "NativeBufferI8"

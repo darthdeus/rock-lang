@@ -9,6 +9,7 @@
 pub mod cimgui_embed;
 pub mod compilation_units;
 pub mod engine_build;
+pub mod js_runner;
 pub mod lua_runner;
 pub mod preprocessor;
 pub mod process_management;

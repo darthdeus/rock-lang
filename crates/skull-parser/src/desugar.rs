@@ -102,6 +102,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
                 ty,
                 default: None,
                 is_variadic: false,
+                annotations: Vec::new(),
             };
             let mk_anno = |nm: &str| Annotation {
                 span: sp,
@@ -186,7 +187,7 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
             out.push(*func);
             out.extend(args.iter().map(|a| a.value));
         }
-        ExprKind::ArrayLiteral(xs) | ExprKind::NativeArrayLiteral(xs) | ExprKind::Tuple(xs) => {
+        ExprKind::ArrayLiteral(xs) | ExprKind::Tuple(xs) => {
             out.extend(xs.iter().copied());
         }
         ExprKind::StructLiteral { bases, fields, .. } => {

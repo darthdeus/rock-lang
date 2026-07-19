@@ -31,31 +31,6 @@ fn is_nan(value: float) -> bool {
     return value != value
 }
 
-// Native arrays in Rock are denoted with ![...] syntax. These are plain Lua
-// tables (1-indexed). Generic over T so value-typed elements (e.g. ![V2])
-// flow without going through `any` (value types refuse `any` boxing).
-inline(lua) fn array_len<T>(arr: ![T]) -> int = "return #arr"
-inline(lua) fn array_push<T>(arr: ![T], value: T) = "arr[#arr + 1] = value"
-@inline inline(lua) fn array_pop<T>(arr: ![T]) -> T = "table.remove(arr)"
-inline(lua) fn array_clear<T>(arr: ![T]) = "for i = #arr, 1, -1 do arr[i] = nil end"
-
-// Bounds-checked native-array read. `arr[i]` on native arrays (![T])
-// compiles to this helper so it returns T (not T?) with an error on
-// out-of-range. Matches the unified `x[i] -> T / x.get(i) -> T?`
-// surface across collection types.
-@nomangle inline(lua) fn __narr_get_checked(arr: any, i: int) -> any = """
-    local v = arr[i + 1]
-    if v == nil then
-        error("Native array index out of bounds: index " .. tostring(i) ..
-              " is outside [0, " .. tostring(#arr) .. ")")
-    end
-    return v
-"""
-
-// Native arrays don't need a dedicated `.get()` — `arr[i]` already
-// returns `T?` (Lua table miss = nil), which matches the unified
-// `.get() -> T?` contract from the other collection types.
-
 // ============================================================================
 // FFI out-parameter buffers
 // ============================================================================
@@ -147,19 +122,19 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
 // Single-hop accessors: the inline(lua) body reaches into the Rock struct's
 // .ptr field directly. This avoids the extra Lua call frame a wrapper would
 // introduce and lets LuaJIT fold the field load + ffi index in one trace.
-inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
-inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
-inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
-inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
 
 // Safe accessor matching the unified `.get(i) -> T?` surface used across
 // all collection types. Returns null on out-of-range; `buf[i]` is the
 // direct-access counterpart.
-inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<float>, i: int) -> float? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
@@ -491,11 +466,11 @@ struct NativeBufferU16 { ptr: PtrU16, len: int }
 struct NativeBufferI16 { ptr: PtrI16, len: int }
 struct NativeBufferU32 { ptr: PtrU32, len: int }
 
-@nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return ffi.new("uint8_t[?]", n)'
-@nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return ffi.new("int8_t[?]", n)'
-@nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return ffi.new("uint16_t[?]", n)'
-@nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
-@nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u8(n: int)  -> PtrU8  = 'return ffi.new("uint8_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i8(n: int)  -> PtrI8  = 'return ffi.new("int8_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u16(n: int) -> PtrU16 = 'return ffi.new("uint16_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return ffi.new("int16_t[?]", n)'
+@intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return ffi.new("uint32_t[?]", n)'
 
 fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
 fn native_buffer_i8(n: int)  -> NativeBufferI8  { return NativeBufferI8  { ptr: __nb_alloc_i8(n),  len: n } }
@@ -506,32 +481,32 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // Single-hop accessors per variant. All surface as int (LuaJIT handles
 // the C<->Lua number conversion at the ffi boundary). One nb_get + nb_set
 // pair per NativeBuffer phantom variant.
-inline(lua) fn nb_get(b: NativeBufferU8,  i: int) -> int = "return b.ptr[i]"
-inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
-inline(lua) fn nb_get(b: NativeBufferI8,  i: int) -> int = "return b.ptr[i]"
-inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
-inline(lua) fn nb_get(b: NativeBufferU16, i: int) -> int = "return b.ptr[i]"
-inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
-inline(lua) fn nb_get(b: NativeBufferI16, i: int) -> int = "return b.ptr[i]"
-inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
-inline(lua) fn nb_get(b: NativeBufferU32, i: int) -> int = "return b.ptr[i]"
-inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU8,  i: int) -> int = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU8,  i: int, v: int) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI8,  i: int) -> int = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI8,  i: int, v: int) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU16, i: int) -> int = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU16, i: int, v: int) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferI16, i: int) -> int = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferI16, i: int, v: int) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBufferU32, i: int) -> int = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBufferU32, i: int, v: int) = "b.ptr[i] = v"
 
 // Safe `.get(i) -> int?` per variant. Codegen for `buf[i]` emits the
 // bounds-checked helper `__nb_checked_get` (type-agnostic on struct).
-inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferU8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferI8,  i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferU16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferI16, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
-inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
+@intrinsic @native_required inline(lua) fn get(b: NativeBufferU32, i: int) -> int? = """
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
 
@@ -1057,10 +1032,30 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 }
 
 @nomangle fn vec_set<T>(vec: [T], index: int, value: T) {
-    if index >= 0 && index < vec.len {
-        table_set(vec._data, index + 1, value)
+    if index < 0 || index >= vec.len {
+        error("Vec.set index out of bounds: index {index} is outside [0, {vec.len})")
     }
+    table_set(vec._data, index + 1, value)
 }
+
+// Bounds-checked indexing helpers, emitted by codegen for `xs[i]` reads and
+// stores (the __nb_checked_* pattern; release stripping is the same future
+// release-mode work). `.get(i)` above is the null-returning form.
+@nomangle inline(lua) fn __vec_checked_get(vec: any, i: int) -> any = """
+    if i < 0 or i >= vec.len then
+        error("Vec index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(vec.len) .. ")")
+    end
+    return vec._data[i + 1]
+"""
+
+@nomangle inline(lua) fn __vec_checked_set(vec: any, i: int, v: any) = """
+    if i < 0 or i >= vec.len then
+        error("Vec index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(vec.len) .. ")")
+    end
+    vec._data[i + 1] = v
+"""
 
 @nomangle fn vec_len<T>(vec: [T]) -> int {
     return vec.len
@@ -1247,16 +1242,16 @@ fn expect<T>(value: T?, message: string) -> T {
 }
 
 // Common utility functions
-fn max<T>(a: T, b: T) -> T {
+@intrinsic fn max<T>(a: T, b: T) -> T {
     if a > b { return a } else { return b }
 }
 
-fn min<T>(a: T, b: T) -> T {
+@intrinsic fn min<T>(a: T, b: T) -> T {
     if a < b { return a } else { return b }
 }
 
 
-@pure fn clamp(value: float, min: float, max: float) -> float {
+@intrinsic @pure fn clamp(value: float, min: float, max: float) -> float {
     if value < min {
         return min
     } else if value > max {
@@ -1272,8 +1267,8 @@ fn min<T>(a: T, b: T) -> T {
 // Historical aliases for `float(int)`. All three — `float`, `int_to_float`,
 // `to_float` — are `@expand("$1")` identities, substituted at call sites
 // with zero runtime cost. `float(int)` is the canonical name.
-@pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
-@pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
+@intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
+@intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
 
 inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
@@ -1335,7 +1330,7 @@ inline(lua) fn float_to_int(value: float) -> int = """
 // `@expand("$1")` substitutes the argument expression at the call site with
 // zero function-call overhead. Confirmed in tmp/codegen_expand.lua: calls
 // vanish entirely in the generated Lua.
-@pure @inline inline(lua) fn float(value: int) -> float = "return value"
+@intrinsic @pure @inline inline(lua) fn float(value: int) -> float = "return value"
 
 // Coroutine support functions
 // Global resume function for method call rewrite - will be overridden by coroutine object methods
@@ -1463,11 +1458,11 @@ inline(lua) fn table_new() -> any = """return {}"""
     return #tbl
 """
 
-@inline inline(lua) fn table_get(tbl: any, index: any) -> any = """
+@intrinsic @native_required @inline inline(lua) fn table_get(tbl: any, index: any) -> any = """
     return tbl[index]
 """
 
-@inline inline(lua) fn table_set(tbl: any, index: any, value: any) = """
+@intrinsic @native_required @inline inline(lua) fn table_set(tbl: any, index: any, value: any) = """
     tbl[index] = value
 """
 
@@ -1736,27 +1731,28 @@ inline(lua) fn random_int(min: int, max: int) -> int = """
 inline(lua) fn random_seed(seed: int) = """
     __rock_rng_seed(seed)
 """
-@pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
-@pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
-@pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
-@pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
-@pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"
-@pure fn round(x: float) -> float { return floor(x + 0.5) }
+@intrinsic @pure @inline inline(lua) fn sin(x: float) -> float = "math.sin(x)"
+@intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
+@intrinsic @pure @inline inline(lua) fn tan(x: float) -> float = "math.tan(x)"
+@intrinsic @pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
+@intrinsic @pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
+@intrinsic @pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"
+@intrinsic @pure fn round(x: float) -> float { return floor(x + 0.5) }
 @pure fn round_to_places(x: float, places: int) -> float {
     let mult = pow(10.0, float(places))
     return floor(x * mult + 0.5) / mult
 }
-@pure @inline inline(lua) fn abs(x: float) -> float = "math.abs(x)"
-@pure @inline inline(lua) fn abs(x: int) -> int = "math.abs(x)"
+@intrinsic @pure @inline inline(lua) fn abs(x: float) -> float = "math.abs(x)"
+@intrinsic @pure @inline inline(lua) fn abs(x: int) -> int = "math.abs(x)"
 
-@pure fn sign(x: int) -> int {
+@intrinsic @pure fn sign(x: int) -> int {
     if x > 0 { 1 } else if x < 0 { -1 } else { 0 }
 }
-@pure fn sign(x: float) -> float {
+@intrinsic @pure fn sign(x: float) -> float {
     if x > 0.0 { 1.0 } else if x < 0.0 { -1.0 } else { 0.0 }
 }
-@pure @inline inline(lua) fn floor(x: float) -> float = "math.floor(x)"
-@pure @inline inline(lua) fn ceil(x: float) -> float = "math.ceil(x)"
+@intrinsic @pure @inline inline(lua) fn floor(x: float) -> float = "math.floor(x)"
+@intrinsic @pure @inline inline(lua) fn ceil(x: float) -> float = "math.ceil(x)"
 
 // Miscellaneous functions
 inline(lua) fn get_os() -> string = """
@@ -2468,11 +2464,11 @@ fn Vec<T>.sample(vec) -> T? {
     return vec_get(vec, index)
 }
 
-@pure fn lerp(a: float, b: float, t: float) -> float { return a + (b - a) * t }
+@intrinsic @pure fn lerp(a: float, b: float, t: float) -> float { return a + (b - a) * t }
 
-@pure fn fract(x: float) -> float { return x - floor(x) }
+@intrinsic @pure fn fract(x: float) -> float { return x - floor(x) }
 
-@pure fn smoothstep(edge0: float, edge1: float, x: float) -> float {
+@intrinsic @pure fn smoothstep(edge0: float, edge1: float, x: float) -> float {
     let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
 }
@@ -2620,10 +2616,10 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 // String manipulation functions
 // string had a redundant `len` + `length` pair (both `string.len`); keep
 // `len` to match Vec/Map/Arena. (Vec2.length is an unrelated overload.)
-@inline inline(lua) fn string.len(s) -> int = "string.len(s)"
+@intrinsic @inline inline(lua) fn string.len(s) -> int = "string.len(s)"
 
 
-inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
+@intrinsic inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
     -- Rock uses 0-based indexing, Lua uses 1-based
     return string.sub(s, start + 1, end_idx)
 """
@@ -2636,7 +2632,7 @@ inline(lua) fn string.substring(s, start: int, end_idx: int) -> string = """
 // Returns the 0-based unit index of the first match at or after `from`, or -1.
 // Stays intrinsic (Lua `string.find(..., true)` runs at C speed); Layer-2
 // string algorithms in strings.rock build on it.
-inline(lua) fn string.find(s, substr: string, from: int = 0) -> int = """
+@intrinsic @native_required inline(lua) fn string.find(s, substr: string, from: int = 0) -> int = """
     local pos = string.find(s, substr, from + 1, true)
     if pos then
         return pos - 1  -- Convert to 0-based index
@@ -2645,9 +2641,9 @@ inline(lua) fn string.find(s, substr: string, from: int = 0) -> int = """
     end
 """
 
-@inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
+@intrinsic @inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
 
-inline(lua) fn from_codepoint(cp: int) -> string = """
+@intrinsic inline(lua) fn from_codepoint(cp: int) -> string = """
     if cp < 0 or cp > 0x10FFFF then
         error("from_codepoint: codepoint out of range: " .. tostring(cp))
     end
@@ -2670,7 +2666,7 @@ inline(lua) fn from_codepoint(cp: int) -> string = """
 // false cross-backend promise -- an index is opaque, feed it back to a string
 // primitive, do not do arithmetic on the value across backends. Real
 // characters come from `chars()`.
-inline(lua) fn string.unit_at(s, index: int) -> int = """
+@intrinsic inline(lua) fn string.unit_at(s, index: int) -> int = """
     return string.byte(s, index + 1) or 0  -- Convert to 1-based, return 0 if out of bounds
 """
 
@@ -2680,9 +2676,9 @@ inline(lua) fn string.unit_at(s, index: int) -> int = """
 // O(n^2) even on luajit (immutable interned strings), so join/split/format
 // results build through this (Lua: table + table.concat).
 struct StringBuilder {}
-inline(lua) fn sb_new() -> StringBuilder = "return {}"
-inline(lua) fn sb_push(sb: StringBuilder, s: string) = "sb[#sb + 1] = s"
-inline(lua) fn sb_build(sb: StringBuilder) -> string = "return table.concat(sb)"
+@intrinsic inline(lua) fn sb_new() -> StringBuilder = "return {}"
+@intrinsic inline(lua) fn sb_push(sb: StringBuilder, s: string) = "sb[#sb + 1] = s"
+@intrinsic inline(lua) fn sb_build(sb: StringBuilder) -> string = "return table.concat(sb)"
 
 fn lt(a: string, b: string) -> bool { return le(a, b) && a != b }
 inline(lua) fn le(a: string, b: string) -> bool = "return a <= b"

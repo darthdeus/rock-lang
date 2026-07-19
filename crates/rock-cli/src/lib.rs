@@ -44,6 +44,8 @@ mod completion_sweep;
 mod iter_completion;
 mod iter_lsp;
 mod iter_parse;
+pub mod js_test;
+mod test_protocol;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
@@ -318,11 +320,16 @@ pub enum Backend {
     Bone,
     /// `skull` — the Claude-managed codegen on bone's HIR (emits + runs Lua).
     Skull,
+    /// `js` — the JS-subset test executor (`docs/multi-backend-testing-plan.md`
+    /// T1): bone type-checks, then each `@test` fn + its callee closure is
+    /// emitted via `skull-codegen-js` and run under node; tests outside the
+    /// subset report SKIP(reason). Serves `test` only.
+    Js,
 }
 
 impl clap::ValueEnum for Backend {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Bone, Self::Skull]
+        &[Self::Bone, Self::Skull, Self::Js]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
         Some(clap::builder::PossibleValue::new(self.name()))
@@ -335,6 +342,7 @@ impl Backend {
         match self {
             Self::Bone => "bone",
             Self::Skull => "skull",
+            Self::Js => "js",
         }
     }
 
@@ -343,6 +351,7 @@ impl Backend {
         match self {
             Self::Bone => "bone is a typechecker with no codegen/runtime",
             Self::Skull => "skull is a bone-HIR codegen",
+            Self::Js => "js is a JS-subset @test executor (node), not a program codegen",
         }
     }
 
@@ -367,6 +376,7 @@ impl Backend {
             Self::Skull => &[
                 Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, Perf, Sim,
             ],
+            Self::Js => &[Test],
         }
     }
 
@@ -412,6 +422,9 @@ pub struct Args {
     pub command: CliCommand,
     pub files: Vec<String>,
     pub output: Option<String>,
+    /// For `rock shader` two-root pipeline form: GLSL profile (`330core` |
+    /// `300es`). Default `330core`. See `skull_backend::skull_shader`.
+    pub profile: Option<String>,
     pub no_stdlib: bool,
     pub stdout: bool,
     pub check: bool,
@@ -514,6 +527,7 @@ impl Args {
             )
             .arg(Arg::new("files").num_args(0..))
             .arg(Arg::new("output").long("output"))
+            .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
                 .help("Compile without the standard library"))
             .arg(Arg::new("stdout").long("stdout").action(ArgAction::SetTrue)
@@ -594,7 +608,7 @@ impl Args {
                 .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
-                .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua) or `bone` (type-check only, no codegen). Can also be set via ROCK_BACKEND=bone|skull."))
+                .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), or `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset). Can also be set via ROCK_BACKEND=bone|skull|js."))
             .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
                 .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
@@ -610,6 +624,7 @@ impl Args {
             command,
             files: many_str("files"),
             output: m.get_one::<String>("output").cloned(),
+            profile: m.get_one::<String>("profile").cloned(),
             no_stdlib: m.get_flag("no-stdlib"),
             stdout: m.get_flag("stdout"),
             check: m.get_flag("check"),
@@ -657,6 +672,7 @@ impl Args {
                     match std::env::var("ROCK_BACKEND").ok().as_deref() {
                         Some("bone") => Some(Backend::Bone),
                         Some("skull") => Some(Backend::Skull),
+                        Some("js") => Some(Backend::Js),
                         _ => None,
                     }
                 });
@@ -710,6 +726,18 @@ mod caps_tests {
         for cmd in [Fmt, Completions, StoneTest] {
             assert!(!Backend::Skull.serves(cmd), "skull should reject {:?}", cmd);
         }
+    }
+
+    #[test]
+    fn js_serves_test_only() {
+        use CliCommand::*;
+        assert!(Backend::Js.serves(Test), "js serves test");
+        for cmd in [Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim] {
+            assert!(!Backend::Js.serves(cmd), "js should reject {:?}", cmd);
+        }
+        let msg = Backend::Js.reject_reason(CliCommand::Run).expect("js rejects run");
+        assert!(msg.contains("`js` backend cannot serve `run`"), "{msg}");
+        assert!(msg.contains("test"), "supported list names test: {msg}");
     }
 
     #[test]

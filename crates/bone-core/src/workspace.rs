@@ -31,6 +31,12 @@ pub struct Workspace {
 
     pub functions_by_name: FxHashMap<Ustr, FnList>,
 
+    /// Workspace-wide `deco` declaration names, collected from the raw ASTs in
+    /// `lower_modules` BEFORE lowering (the `type_generic_arity` pattern) so
+    /// annotation validation can accept `@<deco>` cross-module. Insert-only:
+    /// the incremental single-module re-lower augments rather than wipes.
+    pub decorator_names: FxHashSet<Ustr>,
+
     pub phase_timings: Vec<(&'static str, Duration)>,
 
     /// Count of function bodies actually re-inferred (check_function run, NOT
@@ -85,6 +91,7 @@ impl Workspace {
             globals_by_name: Default::default(),
             const_globals: Default::default(),
             functions_by_name: Default::default(),
+            decorator_names: Default::default(),
 
             phase_timings: Default::default(),
 

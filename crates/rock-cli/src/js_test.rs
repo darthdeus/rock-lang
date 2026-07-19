@@ -1,0 +1,487 @@
+//! `rock test <path> --backend js` -- execute the `@test` suite under node via
+//! the JS-subset emitter (`skull-codegen-js`), T1 of
+//! `docs/multi-backend-testing-plan.md`.
+//!
+//! Shares the backend-neutral half of the test driver with the luajit path
+//! (`skull_backend::skull_test`): unit discovery (`collect_test_units`), the
+//! `@test` metadata (`skull::module_tests_with_ids`), the compile-failure
+//! expect-failure fallback, and the `__SKULL__` protocol parser
+//! (`test_protocol`). Per-backend here: per-test callee-closure emission
+//! (`skull_codegen_js::emit::emit_with_closure`), the node batch runner, and
+//! SKIP(reason) reporting -- a test whose closure hits anything outside the JS
+//! subset reports as SKIP carrying the reject message, never FAIL, never
+//! silently dropped. The end-of-run skip-reason histogram is the emitter work
+//! list (T2+).
+
+use crate::bone_backend::{categorize, short_path};
+use crate::test_protocol::{parse_skull_markers, reason_histogram};
+use crate::Result;
+use colored::Colorize;
+use skull_mir::lower::ScalarCtx;
+use skull_mir::mir::FuncRef;
+use std::time::Instant;
+
+/// One unit's (file or package) outcome under the JS executor.
+enum JsUnitOutcome {
+    /// bone accepted the unit; per-test verdicts follow.
+    Ran {
+        passed: usize,
+        /// FAIL detail lines (throw under node, or a harness-invariant breach).
+        fails: Vec<String>,
+        /// (test name, skip reason) for tests outside the JS subset.
+        skips: Vec<(String, String)>,
+    },
+    /// bone rejected the unit and every `@test` expected the failure -- each
+    /// counts as a passing test (luajit-path parity).
+    ExpectFailPass { tests: usize },
+    /// bone rejected the unit unexpectedly, or the emitted JS failed to load
+    /// under node (a backend bug, not a test failure).
+    UnitFail { reason: String, rendered: String },
+}
+
+/// Whole-run tallies -- the testable core consumed by the ratchet test.
+pub struct JsSuiteSummary {
+    pub files: usize,
+    pub tests_passed: usize,
+    pub tests_failed: usize,
+    pub tests_skipped: usize,
+    pub unit_failures: usize,
+    /// Skip reasons bucketed by exact message, count desc.
+    pub skip_reasons: Vec<(String, usize)>,
+}
+
+/// `rock test --backend js` entry: run, print per-file lines + the end-of-run
+/// summary and skip histogram, exit non-zero on any FAIL or unit failure.
+pub fn js_test(paths: &[String]) -> Result<()> {
+    let start = Instant::now();
+    let summary = js_test_run(paths, true)?;
+    println!(
+        "\njs backend: {}/{} @tests passed ({} failed, {} skipped) across {} files ({:.2}s)",
+        summary.tests_passed.to_string().green(),
+        summary.tests_passed + summary.tests_failed + summary.tests_skipped,
+        if summary.tests_failed == 0 {
+            summary.tests_failed.to_string().green()
+        } else {
+            summary.tests_failed.to_string().red()
+        },
+        summary.tests_skipped.to_string().yellow(),
+        summary.files,
+        start.elapsed().as_secs_f64(),
+    );
+    if summary.unit_failures > 0 {
+        println!(
+            "  {} unit(s) failed to build/run (see FAILED lines above)",
+            summary.unit_failures.to_string().red()
+        );
+    }
+    if !summary.skip_reasons.is_empty() {
+        println!("\n{}", "=== skip reasons (js) -- the T2+ work list ===".bold());
+        let shown = summary.skip_reasons.len().min(50);
+        for (reason, count) in summary.skip_reasons.iter().take(shown) {
+            println!("  {:>5}  {}", count.to_string().yellow(), reason);
+        }
+        if summary.skip_reasons.len() > shown {
+            println!(
+                "  {:>5}  ({} more distinct reasons)",
+                "...",
+                summary.skip_reasons.len() - shown
+            );
+        }
+    }
+    if summary.tests_failed > 0 || summary.unit_failures > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Run the suite; optionally print per-file lines as units complete. Public for
+/// the ratchet test (`print = false`).
+pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
+    let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
+
+    let mut summary = JsSuiteSummary {
+        files: 0,
+        tests_passed: 0,
+        tests_failed: 0,
+        tests_skipped: 0,
+        unit_failures: 0,
+        skip_reasons: Vec::new(),
+    };
+    let mut all_skip_reasons: Vec<String> = Vec::new();
+
+    // bone can panic during inference on some inputs (a bone bug); contain it
+    // per unit like the luajit driver does.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let mut outcomes: Vec<(String, std::thread::Result<JsUnitOutcome>)> = Vec::new();
+    for file in &files {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            js_build_file(file)
+        }));
+        outcomes.push((short_path(file), outcome));
+    }
+    for dir in &package_dirs {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            js_build_package(dir)
+        }));
+        outcomes.push((short_path(dir), outcome));
+    }
+
+    std::panic::set_hook(prev_hook);
+
+    for (label, outcome) in outcomes {
+        summary.files += 1;
+        match outcome {
+            Ok(JsUnitOutcome::Ran { passed, fails, skips }) => {
+                summary.tests_passed += passed;
+                summary.tests_failed += fails.len();
+                summary.tests_skipped += skips.len();
+                for (_, reason) in &skips {
+                    all_skip_reasons.push(reason.clone());
+                }
+                if print && (passed + fails.len() + skips.len() > 0) {
+                    let status = if fails.is_empty() { "ok".green() } else { "FAILED".red() };
+                    println!(
+                        "{:.<60} {}  ({} pass, {} fail, {} skip)",
+                        label,
+                        status,
+                        passed,
+                        fails.len(),
+                        skips.len()
+                    );
+                    for detail in &fails {
+                        println!("  {} {}", "FAIL".red(), detail);
+                    }
+                }
+            }
+            Ok(JsUnitOutcome::ExpectFailPass { tests }) => {
+                summary.tests_passed += tests;
+                if print {
+                    println!(
+                        "{:.<60} {}  ({} pass, 0 fail, 0 skip)",
+                        label,
+                        "ok".green(),
+                        tests
+                    );
+                }
+            }
+            Ok(JsUnitOutcome::UnitFail { reason, rendered }) => {
+                summary.unit_failures += 1;
+                if print {
+                    println!("{:.<60} {}  {}", label, "FAILED".red(), reason.dimmed());
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        println!("{rendered}");
+                    }
+                }
+            }
+            Err(panic) => {
+                summary.unit_failures += 1;
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                if print {
+                    println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
+                }
+            }
+        }
+    }
+
+    summary.skip_reasons = reason_histogram(all_skip_reasons.iter().map(|s| s.as_str()));
+    Ok(summary)
+}
+
+/// One isolated test file: parse + bone type-check with the stdlib, discover
+/// `@test` fns, then run them via the per-test closure emission + node batch.
+fn js_build_file(file: &str) -> JsUnitOutcome {
+    let src = match fs_err::read_to_string(file) {
+        Ok(s) => s,
+        Err(e) => {
+            return JsUnitOutcome::UnitFail { reason: e.to_string(), rendered: e.to_string() }
+        }
+    };
+    let user = match skull_parser::parse_module(&src, ustr::Ustr::from(file)) {
+        Ok(u) => u,
+        Err(e) => return js_compile_failure(file, &src, &[e]),
+    };
+    let user_file = user.file;
+    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+        Ok(ws) => ws,
+        Err(errs) => return js_compile_failure(file, &src, &errs),
+    };
+    let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
+    // A discovery error (malformed `@test` annotation on a bone-accepted file)
+    // is a rejection, never an expected compile failure -- so it does NOT route
+    // through `js_compile_failure`'s expect-failure escape.
+    let tests: Vec<(FuncRef, skull::SkullTest)> = match skull::module_tests_with_ids(&ws, user_mid)
+    {
+        Ok(tests) => tests
+            .into_iter()
+            .map(|(fid, t)| (FuncRef { module: user_mid, func: fid }, t))
+            .collect(),
+        Err(e) => {
+            return JsUnitOutcome::UnitFail {
+                reason: categorize(&e.message),
+                rendered: crate::skull_backend::render_file_errs(file, &src, &[e]),
+            }
+        }
+    };
+    js_run_tests(&ws, &tests)
+}
+
+/// A `stick.toml` package built as ONE workspace (tests included), mirroring
+/// `skull_build_package`; its `@test`s run through the same per-test path.
+fn js_build_package(dir: &str) -> JsUnitOutcome {
+    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
+    let sources = match crate::unified_compile::discover_sources(&spec) {
+        Ok(s) => s,
+        Err(e) => {
+            return JsUnitOutcome::UnitFail {
+                reason: "cannot load project".to_string(),
+                rendered: e.to_string(),
+            }
+        }
+    };
+    let (mut modules, _entry) = match crate::skull_backend::skull_assemble_project(&sources) {
+        Ok(v) => v,
+        Err(errs) => {
+            return JsUnitOutcome::UnitFail {
+                reason: categorize(&errs[0].message),
+                rendered: crate::skull_backend::render_project_errs(&sources, &errs),
+            }
+        }
+    };
+    let ws = match crate::bone_backend::check_modules(&mut modules) {
+        Ok(ws) => ws,
+        Err(errs) => {
+            return JsUnitOutcome::UnitFail {
+                reason: categorize(&errs[0].message),
+                rendered: crate::skull_backend::render_project_errs(&sources, &errs),
+            }
+        }
+    };
+    let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
+        Ok(tests) => tests,
+        Err(e) => {
+            return JsUnitOutcome::UnitFail {
+                reason: categorize(&e.message),
+                rendered: e.message,
+            }
+        }
+    };
+    js_run_tests(&ws, &tests)
+}
+
+/// The luajit driver's compile-failure rule, shared verbatim: a bone rejection
+/// where every discovered `@test` carries `expect_failure`/`@ignore` is the
+/// expected (passing) outcome; anything else is a unit failure.
+fn js_compile_failure(
+    file: &str,
+    src: &str,
+    errs: &[rock_core::CompilerError],
+) -> JsUnitOutcome {
+    if let Some(tests) = crate::skull_backend::all_tests_expect_compile_failure(file, src) {
+        return JsUnitOutcome::ExpectFailPass { tests };
+    }
+    JsUnitOutcome::UnitFail {
+        reason: categorize(&errs[0].message),
+        rendered: crate::skull_backend::render_file_errs(file, src, errs),
+    }
+}
+
+/// Per-test closure emission + one node invocation for the unit's runnable
+/// tests, speaking the `__SKULL__` protocol.
+fn js_run_tests(
+    ws: &bone_semantic::inference::Workspace,
+    tests: &[(FuncRef, skull::SkullTest)],
+) -> JsUnitOutcome {
+    let mut fails: Vec<String> = Vec::new();
+    let mut skips: Vec<(String, String)> = Vec::new();
+    // (display name, root JS name, emitted defs, expected output, value test?)
+    let mut runnable: Vec<(String, String, String, Option<String>, bool)> = Vec::new();
+
+    let scx = ScalarCtx::new(ws);
+    for (i, (fr, t)) in tests.iter().enumerate() {
+        let js_name = format!("__t{i}");
+        let roots = [(*fr, js_name.clone())];
+        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
+        }));
+        match emitted {
+            Ok(Ok(js)) => {
+                runnable.push((t.name.clone(), js_name, js, t.output.clone(), t.returns.is_some()))
+            }
+            Ok(Err(e)) => skips.push((t.name.clone(), e.message.clone())),
+            Err(panic) => {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                skips.push((t.name.clone(), format!("panic during JS emission: {msg}")));
+            }
+        }
+    }
+
+    if runnable.is_empty() {
+        return JsUnitOutcome::Ran { passed: 0, fails, skips };
+    }
+
+    let program = build_node_program(&runnable);
+    let timeout = Some(std::time::Duration::from_secs(15));
+    let run = match rock_host::js_runner::run_node_code_with_timeout(&program, timeout) {
+        Ok(r) => r,
+        Err(e) => {
+            return JsUnitOutcome::UnitFail {
+                reason: "node run failed".to_string(),
+                rendered: e.message,
+            }
+        }
+    };
+
+    // The harness try/catches every test, so marker lines exist iff the program
+    // loaded. Missing/short markers = the emitted JS itself is bad (a backend
+    // bug), surfaced with the program for diagnosis -- never silently absorbed.
+    let markers = match parse_skull_markers(&run.stdout) {
+        Some(m) if m.passed + m.fails.len() + m.values.len() == runnable.len() => m,
+        _ => {
+            return JsUnitOutcome::UnitFail {
+                reason: "invalid JS emitted (js backend bug)".to_string(),
+                rendered: format!(
+                    "stdout:\n{}\nstderr:\n{}\n\n--- emitted js (truncated) ---\n{}",
+                    run.stdout,
+                    run.stderr,
+                    truncate_js(&program)
+                ),
+            }
+        }
+    };
+    fails.extend(markers.fails);
+    let mut passed = markers.passed;
+
+    // VALUE lines: compare the serialized return value HOST-side against the
+    // pinned `@test(returns = ...)` literal -- same policy as the luajit path
+    // (test_protocol::compare_value is the single comparison site).
+    let expects: std::collections::HashMap<&str, &skull::ValueExpect> = tests
+        .iter()
+        .filter_map(|(_, t)| t.returns.as_ref().map(|v| (t.name.as_str(), v)))
+        .collect();
+    for (name, val) in &markers.values {
+        let Some(expect) = expects.get(name.as_str()) else {
+            return JsUnitOutcome::UnitFail {
+                reason: "harness invariant breach (js backend bug)".to_string(),
+                rendered: format!("VALUE line for `{name}` without a returns expectation"),
+            };
+        };
+        match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
+        {
+            Ok(()) => passed += 1,
+            Err(detail) => fails.push(format!("{name}: {detail}")),
+        }
+    }
+    JsUnitOutcome::Ran { passed, fails, skips }
+}
+
+/// A JS double-quoted string literal for a Rust string, escaping the control
+/// and non-ASCII chars a JS lexer needs (test output can carry arbitrary
+/// bytes). `{:?}` would emit Rust's `\u{XXXX}`, which JS rejects.
+fn js_str(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            '\n' => o.push_str("\\n"),
+            '\r' => o.push_str("\\r"),
+            '\t' => o.push_str("\\t"),
+            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
+                for u in c.encode_utf16(&mut [0u16; 2]) {
+                    o.push_str(&format!("\\u{:04x}", u));
+                }
+            }
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// Assemble the per-file node program: shim + string-runtime preamble, a
+/// buffer-capturing `print` (Lua-parity: args `lua_tostring`-joined by TAB, one
+/// trailing newline per call), each runnable test's closure-emitted defs
+/// (callee names are FuncRef-deterministic, so duplicate definitions across
+/// tests are byte-identical and redefinition is harmless), then the harness
+/// running each test with its buffer reset and comparing the captured stdout
+/// (trimmed) against the `output=` expectation -- one `__SKULL__` line per test.
+fn build_node_program(runnable: &[(String, String, String, Option<String>, bool)]) -> String {
+    let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
+    p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
+    p.push_str(skull_codegen_js::JS_TABLE_PRIM);
+    p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
+    p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
+    p.push_str(
+        r#"
+var __buf = [];
+function print() {
+  var p = [];
+  for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));
+  __buf.push(p.join("\t") + "\n");
+}
+"#,
+    );
+    for (_, _, defs, _, _) in runnable {
+        p.push_str(defs);
+    }
+    p.push_str("var __tests = [\n");
+    for (name, js_name, _, out, is_value) in runnable {
+        let out_js = match out {
+            Some(s) => js_str(s),
+            None => "null".to_string(),
+        };
+        p.push_str(&format!(
+            "  {{ f: {js_name}, name: {}, out: {out_js}, val: {is_value} }},\n",
+            js_str(name)
+        ));
+    }
+    p.push_str("];\n");
+    // __fmtval: toPrecision(17) round-trips any f64 (the host compares parsed
+    // f64s, so it need not match luajit's %.17g byte-for-byte); bools as-is.
+    p.push_str(
+        r#"function __esc(s) { return String(s).replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\t/g, "\\t"); }
+function __fmtval(v) {
+  if (typeof v === "boolean") return v ? "true" : "false";
+  return Number(v).toPrecision(17);
+}
+for (var i = 0; i < __tests.length; i++) {
+  var t = __tests[i];
+  __buf = [];
+  try {
+    var ret = t.f();
+    var got = __buf.join("").replace(/^\s+/, "").replace(/\s+$/, "");
+    if (t.out !== null && got !== t.out) {
+      process.stdout.write("\n__SKULL__\tFAIL\t" + t.name + ": output mismatch: expected <" + __esc(t.out) + "> got <" + __esc(got) + ">\n");
+    } else if (t.val) {
+      process.stdout.write("\n__SKULL__\tVALUE\t" + t.name + "\t" + __fmtval(ret) + "\n");
+    } else {
+      process.stdout.write("\n__SKULL__\tPASS\t\n");
+    }
+  } catch (e) {
+    var m = (e && e.message !== undefined) ? e.message : e;
+    process.stdout.write("\n__SKULL__\tFAIL\t" + t.name + ": error: " + __esc(m) + "\n");
+  }
+}
+"#,
+    );
+    p
+}
+
+/// Keep emitted-JS dumps in error reports manageable.
+fn truncate_js(s: &str) -> String {
+    if s.len() > 4000 {
+        format!("{}\n... ({} more bytes)", &s[..4000], s.len() - 4000)
+    } else {
+        s.to_string()
+    }
+}

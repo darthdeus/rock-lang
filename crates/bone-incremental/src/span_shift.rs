@@ -136,7 +136,6 @@ pub fn shift_module_after_edit(
                 | Expr::If { .. }
                 | Expr::IfLet { .. }
                 | Expr::Array(_)
-                | Expr::NativeArray(_)
                 | Expr::StructLiteral { .. }
                 | Expr::FieldAccess { .. }
                 | Expr::Global(_)

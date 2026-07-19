@@ -4,6 +4,7 @@ use skull_parser::{
 use ustr::ustr;
 
 use bone_core::{
+    annotations::{validate_annotations, AnnoPos},
     hir::{
         BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef, Expr,
         Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern, RecordPatField,
@@ -443,14 +444,8 @@ pub fn lower_type_expr_in(
                 }
             }
 
-            if ctor.name.as_str() == "NativeArray"
-                && matches!(lowered.first(), Some(TypeExpr::Nullable(..)))
-            {
-                comp_error!(te.span, "`![T?]` is not allowed - NativeArray uses `#` for length which stops at first `nil`")
-            }
-
             // Wrong generic-argument count for a user nominal (`G<int, int>` for
-            // `struct G<T>`, or too few). Builtins (Coroutine, NativeArray, Map,
+            // `struct G<T>`, or too few). Builtins (Coroutine, Map,
             // Vec/Array) aren't in `type_generic_arity`, so they keep their own
             // arity logic. Cross-module via the workspace map. The bare (0-arg)
             // case is handled in the Ident arm.
@@ -1039,11 +1034,6 @@ pub fn lower_expr_value(
         ExprKind::ArrayLiteral(elems) => {
             let elems = lower_exprs(ctx, a, body, scope, elems.iter())?;
             Expr::Array(elems)
-        }
-
-        ExprKind::NativeArrayLiteral(elems) => {
-            let elems = lower_exprs(ctx, a, body, scope, elems.iter())?;
-            Expr::NativeArray(elems)
         }
 
         ExprKind::If {
@@ -1643,11 +1633,28 @@ pub fn build_function(
             name: p.name.name,
             ty: ty_ref,
             has_default: p.default.is_some(),
+            annotations: lower_annotations(a, &p.annotations),
         });
     }
 
-    let (body_failed, lua_body, is_extern, ffi_lib, errors) =
+    // Registry violations accumulate as lowering errors (the recovery channel)
+    // rather than failing fast: the workspace must stay buildable while an
+    // annotation is mid-typed (decorator completion runs on it), and
+    // `body_errors()` already turns any lowering error into a hard verdict.
+    let annotations = lower_annotations(a, annotations);
+    let mut anno_errors = Vec::new();
+    if let Err(e) = validate_annotations(AnnoPos::FnItem, &annotations, &ctx.workspace.decorator_names) {
+        anno_errors.push(e);
+    }
+    for pd in param_decls.iter() {
+        if let Err(e) = validate_annotations(AnnoPos::Param, &pd.annotations, &ctx.workspace.decorator_names) {
+            anno_errors.push(e);
+        }
+    }
+
+    let (body_failed, lua_body, is_extern, ffi_lib, mut errors) =
         lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
+    errors.extend(anno_errors);
 
     let is_variadic = f.params.last().map_or(false, |p| p.is_variadic);
     let num_required = f
@@ -1671,7 +1678,7 @@ pub fn build_function(
         return_ty,
         lua_body,
         is_extern,
-        annotations: lower_annotations(a, annotations),
+        annotations,
         ffi_lib,
     };
 
@@ -1901,9 +1908,22 @@ pub fn relower_function_in_place(
         lower_type_expr_local(&mut ctx, a, &mut body, a.te(&p.ty))?;
     }
 
-    let (body_failed, _lua_body, _is_extern, _ffi_lib, errors) =
+    let (body_failed, _lua_body, _is_extern, _ffi_lib, mut errors) =
         lower_fn_body_into(&mut ctx, a, f, &mut body, &param_tys)?;
     ctx.module.lower_var_high_water = ctx._next_var_id;
+
+    // Re-validate annotations on the body-only path too: the REPLACE below
+    // would otherwise clear a still-present annotation violation recorded by
+    // the last full lower.
+    let lowered_annos = lower_annotations(a, annotations);
+    if let Err(e) = validate_annotations(AnnoPos::FnItem, &lowered_annos, &ctx.workspace.decorator_names) {
+        errors.push(e);
+    }
+    for pd in ctx.module.functions[fid].param_decls.iter() {
+        if let Err(e) = validate_annotations(AnnoPos::Param, &pd.annotations, &ctx.workspace.decorator_names) {
+            errors.push(e);
+        }
+    }
 
     // REPLACE this body's lowering errors (clears stale ones from a prior edit) --
     // the flat-Vec append was the lower-error-path leak + stale-diagnostic bug.
@@ -1959,11 +1979,14 @@ pub fn lower_struct_def(
             );
         }
 
+        let field_annotations = lower_annotations(a, &field.annotations);
+        validate_annotations(AnnoPos::StructField, &field_annotations, &ctx.workspace.decorator_names)?;
         fields.push(hir::StructFieldDef {
             name: field.name.name,
             ty,
             span: field.name.span,
             has_default: field.default.is_some(),
+            annotations: field_annotations,
         });
 
         if let Some(default) = default {
@@ -2011,11 +2034,14 @@ pub fn lower_enum_def(
                 let rec: Vec<hir::StructFieldDef> = fs
                     .iter()
                     .map(|f| {
+                        let annos = lower_annotations(a, &f.annotations);
+                        validate_annotations(AnnoPos::EnumVariantField, &annos, &ctx.workspace.decorator_names)?;
                         Ok(hir::StructFieldDef {
                             name: f.name.name,
                             ty: lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?,
                             span: f.name.span,
                             has_default: false,
+                            annotations: annos,
                         })
                     })
                     .try_vec()?;
@@ -2548,10 +2574,13 @@ pub fn lower_decorator_def(
 
         bindings.insert(p.name.name, b_idx);
         params.push(b_idx);
+        let deco_param_annotations = lower_annotations(a, &p.annotations);
+        validate_annotations(AnnoPos::DecoParam, &deco_param_annotations, &ctx.workspace.decorator_names)?;
         param_decls.push(ParamDecl {
             name: p.name.name,
             ty: ty_ref,
             has_default: p.default.is_some(),
+            annotations: deco_param_annotations,
         });
     }
 
@@ -2625,7 +2654,7 @@ pub fn lower_decorator_def(
     Ok(idx)
 }
 
-fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hir::Annotation> {
+pub fn lower_annotations(ast: &Ast, anns: &[skull_parser::Annotation]) -> Vec<hir::Annotation> {
     anns.iter()
         .map(|a| hir::Annotation {
             span: a.span,
@@ -2647,12 +2676,14 @@ fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
 
     match &a.e(&e).kind {
         ExprKind::Int(i, _) => hir::AnnoValue::Int(*i),
+        ExprKind::Float(f) => hir::AnnoValue::Float(f.0),
         ExprKind::Bool(b) => hir::AnnoValue::Bool(*b),
         ExprKind::String(s) => hir::AnnoValue::String(*s),
         ExprKind::Ident(id) => hir::AnnoValue::Ident(id.clone()),
 
         ExprKind::UnaryMinus(inner) => match &a.e(inner).kind {
             ExprKind::Int(i, _) => hir::AnnoValue::Int(-*i),
+            ExprKind::Float(f) => hir::AnnoValue::Float(-f.0),
             _ => hir::AnnoValue::Other,
         },
 

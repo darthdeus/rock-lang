@@ -488,17 +488,19 @@ pub struct AnnoArg {
 #[derive(Clone, Debug)]
 pub enum AnnoValue {
     Int(i64),
+    Float(f64),
     String(Ustr),
     Ident(Ident),
     Bool(bool),
     Other,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct ParamDecl {
     pub name: Ustr,
     pub ty: TyId,
     pub has_default: bool,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug)]
@@ -648,7 +650,6 @@ pub enum Expr {
     },
 
     Array(IdxRange<Expr>),
-    NativeArray(IdxRange<Expr>),
 
     StructLiteral {
         name: Ustr,
@@ -803,12 +804,13 @@ pub struct StructDef {
     pub fields: Vec<StructFieldDef>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct StructFieldDef {
     pub name: Ustr,
     pub ty: TyId,
     pub span: Span,
     pub has_default: bool,
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Copy, Clone, Debug)]

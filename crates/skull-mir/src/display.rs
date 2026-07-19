@@ -149,7 +149,6 @@ fn fmt_inst(
         }
 
         Inst::MakeTuple(vs) => format!("tuple [{}]", list(vs)),
-        Inst::MakeArray(vs) => format!("array [{}]", list(vs)),
         Inst::MakeVec(vs) => format!("vec [{}]", list(vs)),
         Inst::MakeStruct { ty, fields } => {
             let fs = fields

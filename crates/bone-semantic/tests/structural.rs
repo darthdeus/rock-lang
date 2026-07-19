@@ -1137,23 +1137,6 @@ fn duplicate_newtype_rejected() {
 // false-greens on a spurious collision rather than a real duplicate-symbol
 // diagnostic. `backend-diff tests/errors` covers that case as the live oracle.)
 
-// ─── ![T?] is unsound: NativeArray of nullable T (RED) ───────────────────────
-//
-// `![T?]` is a bare Lua table; an embedded `null` makes `#arr` / `ipairs` stop
-// at the first nil, silently truncating iteration -- use `[T?]` (Vec, tracked
-// `.len`) instead. rock rejects the type; bone accepts today (LEAD). The bad
-// type alone triggers it -- no literal/loop needed (keeps the no-stdlib harness
-// from false-greening on `print`/`for`/interpolation). RED now; green when bone
-// rejects a nullable NativeArray element type.
-
-#[test]
-fn native_array_of_nullable_rejected() {
-    assert!(
-        bone_rejects("fn f(xs: ![int?]) -> int { return 0 }"),
-        "a NativeArray element type may not be nullable (![T?] is unsound)"
-    );
-}
-
 // ─── Control-flow placement (RED until bone validates it) ────────────────────
 //
 // `break`/`continue` are only meaningful inside a loop; `return` only in
@@ -1561,6 +1544,117 @@ fn main() {
         msgs.iter().any(|m| m.contains("does not satisfy")),
         "the bound-conformance rejection reason must be surfaced: {msgs:?}"
     );
+}
+
+// An operator desugar (`!x` -> `__not`, unary `-x` -> `__unm`) reaching an
+// EMPTY overload set reads as an operator error naming the operand type, not
+// as a missing internal function ("Function `__not` doesn't exist").
+#[test]
+fn operator_miss_reads_as_operator_error() {
+    let msgs = main_body_error_messages("fn main() { let xs = [1, 2]\n let y = !xs }");
+    assert!(
+        msgs.iter().any(|m| m.contains("operator `!` is not defined for")),
+        "expected an operator-shaped message, got: {msgs:?}"
+    );
+    assert!(
+        !msgs.iter().any(|m| m.contains("__not")),
+        "the internal desugar name must not leak: {msgs:?}"
+    );
+}
+
+#[test]
+fn unary_minus_miss_reads_as_operator_error() {
+    let msgs = main_body_error_messages(
+        "struct P { x: int }\nfn main() { let p = P { x: 1 }\n let q = -p }",
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("operator `-` is not defined for")),
+        "expected an operator-shaped message, got: {msgs:?}"
+    );
+}
+
+// Float literals in annotation args must survive lowering as
+// `AnnoValue::Float` (incl. the unary-minus form) -- the value-test
+// expectation surface (`@test(returns = 1.5)`,
+// docs/multi-backend-testing-plan.md V1) reads them; `Other` would make
+// float expectations silently unreadable.
+#[test]
+fn annotation_float_args_lower_as_float() {
+    let ws = check(
+        "@test(returns = 1.5)\nfn a() -> float { return 1.5 }\n\
+         @test(returns = -2.5)\nfn b() -> float { return -2.5 }\n",
+    )
+    .unwrap();
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let mut got = vec![];
+    for (_, f) in ws.module(mid).functions.iter() {
+        for ann in &f.annotations {
+            if ann.name.name.as_str() == "test" {
+                for arg in &ann.args {
+                    got.push(format!("{:?}", arg.value));
+                }
+            }
+        }
+    }
+    got.sort();
+    assert_eq!(got, vec!["Float(-2.5)", "Float(1.5)"], "float annotation args must not lower to Other");
+}
+
+// Lossless lowering of param/field annotations (docs/annotations-design.md
+// S3): skull-side consumers (@size/@instance/@flat) read these from HIR, so
+// dropping them at lowering is a silent-drop hole.
+#[test]
+fn param_annotations_survive_lowering() {
+    let ws = check("fn f(@size(32) xs: int, plain: int) -> int { return xs + plain }\n").unwrap();
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let (_, f) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "f")
+        .expect("fn f");
+    let annotated = &f.param_decls[0];
+    assert_eq!(annotated.annotations.len(), 1, "param annotation must survive lowering");
+    assert_eq!(annotated.annotations[0].name.name.as_str(), "size");
+    assert!(
+        matches!(annotated.annotations[0].args[0].value, bone_semantic::hir::AnnoValue::Int(32)),
+        "annotation arg must lower with its value, got {:?}",
+        annotated.annotations[0].args[0].value
+    );
+    assert!(f.param_decls[1].annotations.is_empty(), "unannotated param stays empty");
+}
+
+#[test]
+fn field_annotations_survive_lowering() {
+    let ws = check("value V { @flat id: int, pos: float }\n").unwrap();
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let s = ws
+        .module(mid)
+        .structs
+        .iter()
+        .map(|(_, s)| s)
+        .find(|s| s.name.as_str() == "V")
+        .expect("struct V");
+    let annotated = &s.fields[0];
+    assert_eq!(annotated.annotations.len(), 1, "field annotation must survive lowering");
+    assert_eq!(annotated.annotations[0].name.name.as_str(), "flat");
+    assert!(annotated.annotations[0].args.is_empty());
+    assert!(s.fields[1].annotations.is_empty(), "unannotated field stays empty");
 }
 
 // A resolved call to a generic fn persists the winning candidate's

@@ -1038,7 +1038,7 @@ impl Parser {
                 ));
             }
             let span = name.span;
-            params.push(Param { span, name, ty, default: None, is_variadic: false });
+            params.push(Param { span, name, ty, default: None, is_variadic: false, annotations: Vec::new() });
             self.skip_comments();
             self.eat(TokenKind::Comma);
         }
@@ -1047,6 +1047,7 @@ impl Parser {
             if self.kind() == TokenKind::CloseParen {
                 break;
             }
+            let annotations = self.parse_item_annotations()?;
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             // Variadic spelled either leading (`...T`, the stdlib form e.g.
@@ -1060,7 +1061,7 @@ impl Parser {
                 None
             };
             let span = self.span_from(name.span);
-            params.push(Param { span, name, ty, default, is_variadic });
+            params.push(Param { span, name, ty, default, is_variadic, annotations });
             self.skip_comments();
             if !self.eat(TokenKind::Comma) {
                 break;
@@ -1098,6 +1099,7 @@ impl Parser {
             if self.kind() == TokenKind::CloseCurly || self.at_end() {
                 break;
             }
+            let annotations = self.parse_item_annotations()?;
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_type()?;
@@ -1107,7 +1109,7 @@ impl Parser {
                 None
             };
             let span = self.span_from(name.span);
-            fields.push(Field { span, name, ty, default });
+            fields.push(Field { span, name, ty, default, annotations });
             self.skip_comments();
             // Item separator: comma or newline (both allowed).
             self.eat(TokenKind::Comma);
@@ -1271,20 +1273,6 @@ impl Parser {
                 let inner = self.parse_type()?;
                 self.expect(TokenKind::CloseSquare)?;
                 TypeExprKind::Array(inner)
-            }
-            TokenKind::Bang => {
-                // `![T]` native-array type. rock has no dedicated NativeArray
-                // TypeExprKind — it carries it as `App{NativeArray, [T]}`, which
-                // renders `(NativeArray T)`; mirror that exactly.
-                let bang_span = self.span();
-                self.advance();
-                self.expect(TokenKind::OpenSquare)?;
-                let inner = self.parse_type()?;
-                self.expect(TokenKind::CloseSquare)?;
-                TypeExprKind::App {
-                    ctor: Ident { span: bang_span, name: Ustr::from("NativeArray") },
-                    args: vec![inner],
-                }
             }
             TokenKind::OpenParen => {
                 // `()` Unit, `(T)` parenthesized T, `(A, B)` tuple, or
@@ -2193,16 +2181,6 @@ impl Parser {
             }
             self.expect(TokenKind::CloseParen)?;
             return self.finish_lambda(params, start);
-        }
-
-        // `![ ... ]` native array literal (`!` then `[`).
-        if self.kind() == TokenKind::Bang && self.peek_kind() == TokenKind::OpenSquare {
-            self.advance(); // `!`
-            self.advance(); // `[`
-            let items = self.parse_expr_list(TokenKind::CloseSquare)?;
-            let end = self.expect(TokenKind::CloseSquare)?;
-            let span = self.merge_spans(start, end);
-            return Ok(self.ast.expr(span, ExprKind::NativeArrayLiteral(items)));
         }
 
         // Leading `.ident` is a sibling-field reference (`current: int = .max`).

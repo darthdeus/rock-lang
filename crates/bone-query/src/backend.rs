@@ -3680,7 +3680,7 @@ pub(crate) fn bind_generic(
 
 /// Structural mirror of bone-inference's `for_elem_ty` ITERABLE judgment
 /// (keep the shape list in sync): `[T]`, `Map<K, V>`, `Arena<T>`, and the
-/// native array/buffer nominals. Drives the ForIn completion rung.
+/// native buffer nominals. Drives the ForIn completion rung.
 pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: TyId) -> bool {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     match ty_of(ws, body, ty) {
@@ -3689,7 +3689,6 @@ pub(crate) fn is_iterable_ty(ws: &Workspace, body: Option<&BodyInference>, ty: T
         TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => matches!(
             n.as_str(),
             "Arena"
-                | "NativeArray"
                 | "NativeBuffer"
                 | "NativeBufferU8"
                 | "NativeBufferI8"
