@@ -425,13 +425,25 @@ struct FnEmit<'a> {
     folded_block: HashMap<Idx<Block>, Idx<Cell>>,
     /// A counted-loop bound temp folded into the for-header -> its const value.
     folded_bound: HashMap<Idx<Cell>, Idx<Inst>>,
-    /// Vertex-entry mode: varyings field name -> GLSL type. When set, the fn is
-    /// emitted as `void main()` and its terminal `return <MakeValueStruct>`
-    /// becomes `gl_Position = <position>;` plus a `<varying> = <val>;` per field.
-    vertex_out: Option<HashMap<Ustr, GlslTy>>,
+    /// `void main()` mode: the fn is emitted as `void main()` and its terminal
+    /// `return <MakeValueStruct>` destructures into a named global assignment per
+    /// field (vertex varyings, or MRT fragment outputs).
+    main_out: Option<MainOut>,
     /// The fn's name span -- body-level emit errors anchor here (MIR insts carry
     /// no spans, so per-expression precision is not available).
     fn_span: Span,
+}
+
+/// A `void main()` entry that destructures its terminal `return <struct
+/// literal>` into named global assignments: vertex varyings (+ gl_Position) or
+/// MRT fragment outputs (`layout(location=N) out vec4`).
+#[derive(Clone)]
+struct MainOut {
+    /// Field name -> GLSL type (the assignment target's type).
+    fields: HashMap<Ustr, GlslTy>,
+    /// Vertex only: a `position` field becomes `gl_Position` (suppressed as a
+    /// named output). Fragment MRT has no such remap -- every field is an out.
+    position_is_gl: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -473,17 +485,17 @@ fn emit_fn_def_with(
     entry: Option<&EntryShape>,
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
-    let is_vertex = entry.is_some_and(|s| s.vertex_out.is_some());
-    let name = if is_vertex {
+    let emits_main = entry.is_some_and(|s| s.main_out.is_some());
+    let name = if emits_main {
         "main".to_string()
     } else if entry.is_some() {
         f.name.as_str().to_string()
     } else {
         mangle_fn(ws, f, overloaded)
     };
-    // A vertex entry returns the (non-tier-0) varyings struct, destructured into
-    // gl_Position + varying outs -- its GLSL fn is `void main()`, no signature ret.
-    let ret_ty = if is_vertex {
+    // A `void main()` entry destructures its returned struct into globals
+    // (gl_Position + varyings, or MRT outs) -- no signature return type.
+    let ret_ty = if emits_main {
         None
     } else {
         match f.return_ty {
@@ -532,7 +544,7 @@ fn emit_fn_def_with(
         folded_cond: HashMap::default(),
         folded_block: HashMap::default(),
         folded_bound: HashMap::default(),
-        vertex_out: entry.and_then(|s| s.vertex_out.as_ref().map(|v| v.iter().copied().collect())),
+        main_out: entry.and_then(|s| s.main_out.clone()),
         fn_span: f.name_span,
     };
     e.assign_cell_names();
@@ -1195,27 +1207,27 @@ impl FnEmit<'_> {
     }
 
     fn emit_return(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
-        // Vertex entry: `return <VaryingsStruct { position, ... }>` destructures
-        // into `gl_Position = <position>;` + a `<varying> = <val>;` per field.
-        if self.vertex_out.is_some() {
-            let varyings = self.vertex_out.clone().unwrap();
+        // `void main()` mode: `return <Struct { field, ... }>` destructures into a
+        // named global assignment per field -- vertex varyings (a `position` field
+        // -> gl_Position) or MRT fragment outputs.
+        if let Some(mo) = self.main_out.clone() {
             let [v] = vs else {
-                return Err(err(self.span(), "shader vertex: entry must return the varyings struct"));
+                return Err(err(self.span(), "shader entry: a void-main entry must return its output struct"));
             };
             let fields: Vec<(Ustr, Idx<Inst>)> = match &self.f.insts[*v] {
                 Inst::MakeValueStruct { fields, .. } => fields.iter().map(|&(n, x)| (n, x)).collect(),
                 _ => {
                     return Err(err(
                         self.span(),
-                        "shader vertex: entry must return a varyings struct literal",
+                        "shader entry: a void-main entry must return an output struct literal",
                     ))
                 }
             };
             for (name, val) in fields {
-                let (target, want) = if name.as_str() == "position" {
+                let (target, want) = if mo.position_is_gl && name.as_str() == "position" {
                     ("gl_Position".to_string(), GlslTy::Vec4)
                 } else {
-                    (name.to_string(), varyings.get(&name).copied().unwrap_or(GlslTy::Float))
+                    (name.to_string(), mo.fields.get(&name).copied().unwrap_or(GlslTy::Float))
                 };
                 let s = self.render_val_t(val, want)?;
                 self.push(&format!("{target} = {s};"));
@@ -1529,9 +1541,9 @@ struct EntryShape {
     /// by name (via `at()` -> indexing); NOT tier-0-typed, so they are skipped
     /// when typing param cells.
     arrays: Vec<usize>,
-    /// Vertex-entry mode: varyings field name -> GLSL type (position included).
-    /// Presence switches emission to `void main()` with return-destructure.
-    vertex_out: Option<Vec<(Ustr, GlslTy)>>,
+    /// `void main()` mode: presence switches emission to `void main()` with a
+    /// return-struct destructure (vertex varyings, or MRT fragment outputs).
+    main_out: Option<MainOut>,
 }
 
 /// The default fullscreen vertex stage -- identical to the hand-written
@@ -1627,7 +1639,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
         uniform_fields,
         samplers,
         arrays: Vec::new(),
-        vertex_out: None,
+        main_out: None,
     })
 }
 
@@ -1771,6 +1783,10 @@ struct FragShape {
     samplers: Vec<(usize, Ustr)>,
     /// `UniformArray<T>` params: (index, name, element type, @size capacity).
     arrays: Vec<(usize, Ustr, GlslTy, i64)>,
+    /// MRT outputs: `Some` when the entry returns a value struct of all-Vec4
+    /// fields -> one `layout(location=N) out vec4 <field>` per field, in
+    /// declaration order. `None` = the single implicit `FragColor` output.
+    outputs: Option<Vec<(Ustr, GlslTy)>>,
 }
 
 fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
@@ -1977,11 +1993,33 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     if uniform_params.len() > 1 {
         return Err(err(span, "shader fragment: at most one @uniform struct param is allowed"));
     }
-    match f.return_ty.map(|rt| glsl_ty(ws, rt, span, "return")) {
-        Some(Ok(GlslTy::Vec4)) => {}
-        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor)")),
-    }
-    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers, arrays })
+    // Return: a single Vec4 (implicit FragColor) OR an all-Vec4 value struct
+    // (MRT -- one `layout(location=N) out vec4 <field>` per field, in order).
+    let outputs = match f.return_ty.map(|rt| (rt, glsl_ty(ws, rt, span, "return"))) {
+        Some((_, Ok(GlslTy::Vec4))) => None,
+        Some((rt, Err(_))) => {
+            let sd = struct_def_of(ws, rt).ok_or_else(|| {
+                err(span, "shader fragment: the return type must be Vec4 (FragColor) or a value struct of Vec4 fields (MRT outputs)")
+            })?;
+            let mut outs = Vec::new();
+            for fd in &sd.fields {
+                let fty = glsl_ty(ws, fd.ty, span, &format!("MRT output `{}`", fd.name))?;
+                if fty != GlslTy::Vec4 {
+                    return Err(err(span, format!(
+                        "shader fragment: MRT output `{}` ({}) must be Vec4 (each output is a `layout(location=N) out vec4`)",
+                        fd.name, fty.name()
+                    )));
+                }
+                outs.push((fd.name, fty));
+            }
+            if outs.is_empty() {
+                return Err(err(span, "shader fragment: the MRT output struct must have at least one Vec4 field"));
+            }
+            Some(outs)
+        }
+        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor) or a value struct of Vec4 fields (MRT outputs)")),
+    };
+    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers, arrays, outputs })
 }
 
 /// Reject GPU builtins reached from the wrong stage: frag_coord/fwidth/discard
@@ -2093,7 +2131,10 @@ fn emit_vertex_stage(
         uniform_fields: v.attrs.iter().copied().chain(v.uniforms.iter().copied()).collect(),
         samplers: v.samplers.clone(),
         arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
-        vertex_out: Some(varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect()),
+        main_out: Some(MainOut {
+            fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect(),
+            position_is_gl: true,
+        }),
     };
     let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Vertex)?;
 
@@ -2130,12 +2171,19 @@ fn emit_fragment_stage(
     varyings: &VaryingsShape,
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
+    // MRT: the entry is emitted as `void main()` destructuring its returned
+    // output struct into the `layout(location=N) out` globals (like the vertex
+    // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
+    let main_out = fs.outputs.as_ref().map(|outs| MainOut {
+        fields: outs.iter().copied().collect(),
+        position_is_gl: false,
+    });
     let shape = EntryShape {
         global_params: std::iter::once(fs.varyings_param).chain(fs.uniform_params.iter().copied()).collect(),
         uniform_fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).chain(fs.uniforms.iter().copied()).collect(),
         samplers: fs.samplers.clone(),
         arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
-        vertex_out: None,
+        main_out,
     };
     let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Fragment)?;
     reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
@@ -2145,7 +2193,15 @@ fn emit_fragment_stage(
         let q = if *flat { "flat " } else { "" };
         out.push_str(&format!("{q}in {} {};\n", t.name(), n));
     }
-    out.push_str("out vec4 FragColor;\n\n");
+    match &fs.outputs {
+        None => out.push_str("out vec4 FragColor;\n\n"),
+        Some(outs) => {
+            for (loc, (n, _)) in outs.iter().enumerate() {
+                out.push_str(&format!("layout(location = {loc}) out vec4 {n};\n"));
+            }
+            out.push('\n');
+        }
+    }
     for (n, t) in &fs.uniforms {
         out.push_str(&format!("uniform {} {};\n", t.name(), n));
     }
@@ -2158,8 +2214,12 @@ fn emit_fragment_stage(
     out.push('\n');
     out.push_str(&helpers);
     out.push_str(&emit_fn_def_with(ws, overloaded, fref, &mf, Some(&shape))?);
-    out.push('\n');
-    out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
+    // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
+    // MRT: the entry IS `void main()` (destructured), so no wrapper.
+    if fs.outputs.is_none() {
+        out.push('\n');
+        out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
+    }
     Ok(out)
 }
 
@@ -2169,8 +2229,15 @@ fn emit_fragment_stage(
 /// a vertex/fragment same-name pair is a link error (or a silent alias), never
 /// two distinct bindings. Varyings are one name in both stages (inserted once).
 fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &FragShape, span: Span) -> Result<(), CompilerError> {
-    let mut seen: HashSet<Ustr> =
-        [Ustr::from("gl_Position"), Ustr::from("FragColor")].into_iter().collect();
+    // gl_Position is always reserved. `FragColor` is reserved only for the
+    // single-output form -- with MRT the outputs are explicit named fields (one
+    // of which may itself be `FragColor`), so they go through the collision check
+    // like any other name rather than being pre-seeded.
+    let mut seen: HashSet<Ustr> = [Ustr::from("gl_Position")].into_iter().collect();
+    if fs.outputs.is_none() {
+        seen.insert(Ustr::from("FragColor"));
+    }
+    let mrt_outputs = fs.outputs.iter().flatten().map(|&(n, _)| n);
     let names = v.attrs.iter().map(|&(n, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n)| n))
@@ -2178,7 +2245,8 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
         .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
         .chain(fs.samplers.iter().map(|&(_, n)| n))
-        .chain(fs.arrays.iter().map(|&(_, n, ..)| n));
+        .chain(fs.arrays.iter().map(|&(_, n, ..)| n))
+        .chain(mrt_outputs);
     for n in names {
         if !seen.insert(n) {
             return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and reserved names share one GLSL namespace across both stages)")));

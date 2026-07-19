@@ -352,6 +352,95 @@ fn bool_uniform_is_allowed() {
     assert!(glsl.contains("uniform bool uEnabled;"), "got:\n{glsl}");
 }
 
+// --- A2b: MRT fragment output (value-struct-of-Vec4 return) ------------------
+// A fragment entry may return a value struct whose fields are all Vec4 -> one
+// `layout(location=N) out vec4 <field>` per field, in declaration order. The
+// single-Vec4 return (FragColor only) stays unchanged.
+
+const MRT_SRC: &str = r#"
+    value QV   { aPos: Vec2, aEntityId: float }
+    value Vary { position: Vec4, TexCoord: Vec2, @flat EntityId: float }
+    value SpriteOut { FragColor: Vec4, FragId: Vec4 }
+    @shader(vertex)
+    fn vt(@attr a: QV) -> Vary {
+        return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos, EntityId: a.aEntityId }
+    }
+    @shader(fragment)
+    fn fr(vary: Vary, uTexture: Sampler2D) -> SpriteOut {
+        let c = texture(uTexture, vary.TexCoord)
+        return SpriteOut { FragColor: c, FragId: Vec4 { x: vary.EntityId, y: 0.0, z: 0.0, w: 1.0 } }
+    }
+"#;
+
+#[test]
+fn mrt_fragment_outputs_by_field_order() {
+    let glsl = emit_pipeline(MRT_SRC, "vt", "fr").expect("emit");
+    // Field order == layout location, mirroring the @attr location contract.
+    assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout(location = 1) out vec4 FragId;"), "got:\n{glsl}");
+    // MRT frag is `void main()` with destructured assignments -- no `vec4 fr()`
+    // returning + a `FragColor = fr();` wrapper.
+    assert!(glsl.contains("void main()"), "got:\n{glsl}");
+    assert!(glsl.contains("FragColor = "), "got:\n{glsl}");
+    assert!(glsl.contains("FragId = "), "got:\n{glsl}");
+    assert!(!glsl.contains("FragColor = fr("), "MRT must not emit a single-output wrapper:\n{glsl}");
+    // The bare (non-layout) single-output declaration must be absent.
+    assert!(!glsl.contains("\nout vec4 FragColor;"), "MRT must not emit the bare FragColor out:\n{glsl}");
+}
+
+/// Both profiles emit the same MRT outputs (only the version/precision differ).
+#[test]
+fn mrt_fragment_es300() {
+    let glsl = emit_pipeline_profile(MRT_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
+    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
+    assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout(location = 1) out vec4 FragId;"), "got:\n{glsl}");
+}
+
+/// Single-Vec4 fragment return is unchanged by the MRT work.
+#[test]
+fn single_output_fragment_still_wraps() {
+    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
+    assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
+    assert!(glsl.contains("FragColor = ui_frag("), "got:\n{glsl}");
+    assert!(!glsl.contains("layout(location = 0) out vec4"), "single output has no layout:\n{glsl}");
+}
+
+/// Every MRT output field must be Vec4 (each is a `out vec4`); a non-Vec4 field
+/// rejects.
+#[test]
+fn reject_mrt_non_vec4_field() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        value BadOut { FragColor: Vec4, depth: float }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary) -> BadOut { return BadOut { FragColor: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }, depth: 0.5 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "Vec4");
+}
+
+/// MRT output names join the one cross-stage namespace -- an output name that
+/// collides with a uniform rejects.
+#[test]
+fn reject_mrt_output_name_collision() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        value FU { FragId: float }
+        value Out2 { FragColor: Vec4, FragId: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @shader(fragment)
+        fn fr(vary: Vary, @uniform u: FU) -> Out2 {
+            return Out2 { FragColor: Vec4 { x: u.FragId, y: 0.0, z: 0.0, w: 1.0 }, FragId: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+    "#;
+    reject_pipeline(src, "vt", "fr", "collide");
+}
+
 // --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
 
 // --- A2c: the instanced tier -- @instance attrs continue the locations -------
