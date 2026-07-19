@@ -25,17 +25,26 @@ impl DependencyResolver {
     }
 
     pub fn resolve(&mut self, config: &StickConfig) -> Result<Vec<ResolvedDependency>> {
-        // Start with direct dependencies
-        for (name, dep) in &config.dependencies {
+        // Start with direct dependencies. `config.dependencies` is a HashMap, so
+        // iterate its keys sorted -- the resolution/concatenation order flows into
+        // `ws.modules` (type_id numbering + function-chunk emission order), and an
+        // unsorted HashMap walk makes the emitted `.lua` non-reproducible run-to-run
+        // (per-process RandomState) and across builds (unfuck-backlog #58).
+        let mut direct: Vec<(&String, &Dependency)> = config.dependencies.iter().collect();
+        direct.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, dep) in direct {
             self.resolve_dependency(name.clone(), dep, false)?;
         }
 
-        // Collect all resolved dependencies in dependency order
+        // Collect all resolved dependencies in dependency order. Seed the DFS from
+        // the resolved names sorted (same reproducibility rationale as above).
         let mut result = Vec::new();
         let mut visited = HashSet::new();
         let mut visiting = HashSet::new();
 
-        for name in self.resolved.keys() {
+        let mut names: Vec<String> = self.resolved.keys().cloned().collect();
+        names.sort();
+        for name in &names {
             self.collect_ordered(name, &mut result, &mut visited, &mut visiting)?;
         }
 

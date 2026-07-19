@@ -374,7 +374,13 @@ pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<Strin
 
     let mut files = Vec::new();
 
-    for entry in WalkDir::new(&canonical_base) {
+    // Sort each directory's entries by name so discovery order is independent of
+    // the filesystem's `read_dir` order (which is stable per working-tree state
+    // but shifts when files are rewritten -- e.g. a `git checkout` between builds).
+    // Module order flows into `ws.modules`, which drives `type_id` numbering and
+    // function-chunk emission order, so an unsorted walk makes the emitted `.lua`
+    // non-reproducible across builds (unfuck-backlog #58).
+    for entry in WalkDir::new(&canonical_base).sort_by_file_name() {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
