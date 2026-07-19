@@ -122,9 +122,37 @@ pub fn emit_fn_with_callees(
         general,
         active: HashSet::new(),
         visited: HashSet::new(),
+        lambdas: HashMap::new(),
+        lambda_owned: compute_lambda_owned(mf),
         out: String::new(),
         indent: 1,
     };
+
+    // Pre-render every lambda body to a JS arrow, inner-first: a nested lambda's
+    // `Inst::Lambda` is lowered before its enclosing one, so ascending inst order
+    // renders inner arrows before an outer arrow that references them.
+    let mut lambda_insts: Vec<Idx<Inst>> = mf
+        .insts
+        .iter()
+        .filter(|(_, i)| matches!(i, Inst::Lambda { .. }))
+        .map(|(id, _)| id)
+        .collect();
+    lambda_insts.sort_by_key(|&i| raw(i));
+    let hoistable = hoistable_lambdas(mf, &em.lambda_owned);
+    let mut hoisted: Vec<String> = Vec::new();
+    for iid in lambda_insts {
+        let arrow = em.render_lambda(iid)?;
+        if hoistable.contains(&iid) {
+            // A shared module-level value: same-site references are `==` (matches
+            // luajit P3). The name is unique (`js_name` is program-unique, inst
+            // ids are fn-unique).
+            let name = format!("{js_name}__lam{}", raw(iid));
+            hoisted.push(format!("const {name} = {arrow};\n"));
+            em.lambdas.insert(iid, name);
+        } else {
+            em.lambdas.insert(iid, arrow);
+        }
+    }
 
     let params: Vec<String> = mf.params.iter().map(|&c| cell_name(c)).collect();
     let mut header = format!("function {js_name}({}) {{\n", params.join(", "));
@@ -154,7 +182,7 @@ pub fn emit_fn_with_callees(
     }
 
     em.emit_seq(mf.entry, None, LoopCtx::default())?;
-    Ok(format!("{header}{}}}\n", em.out))
+    Ok(format!("{}{header}{}}}\n", hoisted.concat(), em.out))
 }
 
 struct Emitter<'a> {
@@ -183,6 +211,12 @@ struct Emitter<'a> {
     /// loop.
     active: HashSet<Idx<Block>>,
     visited: HashSet<Idx<Block>>,
+    /// Each `Lambda` inst -> its pre-rendered JS arrow expression. Populated
+    /// inner-first (ascending inst id) before the main walk, so a `render_val`
+    /// of a `Lambda` operand is a map lookup even for nested lambdas.
+    lambdas: HashMap<Idx<Inst>, String>,
+    /// Each `Lambda` inst -> the cells its arrow body must `let`-declare.
+    lambda_owned: HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
     out: String,
     indent: usize,
 }
@@ -482,14 +516,13 @@ impl Emitter<'_> {
                     );
                     self.push(&line);
                 }
-                // A call in statement position (value unused): `nb_set(b, i, v)`.
-                Inst::Call { .. } if self.use_count[raw(iid) as usize] == 0 => {
+                // A call in statement position (value unused): `nb_set(b, i, v)`
+                // or a closure invoked for effect, `(f)(x);`.
+                Inst::Call { .. } | Inst::CallValue { .. }
+                    if self.use_count[raw(iid) as usize] == 0 =>
+                {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
-                }
-                // An unused indirect call would be a silently-dropped effect.
-                Inst::CallValue { .. } if self.use_count[raw(iid) as usize] == 0 => {
-                    return Err(err("JS subset: indirect call not supported"));
                 }
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
@@ -527,6 +560,34 @@ impl Emitter<'_> {
             _ => return Err(err("JS subset: multi-value return not supported")),
         }
         Ok(())
+    }
+
+    /// Render a `Lambda` inst as a JS arrow `(<params>) => { <body> }`. The body
+    /// is the lambda's sub-CFG (rooted at `entry`, in the same arenas): captured
+    /// cells render to the same `c<N>` name they carry in the enclosing scope, so
+    /// JS lexical capture stands in for the Lua upvalue. Emits into a scratch
+    /// buffer so `render_inst_expr` (immutable) can look the string up later.
+    fn render_lambda(&mut self, iid: Idx<Inst>) -> Result<String, CompilerError> {
+        let Inst::Lambda { params, entry } = &self.mf.insts[iid] else {
+            unreachable!("render_lambda on a non-Lambda inst");
+        };
+        let param_names: Vec<String> = params.iter().map(|&c| cell_name(c)).collect();
+        let entry = *entry;
+        let owned = self.lambda_owned.get(&iid).cloned().unwrap_or_default();
+
+        let saved_out = std::mem::take(&mut self.out);
+        let saved_indent = self.indent;
+        self.indent = saved_indent + 1;
+        if !owned.is_empty() {
+            let names: Vec<String> = owned.iter().map(|&c| cell_name(c)).collect();
+            self.push(&format!("let {};", names.join(", ")));
+        }
+        self.emit_seq(entry, None, LoopCtx::default())?;
+        let body = std::mem::replace(&mut self.out, saved_out);
+        self.indent = saved_indent;
+
+        let close = "  ".repeat(saved_indent);
+        Ok(format!("({}) => {{\n{body}{close}}}", param_names.join(", ")))
     }
 
     /// The JS expression for a value operand: the bound `v<raw>` temp if the
@@ -604,6 +665,21 @@ impl Emitter<'_> {
                 format!("((({a} % {b}) + {b}) % {b})")
             }
             Inst::Call { func, args } => self.render_call(*func, args)?,
+            // A closure value: the arrow was pre-rendered inner-first before the
+            // main walk. Parenthesized so a `CallValue` of it (`(<arrow>)(args)`)
+            // is a valid IIFE.
+            Inst::Lambda { .. } => match self.lambdas.get(&iid) {
+                Some(arrow) => format!("({arrow})"),
+                None => return Err(err("JS subset: lambda not pre-rendered")),
+            },
+            // An indirect call `callee(args)`: the callee is parenthesized so an
+            // inline arrow callee still parses as a call target.
+            Inst::CallValue { callee, args } => {
+                let c = self.render_val(*callee)?;
+                let rendered: Result<Vec<String>, CompilerError> =
+                    args.iter().map(|a| self.render_val(*a)).collect();
+                format!("({c})({})", rendered?.join(", "))
+            }
             // Structs are plain objects tagged with `__ty` (mirrors the Lua
             // `__rock_create_struct`: sets `obj.__ty`, no metatable). NativeBuffer
             // keeps its bespoke `{ptr, len}` (no `__ty`) so the nb differential's
@@ -1124,7 +1200,8 @@ fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
     let mut use_count = vec![0u32; ni];
     let mut use_block = vec![NONE; ni];
     let mut def_block = vec![NONE; ni];
-    for b in reachable_blocks(mf) {
+    let blocks = emitted_blocks(mf);
+    for &b in &blocks {
         let br = raw(b);
         for &id in &mf.blocks[b].insts {
             if mf.insts[id].produces_value() {
@@ -1143,7 +1220,7 @@ fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
         });
     }
     let mut inl = vec![false; ni];
-    for b in reachable_blocks(mf) {
+    for &b in &blocks {
         for &id in &mf.blocks[b].insts {
             let k = raw(id) as usize;
             if use_count[k] == 1
@@ -1175,9 +1252,14 @@ fn succ(mf: &MirFunc, b: Idx<Block>) -> Vec<Option<Idx<Block>>> {
 
 /// Blocks reachable from the entry, in discovery order.
 fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
+    reachable_from(mf, mf.entry)
+}
+
+/// Blocks reachable over terminators from `root` (a fn entry OR a lambda entry).
+fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
     let mut reachable = Vec::new();
     let mut seen = HashSet::new();
-    let mut stack = vec![mf.entry];
+    let mut stack = vec![root];
     while let Some(b) = stack.pop() {
         if !seen.insert(b) {
             continue;
@@ -1188,4 +1270,108 @@ fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
         }
     }
     reachable
+}
+
+/// Every block the emitter walks: the fn's entry component plus each `Lambda`'s
+/// sub-CFG. A lambda body is unreachable from `mf.entry` (only its `Inst::Lambda`
+/// operand references it), so `reachable_blocks` alone misses it -- and the value
+/// model would then leave a lambda-body temp unmaterialized. Order is
+/// deterministic (entry component first, then lambdas in inst order).
+fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
+    let mut out = reachable_blocks(mf);
+    let mut seen: HashSet<Idx<Block>> = out.iter().copied().collect();
+    for (_, inst) in mf.insts.iter() {
+        if let Inst::Lambda { entry, .. } = inst {
+            for b in reachable_from(mf, *entry) {
+                if seen.insert(b) {
+                    out.push(b);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Cells that a lambda arrow must `let`-declare itself, keyed by the `Lambda`
+/// inst. A stored (non-param) cell belongs to the INNERMOST scope whose body
+/// contains all its store sites: a cell stored only inside one lambda's body is
+/// arrow-local; a captured-then-mutated cell (stored in the enclosing scope too)
+/// stays owned by the enclosing scope and is declared there, so a single JS
+/// binding is shared -- closure capture by reference, exactly like a Lua upvalue.
+fn compute_lambda_owned(mf: &MirFunc) -> HashMap<Idx<Inst>, Vec<Idx<Cell>>> {
+    let mut params: HashSet<u32> = mf.params.iter().map(|&c| raw(c)).collect();
+    let mut lambdas: Vec<(Idx<Inst>, HashSet<Idx<Block>>)> = Vec::new();
+    for (id, inst) in mf.insts.iter() {
+        if let Inst::Lambda { params: ps, entry } = inst {
+            params.extend(ps.iter().map(|&c| raw(c)));
+            lambdas.push((id, reachable_from(mf, *entry).into_iter().collect()));
+        }
+    }
+    let mut store_blocks: HashMap<u32, (Idx<Cell>, HashSet<Idx<Block>>)> = HashMap::new();
+    for (b, blk) in mf.blocks.iter() {
+        for &iid in &blk.insts {
+            if let Inst::Store { cell, .. } = mf.insts[iid] {
+                store_blocks.entry(raw(cell)).or_insert_with(|| (cell, HashSet::new())).1.insert(b);
+            }
+        }
+    }
+    let mut owned: HashMap<Idx<Inst>, Vec<Idx<Cell>>> = HashMap::new();
+    for (craw, (cell, blocks)) in &store_blocks {
+        if params.contains(craw) {
+            continue;
+        }
+        // Innermost (smallest-body) lambda whose body contains every store site.
+        // A cell whose stores span the enclosing scope is owned there (declared
+        // at the fn top by the reachable-from-entry pass), so it lands in no
+        // lambda here.
+        let best = lambdas
+            .iter()
+            .filter(|(_, body)| blocks.iter().all(|b| body.contains(b)))
+            .min_by_key(|(_, body)| body.len());
+        if let Some((lid, _)) = best {
+            owned.entry(*lid).or_default().push(*cell);
+        }
+    }
+    for v in owned.values_mut() {
+        v.sort_by_key(|&c| raw(c));
+    }
+    owned
+}
+
+/// Lambdas that carry NO capture and can be hoisted to a single module-level
+/// value. luajit shares one hoisted fn per capture-free site (P3), so two
+/// references to the same-site lambda are `==` (identity leaf); an inline arrow
+/// would mint a fresh value per call and diverge. A lambda is hoistable iff every
+/// cell it references is its own param or arrow-local AND it nests no lambda (a
+/// nested capture would reach an enclosing cell not in module scope). `owned` is
+/// [`compute_lambda_owned`]'s result.
+fn hoistable_lambdas(
+    mf: &MirFunc,
+    owned: &HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
+) -> HashSet<Idx<Inst>> {
+    let mut out = HashSet::new();
+    for (id, inst) in mf.insts.iter() {
+        let Inst::Lambda { params, entry } = inst else { continue };
+        let body: HashSet<Idx<Block>> = reachable_from(mf, *entry).into_iter().collect();
+        let mut local: HashSet<u32> = params.iter().map(|&c| raw(c)).collect();
+        local.extend(owned.get(&id).into_iter().flatten().map(|&c| raw(c)));
+        let mut hoistable = true;
+        for &b in &body {
+            for &iid in &mf.blocks[b].insts {
+                match &mf.insts[iid] {
+                    Inst::Lambda { .. } => hoistable = false,
+                    Inst::Load(c) | Inst::Store { cell: c, .. } => {
+                        if !local.contains(&raw(*c)) {
+                            hoistable = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if hoistable {
+            out.insert(id);
+        }
+    }
+    out
 }
