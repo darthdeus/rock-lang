@@ -41,17 +41,6 @@ pub fn game_requests_video(game_path: &str) -> Result<bool> {
     Ok(cfg.as_ref().map_or(false, |c| c.needs_engine_lib("video")))
 }
 
-/// Same as `game_requests_video`, for the optional stone-3d cdylib
-/// (`[engine] needs = ["3d"]`). Only pac uses 3D today.
-pub fn game_requests_3d(game_path: &str) -> Result<bool> {
-    let manifest = Path::new(game_path).join("stick.toml");
-    let cfg = crate::stick::StickConfig::from_path_optional(&manifest)?;
-    if let Some(ref cfg) = cfg {
-        cfg.validate_engine_needs()?;
-    }
-    Ok(cfg.as_ref().map_or(false, |c| c.needs_engine_lib("3d")))
-}
-
 /// Build a cargo crate and stage its cdylib into tmp/ under the given name.
 /// Release layout is a no-op (prebuilt libs already staged); dev layout shells
 /// out to cargo then copies + renames the cdylib via `stage_cdylib`.
@@ -175,30 +164,15 @@ pub fn build_stone_video() -> Result<()> {
     cargo_build_and_stage_lib("stone-video", "stone-video", "stone_video", "stone_video")
 }
 
-/// Build stone-3d and stage it as libstone_3d in tmp/ (only if the crate exists).
-pub fn build_stone_3d() -> Result<()> {
-    if crate::project::is_release_layout() {
-        return Ok(());
-    }
-    if !std::path::Path::new("stone-3d").exists() {
-        return Ok(());
-    }
-    cargo_build_and_stage_lib("stone-3d", "stone-3d", "stone_3d", "stone_3d")
-}
-
 /// Build the engine cdylibs required for a specific game. Always builds
 /// stone-rs; additionally builds stone-video iff the game's stick.toml
-/// declares `[engine] needs = ["video"]`, and stone-3d iff it declares
-/// `[engine] needs = ["3d"]`. Missing/unparseable stick.toml is treated as
-/// "core only" — we don't fail the run, the caller will hit a clearer error
-/// during compile if the game is misconfigured.
+/// declares `[engine] needs = ["video"]`. Missing/unparseable stick.toml is
+/// treated as "core only" — we don't fail the run, the caller will hit a
+/// clearer error during compile if the game is misconfigured.
 pub fn build_engine_libs(game_path: &str) -> Result<()> {
     build_libstone()?;
     if game_requests_video(game_path)? {
         build_stone_video()?;
-    }
-    if game_requests_3d(game_path)? {
-        build_stone_3d()?;
     }
     Ok(())
 }

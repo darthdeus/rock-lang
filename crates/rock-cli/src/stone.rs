@@ -244,10 +244,10 @@ pub fn do_stone_watch(
     };
 
     // Set up file watcher for game files, stdlib, stone (engine Rock code),
-    // stone-rs / stone-video / stone-3d (engine Rust crates), the rock
-    // compiler, and tmp/ for the restart-trigger file. FileWatcher silently
-    // skips nonexistent paths, so listing the optional crates is safe on
-    // machines where they aren't checked out.
+    // stone-rs / stone-video (engine Rust crates), the rock compiler, and
+    // tmp/ for the restart-trigger file. FileWatcher silently skips
+    // nonexistent paths, so listing the optional crates is safe on machines
+    // where they aren't checked out.
     let mut watch_paths = vec![
         PathBuf::from(path),
         // The stdlib is read from disk at runtime, so watch the resolved
@@ -263,8 +263,6 @@ pub fn do_stone_watch(
         PathBuf::from("stone-video/src"),
         PathBuf::from("stone-video/Cargo.toml"),
         PathBuf::from("stone-video/build.rs"),
-        PathBuf::from("stone-3d/src"),
-        PathBuf::from("stone-3d/Cargo.toml"),
         PathBuf::from("Cargo.toml"),
         PathBuf::from("Cargo.lock"),
         PathBuf::from("tmp"),  // Watch tmp/ for restart.txt trigger
@@ -324,8 +322,7 @@ pub fn do_stone_watch(
             // Match stone-rs/ and stone-video/ BEFORE the generic "Cargo." check
             // below: `stone-rs/Cargo.toml` would otherwise be routed to the
             // compiler-rebuild branch and never trigger a libstone rebuild.
-            if path_str.contains("stone-rs/") || path_str.contains("stone-video/")
-                || path_str.contains("stone-3d/") {
+            if path_str.contains("stone-rs/") || path_str.contains("stone-video/") {
                 needs_libstone_rebuild = true;
                 changed_libstone.push(filename);
             } else if is_compiler_source(&path_str) {
@@ -511,8 +508,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
 
     let needs_video = rock_host::engine_build::game_requests_video(game_path)?
         && std::path::Path::new("stone-video").exists();
-    let needs_3d = rock_host::engine_build::game_requests_3d(game_path)?
-        && std::path::Path::new("stone-3d").exists();
 
     // Two invocations are required. A single `cargo build -p stone-rs
     // -p rock-cli --bin rock` builds only the `rock` bin (the `--bin`
@@ -527,9 +522,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
     if needs_video {
         lib_args.extend(["-p", "stone-video"]);
     }
-    if needs_3d {
-        lib_args.extend(["-p", "stone-3d"]);
-    }
     rock_host::engine_build::run_cargo(&lib_args, "Failed to build engine libs")?;
 
     rock_host::engine_build::run_cargo(
@@ -540,9 +532,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
     rock_host::engine_build::stage_cdylib("stone_rs", "stone")?;
     if needs_video {
         rock_host::engine_build::stage_cdylib("stone_video", "stone_video")?;
-    }
-    if needs_3d {
-        rock_host::engine_build::stage_cdylib("stone_3d", "stone_3d")?;
     }
 
     Ok(())
