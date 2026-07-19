@@ -2321,6 +2321,116 @@ pub fn emit_shader(ws: &Workspace, mid: ModuleId, roots: &[String]) -> Result<St
     }
 }
 
+/// The scalar return kind of a value-test fn -- selects the readback texture
+/// format on the GL side (int/bool -> R32I, float -> R32F) and the fragment
+/// output declaration.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ValueTestRet {
+    Int,
+    Float,
+    Bool,
+}
+
+impl ValueTestRet {
+    /// The GL runner's tag for this kind (matches the JSON job protocol).
+    pub fn tag(self) -> &'static str {
+        match self {
+            ValueTestRet::Int => "int",
+            ValueTestRet::Float => "float",
+            ValueTestRet::Bool => "bool",
+        }
+    }
+}
+
+/// A complete GLSL shader pair driving one `@test(returns = ...)` value test
+/// (`docs/multi-backend-testing-plan.md` G1). The fragment shader wraps the
+/// emitted root fn and writes its scalar result to `layout(location = 0)`; the
+/// vertex shader draws a fullscreen triangle (no vertex attributes). Both carry
+/// the profile's `#version` line so the GL runner compiles them as one program.
+#[derive(Debug)]
+pub struct ValueTestShaders {
+    pub vertex: String,
+    pub fragment: String,
+    pub ret: ValueTestRet,
+}
+
+/// The profile's `#version` line plus the fragment-stage precision preamble
+/// (ES needs an explicit float/int precision; core does not).
+fn profile_header(profile: GlslProfile) -> (&'static str, &'static str) {
+    match profile {
+        GlslProfile::Core330 => ("#version 330 core", ""),
+        GlslProfile::Es300 => ("#version 300 es", "precision highp float;\nprecision highp int;\n"),
+    }
+}
+
+/// Emit the vertex+fragment GLSL pair for a scalar-returning `@test(returns=)`
+/// fn under `profile`. The root must take no parameters (a `@test` fn) and
+/// return `int`/`float`/`bool`; anything else -- a non-tier-0 return, a param,
+/// or a body outside the tier-0 profile -- rejects with a spanned
+/// `CompilerError` (the G1 two-tier SKIP reason). No fallback: an unmappable
+/// intrinsic or non-scalar shape is a rejection, never a guess.
+pub fn emit_value_test(
+    ws: &Workspace,
+    mid: ModuleId,
+    root: &str,
+    profile: GlslProfile,
+) -> Result<ValueTestShaders, CompilerError> {
+    let fref = resolve_root(ws, mid, root)?;
+    let f = &ws.module(fref.module).functions[fref.func];
+    if !f.param_decls.is_empty() {
+        return Err(err(
+            f.name_span,
+            "value test: the root fn must take no parameters (a @test fn)",
+        ));
+    }
+    let ret = match f.return_ty.map(|rt| glsl_ty(ws, rt, f.name_span, "return")) {
+        Some(Ok(GlslTy::Int)) => ValueTestRet::Int,
+        Some(Ok(GlslTy::Float)) => ValueTestRet::Float,
+        Some(Ok(GlslTy::Bool)) => ValueTestRet::Bool,
+        Some(Ok(other)) => {
+            return Err(err(
+                f.name_span,
+                format!(
+                    "value test: return type `{}` is not a scalar (only int/float/bool return \
+                     values are read back today)",
+                    other.name()
+                ),
+            ))
+        }
+        _ => {
+            return Err(err(
+                f.name_span,
+                "value test: the root fn must return int/float/bool",
+            ))
+        }
+    };
+
+    // The fn library runs the strict tier-0 profile pass; a body outside the
+    // subset rejects here (the SKIP reason -- the A1 fn-emission work list).
+    let defs = emit_shader_library(ws, mid, std::slice::from_ref(&root.to_string()))?;
+    let overloaded = compute_overloaded_names(ws);
+    let call = mangle_fn(ws, f, &overloaded);
+
+    let (version, precision) = profile_header(profile);
+    let (out_ty, out_expr) = match ret {
+        ValueTestRet::Int => ("int", format!("{call}()")),
+        ValueTestRet::Float => ("float", format!("{call}()")),
+        ValueTestRet::Bool => ("int", format!("({call}() ? 1 : 0)")),
+    };
+    let fragment = format!(
+        "{version}\n{precision}\n{defs}\nlayout(location = 0) out {out_ty} _rock_value_out;\n\
+         void main() {{\n  _rock_value_out = {out_expr};\n}}\n"
+    );
+    // A fullscreen triangle from gl_VertexID -- no vertex buffers/attributes, so
+    // the runner binds only an empty VAO. gl_VertexID is core since 3.0 / ES 3.0.
+    let vertex = format!(
+        "{version}\nvoid main() {{\n  \
+         vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  \
+         gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n}}\n"
+    );
+    Ok(ValueTestShaders { vertex, fragment, ret })
+}
+
 /// True iff `root` resolves to a `@shader(vertex)` fn -- the CLI routes to the
 /// two-root vertex+fragment pipeline form when any root is a vertex entry.
 pub fn is_vertex_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool {
@@ -2395,5 +2505,87 @@ mod assertion_flip_tests {
         let r = emit_fn_def(&ws, &overloaded, fref, &mf);
         let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
         assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod value_test_shader {
+    use super::*;
+    use ustr::Ustr;
+
+    fn build_ws(src: &str) -> (Workspace, ModuleId) {
+        let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect();
+        modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+        let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("mid");
+        (ws, mid)
+    }
+
+    #[test]
+    fn int_return_wraps_root_and_writes_int_output() {
+        let (ws, mid) = build_ws("fn t() -> int { return min(3, 5) }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
+        assert_eq!(s.ret, ValueTestRet::Int);
+        assert!(s.fragment.starts_with("#version 330 core\n"), "{}", s.fragment);
+        assert!(s.fragment.contains("layout(location = 0) out int _rock_value_out;"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
+        assert!(s.fragment.contains("int t()"), "callee def present: {}", s.fragment);
+        assert!(s.vertex.contains("gl_VertexID"), "{}", s.vertex);
+    }
+
+    #[test]
+    fn float_return_uses_r32f_shape() {
+        let (ws, mid) = build_ws("fn t() -> float { return clamp(9.0, 0.0, 5.0) }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
+        assert_eq!(s.ret, ValueTestRet::Float);
+        assert!(s.fragment.contains("out float _rock_value_out;"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
+    }
+
+    #[test]
+    fn bool_return_writes_zero_or_one_to_int_output() {
+        let (ws, mid) = build_ws("fn t() -> bool { return 3.0 == 3.0 }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
+        assert_eq!(s.ret, ValueTestRet::Bool);
+        assert!(s.fragment.contains("out int _rock_value_out;"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = (t() ? 1 : 0);"), "{}", s.fragment);
+    }
+
+    #[test]
+    fn es_profile_carries_version_and_precision() {
+        let (ws, mid) = build_ws("fn t() -> float { return abs(-6.5) }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Es300).expect("emit");
+        assert!(s.fragment.starts_with("#version 300 es\n"), "{}", s.fragment);
+        assert!(s.fragment.contains("precision highp float;"), "{}", s.fragment);
+        assert!(s.vertex.starts_with("#version 300 es\n"), "{}", s.vertex);
+    }
+
+    #[test]
+    fn parametered_root_rejects() {
+        let (ws, mid) = build_ws("fn t(x: int) -> int { return x }");
+        let e = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect_err("params reject");
+        assert!(e.message.contains("no parameters"), "{}", e.message);
+    }
+
+    #[test]
+    fn non_scalar_return_rejects() {
+        let (ws, mid) = build_ws("fn t() -> Vec2 { return vec2(1.0, 2.0) }");
+        let e = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect_err("vec reject");
+        assert!(e.message.contains("not a scalar"), "{}", e.message);
+    }
+
+    #[test]
+    fn body_outside_tier0_rejects_with_profile_reason() {
+        // A string is well above tier 0 -- the fn library profile pass rejects,
+        // surfacing the SKIP reason rather than emitting a guess.
+        let (ws, mid) = build_ws("fn t() -> int { let s = \"hi\"; return 1 }");
+        let e = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect_err("string reject");
+        assert!(!e.message.is_empty(), "reason present");
     }
 }
