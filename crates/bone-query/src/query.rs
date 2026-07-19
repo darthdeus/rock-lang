@@ -47,7 +47,17 @@ pub fn definition_at(
                 hir::Callee::Value(_) => None,
             },
 
-            hir::Expr::Global(name) | hir::Expr::SiblingRef(name) => def_of_name(ws, *name),
+            hir::Expr::Global(name) => def_of_name(ws, *name),
+
+            // A `.field` ref: in a `FieldOf<Struct, V>` slot it resolves to the
+            // struct's field decl (like `recv.field` access); otherwise it's a
+            // sibling/global name.
+            hir::Expr::SiblingRef(name) => inf
+                .per_fn
+                .get(&owner)
+                .and_then(|bi| field_ref_struct(ws, bi, *bi.expr_types.get(e)?))
+                .and_then(|sname| struct_field_span(ws, sname, *name))
+                .or_else(|| def_of_name(ws, *name)),
 
             // A field name in a struct literal -> the struct's field decl;
             // otherwise the head -> the struct.
@@ -376,6 +386,18 @@ pub fn hover_at(
                                 } else if enum_name_span.offset_range.0 <= offset && offset < vs {
                                     if let Some(s) = render_enum_def(ws, *enum_name) {
                                         return Some((s, *enum_name_span));
+                                    }
+                                }
+                            }
+                            // A `.field` ref in a `FieldOf<Struct, V>` slot ->
+                            // the referenced field (`f: V (field of Struct)`),
+                            // not the raw FieldOf wrapper type.
+                            hir::Expr::SiblingRef(name) => {
+                                if let Some(sname) =
+                                    field_ref_struct(ws, bi, *bi.expr_types.get(e)?)
+                                {
+                                    if let Some(s) = render_field_of(ws, sname, *name) {
+                                        return Some((s, span));
                                     }
                                 }
                             }
@@ -2836,6 +2858,18 @@ pub(crate) fn receiver_vec_elem(
 
 /// `(struct name, inferred type args)` if `ty` is a nominal-struct `App`
 /// (peeling a `Nullable`). Args are `TyId`s in the same arena as `ty`.
+/// If `ty` is `FieldOf<Struct, V>`, the `Struct` name -- the struct a `.field`
+/// ref in that slot indexes. `None` for any other type (a plain sibling ref, or
+/// a `FieldOf` whose first arg isn't a nominal struct).
+fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
+    let (ctor, args) = struct_app_args(ws, bi, ty)?;
+    if ctor.as_str() != "FieldOf" {
+        return None;
+    }
+    let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;
+    Some(sname)
+}
+
 fn struct_app_args(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<(Ustr, Vec<TyId>)> {
     match deref_ty(ws, Some(bi), ty)? {
         hir::TypeExpr::App {
