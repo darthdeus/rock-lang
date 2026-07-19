@@ -11,6 +11,12 @@ struct Sampler2D {
     error("texture() is GPU-only (shader fns are not CPU-callable)")
 """
 
+// The sampler's mip-0 dimensions as a float Vec2 (`vec2(textureSize(s, 0))`).
+// Not stage-restricted -- textureSize is legal in every GLSL stage.
+@intrinsic @gpu_only inline(lua) fn texture_size(s: Sampler2D) -> Vec2 = """
+    error("texture_size() is GPU-only (shader fns are not CPU-callable)")
+"""
+
 // GPU builtins (docs/shaders.md). Fragment-stage only; the
 // emitter whitelists them per stage. CPU bodies error -- never a silent stub.
 @intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """

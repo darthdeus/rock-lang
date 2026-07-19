@@ -97,6 +97,23 @@ fn builtin_discard_is_a_statement() {
     assert!(!glsl.contains("discard()"), "discard must not render as a call:\n{glsl}");
 }
 
+/// texture_size(s) -> `vec2(textureSize(s, 0))`: the sampler's mip-0 dimensions
+/// as a float Vec2 (used for gl_FragCoord-based canvas sampling in sprite_batch).
+/// Not stage-restricted (textureSize is legal in every GLSL stage).
+#[test]
+fn builtin_texture_size_maps() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tex: Sampler2D, tc: Vec2) -> Vec4 {
+            let sz = texture_size(tex)
+            return Vec4 { x: sz.x, y: sz.y, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_entry(src, "f").expect("emit");
+    assert!(glsl.contains("vec2(textureSize(tex, 0))"), "got:\n{glsl}");
+    assert!(!glsl.contains("texture_size("), "must not emit a fn call:\n{glsl}");
+}
+
 // --- the vertex+fragment pipeline scaffold (A2a) -----------------------------
 
 /// The mag-UI-shaped port (ui_sdf_bar): a per-vertex attribute struct, a Mat4

@@ -292,6 +292,9 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("v", 0, "vec2(0.0)"),
     ("zero", 0, "vec2(0.0)"),
     ("texture", 2, "texture($1, $2)"),
+    // textureSize returns ivec2; wrap in vec2(...) so the result is a float Vec2
+    // (matches Rock's `-> Vec2`, and the gl_FragCoord/size divides it feeds).
+    ("texture_size", 1, "vec2(textureSize($1, 0))"),
     // GPU builtins (docs/shaders.md). frag_coord/discard take no
     // args -> bare builtins (discard renders as the statement `discard;`, see
     // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
