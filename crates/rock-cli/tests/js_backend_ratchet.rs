@@ -29,6 +29,7 @@ fn corpus() -> Vec<String> {
         "tests/js_loops_valuemodel.rock",
         "tests/js_collections.rock",
         "tests/js_closures.rock",
+        "tests/js_match.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -54,8 +55,9 @@ fn js_runnable_coverage_ratchet() {
     // tests/js_loops_valuemodel.rock to the corpus, raising it to 74; T4
     // (error/assert, Vec, structs, Map, equality) added tests/js_collections.rock
     // and lifted the whole corpus to 91. T5 (closures/lambdas) added
-    // tests/js_closures.rock and lifted it to 99.
-    const FLOOR: usize = 99;
+    // tests/js_closures.rock and lifted it to 99. T6 (short-circuit fold +
+    // exhaustive-match structuring) added tests/js_match.rock and lifted it to 106.
+    const FLOOR: usize = 106;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

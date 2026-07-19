@@ -160,7 +160,12 @@ fn idoms(n: usize, entry: usize, preds: &[Vec<usize>], rpo_order: &[usize]) -> V
 }
 
 /// Immediate post-dominators: dominators on the reversed CFG rooted at a virtual
-/// exit (node `n`) that every `Return`/`Unreachable` block flows into.
+/// exit (node `n`) that every `Return` block flows into. `Unreachable` blocks do
+/// NOT connect to the exit: they mark control the compiler proved never runs (an
+/// exhaustive-`match` default, code after a diverging call), so counting them as
+/// an exit path would defeat post-dominance of the REAL join -- an exhaustive
+/// enum match's `if/else-if` chain would then double-walk its return block and
+/// reject as a shared branch tail.
 fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Block>>> {
     let exit = n;
     let nn = n + 1;
@@ -171,8 +176,7 @@ fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Bloc
             rev_adj[s].push(b);
         }
         rev_preds[b].extend_from_slice(&succ[b]);
-        let terminal = matches!(f.blocks[bi(b)].term, Term::Return(_) | Term::Unreachable);
-        if terminal {
+        if matches!(f.blocks[bi(b)].term, Term::Return(_)) {
             rev_adj[exit].push(b);
             rev_preds[b].push(exit);
         }

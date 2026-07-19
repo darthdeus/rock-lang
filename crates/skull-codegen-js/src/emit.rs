@@ -348,6 +348,25 @@ impl Emitter<'_> {
         }
     }
 
+    /// A `Branch` block whose insts are all pure, non-erroring, side-effect-free
+    /// (`Store`/`Call`/`Index`-bounds-check excluded), so its condition can be
+    /// folded into an enclosing `&&`/`||` -- any statement it materializes (a
+    /// tuple/struct projection) is hoisted before the `if` and computed
+    /// unconditionally, which is observably identical for a pure read. Returns the
+    /// branch's `(cond, then, else)`.
+    fn foldable_branch(&self, b: Idx<Block>) -> Option<(Idx<Inst>, Idx<Block>, Idx<Block>)> {
+        let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[b].term else {
+            return None;
+        };
+        let pure = self.mf.blocks[b].insts.iter().all(|&i| {
+            matches!(
+                &self.mf.insts[i],
+                Inst::Load(_) | Inst::TupleIndex { .. } | Inst::Field { .. } | Inst::Len { .. }
+            ) || always_inlinable(&self.mf.insts[i])
+        });
+        pure.then_some((cond, then_bb, else_bb))
+    }
+
     /// Emit an `if`-diamond. Returns the join to continue at, or `None` when the
     /// arms diverge (the join is the virtual exit) and there is no fall-through.
     fn emit_branch(
@@ -359,7 +378,38 @@ impl Emitter<'_> {
         stop: Option<Idx<Block>>,
         ctx: LoopCtx,
     ) -> Result<Option<Idx<Block>>, CompilerError> {
-        let cond_s = self.render_val(cond)?;
+        // Short-circuit fold: a `match` range/tuple pattern lowers to nested
+        // branches whose failure arms share one tail block (`if A { if B { X }
+        // else { S } } else { S }`) -- reducible but not a natural loop, so the
+        // relooper cannot structure the doubly-reached `S`. Recognizing the chain
+        // (`A && B`; the `||` dual for a shared success arm) collapses it to a
+        // clean diamond that rejoins at the ipost-dominator. A folded inner
+        // block's pure projections hoist before the `if`.
+        let (cond_s, then_bb, else_bb) = {
+            let mut cond_s = self.render_val(cond)?;
+            let (mut then_bb, mut else_bb) = (then_bb, else_bb);
+            loop {
+                if let Some((c2, t2, e2)) = self.foldable_branch(then_bb) {
+                    if e2 == else_bb {
+                        self.emit_block_effects(then_bb)?;
+                        self.visited.insert(then_bb);
+                        cond_s = format!("({cond_s} && {})", self.render_val(c2)?);
+                        then_bb = t2;
+                        continue;
+                    }
+                }
+                if let Some((c2, t2, e2)) = self.foldable_branch(else_bb) {
+                    if t2 == then_bb {
+                        self.emit_block_effects(else_bb)?;
+                        self.visited.insert(else_bb);
+                        cond_s = format!("({cond_s} || {})", self.render_val(c2)?);
+                        else_bb = e2;
+                        continue;
+                    }
+                }
+                break (cond_s, then_bb, else_bb);
+            }
+        };
         // Empty else -> then-only `if`; continue at the else target.
         if let Some(j) = self.empty_forward(else_bb) {
             self.push(&format!("if ({cond_s}) {{"));
