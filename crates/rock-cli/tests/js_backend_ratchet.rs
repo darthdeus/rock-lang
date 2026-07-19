@@ -33,6 +33,7 @@ fn corpus() -> Vec<String> {
         "tests/js_multivalue.rock",
         "tests/js_inline.rock",
         "tests/js_value_structs.rock",
+        "tests/js_shared_tail.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -65,8 +66,11 @@ fn js_runnable_coverage_ratchet() {
     // guard + relooper empty-forward/infinite-loop fixes) added tests/js_inline.rock
     // -> 114 (full-suite pass count 2299 -> 2568). T8b (GC-free value structs emit
     // a plain `{__ty, ...}` object; GC-carrying ones reject) added
-    // tests/js_value_structs.rock -> 118 (full-suite 2568 -> 2650).
-    const FLOOR: usize = 118;
+    // tests/js_value_structs.rock -> 118 (full-suite 2568 -> 2650). T8c
+    // (shared-branch-tail structuring: lambda-body loop analysis, tail
+    // duplication, labeled loops for multi-level jumps) added
+    // tests/js_shared_tail.rock -> 122 (full-suite 2650 -> 2738).
+    const FLOOR: usize = 122;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

@@ -38,7 +38,13 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         eprintln!("SKIP: node not found");
         return;
     }
-    let program = format!("{defs}\nconsole.log({root}());");
+    let program = format!(
+        "{}{}{}{}\n{defs}\nconsole.log({root}());",
+        skull_codegen_js::JS_NB_CHECK_SHIMS,
+        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        skull_codegen_js::JS_TABLE_PRIM,
+        skull_codegen_js::JS_STRUCTURAL_EQ,
+    );
     let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
@@ -69,28 +75,21 @@ fn pure_callee_is_spliced() {
     eval_int(&js, "root", 9);
 }
 
-// SENTINEL (flip when post-inline shared-tail structuring lands, T8c). An
-// iterator combinator TERMINAL chain now monomorphizes by inlining -- the reject
-// moved off `CallBoundMulti` (proving the inliner runs), but the inlined
-// map/filter/reduce lowers to a `while` whose multiple element-skip arms
-// converge on a shared latch tail. That shared-branch-tail is the plan's
-// explicitly-deferred relooper gap (the 299-bucket) and needs tail-duplication /
-// flag-based structuring, not the pipeline share. Pin the honest reject so this
-// goes red the moment that structuring makes it emit.
+// An iterator combinator TERMINAL chain monomorphizes by inlining, and the
+// resulting nested loops (the inlined `next()` skip-loop continuing the outer
+// for-loop) now structure via labeled loops (T8c Class B). Was the sentinel
+// `combinator_terminal_chain_awaits_shared_tail_structuring` pinning the honest
+// shared-branch-tail reject; flipped when the structuring landed.
 #[test]
-fn combinator_terminal_chain_awaits_shared_tail_structuring() {
+fn combinator_terminal_chain_structures() {
     let ws = ws_with(
         "fn root() -> int {\n\
              let v = [1, 2, 3]\n\
              v.map(_ * 2).filter(_ > 2).reduce(0, (a, b) => a + b)\n\
          }",
     );
-    let err = emit_closure(&ws, "root").expect_err("terminal chain still awaits shared-tail work");
-    assert!(
-        err.contains("shared branch tail"),
-        "expected the inlined chain to reach the shared-tail gap (not the old \
-         CallBoundMulti reject), got: {err}"
-    );
+    let js = emit_closure(&ws, "root").expect("inlined combinator chain structures via labeled loops");
+    eval_int(&js, "root", 10);
 }
 
 // A call omitting a defaulted param is a legal 2-arg call to a 3-param callee --

@@ -126,6 +126,9 @@ pub fn emit_fn_with_callees(
         lambdas: HashMap::new(),
         lambda_owned: compute_lambda_owned(mf),
         loop_iter,
+        loop_stack: Vec::new(),
+        loop_markers: Vec::new(),
+        labels_used: HashSet::new(),
         out: String::new(),
         indent: 1,
     };
@@ -190,7 +193,26 @@ pub fn emit_fn_with_callees(
     }
 
     em.emit_seq(mf.entry, None, LoopCtx::default())?;
-    Ok(format!("{}{header}{}}}\n", hoisted.concat(), em.out))
+    let body = format!("{}{header}{}}}\n", hoisted.concat(), em.out);
+    Ok(finalize_labels(body, &em.loop_markers, &em.labels_used))
+}
+
+/// A unique, JS-invalid sentinel a loop emits in place of its label; resolved by
+/// [`finalize_labels`] to `L<h>: ` if a multi-level jump targeted it, else stripped.
+/// `\x01` cannot appear in emitted JS source, so the replace is unambiguous.
+fn loop_marker(h: Idx<Block>) -> String {
+    format!("\u{1}L{}\u{1}", raw(h))
+}
+
+/// Resolve loop-label sentinels: a targeted loop's marker becomes `L<h>: `; the
+/// rest are stripped, keeping single-level loops byte-identical.
+fn finalize_labels(mut s: String, markers: &[Idx<Block>], used: &HashSet<Idx<Block>>) -> String {
+    for &h in markers {
+        let m = loop_marker(h);
+        let repl = if used.contains(&h) { format!("L{}: ", raw(h)) } else { String::new() };
+        s = s.replace(&m, &repl);
+    }
+    s
 }
 
 struct Emitter<'a> {
@@ -228,6 +250,16 @@ struct Emitter<'a> {
     /// Loop header -> cells to `let`-declare per-iteration inside that loop body
     /// (a closure capturing a loop variable must see its iteration's value).
     loop_iter: HashMap<Idx<Block>, Vec<Idx<Cell>>>,
+    /// The stack of enclosing loops (innermost last), for multi-level `continue`/
+    /// `break` to a non-innermost loop (`labeled_jump`).
+    loop_stack: Vec<LoopFrame>,
+    /// Every loop that emitted a `loop_marker` prefix, in emission order.
+    loop_markers: Vec<Idx<Block>>,
+    /// Loop headers a `labeled_jump` actually targeted -- these get a real
+    /// `L<header>:` label at finalization; the rest have their marker stripped, so
+    /// single-level loops stay byte-identical. Discovered DURING emission (the
+    /// runtime `loop_stack` nesting), avoiding a fragile static pre-pass.
+    labels_used: HashSet<Idx<Block>>,
     out: String,
     indent: usize,
 }
@@ -238,6 +270,18 @@ struct Emitter<'a> {
 struct LoopCtx {
     cont: Option<Idx<Block>>,
     brk: Option<Idx<Block>>,
+}
+
+/// One entry in the enclosing-loop stack (`Emitter::loop_stack`), for MULTI-LEVEL
+/// jumps: a `Goto` to a non-innermost loop's `cont`/`brk` emits `continue L<h>;`/
+/// `break L<h>;`. Arises from an inlined iterator `next()` whose skip-loop nests
+/// inside the for-loop and `continue`s the OUTER loop. `header` names the JS label
+/// (`L<header>`); the loop is labeled only if [`Emitter::needs_label`] holds.
+#[derive(Clone, Copy)]
+struct LoopFrame {
+    cont: Idx<Block>,
+    brk: Idx<Block>,
+    header: Idx<Block>,
 }
 
 /// A recognized range-`for` loop (the shape `lower_for_range` emits).
@@ -330,9 +374,21 @@ impl Emitter<'_> {
             }
             if !self.visited.insert(cur) {
                 // Natural loops are dispatched above, so a revisit here is a
-                // reducible-but-unstructured shape: a branch whose arms share a
-                // tail (a control-flow short-circuit, e.g. a `match` range/tuple
-                // pattern) that this emitter does not yet recover. Reject cleanly.
+                // reducible-but-unstructured shape. A FORWARD shared tail -- a
+                // block reached from 2+ branch arms that is not the branch's ipdom
+                // (an or-pattern success arm, a multiple-`continue` latch tail) --
+                // has no back-edge through it, so re-emitting it inline (tail
+                // DUPLICATION) terminates and is semantically identical: each
+                // dynamic execution follows exactly one copy. Bounded by `stop`,
+                // small, and lambda-/loop-free (`dup_region`). An enclosing active
+                // loop header (a multi-level jump) is NOT a forward tail -- that is
+                // the labeled-`continue` path in the `Goto` arm below, and if it
+                // reaches here it is genuinely unstructured. Anything else rejects.
+                if !self.active.contains(&cur) {
+                    if let Some(region) = self.dup_region(cur, stop, ctx) {
+                        return self.emit_dup(cur, stop, ctx, &region);
+                    }
+                }
                 return Err(err("JS subset: unstructured control flow (shared branch tail)"));
             }
             self.emit_block_effects(cur)?;
@@ -354,10 +410,183 @@ impl Emitter<'_> {
                     if Some(t) == stop {
                         return Ok(());
                     }
+                    // A `Goto` to an ENCLOSING (non-innermost) loop's header/exit:
+                    // a labeled `continue L<h>;`/`break L<h>;` (the inlined iterator
+                    // next() skip-loop that continues the outer for-loop).
+                    if let Some(stmt) = self.labeled_jump(t) {
+                        self.push(&stmt);
+                        return Ok(());
+                    }
                     cur = t;
                 }
                 Term::Branch { cond, then_bb, else_bb } => {
                     match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
+                        Some(m) => cur = m,
+                        None => return Ok(()),
+                    }
+                }
+                Term::Switch { .. } => return Err(err("JS subset: `match`/switch not supported")),
+                Term::Yield { .. } => return Err(err("JS subset: `yield` not supported")),
+            }
+        }
+    }
+
+    /// The set of blocks a forward shared tail `start` spans up to `stop` (the
+    /// merge the duplicated copies rejoin at), or `None` if duplicating it would
+    /// be unsound or too large. Boundaries: `stop`, and the enclosing loop's
+    /// `cont`/`brk` (a `Goto` there is a `continue`/`break`, not a region block).
+    /// Rejected regions (kept as an honest shared-tail reject):
+    /// - larger than 8 blocks / 32 insts (a pathological blow-up),
+    /// - a block that is a registered loop header (a back-edge -> non-terminating
+    ///   re-walk),
+    /// - a block carrying an `Inst::Lambda` (rendering it twice collides with the
+    ///   `lambdas`/`lambda_owned` identity/hoist maps keyed by `Idx<Inst>`),
+    /// - a materialized (`let v<N>`) region value read from OUTSIDE the region
+    ///   (a temp that would be undefined in the second copy's scope).
+    fn dup_region(
+        &self,
+        start: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Option<HashSet<Idx<Block>>> {
+        const MAX_BLOCKS: usize = 8;
+        const MAX_INSTS: usize = 32;
+        let boundary = |b: Idx<Block>| Some(b) == stop || Some(b) == ctx.cont || Some(b) == ctx.brk;
+        let mut region: HashSet<Idx<Block>> = HashSet::new();
+        let mut insts = 0usize;
+        let mut stack = vec![start];
+        while let Some(b) = stack.pop() {
+            if boundary(b) || !region.insert(b) {
+                continue;
+            }
+            if region.len() > MAX_BLOCKS {
+                return None;
+            }
+            if self.counted.contains_key(&b) || self.general.contains_key(&b) {
+                return None;
+            }
+            for &iid in &self.mf.blocks[b].insts {
+                if matches!(self.mf.insts[iid], Inst::Lambda { .. }) {
+                    return None;
+                }
+                insts += 1;
+            }
+            if insts > MAX_INSTS {
+                return None;
+            }
+            structure::successors(&self.mf.blocks[b].term, |t| {
+                if !boundary(t) {
+                    stack.push(t);
+                }
+            });
+        }
+        if self.region_temp_escapes(&region) {
+            return None;
+        }
+        Some(region)
+    }
+
+    /// Whether a `let v<N>` materialized inside `region` is used by any inst or
+    /// terminator OUTSIDE it. Cross-block values normally route through hoisted
+    /// cells (the `sign` shape), so this should never fire -- but a temp that DID
+    /// escape would be undefined in the duplicated copy's block scope, so the guard
+    /// makes duplication sound regardless of the value model's guarantees.
+    fn region_temp_escapes(&self, region: &HashSet<Idx<Block>>) -> bool {
+        let mut mat: HashSet<Idx<Inst>> = HashSet::new();
+        for &b in region {
+            for &iid in &self.mf.blocks[b].insts {
+                let k = raw(iid) as usize;
+                if self.mf.insts[iid].produces_value()
+                    && !self.inlinable[k]
+                    && self.use_count[k] > 0
+                {
+                    mat.insert(iid);
+                }
+            }
+        }
+        if mat.is_empty() {
+            return false;
+        }
+        for (b, blk) in self.mf.blocks.iter() {
+            if region.contains(&b) {
+                continue;
+            }
+            let mut hit = false;
+            for &iid in &blk.insts {
+                for_each_operand(&self.mf.insts[iid], &mut |op| hit |= mat.contains(&op));
+            }
+            for_each_term_operand(&blk.term, &mut |op| hit |= mat.contains(&op));
+            if hit {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Re-emit the forward shared-tail region `start..stop` inline (tail
+    /// duplication). A self-contained re-walk that does NOT consult/mark
+    /// `visited` (the whole point is to duplicate already-emitted blocks); it
+    /// terminates because `dup_region` proved the region loop-free and bounded by
+    /// `stop`. Its `let v<N>` temps live in the caller's fresh arm scope, so a
+    /// same-named temp from the first copy does not collide.
+    fn emit_dup(
+        &mut self,
+        start: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+        region: &HashSet<Idx<Block>>,
+    ) -> Result<(), CompilerError> {
+        let mut cur = start;
+        loop {
+            if Some(cur) == stop {
+                return Ok(());
+            }
+            if Some(cur) == ctx.brk {
+                self.push("break;");
+                return Ok(());
+            }
+            self.emit_block_effects(cur)?;
+            match self.mf.blocks[cur].term.clone() {
+                Term::Return(vs) => {
+                    self.emit_return(&vs)?;
+                    return Ok(());
+                }
+                Term::Unreachable => return Ok(()),
+                Term::Goto(t) => {
+                    if Some(t) == ctx.cont {
+                        self.push("continue;");
+                        return Ok(());
+                    }
+                    if Some(t) == ctx.brk {
+                        self.push("break;");
+                        return Ok(());
+                    }
+                    if Some(t) == stop {
+                        return Ok(());
+                    }
+                    if let Some(stmt) = self.labeled_jump(t) {
+                        self.push(&stmt);
+                        return Ok(());
+                    }
+                    cur = t;
+                }
+                Term::Branch { cond, then_bb, else_bb } => {
+                    let cond_s = self.render_val(cond)?;
+                    let merge = self
+                        .structure
+                        .ipdom(cur)
+                        .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk && region.contains(&m));
+                    let arm_stop = merge.map(Some).unwrap_or(stop);
+                    self.push(&format!("if ({cond_s}) {{"));
+                    self.indent += 1;
+                    self.emit_dup(then_bb, arm_stop, ctx, region)?;
+                    self.indent -= 1;
+                    self.push("} else {");
+                    self.indent += 1;
+                    self.emit_dup(else_bb, arm_stop, ctx, region)?;
+                    self.indent -= 1;
+                    self.push("}");
+                    match merge {
                         Some(m) => cur = m,
                         None => return Ok(()),
                     }
@@ -518,16 +747,44 @@ impl Emitter<'_> {
         // rendered inline so it never depends on a header-block temp we skip.
         let bound = self.render_inst_expr(li.bound)?;
         let cmp = if li.inclusive { "<=" } else { "<" };
-        self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
+        self.loop_markers.push(header);
+        let mark = loop_marker(header);
+        self.push(&format!("{mark}for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
         self.indent += 1;
         self.emit_loop_iter_decls(header);
         let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
+        self.loop_stack.push(LoopFrame { cont: li.latch, brk: li.exit, header });
         let body_len = self.out.len();
         self.emit_seq(li.body_entry, None, ctx)?;
         self.trim_trailing_continue(body_len);
+        self.loop_stack.pop();
         self.indent -= 1;
         self.push("}");
         Ok(())
+    }
+
+    /// The JS statement for a `Goto(t)` that is a `continue`/`break` of an
+    /// enclosing loop: bare for the innermost, labeled (`continue L<h>;`) for an
+    /// outer one (a multi-level jump), recording that header so `finalize_labels`
+    /// materializes its `L<h>:`. `None` if `t` is no enclosing loop target.
+    fn labeled_jump(&mut self, t: Idx<Block>) -> Option<String> {
+        let innermost = self.loop_stack.last().map(|f| f.header);
+        let hit = self
+            .loop_stack
+            .iter()
+            .rev()
+            .find_map(|f| (t == f.cont).then_some((f.header, true)).or((t == f.brk).then_some((f.header, false))))?;
+        let (header, is_cont) = hit;
+        let bare = Some(header) == innermost;
+        if bare {
+            return Some(if is_cont { "continue;".to_string() } else { "break;".to_string() });
+        }
+        self.labels_used.insert(header);
+        Some(if is_cont {
+            format!("continue L{};", raw(header))
+        } else {
+            format!("break L{};", raw(header))
+        })
     }
 
     /// A general loop. Two shapes:
@@ -546,9 +803,12 @@ impl Emitter<'_> {
         let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
 
         self.active.insert(h);
-        self.push("while (true) {");
+        self.loop_markers.push(h);
+        let mark = loop_marker(h);
+        self.push(&format!("{mark}while (true) {{"));
         self.indent += 1;
         self.emit_loop_iter_decls(h);
+        self.loop_stack.push(LoopFrame { cont: h, brk: exit, header: h });
 
         if let Some(test) = region.test {
             let (cond, body_start, break_when_true) = self.test_arms(test, exit)?;
@@ -570,6 +830,7 @@ impl Emitter<'_> {
             self.trim_trailing_continue(body_len);
         }
 
+        self.loop_stack.pop();
         self.indent -= 1;
         self.push("}");
         self.active.remove(&h);
@@ -959,13 +1220,15 @@ impl Emitter<'_> {
         // intrinsic template (below), Map via the JS `Map.get` (miss -> undefined,
         // which `== null` reads as nil), Vec co-emits its pure-Rock body. Any
         // other receiver rejects rather than kinda-working.
-        if cf.name.as_str() == "get" && cf.param_decls.len() == 2 {
-            match first_param_nominal(self.ws, cf).as_deref() {
-                Some(n) if is_native_buffer(n) => {} // intrinsic template path below
-                Some("Map") => return Ok(format!("{}.get({})", rargs[0], rargs[1])),
-                Some("Vec") => {} // co-emit path below
-                _ => return Err(err("JS subset: `get` receiver not supported")),
-            }
+        // Only the BUILTIN Map (`TypeCtor::Map`) renders inline as `.get` -- a user
+        // struct named `Map` (a `Nominal`) with its own `get` fn is a plain callee
+        // and co-emits like any other. NativeBuffer falls to its intrinsic
+        // template; Vec and user receivers fall to the co-emit path.
+        if cf.name.as_str() == "get"
+            && cf.param_decls.len() == 2
+            && first_param_is_builtin_map(self.ws, cf)
+        {
+            return Ok(format!("{}.get({})", rargs[0], rargs[1]));
         }
         // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
         // binding: `print` (variadic -> the harness global), the fixed-arity
@@ -1112,16 +1375,14 @@ pub fn emit_with_closure(
             // Mirror `render_call`'s decision exactly: the `get`/2 receiver
             // gate, then the intrinsic table (stdlib @intrinsic decls only),
             // then co-emit for plain-Rock bodies.
-            if cf.name.as_str() == "get" && cf.param_decls.len() == 2 {
-                match first_param_nominal(ws, cf).as_deref() {
-                    // NativeBuffer via the intrinsic table (handled below); Map
-                    // rendered inline in `render_call` (skip co-emission); Vec
-                    // co-emits its pure-Rock body (falls through).
-                    Some(n) if is_native_buffer(n) => {}
-                    Some("Map") => continue,
-                    Some("Vec") => {}
-                    _ => return Err(err("JS subset: `get` receiver not supported")),
-                }
+            // Mirror `render_call`: only the BUILTIN Map renders inline (skip its
+            // co-emission); NativeBuffer via the intrinsic table (below); Vec and
+            // user-struct `get` co-emit their pure-Rock bodies (fall through).
+            if cf.name.as_str() == "get"
+                && cf.param_decls.len() == 2
+                && first_param_is_builtin_map(ws, cf)
+            {
+                continue;
             }
             if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
                 continue;
@@ -1299,19 +1560,49 @@ fn is_map_new(cf: &bone_semantic::hir::Function) -> bool {
 /// Every cell a lambda's sub-CFG references (loads or writes) -- a superset of
 /// its captures (also includes its own params/locals, harmless for the loop
 /// checks below, which additionally require the cell to be loop-stored).
-fn captured_cells(mf: &MirFunc) -> HashSet<u32> {
-    let mut out = HashSet::new();
-    for (_, inst) in mf.insts.iter() {
-        if let Inst::Lambda { entry, .. } = inst {
+/// Each lambda's GENUINE upvalues: cells referenced in its body but owned by an
+/// enclosing scope (not this lambda's own local or param). A cell a lambda both
+/// owns and uses -- e.g. its own loop counter -- is NOT a capture. Keyed by the
+/// `Lambda` inst.
+fn lambda_upvalues(mf: &MirFunc) -> HashMap<Idx<Inst>, HashSet<u32>> {
+    let owned = compute_lambda_owned(mf);
+    let mut out = HashMap::new();
+    for (id, inst) in mf.insts.iter() {
+        if let Inst::Lambda { params, entry } = inst {
+            let own: HashSet<u32> = owned
+                .get(&id)
+                .map(|v| v.iter().map(|&c| raw(c)).collect())
+                .unwrap_or_default();
+            let plocal: HashSet<u32> = params.iter().map(|&c| raw(c)).collect();
+            let mut ups = HashSet::new();
             for b in reachable_from(mf, *entry) {
                 for &iid in &mf.blocks[b].insts {
+                    let mut consider = |c: u32| {
+                        if !own.contains(&c) && !plocal.contains(&c) {
+                            ups.insert(c);
+                        }
+                    };
                     if let Inst::Load(c) = &mf.insts[iid] {
-                        out.insert(raw(*c));
+                        consider(raw(*c));
                     }
                     for &c in inst_writes(&mf.insts[iid]) {
-                        out.insert(raw(c));
+                        consider(raw(c));
                     }
                 }
+            }
+            out.insert(id, ups);
+        }
+    }
+    out
+}
+
+/// The block that lexically DEFINES each `Lambda` inst (the block holding it).
+fn lambda_def_blocks(mf: &MirFunc) -> HashMap<Idx<Inst>, Idx<Block>> {
+    let mut out = HashMap::new();
+    for (b, blk) in mf.blocks.iter() {
+        for &iid in &blk.insts {
+            if matches!(mf.insts[iid], Inst::Lambda { .. }) {
+                out.insert(iid, b);
             }
         }
     }
@@ -1332,7 +1623,25 @@ fn loop_capture_plan(
     mf: &MirFunc,
     loops: &HashMap<Idx<Block>, LoopRegion>,
 ) -> Result<(HashMap<Idx<Block>, Vec<Idx<Cell>>>, HashSet<u32>), CompilerError> {
-    let captured = captured_cells(mf);
+    // Per loop: the cells captured by a lambda DEFINED inside its body. Only such
+    // a cell -- a loop variable a closure created in the loop captures -- needs a
+    // per-iteration snapshot. A loop merely sitting inside a closure (whose own
+    // counter the closure owns, or whose enclosing accumulator the closure shares
+    // by reference) is NOT a per-iteration site and must not be flagged.
+    let upvals = lambda_upvalues(mf);
+    let def_block = lambda_def_blocks(mf);
+    let mut loop_cands: HashMap<Idx<Block>, HashSet<u32>> = HashMap::new();
+    for (h, region) in loops {
+        let mut cand: HashSet<u32> = HashSet::new();
+        for (lid, dblk) in &def_block {
+            if region.body.contains(dblk) {
+                if let Some(ups) = upvals.get(lid) {
+                    cand.extend(ups.iter().copied());
+                }
+            }
+        }
+        loop_cands.insert(*h, cand);
+    }
     // A reassigned PARAM captured in a loop is function-scoped on purpose -- all
     // closures share one box (`test_param_reassigned_in_loop_shares_one_box`), so
     // it is never relocated per-iteration.
@@ -1348,13 +1657,16 @@ fn loop_capture_plan(
     let mut per_loop: HashMap<Idx<Block>, Vec<Idx<Cell>>> = HashMap::new();
     let mut relocated: HashSet<u32> = HashSet::new();
     for (craw, (cell, blocks)) in &store_blocks {
-        if !captured.contains(craw) || params.contains(craw) {
+        if params.contains(craw) {
             continue;
         }
-        // A captured cell that any loop stores INSIDE its body but also stores
+        // A captured cell that its capturing loop stores INSIDE its body but also
         // OUTSIDE it is loop-varying-but-not-iteration-local (counter/cursor):
         // reject. One stored entirely within a loop body is iteration-local.
-        for region in loops.values() {
+        for (h, region) in loops {
+            if !loop_cands.get(h).is_some_and(|c| c.contains(craw)) {
+                continue;
+            }
             let inside = blocks.iter().any(|b| region.body.contains(b));
             let outside = blocks.iter().any(|b| !region.body.contains(b));
             if inside && outside {
@@ -1366,7 +1678,10 @@ fn loop_capture_plan(
         }
         let innermost = loops
             .iter()
-            .filter(|(_, region)| blocks.iter().all(|b| region.body.contains(b)))
+            .filter(|(h, region)| {
+                loop_cands.get(*h).is_some_and(|c| c.contains(craw))
+                    && blocks.iter().all(|b| region.body.contains(b))
+            })
             .min_by_key(|(_, region)| region.body.len());
         if let Some((header, _)) = innermost {
             per_loop.entry(*header).or_default().push(*cell);
@@ -1408,23 +1723,21 @@ fn is_native_buffer(name: &str) -> bool {
 }
 
 
-/// The nominal type name of `f`'s first declared param (`Vec`, `Map`,
-/// `NativeBuffer*`, ...), for receiver-based dispatch of the overloaded
-/// `get`/2. `None` if there is no first param or it is not a nominal App.
-fn first_param_nominal(ws: &Workspace, f: &bone_semantic::hir::Function) -> Option<String> {
+/// Whether `f`'s first declared param is the BUILTIN `Map<K,V>` (`TypeCtor::Map`),
+/// distinguishing it from a user struct named `Map` (a `Nominal`). The `get`/2
+/// receiver dispatch renders inline `.get` ONLY for the builtin.
+fn first_param_is_builtin_map(ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
     use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
-    let pd = f.param_decls.first()?;
-    let TyId::Static(mid, idx) = pd.ty else {
-        return None;
+    let Some(pd) = f.param_decls.first() else {
+        return false;
     };
-    // `[T]` and `Map<K,V>` are distinct ctors (`Array`/`Map`), not `Nominal` --
-    // canonicalize them to the receiver-dispatch names the emitter keys on.
-    match &ws.module(mid).ty_arena[idx] {
-        TypeExpr::App { ctor: TypeCtor::Array, .. } => Some("Vec".to_string()),
-        TypeExpr::App { ctor: TypeCtor::Map, .. } => Some("Map".to_string()),
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name.as_str().to_string()),
-        _ => None,
-    }
+    let TyId::Static(mid, idx) = pd.ty else {
+        return false;
+    };
+    matches!(
+        &ws.module(mid).ty_arena[idx],
+        TypeExpr::App { ctor: TypeCtor::Map, .. }
+    )
 }
 
 /// Invoke `f` for each inst used as an operand by `inst`. The match is
