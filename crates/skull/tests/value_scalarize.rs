@@ -18,10 +18,10 @@ const VALUE_FIELD_LOOP: &str = r#"
 value FixVec2 { x: float, y: float }
 value IVec2 { x: int, y: int }
 
-@pure fn v(x: float, y: float) -> FixVec2 { return FixVec2 { x: x, y: y } }
+@pure fn fv(x: float, y: float) -> FixVec2 { return FixVec2 { x: x, y: y } }
 @pure fn iv(x: int, y: int) -> IVec2 { return IVec2 { x: x, y: y } }
 @pure fn tile_center(g: IVec2) -> FixVec2 {
-    return v(((g.x + g.y) as float), ((g.x - g.y) as float))
+    return fv(((g.x + g.y) as float), ((g.x - g.y) as float))
 }
 
 fn hot(w: int, h: int) -> float {
