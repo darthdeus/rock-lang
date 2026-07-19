@@ -337,6 +337,83 @@ fn bool_uniform_is_allowed() {
 
 // --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
 
+// --- UniformArray<T> + at() + @size(N) (decision 3; pulled into A2c by grass) -
+
+/// The grass shape: a vertex-stage uniform array read in a dynamic-bound loop.
+#[test]
+fn uniform_array_vertex_decl_and_at() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value VU { entity_count: int }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV, @uniform u: VU, @size(32) entity_positions: UniformArray<Vec2>) -> Vary {
+            let off = v(0.0, 0.0)
+            for i in 0..min(u.entity_count, 32) {
+                off = off + at(entity_positions, i)
+            }
+            return Vary { position: Vec4 { x: a.aPos.x + off.x, y: off.y, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
+    assert!(glsl.contains("uniform vec2 entity_positions[32];"), "got:\n{glsl}");
+    assert!(glsl.contains("entity_positions["), "at() must render as indexing:\n{glsl}");
+    assert!(!glsl.contains("at("), "at() must not render as a call:\n{glsl}");
+}
+
+#[test]
+fn uniform_array_fragment_stage() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary, @size(4) weights: UniformArray<float>) -> Vec4 {
+            let w0 = at(weights, 0)
+            return Vec4 { x: w0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
+    assert!(glsl.contains("uniform float weights[4];"), "got:\n{glsl}");
+    assert!(glsl.contains("weights[0]"), "got:\n{glsl}");
+}
+
+#[test]
+fn reject_uniform_array_without_size() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV, entity_positions: UniformArray<Vec2>) -> Vary {
+            return Vary { position: Vec4 { x: at(entity_positions, 0).x, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "@size");
+}
+
+/// Element types are the corpus set {float, int, Vec2, Vec4} -- Mat4 rejects.
+#[test]
+fn reject_uniform_array_bad_elem() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV, @size(4) mats: UniformArray<Mat4>) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    reject_pipeline(src, "vt", "fr", "element");
+}
+
 // --- vertex_id: vertex-only builtin (A2c) ------------------------------------
 
 #[test]

@@ -30,6 +30,15 @@ struct Sampler2D {
     error("vertex_id() is GPU-only (vertex-stage builtin)")
 """
 
+// Uniform arrays (docs/glsl-a2-plan.md decision 3). Param-position-only
+// phantom, `@size(N)` required on the param, param name = GLSL uniform name.
+// CPU upload stays shader_set_*_array (declared N is capacity).
+struct UniformArray<T> { }
+
+@intrinsic @gpu_only inline(lua) fn at<T>(a: UniformArray<T>, i: int) -> T = """
+    error("at() is GPU-only (uniform-array indexing)")
+"""
+
 // In-game shader compilation (docs/glsl-a3-integration-plan.md A3a). A call
 // `rock_shader(vert, frag)` (two direct references to top-level @shader fns)
 // is expanded at MIR lowering to the pipeline key const "<vert>+<frag>" that

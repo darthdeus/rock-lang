@@ -296,6 +296,9 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("fwidth", 1, "fwidth($1)"),
     ("discard", 0, "discard"),
     ("vertex_id", 0, "gl_VertexID"),
+    // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
+    // param renders as plain GLSL indexing of the declared uniform array.
+    ("at", 2, "$1[$2]"),
 ];
 
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
@@ -527,21 +530,26 @@ fn emit_fn_def_with(
         fn_span: f.name_span,
     };
     e.assign_cell_names();
-    // Global-base struct params + samplers are dropped from the GLSL signature.
+    // Global-base struct params + samplers + uniform arrays are dropped from the
+    // GLSL signature.
     let dropped: HashSet<usize> = entry
         .map(|s| {
             s.global_params
                 .iter()
                 .copied()
                 .chain(s.samplers.iter().map(|&(i, _)| i))
+                .chain(s.arrays.iter().copied())
                 .collect()
         })
         .unwrap_or_default();
     // A global-base struct param is not a tier-0 GLSL leaf (glsl_ty would reject
     // it); its reads render as bare globals. Samplers DO map (`sampler2D`), so
-    // they still get a cell type.
-    let struct_params: HashSet<usize> =
-        entry.map(|s| s.global_params.iter().copied().collect()).unwrap_or_default();
+    // they still get a cell type. Uniform-array params have no tier-0 type
+    // either -- their only legal use is as `at()`'s first arg, which renders the
+    // cell name (= the declared uniform array).
+    let struct_params: HashSet<usize> = entry
+        .map(|s| s.global_params.iter().copied().chain(s.arrays.iter().copied()).collect())
+        .unwrap_or_default();
     for (i, &c) in mf.params.iter().enumerate() {
         if struct_params.contains(&i) {
             continue;
@@ -1503,6 +1511,10 @@ struct EntryShape {
     uniform_fields: Vec<(Ustr, GlslTy)>,
     /// Sampler params: (param index, name). Also dropped, read as bare globals.
     samplers: Vec<(usize, Ustr)>,
+    /// `UniformArray<T>` param indices. Dropped from the signature and referenced
+    /// by name (via `at()` -> indexing); NOT tier-0-typed, so they are skipped
+    /// when typing param cells.
+    arrays: Vec<usize>,
     /// Vertex-entry mode: varyings field name -> GLSL type (position included).
     /// Presence switches emission to `void main()` with return-destructure.
     vertex_out: Option<Vec<(Ustr, GlslTy)>>,
@@ -1600,6 +1612,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
         global_params: uniform_param.into_iter().collect(),
         uniform_fields,
         samplers,
+        arrays: Vec::new(),
         vertex_out: None,
     })
 }
@@ -1723,6 +1736,8 @@ struct VertexShape {
     uniforms: Vec<(Ustr, GlslTy)>,
     /// Sampler params (rare in vertex, but legal).
     samplers: Vec<(usize, Ustr)>,
+    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
+    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
     /// The varyings value-struct return type.
     varyings_ty: TyId,
 }
@@ -1740,10 +1755,47 @@ struct FragShape {
     uniform_params: Vec<usize>,
     uniforms: Vec<(Ustr, GlslTy)>,
     samplers: Vec<(usize, Ustr)>,
+    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
+    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
 }
 
 fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
     annos.iter().any(|a| a.name.name.as_str() == name)
+}
+
+/// The int argument of an `@name(N)` annotation, if present (arity/type are
+/// registry-validated upstream).
+fn anno_int(annos: &[bone_semantic::hir::Annotation], name: &str) -> Option<i64> {
+    annos
+        .iter()
+        .find(|a| a.name.name.as_str() == name)
+        .and_then(|a| a.args.first())
+        .and_then(|arg| match arg.value {
+            AnnoValue::Int(n) => Some(n),
+            _ => None,
+        })
+}
+
+/// The element type of a `UniformArray<T>`-typed param, or `None` when the type
+/// is not the uniform-array phantom. Elements are the corpus set (decision 3):
+/// float, int, Vec2, Vec4.
+fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<GlslTy>, CompilerError> {
+    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = ty_expr(ws, ty) else {
+        return Ok(None);
+    };
+    if n.as_str() != "UniformArray" {
+        return Ok(None);
+    }
+    let Some(first) = params.into_iter().next() else {
+        return Err(err(span, "shader: UniformArray needs an element type argument"));
+    };
+    match glsl_ty(ws, ty.with_idx(first), span, "uniform-array element")? {
+        t @ (GlslTy::Float | GlslTy::Int | GlslTy::Vec2 | GlslTy::Vec4) => Ok(Some(t)),
+        other => Err(err(span, format!(
+            "shader: UniformArray element type `{}` is not supported (allowed: float, int, Vec2, Vec4)",
+            other.name()
+        ))),
+    }
 }
 
 /// The [`StructDef`] behind a nominal type, if any.
@@ -1774,9 +1826,17 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
 /// return type is the varyings struct.
 fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, CompilerError> {
     let span = f.name_span;
-    let (mut per_vertex, mut instanced, mut uniform_params, mut samplers) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut per_vertex, mut instanced, mut uniform_params, mut samplers, mut arrays) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, pd) in f.param_decls.iter().enumerate() {
+        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
+            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
+                "shader vertex: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
+                pd.name
+            )))?;
+            arrays.push((i, pd.name, elem, n));
+            continue;
+        }
         match glsl_ty(ws, pd.ty, span, "parameter") {
             Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
             Ok(other) => {
@@ -1822,7 +1882,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let varyings_ty = f
         .return_ty
         .ok_or_else(|| err(span, "shader vertex: entry must return a varyings value struct"))?;
-    Ok(VertexShape { attr_params, attrs, uniform_params, uniforms, samplers, varyings_ty })
+    Ok(VertexShape { attr_params, attrs, uniform_params, uniforms, samplers, arrays, varyings_ty })
 }
 
 /// Classify the varyings struct: a required `position: Vec4` field (-> gl_Position,
@@ -1875,8 +1935,17 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     if nominal_name(ws, first.ty).is_none() || nominal_name(ws, first.ty) != nominal_name(ws, vert_varyings_ty) {
         return Err(err(span, "shader fragment: the first param must be the varyings struct (the vertex entry's return type) -- the pair's varyings types do not match"));
     }
-    let (mut uniform_params, mut uniforms, mut samplers) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut uniform_params, mut uniforms, mut samplers, mut arrays) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
+        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
+            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
+                "shader fragment: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
+                pd.name
+            )))?;
+            arrays.push((i, pd.name, elem, n));
+            continue;
+        }
         match glsl_ty(ws, pd.ty, span, "parameter") {
             Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
             Ok(other) => {
@@ -1898,7 +1967,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         Some(Ok(GlslTy::Vec4)) => {}
         _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor)")),
     }
-    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers })
+    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers, arrays })
 }
 
 /// Reject GPU builtins reached from the wrong stage: frag_coord/fwidth/discard
@@ -2009,6 +2078,7 @@ fn emit_vertex_stage(
         global_params: v.attr_params.iter().copied().chain(v.uniform_params.iter().copied()).collect(),
         uniform_fields: v.attrs.iter().copied().chain(v.uniforms.iter().copied()).collect(),
         samplers: v.samplers.clone(),
+        arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
         vertex_out: Some(varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect()),
     };
     let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Vertex)?;
@@ -2018,9 +2088,12 @@ fn emit_vertex_stage(
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
     out.push('\n');
-    if !v.uniforms.is_empty() {
+    if !v.uniforms.is_empty() || !v.arrays.is_empty() {
         for (n, t) in &v.uniforms {
             out.push_str(&format!("uniform {} {};\n", t.name(), n));
+        }
+        for (_, n, t, cap) in &v.arrays {
+            out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
         }
         out.push('\n');
     }
@@ -2047,6 +2120,7 @@ fn emit_fragment_stage(
         global_params: std::iter::once(fs.varyings_param).chain(fs.uniform_params.iter().copied()).collect(),
         uniform_fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).chain(fs.uniforms.iter().copied()).collect(),
         samplers: fs.samplers.clone(),
+        arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
         vertex_out: None,
     };
     let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Fragment)?;
@@ -2060,6 +2134,9 @@ fn emit_fragment_stage(
     out.push_str("out vec4 FragColor;\n\n");
     for (n, t) in &fs.uniforms {
         out.push_str(&format!("uniform {} {};\n", t.name(), n));
+    }
+    for (_, n, t, cap) in &fs.arrays {
+        out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
     }
     for (_, n) in &fs.samplers {
         out.push_str(&format!("uniform sampler2D {};\n", n));
@@ -2083,9 +2160,11 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
     let names = v.attrs.iter().map(|&(n, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n)| n))
+        .chain(v.arrays.iter().map(|&(_, n, ..)| n))
         .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
-        .chain(fs.samplers.iter().map(|&(_, n)| n));
+        .chain(fs.samplers.iter().map(|&(_, n)| n))
+        .chain(fs.arrays.iter().map(|&(_, n, ..)| n));
     for n in names {
         if !seen.insert(n) {
             return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
