@@ -1542,6 +1542,9 @@ pub fn lower_function_spec(
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg,
+        // A coroutine body emits via `emit_coroutine` before `inline_functions`
+        // runs, so it is never spliced -- box value args (see field docs).
+        in_unspliced_ctx: func.is_coroutine,
         param_shapes,
         ret_shape,
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
@@ -1608,6 +1611,8 @@ pub fn lower_global(
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg: None,
+        // Global-init bodies never run `inline_functions` -- box value args.
+        in_unspliced_ctx: true,
         param_shapes: Vec::new(),
         ret_shape: None,
         ret_tuple: None,
@@ -1662,6 +1667,8 @@ pub fn lower_decorator(
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg: None,
+        // Decorator bodies never run `inline_functions` -- box value args.
+        in_unspliced_ctx: true,
         param_shapes: Vec::new(),
         ret_shape: None,
         ret_tuple: None,
@@ -1711,6 +1718,15 @@ struct Builder<'a> {
     /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
     /// the next `resume(arg)`). `None` outside a coroutine.
     resume_arg: Option<Idx<Cell>>,
+    /// True while lowering a body the MIR inliner will NOT splice into: a closure
+    /// sub-CFG (upvalue cap), a hoisted nested fn, a coroutine, a global init, or
+    /// a decorator (none run `inline_functions`). A call here must NOT take the
+    /// SPECIALIZED scalar ABI (splatting a value arg to leaves), which is only
+    /// sound when the inliner replaces the call with the matching specialized
+    /// body -- an unspliced residual would call the SHARED generic body (`T` = one
+    /// boxed slot) with splatted args and drop every leaf but the first. Boxing
+    /// the value arg matches the shared body exactly.
+    in_unspliced_ctx: bool,
     /// Per-param scalarized shape: `Some` for a value param expanded to leaf
     /// cells (parallel to `body.param_bindings`). Empty when the fn doesn't use
     /// the scalar ABI (globals, decorators, non-value fns).
@@ -1990,6 +2006,9 @@ impl Builder<'_> {
             defers: Vec::new(),
             in_defer_body: false,
             resume_arg: None,
+            // A hoisted nested fn is emitted via `emit_nested_fns`, which never
+            // runs `inline_functions` -- box value args.
+            in_unspliced_ctx: true,
             param_shapes: Vec::new(),
             ret_shape: None,
             ret_tuple: None,
@@ -2536,6 +2555,9 @@ impl Builder<'_> {
                 // the reset unmasks no diagnostic -- it just makes the flag honest).
                 let saved_defers = std::mem::take(&mut self.defers);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
+                // A lambda body is a sub-CFG the inliner refuses (upvalue cap), so
+                // its calls are never spliced -- box value args (see field docs).
+                let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
                 self.ret_tuple = self.lambda_ret_tuple_arity(e);
                 let v = self.lower_expr(body)?;
                 if self.is_open() {
@@ -2547,6 +2569,7 @@ impl Builder<'_> {
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
+                self.in_unspliced_ctx = saved_unspliced;
                 self.ret_tuple = saved_ret_tuple;
                 self.ret_shape = saved_ret_shape;
                 self.cur = saved;
@@ -3377,8 +3400,10 @@ impl Builder<'_> {
         // A value-instantiated `@inline` generic call takes the specialized scalar
         // ABI: value args splat, the return arrives as leaves, and the emitted call
         // is tagged so the inliner splices the matching specialized snapshot. Empty
-        // `subst` = the shared (unspecialized) path, byte-identical.
-        let spec = self.call_spec(e, func);
+        // `subst` = the shared (unspecialized) path, byte-identical. In an unspliced
+        // context the splice never fires, so the splatted call would reach the
+        // SHARED generic body and drop leaves -- keep the shared boxed ABI there.
+        let spec = if self.in_unspliced_ctx { None } else { self.call_spec(e, func) };
         let empty = SpecSubst::new();
         let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
         // The instantiation key is recorded on the emitted call inst whenever this

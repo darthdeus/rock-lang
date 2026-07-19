@@ -661,6 +661,7 @@ fn emit_body_chunk(
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
     times.cleanup = tc.elapsed();
     validate_no_residual_bound_calls(ws, f, &mf)?;
+    validate_no_residual_spec_bindings(f, &mf)?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, overloaded, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -749,6 +750,39 @@ fn validate_no_residual_bound_calls(
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Post-inline gate: a call the caller lowered with the SPECIALIZED scalar ABI
+/// (its value args splatted to leaves, tagged in `spec_bindings`) MUST have been
+/// spliced with the matching specialized body -- the shared generic body takes
+/// `T` as one boxed slot and would drop every leaf but the first. A surviving
+/// (still block-reachable) entry means the splice was skipped; that is the
+/// documented hard rejection (`MirFunc::spec_bindings` docs) rather than emitting
+/// broken Lua. The lowerer boxes value args in contexts the inliner never enters
+/// (closures, nested fns, coroutines, globals, decorators) and the inliner
+/// force-splices specialized calls past the cell budget, so this never fires on a
+/// well-formed program -- it guards the invariant, not a known reachable case.
+fn validate_no_residual_spec_bindings(
+    f: &bone_semantic::hir::Function,
+    mf: &skull_mir::mir::MirFunc,
+) -> Result<(), String> {
+    for (_, block) in mf.blocks.iter() {
+        for &iid in &block.insts {
+            if mf.spec_bindings.contains_key(&iid)
+                && matches!(
+                    &mf.insts[iid],
+                    skull_mir::mir::Inst::Call { .. } | skull_mir::mir::Inst::CallMulti { .. }
+                )
+            {
+                return Err(format!(
+                    "`{}`: a value-specialized generic call was not spliced (its args are \
+                     splatted to leaves, so the shared generic body cannot serve it)",
+                    f.name
+                ));
             }
         }
     }
