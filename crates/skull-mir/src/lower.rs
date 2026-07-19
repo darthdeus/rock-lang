@@ -230,7 +230,7 @@ fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
         .collect()
 }
 
-// --- `@struct_expand` intrinsic (docs/pass-uniforms-design.md, Layer 2) --------
+// --- `@struct_expand` intrinsic (docs/shaders.md, Layer 2) --------
 //
 // A call to a fn declared `@struct_expand fn f<T>(u: T) -> [(string, E)]` is
 // replaced at lowering by the literal pairs list: one `(field_name, E::V(u.field))`
@@ -857,7 +857,7 @@ pub struct ScalarCtx {
     /// keeps value structs as first-class single values (params/returns/args),
     /// never splatting them to leaf scalars. Used by the GLSL backend, where a
     /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves
-    /// (`docs/glsl-spike.md` finding 5). The toggle is contained because
+    /// (`docs/shaders.md` finding 5). The toggle is contained because
     /// [`fn_uses_scalar_abi`] is the single gate the definition and every call site
     /// both consult, so flipping it here can never drift the two ABIs apart.
     values_first_class: bool,
@@ -3285,7 +3285,7 @@ impl Builder<'_> {
             // INDIRECT call: a fn-typed struct field via UFCS (`recv.f(a)` ==
             // `f(recv, a)`, no real fn `f`) or a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
-                // A `@struct_expand` fn (docs/pass-uniforms-design.md) is replaced
+                // A `@struct_expand` fn (docs/shaders.md) is replaced
                 // by its literal pairs list -- recognized through the intrinsic
                 // registry off the resolved FuncRef, so no user fn is hijacked by
                 // name and the common non-intrinsic call pays only one field read.
@@ -6305,7 +6305,7 @@ impl Builder<'_> {
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
     /// literal pairs list. See the free helpers above and
-    /// docs/pass-uniforms-design.md (Layer 2).
+    /// docs/shaders.md (Layer 2).
     fn expand_struct_pairs(
         &mut self,
         call: Idx<Expr>,
@@ -6372,7 +6372,7 @@ impl Builder<'_> {
     }
 
     /// Expand a `rock_shader(vert, frag)` call to its pipeline key const
-    /// `"<vert>+<frag>"` (docs/glsl-a3a-implementation.md). The driver
+    /// `"<vert>+<frag>"` (docs/shaders.md). The driver
     /// (`skull::mir_emit`) emits the matching top-level `__rock_shader_register`;
     /// this side produces only the key -- no GLSL, so skull-mir stays free of the
     /// GLSL backend. Rejections flow through the shared `resolve_shader_pair`; the
@@ -6810,7 +6810,7 @@ impl Builder<'_> {
     /// int-expr-in-float-slot; never int->int (loop counters/bounds, idiv/imod
     /// operands, int==int stay untouched -- the counted-loop latch recognition
     /// keeps matching `Const(Lit::Int(1))`). Identity on luajit; materialized by
-    /// non-Lua backends. See `docs/typed-mir-coercion-plan.md`.
+    /// non-Lua backends. See `docs/shaders.md`.
     fn coerced(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, expected: TyId) -> Idx<Inst> {
         let to_float = self.resolve_ty(expected).and_then(|t| self.arith_ty_of(t)) == Some(ArithTy::Float);
         self.coerce_i2f(value, self.arith_ty(value_expr) == Some(ArithTy::Int), to_float)
@@ -7685,7 +7685,7 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
     None
 }
 
-// -- `@struct_expand` emit-time rejection (docs/pass-uniforms-design.md, Layer 2).
+// -- `@struct_expand` emit-time rejection (docs/shaders.md, Layer 2).
 // The lowering expander replaces a valid call; this pass is the FATAL gate that
 // rejects an invalid one, since a per-fn lowering error would only be recorded as
 // a lenient skip. Both resolve fields through `struct_expand_variants`, so they
@@ -7770,7 +7770,7 @@ pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
 }
 
 // -- `@shader_expand` (`rock_shader`) expansion + rejection
-// (docs/glsl-a3a-implementation.md). A call collapses to the pipeline key const
+// (docs/shaders.md). A call collapses to the pipeline key const
 // `"<vert>+<frag>"`; the driver (skull::mir_emit) emits one top-level
 // `__rock_shader_register(key, glsl)` per distinct pair. The lowering expander,
 // the fatal rejection gate, and the driver's pair collector all resolve args

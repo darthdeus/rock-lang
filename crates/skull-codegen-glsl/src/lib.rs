@@ -1,4 +1,4 @@
-//! skull-codegen-glsl -- GLSL function-library emission (route B, `docs/glsl-spike.md`).
+//! skull-codegen-glsl -- GLSL function-library emission (route B, `docs/shaders.md`).
 //!
 //! A second codegen backend over the shared `skull-mir` substrate (sibling of
 //! `skull-codegen-lua`). Given a typechecked [`Workspace`] and a set of root fn
@@ -14,7 +14,7 @@
 //!     skip-and-continue; never emit a guess.
 //!
 //! The tier-0 intrinsic mapping table ([`intrinsic_template`]) is the hand-written
-//! spec from `docs/glsl-spike.md`, keyed by the callee's mangled signature (name +
+//! spec from `docs/shaders.md`, keyed by the callee's mangled signature (name +
 //! GLSL param types) -- the future `@intrinsic` GLSL column.
 
 mod structure;
@@ -246,7 +246,7 @@ fn inst_kind(inst: &Inst) -> &'static str {
 
 // --- intrinsic mapping table ------------------------------------------------
 
-/// The GLSL tier-0 intrinsic table (`docs/glsl-spike.md`): one row per
+/// The GLSL tier-0 intrinsic table (`docs/shaders.md`): one row per
 /// (name, arity) -> `$1..$n` expression template. Single source for both
 /// [`GlslIntrinsics::lookup`] (call-site rendering) and
 /// [`GlslIntrinsics::entries`] (the fail-closed key surface), so the two can
@@ -292,7 +292,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("v", 0, "vec2(0.0)"),
     ("zero", 0, "vec2(0.0)"),
     ("texture", 2, "texture($1, $2)"),
-    // GPU builtins (docs/glsl-a2-plan.md decision 5). frag_coord/discard take no
+    // GPU builtins (docs/shaders.md). frag_coord/discard take no
     // args -> bare builtins (discard renders as the statement `discard;`, see
     // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
     ("frag_coord", 0, "gl_FragCoord"),
@@ -359,7 +359,7 @@ fn vec_op_symbol(name: &str) -> Option<&'static str> {
 // --- per-function emission ---------------------------------------------------
 
 /// A cosmetic-tier fold of a lowered `&&`/`||`/expression-`if` diamond back into
-/// one GLSL expression (`docs/glsl-relooper-plan.md`). The diamond stored its
+/// one GLSL expression (`docs/shaders.md`). The diamond stored its
 /// result into a single-use cell across two single-store arms; instead of
 /// emitting the diamond we render this expression at the cell's one use.
 #[derive(Clone, Copy)]
@@ -413,7 +413,7 @@ struct FnEmit<'a> {
     /// Entry mode: global field name -> GLSL type (for `ty_of` on those reads).
     /// Names are collision-checked unique, so one combined map covers all bases.
     uniform_fields: HashMap<Ustr, GlslTy>,
-    /// Cosmetic folds (`docs/glsl-relooper-plan.md`, cosmetic tier). A diamond's
+    /// Cosmetic folds (`docs/shaders.md`, cosmetic tier). A diamond's
     /// single-use result cell -> the expression it renders as; the diamond itself
     /// is skipped, its declaration + stores suppressed.
     folded_cond: HashMap<Idx<Cell>, FoldedDiamond>,
@@ -661,7 +661,7 @@ impl FnEmit<'_> {
         }
     }
 
-    /// Detect the cosmetic-tier folds (`docs/glsl-relooper-plan.md`): `&&`/`||`
+    /// Detect the cosmetic-tier folds (`docs/shaders.md`): `&&`/`||`
     /// short-circuit diamonds collapse back to infix boolean expressions.
     fn compute_folds(&mut self) {
         let reach: HashSet<Idx<Block>> =
@@ -864,7 +864,7 @@ impl FnEmit<'_> {
             return Err(err(
                 self.span(),
                 format!(
-                    "shader profile: int-typed value ({}) in a float context without an IntToFloat coercion -- a missed lowering sink (docs/typed-mir-coercion-plan.md)",
+                    "shader profile: int-typed value ({}) in a float context without an IntToFloat coercion -- a missed lowering sink (docs/shaders.md)",
                     inst_kind(&self.f.insts[iid])
                 ),
             ));
@@ -1509,7 +1509,7 @@ pub fn emit_shader_library(
     Ok(out)
 }
 
-// --- A1: fragment-entry compilation (docs/glsl-a1-plan.md) --------------------
+// --- A1: fragment-entry compilation (docs/shaders.md) --------------------
 
 /// A classified shader entry signature (A1 fragment, or an A2 pipeline stage).
 struct EntryShape {
@@ -1714,7 +1714,7 @@ pub fn emit_shader_entry(
     ))
 }
 
-/// Emission profile (docs/glsl-a2-plan.md decision 6): the `#version` line and
+/// Emission profile (docs/shaders.md): the `#version` line and
 /// any builtin/precision differences. `Core330` is the desktop default; `Es300`
 /// is the mobile GLES target. Threaded through every A2 emission path.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -1724,7 +1724,7 @@ pub enum GlslProfile {
     Es300,
 }
 
-// --- A2: vertex+fragment pipeline (docs/glsl-a2-plan.md) ---------------------
+// --- A2: vertex+fragment pipeline (docs/shaders.md) ---------------------
 
 /// The vertex stage: which shader stage a reachability walk is emitting (drives
 /// per-stage builtin gating).
@@ -2185,7 +2185,7 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
 }
 
 /// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
-/// `#ifdef VERTEX`/`#ifdef PIXEL` file (docs/glsl-a2-plan.md). The vertex entry's
+/// `#ifdef VERTEX`/`#ifdef PIXEL` file (docs/shaders.md). The vertex entry's
 /// return type (the varyings value struct) must be exactly the fragment entry's
 /// first param type. Vertex params are classified by annotation: `@attr` (per-
 /// vertex attribute struct), `@instance` (per-instance attribute divisor), and

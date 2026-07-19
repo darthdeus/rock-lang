@@ -708,7 +708,7 @@ fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::GlslProfile
 /// Two forms:
 ///   - fn-library / single `@shader(fragment)` entry (route B / A1): unchanged.
 ///   - `<vert_fn> <frag_fn> [--profile 330core|300es]`: the A2 vertex+fragment
-///     pipeline (`docs/glsl-a2-plan.md`), selected when a root is `@shader(vertex)`.
+///     pipeline (`docs/shaders.md`), selected when a root is `@shader(vertex)`.
 /// A profile violation renders spanned against the source and exits non-zero.
 pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<String>) -> Result<()> {
     let Some((path, roots)) = files.split_first() else {

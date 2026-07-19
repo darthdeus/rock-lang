@@ -1,4 +1,4 @@
-//! A2 vertex+fragment pipeline (docs/glsl-a2-plan.md): whole-program shader
+//! A2 vertex+fragment pipeline (docs/shaders.md): whole-program shader
 //! compilation. RED-first scaffold -- these pin the A2a target behavior and go
 //! green as the emitter lands.
 //!

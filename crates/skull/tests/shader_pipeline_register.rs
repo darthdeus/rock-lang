@@ -1,5 +1,5 @@
 //! Driver contract for the `rock_shader` in-game shader-pipeline intrinsic
-//! (docs/glsl-a3-integration-plan.md A3a). A call `rock_shader(vert, frag)`
+//! (docs/shaders.md). A call `rock_shader(vert, frag)`
 //! (two direct references to top-level `@shader` fns) collapses at emit to the
 //! pipeline key const `"<vert>+<frag>"`, and the driver emits exactly one
 //! top-level `__rock_shader_register("<key>", <glsl>)` per DISTINCT pair -- N

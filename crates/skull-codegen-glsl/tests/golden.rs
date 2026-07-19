@@ -102,7 +102,7 @@ fn nested_counted_loops() {
     assert!(!glsl.contains("__op_sub"), "vec operators must not emit fn defs:\n{glsl}");
 }
 
-// --- relooper: structured control flow (docs/glsl-relooper-plan.md) ---------
+// --- relooper: structured control flow (docs/shaders.md) ---------
 
 /// Milestone 2: the `pick` shape that `reject_if_branch_sentinel` pinned now
 /// emits an if/else (both arms diverge; ipdom collapses to the virtual exit).
@@ -187,7 +187,7 @@ fn if_else_if_ladder() {
 }
 
 /// Expression-position `if` into a cell folds to a ternary (cosmetic tier,
-/// `docs/glsl-relooper-plan.md` item 2): both arms single-store the single-use
+/// `docs/shaders.md` item 2): both arms single-store the single-use
 /// result cell -> `(cond ? a : b)` at the use.
 #[test]
 fn expression_if_into_cell() {
@@ -219,7 +219,7 @@ fn ternary_int_result_outer_coercion() {
 }
 
 /// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`
-/// (cosmetic tier -- `docs/glsl-relooper-plan.md`).
+/// (cosmetic tier -- `docs/shaders.md`).
 #[test]
 fn and_in_nested_if() {
     let src = r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#;
@@ -421,7 +421,7 @@ fn nested_loop_with_if() {
 }
 
 /// Const loop bound folds into the for-header (cosmetic tier,
-/// `docs/glsl-relooper-plan.md` item 3): `t = 4; for (; i < t; ...)` -> `for (;
+/// `docs/shaders.md` item 3): `t = 4; for (; i < t; ...)` -> `for (;
 /// i < 4; ...)`, dropping the single-use bound temp + its declaration. A const
 /// is loop-invariant, so re-reading it each iteration is identical.
 #[test]
@@ -566,7 +566,7 @@ fn int_literal_float_contexts() {
 // bone allows general int->float subsumption (`fn f(i: int) -> float { return i }`
 // and `takes_float(i)` both compile). On GLSL that materializes a `float(...)`
 // wrap; the coercion is inserted at lowering (Inst::IntToFloat), not re-derived
-// in the emitter. Docs: docs/typed-mir-coercion-plan.md.
+// in the emitter. Docs: docs/shaders.md.
 
 /// An int PARAM (non-literal) returned from a float fn gets a `float(...)` wrap.
 #[test]
@@ -611,7 +611,7 @@ fn let_float_annotation_cell_typing() {
     );
 }
 
-// --- A1: fragment-entry compilation (docs/glsl-a1-plan.md) -------------------
+// --- A1: fragment-entry compilation (docs/shaders.md) -------------------
 
 fn emit_entry(src: &str, root: &str) -> Result<String, String> {
     let mut modules = STDLIB.clone();

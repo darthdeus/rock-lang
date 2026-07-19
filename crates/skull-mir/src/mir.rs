@@ -150,7 +150,7 @@ pub enum Inst {
     /// int and the flow position float. Identity on luajit (all doubles), so
     /// codegen-lua renders it as the operand verbatim; non-Lua backends
     /// materialize the conversion (GLSL: fold an int Const to float text, else
-    /// wrap `float(...)`). See `docs/typed-mir-coercion-plan.md`.
+    /// wrap `float(...)`). See `docs/shaders.md`.
     IntToFloat(Idx<Inst>),
 
     // --- unary ---

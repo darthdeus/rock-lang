@@ -1,4 +1,4 @@
-// GPU-only shader surface (docs/glsl-a1-plan.md). Sampler2D is a phantom
+// GPU-only shader surface (docs/shaders.md). Sampler2D is a phantom
 // param type for @shader entry fns -- never constructed CPU-side. texture()
 // maps to the GLSL builtin; reaching it on the CPU is a hard error, never a
 // silent stub.
@@ -11,7 +11,7 @@ struct Sampler2D {
     error("texture() is GPU-only (shader fns are not CPU-callable)")
 """
 
-// GPU builtins (docs/glsl-a2-plan.md decision 5). Fragment-stage only; the
+// GPU builtins (docs/shaders.md). Fragment-stage only; the
 // emitter whitelists them per stage. CPU bodies error -- never a silent stub.
 @intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """
     error("frag_coord() is GPU-only (fragment-stage builtin)")
@@ -30,7 +30,7 @@ struct Sampler2D {
     error("vertex_id() is GPU-only (vertex-stage builtin)")
 """
 
-// Uniform arrays (docs/glsl-a2-plan.md decision 3). Param-position-only
+// Uniform arrays (docs/shaders.md). Param-position-only
 // phantom, `@size(N)` required on the param, param name = GLSL uniform name.
 // CPU upload stays shader_set_*_array (declared N is capacity).
 struct UniformArray<T> { }
@@ -39,7 +39,7 @@ struct UniformArray<T> { }
     error("at() is GPU-only (uniform-array indexing)")
 """
 
-// In-game shader compilation (docs/glsl-a3-integration-plan.md A3a). A call
+// In-game shader compilation (docs/shaders.md). A call
 // `rock_shader(vert, frag)` (two direct references to top-level @shader fns)
 // is expanded at MIR lowering to the pipeline key const "<vert>+<frag>" that
 // pipeline() looks up; the driver emits one __rock_shader_register(key, glsl)
@@ -50,7 +50,7 @@ struct UniformArray<T> { }
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
 
-// Single-arg fullscreen form (docs/glsl-a3-integration-plan.md A3c): a direct
+// Single-arg fullscreen form (docs/shaders.md): a direct
 // reference to a top-level @shader(fragment) fn. Expands to the bare frag-name
 // key (never contains '+', so it cannot collide with a pair key); the driver
 // routes it to the A1 single-entry emitter (PIXEL body + fullscreen VERTEX

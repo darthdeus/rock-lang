@@ -950,7 +950,7 @@ fn lua_long_bracket(s: &str) -> String {
 }
 
 /// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
-/// pair (docs/glsl-a3a-implementation.md A3a). Emitted at module-init time after
+/// pair (docs/shaders.md). Emitted at module-init time after
 /// the `@sim` registrations, at chunk top level, so a reload re-`dofile`s them
 /// with the new source (the hot-reload-parity invariant). Deterministic
 /// sorted-by-key order (from `collect_shader_pairs`) keeps re-emission
@@ -1205,7 +1205,7 @@ fn assemble(
     out.push_str(&decorator_application_lines(ws, overloaded, &deco_map, &mut skipped));
     // `@sim` registrations (after fn + global defs; same init slot as rock).
     out.push_str(&sim_registration_lines(ws, overloaded)?);
-    // `rock_shader` pipeline registrations (docs/glsl-a3a-implementation.md):
+    // `rock_shader` pipeline registrations (docs/shaders.md):
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
     out.push_str(&shader_registration_lines(ws)?);

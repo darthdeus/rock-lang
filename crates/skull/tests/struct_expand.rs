@@ -1,5 +1,5 @@
 //! Codegen-shape + rejection contract for the `@struct_expand` intrinsic
-//! (docs/pass-uniforms-design.md, Layer 2). A call to a `@struct_expand fn f<T>(u:
+//! (docs/shaders.md). A call to a `@struct_expand fn f<T>(u:
 //! T) -> [(string, E)]` is replaced at emit by the literal pairs list -- one
 //! `(field_name, E::V(u.field))` per struct field, declaration order, the variant
 //! chosen structurally by payload type. The positive control lives here (successful

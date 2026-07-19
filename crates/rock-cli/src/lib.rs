@@ -222,7 +222,7 @@ pub enum CliCommand {
     /// ignores `--backend`. See `backend_stats::do_backend_stats`.
     BackendStats,
     /// `rock shader <file.rock> <fn> [fn...] --output <file.glsl>` -- GLSL
-    /// function-library emission (route B, `docs/glsl-fn-emission.md`). Type-checks
+    /// function-library emission (route B, `docs/shaders.md`). Type-checks
     /// the file against the stdlib, then emits GLSL fn definitions for the named
     /// root fns + their reachable tier-0 callees, topologically ordered. Strict
     /// profile (rejects anything above tier 0). Backend-agnostic: dispatched before
