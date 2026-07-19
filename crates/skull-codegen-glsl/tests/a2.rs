@@ -337,6 +337,49 @@ fn bool_uniform_is_allowed() {
 
 // --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
 
+// --- A2c: the instanced tier -- @instance attrs continue the locations -------
+
+/// The grass shape in miniature: per-vertex quad attrs at locations 0..1, the
+/// instance struct continuing at 2..5 (the gpu_mesh sequential-location
+/// contract), a @flat varying, and vertex_id-gated tip work.
+#[test]
+fn instanced_locations_continue_across_structs() {
+    let src = r#"
+        value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
+        value GrassInst { InstancePosition: Vec2, InstanceRotation: float, InstanceScale: float, InstanceHeight: float }
+        value Vary { position: Vec4, TexCoord: Vec2, @flat y_pos: float }
+        @shader(vertex)
+        fn vt(@attr a: QuadVert, @instance inst: GrassInst) -> Vary {
+            let bend = 0.0
+            let vid = vertex_id() % 4
+            if vid == 0 || vid == 1 {
+                bend = 0.1
+            }
+            let px = inst.InstancePosition.x + a.aPos.x * inst.InstanceScale + bend
+            let py = inst.InstancePosition.y + a.aPos.y * inst.InstanceHeight
+            return Vary {
+                position: Vec4 { x: px, y: py, z: 0.0, w: 1.0 },
+                TexCoord: a.aTexCoord,
+                y_pos: inst.InstancePosition.y,
+            }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 {
+            return Vec4 { x: vary.TexCoord.x, y: vary.y_pos, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
+    assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout (location = 2) in vec2 InstancePosition;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout (location = 3) in float InstanceRotation;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout (location = 4) in float InstanceScale;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout (location = 5) in float InstanceHeight;"), "got:\n{glsl}");
+    assert!(glsl.contains("flat out float y_pos;"), "got:\n{glsl}");
+    assert!(glsl.contains("flat in float y_pos;"), "got:\n{glsl}");
+    assert!(glsl.contains("gl_VertexID"), "got:\n{glsl}");
+}
+
 // --- UniformArray<T> + at() + @size(N) (decision 3; pulled into A2c by grass) -
 
 /// The grass shape: a vertex-stage uniform array read in a dynamic-bound loop.
@@ -361,6 +404,14 @@ fn uniform_array_vertex_decl_and_at() {
     assert!(glsl.contains("uniform vec2 entity_positions[32];"), "got:\n{glsl}");
     assert!(glsl.contains("entity_positions["), "at() must render as indexing:\n{glsl}");
     assert!(!glsl.contains("at("), "at() must not render as a call:\n{glsl}");
+    // The loop-bound temp for min(int, int) must be int: ES300 has no implicit
+    // int->float on assignment, so the float fallback fails to compile there.
+    let line = glsl
+        .lines()
+        .find(|l| l.contains("= min(entity_count, 32);"))
+        .expect("min bound assignment");
+    let name = line.trim().split(" = ").next().unwrap();
+    assert!(glsl.contains(&format!("int {name};")), "bound temp `{name}` must be int:\n{glsl}");
 }
 
 #[test]

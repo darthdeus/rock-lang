@@ -832,10 +832,18 @@ impl FnEmit<'_> {
                 "Mat4" => GlslTy::Mat4,
                 _ => GlslTy::Float,
             },
-            Inst::Call { func, .. } => {
+            Inst::Call { func, args } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
                 match cf.return_ty.and_then(|rt| glsl_ty(self.ws, rt, cf.name_span, "return").ok()) {
                     Some(t) => t,
+                    // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
+                    // GLSL's result type is the argument type. Load-bearing under
+                    // ES300, which has no implicit int->float on assignment.
+                    None if matches!(cf.name.as_str(), "min" | "max" | "clamp" | "abs")
+                        && !args.is_empty() =>
+                    {
+                        self.ty_of(args[0])
+                    }
                     None => GlslTy::Float,
                 }
             }
