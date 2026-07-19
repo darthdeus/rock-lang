@@ -31,6 +31,7 @@ fn corpus() -> Vec<String> {
         "tests/js_closures.rock",
         "tests/js_match.rock",
         "tests/js_multivalue.rock",
+        "tests/js_inline.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -59,7 +60,10 @@ fn js_runnable_coverage_ratchet() {
     // tests/js_closures.rock and lifted it to 99. T6 (short-circuit fold +
     // exhaustive-match structuring) added tests/js_match.rock and lifted it to 106.
     // T7 (multi-value ABI + loop-capture) added tests/js_multivalue.rock -> 111.
-    const FLOOR: usize = 111;
+    // T8a (shared transform pipeline: inline/cleanup/recover + narrowed arity
+    // guard + relooper empty-forward/infinite-loop fixes) added tests/js_inline.rock
+    // -> 114 (full-suite pass count 2299 -> 2568 the same arc).
+    const FLOOR: usize = 114;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

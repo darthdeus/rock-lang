@@ -635,7 +635,7 @@ fn emit_body_chunk(
         times.cleanup = tc.elapsed();
         // Coroutines never inline, so a combinator chain here would leave a
         // call to a bounded fn that has no standalone emission -- reject.
-        validate_no_residual_bound_calls(ws, f, &mf)?;
+        skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let lua = skull_transform::emit_coroutine(ws, cg, self_ref, &mf);
@@ -660,7 +660,7 @@ fn emit_body_chunk(
     skull_transform::cleanup(&mut mf); // drop dead values + dead-cell stores
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
     times.cleanup = tc.elapsed();
-    validate_no_residual_bound_calls(ws, f, &mf)?;
+    skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, overloaded, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -714,46 +714,6 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
-/// Post-inline gate: a body about to be emitted must contain no placeholder
-/// bound-call and no residual call to a bounded fn. Either residue means the
-/// mono-by-inlining contract broke -- most commonly a combinator chain in a
-/// context the inliner does not enter (a `co fn` body, a recursive bounded
-/// fn). Reject with a real error instead of emitting broken Lua.
-fn validate_no_residual_bound_calls(
-    ws: &Workspace,
-    f: &bone_semantic::hir::Function,
-    mf: &skull_mir::mir::MirFunc,
-) -> Result<(), String> {
-    // Walk block inst-lists, not the raw arena: a splice drops the consumed
-    // call inst from its block but the arena still holds it.
-    for (_, block) in mf.blocks.iter() {
-        for &iid in &block.insts {
-            match &mf.insts[iid] {
-                skull_mir::mir::Inst::CallBoundMulti { .. } => {
-                    return Err(format!(
-                        "`{}`: an `Iterator`-bounded call was not monomorphized (a bounded fn \
-                         only works inlined; is this a recursive bounded fn?)",
-                        f.name
-                    ));
-                }
-                skull_mir::mir::Inst::Call { func, .. }
-                | skull_mir::mir::Inst::CallMulti { func, .. } => {
-                    let callee = &ws.module(func.module).functions[func.func];
-                    if fn_has_bounds(callee) {
-                        return Err(format!(
-                            "`{}` calls `Iterator`-bounded `{}` in a context that cannot inline \
-                             it (bounded fns have no standalone emission -- iterator combinators \
-                             are not supported inside `co fn` bodies or recursive bounded fns)",
-                            f.name, callee.name
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
 
 /// Assemble the full Lua program: prelude + decorator defs + the function section
 /// (cached chunks for ordinary/coroutine bodies, regenerated externs/inline(lua))

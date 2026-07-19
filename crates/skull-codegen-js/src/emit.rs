@@ -304,6 +304,15 @@ impl Emitter<'_> {
             if Some(cur) == stop {
                 return Ok(());
             }
+            // Entering the enclosing loop's exit block IS a break: a `loop {}`
+            // whose `break` is a branch arm directly into the exit (no `Goto(exit)`
+            // edge to catch below) relies on this. Checked before the visited mark
+            // so the exit stays available for the post-loop emission the header's
+            // dispatcher resumes at.
+            if Some(cur) == ctx.brk {
+                self.push("break;");
+                return Ok(());
+            }
             // A natural-loop header is dispatched structurally (before the
             // visited guard): `emit_general` re-enters `emit_seq` on the header
             // for its condition region, so the header must not be pre-marked.
@@ -421,8 +430,42 @@ impl Emitter<'_> {
                 break (cond_s, then_bb, else_bb);
             }
         };
-        // Empty else -> then-only `if`; continue at the else target.
-        if let Some(j) = self.empty_forward(else_bb) {
+        // Empty else -> then-only `if`; continue at the else target. Valid ONLY
+        // when the empty arm forwards to the branch's actual merge (the FILTERED
+        // ipdom `merge` below): the shortcut stops the live arm at `j` and resumes
+        // there, correct only if that arm also reconverges at `j`. Two ways `j`
+        // (the empty arm's forward target) can differ from the real merge:
+        //   - the live arm merges LATER, past an empty arm that forwards to an
+        //     intermediate block (the inlined bounds-check
+        //     `if oob { r = nil } else { r = data[i] }` shape) -- `j` is not the
+        //     join, so both arms would independently reach the merge and
+        //     double-visit it;
+        //   - `j` is a loop back/exit edge (`ctx.cont`/`ctx.brk`) -- a `Goto`
+        //     there must lower to `continue;`/`break;` (which the full-diamond
+        //     path does via `emit_seq`'s terminator handling), not fall through to
+        //     the header and re-enter it.
+        // The empty-arm shortcut (`if (cond) { live_arm }`, resume at the empty
+        // arm's forward target `j`) is sound when either:
+        //   - the branch has a real forward merge and `j` IS it (`merge ==
+        //     Some(j)`) -- both arms rejoin at `j`; or
+        //   - the branch has NO forward merge (`merge` is None): both arms diverge
+        //     (a `break`/`continue`/`return`), so the empty arm's forward is a
+        //     genuine divergence (e.g. `if (i == 3) { break }` in a `for`, whose
+        //     empty else falls through to `continue`) and the live arm diverges
+        //     too -- there is no shared tail to double-visit.
+        // It is UNSOUND when the branch HAS a forward merge but `j` is a plain
+        // intermediate block the live arm skips PAST to reach it (the inlined
+        // bounds-check `if oob { r = nil } else { r = data[i] }` tail: `j` is not
+        // the join). And in all cases `j` must not be the ACTIVE header -- resuming
+        // at a `loop {}`'s own header (its `continue` target) re-enters it.
+        let merge = self
+            .structure
+            .ipdom(blk)
+            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
+        let forward_ok = |j: Idx<Block>| {
+            (merge == Some(j) || merge.is_none()) && !self.active.contains(&j)
+        };
+        if let Some(j) = self.empty_forward(else_bb).filter(|&j| forward_ok(j)) {
             self.push(&format!("if ({cond_s}) {{"));
             self.indent += 1;
             self.emit_seq(then_bb, Some(j), ctx)?;
@@ -430,8 +473,8 @@ impl Emitter<'_> {
             self.push("}");
             return Ok(Some(j));
         }
-        // Empty then -> invert and emit the else arm only.
-        if let Some(j) = self.empty_forward(then_bb) {
+        // Empty then -> invert and emit the else arm only (same forward guard).
+        if let Some(j) = self.empty_forward(then_bb).filter(|&j| forward_ok(j)) {
             self.push(&format!("if (!({cond_s})) {{"));
             self.indent += 1;
             self.emit_seq(else_bb, Some(j), ctx)?;
@@ -442,10 +485,6 @@ impl Emitter<'_> {
         // Full diamond. The merge is ipdom, unless an arm diverges (ipdom
         // collapses to the virtual exit or a loop target) -- then the arms absorb
         // the continuation up to the enclosing stop and there is no fall-through.
-        let merge = self
-            .structure
-            .ipdom(blk)
-            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
         let arm_stop = merge.map(Some).unwrap_or(stop);
         self.push(&format!("if ({cond_s}) {{"));
         self.indent += 1;
@@ -491,36 +530,45 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A general loop: `while (true) { <cond region>; if (!(cond)) break; <body> }`.
-    /// The condition region may be a multi-block diamond (`while a && b`), so it
-    /// goes through the structurizer recursively. A range-`for` is just this shape
-    /// whose test IS the header `Branch` (its else is the exit) and whose latch is
-    /// the increment block -- `continue` runs the increment before re-testing.
+    /// A general loop. Two shapes:
+    /// - `while cond`/`for` (`region.test` set): `while (true) { <cond region>;
+    ///   if (!(cond)) break; <body> }`. The condition region may be a multi-block
+    ///   diamond (`while a && b`), so it goes through the structurizer recursively.
+    /// - `loop {}` (`region.test` None): a headerless `while (true) { <body> }`;
+    ///   the loop's `break`s and `continue`s fall out of the body's own branch
+    ///   structure (a `Goto(exit)` -> `break`, a `Goto(header)` -> `continue`, and
+    ///   a branch arm ENTERING the exit block breaks via the `cur == brk` guard in
+    ///   [`Self::emit_seq`]). Reached when a `continue` precedes the `break`, so no
+    ///   single test dominates the back-edges.
     fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
         let h = region.header;
         let exit = region.exit;
-        let (test, cond, body_start, break_when_true) = self.find_test(region)?;
+        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
 
         self.active.insert(h);
         self.push("while (true) {");
         self.indent += 1;
         self.emit_loop_iter_decls(h);
 
-        self.emit_seq(h, Some(test), outer)?;
-        self.emit_block_effects(test)?;
-        self.visited.insert(test);
-
-        let cond_s = self.render_val(cond)?;
-        if break_when_true {
-            self.push(&format!("if ({cond_s}) {{ break; }}"));
+        if let Some(test) = region.test {
+            let (cond, body_start, break_when_true) = self.test_arms(test, exit)?;
+            self.emit_seq(h, Some(test), outer)?;
+            self.emit_block_effects(test)?;
+            self.visited.insert(test);
+            let cond_s = self.render_val(cond)?;
+            if break_when_true {
+                self.push(&format!("if ({cond_s}) {{ break; }}"));
+            } else {
+                self.push(&format!("if (!({cond_s})) {{ break; }}"));
+            }
+            let body_len = self.out.len();
+            self.emit_seq(body_start, None, ctx)?;
+            self.trim_trailing_continue(body_len);
         } else {
-            self.push(&format!("if (!({cond_s})) {{ break; }}"));
+            let body_len = self.out.len();
+            self.emit_seq(h, None, ctx)?;
+            self.trim_trailing_continue(body_len);
         }
-
-        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
-        let body_len = self.out.len();
-        self.emit_seq(body_start, None, ctx)?;
-        self.trim_trailing_continue(body_len);
 
         self.indent -= 1;
         self.push("}");
@@ -528,23 +576,22 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// The loop's condition test: the unique body `Branch` with a direct successor
-    /// to the exit. Returns `(test block, cond, body entry, break-when-cond-true)`.
-    fn find_test(
+    /// Decompose the `while cond`/`for` header test `test` (a `Branch` with one
+    /// arm directly to `exit`): returns `(cond, body entry, break-when-cond-true)`.
+    fn test_arms(
         &self,
-        region: &LoopRegion,
-    ) -> Result<(Idx<Block>, Idx<Inst>, Idx<Block>, bool), CompilerError> {
-        for &b in &region.body {
-            if let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[b].term {
-                if then_bb == region.exit {
-                    return Ok((b, cond, else_bb, true));
-                }
-                if else_bb == region.exit {
-                    return Ok((b, cond, then_bb, false));
-                }
+        test: Idx<Block>,
+        exit: Idx<Block>,
+    ) -> Result<(Idx<Inst>, Idx<Block>, bool), CompilerError> {
+        if let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[test].term {
+            if then_bb == exit {
+                return Ok((cond, else_bb, true));
+            }
+            if else_bb == exit {
+                return Ok((cond, then_bb, false));
             }
         }
-        Err(err("JS subset: unstructured loop (no single condition test)"))
+        Err(err("JS subset: unstructured loop (condition test has no direct exit arm)"))
     }
 
     /// Drop a redundant trailing `continue;` that is the loop body's natural
@@ -1025,12 +1072,33 @@ pub fn emit_with_closure(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
+    // Same per-body pipeline the luajit path runs (`skull::mir_emit::emit_body_chunk`):
+    // lower -> inline_functions -> cleanup -> recover_counted_loops -> residual-
+    // bound-call validation. Inlining splices `@inline`/`@pure`/`Iterator`-bounded
+    // callees, so a combinator chain monomorphizes and the post-inline residual
+    // calls (below) drive co-emission of only the plain fns that survive. The
+    // cache is per-call (step-3-simplest scope); measured against the ~2x wall-time
+    // gate before considering a hoist.
+    let mut cache = skull_transform::InlineCache::default();
     let mut names: HashMap<FuncRef, String> = roots.iter().cloned().collect();
     let mut queue: Vec<FuncRef> = roots.iter().map(|(fr, _)| *fr).collect();
     let mut seen: HashSet<FuncRef> = queue.iter().copied().collect();
     let mut lowered: Vec<(FuncRef, MirFunc)> = Vec::new();
     while let Some(fr) = queue.pop() {
-        let mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
+        let f = &ws.module(fr.module).functions[fr.func];
+        let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
+        // Coroutines never inline (they reject at emit here anyway), mirroring the
+        // luajit path's coroutine branch (cleanup only, no inline / forl rewrite).
+        if mf.is_coroutine {
+            skull_transform::cleanup(&mut mf);
+        } else {
+            skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut cache)?;
+            skull_transform::cleanup(&mut mf);
+            skull_transform::recover_counted_loops(ws, &mut mf);
+        }
+        skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
+        // Discover co-emit callees from the POST-inline residual calls only, so a
+        // spliced callee (its call inst dropped from its block) stops co-emitting.
         for callee in call_targets(&mf) {
             let cf = &ws.module(callee.module).functions[callee.func];
             // Mirror `render_call`'s decision exactly: the `get`/2 receiver
@@ -1065,27 +1133,33 @@ pub fn emit_with_closure(
     }
     // Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values
     // at the call, but a co-emitted callee that uses the param as a WHOLE value
-    // keeps a single (un-expanded) MIR param -- so the arg count exceeds the
-    // callee's param count and leaves would be silently dropped. luajit dissolves
-    // this by INLINING the callee (its whole pipeline runs the inliner); this
-    // raw-lowered path does not, so reject rather than emit-and-hope. (Fully
-    // SROA'd value structs and tuple multi-returns keep matching arities.)
+    // keeps a single (un-expanded) MIR param -- so `argc > arity` and leaves would
+    // be silently dropped. The residual co-emitted callees here were NOT inlined
+    // (value-struct-whole-value use blocks inlining eligibility), so reject rather
+    // than emit-and-hope. The legitimate `argc < arity` shape is an omitted
+    // defaulted param (callee-side `== nil` fill; the omitted arg arrives as JS
+    // `undefined`): accept down to the count of params WITHOUT a default.
     let arities: HashMap<FuncRef, usize> =
         lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
     for (_, mf) in &lowered {
-        for (_, inst) in mf.insts.iter() {
-            let (callee, argc) = match inst {
-                Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (func, args.len()),
-                _ => continue,
-            };
-            if let Some(&arity) = arities.get(callee) {
-                if argc != arity {
-                    let cf = &ws.module(callee.module).functions[callee.func];
-                    return Err(err(format!(
-                        "JS subset: value-struct scalar ABI mismatch calling `{}` \
-                         ({argc} args vs {arity} params; callee not inlined)",
-                        cf.name
-                    )));
+        for (_, block) in mf.blocks.iter() {
+            for &iid in &block.insts {
+                let (callee, argc) = match &mf.insts[iid] {
+                    Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
+                        (func, args.len())
+                    }
+                    _ => continue,
+                };
+                if let Some(&arity) = arities.get(callee) {
+                    let required = required_arg_count(ws, *callee, arity);
+                    if argc < required || argc > arity {
+                        let cf = &ws.module(callee.module).functions[callee.func];
+                        return Err(err(format!(
+                            "JS subset: value-struct scalar ABI mismatch calling `{}` \
+                             ({argc} args vs {required}..={arity} params; callee not inlined)",
+                            cf.name
+                        )));
+                    }
                 }
             }
         }
@@ -1097,17 +1171,39 @@ pub fn emit_with_closure(
     Ok(out)
 }
 
-/// Every statically-resolved call target in `mf` (incl. lambda sub-CFGs --
-/// the inst arena is shared).
+/// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
+/// the raw arena) so a spliced-away call's stale arena inst is not re-discovered
+/// -- only the calls that survive inlining co-emit. Lambda sub-CFG blocks live in
+/// the same block arena, so their calls are covered too.
 fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     let mut out = Vec::new();
-    for (_, inst) in mf.insts.iter() {
-        match inst {
-            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
-            _ => {}
+    for (_, block) in mf.blocks.iter() {
+        for &iid in &block.insts {
+            match &mf.insts[iid] {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
+                _ => {}
+            }
         }
     }
     out
+}
+
+/// The minimum argument count a co-emitted callee accepts: its MIR param count
+/// minus the params carrying a default (each omitted trailing default arrives as
+/// JS `undefined` and is filled callee-side). Defaults live on the fn's HIR body;
+/// for the scalar defaults this gate targets (`step: int = 1`) each maps 1:1 to a
+/// MIR param slot. A GC value-struct default would break the 1:1 assumption, but
+/// value-struct construction rejects at emit independently, so no such call is
+/// admitted here.
+fn required_arg_count(ws: &Workspace, fr: FuncRef, arity: usize) -> usize {
+    use bone_semantic::hir::BodyOwner;
+    let n_defaults = ws
+        .module(fr.module)
+        .bodies
+        .get(&BodyOwner::Function(fr.func))
+        .map(|b| b.param_defaults.iter().filter(|d| d.is_some()).count())
+        .unwrap_or(0);
+    arity.saturating_sub(n_defaults)
 }
 
 /// Whether `cf` renders via the JS template table: it must both HAVE a table

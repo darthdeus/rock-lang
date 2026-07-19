@@ -85,16 +85,18 @@ fn reassigned_param_stays_shared() {
     assert!(js.starts_with("function f(c0)"), "p stays a param:\n{js}");
 }
 
-// Value structs are deferred: a re-box (whole-value use through a call) hits
-// either the MakeValueStruct reject or the scalar-ABI arity guard.
+// Value structs are still deferred where the struct is used as a WHOLE value:
+// an `==` needs the boxed struct, so `MakeValueStruct` survives cleanup and
+// rejects. (A value struct read straight off its scalar-ABI leaves, with no
+// boxing, now scalarizes through and emits after the T8a pipeline share;
+// full `MakeValueStruct` emission is T8b.)
 #[test]
-fn value_struct_rejects() {
+fn value_struct_whole_value_rejects() {
     let ws = ws_with(
         "value V { x: int, y: int }\n\
-         fn mk(a: int) -> V { V { x: a, y: a + 1 } }\n\
-         fn f(a: int) -> int { let v = mk(a); v.x + v.y }",
+         fn f() -> bool { let a = V { x: 1, y: 2 }; let b = V { x: 1, y: 2 }; a == b }",
     );
-    let err = emit_closure(&ws, "f").expect_err("value struct must reject");
+    let err = emit_closure(&ws, "f").expect_err("whole-value struct must reject");
     assert!(
         err.contains("value struct") || err.contains("scalar ABI"),
         "rejects for a value-struct reason: {err}"
