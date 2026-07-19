@@ -111,6 +111,7 @@ pub fn emit_fn_with_callees(
             }
         }
     }
+    let (loop_iter, loop_iter_cells) = loop_capture_plan(mf, &st.loops)?;
     let mut em = Emitter {
         ws,
         mf,
@@ -122,9 +123,38 @@ pub fn emit_fn_with_callees(
         general,
         active: HashSet::new(),
         visited: HashSet::new(),
+        lambdas: HashMap::new(),
+        lambda_owned: compute_lambda_owned(mf),
+        loop_iter,
         out: String::new(),
         indent: 1,
     };
+
+    // Pre-render every lambda body to a JS arrow, inner-first: a nested lambda's
+    // `Inst::Lambda` is lowered before its enclosing one, so ascending inst order
+    // renders inner arrows before an outer arrow that references them.
+    let mut lambda_insts: Vec<Idx<Inst>> = mf
+        .insts
+        .iter()
+        .filter(|(_, i)| matches!(i, Inst::Lambda { .. }))
+        .map(|(id, _)| id)
+        .collect();
+    lambda_insts.sort_by_key(|&i| raw(i));
+    let hoistable = hoistable_lambdas(mf, &em.lambda_owned);
+    let mut hoisted: Vec<String> = Vec::new();
+    for iid in lambda_insts {
+        let arrow = em.render_lambda(iid)?;
+        if hoistable.contains(&iid) {
+            // A shared module-level value: same-site references are `==` (matches
+            // luajit P3). The name is unique (`js_name` is program-unique, inst
+            // ids are fn-unique).
+            let name = format!("{js_name}__lam{}", raw(iid));
+            hoisted.push(format!("const {name} = {arrow};\n"));
+            em.lambdas.insert(iid, name);
+        } else {
+            em.lambdas.insert(iid, arrow);
+        }
+    }
 
     let params: Vec<String> = mf.params.iter().map(|&c| cell_name(c)).collect();
     let mut header = format!("function {js_name}({}) {{\n", params.join(", "));
@@ -139,7 +169,13 @@ pub fn emit_fn_with_callees(
     // emits, so declaring its cell would leave an unused `let`.
     for &b in &reachable_blocks(mf) {
         for &iid in &mf.blocks[b].insts {
-            if let Inst::Store { cell, .. } = mf.insts[iid] {
+            for &cell in inst_writes(&mf.insts[iid]) {
+                // Loop-captured cells are declared per-iteration inside their loop
+                // body (below), not at the fn top -- a fn-top `let` would be shared
+                // across iterations and defeat per-iteration capture.
+                if loop_iter_cells.contains(&raw(cell)) {
+                    continue;
+                }
                 if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
                     declared.push(raw(cell));
                 }
@@ -154,7 +190,7 @@ pub fn emit_fn_with_callees(
     }
 
     em.emit_seq(mf.entry, None, LoopCtx::default())?;
-    Ok(format!("{header}{}}}\n", em.out))
+    Ok(format!("{}{header}{}}}\n", hoisted.concat(), em.out))
 }
 
 struct Emitter<'a> {
@@ -183,6 +219,15 @@ struct Emitter<'a> {
     /// loop.
     active: HashSet<Idx<Block>>,
     visited: HashSet<Idx<Block>>,
+    /// Each `Lambda` inst -> its pre-rendered JS arrow expression. Populated
+    /// inner-first (ascending inst id) before the main walk, so a `render_val`
+    /// of a `Lambda` operand is a map lookup even for nested lambdas.
+    lambdas: HashMap<Idx<Inst>, String>,
+    /// Each `Lambda` inst -> the cells its arrow body must `let`-declare.
+    lambda_owned: HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
+    /// Loop header -> cells to `let`-declare per-iteration inside that loop body
+    /// (a closure capturing a loop variable must see its iteration's value).
+    loop_iter: HashMap<Idx<Block>, Vec<Idx<Cell>>>,
     out: String,
     indent: usize,
 }
@@ -259,12 +304,21 @@ impl Emitter<'_> {
             if Some(cur) == stop {
                 return Ok(());
             }
+            // Entering the enclosing loop's exit block IS a break: a `loop {}`
+            // whose `break` is a branch arm directly into the exit (no `Goto(exit)`
+            // edge to catch below) relies on this. Checked before the visited mark
+            // so the exit stays available for the post-loop emission the header's
+            // dispatcher resumes at.
+            if Some(cur) == ctx.brk {
+                self.push("break;");
+                return Ok(());
+            }
             // A natural-loop header is dispatched structurally (before the
             // visited guard): `emit_general` re-enters `emit_seq` on the header
             // for its condition region, so the header must not be pre-marked.
             if !self.active.contains(&cur) {
                 if let Some(li) = self.counted.get(&cur).copied() {
-                    self.emit_counted(li)?;
+                    self.emit_counted(cur, li)?;
                     cur = li.exit;
                     continue;
                 }
@@ -314,6 +368,25 @@ impl Emitter<'_> {
         }
     }
 
+    /// A `Branch` block whose insts are all pure, non-erroring, side-effect-free
+    /// (`Store`/`Call`/`Index`-bounds-check excluded), so its condition can be
+    /// folded into an enclosing `&&`/`||` -- any statement it materializes (a
+    /// tuple/struct projection) is hoisted before the `if` and computed
+    /// unconditionally, which is observably identical for a pure read. Returns the
+    /// branch's `(cond, then, else)`.
+    fn foldable_branch(&self, b: Idx<Block>) -> Option<(Idx<Inst>, Idx<Block>, Idx<Block>)> {
+        let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[b].term else {
+            return None;
+        };
+        let pure = self.mf.blocks[b].insts.iter().all(|&i| {
+            matches!(
+                &self.mf.insts[i],
+                Inst::Load(_) | Inst::TupleIndex { .. } | Inst::Field { .. } | Inst::Len { .. }
+            ) || always_inlinable(&self.mf.insts[i])
+        });
+        pure.then_some((cond, then_bb, else_bb))
+    }
+
     /// Emit an `if`-diamond. Returns the join to continue at, or `None` when the
     /// arms diverge (the join is the virtual exit) and there is no fall-through.
     fn emit_branch(
@@ -325,9 +398,74 @@ impl Emitter<'_> {
         stop: Option<Idx<Block>>,
         ctx: LoopCtx,
     ) -> Result<Option<Idx<Block>>, CompilerError> {
-        let cond_s = self.render_val(cond)?;
-        // Empty else -> then-only `if`; continue at the else target.
-        if let Some(j) = self.empty_forward(else_bb) {
+        // Short-circuit fold: a `match` range/tuple pattern lowers to nested
+        // branches whose failure arms share one tail block (`if A { if B { X }
+        // else { S } } else { S }`) -- reducible but not a natural loop, so the
+        // relooper cannot structure the doubly-reached `S`. Recognizing the chain
+        // (`A && B`; the `||` dual for a shared success arm) collapses it to a
+        // clean diamond that rejoins at the ipost-dominator. A folded inner
+        // block's pure projections hoist before the `if`.
+        let (cond_s, then_bb, else_bb) = {
+            let mut cond_s = self.render_val(cond)?;
+            let (mut then_bb, mut else_bb) = (then_bb, else_bb);
+            loop {
+                if let Some((c2, t2, e2)) = self.foldable_branch(then_bb) {
+                    if e2 == else_bb {
+                        self.emit_block_effects(then_bb)?;
+                        self.visited.insert(then_bb);
+                        cond_s = format!("({cond_s} && {})", self.render_val(c2)?);
+                        then_bb = t2;
+                        continue;
+                    }
+                }
+                if let Some((c2, t2, e2)) = self.foldable_branch(else_bb) {
+                    if t2 == then_bb {
+                        self.emit_block_effects(else_bb)?;
+                        self.visited.insert(else_bb);
+                        cond_s = format!("({cond_s} || {})", self.render_val(c2)?);
+                        else_bb = e2;
+                        continue;
+                    }
+                }
+                break (cond_s, then_bb, else_bb);
+            }
+        };
+        // Empty else -> then-only `if`; continue at the else target. Valid ONLY
+        // when the empty arm forwards to the branch's actual merge (the FILTERED
+        // ipdom `merge` below): the shortcut stops the live arm at `j` and resumes
+        // there, correct only if that arm also reconverges at `j`. Two ways `j`
+        // (the empty arm's forward target) can differ from the real merge:
+        //   - the live arm merges LATER, past an empty arm that forwards to an
+        //     intermediate block (the inlined bounds-check
+        //     `if oob { r = nil } else { r = data[i] }` shape) -- `j` is not the
+        //     join, so both arms would independently reach the merge and
+        //     double-visit it;
+        //   - `j` is a loop back/exit edge (`ctx.cont`/`ctx.brk`) -- a `Goto`
+        //     there must lower to `continue;`/`break;` (which the full-diamond
+        //     path does via `emit_seq`'s terminator handling), not fall through to
+        //     the header and re-enter it.
+        // The empty-arm shortcut (`if (cond) { live_arm }`, resume at the empty
+        // arm's forward target `j`) is sound when either:
+        //   - the branch has a real forward merge and `j` IS it (`merge ==
+        //     Some(j)`) -- both arms rejoin at `j`; or
+        //   - the branch has NO forward merge (`merge` is None): both arms diverge
+        //     (a `break`/`continue`/`return`), so the empty arm's forward is a
+        //     genuine divergence (e.g. `if (i == 3) { break }` in a `for`, whose
+        //     empty else falls through to `continue`) and the live arm diverges
+        //     too -- there is no shared tail to double-visit.
+        // It is UNSOUND when the branch HAS a forward merge but `j` is a plain
+        // intermediate block the live arm skips PAST to reach it (the inlined
+        // bounds-check `if oob { r = nil } else { r = data[i] }` tail: `j` is not
+        // the join). And in all cases `j` must not be the ACTIVE header -- resuming
+        // at a `loop {}`'s own header (its `continue` target) re-enters it.
+        let merge = self
+            .structure
+            .ipdom(blk)
+            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
+        let forward_ok = |j: Idx<Block>| {
+            (merge == Some(j) || merge.is_none()) && !self.active.contains(&j)
+        };
+        if let Some(j) = self.empty_forward(else_bb).filter(|&j| forward_ok(j)) {
             self.push(&format!("if ({cond_s}) {{"));
             self.indent += 1;
             self.emit_seq(then_bb, Some(j), ctx)?;
@@ -335,8 +473,8 @@ impl Emitter<'_> {
             self.push("}");
             return Ok(Some(j));
         }
-        // Empty then -> invert and emit the else arm only.
-        if let Some(j) = self.empty_forward(then_bb) {
+        // Empty then -> invert and emit the else arm only (same forward guard).
+        if let Some(j) = self.empty_forward(then_bb).filter(|&j| forward_ok(j)) {
             self.push(&format!("if (!({cond_s})) {{"));
             self.indent += 1;
             self.emit_seq(else_bb, Some(j), ctx)?;
@@ -347,10 +485,6 @@ impl Emitter<'_> {
         // Full diamond. The merge is ipdom, unless an arm diverges (ipdom
         // collapses to the virtual exit or a loop target) -- then the arms absorb
         // the continuation up to the enclosing stop and there is no fall-through.
-        let merge = self
-            .structure
-            .ipdom(blk)
-            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
         let arm_stop = merge.map(Some).unwrap_or(stop);
         self.push(&format!("if ({cond_s}) {{"));
         self.indent += 1;
@@ -364,11 +498,21 @@ impl Emitter<'_> {
         Ok(merge)
     }
 
+    /// `let <cells>;` for the cells this loop declares per-iteration (a captured
+    /// loop variable). Emitted at the loop body top so each iteration binds fresh.
+    fn emit_loop_iter_decls(&mut self, header: Idx<Block>) {
+        if let Some(cells) = self.loop_iter.get(&header) {
+            let names: Vec<String> = cells.iter().map(|&c| cell_name(c)).collect();
+            let line = format!("let {};", names.join(", "));
+            self.push(&line);
+        }
+    }
+
     /// A range-`for`: `for (; slot < bound; slot = slot + 1) { body }`. The slot
     /// and bound were initialized in the preheader (hoisted cells), so the `for`
     /// init clause is empty. `continue` targets the latch (the `for` increment
     /// runs it); `break` targets the exit.
-    fn emit_counted(&mut self, li: LoopInfo) -> Result<(), CompilerError> {
+    fn emit_counted(&mut self, header: Idx<Block>, li: LoopInfo) -> Result<(), CompilerError> {
         let slot = cell_name(li.slot);
         // The bound is a `Load` of a hoisted preheader cell (or a const),
         // rendered inline so it never depends on a header-block temp we skip.
@@ -376,6 +520,7 @@ impl Emitter<'_> {
         let cmp = if li.inclusive { "<=" } else { "<" };
         self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
         self.indent += 1;
+        self.emit_loop_iter_decls(header);
         let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
         let body_len = self.out.len();
         self.emit_seq(li.body_entry, None, ctx)?;
@@ -385,35 +530,45 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A general loop: `while (true) { <cond region>; if (!(cond)) break; <body> }`.
-    /// The condition region may be a multi-block diamond (`while a && b`), so it
-    /// goes through the structurizer recursively. A range-`for` is just this shape
-    /// whose test IS the header `Branch` (its else is the exit) and whose latch is
-    /// the increment block -- `continue` runs the increment before re-testing.
+    /// A general loop. Two shapes:
+    /// - `while cond`/`for` (`region.test` set): `while (true) { <cond region>;
+    ///   if (!(cond)) break; <body> }`. The condition region may be a multi-block
+    ///   diamond (`while a && b`), so it goes through the structurizer recursively.
+    /// - `loop {}` (`region.test` None): a headerless `while (true) { <body> }`;
+    ///   the loop's `break`s and `continue`s fall out of the body's own branch
+    ///   structure (a `Goto(exit)` -> `break`, a `Goto(header)` -> `continue`, and
+    ///   a branch arm ENTERING the exit block breaks via the `cur == brk` guard in
+    ///   [`Self::emit_seq`]). Reached when a `continue` precedes the `break`, so no
+    ///   single test dominates the back-edges.
     fn emit_general(&mut self, region: &LoopRegion, outer: LoopCtx) -> Result<(), CompilerError> {
         let h = region.header;
         let exit = region.exit;
-        let (test, cond, body_start, break_when_true) = self.find_test(region)?;
+        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
 
         self.active.insert(h);
         self.push("while (true) {");
         self.indent += 1;
+        self.emit_loop_iter_decls(h);
 
-        self.emit_seq(h, Some(test), outer)?;
-        self.emit_block_effects(test)?;
-        self.visited.insert(test);
-
-        let cond_s = self.render_val(cond)?;
-        if break_when_true {
-            self.push(&format!("if ({cond_s}) {{ break; }}"));
+        if let Some(test) = region.test {
+            let (cond, body_start, break_when_true) = self.test_arms(test, exit)?;
+            self.emit_seq(h, Some(test), outer)?;
+            self.emit_block_effects(test)?;
+            self.visited.insert(test);
+            let cond_s = self.render_val(cond)?;
+            if break_when_true {
+                self.push(&format!("if ({cond_s}) {{ break; }}"));
+            } else {
+                self.push(&format!("if (!({cond_s})) {{ break; }}"));
+            }
+            let body_len = self.out.len();
+            self.emit_seq(body_start, None, ctx)?;
+            self.trim_trailing_continue(body_len);
         } else {
-            self.push(&format!("if (!({cond_s})) {{ break; }}"));
+            let body_len = self.out.len();
+            self.emit_seq(h, None, ctx)?;
+            self.trim_trailing_continue(body_len);
         }
-
-        let ctx = LoopCtx { cont: Some(h), brk: Some(exit) };
-        let body_len = self.out.len();
-        self.emit_seq(body_start, None, ctx)?;
-        self.trim_trailing_continue(body_len);
 
         self.indent -= 1;
         self.push("}");
@@ -421,23 +576,22 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// The loop's condition test: the unique body `Branch` with a direct successor
-    /// to the exit. Returns `(test block, cond, body entry, break-when-cond-true)`.
-    fn find_test(
+    /// Decompose the `while cond`/`for` header test `test` (a `Branch` with one
+    /// arm directly to `exit`): returns `(cond, body entry, break-when-cond-true)`.
+    fn test_arms(
         &self,
-        region: &LoopRegion,
-    ) -> Result<(Idx<Block>, Idx<Inst>, Idx<Block>, bool), CompilerError> {
-        for &b in &region.body {
-            if let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[b].term {
-                if then_bb == region.exit {
-                    return Ok((b, cond, else_bb, true));
-                }
-                if else_bb == region.exit {
-                    return Ok((b, cond, then_bb, false));
-                }
+        test: Idx<Block>,
+        exit: Idx<Block>,
+    ) -> Result<(Idx<Inst>, Idx<Block>, bool), CompilerError> {
+        if let Term::Branch { cond, then_bb, else_bb } = self.mf.blocks[test].term {
+            if then_bb == exit {
+                return Ok((cond, else_bb, true));
+            }
+            if else_bb == exit {
+                return Ok((cond, then_bb, false));
             }
         }
-        Err(err("JS subset: unstructured loop (no single condition test)"))
+        Err(err("JS subset: unstructured loop (condition test has no direct exit arm)"))
     }
 
     /// Drop a redundant trailing `continue;` that is the loop body's natural
@@ -448,6 +602,19 @@ impl Emitter<'_> {
             let cut = self.out.len() - line.len();
             if cut >= start && (cut == 0 || self.out.as_bytes()[cut - 1] == b'\n') {
                 self.out.truncate(cut);
+            }
+        }
+    }
+
+    /// A multi-value assignment `[d0, d1, ...] = <call>;` (a single dest is a
+    /// plain `d0 = <call>;` -- the scalar ABI returns one leaf as a scalar, not a
+    /// one-element array, matching [`Self::emit_return`]).
+    fn multi_assign(&self, dests: &[Idx<Cell>], call: &str) -> String {
+        match dests {
+            [d] => format!("{} = {call};", cell_name(*d)),
+            _ => {
+                let names: Vec<String> = dests.iter().map(|&d| cell_name(d)).collect();
+                format!("[{}] = {call};", names.join(", "))
             }
         }
     }
@@ -482,14 +649,29 @@ impl Emitter<'_> {
                     );
                     self.push(&line);
                 }
-                // A call in statement position (value unused): `nb_set(b, i, v)`.
-                Inst::Call { .. } if self.use_count[raw(iid) as usize] == 0 => {
+                // A call in statement position (value unused): `nb_set(b, i, v)`
+                // or a closure invoked for effect, `(f)(x);`.
+                Inst::Call { .. } | Inst::CallValue { .. }
+                    if self.use_count[raw(iid) as usize] == 0 =>
+                {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
-                // An unused indirect call would be a silently-dropped effect.
-                Inst::CallValue { .. } if self.use_count[raw(iid) as usize] == 0 => {
-                    return Err(err("JS subset: indirect call not supported"));
+                // A multi-value call (scalarized value-struct / tuple return):
+                // `[d0, d1, ...] = callee(args);` destructures the array the
+                // multi-return callee packs. Dest cells are hoist-declared at the
+                // fn top, so this is an assignment, not a `let`. The leaves are
+                // read back via `Load` of each dest.
+                Inst::CallMulti { dests, func, args } => {
+                    let call = self.render_call(*func, args)?;
+                    self.push(&self.multi_assign(dests, &call));
+                }
+                Inst::CallValueMulti { dests, callee, args } => {
+                    let c = self.render_val(*callee)?;
+                    let rendered: Result<Vec<String>, CompilerError> =
+                        args.iter().map(|a| self.render_val(*a)).collect();
+                    let call = format!("({c})({})", rendered?.join(", "));
+                    self.push(&self.multi_assign(dests, &call));
                 }
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
@@ -524,9 +706,44 @@ impl Emitter<'_> {
                 let s = self.render_val(*v)?;
                 self.push(&format!("return {s};"));
             }
-            _ => return Err(err("JS subset: multi-value return not supported")),
+            // The scalar ABI returns a scalarized value struct / tuple as N leaf
+            // values; JS has no multi-return, so pack them into an array the
+            // `CallMulti` caller destructures.
+            _ => {
+                let parts: Result<Vec<String>, CompilerError> =
+                    vs.iter().map(|&v| self.render_val(v)).collect();
+                self.push(&format!("return [{}];", parts?.join(", ")));
+            }
         }
         Ok(())
+    }
+
+    /// Render a `Lambda` inst as a JS arrow `(<params>) => { <body> }`. The body
+    /// is the lambda's sub-CFG (rooted at `entry`, in the same arenas): captured
+    /// cells render to the same `c<N>` name they carry in the enclosing scope, so
+    /// JS lexical capture stands in for the Lua upvalue. Emits into a scratch
+    /// buffer so `render_inst_expr` (immutable) can look the string up later.
+    fn render_lambda(&mut self, iid: Idx<Inst>) -> Result<String, CompilerError> {
+        let Inst::Lambda { params, entry } = &self.mf.insts[iid] else {
+            unreachable!("render_lambda on a non-Lambda inst");
+        };
+        let param_names: Vec<String> = params.iter().map(|&c| cell_name(c)).collect();
+        let entry = *entry;
+        let owned = self.lambda_owned.get(&iid).cloned().unwrap_or_default();
+
+        let saved_out = std::mem::take(&mut self.out);
+        let saved_indent = self.indent;
+        self.indent = saved_indent + 1;
+        if !owned.is_empty() {
+            let names: Vec<String> = owned.iter().map(|&c| cell_name(c)).collect();
+            self.push(&format!("let {};", names.join(", ")));
+        }
+        self.emit_seq(entry, None, LoopCtx::default())?;
+        let body = std::mem::replace(&mut self.out, saved_out);
+        self.indent = saved_indent;
+
+        let close = "  ".repeat(saved_indent);
+        Ok(format!("({}) => {{\n{body}{close}}}", param_names.join(", ")))
     }
 
     /// The JS expression for a value operand: the bound `v<raw>` temp if the
@@ -604,6 +821,21 @@ impl Emitter<'_> {
                 format!("((({a} % {b}) + {b}) % {b})")
             }
             Inst::Call { func, args } => self.render_call(*func, args)?,
+            // A closure value: the arrow was pre-rendered inner-first before the
+            // main walk. Parenthesized so a `CallValue` of it (`(<arrow>)(args)`)
+            // is a valid IIFE.
+            Inst::Lambda { .. } => match self.lambdas.get(&iid) {
+                Some(arrow) => format!("({arrow})"),
+                None => return Err(err("JS subset: lambda not pre-rendered")),
+            },
+            // An indirect call `callee(args)`: the callee is parenthesized so an
+            // inline arrow callee still parses as a call target.
+            Inst::CallValue { callee, args } => {
+                let c = self.render_val(*callee)?;
+                let rendered: Result<Vec<String>, CompilerError> =
+                    args.iter().map(|a| self.render_val(*a)).collect();
+                format!("({c})({})", rendered?.join(", "))
+            }
             // Structs are plain objects tagged with `__ty` (mirrors the Lua
             // `__rock_create_struct`: sets `obj.__ty`, no metatable). NativeBuffer
             // keeps its bespoke `{ptr, len}` (no `__ty`) so the nb differential's
@@ -614,6 +846,28 @@ impl Emitter<'_> {
                 if !name.is_empty() && !is_native_buffer(&name) {
                     parts.push(format!("__ty: {}", js_string_lit(&name)?));
                 }
+                for (f, v) in fields {
+                    parts.push(format!("{f}: {}", self.render_val(*v)?));
+                }
+                format!("({{{}}})", parts.join(", "))
+            }
+            // A `value` struct is byte-value cdata on luajit; on JS an all-scalar
+            // (GC-free) one is a plain `{__ty, ...}` object, same shape as a
+            // reference struct -- structural deep-eq (`JS_STRUCTURAL_EQ`) matches
+            // luajit's byte-value eq for all-scalar leaves. The scalar ABI elides
+            // most value structs at call boundaries (they scalarize through); this
+            // covers the whole-value re-box (`==`, a Vec element, a boxed return).
+            // A GC-carrying value struct compares its pointer fields by REFERENCE
+            // on luajit, which the generic contents-eq cannot reproduce without
+            // type-aware codegen -- rejected (T8c+).
+            Inst::MakeValueStruct { name, fields } => {
+                if !skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
+                    return Err(err(format!(
+                        "JS subset: GC-carrying value struct `{name}` (reference-field \
+                         eq needs type-aware codegen)"
+                    )));
+                }
+                let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
                     parts.push(format!("{f}: {}", self.render_val(*v)?));
                 }
@@ -826,12 +1080,33 @@ pub fn emit_with_closure(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
+    // Same per-body pipeline the luajit path runs (`skull::mir_emit::emit_body_chunk`):
+    // lower -> inline_functions -> cleanup -> recover_counted_loops -> residual-
+    // bound-call validation. Inlining splices `@inline`/`@pure`/`Iterator`-bounded
+    // callees, so a combinator chain monomorphizes and the post-inline residual
+    // calls (below) drive co-emission of only the plain fns that survive. The
+    // cache is per-call (step-3-simplest scope); measured against the ~2x wall-time
+    // gate before considering a hoist.
+    let mut cache = skull_transform::InlineCache::default();
     let mut names: HashMap<FuncRef, String> = roots.iter().cloned().collect();
     let mut queue: Vec<FuncRef> = roots.iter().map(|(fr, _)| *fr).collect();
     let mut seen: HashSet<FuncRef> = queue.iter().copied().collect();
     let mut lowered: Vec<(FuncRef, MirFunc)> = Vec::new();
     while let Some(fr) = queue.pop() {
-        let mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
+        let f = &ws.module(fr.module).functions[fr.func];
+        let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
+        // Coroutines never inline (they reject at emit here anyway), mirroring the
+        // luajit path's coroutine branch (cleanup only, no inline / forl rewrite).
+        if mf.is_coroutine {
+            skull_transform::cleanup(&mut mf);
+        } else {
+            skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut cache)?;
+            skull_transform::cleanup(&mut mf);
+            skull_transform::recover_counted_loops(ws, &mut mf);
+        }
+        skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
+        // Discover co-emit callees from the POST-inline residual calls only, so a
+        // spliced callee (its call inst dropped from its block) stops co-emitting.
         for callee in call_targets(&mf) {
             let cf = &ws.module(callee.module).functions[callee.func];
             // Mirror `render_call`'s decision exactly: the `get`/2 receiver
@@ -864,6 +1139,39 @@ pub fn emit_with_closure(
         }
         lowered.push((fr, mf));
     }
+    // Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values
+    // at the call, but a co-emitted callee that uses the param as a WHOLE value
+    // keeps a single (un-expanded) MIR param -- so `argc > arity` and leaves would
+    // be silently dropped. The residual co-emitted callees here were NOT inlined
+    // (value-struct-whole-value use blocks inlining eligibility), so reject rather
+    // than emit-and-hope. The legitimate `argc < arity` shape is an omitted
+    // defaulted param (callee-side `== nil` fill; the omitted arg arrives as JS
+    // `undefined`): accept down to the count of params WITHOUT a default.
+    let arities: HashMap<FuncRef, usize> =
+        lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
+    for (_, mf) in &lowered {
+        for (_, block) in mf.blocks.iter() {
+            for &iid in &block.insts {
+                let (callee, argc) = match &mf.insts[iid] {
+                    Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
+                        (func, args.len())
+                    }
+                    _ => continue,
+                };
+                if let Some(&arity) = arities.get(callee) {
+                    let required = required_arg_count(ws, *callee, arity);
+                    if argc < required || argc > arity {
+                        let cf = &ws.module(callee.module).functions[callee.func];
+                        return Err(err(format!(
+                            "JS subset: value-struct scalar ABI mismatch calling `{}` \
+                             ({argc} args vs {required}..={arity} params; callee not inlined)",
+                            cf.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
     let mut out = String::new();
     for (fr, mf) in &lowered {
         out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names)?);
@@ -871,17 +1179,39 @@ pub fn emit_with_closure(
     Ok(out)
 }
 
-/// Every statically-resolved call target in `mf` (incl. lambda sub-CFGs --
-/// the inst arena is shared).
+/// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
+/// the raw arena) so a spliced-away call's stale arena inst is not re-discovered
+/// -- only the calls that survive inlining co-emit. Lambda sub-CFG blocks live in
+/// the same block arena, so their calls are covered too.
 fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     let mut out = Vec::new();
-    for (_, inst) in mf.insts.iter() {
-        match inst {
-            Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
-            _ => {}
+    for (_, block) in mf.blocks.iter() {
+        for &iid in &block.insts {
+            match &mf.insts[iid] {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
+                _ => {}
+            }
         }
     }
     out
+}
+
+/// The minimum argument count a co-emitted callee accepts: its MIR param count
+/// minus the params carrying a default (each omitted trailing default arrives as
+/// JS `undefined` and is filled callee-side). Defaults live on the fn's HIR body;
+/// for the scalar defaults this gate targets (`step: int = 1`) each maps 1:1 to a
+/// MIR param slot. A GC value-struct default would break the 1:1 assumption, but
+/// value-struct construction rejects at emit independently, so no such call is
+/// admitted here.
+fn required_arg_count(ws: &Workspace, fr: FuncRef, arity: usize) -> usize {
+    use bone_semantic::hir::BodyOwner;
+    let n_defaults = ws
+        .module(fr.module)
+        .bodies
+        .get(&BodyOwner::Function(fr.func))
+        .map(|b| b.param_defaults.iter().filter(|d| d.is_some()).count())
+        .unwrap_or(0);
+    arity.saturating_sub(n_defaults)
 }
 
 /// Whether `cf` renders via the JS template table: it must both HAVE a table
@@ -964,6 +1294,102 @@ fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
 /// JS `Map` rather than co-emitted to a plain object (which coerces keys).
 fn is_map_new(cf: &bone_semantic::hir::Function) -> bool {
     cf.name.as_str() == "map_new" && cf.param_decls.is_empty()
+}
+
+/// Every cell a lambda's sub-CFG references (loads or writes) -- a superset of
+/// its captures (also includes its own params/locals, harmless for the loop
+/// checks below, which additionally require the cell to be loop-stored).
+fn captured_cells(mf: &MirFunc) -> HashSet<u32> {
+    let mut out = HashSet::new();
+    for (_, inst) in mf.insts.iter() {
+        if let Inst::Lambda { entry, .. } = inst {
+            for b in reachable_from(mf, *entry) {
+                for &iid in &mf.blocks[b].insts {
+                    if let Inst::Load(c) = &mf.insts[iid] {
+                        out.insert(raw(*c));
+                    }
+                    for &c in inst_writes(&mf.insts[iid]) {
+                        out.insert(raw(c));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Plan per-iteration cell bindings for closures created in loops. A closure
+/// capturing a loop variable must see THAT iteration's value (Lua/Rock rebind
+/// loop bodies fresh; skull snapshots such a cell by value). In JS a `let`
+/// declared inside the loop body IS per-iteration, so a captured cell whose every
+/// store is within one loop's body is relocated there (returned keyed by loop
+/// header, plus the flat exclusion set for the fn-top declaration). A captured
+/// cell that a loop mutates but also assigns OUTSIDE the body -- a range counter
+/// (init in the preheader) or an `enumerate` cursor -- cannot be block-scoped
+/// without rewriting the closure's reference, so it is REJECTED rather than
+/// miscompiled to the shared final value.
+fn loop_capture_plan(
+    mf: &MirFunc,
+    loops: &HashMap<Idx<Block>, LoopRegion>,
+) -> Result<(HashMap<Idx<Block>, Vec<Idx<Cell>>>, HashSet<u32>), CompilerError> {
+    let captured = captured_cells(mf);
+    // A reassigned PARAM captured in a loop is function-scoped on purpose -- all
+    // closures share one box (`test_param_reassigned_in_loop_shares_one_box`), so
+    // it is never relocated per-iteration.
+    let params: HashSet<u32> = mf.params.iter().map(|&c| raw(c)).collect();
+    let mut store_blocks: HashMap<u32, (Idx<Cell>, HashSet<Idx<Block>>)> = HashMap::new();
+    for (b, blk) in mf.blocks.iter() {
+        for &iid in &blk.insts {
+            for &cell in inst_writes(&mf.insts[iid]) {
+                store_blocks.entry(raw(cell)).or_insert_with(|| (cell, HashSet::new())).1.insert(b);
+            }
+        }
+    }
+    let mut per_loop: HashMap<Idx<Block>, Vec<Idx<Cell>>> = HashMap::new();
+    let mut relocated: HashSet<u32> = HashSet::new();
+    for (craw, (cell, blocks)) in &store_blocks {
+        if !captured.contains(craw) || params.contains(craw) {
+            continue;
+        }
+        // A captured cell that any loop stores INSIDE its body but also stores
+        // OUTSIDE it is loop-varying-but-not-iteration-local (counter/cursor):
+        // reject. One stored entirely within a loop body is iteration-local.
+        for region in loops.values() {
+            let inside = blocks.iter().any(|b| region.body.contains(b));
+            let outside = blocks.iter().any(|b| !region.body.contains(b));
+            if inside && outside {
+                return Err(err(
+                    "JS subset: closure captures a loop counter / cursor (per-iteration \
+                     snapshot not yet supported)",
+                ));
+            }
+        }
+        let innermost = loops
+            .iter()
+            .filter(|(_, region)| blocks.iter().all(|b| region.body.contains(b)))
+            .min_by_key(|(_, region)| region.body.len());
+        if let Some((header, _)) = innermost {
+            per_loop.entry(*header).or_default().push(*cell);
+            relocated.insert(*craw);
+        }
+    }
+    for v in per_loop.values_mut() {
+        v.sort_by_key(|&c| raw(c));
+    }
+    Ok((per_loop, relocated))
+}
+
+/// The cells an inst writes: a `Store`'s target, or a multi-value call's dests.
+/// These are the cells that need a hoisted `let` (the multi-assign / store binds
+/// them, and a later block may read them across a branch merge).
+fn inst_writes(inst: &Inst) -> &[Idx<Cell>] {
+    match inst {
+        Inst::Store { cell, .. } => std::slice::from_ref(cell),
+        Inst::CallMulti { dests, .. }
+        | Inst::CallValueMulti { dests, .. }
+        | Inst::CallBoundMulti { dests, .. } => dests,
+        _ => &[],
+    }
 }
 
 /// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
@@ -1124,7 +1550,8 @@ fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
     let mut use_count = vec![0u32; ni];
     let mut use_block = vec![NONE; ni];
     let mut def_block = vec![NONE; ni];
-    for b in reachable_blocks(mf) {
+    let blocks = emitted_blocks(mf);
+    for &b in &blocks {
         let br = raw(b);
         for &id in &mf.blocks[b].insts {
             if mf.insts[id].produces_value() {
@@ -1143,7 +1570,7 @@ fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
         });
     }
     let mut inl = vec![false; ni];
-    for b in reachable_blocks(mf) {
+    for &b in &blocks {
         for &id in &mf.blocks[b].insts {
             let k = raw(id) as usize;
             if use_count[k] == 1
@@ -1175,9 +1602,14 @@ fn succ(mf: &MirFunc, b: Idx<Block>) -> Vec<Option<Idx<Block>>> {
 
 /// Blocks reachable from the entry, in discovery order.
 fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
+    reachable_from(mf, mf.entry)
+}
+
+/// Blocks reachable over terminators from `root` (a fn entry OR a lambda entry).
+fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
     let mut reachable = Vec::new();
     let mut seen = HashSet::new();
-    let mut stack = vec![mf.entry];
+    let mut stack = vec![root];
     while let Some(b) = stack.pop() {
         if !seen.insert(b) {
             continue;
@@ -1188,4 +1620,109 @@ fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
         }
     }
     reachable
+}
+
+/// Every block the emitter walks: the fn's entry component plus each `Lambda`'s
+/// sub-CFG. A lambda body is unreachable from `mf.entry` (only its `Inst::Lambda`
+/// operand references it), so `reachable_blocks` alone misses it -- and the value
+/// model would then leave a lambda-body temp unmaterialized. Order is
+/// deterministic (entry component first, then lambdas in inst order).
+fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
+    let mut out = reachable_blocks(mf);
+    let mut seen: HashSet<Idx<Block>> = out.iter().copied().collect();
+    for (_, inst) in mf.insts.iter() {
+        if let Inst::Lambda { entry, .. } = inst {
+            for b in reachable_from(mf, *entry) {
+                if seen.insert(b) {
+                    out.push(b);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Cells that a lambda arrow must `let`-declare itself, keyed by the `Lambda`
+/// inst. A stored (non-param) cell belongs to the INNERMOST scope whose body
+/// contains all its store sites: a cell stored only inside one lambda's body is
+/// arrow-local; a captured-then-mutated cell (stored in the enclosing scope too)
+/// stays owned by the enclosing scope and is declared there, so a single JS
+/// binding is shared -- closure capture by reference, exactly like a Lua upvalue.
+fn compute_lambda_owned(mf: &MirFunc) -> HashMap<Idx<Inst>, Vec<Idx<Cell>>> {
+    let mut params: HashSet<u32> = mf.params.iter().map(|&c| raw(c)).collect();
+    let mut lambdas: Vec<(Idx<Inst>, HashSet<Idx<Block>>)> = Vec::new();
+    for (id, inst) in mf.insts.iter() {
+        if let Inst::Lambda { params: ps, entry } = inst {
+            params.extend(ps.iter().map(|&c| raw(c)));
+            lambdas.push((id, reachable_from(mf, *entry).into_iter().collect()));
+        }
+    }
+    let mut store_blocks: HashMap<u32, (Idx<Cell>, HashSet<Idx<Block>>)> = HashMap::new();
+    for (b, blk) in mf.blocks.iter() {
+        for &iid in &blk.insts {
+            for &cell in inst_writes(&mf.insts[iid]) {
+                store_blocks.entry(raw(cell)).or_insert_with(|| (cell, HashSet::new())).1.insert(b);
+            }
+        }
+    }
+    let mut owned: HashMap<Idx<Inst>, Vec<Idx<Cell>>> = HashMap::new();
+    for (craw, (cell, blocks)) in &store_blocks {
+        if params.contains(craw) {
+            continue;
+        }
+        // Innermost (smallest-body) lambda whose body contains every store site.
+        // A cell whose stores span the enclosing scope is owned there (declared
+        // at the fn top by the reachable-from-entry pass), so it lands in no
+        // lambda here.
+        let best = lambdas
+            .iter()
+            .filter(|(_, body)| blocks.iter().all(|b| body.contains(b)))
+            .min_by_key(|(_, body)| body.len());
+        if let Some((lid, _)) = best {
+            owned.entry(*lid).or_default().push(*cell);
+        }
+    }
+    for v in owned.values_mut() {
+        v.sort_by_key(|&c| raw(c));
+    }
+    owned
+}
+
+/// Lambdas that carry NO capture and can be hoisted to a single module-level
+/// value. luajit shares one hoisted fn per capture-free site (P3), so two
+/// references to the same-site lambda are `==` (identity leaf); an inline arrow
+/// would mint a fresh value per call and diverge. A lambda is hoistable iff every
+/// cell it references is its own param or arrow-local AND it nests no lambda (a
+/// nested capture would reach an enclosing cell not in module scope). `owned` is
+/// [`compute_lambda_owned`]'s result.
+fn hoistable_lambdas(
+    mf: &MirFunc,
+    owned: &HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
+) -> HashSet<Idx<Inst>> {
+    let mut out = HashSet::new();
+    for (id, inst) in mf.insts.iter() {
+        let Inst::Lambda { params, entry } = inst else { continue };
+        let body: HashSet<Idx<Block>> = reachable_from(mf, *entry).into_iter().collect();
+        let mut local: HashSet<u32> = params.iter().map(|&c| raw(c)).collect();
+        local.extend(owned.get(&id).into_iter().flatten().map(|&c| raw(c)));
+        let mut hoistable = true;
+        for &b in &body {
+            for &iid in &mf.blocks[b].insts {
+                if matches!(&mf.insts[iid], Inst::Lambda { .. }) {
+                    hoistable = false;
+                }
+                let refs = match &mf.insts[iid] {
+                    Inst::Load(c) => std::slice::from_ref(c),
+                    other => inst_writes(other),
+                };
+                if refs.iter().any(|c| !local.contains(&raw(*c))) {
+                    hoistable = false;
+                }
+            }
+        }
+        if hoistable {
+            out.insert(id);
+        }
+    }
+    out
 }

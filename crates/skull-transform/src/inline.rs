@@ -977,6 +977,53 @@ pub fn inline_functions(
     Ok((spliced, records))
 }
 
+/// Whether the fn declares any `Iterator` bound on its generics -- such a fn has
+/// no standalone emission (it exists only inlined at its call sites).
+pub fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
+    f.generic_bounds.iter().any(Option::is_some)
+}
+
+/// Post-inline gate: a body about to be emitted must contain no placeholder
+/// bound-call and no residual call to a bounded fn. Either residue means the
+/// mono-by-inlining contract broke -- most commonly a combinator chain in a
+/// context the inliner does not enter (a `co fn` body, a recursive bounded fn).
+/// Reject with a real error instead of emitting broken output. Shared by the
+/// luajit driver (`skull::mir_emit`) and the JS closure emitter.
+pub fn validate_no_residual_bound_calls(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+    mf: &MirFunc,
+) -> Result<(), CompilerError> {
+    // Walk block inst-lists, not the raw arena: a splice drops the consumed call
+    // inst from its block but the arena still holds it.
+    for (_, block) in mf.blocks.iter() {
+        for &iid in &block.insts {
+            match &mf.insts[iid] {
+                Inst::CallBoundMulti { .. } => {
+                    return Err(CompilerError::new_no_location(format!(
+                        "`{}`: an `Iterator`-bounded call was not monomorphized (a bounded fn \
+                         only works inlined; is this a recursive bounded fn?)",
+                        f.name
+                    )));
+                }
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                    let callee = &ws.module(func.module).functions[func.func];
+                    if fn_has_bounds(callee) {
+                        return Err(CompilerError::new_no_location(format!(
+                            "`{}` calls `Iterator`-bounded `{}` in a context that cannot inline \
+                             it (bounded fns have no standalone emission -- iterator combinators \
+                             are not supported inside `co fn` bodies or recursive bounded fns)",
+                            f.name, callee.name
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -43,6 +43,14 @@ pub(crate) struct LoopRegion {
     pub(crate) header: Idx<Block>,
     pub(crate) body: HashSet<Idx<Block>>,
     pub(crate) exit: Idx<Block>,
+    /// The header-condition test block, when this is a `while cond`/`for` shape:
+    /// a single body block that dominates every latch and has a lone out-of-loop
+    /// successor, so the loop emits `while (true) { <header..test>; if (!cond)
+    /// break; <body> }`. `None` for a `loop {}` whose exits are inline `break`s --
+    /// no test dominates the back-edges (e.g. a `continue` precedes the `break`),
+    /// so it emits as a bare `while (true) { <body> }` with the break/continue
+    /// falling out of the body's own branch structure.
+    pub(crate) test: Option<Idx<Block>>,
 }
 
 pub(crate) struct Structure {
@@ -160,7 +168,12 @@ fn idoms(n: usize, entry: usize, preds: &[Vec<usize>], rpo_order: &[usize]) -> V
 }
 
 /// Immediate post-dominators: dominators on the reversed CFG rooted at a virtual
-/// exit (node `n`) that every `Return`/`Unreachable` block flows into.
+/// exit (node `n`) that every `Return` block flows into. `Unreachable` blocks do
+/// NOT connect to the exit: they mark control the compiler proved never runs (an
+/// exhaustive-`match` default, code after a diverging call), so counting them as
+/// an exit path would defeat post-dominance of the REAL join -- an exhaustive
+/// enum match's `if/else-if` chain would then double-walk its return block and
+/// reject as a shared branch tail.
 fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Block>>> {
     let exit = n;
     let nn = n + 1;
@@ -171,8 +184,7 @@ fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Bloc
             rev_adj[s].push(b);
         }
         rev_preds[b].extend_from_slice(&succ[b]);
-        let terminal = matches!(f.blocks[bi(b)].term, Term::Return(_) | Term::Unreachable);
-        if terminal {
+        if matches!(f.blocks[bi(b)].term, Term::Return(_)) {
             rev_adj[exit].push(b);
             rev_preds[b].push(exit);
         }
@@ -241,24 +253,47 @@ fn natural_loops(
             })
             .collect();
         candidates.sort_by_key(|&b| b);
-        let Some(&test) =
-            candidates.iter().find(|&&c| candidates.iter().all(|&c2| dominates(idom, c, c2)))
-        else {
-            continue; // no single condition test; the walker rejects
-        };
-        let exits: Vec<usize> =
-            succ[test].iter().copied().filter(|s| !body.contains(s)).collect();
-        if exits.len() != 1 {
-            continue;
-        }
-        out.insert(
-            bi(h),
+        // A `while cond`/`for` shape: a single body block dominating every latch,
+        // with a lone out-of-loop successor, is the header-condition test. This is
+        // the exact registration the tier-0 loops already used -- preserved as-is.
+        let single_test = candidates
+            .iter()
+            .copied()
+            .find(|&c| candidates.iter().all(|&c2| dominates(idom, c, c2)))
+            .and_then(|test| {
+                let mut exits = succ[test].iter().copied().filter(|s| !body.contains(s));
+                let e = exits.next()?;
+                exits.next().is_none().then_some((test, e))
+            });
+        let region = if let Some((test, exit)) = single_test {
             LoopRegion {
                 header: bi(h),
                 body: body.iter().map(|&x| bi(x)).collect(),
-                exit: bi(exits[0]),
-            },
-        );
+                exit: bi(exit),
+                test: Some(bi(test)),
+            }
+        } else {
+            // No dominating test (a `loop {}` whose `break` follows a `continue`):
+            // a headerless `while (true)`. Structurable only if every out-of-loop
+            // edge across the body targets ONE exit block; a multi-exit loop is
+            // dropped so the walker rejects cleanly.
+            let mut exit_targets: Vec<usize> = body
+                .iter()
+                .flat_map(|&b| succ[b].iter().copied().filter(|s| !body.contains(s)))
+                .collect();
+            exit_targets.sort_unstable();
+            exit_targets.dedup();
+            if exit_targets.len() != 1 {
+                continue;
+            }
+            LoopRegion {
+                header: bi(h),
+                body: body.iter().map(|&x| bi(x)).collect(),
+                exit: bi(exit_targets[0]),
+                test: None,
+            }
+        };
+        out.insert(bi(h), region);
     }
     out
 }

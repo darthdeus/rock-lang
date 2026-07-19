@@ -14,7 +14,7 @@
 //! inside the loop braces.
 
 mod common;
-use common::{emit_user, emit_user_err, ws_with};
+use common::{emit_user, ws_with};
 
 // General `while` with a manual counter (NOT a range-for). The accumulator c1
 // and counter c2 are read+written across the back-edge; each iteration
@@ -253,10 +253,11 @@ function f(c0) {
 }
 
 // A `match` range pattern lowers to a control-flow short-circuit whose two
-// failure branches share a tail block -- reducible, but not a natural loop and
-// not yet recovered. It keeps rejecting (reject-don't-fallback), NOT as a loop.
+// failure branches share a tail block -- reducible but not a natural loop. The
+// short-circuit fold recovers it into one `&&` diamond (see tests/match_fold.rs
+// for the behavioral coverage); it no longer rejects.
 #[test]
-fn shared_tail_rejects() {
+fn range_match_folds_to_and_diamond() {
     let ws = ws_with(
         "fn f(n: int) -> int {
             return match n {
@@ -265,9 +266,11 @@ fn shared_tail_rejects() {
             }
         }",
     );
-    assert_eq!(
-        emit_user_err(&ws, "f"),
-        "JS subset: unstructured control flow (shared branch tail)"
+    let js = emit_user(&ws, "f");
+    assert!(js.contains("&&"), "range match folds to an && diamond:\n{js}");
+    assert!(
+        !js.contains("shared branch tail"),
+        "no longer rejects:\n{js}"
     );
 }
 

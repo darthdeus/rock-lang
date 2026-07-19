@@ -28,6 +28,11 @@ fn corpus() -> Vec<String> {
         "tests/type_inference_core.rock",
         "tests/js_loops_valuemodel.rock",
         "tests/js_collections.rock",
+        "tests/js_closures.rock",
+        "tests/js_match.rock",
+        "tests/js_multivalue.rock",
+        "tests/js_inline.rock",
+        "tests/js_value_structs.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -52,8 +57,16 @@ fn js_runnable_coverage_ratchet() {
     // (tests/intrinsics/value_reference.rock) raised it to 67; T3 (loops) added
     // tests/js_loops_valuemodel.rock to the corpus, raising it to 74; T4
     // (error/assert, Vec, structs, Map, equality) added tests/js_collections.rock
-    // and lifted the whole corpus to 91.
-    const FLOOR: usize = 91;
+    // and lifted the whole corpus to 91. T5 (closures/lambdas) added
+    // tests/js_closures.rock and lifted it to 99. T6 (short-circuit fold +
+    // exhaustive-match structuring) added tests/js_match.rock and lifted it to 106.
+    // T7 (multi-value ABI + loop-capture) added tests/js_multivalue.rock -> 111.
+    // T8a (shared transform pipeline: inline/cleanup/recover + narrowed arity
+    // guard + relooper empty-forward/infinite-loop fixes) added tests/js_inline.rock
+    // -> 114 (full-suite pass count 2299 -> 2568). T8b (GC-free value structs emit
+    // a plain `{__ty, ...}` object; GC-carrying ones reject) added
+    // tests/js_value_structs.rock -> 118 (full-suite 2568 -> 2650).
+    const FLOOR: usize = 118;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
