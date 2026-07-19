@@ -54,6 +54,10 @@ value Vec4 {
     return Vec2 { x: a.x * b.x, y: a.y * b.y }
 }
 
+@pure operator /(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x / b.x, y: a.y / b.y }
+}
+
 @pure operator /(a: Vec2, b: float) -> Vec2 {
     return Vec2 { x: a.x / b, y: a.y / b }
 }

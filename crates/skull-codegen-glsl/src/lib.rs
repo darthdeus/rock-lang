@@ -284,6 +284,9 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("dot", 2, "dot($1, $2)"),
     ("length", 1, "length($1)"),
     ("distance", 2, "distance($1, $2)"),
+    // NO normalize row: Rock's Vec2.normalize is zero-safe (returns zero()),
+    // GLSL's native normalize is undefined at 0 -- the Rock body emits as a
+    // helper fn instead (pinned by vec2_normalize_body).
     ("v", 2, "vec2($1, $2)"),
     ("v", 1, "vec2($1)"),
     ("v", 0, "vec2(0.0)"),
