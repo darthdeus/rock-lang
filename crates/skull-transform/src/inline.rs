@@ -383,10 +383,15 @@ fn find_site(
             let cell_count = func.cells.len();
             match get(cache, ws, scx, site.fref(), site.key()) {
                 // Decline a splice that would breach the per-caller cell budget
-                // (keep scanning — a smaller candidate may still fit).
+                // (keep scanning — a smaller candidate may still fit). A SPECIALIZED
+                // call (non-empty spec key) is exempt: its args are splatted to
+                // leaves, so the shared generic body cannot serve it -- it MUST
+                // splice, and eligibility is a subset of `classify` so a candidate
+                // always exists. Declining it would leave a residual miscompile.
                 Some(cand)
                     if arity_ok(cand, &site)
-                        && cell_count + cand.func.cells.len() <= CELL_BUDGET =>
+                        && (!site.key().is_empty()
+                            || cell_count + cand.func.cells.len() <= CELL_BUDGET) =>
                 {
                     return Some(site)
                 }
