@@ -2333,13 +2333,47 @@ fn count<I: Iterator<T>, T>(it: I) -> int {
     return n
 }
 
-// min_by/max_by (fn-value key) and sum/sum_f (concrete Iterator<int|float>
-// bound) are HELD: each independently trips a whole-program monomorphization
-// bug -- correct in isolation, but "expected string, found T" at emit time
-// when they coexist with co-fn + macro + __SITE__ code (bone/skull, not this
-// Rock). Re-land after the fix. Repro + matrix:
-// docs/nested-generic-terminal-fnparam-bug.md. Meanwhile: min via a `for`
-// loop; sum via `reduce(it, 0, (a, x) => a + x)`.
+@inline
+fn min_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
+    let best: T? = null
+    let best_k = 0.0
+    for x in it {
+        let k = key(x)
+        if best == null || k < best_k {
+            best = x
+            best_k = k
+        }
+    }
+    return best
+}
+
+@inline
+fn max_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
+    let best: T? = null
+    let best_k = 0.0
+    for x in it {
+        let k = key(x)
+        if best == null || k > best_k {
+            best = x
+            best_k = k
+        }
+    }
+    return best
+}
+
+@inline
+fn sum<I: Iterator<int>>(it: I) -> int {
+    let acc = 0
+    for x in it { acc = acc + x }
+    return acc
+}
+
+@inline
+fn sum_f<I: Iterator<float>>(it: I) -> float {
+    let acc = 0.0
+    for x in it { acc = acc + x }
+    return acc
+}
 
 // RingBuffer<T> -- fixed-capacity history buffer (trails, position history,
 // decals). `push` appends until full, then overwrites the oldest. `ago(k)`
