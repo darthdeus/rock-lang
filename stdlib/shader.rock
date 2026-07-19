@@ -25,6 +25,11 @@ struct Sampler2D {
     error("discard() is GPU-only (fragment-stage builtin)")
 """
 
+// Vertex-stage only (A2c): the per-vertex index within the draw call.
+@intrinsic @gpu_only inline(lua) fn vertex_id() -> int = """
+    error("vertex_id() is GPU-only (vertex-stage builtin)")
+"""
+
 // In-game shader compilation (docs/glsl-a3-integration-plan.md A3a). A call
 // `rock_shader(vert, frag)` (two direct references to top-level @shader fns)
 // is expanded at MIR lowering to the pipeline key const "<vert>+<frag>" that

@@ -295,6 +295,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("frag_coord", 0, "gl_FragCoord"),
     ("fwidth", 1, "fwidth($1)"),
     ("discard", 0, "discard"),
+    ("vertex_id", 0, "gl_VertexID"),
 ];
 
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
@@ -1649,6 +1650,8 @@ pub fn emit_shader_entry(
     }
     reach.gray.remove(&fref);
 
+    reject_stage_violations(ws, Stage::Fragment, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
+
     let (mut uses_idiv, mut uses_imod) = (false, false);
     for body in reach.bodies.values().chain(std::iter::once(&mf)) {
         for (_, inst) in body.insts.iter() {
@@ -1898,23 +1901,26 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers })
 }
 
-/// Reject fragment-only GPU builtins (frag_coord/fwidth/discard) reached from the
-/// vertex stage.
+/// Reject GPU builtins reached from the wrong stage: frag_coord/fwidth/discard
+/// are fragment-only, vertex_id is vertex-only.
 fn reject_stage_violations<'a>(
     ws: &Workspace,
     stage: Stage,
     bodies: impl Iterator<Item = &'a MirFunc>,
     span: Span,
 ) -> Result<(), CompilerError> {
-    if stage != Stage::Vertex {
-        return Ok(());
-    }
     for mf in bodies {
         for (_, inst) in mf.insts.iter() {
             if let Inst::Call { func, .. } = inst {
                 let n = ws.module(func.module).functions[func.func].name;
-                if matches!(n.as_str(), "fwidth" | "frag_coord" | "discard") {
-                    return Err(err(span, format!("shader vertex: `{n}()` is a fragment-stage builtin, not available in the vertex stage")));
+                match (stage, n.as_str()) {
+                    (Stage::Vertex, "fwidth" | "frag_coord" | "discard") => {
+                        return Err(err(span, format!("shader vertex: `{n}()` is a fragment-stage builtin, not available in the vertex stage")));
+                    }
+                    (Stage::Fragment, "vertex_id") => {
+                        return Err(err(span, format!("shader fragment: `{n}()` is a vertex-stage builtin, not available in the fragment stage")));
+                    }
+                    _ => {}
                 }
             }
         }

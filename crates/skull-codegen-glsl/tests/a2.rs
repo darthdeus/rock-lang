@@ -337,6 +337,64 @@ fn bool_uniform_is_allowed() {
 
 // --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
 
+// --- vertex_id: vertex-only builtin (A2c) ------------------------------------
+
+#[test]
+fn builtin_vertex_id_maps() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            let vid = vertex_id() % 4
+            let bend = 0.0
+            if vid == 0 || vid == 1 {
+                bend = 1.0
+            }
+            return Vary { position: Vec4 { x: a.aPos.x + bend, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
+    "#;
+    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
+    assert!(glsl.contains("gl_VertexID"), "got:\n{glsl}");
+    assert!(!glsl.contains("vertex_id("), "must not emit a fn call:\n{glsl}");
+}
+
+#[test]
+fn reject_vertex_id_in_fragment_stage() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 {
+            let vid = vertex_id()
+            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    reject_pipeline(src, "vt", "fr", "vertex-stage builtin");
+}
+
+/// The A1 fragment-only entry is also a fragment stage -- vertex_id rejects.
+#[test]
+fn reject_vertex_id_in_a1_entry() {
+    let src = r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {
+            let vid = vertex_id()
+            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    match emit_entry(src, "f") {
+        Ok(glsl) => panic!("expected rejection but emitted:\n{glsl}"),
+        Err(msg) => assert!(msg.contains("vertex-stage builtin"), "rejection should mention `vertex-stage builtin`, got: {msg}"),
+    }
+}
+
 #[test]
 fn reject_fwidth_in_vertex() {
     let src = r#"
