@@ -123,9 +123,21 @@ fn reject_entry_two_uniform_structs() {
         value Ua { a: float }
         value Ub { b: float }
         @shader(fragment)
-        fn f(u1: Ua, u2: Ub, tc: Vec2) -> Vec4 { return Vec4 { x: u1.a, y: u2.b, z: 0.0, w: 1.0 } }
+        fn f(@uniform u1: Ua, @uniform u2: Ub, tc: Vec2) -> Vec4 { return Vec4 { x: u1.a, y: u2.b, z: 0.0, w: 1.0 } }
     "#;
     reject_entry(src, "f", "one uniform struct");
+}
+
+/// A1 requires @uniform on the fragment uniform struct (one rule everywhere with
+/// the A2 pipeline). An unmarked value-struct param rejects, naming the fix.
+#[test]
+fn reject_entry_unmarked_uniform_struct() {
+    let src = r#"
+        value U { strength: float }
+        @shader(fragment)
+        fn f(u: U, tc: Vec2) -> Vec4 { return Vec4 { x: u.strength, y: tc.y, z: 0.0, w: 1.0 } }
+    "#;
+    reject_entry(src, "f", "@uniform");
 }
 
 #[test]
@@ -169,7 +181,7 @@ fn reject_entry_uniform_name_collision() {
     let src = r#"
         value U { scene: float }
         @shader(fragment)
-        fn f(u: U, scene: Sampler2D, tc: Vec2) -> Vec4 { return texture(scene, tc) }
+        fn f(@uniform u: U, scene: Sampler2D, tc: Vec2) -> Vec4 { return texture(scene, tc) }
     "#;
     reject_entry(src, "f", "collide");
 }

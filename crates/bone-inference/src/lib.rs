@@ -51,8 +51,6 @@ static Q_R: LazyLock<Ustr> = LazyLock::new(|| ustr("?R"));
 
 static Q_LAM: LazyLock<Ustr> = LazyLock::new(|| ustr("?lam"));
 
-static NATIVE_ARRAY: LazyLock<Ustr> = LazyLock::new(|| ustr("NativeArray"));
-
 static VEC: LazyLock<Ustr> = LazyLock::new(|| ustr("Vec"));
 
 static ENTITY: LazyLock<Ustr> = LazyLock::new(|| ustr("Entity"));

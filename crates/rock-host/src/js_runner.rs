@@ -1,0 +1,81 @@
+//! In-memory node eval: pipe an emitted JS program into node's stdin, capture
+//! stdout/stderr separately. The node sibling of `lua_runner` -- used by the
+//! `--backend js` test executor. node is resolved from PATH; its absence is a
+//! hard `CompilerError` (the caller asked for the JS backend explicitly).
+
+use crate::process_management::{register_child_process, unregister_child_process};
+use rock_core::CompilerError;
+use std::time::Duration;
+use wait_timeout::ChildExt;
+
+/// One node run's outcome. Unlike `lua_runner`, stderr stays separate: the JS
+/// executor's protocol lives on stdout and its error reports quote stderr
+/// verbatim.
+pub struct NodeRun {
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+}
+
+pub fn run_node_code_with_timeout(
+    code: &str,
+    timeout: Option<Duration>,
+) -> Result<NodeRun, CompilerError> {
+    let mut cmd = std::process::Command::new("node");
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        CompilerError::new_no_location(if e.kind() == std::io::ErrorKind::NotFound {
+            "node not found on PATH (required for --backend js)".to_string()
+        } else {
+            format!("failed to spawn node: {e}")
+        })
+    })?;
+    let pid = child.id();
+    register_child_process(pid);
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("node stdin is piped");
+        if let Err(e) = stdin.write_all(code.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            unregister_child_process(pid);
+            return Err(CompilerError::new_no_location(format!(
+                "failed to write program to node process: {e}"
+            )));
+        }
+    }
+    // Close stdin so node sees EOF and executes the piped program.
+    drop(child.stdin.take());
+
+    let output = if let Some(timeout_duration) = timeout {
+        match child
+            .wait_timeout(timeout_duration)
+            .expect("failed to wait for node process")
+        {
+            Some(_status) => child.wait_with_output().expect("failed to read node output"),
+            None => {
+                child.kill().expect("failed to kill timed-out node process");
+                child.wait().expect("failed to wait for killed node process");
+                unregister_child_process(pid);
+                return Err(CompilerError::new_no_location(format!(
+                    "node process timed out after {} seconds",
+                    timeout_duration.as_secs_f32()
+                )));
+            }
+        }
+    } else {
+        child.wait_with_output().expect("failed to read node output")
+    };
+
+    unregister_child_process(pid);
+
+    Ok(NodeRun {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        success: output.status.success(),
+    })
+}

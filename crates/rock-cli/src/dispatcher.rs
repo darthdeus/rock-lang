@@ -392,6 +392,24 @@ impl CommandContext {
         }
     }
 
+    /// Dispatch through the `js` test executor (bone type-check + JS-subset
+    /// per-test emission, run under node). Serves `test` only -- the `serves`
+    /// table gates everything else before this switch.
+    fn run_command_js(&self) -> Result<()> {
+        match self.args.command {
+            CliCommand::Test => {
+                let files = self.get_test_files()?;
+                crate::js_test::js_test(&files)
+            }
+            other => unreachable!(
+                "js dispatch reached unsupported command {:?}; the capability \
+                 gate should have rejected it — Backend::supported_commands and \
+                 run_command_js have diverged",
+                other
+            ),
+        }
+    }
+
     /// Dispatch through the `skull` backend (bone type-check + skull codegen ->
     /// Lua, executed via luajit). Only the codegen-capable commands route here;
     /// anything else is rejected, like the bone path.
@@ -455,7 +473,11 @@ impl CommandContext {
         // file against the stdlib and emits GLSL, so it's backend-agnostic and
         // dispatches before the backend switch like fmt/completions.
         if self.args.command == CliCommand::Shader {
-            return crate::skull_backend::skull_shader(&self.args.files, self.args.output.clone());
+            return crate::skull_backend::skull_shader(
+                &self.args.files,
+                self.args.output.clone(),
+                self.args.profile.clone(),
+            );
         }
         // iter-parse is a front-end (tokenize+parse) profiling loop; the
         // front-end is backend-independent, so dispatch before the backend switch.
@@ -605,6 +627,10 @@ impl CommandContext {
         if self.args.backend == crate::Backend::Bone {
             self.require_backend_support()?;
             return self.run_command_bone();
+        }
+        if self.args.backend == crate::Backend::Js {
+            self.require_backend_support()?;
+            return self.run_command_js();
         }
         self.require_backend_support()?;
         self.run_command_skull()

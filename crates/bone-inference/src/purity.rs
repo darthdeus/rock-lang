@@ -198,7 +198,7 @@ pub(crate) fn reject_captures_expr(
             go!(b);
         }
 
-        Expr::Tuple(es) | Expr::Array(es) | Expr::NativeArray(es) => {
+        Expr::Tuple(es) | Expr::Array(es) => {
             for x in es {
                 go!(x);
             }
@@ -496,7 +496,7 @@ pub(crate) fn verify_pure_expr(
         }
         // Array literals allocate a heap table -- identity observable across
         // re-evaluation, so not dup-safe.
-        Expr::Array(es) | Expr::NativeArray(es) => {
+        Expr::Array(es) => {
             errors.push(CompilerError::new_with_label(
                 span,
                 "`@pure` function builds an array literal (allocates a heap table, identity observable)"

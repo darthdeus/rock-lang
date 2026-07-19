@@ -9,5 +9,6 @@
 
 #[macro_use]
 pub mod prelude;
+pub mod annotations;
 pub mod hir;
 pub mod workspace;

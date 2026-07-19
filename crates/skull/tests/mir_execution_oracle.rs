@@ -152,7 +152,7 @@ fn corpus_execution_oracle() {
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).ok()?;
             let mid = *ws.module_ids.get(&ustr::Ustr::from(modname.as_str()))?;
             let emit = skull::mir_emit::emit_workspace_mir(&ws, mid).ok()?;
-            let tests = skull::module_tests(&ws, mid);
+            let tests = skull::module_tests(&ws, mid).ok()?;
             Some((emit.lua, emit.skipped.len(), tests))
         }));
         let (mut lua, skipped, tests) = match built {

@@ -33,6 +33,8 @@ bone-query = { path = "../bone-query" }
 rock-lsp = { path = "../rock-lsp" }
 skull = { path = "../skull" }
 skull-codegen-glsl = { path = "../skull-codegen-glsl" }
+skull-codegen-js = { path = "../skull-codegen-js" }
+skull-mir = { path = "../skull-mir" }
 lsp-types = { path = "../lsp-types-manual", package = "lsp-types-manual" }
 
 clap = { workspace = true }

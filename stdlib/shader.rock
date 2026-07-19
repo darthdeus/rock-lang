@@ -7,6 +7,40 @@ struct Sampler2D {
     __handle: int,
 }
 
-inline(lua) fn texture(s: Sampler2D, uv: Vec2) -> Vec4 = """
+@intrinsic @gpu_only inline(lua) fn texture(s: Sampler2D, uv: Vec2) -> Vec4 = """
     error("texture() is GPU-only (shader fns are not CPU-callable)")
+"""
+
+// GPU builtins (docs/glsl-a2-plan.md decision 5). Fragment-stage only; the
+// emitter whitelists them per stage. CPU bodies error -- never a silent stub.
+@intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """
+    error("frag_coord() is GPU-only (fragment-stage builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn fwidth(x: float) -> float = """
+    error("fwidth() is GPU-only (fragment-stage builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn discard() = """
+    error("discard() is GPU-only (fragment-stage builtin)")
+"""
+
+// In-game shader compilation (docs/glsl-a3-integration-plan.md A3a). A call
+// `rock_shader(vert, frag)` (two direct references to top-level @shader fns)
+// is expanded at MIR lowering to the pipeline key const "<vert>+<frag>" that
+// pipeline() looks up; the driver emits one __rock_shader_register(key, glsl)
+// per distinct pair at chunk top level. Annotation-keyed (not name-keyed) so a
+// user fn named rock_shader can't hijack it. The CPU body only fires if the fn
+// is taken as a value (never a silent stub); a real call is always expanded.
+@shader_expand inline(lua) fn rock_shader<V, F>(vert: V, frag: F) -> string = """
+    error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
+"""
+
+// Single-arg fullscreen form (docs/glsl-a3-integration-plan.md A3c): a direct
+// reference to a top-level @shader(fragment) fn. Expands to the bare frag-name
+// key (never contains '+', so it cannot collide with a pair key); the driver
+// routes it to the A1 single-entry emitter (PIXEL body + fullscreen VERTEX
+// passthrough). Same @shader_expand, so resolution stays annotation-keyed.
+@shader_expand inline(lua) fn rock_shader<F>(frag: F) -> string = """
+    error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """

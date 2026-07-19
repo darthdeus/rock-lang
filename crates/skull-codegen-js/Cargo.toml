@@ -1,0 +1,25 @@
+[package]
+name = "skull-codegen-js"
+version = "0.1.0"
+edition = "2024"
+
+# skull-codegen-js: the conformance-differential JS backend (docs/js-backend-plan.md).
+# A structured MIR->JS emitter for the scalar + NativeBuffer subset, run under
+# node as the second executing backend: mapping-vs-fallback for the scalar
+# intrinsics, JS-native vs luajit-native for the @native_required NativeBuffer
+# surface (tests/nb_differential.rs). Not a deployment target (that is S5).
+
+[dependencies]
+skull-mir = { path = "../skull-mir" }
+bone-semantic = { path = "../bone-semantic" }
+skull-parser = { path = "../skull-parser" }
+comfy-la-arena = { workspace = true }
+
+[dev-dependencies]
+rock-host = { path = "../rock-host" }
+skull = { path = "../skull" }
+skull-parser = { path = "../skull-parser" }
+ustr = { workspace = true }
+
+[lints]
+workspace = true

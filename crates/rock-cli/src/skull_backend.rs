@@ -26,7 +26,25 @@ use std::time::{Duration, Instant};
 /// symbols are referenced by name (resolved at runtime by a real stdlib
 /// prelude, or simply not called under the load-only validity gate).
 fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<CompilerError>> {
-    Ok(skull_emit_full(file, src)?.0)
+    Ok(skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?.0)
+}
+
+/// A [`skull_emit_full`] failure. `Discovery` (a malformed `@test` annotation on
+/// a file bone ACCEPTED) is split from `Compile` so the expect-compile-failure
+/// escape in [`skull_build`] never absorbs it -- `@test(expect_failure = true,
+/// returns = 42)` must reject, not count as an expected compile failure.
+enum EmitFullErr {
+    Compile(Vec<CompilerError>),
+    Discovery(CompilerError),
+}
+
+impl EmitFullErr {
+    fn into_errs(self) -> Vec<CompilerError> {
+        match self {
+            EmitFullErr::Compile(errs) => errs,
+            EmitFullErr::Discovery(e) => vec![e],
+        }
+    }
 }
 
 /// Emit the workspace and also discover the user module's `@test` functions
@@ -35,12 +53,14 @@ fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<Compiler
 fn skull_emit_full(
     file: &str,
     src: &str,
-) -> std::result::Result<(String, Vec<skull::SkullTest>), Vec<CompilerError>> {
-    let user = skull_parser::parse_module(src, ustr::Ustr::from(file)).map_err(|e| vec![e])?;
+) -> std::result::Result<(String, Vec<skull::SkullTest>), EmitFullErr> {
+    let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
+        .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
-    let ws = crate::bone_backend::check_with_stdlib([user])?;
+    let ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid).map_err(|e| vec![e])?;
+    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
+        .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let (lua, skipped) = (emit.lua, emit.skipped);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
         eprintln!("skull: {} stdlib fns skipped", skipped.len());
@@ -48,7 +68,7 @@ fn skull_emit_full(
             eprintln!("  {name}: {reason}");
         }
     }
-    let tests = skull::module_tests(&ws, user_mid);
+    let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
     Ok((lua, tests))
 }
 
@@ -313,7 +333,7 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
 ///
 /// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
 /// `discover_sources` — bone supplies its own via `bone_stdlib_modules()`.
-fn skull_assemble_project(
+pub(crate) fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
@@ -350,7 +370,15 @@ fn build_test_harness(tests: &[skull::SkullTest]) -> String {
         };
         // `f` is the global test fn by name; `out` is the expected stdout (or nil).
         // `name` labels the FAIL line (a package unit runs many tests together).
-        h.push_str(&format!("  {{ f = {}, out = {}, name = {} }},\n", t.name, out, lua_str(&t.name)));
+        // `val` marks a `@test(returns = ...)` test: the harness emits a VALUE
+        // line carrying the serialized return value; the HOST compares it.
+        h.push_str(&format!(
+            "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
+            t.name,
+            out,
+            lua_str(&t.name),
+            t.returns.is_some()
+        ));
     }
     h.push_str("}\n");
     h.push_str(
@@ -370,14 +398,20 @@ for _, t in ipairs(__skull_T) do
   io.write = function(...)
     for i = 1, select('#', ...) do buf[#buf + 1] = tostring((select(i, ...))) end
   end
-  local ok, err = pcall(t.f)
+  local ok, ret = pcall(t.f)
   print = rp
   io.write = rw
   local got = table.concat(buf, ""):gsub("^%s+", ""):gsub("%s+$", "")
   if not ok then
-    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(err)), "\n")
+    io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(ret)), "\n")
   elseif t.out ~= nil and got ~= t.out then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": output mismatch: expected <", __esc(t.out), "> got <", __esc(got), ">\n")
+  elseif t.val then
+    -- %.17g round-trips any f64; booleans via tostring. The host does the
+    -- comparison (test_protocol::compare_value), never this harness.
+    local s
+    if type(ret) == "number" then s = string.format("%.17g", ret) else s = tostring(ret) end
+    io.write("\n__SKULL__\tVALUE\t", t.name, "\t", s, "\n")
   else
     io.write("\n__SKULL__\tPASS\t\n")
   end
@@ -391,7 +425,7 @@ end
 /// real `file` path as the span file id, so the source must be registered under
 /// that same id -- registering under a placeholder makes every span lookup fail
 /// ("Unable to fetch source") and silently drops the snippet + labels.
-fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
+pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -408,6 +442,7 @@ fn no_user_module(e: CompilerError) -> anyhow::Error {
 }
 
 /// A skull failure: a short bucketed reason + the full rendered detail.
+#[derive(Debug)]
 struct SkullFailure {
     reason: String,
     rendered: String,
@@ -419,6 +454,7 @@ struct SkullFailure {
 /// toward "emit valid Lua" but not toward execution. Both variants carry the
 /// number of individual `@test` functions involved so the runner can report
 /// per-`@test` totals, not just per-file ones.
+#[derive(Debug)]
 enum SkullOutcome {
     /// All `@test`s passed (or the file had none). `tests` = number that ran
     /// green (0 for a load-only file with no `@test`s).
@@ -436,30 +472,46 @@ fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, Skull
     // skull codegen gap; both carry a `CompilerError`.
     let (lua, tests) = match skull_emit_full(file, src) {
         Ok(v) => v,
-        Err(errs) => {
+        Err(EmitFullErr::Compile(errs)) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
             // compile — a bone rejection here is the expected (passing) outcome.
             // (Mirrors the real rock runner's compile-Err branch.)
-            let mut sf = SourceFiles { files: vec![] };
-            sf.add_or_update_file(source_file_from_path_and_contents(
-                file.to_string(),
-                file.to_string(),
-                src.to_string(),
-            ));
-            let test_fns = crate::test::find_test_functions_from_sources(&sf);
-            if !test_fns.is_empty() && test_fns.iter().all(|t| t.expect_failure || t.ignored) {
-                // Every `@test` expected the compile to fail, and it did: each
-                // counts as a passing test.
-                return Ok(SkullOutcome::Pass { tests: test_fns.len() });
+            if let Some(tests) = all_tests_expect_compile_failure(file, src) {
+                return Ok(SkullOutcome::Pass { tests });
             }
             return Err(SkullFailure {
                 reason: categorize(&errs[0].message),
                 rendered: render_file_errs(file, src, &errs),
             });
         }
+        Err(EmitFullErr::Discovery(e)) => {
+            return Err(SkullFailure {
+                reason: categorize(&e.message),
+                rendered: render_file_errs(file, src, &[e]),
+            });
+        }
     };
 
     run_emitted_tests(&lua, &tests)
+}
+
+/// `Some(count)` when `file` declares `@test` fns and EVERY one carries
+/// `expect_failure`/`@ignore` -- a compile rejection is then the expected
+/// (passing) outcome and each counts as a passing test. Shared by the luajit
+/// and JS executors (both bone-type-check first, so the rule is identical).
+pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
+    let mut sf = SourceFiles { files: vec![] };
+    sf.add_or_update_file(source_file_from_path_and_contents(
+        file.to_string(),
+        file.to_string(),
+        src.to_string(),
+    ));
+    let test_fns = crate::test::find_test_functions_from_sources(&sf);
+    if !test_fns.is_empty() && test_fns.iter().all(|t| t.expect_failure || t.ignored) {
+        Some(test_fns.len())
+    } else {
+        None
+    }
 }
 
 /// Given emitted workspace Lua and the `@test` fns discovered in it, run them
@@ -503,27 +555,37 @@ fn run_emitted_tests(
         }
     };
 
-    let results: Vec<&str> = stdout
-        .lines()
-        .filter(|l| l.starts_with("__SKULL__\t"))
-        .collect();
-
     // No result lines at all => the module didn't even load (a skull bug),
     // not a test failure.
-    if results.is_empty() {
+    let Some(markers) = crate::test_protocol::parse_skull_markers(&stdout) else {
         return Err(SkullFailure {
             reason: "invalid lua emitted (skull bug)".to_string(),
             rendered: format!("{stdout}\n\n--- emitted lua (truncated) ---\n{}", truncate(&program)),
         });
+    };
+
+    // VALUE lines: compare the serialized return value HOST-side against the
+    // pinned `@test(returns = ...)` literal.
+    let mut passed = markers.passed;
+    let mut fails = markers.fails;
+    let expects: HashMap<&str, &skull::ValueExpect> = tests
+        .iter()
+        .filter_map(|t| t.returns.as_ref().map(|v| (t.name.as_str(), v)))
+        .collect();
+    for (name, val) in &markers.values {
+        let Some(expect) = expects.get(name.as_str()) else {
+            return Err(SkullFailure {
+                reason: "harness invariant breach (skull bug)".to_string(),
+                rendered: format!("VALUE line for `{name}` without a returns expectation"),
+            });
+        };
+        match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
+        {
+            Ok(()) => passed += 1,
+            Err(detail) => fails.push(format!("{name}: {detail}")),
+        }
     }
 
-    let fails: Vec<String> = results
-        .iter()
-        .filter(|l| l.contains("\tFAIL\t"))
-        .map(|l| l.splitn(3, '\t').nth(2).unwrap_or("").to_string())
-        .collect();
-
-    let passed = results.len() - fails.len();
     if fails.is_empty() {
         Ok(SkullOutcome::Pass { tests: passed })
     } else {
@@ -571,7 +633,10 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
             });
         }
     };
-    let tests = collect_package_tests(&ws, dir);
+    let tests = collect_package_tests(&ws, dir).map_err(|e| SkullFailure {
+        reason: categorize(&e.message),
+        rendered: render_project_err(&sources, &e),
+    })?;
     run_emitted_tests(&lua, &tests)
 }
 
@@ -582,7 +647,16 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
 fn collect_package_tests(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
-) -> Vec<skull::SkullTest> {
+) -> std::result::Result<Vec<skull::SkullTest>, CompilerError> {
+    Ok(collect_package_test_fns(ws, dir)?.into_iter().map(|(_, t)| t).collect())
+}
+
+/// [`collect_package_tests`] carrying each test's `FuncRef` (the JS executor
+/// lowers/emits per test fn).
+pub(crate) fn collect_package_test_fns(
+    ws: &bone_semantic::inference::Workspace,
+    dir: &str,
+) -> std::result::Result<Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>, CompilerError> {
     use bone_semantic::prelude::ModuleId;
     let root = std::path::Path::new(dir)
         .canonicalize()
@@ -597,10 +671,14 @@ fn collect_package_tests(
             .map(|c| c.starts_with(&root))
             .unwrap_or(false);
         if under {
-            out.extend(skull::module_tests(ws, m.id));
+            out.extend(
+                skull::module_tests_with_ids(ws, m.id)?
+                    .into_iter()
+                    .map(|(fid, t)| (skull_mir::mir::FuncRef { module: m.id, func: fid }, t)),
+            );
         }
     }
-    out
+    Ok(out)
 }
 
 /// Keep emitted-Lua dumps in error reports manageable.
@@ -613,13 +691,26 @@ fn truncate(s: &str) -> String {
 }
 
 /// `rock compile <file> --backend skull` — emit Lua to `output` (or stdout).
-/// `rock shader <file.rock> <fn> [fn...] --output <file.glsl>` -- GLSL
-/// function-library emission (route B, `docs/glsl-fn-emission.md`). Type-checks
-/// the file against the stdlib, then emits GLSL fn definitions for the named root
-/// fns + their reachable tier-0 callees. Backend-agnostic (dispatched before the
-/// backend switch). A profile violation renders spanned against the source and
-/// exits non-zero.
-pub fn skull_shader(files: &[String], output: Option<String>) -> Result<()> {
+/// Parse the `--profile` value for the pipeline form. No fallback: an unknown
+/// value rejects listing the valid ones.
+fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::GlslProfile> {
+    use skull_codegen_glsl::GlslProfile;
+    match s {
+        None | Some("330core") => Ok(GlslProfile::Core330),
+        Some("300es") => Ok(GlslProfile::Es300),
+        Some(other) => {
+            anyhow::bail!("rock shader: unknown --profile `{other}` (valid: 330core, 300es)")
+        }
+    }
+}
+
+/// `rock shader <file.rock> <fn> [fn...] [--output <file.glsl>]` -- GLSL emission.
+/// Two forms:
+///   - fn-library / single `@shader(fragment)` entry (route B / A1): unchanged.
+///   - `<vert_fn> <frag_fn> [--profile 330core|300es]`: the A2 vertex+fragment
+///     pipeline (`docs/glsl-a2-plan.md`), selected when a root is `@shader(vertex)`.
+/// A profile violation renders spanned against the source and exits non-zero.
+pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<String>) -> Result<()> {
     let Some((path, roots)) = files.split_first() else {
         anyhow::bail!("rock shader: usage: rock shader <file.rock> <fn> [fn...] --output <file.glsl>");
     };
@@ -650,25 +741,63 @@ pub fn skull_shader(files: &[String], output: Option<String>) -> Result<()> {
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     let roots: Vec<String> = roots.to_vec();
-    let glsl = match skull_codegen_glsl::emit_shader(&ws, user_mid, &roots) {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("{}", render_file_errs(path, &src, &[e]));
-            std::process::exit(1);
+
+    // Pipeline form: any root is a `@shader(vertex)` entry.
+    let is_pipeline = roots
+        .iter()
+        .any(|r| skull_codegen_glsl::is_vertex_shader_root(&ws, user_mid, r));
+
+    let glsl = if is_pipeline {
+        if roots.len() != 2 {
+            anyhow::bail!("rock shader: the vertex+fragment pipeline form takes exactly two roots: <vert_fn> <frag_fn>");
+        }
+        let prof = parse_glsl_profile(profile.as_deref())?;
+        match skull_codegen_glsl::emit_shader_pipeline(&ws, user_mid, &roots[0], &roots[1], prof) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("{}", render_file_errs(path, &src, &[e]));
+                std::process::exit(1);
+            }
+        }
+    } else {
+        if profile.is_some() {
+            anyhow::bail!("rock shader: --profile only applies to the vertex+fragment pipeline form (<vert_fn> <frag_fn>)");
+        }
+        match skull_codegen_glsl::emit_shader(&ws, user_mid, &roots) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("{}", render_file_errs(path, &src, &[e]));
+                std::process::exit(1);
+            }
         }
     };
+
     match output {
         Some(out) => {
             // Keep the fn-library header text stable: utils_math.glsl byte-identity.
             let mode = if glsl.starts_with("#version") { "shader entry" } else { "route B" };
+            let profile_flag = profile.as_deref().map(|p| format!(" --profile {p}")).unwrap_or_default();
             let header = format!(
                 "// GENERATED by skull-codegen-glsl ({mode}) -- DO NOT EDIT.\n\
-                 // Regenerate: rock shader {} {} --output {}\n\n",
+                 // Regenerate: rock shader {} {}{} --output {}\n\n",
                 path,
                 roots.join(" "),
+                profile_flag,
                 out
             );
-            rock_host::project::write_atomic(&out, &format!("{header}{glsl}"))?;
+            // A `#version` output puts the header AFTER the version line: the ES
+            // profile requires `#version` to be the very first token (a leading
+            // comment is a hard error), and the engine loader keeps the header
+            // in-source, so a header-before-#version breaks the mobile profile.
+            let file = if let Some(rest) = glsl.strip_prefix("#version") {
+                let nl = rest.find('\n').map(|p| p + 1).unwrap_or(rest.len());
+                let (version_tail, body) = rest.split_at(nl);
+                let body = body.strip_prefix('\n').unwrap_or(body);
+                format!("#version{version_tail}{header}{body}")
+            } else {
+                format!("{header}{glsl}")
+            };
+            rock_host::project::write_atomic(&out, &file)?;
             log::info!(target: "SHADER", "{} [{}] -> {}", path, roots.join(", "), out);
         }
         None => print!("{glsl}"),
@@ -928,7 +1057,7 @@ fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
 
 /// [`render_project_err`] over every collected diagnostic, joined into one
 /// report — the CLI prints ALL of them, matching the LSP.
-fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
+pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles { files: vec![] };
     for file in &sources.files {
         let f = file.borrow();
@@ -1249,14 +1378,12 @@ fn skull_run_project(dir: &str) -> Result<()> {
 /// `rock test <paths> --backend skull` — for every `.rock` file, run the skull
 /// pipeline and the luajit validity gate; report pass/fail + a bucketed
 /// failure-reason histogram (the skull analogue of the bone test histogram).
-pub fn skull_test(paths: &[String]) -> Result<()> {
-    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
-
-    // A test UNIT is either an isolated file (root `tests/`: independent
-    // programs that would collide in one workspace) or a whole `stick.toml`
-    // package built as ONE workspace. A cross-file lib can only be tested the
-    // second way -- per-file, any file referencing a sibling's symbol fails to
-    // compile. Package dirs go the workspace route; everything else per-file.
+/// Split `paths` into test UNITS: isolated files (root `tests/`: independent
+/// programs that would collide in one workspace) and whole `stick.toml`
+/// packages built as ONE workspace each. A cross-file lib can only be tested
+/// the second way -- per-file, any file referencing a sibling's symbol fails to
+/// compile. Shared by every test executor (luajit + JS).
+pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut files = Vec::new();
     let mut package_dirs = Vec::new();
     for path in paths {
@@ -1270,6 +1397,13 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
     files.dedup();
     package_dirs.sort();
     package_dirs.dedup();
+    Ok((files, package_dirs))
+}
+
+pub fn skull_test(paths: &[String]) -> Result<()> {
+    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
+
+    let (files, package_dirs) = collect_test_units(paths)?;
 
     let start = Instant::now();
     let mut emit_ok = 0usize; // units: emit valid Lua (passes or test-fails)
@@ -2457,7 +2591,7 @@ mod overlay_runtime_tests {
         let Ok(ws) = crate::bone_backend::check_with_stdlib([user]) else { return r };
         let mid = crate::bone_backend::entry_module_id(&ws, user_file);
         let Ok((full, mut cache)) = skull::mir_emit::emit_full(&ws, mid) else { return r };
-        let tests = skull::module_tests(&ws, mid);
+        let Ok(tests) = skull::module_tests(&ws, mid) else { return r };
         if tests.is_empty() {
             return r;
         }
@@ -2554,7 +2688,6 @@ mod overlay_runtime_tests {
             "tests/adversarial_functions_lambdas.rock",
             "tests/adversarial_coroutines.rock",
             "tests/adversarial_nullable_refinement.rock",
-            "tests/adversarial_native_arrays.rock",
         ];
         let present: Vec<String> = curated.iter().map(|s| ws_path(s)).filter(|f| std::path::Path::new(f).exists()).collect();
         assert!(present.len() >= 8, "curated corpus files missing: only {} present", present.len());
@@ -4951,6 +5084,63 @@ mod force_full_tests {
             std::fs::read_to_string(&main_lua).unwrap(),
             main_v1,
             "force_full must leave the last-good main.lua untouched, not overwrite with a partial build"
+        );
+    }
+}
+
+#[cfg(test)]
+mod value_test_exec {
+    //! `@test(returns = <literal>)` end-to-end on the luajit executor: the
+    //! harness emits a VALUE marker, the host compares
+    //! (`test_protocol::compare_value`). Discovery rejections (the
+    //! returns+expect_failure contradiction) must fail the unit, never route
+    //! through the expect-compile-failure escape.
+
+    use super::*;
+
+    #[test]
+    fn value_mismatch_fails_with_detail() {
+        let src = "@test(returns = 43)\nfn r() -> int { return 42 }\n";
+        match skull_build("val.rock", src).expect("build ok") {
+            SkullOutcome::TestFail { passed, fails } => {
+                assert_eq!(passed, 0);
+                assert_eq!(fails, vec!["r: value mismatch: expected <43> got <42>".to_string()]);
+            }
+            SkullOutcome::Pass { .. } => panic!("mismatching value test must FAIL"),
+        }
+    }
+
+    #[test]
+    fn value_tests_pass_int_float_bool_and_with_output() {
+        let src = "@test(returns = 42)\nfn a() -> int { return 42 }\n\
+                   @test(returns = -1.5)\nfn b() -> float { return -1.5 }\n\
+                   @test(returns = true)\nfn c() -> bool { return true }\n\
+                   @test(returns = 6, output = \"hi\")\nfn d() -> int { print(\"hi\")\n return 6 }\n";
+        match skull_build("val.rock", src).expect("build ok") {
+            SkullOutcome::Pass { tests } => assert_eq!(tests, 4),
+            SkullOutcome::TestFail { fails, .. } => panic!("expected all pass, got {fails:?}"),
+        }
+    }
+
+    #[test]
+    fn value_test_error_still_fails() {
+        let src = "@test(returns = 1)\nfn e() -> int { error(\"boom\")\n return 1 }\n";
+        match skull_build("val.rock", src).expect("build ok") {
+            SkullOutcome::TestFail { fails, .. } => {
+                assert!(fails[0].contains("error:"), "got {fails:?}");
+            }
+            SkullOutcome::Pass { .. } => panic!("erroring value test must FAIL"),
+        }
+    }
+
+    #[test]
+    fn returns_plus_expect_failure_is_a_unit_failure_not_expected_pass() {
+        let src = "@test(expect_failure = true, returns = 42)\nfn contra() -> int { return 42 }\n";
+        let err = skull_build("val.rock", src).expect_err("contradiction must reject the unit");
+        assert!(
+            err.reason.contains("contradictory"),
+            "unexpected reason: {}",
+            err.reason
         );
     }
 }

@@ -28,6 +28,7 @@ use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
 use comfy_la_arena::{Idx, IdxRange};
 use skull_parser::CompilerError;
 
+use crate::intrinsics::ExpandKind;
 use crate::mir::*;
 
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
@@ -1236,7 +1237,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             tag!(9);
             n.hash(h);
         }
-        Expr::Tuple(es) | Expr::Array(es) | Expr::NativeArray(es) => {
+        Expr::Tuple(es) | Expr::Array(es) => {
             tag!(10);
             for x in es {
                 go!(x);
@@ -2405,8 +2406,7 @@ impl Builder<'_> {
                 let vs = self.lower_exprs(elems)?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
-            Expr::Array(elems) => self.lower_array_literal(elems, ContainerKind::Vec),
-            Expr::NativeArray(elems) => self.lower_array_literal(elems, ContainerKind::NativeArray),
+            Expr::Array(elems) => self.lower_array_literal(elems),
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
@@ -3001,36 +3001,26 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    /// `[..]` / `![..]`, with spread support. No spread -> a single
-    /// `MakeVec`/`MakeArray`. With a `..x` element, build the empty array then
-    /// push each element / splice each spread (`ArrayPush`), so spreads of
-    /// tuples/structs/arrays splice element-wise.
-    fn lower_array_literal(
-        &mut self,
-        elems: IdxRange<Expr>,
-        kind: ContainerKind,
-    ) -> Result<Idx<Inst>, CompilerError> {
+    /// `[..]`, with spread support. No spread -> a single `MakeVec`. With a
+    /// `..x` element, build the empty Vec then push each element / splice each
+    /// spread (`ArrayPush`), so spreads of tuples/structs/arrays splice
+    /// element-wise.
+    fn lower_array_literal(&mut self, elems: IdxRange<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let idxs: Vec<Idx<Expr>> = elems.into_iter().collect();
         let has_spread = idxs
             .iter()
             .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
         if !has_spread {
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
-            return Ok(self.emit_cur(match kind {
-                ContainerKind::Vec => Inst::MakeVec(vs),
-                _ => Inst::MakeArray(vs),
-            }));
+            return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        let arr = self.emit_cur(match kind {
-            ContainerKind::Vec => Inst::MakeVec(vec![]),
-            _ => Inst::MakeArray(vec![]),
-        });
+        let arr = self.emit_cur(Inst::MakeVec(vec![]));
         for &e in &idxs {
             if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                self.spread_into(arr, inner, kind)?;
+                self.spread_into(arr, inner, ContainerKind::Vec)?;
             } else {
                 let v = self.lower_expr(e)?;
-                self.emit_cur(Inst::ArrayPush { arr, value: v, kind });
+                self.emit_cur(Inst::ArrayPush { arr, value: v, kind: ContainerKind::Vec });
             }
         }
         Ok(arr)
@@ -3273,11 +3263,16 @@ impl Builder<'_> {
             // `f(recv, a)`, no real fn `f`) or a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
                 // A `@struct_expand` fn (docs/pass-uniforms-design.md) is replaced
-                // by its literal pairs list -- keyed on the declaration annotation
-                // (checked off the resolved FuncRef, so no user fn is hijacked by
-                // name and the common non-annotated call pays only one field read).
-                Ok(func) if self.fn_has_struct_expand(func) => {
+                // by its literal pairs list -- recognized through the intrinsic
+                // registry off the resolved FuncRef, so no user fn is hijacked by
+                // name and the common non-intrinsic call pays only one field read.
+                Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::StructPairs)) => {
                     self.expand_struct_pairs(e, func, &arg_idxs)
+                }
+                Ok(func)
+                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) =>
+                {
+                    self.expand_shader_pipeline(e, &arg_idxs)
                 }
                 Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
@@ -4810,6 +4805,12 @@ impl Builder<'_> {
                 "for over Arena must route through the iterator protocol (for_iter_protocol missing)",
             ));
         }
+        // FlatVec iterates its `buf` storage bounded by the `len` field;
+        // `lower_for_array` owns that special-case. Route here so `coll_kind`
+        // stays closed over Vec/Map/NativeBuffer (it can't classify FlatVec).
+        if self.expr_is_flat_vec(iter) {
+            return self.lower_for_array(vars, iter, body);
+        }
         match self.coll_kind(iter) {
             // `for x in [T]` always arrives with `for_iter_protocol` populated
             // (bone routes Array to the stdlib VecIter protocol); reaching the
@@ -4818,9 +4819,7 @@ impl Builder<'_> {
             ContainerKind::Vec => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
             )),
-            ContainerKind::NativeArray | ContainerKind::NativeBuffer => {
-                self.lower_for_array(vars, iter, body)
-            }
+            ContainerKind::NativeBuffer => self.lower_for_array(vars, iter, body),
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
         }
     }
@@ -6272,12 +6271,11 @@ impl Builder<'_> {
         Ok(ValueRepr::Group { name: shape.name, parts })
     }
 
-    /// True iff `func` carries the `@struct_expand` annotation.
-    fn fn_has_struct_expand(&self, func: FuncRef) -> bool {
-        self.ws.module(func.module).functions[func.func]
-            .annotations
-            .iter()
-            .any(|a| a.name.name.as_str() == "struct_expand")
+    /// The compile-time expansion kind for `func`, routed through the intrinsic
+    /// registry ([`crate::intrinsics::expand_kind`]) -- the ONE recognizer, so
+    /// there is no second bespoke annotation check.
+    fn fn_expand_kind(&self, func: FuncRef) -> Option<ExpandKind> {
+        crate::intrinsics::expand_kind(&self.ws.module(func.module).functions[func.func])
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
@@ -6346,6 +6344,22 @@ impl Builder<'_> {
             tuples.push(tup);
         }
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeVec(tuples))))
+    }
+
+    /// Expand a `rock_shader(vert, frag)` call to its pipeline key const
+    /// `"<vert>+<frag>"` (docs/glsl-a3a-implementation.md). The driver
+    /// (`skull::mir_emit`) emits the matching top-level `__rock_shader_register`;
+    /// this side produces only the key -- no GLSL, so skull-mir stays free of the
+    /// GLSL backend. Rejections flow through the shared `resolve_shader_pair`; the
+    /// fatal gate is `shader_expand_rejection`.
+    fn expand_shader_pipeline(
+        &mut self,
+        call: Idx<Expr>,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let pair = resolve_shader_pair(self.ws, self.body, call, arg_idxs)?;
+        let key = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(pair.key.as_str()))));
+        Ok(ValueRepr::Scalar(key))
     }
 
     /// Construct `enum_name::variant(payload)` for a variant with a single
@@ -6727,7 +6741,9 @@ impl Builder<'_> {
     }
 
     /// The collection kind of a base expression, from its inferred type — drives
-    /// the index/length shape (decision 9). Defaults to `NativeArray`.
+    /// the index/length shape (decision 9). bone's index/iter whitelist is closed
+    /// (`Vec`/`Map`/`NativeBuffer`+sized), so any other type reaching here is a
+    /// front-end/back-end disagreement, not a program the user could write.
     fn coll_kind(&self, base: Idx<Expr>) -> ContainerKind {
         match self.expr_ty(base) {
             Some(TypeExpr::App {
@@ -6742,7 +6758,17 @@ impl Builder<'_> {
                 ctor: TypeCtor::Nominal(name),
                 ..
             }) if is_native_buffer(name.as_str()) => ContainerKind::NativeBuffer,
-            _ => ContainerKind::NativeArray,
+            _ => {
+                let rendered = self
+                    .inf
+                    .and_then(|i| i.expr_types.get(base).copied())
+                    .map(|t| self.ws.render(self.inf, t))
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                unreachable!(
+                    "coll_kind: expected an indexable container (Vec/Map/NativeBuffer); \
+                     bone admitted an index/iter on `{rendered}`"
+                )
+            }
         }
     }
 
@@ -7634,41 +7660,6 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
     None
 }
 
-/// When `ty` resolves to `NativeArray<E>` with `E` a nullable type, returns true.
-fn na_optional_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> bool {
-    let Some(ty) = resolve_tyid(ws, inf, ty) else { return false };
-    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), params }) = ty_node(ws, inf, ty)
-    else {
-        return false;
-    };
-    if name.as_str() != "NativeArray" {
-        return false;
-    }
-    let Some(elem_idx) = params.into_iter().next() else { return false };
-    let Some(elem) = resolve_tyid(ws, inf, ty.with_idx(elem_idx)) else { return false };
-    matches!(ty_node(ws, inf, elem), Some(TypeExpr::Nullable(..)))
-}
-
-/// Scan module `mid`'s bodies for an expression whose inferred type is
-/// `NativeArray<T?>`. `![T?]` is a bare Lua table; `#` / `ipairs` stop at the
-/// first nil, so an embedded `null` silently truncates iteration -- use `[T?]`
-/// (Vec, tracked `.len`) instead. bone rejects the annotated forms; an inferred
-/// literal (`![1, null]`) slips through, so this is the emit-time gate. Returns
-/// the first offending expression's span.
-pub fn native_array_optional_elem(ws: &Workspace, mid: ModuleId) -> Option<Span> {
-    let module = ws.module(mid);
-    let ir = ws.inference(mid)?;
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (e, tyid) in inf.expr_types.iter() {
-            if na_optional_elem(ws, inf, *tyid) {
-                return Some(body.expr_spans[e]);
-            }
-        }
-    }
-    None
-}
-
 // -- `@struct_expand` emit-time rejection (docs/pass-uniforms-design.md, Layer 2).
 // The lowering expander replaces a valid call; this pass is the FATAL gate that
 // rejects an invalid one, since a per-fn lowering error would only be recorded as
@@ -7707,7 +7698,7 @@ pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             };
             let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
             let f = &ws.module(fmod).functions[fid];
-            if !f.annotations.iter().any(|a| a.name.name.as_str() == "struct_expand") {
+            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::StructPairs)) {
                 continue;
             }
             let fname = f.name;
@@ -7748,6 +7739,227 @@ pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             if let Err(msg) = struct_expand_variants(ws, enum_name, &fields) {
                 return reject(arg_span, format!("`@struct_expand`: {msg}"));
             }
+        }
+    }
+    None
+}
+
+// -- `@shader_expand` (`rock_shader`) expansion + rejection
+// (docs/glsl-a3a-implementation.md). A call collapses to the pipeline key const
+// `"<vert>+<frag>"`; the driver (skull::mir_emit) emits one top-level
+// `__rock_shader_register(key, glsl)` per distinct pair. The lowering expander,
+// the fatal rejection gate, and the driver's pair collector all resolve args
+// through `resolve_shader_pair`, so they never diverge. skull-mir stays free of
+// GLSL emission (the layering constraint): only FuncRefs + the key cross up. --
+
+/// A resolved `rock_shader(...)` pipeline. Two forms:
+/// - two-arg `rock_shader(vert, frag)`: `vert = Some(..)`, `key = "<vert>+<frag>"`;
+///   the driver runs `emit_shader_pipeline`.
+/// - one-arg fullscreen `rock_shader(frag)`: `vert = None`, `key = "<frag>"` (a
+///   bare name, never containing '+', so it can never collide with a pair key);
+///   the driver runs `emit_shader_entry`.
+/// `key` is the pipeline name const `pipeline()` looks up.
+#[derive(Clone, Debug)]
+pub struct ShaderPair {
+    pub key: String,
+    pub vert: Option<FuncRef>,
+    pub frag: FuncRef,
+}
+
+/// The `@shader(<stage>)` stage of `f` (`"vertex"`/`"fragment"`), else `None`.
+/// A local read of the annotation (skull-codegen-glsl has the same helper, but
+/// skull-mir must not depend on it -- the layering constraint).
+fn shader_stage_of(f: &Function) -> Option<&'static str> {
+    let ann = f.annotations.iter().find(|a| a.name.name.as_str() == "shader")?;
+    match ann.args.first().map(|a| &a.value) {
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
+            Some("fragment")
+        }
+        _ => None,
+    }
+}
+
+/// Resolve one `rock_shader` argument to a direct reference to a top-level
+/// `@shader(<want_stage>)` fn. Rejects (spanned) a non-`Expr::Global` arg (a
+/// local, lambda, literal, call -- anything that is not a bare top-level fn
+/// name), a name that is not a unique top-level fn, a non-`@shader` fn, or a
+/// stage mismatch.
+fn resolve_shader_arg(
+    ws: &Workspace,
+    body: &Body,
+    arg: Idx<Expr>,
+    want_stage: &str,
+) -> Result<FuncRef, CompilerError> {
+    let span = body.expr_spans[arg];
+    let reject = |msg: String| CompilerError::new_with_label(span, msg);
+    let Expr::Global(name) = body.expr_arena[arg] else {
+        return Err(reject(format!(
+            "`rock_shader` argument must be a direct reference to a top-level `@shader({want_stage})` fn"
+        )));
+    };
+    let fref = match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
+        Some([(module, func)]) => FuncRef { module: *module, func: *func },
+        _ => {
+            return Err(reject(format!(
+                "`rock_shader` argument `{name}` is not a unique top-level fn"
+            )))
+        }
+    };
+    let f = &ws.module(fref.module).functions[fref.func];
+    match shader_stage_of(f) {
+        Some(stage) if stage == want_stage => Ok(fref),
+        Some(other) => Err(reject(format!(
+            "`rock_shader` expects a `@shader({want_stage})` fn here, but `{name}` is `@shader({other})`"
+        ))),
+        None => Err(reject(format!(
+            "`rock_shader` argument `{name}` is not a `@shader` fn"
+        ))),
+    }
+}
+
+/// Resolve a `rock_shader(...)` call's args to a [`ShaderPair`], or the first
+/// spanned rejection. Arity dispatches the form: one arg -> fullscreen
+/// (`vert = None`, key = bare frag name), two args -> pair (key = `"<vert>+<frag>"`).
+/// Any other arity rejects, naming BOTH legal forms. Shared by the lowering
+/// expander ([`Builder::expand_shader_pipeline`]), the fatal gate
+/// ([`shader_expand_rejection`]), and the driver collector
+/// ([`collect_shader_pairs`]) -- one resolver, never forked.
+pub fn resolve_shader_pair(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+) -> Result<ShaderPair, CompilerError> {
+    match args {
+        [frag_arg] => {
+            let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
+            let fname = ws.module(frag.module).functions[frag.func].name;
+            // Bare frag name -- no '+', so it can never collide with a pair key.
+            Ok(ShaderPair { key: fname.to_string(), vert: None, frag })
+        }
+        [vert_arg, frag_arg] => {
+            let vert = resolve_shader_arg(ws, body, *vert_arg, "vertex")?;
+            let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
+            let vname = ws.module(vert.module).functions[vert.func].name;
+            let fname = ws.module(frag.module).functions[frag.func].name;
+            Ok(ShaderPair { key: format!("{vname}+{fname}"), vert: Some(vert), frag })
+        }
+        _ => Err(CompilerError::new_with_label(
+            body.expr_spans[call_expr],
+            "`rock_shader` takes either one argument -- rock_shader(fragment_fn) \
+             (fullscreen) -- or two -- rock_shader(vertex_fn, fragment_fn)"
+                .to_string(),
+        )),
+    }
+}
+
+/// Scan module `mid`'s bodies for a `rock_shader` call the lowering expander
+/// could not honor (bad arity, a non-`@shader` / non-direct-reference arg, a
+/// stage mismatch). Returns the first spanned rejection. FATAL gate: a per-fn
+/// lowering error is only a lenient skip, so validation lives here.
+pub fn shader_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            if !matches!(
+                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                Some(ExpandKind::ShaderPipeline)
+            ) {
+                continue;
+            }
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Err(err) = resolve_shader_pair(ws, body, e, &arg_idxs) {
+                return Some(err);
+            }
+        }
+    }
+    None
+}
+
+/// Every distinct `rock_shader` pair across the workspace, deduped by key and
+/// sorted by key (deterministic registration order -> byte-stable re-emission).
+/// The driver ([`skull::mir_emit`]) turns each into one top-level
+/// `__rock_shader_register`. Any resolution failure surfaces as `Err` (the fatal
+/// [`shader_expand_rejection`] gate runs first, so this is normally infallible).
+pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerError> {
+    let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
+        std::collections::BTreeMap::new();
+    for (_, &mid) in ws.module_ids.iter() {
+        let module = ws.module(mid);
+        let ir = ws.inference(mid);
+        for (owner, body) in module.bodies.iter() {
+            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
+            for (e, expr) in body.expr_arena.iter() {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                    continue;
+                };
+                let resolved = match inf {
+                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
+                    None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
+                        Some([single]) => Some(*single),
+                        _ => None,
+                    },
+                };
+                let Some((fmod, fid)) = resolved else { continue };
+                if !matches!(
+                    crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                    Some(ExpandKind::ShaderPipeline)
+                ) {
+                    continue;
+                }
+                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+                let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
+                by_key.entry(pair.key.clone()).or_insert(pair);
+            }
+        }
+    }
+    Ok(by_key.into_values().collect())
+}
+
+/// Reject a CPU-side (Lua-emission) DIRECT call to a `@gpu_only` intrinsic
+/// (`texture()`, stdlib/shader.rock). Allowed only when the calling fn is itself
+/// GPU-side (`@shader(...)` or `@gpu_only`) -- shader bodies compile through the
+/// Lua backend (bitgun's `heat_shimmer_frag`) and must keep working. Only DIRECT
+/// calls are rejected: taking the fn as a value and calling it indirectly is out
+/// of scope and keeps hitting the runtime-error body (the never-silent-stub
+/// defense, CLAUDE.md "NEVER swallow errors"). Returns the first spanned reject.
+pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        let caller_is_gpu = match owner {
+            BodyOwner::Function(fid) => crate::intrinsics::is_gpu_context(&module.functions[*fid]),
+            _ => false,
+        };
+        if caller_is_gpu {
+            continue;
+        }
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let f = &ws.module(fmod).functions[fid];
+            if !crate::intrinsics::is_gpu_only(f) {
+                continue;
+            }
+            let fname = f.name;
+            return Some(CompilerError::new_with_label(
+                body.expr_spans[e],
+                format!(
+                    "`{fname}` is GPU-only and cannot be called from CPU (Lua) code. \
+                     Shader helper code that calls `{fname}` must annotate its fn `@shader(...)` \
+                     or `@gpu_only`."
+                ),
+            ));
         }
     }
     None
@@ -7858,9 +8070,9 @@ mod tests {
     }
 
     #[test]
-    fn compound_assign_to_native_array_index() {
+    fn compound_assign_to_vec_index() {
         let dump = mir_std(
-            "fn f() -> int { let arr = ![10, 20, 30]\n arr[1] += 5\n arr[1] }",
+            "fn f() -> int { let arr = [10, 20, 30]\n arr[1] += 5\n arr[1] }",
             "f",
         );
         assert!(dump.contains("store_index"), "expected a store_index, got:\n{dump}");
@@ -8184,21 +8396,6 @@ fn f() {
     }
 
     #[test]
-    fn native_array_literal_builds_an_array() {
-        assert_eq!(
-            mir("fn f() -> ![int] { ![1, 2] }", "f"),
-            "\
-fn f() {
-  bb0:
-    v0 = const 1
-    v1 = const 2
-    v2 = array [v0, v1]
-    return v2
-}"
-        );
-    }
-
-    #[test]
     fn tuple_return_splats_multi_value() {
         // A tuple-return fn splats its N elements (multi-return ABI) instead of
         // returning one heap table. The `tuple` inst here is dead (elided from the
@@ -8337,16 +8534,16 @@ fn f(c0) {
     }
 
     #[test]
-    fn for_over_array_indexes_each_element() {
-        // Native array: the builtin counted template. (`[T]` routes through
+    fn for_over_native_buffer_indexes_each_element() {
+        // NativeBuffer: the builtin counted template. (`[T]` routes through
         // the stdlib VecIter protocol instead and never reaches this path.)
         assert_eq!(
-            mir("fn f(xs: ![int]) { for x in xs { } }", "f"),
+            mir("fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f"),
             "\
 fn f(c0) {
   bb0:
     v0 = load c0
-    v1 = len.NativeArray v0
+    v1 = len.NativeBuffer v0
     v2 = const 0
     store c1, v2
     goto bb1
@@ -8356,7 +8553,7 @@ fn f(c0) {
     branch v4 -> bb2, bb4
   bb2:
     v5 = load c1
-    v6 = index.NativeArray v0[v5]
+    v6 = index.NativeBuffer v0[v5]
     store c2, v6
     goto bb3
   bb3:
