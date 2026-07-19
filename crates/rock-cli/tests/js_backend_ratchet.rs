@@ -30,6 +30,7 @@ fn corpus() -> Vec<String> {
         "tests/js_collections.rock",
         "tests/js_closures.rock",
         "tests/js_match.rock",
+        "tests/js_multivalue.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -57,7 +58,8 @@ fn js_runnable_coverage_ratchet() {
     // and lifted the whole corpus to 91. T5 (closures/lambdas) added
     // tests/js_closures.rock and lifted it to 99. T6 (short-circuit fold +
     // exhaustive-match structuring) added tests/js_match.rock and lifted it to 106.
-    const FLOOR: usize = 106;
+    // T7 (multi-value ABI + loop-capture) added tests/js_multivalue.rock -> 111.
+    const FLOOR: usize = 111;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

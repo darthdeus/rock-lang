@@ -111,6 +111,7 @@ pub fn emit_fn_with_callees(
             }
         }
     }
+    let (loop_iter, loop_iter_cells) = loop_capture_plan(mf, &st.loops)?;
     let mut em = Emitter {
         ws,
         mf,
@@ -124,6 +125,7 @@ pub fn emit_fn_with_callees(
         visited: HashSet::new(),
         lambdas: HashMap::new(),
         lambda_owned: compute_lambda_owned(mf),
+        loop_iter,
         out: String::new(),
         indent: 1,
     };
@@ -167,7 +169,13 @@ pub fn emit_fn_with_callees(
     // emits, so declaring its cell would leave an unused `let`.
     for &b in &reachable_blocks(mf) {
         for &iid in &mf.blocks[b].insts {
-            if let Inst::Store { cell, .. } = mf.insts[iid] {
+            for &cell in inst_writes(&mf.insts[iid]) {
+                // Loop-captured cells are declared per-iteration inside their loop
+                // body (below), not at the fn top -- a fn-top `let` would be shared
+                // across iterations and defeat per-iteration capture.
+                if loop_iter_cells.contains(&raw(cell)) {
+                    continue;
+                }
                 if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
                     declared.push(raw(cell));
                 }
@@ -217,6 +225,9 @@ struct Emitter<'a> {
     lambdas: HashMap<Idx<Inst>, String>,
     /// Each `Lambda` inst -> the cells its arrow body must `let`-declare.
     lambda_owned: HashMap<Idx<Inst>, Vec<Idx<Cell>>>,
+    /// Loop header -> cells to `let`-declare per-iteration inside that loop body
+    /// (a closure capturing a loop variable must see its iteration's value).
+    loop_iter: HashMap<Idx<Block>, Vec<Idx<Cell>>>,
     out: String,
     indent: usize,
 }
@@ -298,7 +309,7 @@ impl Emitter<'_> {
             // for its condition region, so the header must not be pre-marked.
             if !self.active.contains(&cur) {
                 if let Some(li) = self.counted.get(&cur).copied() {
-                    self.emit_counted(li)?;
+                    self.emit_counted(cur, li)?;
                     cur = li.exit;
                     continue;
                 }
@@ -448,11 +459,21 @@ impl Emitter<'_> {
         Ok(merge)
     }
 
+    /// `let <cells>;` for the cells this loop declares per-iteration (a captured
+    /// loop variable). Emitted at the loop body top so each iteration binds fresh.
+    fn emit_loop_iter_decls(&mut self, header: Idx<Block>) {
+        if let Some(cells) = self.loop_iter.get(&header) {
+            let names: Vec<String> = cells.iter().map(|&c| cell_name(c)).collect();
+            let line = format!("let {};", names.join(", "));
+            self.push(&line);
+        }
+    }
+
     /// A range-`for`: `for (; slot < bound; slot = slot + 1) { body }`. The slot
     /// and bound were initialized in the preheader (hoisted cells), so the `for`
     /// init clause is empty. `continue` targets the latch (the `for` increment
     /// runs it); `break` targets the exit.
-    fn emit_counted(&mut self, li: LoopInfo) -> Result<(), CompilerError> {
+    fn emit_counted(&mut self, header: Idx<Block>, li: LoopInfo) -> Result<(), CompilerError> {
         let slot = cell_name(li.slot);
         // The bound is a `Load` of a hoisted preheader cell (or a const),
         // rendered inline so it never depends on a header-block temp we skip.
@@ -460,6 +481,7 @@ impl Emitter<'_> {
         let cmp = if li.inclusive { "<=" } else { "<" };
         self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
         self.indent += 1;
+        self.emit_loop_iter_decls(header);
         let ctx = LoopCtx { cont: Some(li.latch), brk: Some(li.exit) };
         let body_len = self.out.len();
         self.emit_seq(li.body_entry, None, ctx)?;
@@ -482,6 +504,7 @@ impl Emitter<'_> {
         self.active.insert(h);
         self.push("while (true) {");
         self.indent += 1;
+        self.emit_loop_iter_decls(h);
 
         self.emit_seq(h, Some(test), outer)?;
         self.emit_block_effects(test)?;
@@ -536,6 +559,19 @@ impl Emitter<'_> {
         }
     }
 
+    /// A multi-value assignment `[d0, d1, ...] = <call>;` (a single dest is a
+    /// plain `d0 = <call>;` -- the scalar ABI returns one leaf as a scalar, not a
+    /// one-element array, matching [`Self::emit_return`]).
+    fn multi_assign(&self, dests: &[Idx<Cell>], call: &str) -> String {
+        match dests {
+            [d] => format!("{} = {call};", cell_name(*d)),
+            _ => {
+                let names: Vec<String> = dests.iter().map(|&d| cell_name(d)).collect();
+                format!("[{}] = {call};", names.join(", "))
+            }
+        }
+    }
+
     fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.mf.blocks[b].insts.clone() {
             match &self.mf.insts[iid] {
@@ -574,6 +610,22 @@ impl Emitter<'_> {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
+                // A multi-value call (scalarized value-struct / tuple return):
+                // `[d0, d1, ...] = callee(args);` destructures the array the
+                // multi-return callee packs. Dest cells are hoist-declared at the
+                // fn top, so this is an assignment, not a `let`. The leaves are
+                // read back via `Load` of each dest.
+                Inst::CallMulti { dests, func, args } => {
+                    let call = self.render_call(*func, args)?;
+                    self.push(&self.multi_assign(dests, &call));
+                }
+                Inst::CallValueMulti { dests, callee, args } => {
+                    let c = self.render_val(*callee)?;
+                    let rendered: Result<Vec<String>, CompilerError> =
+                        args.iter().map(|a| self.render_val(*a)).collect();
+                    let call = format!("({c})({})", rendered?.join(", "));
+                    self.push(&self.multi_assign(dests, &call));
+                }
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
@@ -607,7 +659,14 @@ impl Emitter<'_> {
                 let s = self.render_val(*v)?;
                 self.push(&format!("return {s};"));
             }
-            _ => return Err(err("JS subset: multi-value return not supported")),
+            // The scalar ABI returns a scalarized value struct / tuple as N leaf
+            // values; JS has no multi-return, so pack them into an array the
+            // `CallMulti` caller destructures.
+            _ => {
+                let parts: Result<Vec<String>, CompilerError> =
+                    vs.iter().map(|&v| self.render_val(v)).collect();
+                self.push(&format!("return [{}];", parts?.join(", ")));
+            }
         }
         Ok(())
     }
@@ -744,6 +803,20 @@ impl Emitter<'_> {
                     parts.push(format!("{f}: {}", self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
+            }
+            // A `value` struct is byte-value cdata on luajit; on JS it is a plain
+            // `{__ty, ...}` object, same shape as a reference struct (structural eq
+            // + field-by-contents already hold). The scalar ABI usually elides it
+            // at call boundaries; this covers the re-box at a whole-value use.
+            // Value structs are DEFERRED: the scalar ABI at fn boundaries is
+            // reconciled on luajit by the inliner (this raw-lowered path runs no
+            // inliner, so a value-struct param used as a whole value mismatches --
+            // the arity guard rejects those), and a GC-carrying value struct
+            // compares its pointer fields by reference, which the generic runtime
+            // `__op_eq` cannot do without type-aware codegen. Reject until a proper
+            // value-struct arc lands.
+            Inst::MakeValueStruct { .. } => {
+                return Err(err("JS subset: value struct construction (deferred to a future arc)"))
             }
             // A tuple is a plain JS array; `.N` reads index N. (Most tuples are
             // scalarized by SROA before emission; these cover the residue.)
@@ -990,6 +1063,33 @@ pub fn emit_with_closure(
         }
         lowered.push((fr, mf));
     }
+    // Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values
+    // at the call, but a co-emitted callee that uses the param as a WHOLE value
+    // keeps a single (un-expanded) MIR param -- so the arg count exceeds the
+    // callee's param count and leaves would be silently dropped. luajit dissolves
+    // this by INLINING the callee (its whole pipeline runs the inliner); this
+    // raw-lowered path does not, so reject rather than emit-and-hope. (Fully
+    // SROA'd value structs and tuple multi-returns keep matching arities.)
+    let arities: HashMap<FuncRef, usize> =
+        lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
+    for (_, mf) in &lowered {
+        for (_, inst) in mf.insts.iter() {
+            let (callee, argc) = match inst {
+                Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (func, args.len()),
+                _ => continue,
+            };
+            if let Some(&arity) = arities.get(callee) {
+                if argc != arity {
+                    let cf = &ws.module(callee.module).functions[callee.func];
+                    return Err(err(format!(
+                        "JS subset: value-struct scalar ABI mismatch calling `{}` \
+                         ({argc} args vs {arity} params; callee not inlined)",
+                        cf.name
+                    )));
+                }
+            }
+        }
+    }
     let mut out = String::new();
     for (fr, mf) in &lowered {
         out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names)?);
@@ -1090,6 +1190,102 @@ fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
 /// JS `Map` rather than co-emitted to a plain object (which coerces keys).
 fn is_map_new(cf: &bone_semantic::hir::Function) -> bool {
     cf.name.as_str() == "map_new" && cf.param_decls.is_empty()
+}
+
+/// Every cell a lambda's sub-CFG references (loads or writes) -- a superset of
+/// its captures (also includes its own params/locals, harmless for the loop
+/// checks below, which additionally require the cell to be loop-stored).
+fn captured_cells(mf: &MirFunc) -> HashSet<u32> {
+    let mut out = HashSet::new();
+    for (_, inst) in mf.insts.iter() {
+        if let Inst::Lambda { entry, .. } = inst {
+            for b in reachable_from(mf, *entry) {
+                for &iid in &mf.blocks[b].insts {
+                    if let Inst::Load(c) = &mf.insts[iid] {
+                        out.insert(raw(*c));
+                    }
+                    for &c in inst_writes(&mf.insts[iid]) {
+                        out.insert(raw(c));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Plan per-iteration cell bindings for closures created in loops. A closure
+/// capturing a loop variable must see THAT iteration's value (Lua/Rock rebind
+/// loop bodies fresh; skull snapshots such a cell by value). In JS a `let`
+/// declared inside the loop body IS per-iteration, so a captured cell whose every
+/// store is within one loop's body is relocated there (returned keyed by loop
+/// header, plus the flat exclusion set for the fn-top declaration). A captured
+/// cell that a loop mutates but also assigns OUTSIDE the body -- a range counter
+/// (init in the preheader) or an `enumerate` cursor -- cannot be block-scoped
+/// without rewriting the closure's reference, so it is REJECTED rather than
+/// miscompiled to the shared final value.
+fn loop_capture_plan(
+    mf: &MirFunc,
+    loops: &HashMap<Idx<Block>, LoopRegion>,
+) -> Result<(HashMap<Idx<Block>, Vec<Idx<Cell>>>, HashSet<u32>), CompilerError> {
+    let captured = captured_cells(mf);
+    // A reassigned PARAM captured in a loop is function-scoped on purpose -- all
+    // closures share one box (`test_param_reassigned_in_loop_shares_one_box`), so
+    // it is never relocated per-iteration.
+    let params: HashSet<u32> = mf.params.iter().map(|&c| raw(c)).collect();
+    let mut store_blocks: HashMap<u32, (Idx<Cell>, HashSet<Idx<Block>>)> = HashMap::new();
+    for (b, blk) in mf.blocks.iter() {
+        for &iid in &blk.insts {
+            for &cell in inst_writes(&mf.insts[iid]) {
+                store_blocks.entry(raw(cell)).or_insert_with(|| (cell, HashSet::new())).1.insert(b);
+            }
+        }
+    }
+    let mut per_loop: HashMap<Idx<Block>, Vec<Idx<Cell>>> = HashMap::new();
+    let mut relocated: HashSet<u32> = HashSet::new();
+    for (craw, (cell, blocks)) in &store_blocks {
+        if !captured.contains(craw) || params.contains(craw) {
+            continue;
+        }
+        // A captured cell that any loop stores INSIDE its body but also stores
+        // OUTSIDE it is loop-varying-but-not-iteration-local (counter/cursor):
+        // reject. One stored entirely within a loop body is iteration-local.
+        for region in loops.values() {
+            let inside = blocks.iter().any(|b| region.body.contains(b));
+            let outside = blocks.iter().any(|b| !region.body.contains(b));
+            if inside && outside {
+                return Err(err(
+                    "JS subset: closure captures a loop counter / cursor (per-iteration \
+                     snapshot not yet supported)",
+                ));
+            }
+        }
+        let innermost = loops
+            .iter()
+            .filter(|(_, region)| blocks.iter().all(|b| region.body.contains(b)))
+            .min_by_key(|(_, region)| region.body.len());
+        if let Some((header, _)) = innermost {
+            per_loop.entry(*header).or_default().push(*cell);
+            relocated.insert(*craw);
+        }
+    }
+    for v in per_loop.values_mut() {
+        v.sort_by_key(|&c| raw(c));
+    }
+    Ok((per_loop, relocated))
+}
+
+/// The cells an inst writes: a `Store`'s target, or a multi-value call's dests.
+/// These are the cells that need a hoisted `let` (the multi-assign / store binds
+/// them, and a later block may read them across a branch merge).
+fn inst_writes(inst: &Inst) -> &[Idx<Cell>] {
+    match inst {
+        Inst::Store { cell, .. } => std::slice::from_ref(cell),
+        Inst::CallMulti { dests, .. }
+        | Inst::CallValueMulti { dests, .. }
+        | Inst::CallBoundMulti { dests, .. } => dests,
+        _ => &[],
+    }
 }
 
 /// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
@@ -1360,7 +1556,7 @@ fn compute_lambda_owned(mf: &MirFunc) -> HashMap<Idx<Inst>, Vec<Idx<Cell>>> {
     let mut store_blocks: HashMap<u32, (Idx<Cell>, HashSet<Idx<Block>>)> = HashMap::new();
     for (b, blk) in mf.blocks.iter() {
         for &iid in &blk.insts {
-            if let Inst::Store { cell, .. } = mf.insts[iid] {
+            for &cell in inst_writes(&mf.insts[iid]) {
                 store_blocks.entry(raw(cell)).or_insert_with(|| (cell, HashSet::new())).1.insert(b);
             }
         }
@@ -1408,14 +1604,15 @@ fn hoistable_lambdas(
         let mut hoistable = true;
         for &b in &body {
             for &iid in &mf.blocks[b].insts {
-                match &mf.insts[iid] {
-                    Inst::Lambda { .. } => hoistable = false,
-                    Inst::Load(c) | Inst::Store { cell: c, .. } => {
-                        if !local.contains(&raw(*c)) {
-                            hoistable = false;
-                        }
-                    }
-                    _ => {}
+                if matches!(&mf.insts[iid], Inst::Lambda { .. }) {
+                    hoistable = false;
+                }
+                let refs = match &mf.insts[iid] {
+                    Inst::Load(c) => std::slice::from_ref(c),
+                    other => inst_writes(other),
+                };
+                if refs.iter().any(|c| !local.contains(&raw(*c))) {
+                    hoistable = false;
                 }
             }
         }
