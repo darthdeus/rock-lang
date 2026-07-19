@@ -851,19 +851,27 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // A `value` struct is byte-value cdata on luajit; on JS it is a plain
-            // `{__ty, ...}` object, same shape as a reference struct (structural eq
-            // + field-by-contents already hold). The scalar ABI usually elides it
-            // at call boundaries; this covers the re-box at a whole-value use.
-            // Value structs are DEFERRED: the scalar ABI at fn boundaries is
-            // reconciled on luajit by the inliner (this raw-lowered path runs no
-            // inliner, so a value-struct param used as a whole value mismatches --
-            // the arity guard rejects those), and a GC-carrying value struct
-            // compares its pointer fields by reference, which the generic runtime
-            // `__op_eq` cannot do without type-aware codegen. Reject until a proper
-            // value-struct arc lands.
-            Inst::MakeValueStruct { .. } => {
-                return Err(err("JS subset: value struct construction (deferred to a future arc)"))
+            // A `value` struct is byte-value cdata on luajit; on JS an all-scalar
+            // (GC-free) one is a plain `{__ty, ...}` object, same shape as a
+            // reference struct -- structural deep-eq (`JS_STRUCTURAL_EQ`) matches
+            // luajit's byte-value eq for all-scalar leaves. The scalar ABI elides
+            // most value structs at call boundaries (they scalarize through); this
+            // covers the whole-value re-box (`==`, a Vec element, a boxed return).
+            // A GC-carrying value struct compares its pointer fields by REFERENCE
+            // on luajit, which the generic contents-eq cannot reproduce without
+            // type-aware codegen -- rejected (T8c+).
+            Inst::MakeValueStruct { name, fields } => {
+                if !skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
+                    return Err(err(format!(
+                        "JS subset: GC-carrying value struct `{name}` (reference-field \
+                         eq needs type-aware codegen)"
+                    )));
+                }
+                let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
+                for (f, v) in fields {
+                    parts.push(format!("{f}: {}", self.render_val(*v)?));
+                }
+                format!("({{{}}})", parts.join(", "))
             }
             // A tuple is a plain JS array; `.N` reads index N. (Most tuples are
             // scalarized by SROA before emission; these cover the residue.)

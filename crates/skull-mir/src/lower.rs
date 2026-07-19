@@ -123,6 +123,17 @@ fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
         .or_else(|| enum_value_shape(ws, name).map(|e| e.value_shape()))
 }
 
+/// Whether `name` is a GC-FREE (all-scalar) value struct: every leaf is a
+/// primitive or a nested all-scalar value struct, so no field is a boxed
+/// string/array/nullable/generic slot. Such a struct is byte-value comparable,
+/// so a plain-object emission plus structural deep-eq reproduces luajit's
+/// value-eq exactly. Backends (skull-codegen-js T8b) gate value-struct emission
+/// on this: a GC-carrying value struct compares its pointer fields by REFERENCE
+/// on luajit, which a generic contents-eq cannot reproduce.
+pub fn value_struct_is_gc_free(ws: &Workspace, name: Ustr) -> bool {
+    value_shape(ws, name).is_some()
+}
+
 fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];

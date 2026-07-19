@@ -32,6 +32,7 @@ fn corpus() -> Vec<String> {
         "tests/js_match.rock",
         "tests/js_multivalue.rock",
         "tests/js_inline.rock",
+        "tests/js_value_structs.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -62,8 +63,10 @@ fn js_runnable_coverage_ratchet() {
     // T7 (multi-value ABI + loop-capture) added tests/js_multivalue.rock -> 111.
     // T8a (shared transform pipeline: inline/cleanup/recover + narrowed arity
     // guard + relooper empty-forward/infinite-loop fixes) added tests/js_inline.rock
-    // -> 114 (full-suite pass count 2299 -> 2568 the same arc).
-    const FLOOR: usize = 114;
+    // -> 114 (full-suite pass count 2299 -> 2568). T8b (GC-free value structs emit
+    // a plain `{__ty, ...}` object; GC-carrying ones reject) added
+    // tests/js_value_structs.rock -> 118 (full-suite 2568 -> 2650).
+    const FLOOR: usize = 118;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
