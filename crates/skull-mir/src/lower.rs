@@ -662,6 +662,26 @@ pub fn value_struct_is_gc(ws: &Workspace, name: Ustr) -> bool {
     value_struct_is_gc_guarded(ws, name, &mut Vec::new())
 }
 
+/// Whether a value-struct field is compared STRUCTURALLY in a GC-tier `__eq`
+/// (`==`, which for scalars/enums is value-equality and for a nested value
+/// struct fires that struct's own metatable), versus BY REFERENCE (`rawequal`).
+/// Scalars, enums, and nested value structs (either tier) are structural; a true
+/// GC-ref field (`[T]`, `Arena<T>`, `Map`, a generic `T`, `string`) is by
+/// reference -- `string` gives the same answer either way (Lua interns; JS `===`
+/// matches), and the contract fixes GC-refs to identity. Consumed by BOTH the
+/// Lua GC-tier `_vt.__eq` emitter (`skull::value_struct_gc_defs`) and the JS
+/// `__rock_vt_eq` registry -- the single field-dispatch oracle, sibling to
+/// [`value_struct_is_gc`].
+pub fn gc_eq_is_structural(ws: &Workspace, ty: TyId) -> bool {
+    if value_field_c_type(ws, ty).is_some() {
+        return true;
+    }
+    matches!(
+        static_ty(ws, ty),
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name)
+    )
+}
+
 fn value_struct_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut Vec<Ustr>) -> bool {
     let Some(sid) = ws.struct_by_name.get(&name) else {
         return false;

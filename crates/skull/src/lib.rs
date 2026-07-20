@@ -533,28 +533,6 @@ fn value_struct_defs(
     Ok((format!("ffi.cdef[[\n{}]]\n{}", typedefs, ctors), emitted, gc))
 }
 
-/// Whether a value-struct field is compared STRUCTURALLY in a GC-tier `__eq`
-/// (`==`, which for scalars/enums is value-equality and for a nested value
-/// struct fires that struct's own metatable), versus BY REFERENCE (`rawequal`).
-/// Scalars, enums, and nested value structs (either tier) are structural; a true
-/// GC-ref field (`[T]`, `Arena<T>`, `Map`, a generic `T`, `string`) is by
-/// reference -- `string` gives the same answer either way (Lua interns), and the
-/// contract fixes GC-refs to identity.
-fn gc_eq_is_structural(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    if c_field_type(ws, ty).is_some() {
-        return true;
-    }
-    let te = match ty {
-        bone_semantic::prelude::TyId::Static(mid, idx) => match ws.modules.get(mid.index()) {
-            Some(m) => m.ty_arena[idx],
-            None => return false,
-        },
-        bone_semantic::prelude::TyId::Local(_) => return false,
-    };
-    matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_value_struct(ws, name))
-}
-
 /// Emit the table-repr materialization defs for every GC-carrying value struct:
 /// a `<Name>_vt(...)` ctor building an immutable Lua table tagged `__ty`, plus a
 /// shared per-type metatable (`__rock_vt_<Name>`) carrying value `__eq`
@@ -586,7 +564,7 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
                 .fields
                 .iter()
                 .map(|f| {
-                    if gc_eq_is_structural(ws, f.ty) {
+                    if skull_mir::lower::gc_eq_is_structural(ws, f.ty) {
                         format!("a.{n} == b.{n}", n = f.name)
                     } else {
                         format!("rawequal(a.{n}, b.{n})", n = f.name)
