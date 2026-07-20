@@ -163,6 +163,12 @@ function __rock_call(f) {
   if (typeof f === "function") return f.apply(null, a);
   return f.__fn.apply(null, [f].concat(a));
 }
+// `try_call(f)`: run `f` and report whether it errored (Lua `pcall`; returns
+// `not ok`). A JS throw is the pcall failure; the error itself is discarded by
+// design (the caller only wants the did-it-error bool, matching the stdlib body).
+function __try_call(f) {
+  try { __rock_call(f); return false; } catch (e) { return true; }
+}
 "#;
 
 /// The `__op_eq` runtime: deep structural equality matching Rock's stdlib

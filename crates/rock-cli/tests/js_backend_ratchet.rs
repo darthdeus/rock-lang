@@ -47,6 +47,7 @@ fn corpus() -> Vec<String> {
         "tests/js_sort.rock",
         "tests/js_format_specs.rock",
         "tests/js_misc_intrinsics.rock",
+        "tests/js_try_call.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -113,8 +114,13 @@ fn js_runnable_coverage_ratchet() {
     // __rock_fmt_* / Format / FormatDyn buckets collapsed). T8d misc intrinsics
     // (tuple_first/tuple_second -> 0-based array projection, __range -> a
     // Vec-shaped runtime object, is_release_mode -> false) added
-    // tests/js_misc_intrinsics.rock -> 217 (full-suite 3190 -> 3209).
-    const FLOOR: usize = 217;
+    // tests/js_misc_intrinsics.rock -> 217 (full-suite 3190 -> 3209). T8d
+    // try_call (`__try_call`: try/catch over __rock_call) + the checked-index
+    // side-effect fix (an unused Vec/NativeBuffer OOB read is emitted, not
+    // dropped, so its bounds check throws) added tests/js_try_call.rock -> 222
+    // (full-suite 3209 -> 3218; the try_call bucket collapsed and 4 bounds tests
+    // that would have gone red are green).
+    const FLOOR: usize = 222;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

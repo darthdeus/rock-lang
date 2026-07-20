@@ -956,6 +956,18 @@ impl Emitter<'_> {
                     let call = format!("__rock_call({})", rendered.join(", "));
                     self.push(&self.multi_assign(dests, &call));
                 }
+                // A checked Vec/NativeBuffer index whose value is UNUSED: its
+                // bounds check throws on OOB, so it must be emitted as a statement
+                // rather than dropped (luajit keeps the checked read -- dropping
+                // it would silently lose the OOB error, diverging under
+                // `try_call(|| xs[oob])`). Map index is a raw miss-returns-nil VM
+                // op with no side effect, so it stays droppable below.
+                Inst::Index { kind: ContainerKind::Vec | ContainerKind::NativeBuffer, .. }
+                    if self.use_count[raw(iid) as usize] == 0 =>
+                {
+                    let line = format!("{};", self.render_inst_expr(iid)?);
+                    self.push(&line);
+                }
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
@@ -1879,6 +1891,8 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("__range", 2) => Some("__range($1, $2)"),
         // The JS harness has no release mode (`_G.__ROCK_RELEASE` is never set).
         ("is_release_mode", 0) => Some("false"),
+        // `pcall(f); return not ok` -- did `f` error? A JS throw is the failure.
+        ("try_call", 1) => Some("__try_call($1)"),
         // Coroutine consumers (stdlib inline(lua) readers of the frame object).
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has
