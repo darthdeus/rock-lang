@@ -52,6 +52,7 @@ fn corpus() -> Vec<String> {
         "tests/js_put.rock",
         "tests/js_log.rock",
         "tests/js_deepcopy.rock",
+        "tests/js_inspect.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -145,8 +146,14 @@ fn js_runnable_coverage_ratchet() {
     // structs/env-records/boxes own-key; primitives + `__fn` by identity so
     // closure shared-box + cofn cyclic-env-record aliasing survive) added
     // tests/js_deepcopy.rock -> 242 (full-suite 3447 -> 3459; the deepcopy bucket
-    // of 8 collapsed).
-    const FLOOR: usize = 242;
+    // of 8 collapsed). T8d inspect (the `__rock_inspect_value` pretty-printer ->
+    // JS runtime: structs sorted-key ` = ` compact/multiline, Vec/Map/array,
+    // scalars, fn-records as `function: ` leaves; a VALUE STRUCT or ENUM arg
+    // rejects at the box boundary -- colon-cdata / numeric-tag renders the
+    // scalarized JS shape cannot reproduce, deferred to those buckets) added
+    // tests/js_inspect.rock -> 249 (full-suite 3459 -> 3485; the inspect /
+    // inspect_formatted buckets collapsed, minus the value-struct/enum skips).
+    const FLOOR: usize = 249;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

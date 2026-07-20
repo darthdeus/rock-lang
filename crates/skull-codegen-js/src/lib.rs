@@ -203,6 +203,116 @@ function __op_eq(a, b) {
 }
 "#;
 
+/// `inspect` / `inspect_formatted`: a faithful port of `__rock_inspect_value`
+/// (stdlib/unified.rock). Adapts to the JS shapes: a struct/enum `{__ty, ...}`
+/// object (keys sorted by `lua_tostring`, `__ty`/`__variant`/`variant`/`__tag`
+/// skipped), a Vec `{_data (1-indexed), len, __ty:"Vec"}`, a JS `Map` (raw-table
+/// analog), a JS array (Lua array-table analog), and scalars. A capturing-lambda
+/// env record (`__fn`) is an opaque callable LEAF (`String(fn)`), matching the
+/// luajit `__rock_fn_mt` rule; a `visited` Map detects cycles. NOTE: most inspect
+/// tests are VACUOUS -- a `@test(output=..)` whose expected contains `{` is an
+/// interpolated string, so its expectation is dropped (`out=nil`) and the test
+/// only checks that inspect RUNS; the byte-checked cases are the brace-free
+/// scalars (`"str"`, numbers, bools). Compact/multiline threshold + key sort
+/// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
+pub const JS_INSPECT_RUNTIME: &str = r#"
+function __rock_inspect_key_lt(a, b) {
+  var sa = lua_tostring(a), sb = lua_tostring(b);
+  return sa < sb ? -1 : (sa > sb ? 1 : 0);
+}
+function __rock_inspect_value(v, indent, path, visited, precision) {
+  if (v === null || v === undefined) return "nil";
+  var vt = typeof v;
+  if (vt === "string") return "\"" + v + "\"";
+  if (vt === "number") {
+    if (precision >= 0 && v !== Math.floor(v)) return __c_f(v, precision);
+    return lua_tostring(v);
+  }
+  if (vt === "boolean") return lua_tostring(v);
+  // A raw fn value renders as Lua's `tostring(function)` form (`function: ..`);
+  // the exact address is never asserted (tests check the `function: ` prefix).
+  if (vt === "function") return "function: builtin";
+  if (vt !== "object") return lua_tostring(v);
+  var t = v;
+  // A capturing-lambda env record is a callable LEAF (never walked) -- rendered
+  // as its function, same `function: ` form as a raw fn.
+  if (t.__fn !== undefined) return "function: builtin";
+  if (visited) {
+    if (visited.has(t)) return "<CYCLE: " + visited.get(t) + ">";
+    visited.set(t, path);
+  }
+  var type_name = t.__ty;
+  if (type_name === "Vec" && t._data && t.len !== undefined) {
+    var vparts = [];
+    for (var i = 1; i <= t.len; i++) {
+      vparts.push(__rock_inspect_value(t._data[i], indent, path + "[" + (i - 1) + "]", visited, precision));
+    }
+    if (visited) visited.delete(t);
+    if (vparts.length === 0) return "Vec { }";
+    return "Vec { " + vparts.join(", ") + " }";
+  }
+  if (Array.isArray(t)) {
+    if (visited) visited.delete(t);
+    if (t.length === 0) return "{}";
+    var aparts = [];
+    for (var j = 0; j < t.length; j++) {
+      aparts.push(__rock_inspect_value(t[j], indent, path + "[" + j + "]", visited, precision));
+    }
+    return "{ " + aparts.join(", ") + " }";
+  }
+  // Keyed case: struct / enum record / Map. Collect (key, value) pairs.
+  var pairs = [];
+  if (t instanceof Map) {
+    t.forEach(function(vv, k) { pairs.push([k, vv]); });
+  } else {
+    for (var k in t) {
+      if (Object.prototype.hasOwnProperty.call(t, k) &&
+          k !== "__variant" && k !== "__ty" && k !== "variant" && k !== "__tag") {
+        pairs.push([k, t[k]]);
+      }
+    }
+  }
+  pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
+  var variant = t.__variant !== undefined ? t.__variant : t.variant;
+  if (type_name !== undefined && variant !== undefined && pairs.length === 0) {
+    if (visited) visited.delete(t);
+    return type_name + "::" + variant;
+  }
+  var header = (type_name !== undefined && variant !== undefined) ? (type_name + "::" + variant)
+    : (type_name !== undefined ? type_name : "");
+  var result;
+  var keyStr = function(k) { return typeof k === "string" ? k : ("[" + lua_tostring(k) + "]"); };
+  if (pairs.length <= 2) {
+    var cparts = pairs.map(function(kv) {
+      return keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent, path + "." + lua_tostring(kv[0]), visited, precision);
+    });
+    result = header !== "" ? header + " { " + cparts.join(", ") + " }" : "{ " + cparts.join(", ") + " }";
+  } else {
+    var lines = pairs.map(function(kv) {
+      return indent + "  " + keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent + "  ", path + "." + lua_tostring(kv[0]), visited, precision);
+    });
+    var body = lines.join(",\n");
+    result = header !== "" ? header + " {\n" + body + "\n" + indent + "}" : "{\n" + body + "\n" + indent + "}";
+  }
+  if (visited) visited.delete(t);
+  return result;
+}
+function inspect(obj, cycle_detect, precision) {
+  if (cycle_detect === undefined) cycle_detect = true;
+  if (precision === undefined) precision = -1;
+  var ot = typeof obj;
+  if (ot !== "object" || obj === null) {
+    if (ot === "string") return "\"" + obj + "\"";
+    if (ot === "function") return "function: builtin";
+    if (ot === "number" && precision >= 0 && obj !== Math.floor(obj)) return __c_f(obj, precision);
+    return lua_tostring(obj);
+  }
+  var visited = cycle_detect ? new Map() : null;
+  return __rock_inspect_value(obj, "", "root", visited, precision);
+}
+function inspect_formatted(obj, precision) { return inspect(obj, true, precision); }
+"#;
+
 /// `deepcopy`: the recursive `__rock_deepcopy_value` clone (stdlib/unified.rock).
 /// A `seen` Map (object identity) preserves the graph -- a shared reference copies
 /// ONCE, a cycle terminates. Primitives and bare functions (a closure's `__fn`)

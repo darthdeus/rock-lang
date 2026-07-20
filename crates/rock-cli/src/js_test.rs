@@ -423,6 +423,7 @@ fn build_node_program(runnable: &[(String, String, String, Option<String>, bool)
     p.push_str(skull_codegen_js::JS_CALL_HELPER);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
+    p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
     p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);
     p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
     p.push_str(
