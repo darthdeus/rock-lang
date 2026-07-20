@@ -53,6 +53,7 @@ fn corpus() -> Vec<String> {
         "tests/js_log.rock",
         "tests/js_deepcopy.rock",
         "tests/js_inspect.rock",
+        "tests/js_enum_boxes.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -153,7 +154,14 @@ fn js_runnable_coverage_ratchet() {
     // scalarized JS shape cannot reproduce, deferred to those buckets) added
     // tests/js_inspect.rock -> 249 (full-suite 3459 -> 3485; the inspect /
     // inspect_formatted buckets collapsed, minus the value-struct/enum skips).
-    const FLOOR: usize = 249;
+    // T8e boxed enums (MakeEnum/MakeEnumDyn box as `{__variant, __ty, 0:.., ..}`
+    // via the nil-dropping `__rock_make_enum` ctor; unit variants of a mixed enum
+    // are `__rock_enum_<E>_<V>` singletons; payload-free enums keep the int repr
+    // with a `__rock_enum_<E>_names` Map; the coroutine channel rebox goes 0-based)
+    // added tests/js_enum_boxes.rock -> 257 (full-suite 3492 -> 3537; the MakeEnum
+    // / MakeEnumDyn / __rock_enum_* buckets collapsed + chained JsonValue/recursive/
+    // record-variant unlocks).
+    const FLOOR: usize = 257;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

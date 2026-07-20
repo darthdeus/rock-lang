@@ -37,6 +37,9 @@ pub struct GlobalCtx {
     state: HashSet<ustr::Ustr>,
     /// A top-level fn used as a value -> its co-emitted JS name.
     fns: HashMap<ustr::Ustr, String>,
+    /// `__rock_enum_<E>_<V>` singletons / `__rock_enum_<E>_names` tables the body
+    /// reads (rendered as a bare top-level name; the def is emitted per program).
+    enum_globals: HashSet<ustr::Ustr>,
 }
 
 fn err(msg: impl Into<String>) -> CompilerError {
@@ -1191,6 +1194,9 @@ impl Emitter<'_> {
             Inst::Global(name) if self.globals.state.contains(name) => {
                 format!("__G.{name}")
             }
+            // A boxed-enum singleton / names table: a bare top-level name whose def
+            // (`var __rock_enum_...`) `emit_with_closure` prepends to the program.
+            Inst::Global(name) if self.globals.enum_globals.contains(name) => name.to_string(),
             Inst::Global(name) => {
                 return Err(err(format!("JS subset: global read `{name}` not supported")))
             }
@@ -1251,6 +1257,18 @@ impl Emitter<'_> {
                     parts.push(format!("{f}: {}", self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
+            }
+            // A non-cdata enum boxes as `{__variant, __ty, 0:.., 1:.., <name>:..}`
+            // via the nil-dropping ctor (`JS_ENUM_RUNTIME`). Positional payloads take
+            // native 0-based keys (luajit's 1-based table keys are Lua table-ctor
+            // semantics; `TupleIndex` reads `base[index]` uniformly here). A unit
+            // variant of a mixed enum is its interned singleton (an `Inst::Global`),
+            // so a bare `MakeEnum` here always carries payload.
+            Inst::MakeEnum { tag, ty, positional, named } => {
+                self.render_make_enum(&js_string_lit(tag.as_str())?, ty, positional, named)?
+            }
+            Inst::MakeEnumDyn { tag, ty, positional, named } => {
+                self.render_make_enum(&self.render_val(*tag)?, ty, positional, named)?
             }
             // A tuple is a plain JS array; `.N` reads index N. (Most tuples are
             // scalarized by SROA before emission; these cover the residue.)
@@ -1337,6 +1355,33 @@ impl Emitter<'_> {
         } else {
             parts.push(id);
         }
+    }
+
+    /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`.
+    /// `tag_expr` is a rendered JS expression (a string literal for `MakeEnum`, the
+    /// dynamic tag operand for `MakeEnumDyn`). The ctor drops nil `kv` slots so a
+    /// union-wide rebox owns exactly the active variant's keys.
+    fn render_make_enum(
+        &self,
+        tag_expr: &str,
+        ty: &ustr::Ustr,
+        positional: &[Idx<Inst>],
+        named: &[(ustr::Ustr, Idx<Inst>)],
+    ) -> Result<String, CompilerError> {
+        let mut kv: Vec<String> = Vec::new();
+        for (i, id) in positional.iter().enumerate() {
+            kv.push(i.to_string());
+            kv.push(self.render_val(*id)?);
+        }
+        for (name, id) in named {
+            kv.push(js_string_lit(name.as_str())?);
+            kv.push(self.render_val(*id)?);
+        }
+        Ok(format!(
+            "__rock_make_enum({tag_expr}, {}, [{}])",
+            js_string_lit(ty.as_str())?,
+            kv.join(", ")
+        ))
     }
 
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
@@ -1538,6 +1583,7 @@ pub fn emit_with_closure(
     // more fns, so they feed the same worklists.
     let state_index = build_state_index(ws);
     let deco_globals = decorator_populated_globals(ws);
+    let enum_defs = build_enum_global_defs(ws);
     let mut gctx = GlobalCtx::default();
     let mut ginit_queue: Vec<(ustr::Ustr, GlobalSite)> = Vec::new();
     let mut ginit_seen: HashSet<ustr::Ustr> = HashSet::new();
@@ -1569,7 +1615,7 @@ pub fn emit_with_closure(
             skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
             discover_callees(ws, &mf, &mut names, &mut queue, &mut seen)?;
             discover_globals(
-                ws, &mf, &state_index, &deco_globals, &mut gctx, &mut ginit_queue, &mut ginit_seen,
+                ws, &mf, &state_index, &deco_globals, &enum_defs, &mut gctx, &mut ginit_queue, &mut ginit_seen,
                 &mut names, &mut queue, &mut seen,
             )?;
             lowered.push((fr, mf));
@@ -1594,7 +1640,7 @@ pub fn emit_with_closure(
             }
             discover_callees(ws, &mf, &mut names, &mut queue, &mut seen)?;
             discover_globals(
-                ws, &mf, &state_index, &deco_globals, &mut gctx, &mut ginit_queue, &mut ginit_seen,
+                ws, &mf, &state_index, &deco_globals, &enum_defs, &mut gctx, &mut ginit_queue, &mut ginit_seen,
                 &mut names, &mut queue, &mut seen,
             )?;
             ginits.push(GlobalInit { name: gname, init_name, mf });
@@ -1645,6 +1691,13 @@ pub fn emit_with_closure(
         .flat_map(|mf| mf.nested_fns.iter().map(|nf| nf.name))
         .collect();
     let mut out = String::new();
+    // Boxed-enum singleton / names-table defs the emitted bodies read, in name
+    // order (deterministic across programs; `var` redeclare is harmless on concat).
+    let mut enum_names: Vec<&ustr::Ustr> = gctx.enum_globals.iter().collect();
+    enum_names.sort();
+    for name in enum_names {
+        out.push_str(&enum_defs[name]);
+    }
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order.
     for g in &ginits {
@@ -1779,6 +1832,7 @@ fn discover_globals(
     mf: &MirFunc,
     state_index: &HashMap<ustr::Ustr, GlobalSite>,
     deco_globals: &HashSet<ustr::Ustr>,
+    enum_defs: &HashMap<ustr::Ustr, String>,
     gctx: &mut GlobalCtx,
     ginit_queue: &mut Vec<(ustr::Ustr, GlobalSite)>,
     ginit_seen: &mut HashSet<ustr::Ustr>,
@@ -1787,7 +1841,9 @@ fn discover_globals(
     seen: &mut HashSet<FuncRef>,
 ) -> Result<(), CompilerError> {
     for name in global_refs(mf) {
-        if let Some(&site) = state_index.get(&name) {
+        if enum_defs.contains_key(&name) {
+            gctx.enum_globals.insert(name);
+        } else if let Some(&site) = state_index.get(&name) {
             if deco_globals.contains(&name) {
                 return Err(err(format!(
                     "JS subset: global `{name}` is populated by decorator application \
@@ -1855,6 +1911,53 @@ fn order_global_inits(ginits: &[GlobalInit]) -> Result<Vec<String>, CompilerErro
         }
     }
     Ok(lines)
+}
+
+/// All valid `__rock_enum_*` global names -> their JS def line. A payload-free
+/// (all-unit, non-cdata) enum yields `__rock_enum_<E>_names`, a `Map` keyed by
+/// ordinal (matching the `kind: Map` index the `{x}` stringify lowers to); a mixed
+/// enum yields a `__rock_enum_<E>_<V>` singleton per unit variant. cdata-eligible
+/// enums have neither (they lower to value structs). Mirrors the Lua backend's
+/// `enum_runtime_defs`; only referenced names are emitted, and the defs tolerate
+/// duplication across concatenated per-test programs (`var` redeclare, same value).
+fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
+    use bone_semantic::hir::VariantPayload;
+    let mut out = HashMap::new();
+    for module in ws.modules.iter() {
+        for (_, e) in module.enums.iter() {
+            if skull_mir::lower::enum_value_shape(ws, e.name).is_some() {
+                continue;
+            }
+            let all_unit = !e.variants.is_empty()
+                && e.variants.iter().all(|v| matches!(v.payload, VariantPayload::Unit));
+            if all_unit {
+                let name = ustr::Ustr::from(format!("__rock_enum_{}_names", e.name).as_str());
+                let items: Vec<String> = e
+                    .variants
+                    .iter()
+                    .enumerate()
+                    .map(|(ord, v)| format!("[{ord}, \"{e}::{v}\"]", e = e.name, v = v.name))
+                    .collect();
+                out.insert(name, format!("var {name} = new Map([{}]);\n", items.join(", ")));
+            } else {
+                for v in e.variants.iter() {
+                    if matches!(v.payload, VariantPayload::Unit) {
+                        let name =
+                            ustr::Ustr::from(format!("__rock_enum_{}_{}", e.name, v.name).as_str());
+                        out.insert(
+                            name,
+                            format!(
+                                "var {name} = {{ __variant: \"{var}\", __ty: \"{ty}\" }};\n",
+                                var = v.name,
+                                ty = e.name,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Emit a `co fn` for JS: the shared coroutine pipeline (`transform_coroutine`
@@ -2014,8 +2117,11 @@ fn emit_js_constructor(
             tag = skull_mir::lower::yield_slot(0),
             ty = js_string_lit(ch.enum_name.as_str())?,
         );
+        // 0-based positional keys: JS `TupleIndex` reads `base[i]` (no +1 like Lua's
+        // array keys), so a boxed-enum consumer of a yielded channel value projects
+        // the payload correctly. Matches `MakeEnum`'s native 0-based keys.
         for i in 0..ch.tuple_width {
-            let _ = write!(box_fields, ", \"{}\": s.{}", i + 1, skull_mir::lower::yield_slot(1 + i));
+            let _ = write!(box_fields, ", \"{}\": s.{}", i, skull_mir::lower::yield_slot(1 + i));
         }
         for (j, rf) in ch.record_fields.iter().enumerate() {
             let _ = write!(

@@ -203,6 +203,25 @@ function __op_eq(a, b) {
 }
 "#;
 
+/// The boxed-enum ctor (T8e). `MakeEnum`/`MakeEnumDyn` box a non-cdata enum as
+/// `{__variant, __ty, 0:.., 1:.., <field>:..}` -- native 0-based positional keys
+/// (luajit uses 1-based table keys; the observable output text is unchanged). The
+/// `kv` flat `[key, val, ..]` list drops NULL/UNDEFINED slots: a `MakeEnumDyn`
+/// union-wide rebox leaves the inactive tuple/record slots nil, and luajit's table
+/// constructor omits nil entries -- so a directly-constructed box (active keys
+/// only) and a reboxed box of the same value must own the SAME keys, or
+/// `__op_eq`'s key-count walk (`JS_STRUCTURAL_EQ`) would call them unequal.
+pub const JS_ENUM_RUNTIME: &str = r#"
+function __rock_make_enum(variant, ty, kv) {
+  var o = { __variant: variant, __ty: ty };
+  for (var i = 0; i < kv.length; i += 2) {
+    var v = kv[i + 1];
+    if (v !== null && v !== undefined) o[kv[i]] = v;
+  }
+  return o;
+}
+"#;
+
 /// `inspect` / `inspect_formatted`: a faithful port of `__rock_inspect_value`
 /// (stdlib/unified.rock). Adapts to the JS shapes: a struct/enum `{__ty, ...}`
 /// object (keys sorted by `lua_tostring`, `__ty`/`__variant`/`variant`/`__tag`
