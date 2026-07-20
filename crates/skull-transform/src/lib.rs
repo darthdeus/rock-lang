@@ -30,7 +30,9 @@ use skull_mir::mir::*;
 mod forl;
 mod inline;
 pub use forl::recover_counted_loops;
-pub use inline::{inline_functions, InlineCache, SpliceRecord};
+pub use inline::{
+    fn_has_bounds, inline_functions, validate_no_residual_bound_calls, InlineCache, SpliceRecord,
+};
 
 const STATE: &str = "__state";
 
