@@ -1872,6 +1872,13 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("__rock_fmt_percent", 2) => Some("__rock_fmt_percent($1, $2)"),
         // `format_float(v, width, decimals)` reconstructs the `%W.Df` printf spec.
         ("format_float", 3) => Some("__rock_sprintf(\"%\" + $2 + \".\" + $3 + \"f\", $1)"),
+        // A tuple is a 0-based JS array; Lua `tuple[1]`/`[2]` are `[0]`/`[1]`.
+        ("tuple_first", 1) => Some("$1[0]"),
+        ("tuple_second", 1) => Some("$1[1]"),
+        // Materialized `a..b` range -> a Vec-shaped object (runtime helper).
+        ("__range", 2) => Some("__range($1, $2)"),
+        // The JS harness has no release mode (`_G.__ROCK_RELEASE` is never set).
+        ("is_release_mode", 0) => Some("false"),
         // Coroutine consumers (stdlib inline(lua) readers of the frame object).
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has

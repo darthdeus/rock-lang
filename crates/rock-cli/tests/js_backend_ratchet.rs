@@ -46,6 +46,7 @@ fn corpus() -> Vec<String> {
         "tests/js_parse_float.rock",
         "tests/js_sort.rock",
         "tests/js_format_specs.rock",
+        "tests/js_misc_intrinsics.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -109,8 +110,11 @@ fn js_runnable_coverage_ratchet() {
     // format_float host templates, and Format/FormatDyn lowered through the
     // single-value C printf port __rock_sprintf with round-half-to-even) added
     // tests/js_format_specs.rock -> 212 (full-suite 3075 -> 3190; the
-    // __rock_fmt_* / Format / FormatDyn buckets collapsed).
-    const FLOOR: usize = 212;
+    // __rock_fmt_* / Format / FormatDyn buckets collapsed). T8d misc intrinsics
+    // (tuple_first/tuple_second -> 0-based array projection, __range -> a
+    // Vec-shaped runtime object, is_release_mode -> false) added
+    // tests/js_misc_intrinsics.rock -> 217 (full-suite 3190 -> 3209).
+    const FLOOR: usize = 217;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

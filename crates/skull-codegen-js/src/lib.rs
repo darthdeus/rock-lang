@@ -129,6 +129,14 @@ function __vec_sort(vec, key_fn) {
   });
   for (var i = 0; i < n; i++) vec._data[i + 1] = part[i];
 }
+// `__range(a, b)`: the materialized half-open range `a..b` as a Vec-shaped
+// object (index 0 is the 1-indexed layout hole, `_data[1..len]` = a..b-1),
+// matching the stdlib inline(lua) `{_data, len}`.
+function __range(a, b) {
+  var d = [null];
+  for (var i = a; i < b; i++) d.push(i);
+  return { _data: d, len: b - a };
+}
 ";
 
 /// Runtime-polymorphic untyped table primitives. In Lua a `Map` IS a raw table,
