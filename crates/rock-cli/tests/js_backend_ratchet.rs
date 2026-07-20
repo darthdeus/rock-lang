@@ -55,6 +55,7 @@ fn corpus() -> Vec<String> {
         "tests/js_inspect.rock",
         "tests/js_enum_boxes.rock",
         "tests/js_vec_helpers.rock",
+        "tests/js_value_gc_eq.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -171,7 +172,15 @@ fn js_runnable_coverage_ratchet() {
     // added tests/js_vec_helpers.rock -> 274 (13 runnable-green; suite pass count
     // unchanged, this slice adds coverage only -- the 0-based `_data` repr change
     // T8f originally scoped was falsified as JS-crate-only, see the plan entry).
-    const FLOOR: usize = 274;
+    // T8g GC-carrying value structs (lift the MakeValueStruct GC reject -> plain
+    // `{__ty,..}` object; per-type `__rock_vt_eq` registry mirroring the Lua
+    // `_vt.__eq` field split -- Vec/Map/ref-struct/generic/string fields `===`,
+    // scalar/nested-value fields `__op_eq`; `__op_eq` consults it before the
+    // generic key walk; the GC-carrying `inspect` arm lifts, oracle-verified to
+    // walk equals-format like the JS object, the GC-free/cdata arm stays gated)
+    // added tests/js_value_gc_eq.rock -> 286 (12 runnable-green: 8 eq + 4 inspect;
+    // full-suite pass 3554 -> 3593, GC-carrying reject bucket 73 -> 0).
+    const FLOOR: usize = 286;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

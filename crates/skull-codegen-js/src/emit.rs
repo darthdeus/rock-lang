@@ -9,7 +9,7 @@
 //! `CompilerError` (reject, don't emit-and-hope); the subset grows with the
 //! backend.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
@@ -1236,22 +1236,16 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // A `value` struct is byte-value cdata on luajit; on JS an all-scalar
-            // (GC-free) one is a plain `{__ty, ...}` object, same shape as a
-            // reference struct -- structural deep-eq (`JS_STRUCTURAL_EQ`) matches
-            // luajit's byte-value eq for all-scalar leaves. The scalar ABI elides
-            // most value structs at call boundaries (they scalarize through); this
-            // covers the whole-value re-box (`==`, a Vec element, a boxed return).
-            // A GC-carrying value struct compares its pointer fields by REFERENCE
-            // on luajit, which the generic contents-eq cannot reproduce without
-            // type-aware codegen -- rejected (T8c+).
+            // A `value` struct is byte-value cdata on luajit; on JS it is a plain
+            // `{__ty, ...}` object, same shape as a reference struct. An all-scalar
+            // (GC-free) one compares via the generic structural deep-eq
+            // (`JS_STRUCTURAL_EQ`), matching luajit's byte-value eq. A GC-carrying
+            // one compares its pointer fields BY REFERENCE on luajit, which the
+            // generic contents-eq cannot reproduce; the per-type `__rock_vt_eq`
+            // registry (`build_vt_eq_defs`) supplies that split and `__op_eq`
+            // consults it before the generic walk -- mirroring luajit's `_vt.__eq`
+            // metatable-authority rule. Construction is identical for both tiers.
             Inst::MakeValueStruct { name, fields } => {
-                if !skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
-                    return Err(err(format!(
-                        "JS subset: GC-carrying value struct `{name}` (reference-field \
-                         eq needs type-aware codegen)"
-                    )));
-                }
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
                     parts.push(format!("{f}: {}", self.render_val(*v)?));
@@ -1386,20 +1380,23 @@ impl Emitter<'_> {
 
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
-        // `inspect`/`inspect_formatted` of a VALUE STRUCT still diverges from luajit:
-        // a value struct renders `Name { f: v }` (colon, via the cdata `__tostring`)
-        // where the generic table walker emits `f = v` (equals), and the two struct
-        // kinds share the `{__ty,..}` JS shape -- so reject at the box boundary. A
-        // boxed ENUM renders faithfully now (T8e): the walker recovers the `E::V`
-        // header from `__variant`/`__ty` and displays 0-based positional keys as
-        // luajit's 1-based `[N]` (`JS_INSPECT_RUNTIME`), byte-matching luajit.
+        // `inspect`/`inspect_formatted` of a GC-FREE value struct still diverges:
+        // it is cdata on luajit, rendered `Name { f: v }` (colon, via the cdata
+        // `__tostring`) where the JS `{__ty,..}`-object walker emits `f = v`
+        // (equals) -- reject at the box boundary. A GC-CARRYING value struct is a
+        // `_vt` TABLE on luajit; `inspect` walks it via the SAME generic
+        // equals-format walker as the JS object (NOT the `_vt.__tostring`, which it
+        // never calls -- oracle-verified: luajit renders `Bag { n = 5, xs = Vec {..} }`),
+        // so it inspects faithfully. A boxed ENUM likewise renders faithfully (T8e).
         if matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
                 if let Inst::MakeValueStruct { name, .. } = &self.mf.insts[arg0] {
-                    return Err(err(format!(
-                        "JS subset: `inspect` of value struct `{name}` \
-                         (colon-format cdata render; deferred to value-struct repr)"
-                    )));
+                    if skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
+                        return Err(err(format!(
+                            "JS subset: `inspect` of GC-free value struct `{name}` \
+                             (colon-format cdata render; deferred to value-struct repr)"
+                        )));
+                    }
                 }
             }
         }
@@ -1687,6 +1684,18 @@ pub fn emit_with_closure(
     for name in enum_names {
         out.push_str(&enum_defs[name]);
     }
+    // Per-type `__rock_vt_eq` registry for every GC-carrying value struct the
+    // program constructs (closed transitively over GC-carrying value-struct
+    // fields, so a nested type's entry always exists for the recursive
+    // `__op_eq`). `__op_eq` consults it before the generic key walk. Assignments
+    // are idempotent -- dup-safe across per-test concatenation, same rule as the
+    // enum singletons.
+    let mut vt_names: BTreeSet<ustr::Ustr> = BTreeSet::new();
+    for mf in lowered.iter().map(|(_, mf)| mf).chain(ginits.iter().map(|g| &g.mf)) {
+        collect_gc_value_structs(ws, mf, &mut vt_names);
+    }
+    close_gc_value_struct_fields(ws, &mut vt_names);
+    out.push_str(&build_vt_eq_defs(ws, &vt_names)?);
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order.
     for g in &ginits {
@@ -1947,6 +1956,95 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
         }
     }
     out
+}
+
+/// Collect every GC-carrying value-struct name a body CONSTRUCTS (an
+/// `Inst::MakeValueStruct` whose type is `value_struct_is_gc`), scanning the
+/// full inst arena so a value struct built as a nested value operand is caught.
+fn collect_gc_value_structs(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ustr::Ustr>) {
+    for inst in mf.insts.values() {
+        if let Inst::MakeValueStruct { name, .. } = inst {
+            if skull_mir::lower::value_struct_is_gc(ws, *name) {
+                out.insert(*name);
+            }
+        }
+    }
+    for nf in &mf.nested_fns {
+        collect_gc_value_structs(ws, nf, out);
+    }
+}
+
+/// Close the referenced set over GC-carrying value-struct FIELDS: a `Wrap`
+/// registry entry recurses through `__op_eq` into its `VecBox` field, so that
+/// field's entry must exist even if `VecBox` is never independently constructed.
+fn close_gc_value_struct_fields(ws: &Workspace, names: &mut BTreeSet<ustr::Ustr>) {
+    let mut queue: Vec<ustr::Ustr> = names.iter().copied().collect();
+    while let Some(name) = queue.pop() {
+        let Some(sid) = ws.struct_by_name.get(&name) else { continue };
+        let s = &ws.module(sid.module).structs[sid.def];
+        for f in &s.fields {
+            if let Some(field_struct) = value_struct_field_name(ws, f.ty) {
+                if skull_mir::lower::value_struct_is_gc(ws, field_struct) && names.insert(field_struct)
+                {
+                    queue.push(field_struct);
+                }
+            }
+        }
+    }
+}
+
+/// The nominal name of `ty` when it resolves to a `value` struct, else `None`
+/// (used to walk value-struct field types for the registry closure).
+fn value_struct_field_name(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<ustr::Ustr> {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    let te = match ty {
+        bone_semantic::prelude::TyId::Static(mid, idx) => ws.modules.get(mid.index())?.ty_arena[idx],
+        bone_semantic::prelude::TyId::Local(_) => return None,
+    };
+    match te {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
+            if ws
+                .struct_by_name
+                .get(&name)
+                .map(|sid| ws.module(sid.module).structs[sid.def].is_value)
+                .unwrap_or(false) =>
+        {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// Emit the `__rock_vt_eq["<N>"] = function(a, b) {...}` entries mirroring the
+/// Lua `_vt.__eq` (`skull::value_struct_gc_defs`) field-for-field: `__op_eq`
+/// (structural) where `gc_eq_is_structural` says structural -- scalars, enums,
+/// nested value structs; `===` (by reference, luajit's `rawequal`) for a Vec /
+/// Map / Arena / reference-struct / generic-`T` / string field. `===` on a JS
+/// string is by-value, matching luajit's interning.
+fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<String, CompilerError> {
+    let mut out = String::new();
+    for name in names {
+        let Some(sid) = ws.struct_by_name.get(name) else { continue };
+        let s = &ws.module(sid.module).structs[sid.def];
+        let cmps: Vec<String> = s
+            .fields
+            .iter()
+            .map(|f| {
+                let (a, b) = (format!("a.{}", f.name), format!("b.{}", f.name));
+                if skull_mir::lower::gc_eq_is_structural(ws, f.ty) {
+                    format!("__op_eq({a}, {b})")
+                } else {
+                    format!("{a} === {b}")
+                }
+            })
+            .collect();
+        let body = if cmps.is_empty() { "true".to_string() } else { cmps.join(" && ") };
+        out.push_str(&format!(
+            "__rock_vt_eq[{}] = function(a, b) {{ return {body}; }};\n",
+            js_string_lit(name.as_str())?
+        ));
+    }
+    Ok(out)
 }
 
 /// Emit a `co fn` for JS: the shared coroutine pipeline (`transform_coroutine`

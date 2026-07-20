@@ -89,10 +89,12 @@ fn nested_value_struct_eq() {
     eval_int(&js, "root", 1);
 }
 
-// A GC-carrying value struct (a boxed string field) REJECTS -- luajit compares
-// its pointer fields by reference, which structural deep-eq cannot reproduce.
+// A GC-carrying value struct (a boxed string field) now emits (T8g): the
+// per-type `__rock_vt_eq` registry supplies the field split -- a `string` field
+// compares BY REFERENCE (luajit interns; JS `===` is by-value), a scalar field
+// structurally. Two boxes with equal string + scalar compare EQUAL.
 #[test]
-fn gc_carrying_value_struct_rejects() {
+fn gc_carrying_value_struct_eq() {
     let src = "value W { s: string, n: int }\n\
                fn root() -> int {\n\
                    let a = W { s: \"hi\", n: 1 }\n\
@@ -100,9 +102,10 @@ fn gc_carrying_value_struct_rejects() {
                    if a == b { 1 } else { 0 }\n\
                }";
     let ws = ws_with(src);
-    let err = emit_closure(&ws, "root").expect_err("GC-carrying value struct must reject");
+    let js = emit_closure(&ws, "root").expect("GC-carrying value struct emits (T8g)");
     assert!(
-        err.contains("GC-carrying value struct"),
-        "rejects for the GC-carrying reason: {err}"
+        js.contains("__rock_vt_eq[\"W\"] = function(a, b) { return a.s === b.s && __op_eq(a.n, b.n); };"),
+        "emits the W registry entry (string ref, scalar structural):\n{js}"
     );
+    eval_int(&js, "root", 1);
 }

@@ -184,6 +184,11 @@ function __try_call(f) {
 /// captures (matching luajit's `__rock_fn_mt` identity-leaf rule and pre-arc
 /// arrow `===`).
 pub const JS_STRUCTURAL_EQ: &str = r#"
+// Per-type equality for GC-carrying value structs (`build_vt_eq_defs` fills it):
+// GC-ref fields by reference, scalar/nested-value fields structural. An entry is
+// the AUTHORITY, mirroring luajit's `_vt.__eq` metatable rule -- consulted before
+// the generic key walk so a Vec/Map/ref-struct field is NOT contents-compared.
+var __rock_vt_eq = {};
 function __op_eq(a, b) {
   var an = (a === null || a === undefined), bn = (b === null || b === undefined);
   if (an || bn) return an && bn;
@@ -195,6 +200,10 @@ function __op_eq(a, b) {
     if (!aa || !ab || a.length !== b.length) return false;
     for (var i = 0; i < a.length; i++) if (!__op_eq(a[i], b[i])) return false;
     return true;
+  }
+  var vt = a.__ty;
+  if (vt !== undefined && vt === b.__ty && __rock_vt_eq[vt] !== undefined) {
+    return __rock_vt_eq[vt](a, b);
   }
   var ka = Object.keys(a), kb = Object.keys(b);
   if (ka.length !== kb.length) return false;
