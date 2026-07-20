@@ -57,6 +57,7 @@ fn corpus() -> Vec<String> {
         "tests/js_vec_helpers.rock",
         "tests/js_value_gc_eq.rock",
         "tests/js_map_eq.rock",
+        "tests/js_trampoline_fallback.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -183,8 +184,15 @@ fn js_runnable_coverage_ratchet() {
     // full-suite pass 3554 -> 3593, GC-carrying reject bucket 73 -> 0). T8g(d)
     // Map eq hole (JS `__op_eq` had no Map branch -- `Object.keys(map)` is `[]`, so
     // unequal Maps behind an eq walk compared EQUAL; added a size + per-key `.get`
-    // branch, order-free) added tests/js_map_eq.rock -> 291.
-    const FLOOR: usize = 291;
+    // branch, order-free) added tests/js_map_eq.rock -> 291. T8h trampoline
+    // fallback (a body the structurer rejects with the shared-branch-tail reason
+    // -- a nested-loop shared tail or an over-cap tail -- re-emits through the
+    // block trampoline `for(;;) switch(__bb)`, which accepts arbitrary CFGs;
+    // cross-block materialized temps hoist to fn scope; the structured multi-value
+    // return arm is ported into the trampoline term printer, ordinary-body path
+    // only) added tests/js_trampoline_fallback.rock -> 300 (the shared-branch-tail
+    // bucket 115 -> 0 suite-wide; 3 corpus shared-tail tests + the 6 new cases).
+    const FLOOR: usize = 300;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

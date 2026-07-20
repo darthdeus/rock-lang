@@ -147,6 +147,9 @@ pub fn emit_fn_with_callees(
         loop_stack: Vec::new(),
         loop_markers: Vec::new(),
         labels_used: HashSet::new(),
+        shared_tail_reject: false,
+        pack_multi_return: false,
+        hoisted_temps: HashSet::new(),
         out: String::new(),
         indent: 1,
     };
@@ -178,9 +181,23 @@ pub fn emit_fn_with_callees(
         header.push_str(&format!("  let {};\n", names.join(", ")));
     }
 
-    em.emit_seq(mf.entry, None, LoopCtx::default())?;
-    let body = format!("{header}{}}}\n", em.out);
-    Ok(finalize_labels(body, &em.loop_markers, &em.labels_used))
+    match em.emit_seq(mf.entry, None, LoopCtx::default()) {
+        Ok(()) => {
+            let body = format!("{header}{}}}\n", em.out);
+            Ok(finalize_labels(body, &em.loop_markers, &em.labels_used))
+        }
+        // The structured relooper cannot express this CFG (a shared branch tail
+        // holding a nested loop, or one over the tail-dup cap). Re-emit the SAME
+        // body through the block trampoline, which accepts arbitrary (incl.
+        // irreducible) CFGs. Emission is pure/idempotent per call, so the
+        // discarded structured attempt leaves no residue. Every OTHER reject
+        // rides `?` out untouched (`shared_tail_reject` is set only at the one
+        // reject site), and a trampoline reject surfaces its own reason.
+        Err(_) if em.shared_tail_reject => {
+            emit_fn_trampoline(ws, mf, js_name, callees, hoisted, globals, mf.entry, &mf.params, true)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Emit a region of `mf` as a block trampoline `for(;;) switch(__bb)` -- the
@@ -199,9 +216,11 @@ pub fn emit_fn_trampoline(
     globals: &GlobalCtx,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
+    pack_multi_return: bool,
 ) -> Result<String, CompilerError> {
     let region = reachable_from(mf, entry);
     let (use_count, inlinable) = compute_inlinable_over(mf, &region);
+    let hoisted_temps = cross_block_temps(mf, &region, &use_count, &inlinable);
     let mut em = Emitter {
         ws,
         mf,
@@ -218,6 +237,9 @@ pub fn emit_fn_trampoline(
         loop_stack: Vec::new(),
         loop_markers: Vec::new(),
         labels_used: HashSet::new(),
+        shared_tail_reject: false,
+        pack_multi_return,
+        hoisted_temps,
         out: String::new(),
         indent: 1,
     };
@@ -235,9 +257,15 @@ pub fn emit_fn_trampoline(
             }
         }
     }
-    if !declared.is_empty() {
+    let mut hoisted_names: Vec<u32> = em.hoisted_temps.iter().copied().collect();
+    hoisted_names.sort_unstable();
+    if !declared.is_empty() || !hoisted_names.is_empty() {
         declared.sort_unstable();
-        let names: Vec<String> = declared.iter().map(|id| format!("c{id}")).collect();
+        let names: Vec<String> = declared
+            .iter()
+            .map(|id| format!("c{id}"))
+            .chain(hoisted_names.iter().map(|id| format!("v{id}")))
+            .collect();
         header.push_str(&format!("  let {};\n", names.join(", ")));
     }
     em.push(&format!("var __bb = {};", raw(entry)));
@@ -324,6 +352,22 @@ struct Emitter<'a> {
     /// single-level loops stay byte-identical. Discovered DURING emission (the
     /// runtime `loop_stack` nesting), avoiding a fragile static pre-pass.
     labels_used: HashSet<Idx<Block>>,
+    /// Set when [`Self::emit_seq`] raises the shared-branch-tail reject (the ONE
+    /// reject the per-body trampoline fallback retries -- every other reject rides
+    /// `?` out untouched). A typed signal, not a message-string compare.
+    shared_tail_reject: bool,
+    /// Whether a multi-value `Term::Return` in the trampoline printer packs an
+    /// array (the ordinary-body fallback ABI, mirroring the structured
+    /// `emit_return`) or rejects. A coroutine step's multi-value return keeps the
+    /// reject -- its return channels through the step protocol, not a raw array.
+    pack_multi_return: bool,
+    /// Materialized `v<N>` temps (raw inst ids) whose use crosses their defining
+    /// block: the flat trampoline switch puts each block in a SIBLING case, so a
+    /// per-case `let v<N>` would be out of scope at a cross-case use. These are
+    /// hoist-declared at the fn top and ASSIGNED in-case; block-local temps keep
+    /// their per-case `let`. Empty for the structured path (block nesting keeps a
+    /// temp in scope) and the spilled coroutine step (no cross-block temps).
+    hoisted_temps: HashSet<u32>,
     out: String,
     indent: usize,
 }
@@ -453,6 +497,7 @@ impl Emitter<'_> {
                         return self.emit_dup(cur, stop, ctx, &region);
                     }
                 }
+                self.shared_tail_reject = true;
                 return Err(err("JS subset: unstructured control flow (shared branch tail)"));
             }
             self.emit_block_effects(cur)?;
@@ -1015,7 +1060,14 @@ impl Emitter<'_> {
                     && self.use_count[raw(iid) as usize] > 0 =>
                 {
                     let expr = self.render_inst_expr(iid)?;
-                    self.push(&format!("let v{} = {};", raw(iid), expr));
+                    // A cross-case temp is hoist-declared at the fn top (see
+                    // `hoisted_temps`); assign, don't re-`let`, so it stays live
+                    // across the flat switch cases. Block-local temps `let` here.
+                    if self.hoisted_temps.contains(&raw(iid)) {
+                        self.push(&format!("v{} = {};", raw(iid), expr));
+                    } else {
+                        self.push(&format!("let v{} = {};", raw(iid), expr));
+                    }
                 }
                 // An inlinable value inst renders at its use; an unused pure inst
                 // (dead `Load`/`Index`/`Field`/`Len`) is dropped. Remaining
@@ -1086,6 +1138,16 @@ impl Emitter<'_> {
                 [v] => {
                     let s = self.render_val(*v)?;
                     self.push(&format!("return {s};"));
+                }
+                // Scalarized value-struct / tuple return: pack the leaves into an
+                // array the `CallMulti` caller destructures, mirroring the
+                // structured `emit_return`. Only the ordinary-body fallback opts
+                // in; a coroutine step's return channels through the step
+                // protocol, so it keeps the reject.
+                _ if self.pack_multi_return => {
+                    let parts: Result<Vec<String>, CompilerError> =
+                        vs.iter().map(|&v| self.render_val(v)).collect();
+                    self.push(&format!("return [{}];", parts?.join(", ")));
                 }
                 _ => return Err(err("JS subset: multi-value coroutine return")),
             },
@@ -2115,6 +2177,7 @@ fn emit_coroutine_js(
         globals,
         lowered.step.entry,
         &[lowered.s_cell, resume_arg],
+        false,
     )?;
     // Hoisted lambda siblings are frame-free ordinary fns (their frame accesses
     // are already `e.c<S>.c<slot>` MIR) -- the normal structured path.
@@ -2135,6 +2198,7 @@ fn emit_coroutine_js(
             globals,
             entry,
             &[lowered.s_cell],
+            false,
         )?);
     }
     for &(slot, entry) in &hook_entries {
@@ -2147,6 +2211,7 @@ fn emit_coroutine_js(
             globals,
             entry,
             &[lowered.s_cell],
+            false,
         )?);
     }
     out.push_str(&emit_js_constructor(js_name, &step_name, &lowered, channel.as_ref())?);
@@ -2703,6 +2768,48 @@ fn compute_inlinable_over(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec
         }
     }
     (use_count, inl)
+}
+
+/// Materialized value temps (raw inst ids) whose use crosses their defining
+/// block. The structured emitter nests blocks so such a temp stays in lexical
+/// scope; the trampoline puts each block in a SIBLING switch case, so a
+/// cross-case `let v<N>` would be undefined at the use -- these get hoist-
+/// declared at the fn top and assigned in-place ([`Emitter::hoisted_temps`]). A
+/// same-block temp is not returned (keeps its per-case `let`).
+fn cross_block_temps(
+    mf: &MirFunc,
+    region: &[Idx<Block>],
+    use_count: &[u32],
+    inlinable: &[bool],
+) -> HashSet<u32> {
+    let mut def_block: HashMap<u32, Idx<Block>> = HashMap::new();
+    for &b in region {
+        for &iid in &mf.blocks[b].insts {
+            let k = raw(iid);
+            if mf.insts[iid].produces_value()
+                && !inlinable[k as usize]
+                && use_count[k as usize] > 0
+            {
+                def_block.insert(k, b);
+            }
+        }
+    }
+    let mut cross: HashSet<u32> = HashSet::new();
+    for &b in region {
+        let mut check = |op: Idx<Inst>| {
+            let k = raw(op);
+            if let Some(&db) = def_block.get(&k) {
+                if db != b {
+                    cross.insert(k);
+                }
+            }
+        };
+        for &iid in &mf.blocks[b].insts {
+            for_each_operand(&mf.insts[iid], &mut check);
+        }
+        for_each_term_operand(&mf.blocks[b].term, &mut check);
+    }
+    cross
 }
 
 /// Successor blocks of `b` (`None` == the virtual exit).
