@@ -42,6 +42,7 @@ fn corpus() -> Vec<String> {
         "tests/stackless_coroutines/phase3_loops.rock",
         "tests/js_table_unset.rock",
         "tests/js_string_builder.rock",
+        "tests/js_string_primitives.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -91,8 +92,12 @@ fn js_runnable_coverage_ratchet() {
     // 2878 -> 2941; the table_unset bucket of 142 collapsed). T8d string builder
     // (sb_new/sb_push/sb_build -> `[]`/`.push`/`.join("")`) added
     // tests/js_string_builder.rock -> 171 (full-suite 2941 -> 2951; the sb_new
-    // bucket of 44 collapsed).
-    const FLOOR: usize = 171;
+    // bucket of 44 collapsed). T8d string primitives (find/substring/unit_at/
+    // upper/lower/string_char host templates + defaulted-arg padding; the
+    // Layer-2 split/replace/trim/... co-emit) added
+    // tests/js_string_primitives.rock -> 188 (full-suite 2951 -> 3049; the find
+    // 37 / unit_at 30 / substring 16 buckets collapsed).
+    const FLOOR: usize = 188;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

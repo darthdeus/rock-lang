@@ -1298,7 +1298,18 @@ impl Emitter<'_> {
             return Ok(format!("print({})", rargs.join(", ")));
         }
         if let Some(tmpl) = host_fn_template(cf) {
-            let refs: Vec<&str> = rargs.iter().map(|s| s.as_str()).collect();
+            // A defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
+            // materialized into the call args, so a template `$N` for it would
+            // stay literal. Pad to the declared arity with `undefined`: JS reads
+            // an omitted arg as `undefined`, and for the templated fns that carry
+            // a default (`find` -> indexOf, whose `from` defaults to 0) that
+            // coincides with the Rock default. Fixed-arity templates are already
+            // full, so this is a no-op there.
+            let mut padded = rargs.clone();
+            while padded.len() < cf.param_decls.len() {
+                padded.push("undefined".to_string());
+            }
+            let refs: Vec<&str> = padded.iter().map(|s| s.as_str()).collect();
             return Ok(fill_template(tmpl, &refs));
         }
         // `map_new` is pure Rock (`transmute(table_new())`) but must be a real JS
@@ -1826,6 +1837,19 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // JS `.length` (UTF-16 units). `float(int)` is an identity (all doubles).
         ("len", 1) => Some("$1.length"),
         ("float", 1) => Some("$1"),
+        // Host-bodied string ops (all lua_body, so a pure-Rock user fn of the same
+        // name -- e.g. the iterator `find(it, pred)` -- co-emits instead). ASCII
+        // subset: `unit_at` is a JS UTF-16 unit, a luajit byte, equal in [0,127].
+        // `find` -> 0-based indexOf (-1 miss); its `from` default is padded to
+        // `undefined` above (indexOf reads that as 0). `substring(start, end)` is
+        // a 0-based end-exclusive slice (Lua `sub(s, start+1, end)`); callers pass
+        // in-range non-negative bounds.
+        ("find", 3) => Some("$1.indexOf($2, $3)"),
+        ("substring", 3) => Some("$1.slice($2, $3)"),
+        ("unit_at", 2) => Some("($1.charCodeAt($2) || 0)"),
+        ("upper", 1) => Some("$1.toUpperCase()"),
+        ("lower", 1) => Some("$1.toLowerCase()"),
+        ("string_char", 1) => Some("String.fromCharCode($1)"),
         // Coroutine consumers (stdlib inline(lua) readers of the frame object).
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has
