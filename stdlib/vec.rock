@@ -227,6 +227,10 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return v(a.x * b.x, a.y * b.y, a.z * b.z)
 }
 
+@pure operator /(a: Vec3, b: Vec3) -> Vec3 {
+    return v(a.x / b.x, a.y / b.y, a.z / b.z)
+}
+
 @pure fn Vec3.neg(a) -> Vec3 {
     return v(-a.x, -a.y, -a.z)
 }
@@ -317,6 +321,10 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 
 @pure operator *(a: Vec4, b: Vec4) -> Vec4 {
     return v(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w)
+}
+
+@pure operator /(a: Vec4, b: Vec4) -> Vec4 {
+    return v(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w)
 }
 
 @pure operator /(a: Vec4, b: float) -> Vec4 {

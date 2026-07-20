@@ -32,6 +32,7 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("sin", 1, "Math.sin($1)"),
     ("cos", 1, "Math.cos($1)"),
     ("sqrt", 1, "Math.sqrt($1)"),
+    ("exp", 1, "Math.exp($1)"),
     ("abs", 1, "Math.abs($1)"),
     ("floor", 1, "Math.floor($1)"),
     ("ceil", 1, "Math.ceil($1)"),

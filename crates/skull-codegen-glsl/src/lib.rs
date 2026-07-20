@@ -259,6 +259,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("cos", 1, "cos($1)"),
     ("tan", 1, "tan($1)"),
     ("sqrt", 1, "sqrt($1)"),
+    ("exp", 1, "exp($1)"),
     ("abs", 1, "abs($1)"),
     ("floor", 1, "floor($1)"),
     ("ceil", 1, "ceil($1)"),

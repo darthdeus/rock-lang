@@ -1746,6 +1746,7 @@ inline(lua) fn random_seed(seed: int) = """
 @intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
 @intrinsic @pure @inline inline(lua) fn tan(x: float) -> float = "math.tan(x)"
 @intrinsic @pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
+@intrinsic @pure @inline inline(lua) fn exp(x: float) -> float = "math.exp(x)"
 @intrinsic @pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
 @intrinsic @pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"
 @intrinsic @pure fn round(x: float) -> float { return floor(x + 0.5) }
