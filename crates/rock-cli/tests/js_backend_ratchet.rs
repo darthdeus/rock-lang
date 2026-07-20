@@ -36,6 +36,10 @@ fn corpus() -> Vec<String> {
         "tests/js_shared_tail.rock",
         "tests/closure_semantics.rock",
         "tests/closure_capture_semantics.rock",
+        "tests/js_coroutines.rock",
+        "tests/coroutines.rock",
+        "tests/stackless_coroutines/phase1_linear.rock",
+        "tests/stackless_coroutines/phase3_loops.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -76,7 +80,11 @@ fn js_runnable_coverage_ratchet() {
     // T5/T7/T8c native-arrow path) added tests/closure_semantics.rock +
     // tests/closure_capture_semantics.rock -> 134; the loop-counter/enumerate
     // captures the deleted T7 path skipped now emit (full-suite 2743 -> 2756).
-    const FLOOR: usize = 134;
+    // S4a (coroutines: shared step transform + materialize_frame + trampoline
+    // emission + JS ctor/runtime) added tests/js_coroutines.rock,
+    // tests/coroutines.rock, and stackless phase1/phase3 -> 157 (full-suite
+    // 2756 -> 2876; the `resume`/`kill`/`coroutine fn` buckets collapsed).
+    const FLOOR: usize = 157;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

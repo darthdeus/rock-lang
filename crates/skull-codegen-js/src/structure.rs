@@ -62,6 +62,13 @@ impl Structure {
     pub(crate) fn ipdom(&self, b: Idx<Block>) -> Option<Idx<Block>> {
         self.ipdom[bx(b)]
     }
+
+    /// A no-analysis placeholder for the trampoline mode, whose per-case
+    /// emission never consults ipdoms or loops (the post-coroutine-transform
+    /// CFG is irreducible by construction, so the relooper analyses don't apply).
+    pub(crate) fn empty(n: usize) -> Structure {
+        Structure { ipdom: vec![None; n], loops: HashMap::new() }
+    }
 }
 
 pub(crate) fn analyze(f: &MirFunc) -> Structure {

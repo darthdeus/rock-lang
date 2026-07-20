@@ -163,6 +163,83 @@ pub fn emit_fn_with_callees(
     Ok(finalize_labels(body, &em.loop_markers, &em.labels_used))
 }
 
+/// Emit a region of `mf` as a block trampoline `for(;;) switch(__bb)` -- the
+/// coroutine-step shape (dispatch-into-loops is irreducible by construction, so
+/// the structured relooper cannot apply). `entry` is the region root (the step
+/// entry, or a detached hook/defer region's block); `params` the emitted fn's
+/// param cells (the step's `[s, resume_arg]`, an aux body's `[s]`). Case bodies
+/// are braced so `let v<N>` temps stay case-local; values are same-block by the
+/// value model + the transform's cross-block spill, so no cross-case temps exist.
+pub fn emit_fn_trampoline(
+    ws: &Workspace,
+    mf: &MirFunc,
+    js_name: &str,
+    callees: &HashMap<FuncRef, String>,
+    hoisted: &HashSet<ustr::Ustr>,
+    entry: Idx<Block>,
+    params: &[Idx<Cell>],
+) -> Result<String, CompilerError> {
+    let region = reachable_from(mf, entry);
+    let (use_count, inlinable) = compute_inlinable_over(mf, &region);
+    let mut em = Emitter {
+        ws,
+        mf,
+        callees,
+        hoisted,
+        use_count,
+        inlinable,
+        structure: structure::Structure::empty(mf.blocks.len()),
+        counted: HashMap::new(),
+        general: HashMap::new(),
+        active: HashSet::new(),
+        visited: HashSet::new(),
+        loop_stack: Vec::new(),
+        loop_markers: Vec::new(),
+        labels_used: HashSet::new(),
+        out: String::new(),
+        indent: 1,
+    };
+    let pnames: Vec<String> = params.iter().map(|&c| cell_name(c)).collect();
+    let mut header = format!("function {js_name}({}) {{\n", pnames.join(", "));
+    let param_set: HashSet<u32> = params.iter().map(|&c| raw(c)).collect();
+    let mut declared: Vec<u32> = Vec::new();
+    let mut seen = HashSet::new();
+    for &b in &region {
+        for &iid in &mf.blocks[b].insts {
+            for &cell in inst_writes(&mf.insts[iid]) {
+                if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
+                    declared.push(raw(cell));
+                }
+            }
+        }
+    }
+    if !declared.is_empty() {
+        declared.sort_unstable();
+        let names: Vec<String> = declared.iter().map(|id| format!("c{id}")).collect();
+        header.push_str(&format!("  let {};\n", names.join(", ")));
+    }
+    em.push(&format!("var __bb = {};", raw(entry)));
+    em.push("for (;;) {");
+    em.indent += 1;
+    em.push("switch (__bb) {");
+    em.indent += 1;
+    let mut cases = region.clone();
+    cases.sort_by_key(|b| raw(*b));
+    for b in cases {
+        em.push(&format!("case {}: {{", raw(b)));
+        em.indent += 1;
+        em.emit_block_effects(b)?;
+        em.emit_trampoline_term(b)?;
+        em.indent -= 1;
+        em.push("}");
+    }
+    em.indent -= 1;
+    em.push("}");
+    em.indent -= 1;
+    em.push("}");
+    Ok(format!("{header}{}}}\n", em.out))
+}
+
 /// A unique, JS-invalid sentinel a loop emits in place of its label; resolved by
 /// [`finalize_labels`] to `L<h>: ` if a multi-level jump targeted it, else stripped.
 /// `\x01` cannot appear in emitted JS source, so the replace is unambiguous.
@@ -924,6 +1001,54 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// A trampoline case's terminator: `__bb` reassignment + `continue` for
+    /// in-region edges, `return` for exits. `Switch` is a literal if-chain (the
+    /// discriminant is a temp or a pure inlinable, so re-rendering is safe).
+    fn emit_trampoline_term(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
+        match self.mf.blocks[b].term.clone() {
+            Term::Goto(t) => self.push(&format!("__bb = {}; continue;", raw(t))),
+            Term::Branch { cond, then_bb, else_bb } => {
+                let c = self.render_val(cond)?;
+                self.push(&format!(
+                    "if ({c}) {{ __bb = {}; }} else {{ __bb = {}; }} continue;",
+                    raw(then_bb),
+                    raw(else_bb)
+                ));
+            }
+            Term::Switch { discr, cases, default } => {
+                let d = self.render_val(discr)?;
+                let mut s = String::new();
+                for (lit, bb) in &cases {
+                    let cmp = match lit {
+                        Lit::Nil => format!("{d} == null"),
+                        Lit::Int(i) => format!("{d} === {i}"),
+                        Lit::Bool(v) => format!("{d} === {v}"),
+                        Lit::Float(f) => format!("{d} === {}", js_number(*f)?),
+                        Lit::Str(v) => format!("{d} === {}", js_string_lit(v.as_str())?),
+                    };
+                    s.push_str(&format!("if ({cmp}) {{ __bb = {}; }} else ", raw(*bb)));
+                }
+                s.push_str(&format!("{{ __bb = {}; }} continue;", raw(default)));
+                self.push(&s);
+            }
+            Term::Return(vs) => match vs.as_slice() {
+                [] => self.push("return;"),
+                [v] => {
+                    let s = self.render_val(*v)?;
+                    self.push(&format!("return {s};"));
+                }
+                _ => return Err(err("JS subset: multi-value coroutine return")),
+            },
+            Term::Unreachable => self.push("return;"),
+            Term::Yield { .. } => {
+                return Err(err(
+                    "trampoline: Term::Yield must not survive transform_coroutine (pass bug)",
+                ))
+            }
+        }
+        Ok(())
+    }
+
     /// The JS expression for a value operand: the bound `v<raw>` temp if the
     /// inst was materialized at its position, else its expression folded inline.
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
@@ -1003,8 +1128,12 @@ impl Emitter<'_> {
             // fn (`convert_closures` emits `Inst::Global(<name>__lambda<k>)`).
             // Same-site references share one value -> `==` (P3 identity parity).
             // Any OTHER global read (module `let`, enum name table, named fn as a
-            // value) is not emitted, so it stays out of subset.
-            Inst::Global(name) if self.hoisted.contains(name) => name.to_string(),
+            // value) is not emitted, so it stays out of subset. `error` is the
+            // one runtime global: the coroutine transform's layout raise and
+            // `yield*`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
+            Inst::Global(name) if self.hoisted.contains(name) || name.as_str() == "error" => {
+                name.to_string()
+            }
             Inst::Global(name) => {
                 return Err(err(format!("JS subset: global read `{name}` not supported")))
             }
@@ -1290,8 +1419,9 @@ pub fn emit_with_closure(
     while let Some(fr) = queue.pop() {
         let f = &ws.module(fr.module).functions[fr.func];
         let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
-        // Coroutines never inline (they reject at emit here anyway), mirroring the
-        // luajit path's coroutine branch (cleanup only, no inline / forl rewrite).
+        // Coroutines never inline, mirroring the luajit path's coroutine branch
+        // (cleanup only, no inline / forl rewrite); the transform + trampoline
+        // emission run in `emit_coroutine_js` at emission time.
         if mf.is_coroutine {
             skull_transform::cleanup(&mut mf);
         } else {
@@ -1381,6 +1511,13 @@ pub fn emit_with_closure(
         lowered.iter().flat_map(|(_, mf)| mf.nested_fns.iter().map(|nf| nf.name)).collect();
     let mut out = String::new();
     for (fr, mf) in &lowered {
+        if mf.is_coroutine {
+            // The shared coroutine pipeline + trampoline step + JS ctor. Runs
+            // its own closure conversion, so its hoisted names extend `hoisted`
+            // locally inside.
+            out.push_str(&emit_coroutine_js(ws, *fr, mf, &names[fr], &names, &hoisted)?);
+            continue;
+        }
         out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names, &hoisted)?);
         // Hoisted closure bodies (`convert_closures`): each is a normal fn named
         // by its `MakeEnv`/`Global` `__fn` reference, emitted as a sibling.
@@ -1389,6 +1526,204 @@ pub fn emit_with_closure(
         }
     }
     Ok(out)
+}
+
+/// Emit a `co fn` for JS: the shared coroutine pipeline (`transform_coroutine`
+/// -> `convert_closures_framed` -> `materialize_frame`) then the trampoline
+/// step, hoisted-lambda siblings, hook/defer aux trampolines over the shared
+/// arena, and the JS ctor (the exact Lua ctor contract: the object IS the
+/// frame; `__resume`/`__advance` drive the step; `JS_CORO_RUNTIME` supplies
+/// `__rock_coroutine_kill`/`__rock_coroutine_run_defers`/`error`).
+fn emit_coroutine_js(
+    ws: &Workspace,
+    fr: FuncRef,
+    mf: &MirFunc,
+    js_name: &str,
+    callees: &HashMap<FuncRef, String>,
+    hoisted: &HashSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
+    let f = &ws.module(fr.module).functions[fr.func];
+    let channel = f.return_ty.and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
+    let mut lowered = skull_transform::transform_coroutine(mf, channel.as_ref());
+    let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
+    let step_name = format!("{js_name}__step");
+    // Aux slot map BEFORE the closure pass mutates the arena (mirrors the Lua
+    // driver); hook/defer regions are untouched by the pass, so the map stays valid.
+    let aux_slots = lowered.aux_all_cells_slots(resume_arg);
+    let frame_info = skull_transform::FrameInfo {
+        s_cell: lowered.s_cell,
+        fields: lowered.frame_cells.iter().copied().collect(),
+        slots: lowered.frame_slots.clone(),
+    };
+    skull_transform::convert_closures_framed(
+        &mut lowered.step,
+        &step_name,
+        Some(&frame_info),
+        Some((&lowered.step_tree, &lowered.step_own)),
+    );
+    // This coroutine's hoisted lambda names are referenced only from its own
+    // bodies, so extend the program set locally.
+    let mut hoisted = hoisted.clone();
+    hoisted.extend(lowered.step.nested_fns.iter().map(|nf| nf.name));
+    // Materialize the ROOT region's frame accesses, then each detached
+    // hook/defer region with the all-cells aux map (disjoint block sets over
+    // the shared arena).
+    let step_entry = lowered.step.entry;
+    skull_transform::materialize_frame(&mut lowered.step, step_entry, lowered.s_cell, &lowered.frame_slots);
+    let mut hook_entries: Vec<(&'static str, Idx<Block>)> = Vec::new();
+    for (kind, lambda) in &lowered.hooks {
+        let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else {
+            return Err(err(format!("co-fn hook {} must be an Inst::Lambda", kind.slot())));
+        };
+        if !params.is_empty() {
+            return Err(err("co-fn lifecycle hooks are nullary"));
+        }
+        hook_entries.push((kind.slot(), *entry));
+    }
+    let defer_entries: Vec<Idx<Block>> =
+        lowered.step.coro_defers.iter().map(|(_, e)| *e).collect();
+    for &e in defer_entries.iter().chain(hook_entries.iter().map(|(_, e)| e)) {
+        skull_transform::materialize_frame(&mut lowered.step, e, lowered.s_cell, &aux_slots);
+    }
+
+    let mut out = emit_fn_trampoline(
+        ws,
+        &lowered.step,
+        &step_name,
+        callees,
+        &hoisted,
+        lowered.step.entry,
+        &[lowered.s_cell, resume_arg],
+    )?;
+    // Hoisted lambda siblings are frame-free ordinary fns (their frame accesses
+    // are already `e.c<S>.c<slot>` MIR) -- the normal structured path.
+    let mut nested = std::mem::take(&mut lowered.step.nested_fns);
+    for nf in nested.iter_mut() {
+        skull_transform::cleanup(nf);
+        skull_transform::recover_counted_loops(ws, nf);
+        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted)?);
+    }
+    lowered.step.nested_fns = nested;
+    for (k, &entry) in defer_entries.iter().enumerate() {
+        out.push_str(&emit_fn_trampoline(
+            ws,
+            &lowered.step,
+            &format!("{js_name}__defer{k}"),
+            callees,
+            &hoisted,
+            entry,
+            &[lowered.s_cell],
+        )?);
+    }
+    for &(slot, entry) in &hook_entries {
+        out.push_str(&emit_fn_trampoline(
+            ws,
+            &lowered.step,
+            &format!("{js_name}{slot}"),
+            callees,
+            &hoisted,
+            entry,
+            &[lowered.s_cell],
+        )?);
+    }
+    out.push_str(&emit_js_constructor(js_name, &step_name, &lowered, channel.as_ref())?);
+    Ok(out)
+}
+
+/// The JS Coroutine constructor + per-co-fn `__resume` (and `__advance` on the
+/// frame-slot channel), mirroring the Lua ctor contract field for field. The
+/// `try/catch` is the `pcall`; `undefined -> null` on the step's value so a
+/// bare terminal return reads as nil.
+fn emit_js_constructor(
+    name: &str,
+    step_name: &str,
+    lowered: &skull_transform::CoroLowered,
+    channel: Option<&skull_mir::lower::YieldChannel>,
+) -> Result<String, CompilerError> {
+    use std::fmt::Write as _;
+    let param_fields: Vec<String> = lowered
+        .params
+        .iter()
+        .map(|p| {
+            lowered
+                .frame_slots
+                .get(p)
+                .map(|s| format!("c{s}"))
+                .ok_or_else(|| err("co-fn param must be a frame cell with a slot"))
+        })
+        .collect::<Result<_, _>>()?;
+    let mut init = vec![
+        "__ty: \"Coroutine\"".to_string(),
+        "__state: 0".to_string(),
+        format!("__layout: {}", lowered.layout_hash),
+    ];
+    for pf in &param_fields {
+        init.push(format!("{pf}: {pf}"));
+    }
+    let n_defers = lowered.step.coro_defers.len();
+    if n_defers > 0 {
+        let list: Vec<String> = (0..n_defers).map(|k| format!("{name}__defer{k}")).collect();
+        init.push(format!("__defers: [{}]", list.join(", ")));
+    }
+    for (kind, _) in &lowered.hooks {
+        let field = kind.slot();
+        init.push(format!("{field}: {name}{field}"));
+    }
+    // The step-raise recovery shared by both resume shapes: errored terminal,
+    // kill the delegated inner, run defers LIFO, fire on_killed.
+    let catch_body = "s.__state = -2; s.__error = (e && e.message !== undefined) ? e.message : e; \
+                      if (s.__inner) { __rock_coroutine_kill(s.__inner); s.__inner = null; } \
+                      __rock_coroutine_run_defers(s); \
+                      if (s.__on_killed) { s.__on_killed(s); }";
+    if let Some(ch) = channel {
+        let mut box_fields = format!(
+            "{{ __variant: s.{tag}, __ty: {ty}",
+            tag = skull_mir::lower::yield_slot(0),
+            ty = js_string_lit(ch.enum_name.as_str())?,
+        );
+        for i in 0..ch.tuple_width {
+            let _ = write!(box_fields, ", \"{}\": s.{}", i + 1, skull_mir::lower::yield_slot(1 + i));
+        }
+        for (j, rf) in ch.record_fields.iter().enumerate() {
+            let _ = write!(
+                box_fields,
+                ", {rf}: s.{}",
+                skull_mir::lower::yield_slot(1 + ch.tuple_width + j)
+            );
+        }
+        box_fields.push_str(" }");
+        return Ok(format!(
+            "function {name}__advance(s, arg) {{\n\
+             \x20 if (s.__state < 0) return true;\n\
+             \x20 if (s.__on_resume) s.__on_resume(s);\n\
+             \x20 try {{ {step_name}(s, arg); }} catch (e) {{ {catch_body} return true; }}\n\
+             \x20 return s.__state < 0;\n\
+             }}\n\
+             function {name}__resume(s, arg) {{\n\
+             \x20 if ({name}__advance(s, arg)) return null;\n\
+             \x20 return {box_fields};\n\
+             }}\n\
+             function {name}({paramlist}) {{\n\
+             \x20 return {{ {fields}, __advance: {name}__advance, __resume: {name}__resume }};\n\
+             }}\n",
+            paramlist = param_fields.join(", "),
+            fields = init.join(", "),
+        ));
+    }
+    Ok(format!(
+        "function {name}__resume(s, arg) {{\n\
+         \x20 if (s.__state < 0) return null;\n\
+         \x20 if (s.__on_resume) s.__on_resume(s);\n\
+         \x20 var val;\n\
+         \x20 try {{ val = {step_name}(s, arg); }} catch (e) {{ {catch_body} return null; }}\n\
+         \x20 return val === undefined ? null : val;\n\
+         }}\n\
+         function {name}({paramlist}) {{\n\
+         \x20 return {{ {fields}, __resume: {name}__resume }};\n\
+         }}\n",
+        paramlist = param_fields.join(", "),
+        fields = init.join(", "),
+    ))
 }
 
 /// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
@@ -1488,6 +1823,17 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // JS `.length` (UTF-16 units). `float(int)` is an identity (all doubles).
         ("len", 1) => Some("$1.length"),
         ("float", 1) => Some("$1"),
+        // Coroutine consumers (stdlib inline(lua) readers of the frame object).
+        // IIFEs where an arg is read twice; `undefined -> null` normalization so
+        // an unset frame field reads as Rock null (Lua nil parity). `resume` has
+        // two arities (overload-by-arity: `c.resume()` vs `c.resume(arg)`).
+        ("resume", 1) => Some("(function(c){var v=c.__resume(c);return v===undefined?null:v;})($1)"),
+        ("resume", 2) => Some("(function(c,a){var v=c.__resume(c,a);return v===undefined?null:v;})($1, $2)"),
+        ("result", 1) => Some("(function(c){var v=c.__return;return v===undefined?null:v;})($1)"),
+        ("status", 1) => Some("(function(c){return c.__state === -2 ? \"errored\" : (c.__state < 0 ? \"dead\" : \"suspended\");})($1)"),
+        ("last_error", 1) => Some("(function(c){var v=c.__error;return v===undefined?null:v;})($1)"),
+        ("kill", 1) => Some("__rock_coroutine_kill($1)"),
+        ("fire_hot_reload", 1) => Some("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) c.__on_hot_reload(c); })($1)"),
         // `error(msg)` diverges; the message is already a string. Wrapped in a
         // throwing IIFE so it is a valid EXPRESSION -- the lowering stores a
         // diverging call's (dead) result into an if-result cell, and a bare
@@ -1679,13 +2025,18 @@ fn always_inlinable(inst: &Inst) -> bool {
 /// SAME block folds into that use; everything else materializes at its program
 /// position. Same-block + single-use makes the fold order-safe.
 fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
+    compute_inlinable_over(mf, &reachable_blocks(mf))
+}
+
+/// [`compute_inlinable`] over an explicit block region -- the trampoline mode
+/// analyzes a detached hook/defer region, not the fn-entry region.
+fn compute_inlinable_over(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec<bool>) {
     const NONE: u32 = u32::MAX;
     let ni = mf.insts.len();
     let mut use_count = vec![0u32; ni];
     let mut use_block = vec![NONE; ni];
     let mut def_block = vec![NONE; ni];
-    let blocks = reachable_blocks(mf);
-    for &b in &blocks {
+    for &b in blocks {
         let br = raw(b);
         for &id in &mf.blocks[b].insts {
             if mf.insts[id].produces_value() {
@@ -1704,7 +2055,7 @@ fn compute_inlinable(mf: &MirFunc) -> (Vec<u32>, Vec<bool>) {
         });
     }
     let mut inl = vec![false; ni];
-    for &b in &blocks {
+    for &b in blocks {
         for &id in &mf.blocks[b].insts {
             let k = raw(id) as usize;
             if use_count[k] == 1

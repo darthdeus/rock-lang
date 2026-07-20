@@ -1686,3 +1686,140 @@ fn dense_slots(cells: impl Iterator<Item = Idx<Cell>>) -> HashMap<Idx<Cell>, u32
     v.into_iter().enumerate().map(|(i, c)| (c, i as u32)).collect()
 }
 
+impl CoroLowered {
+    /// The all-cells aux frame slot map for hook/defer bodies (D5): the step's
+    /// slots shared verbatim (a hook reads the same field the ctor wrote),
+    /// aux-only cells appended after the step's range in raw-id order. Total
+    /// over every step cell except `s`/`resume_arg` -- so every reference in a
+    /// detached hook/defer region resolves to `s.c<slot>`, never a bare local.
+    pub fn aux_all_cells_slots(&self, resume_arg: Idx<Cell>) -> HashMap<Idx<Cell>, u32> {
+        let mut s = self.frame_slots.clone();
+        let base = self.frame_slots.len() as u32;
+        let mut extra: Vec<Idx<Cell>> = self
+            .step
+            .cells
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|&c| c != self.s_cell && c != resume_arg && !s.contains_key(&c))
+            .collect();
+        extra.sort_by_key(|c| raw(*c));
+        for (i, c) in extra.into_iter().enumerate() {
+            s.insert(c, base + i as u32);
+        }
+        s
+    }
+}
+
+/// Materialize a coroutine region's frame accesses as MIR (the JS path's
+/// analog of codegen-lua's root `FrameCtx` rendering): over the blocks
+/// reachable from `entry` via terminators, a bare `Load`/`Store` of a cell in
+/// `slots` becomes a `Field`/`StoreField` on `s` (field `c<slot>`), and a
+/// multi-call dest that is a frame cell is redirected through a fresh temp
+/// cell + a spliced store-back. `MapNext` cells are left untouched (out of the
+/// JS subset; its own inst rejects downstream). Afterwards every remaining
+/// `Load`/`Store` cell in the region must be `s`, one of `mf.params`, or a
+/// temp this pass minted -- anything else is a frame-membership finding, so it
+/// panics rather than emitting an undeclared local.
+pub fn materialize_frame(
+    mf: &mut MirFunc,
+    entry: Idx<Block>,
+    s_cell: Idx<Cell>,
+    slots: &HashMap<Idx<Cell>, u32>,
+) {
+    let field_of = |slot: u32| ustr::Ustr::from(format!("c{slot}").as_str());
+    let mut region: Vec<Idx<Block>> = Vec::new();
+    {
+        let mut seen: HashSet<Idx<Block>> = HashSet::default();
+        let mut stack = vec![entry];
+        seen.insert(entry);
+        while let Some(b) = stack.pop() {
+            region.push(b);
+            term_succs(&mf.blocks[b].term, |t| {
+                if seen.insert(t) {
+                    stack.push(t);
+                }
+            });
+        }
+    }
+    let mut minted: HashSet<Idx<Cell>> = HashSet::default();
+    for &bid in &region {
+        let old: Vec<Idx<Inst>> = std::mem::take(&mut mf.blocks[bid].insts);
+        let mut new: Vec<Idx<Inst>> = Vec::with_capacity(old.len());
+        for id in old {
+            match mf.insts[id].clone() {
+                Inst::Load(c) if slots.contains_key(&c) => {
+                    let sv = mf.insts.alloc(Inst::Load(s_cell));
+                    new.push(sv);
+                    mf.insts[id] = Inst::Field { base: sv, field: field_of(slots[&c]) };
+                    new.push(id);
+                }
+                Inst::Store { cell, value } if slots.contains_key(&cell) => {
+                    let sv = mf.insts.alloc(Inst::Load(s_cell));
+                    new.push(sv);
+                    mf.insts[id] = Inst::StoreField { base: sv, field: field_of(slots[&cell]), value };
+                    new.push(id);
+                }
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => {
+                    // Redirect frame-cell dests to fresh temps, then store each
+                    // back to its `s` field right after the call.
+                    let redirects: Vec<(usize, Idx<Cell>, Idx<Cell>)> = dests
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| slots.contains_key(c))
+                        .map(|(i, &c)| {
+                            let temp = mf.new_cell(None);
+                            minted.insert(temp);
+                            (i, c, temp)
+                        })
+                        .collect();
+                    if let Inst::CallMulti { dests, .. }
+                    | Inst::CallValueMulti { dests, .. }
+                    | Inst::CallBoundMulti { dests, .. } = &mut mf.insts[id]
+                    {
+                        for &(i, _, temp) in &redirects {
+                            dests[i] = temp;
+                        }
+                    }
+                    new.push(id);
+                    for &(_, frame_cell, temp) in &redirects {
+                        let lt = mf.insts.alloc(Inst::Load(temp));
+                        let sv = mf.insts.alloc(Inst::Load(s_cell));
+                        let sf = mf.insts.alloc(Inst::StoreField {
+                            base: sv,
+                            field: field_of(slots[&frame_cell]),
+                            value: lt,
+                        });
+                        new.extend([lt, sv, sf]);
+                    }
+                }
+                _ => new.push(id),
+            }
+        }
+        mf.blocks[bid].insts = new;
+    }
+    // Exhaustiveness: a surviving bare cell is a frame-membership finding.
+    let allowed = |c: Idx<Cell>| {
+        c == s_cell || mf.params.contains(&c) || minted.contains(&c) || mf.resume_arg == Some(c)
+    };
+    for &bid in &region {
+        for &id in &mf.blocks[bid].insts {
+            let bad = match &mf.insts[id] {
+                Inst::Load(c) if !allowed(*c) => Some(*c),
+                Inst::Store { cell, .. } if !allowed(*cell) => Some(*cell),
+                _ => None,
+            };
+            if let Some(c) = bad {
+                panic!(
+                    "materialize_frame: unframed cell c{} ({:?}) survives in region of `{}` \
+                     (frame-membership finding)",
+                    raw(c),
+                    mf.cells[c].name,
+                    mf.name
+                );
+            }
+        }
+    }
+}
+

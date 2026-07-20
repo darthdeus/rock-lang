@@ -166,6 +166,33 @@ function __op_eq(a, b) {
 }
 "#;
 
+/// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
+/// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
+/// plus the `error` global backing the transform's `Inst::Global("error")` +
+/// `CallValue` raise shape (layout-stamp check, `yield*` re-raise). Defer
+/// failures go to STDERR, never stdout -- the harness output-compare must not
+/// see them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
+/// `undefined` and `null` both count as nil, matching the subset's loose rule.
+pub const JS_CORO_RUNTIME: &str = r#"
+function error(m) { throw new Error(m); }
+function __rock_coroutine_run_defers(c) {
+  if (!c.__defers) return;
+  for (var i = c.__defers.length - 1; i >= 0; i--) {
+    try { c.__defers[i](c); } catch (e) {
+      var m = (e && e.message !== undefined) ? e.message : e;
+      process.stderr.write("coroutine defer failed during cleanup: " + m + "\n");
+    }
+  }
+}
+function __rock_coroutine_kill(c) {
+  if (c.__state < 0) return;
+  c.__state = -1;
+  if (c.__inner) { __rock_coroutine_kill(c.__inner); }
+  __rock_coroutine_run_defers(c);
+  if (c.__on_killed) { c.__on_killed(c); }
+}
+"#;
+
 /// JS runtime preamble for the string subset (T2): `lua_tostring` reproduces
 /// Lua's `tostring`/`..` number formatting (`%.14g`), and `__rock_format_float`
 /// ports the stdlib `@nomangle inline(lua)` helper (`stdlib/unified.rock`,

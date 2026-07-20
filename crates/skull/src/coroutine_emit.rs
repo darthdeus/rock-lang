@@ -48,30 +48,11 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     // (LuaJIT 200-local risk). All-cells-framed keeps zero locals and is
     // byte-identical to what these bodies have always produced.
     let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
-    let aux_fields: HashSet<Idx<Cell>> = lowered
-        .step
-        .cells
-        .iter()
-        .map(|(id, _)| id)
-        .filter(|&c| c != lowered.s_cell && c != resume_arg)
-        .collect();
     // Aux slots: SHARED frame cells (co-fn state a hook body reads) MUST reuse
-    // the step's slots -- the hook reads the same field the ctor wrote. Aux-only
-    // cells (lambda-owned, framed only so their body declares no dead local) are
-    // never referenced across the ctor boundary but the map must be total over
-    // `fields`, so they get deterministic slots appended after the step's range
-    // (raw-id order, past every step slot -- no collision with a shared slot).
-    let aux_slots = {
-        let mut s = lowered.frame_slots.clone();
-        let base = lowered.frame_slots.len() as u32;
-        let mut extra: Vec<Idx<Cell>> =
-            aux_fields.iter().copied().filter(|c| !s.contains_key(c)).collect();
-        extra.sort_by_key(|c| raw(*c));
-        for (i, c) in extra.into_iter().enumerate() {
-            s.insert(c, base + i as u32);
-        }
-        s
-    };
+    // the step's slots -- the hook reads the same field the ctor wrote
+    // (`CoroLowered::aux_all_cells_slots`, shared with the JS path).
+    let aux_slots = lowered.aux_all_cells_slots(resume_arg);
+    let aux_fields: HashSet<Idx<Cell>> = aux_slots.keys().copied().collect();
     let aux_frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: aux_fields,
