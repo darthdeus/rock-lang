@@ -224,7 +224,7 @@ function __rock_coroutine_kill(c) {
 /// `%.Pg`, reconstructed from a properly-rounded `toExponential` digit string
 /// (no double-rounding). Prepend to any emitted program that touches strings;
 /// the harness's `print` uses `lua_tostring` for the same parity.
-pub const JS_STRING_RUNTIME: &str = r#"
+pub const JS_STRING_RUNTIME: &str = r##"
 // P significant decimal digits of a positive finite double, rounded
 // half-to-EVEN like C printf (JS toExponential rounds half-UP -- diverges on
 // exact ties, e.g. 123456789012345 -> ...234 not ...235). Exact via BigInt on
@@ -311,7 +311,157 @@ function __parse_float(s) {
   var n = Number(s);
   return n !== n ? null : n;
 }
-"#;
+// The `{x:spec}` string-interpolation format helpers (stdlib/strings.rock,
+// @nomangle inline(lua)). ASCII fill/sep. `__rock_fmt_pad` pads `s` to `width`
+// (`<` left, `^` centered, else right); `__rock_fmt_grouping` inserts `sep`
+// every `group` digits from the right of the integer part (sign + fractional
+// tail preserved); `__rock_fmt_binary` is sign + magnitude base-2 of floor(n);
+// `__rock_fmt_percent` is `v*100` with `p` decimals (p<0 -> 6) + literal `%`.
+function __rock_fmt_pad(s, width, align, fill) {
+  s = lua_tostring(s);
+  var n = s.length;
+  if (n >= width) return s;
+  var pad = width - n;
+  if (align === "<") return s + fill.repeat(pad);
+  if (align === "^") { var left = Math.floor(pad / 2); return fill.repeat(left) + s + fill.repeat(pad - left); }
+  return fill.repeat(pad) + s;
+}
+function __rock_fmt_grouping(s, sep, group) {
+  var m = s.match(/^([+\-]?)([a-zA-Z0-9]+)(\.?[\s\S]*)$/);
+  if (!m) return s;
+  var sign = m[1], num = m[2], frac = m[3];
+  var reversed = num.split("").reverse().join("").replace(new RegExp("(.{" + group + "})", "g"), "$1" + sep);
+  if (reversed.slice(-sep.length) === sep) reversed = reversed.slice(0, reversed.length - sep.length);
+  return sign + reversed.split("").reverse().join("") + frac;
+}
+function __rock_fmt_binary(n) {
+  var x = Math.floor(n);
+  if (x === 0) return "0";
+  var neg = x < 0;
+  if (neg) x = -x;
+  var s = "";
+  while (x > 0) { s = (x % 2) + s; x = Math.floor(x / 2); }
+  return (neg ? "-" : "") + s;
+}
+function __rock_fmt_percent(v, p) {
+  var pp = p < 0 ? 6 : p;
+  return __c_f(v * 100, pp) + "%";
+}
+// C `%f`: `x` rounded to `prec` fractional digits, round-half-to-EVEN (C printf;
+// JS toFixed rounds half-up, diverging on exact ties like 2.5). Exact via BigInt
+// on the IEEE mantissa/exponent -- no double-rounding. Sign split off; -0 and
+// values that round to 0 from below keep the minus.
+function __c_f(x, prec) {
+  if (x !== x) return "nan";
+  if (x === Infinity) return "inf";
+  if (x === -Infinity) return "-inf";
+  var neg = x < 0 || (x === 0 && 1 / x === -Infinity);
+  var ax = Math.abs(x);
+  var dv = new DataView(new ArrayBuffer(8));
+  dv.setFloat64(0, ax);
+  var hi = dv.getUint32(0), lo = dv.getUint32(4);
+  var expBits = (hi >>> 20) & 0x7ff, mantHi = hi & 0xfffff, f, e;
+  if (expBits === 0) { f = (BigInt(mantHi) << 32n) | BigInt(lo >>> 0); e = -1074; }
+  else { f = (BigInt(mantHi | 0x100000) << 32n) | BigInt(lo >>> 0); e = expBits - 1075; }
+  var tenP = 10n ** BigInt(prec);
+  var num, den;
+  if (e >= 0) { num = f * tenP * (1n << BigInt(e)); den = 1n; }
+  else { num = f * tenP; den = 1n << BigInt(-e); }
+  var q = num / den, twice = (num - q * den) * 2n;
+  if (twice > den || (twice === den && q % 2n === 1n)) q += 1n;
+  var digits = q.toString(), s;
+  if (prec === 0) { s = digits; }
+  else { while (digits.length <= prec) digits = "0" + digits; s = digits.slice(0, digits.length - prec) + "." + digits.slice(digits.length - prec); }
+  return (neg ? "-" : "") + s;
+}
+// C `%e`: one digit, `prec` fractional digits, exponent `e[+-]NN` (>= 2 digits).
+function __c_e(x, prec) {
+  if (x !== x) return "nan";
+  if (x === Infinity) return "inf";
+  if (x === -Infinity) return "-inf";
+  var neg = x < 0 || (x === 0 && 1 / x === -Infinity);
+  var ax = Math.abs(x);
+  var mant, E;
+  if (ax === 0) { mant = "0"; if (prec > 0) mant += "." + "0".repeat(prec); E = 0; }
+  else {
+    var r = __bigdigits(ax, prec + 1);
+    mant = r.digits.slice(0, 1) + (prec > 0 ? "." + r.digits.slice(1) : "");
+    E = r.E;
+  }
+  var esign = E < 0 ? "-" : "+", eabs = Math.abs(E).toString();
+  if (eabs.length < 2) eabs = "0" + eabs;
+  return (neg ? "-" : "") + mant + "e" + esign + eabs;
+}
+// C `string.format(fmt, v)` for a SINGLE value -- the shape `Format`/`FormatDyn`
+// emit. Scans `fmt`, copying literals (`%%` -> `%`), and applies the one
+// conversion spec (`%[flags][width][.prec]conv`) to `v`. Conversions: d i u x X o
+// f F e E g G s c. Flags: `-` (left), `0` (zero-pad), `+`/space (sign), `#`
+// (0x/0). Signed integer / hex negatives above 32-bit and Lua's 64-bit %x wrap
+// are out of subset (unused by the interpolation specs).
+function __rock_sprintf(fmt, v) {
+  var out = "", i = 0;
+  while (i < fmt.length) {
+    if (fmt[i] !== "%") { out += fmt[i++]; continue; }
+    i++;
+    if (fmt[i] === "%") { out += "%"; i++; continue; }
+    var flags = "";
+    while (i < fmt.length && "-+ 0#".indexOf(fmt[i]) >= 0) { flags += fmt[i++]; }
+    var width = "";
+    while (i < fmt.length && fmt[i] >= "0" && fmt[i] <= "9") { width += fmt[i++]; }
+    width = width === "" ? -1 : parseInt(width, 10);
+    var prec = -1;
+    if (fmt[i] === ".") { i++; var pp = ""; while (i < fmt.length && fmt[i] >= "0" && fmt[i] <= "9") { pp += fmt[i++]; } prec = pp === "" ? 0 : parseInt(pp, 10); }
+    var conv = fmt[i++];
+    var body, sign = "", isNum = false, prefix = "";
+    if (conv === "d" || conv === "i" || conv === "u") {
+      isNum = true;
+      var n = Math.trunc(Number(v));
+      if (n < 0) { sign = "-"; n = -n; } else if (flags.indexOf("+") >= 0) sign = "+"; else if (flags.indexOf(" ") >= 0) sign = " ";
+      body = n.toString();
+      if (prec >= 0) while (body.length < prec) body = "0" + body;
+    } else if (conv === "x" || conv === "X" || conv === "o") {
+      isNum = true;
+      var base = conv === "o" ? 8 : 16;
+      var m = Math.trunc(Number(v));
+      body = Math.abs(m).toString(base);
+      if (conv === "X") body = body.toUpperCase();
+      if (m < 0) sign = "-";
+      if (prec >= 0) while (body.length < prec) body = "0" + body;
+      if (flags.indexOf("#") >= 0 && m !== 0) prefix = conv === "o" ? "0" : (conv === "X" ? "0X" : "0x");
+    } else if (conv === "f" || conv === "F") {
+      isNum = true;
+      var p = prec < 0 ? 6 : prec, r = __c_f(v, p);
+      if (r[0] === "-") { sign = "-"; body = r.slice(1); } else { body = r; if (flags.indexOf("+") >= 0) sign = "+"; else if (flags.indexOf(" ") >= 0) sign = " "; }
+    } else if (conv === "e" || conv === "E") {
+      isNum = true;
+      var p2 = prec < 0 ? 6 : prec, r2 = __c_e(v, p2);
+      if (conv === "E") r2 = r2.toUpperCase();
+      if (r2[0] === "-") { sign = "-"; body = r2.slice(1); } else { body = r2; if (flags.indexOf("+") >= 0) sign = "+"; else if (flags.indexOf(" ") >= 0) sign = " "; }
+    } else if (conv === "g" || conv === "G") {
+      isNum = true;
+      var p3 = prec < 0 ? 6 : (prec === 0 ? 1 : prec), r3 = __c_g(v, p3);
+      if (conv === "G") r3 = r3.toUpperCase();
+      if (r3[0] === "-") { sign = "-"; body = r3.slice(1); } else { body = r3; if (flags.indexOf("+") >= 0) sign = "+"; else if (flags.indexOf(" ") >= 0) sign = " "; }
+    } else if (conv === "c") {
+      body = String.fromCharCode(Math.trunc(Number(v)));
+    } else if (conv === "s") {
+      body = lua_tostring(v);
+      if (prec >= 0) body = body.slice(0, prec);
+    } else {
+      body = conv; // unknown: echo the conversion char
+    }
+    var core = sign + prefix + body;
+    if (width > core.length) {
+      var padn = width - core.length;
+      if (flags.indexOf("-") >= 0) core = core + " ".repeat(padn);
+      else if (flags.indexOf("0") >= 0 && isNum && !(prec >= 0 && (conv === "d" || conv === "i" || conv === "u" || conv === "x" || conv === "X" || conv === "o"))) core = sign + prefix + "0".repeat(padn) + body;
+      else core = " ".repeat(padn) + core;
+    }
+    out += core;
+  }
+  return out;
+}
+"##;
 
 /// The toy JS backend's [`IntrinsicTable`].
 pub struct JsIntrinsics;

@@ -1253,6 +1253,16 @@ impl Emitter<'_> {
             Inst::Field { base, field } => {
                 format!("{}.{field}", self.render_val(*base)?)
             }
+            // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
+            // value (Lua path). `__rock_sprintf` is the single-value C printf port
+            // (d/i/u/x/X/o/f/F/e/E/g/G/s/c, flags, width, precision; half-even
+            // rounding). Format's fmt is a static string, FormatDyn's is computed.
+            Inst::Format { value, fmt } => {
+                format!("__rock_sprintf({}, {})", js_string_lit(fmt.as_str())?, self.render_val(*value)?)
+            }
+            Inst::FormatDyn { value, fmt } => {
+                format!("__rock_sprintf({}, {})", self.render_val(*fmt)?, self.render_val(*value)?)
+            }
             other => {
                 return Err(err(format!(
                     "JS subset: cannot render {other:?} as a JS expression"
@@ -1855,6 +1865,13 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // `Vec.sort(key_fn)`: sort the 1-indexed `_data` slice in place through
         // the `__vec_sort` runtime (the pure-Rock FlatVec.sort co-emits instead).
         ("sort", 2) => Some("__vec_sort($1, $2)"),
+        // The `{x:spec}` interpolation format helpers -> their JS runtime ports.
+        ("__rock_fmt_pad", 4) => Some("__rock_fmt_pad($1, $2, $3, $4)"),
+        ("__rock_fmt_grouping", 3) => Some("__rock_fmt_grouping($1, $2, $3)"),
+        ("__rock_fmt_binary", 1) => Some("__rock_fmt_binary($1)"),
+        ("__rock_fmt_percent", 2) => Some("__rock_fmt_percent($1, $2)"),
+        // `format_float(v, width, decimals)` reconstructs the `%W.Df` printf spec.
+        ("format_float", 3) => Some("__rock_sprintf(\"%\" + $2 + \".\" + $3 + \"f\", $1)"),
         // Coroutine consumers (stdlib inline(lua) readers of the frame object).
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has
