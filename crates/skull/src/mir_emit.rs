@@ -657,7 +657,7 @@ fn emit_body_chunk(
         skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
-        let lua = skull_transform::emit_coroutine(ws, cg, self_ref, &mf);
+        let lua = crate::coroutine_emit::emit_coroutine(ws, cg, self_ref, &mf);
         times.emit = te.elapsed();
         times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
         return Ok(Chunk {

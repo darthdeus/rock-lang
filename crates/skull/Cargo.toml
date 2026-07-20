@@ -23,6 +23,7 @@ skull-codegen-lua = { path = "../skull-codegen-lua" }
 skull-codegen-glsl = { path = "../skull-codegen-glsl" }
 skull-transform = { path = "../skull-transform" }
 skull-parser = { path = "../skull-parser" }
+comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }

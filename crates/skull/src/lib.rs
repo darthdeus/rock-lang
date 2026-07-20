@@ -13,6 +13,7 @@
 //! goal is `rock test tests --backend skull` at 100% as bone grows. See
 //! `docs/skull-plan.md`.
 
+pub mod coroutine_emit;
 pub mod inline_stats;
 pub mod mir_emit;
 
