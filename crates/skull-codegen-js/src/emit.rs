@@ -1850,6 +1850,8 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("upper", 1) => Some("$1.toUpperCase()"),
         ("lower", 1) => Some("$1.toLowerCase()"),
         ("string_char", 1) => Some("String.fromCharCode($1)"),
+        // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
+        ("parse_float", 1) => Some("__parse_float($1)"),
         // Coroutine consumers (stdlib inline(lua) readers of the frame object).
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has

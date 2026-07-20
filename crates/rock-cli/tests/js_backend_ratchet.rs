@@ -43,6 +43,7 @@ fn corpus() -> Vec<String> {
         "tests/js_table_unset.rock",
         "tests/js_string_builder.rock",
         "tests/js_string_primitives.rock",
+        "tests/js_parse_float.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -96,8 +97,11 @@ fn js_runnable_coverage_ratchet() {
     // upper/lower/string_char host templates + defaulted-arg padding; the
     // Layer-2 split/replace/trim/... co-emit) added
     // tests/js_string_primitives.rock -> 188 (full-suite 2951 -> 3049; the find
-    // 37 / unit_at 30 / substring 16 buckets collapsed).
-    const FLOOR: usize = 188;
+    // 37 / unit_at 30 / substring 16 buckets collapsed). T8d parse_float
+    // (`__parse_float`: strict Lua-tonumber semantics, empty/non-numeric -> null)
+    // added tests/js_parse_float.rock -> 197 (full-suite 3049 -> 3063; the
+    // parse_float bucket of 28 collapsed).
+    const FLOOR: usize = 197;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

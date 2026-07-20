@@ -286,6 +286,15 @@ function __rock_format_float(v) {
   s = s.replace(/0+$/, "").replace(/\.$/, "");
   return s;
 }
+// Lua `tonumber(s)`: a strict whole-string numeric parse (int/float/exponent/
+// `0x` hex, surrounding whitespace trimmed), nil on anything else. JS `Number`
+// agrees EXCEPT it reads an empty/whitespace-only string as 0 (handled here as
+// null) and yields NaN (-> null) for a non-numeric tail. Rock nil is `null`.
+function __parse_float(s) {
+  if (typeof s !== "string" || s.trim() === "") return null;
+  var n = Number(s);
+  return n !== n ? null : n;
+}
 "#;
 
 /// The toy JS backend's [`IntrinsicTable`].
