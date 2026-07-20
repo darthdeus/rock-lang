@@ -1852,6 +1852,9 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("string_char", 1) => Some("String.fromCharCode($1)"),
         // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
         ("parse_float", 1) => Some("__parse_float($1)"),
+        // `Vec.sort(key_fn)`: sort the 1-indexed `_data` slice in place through
+        // the `__vec_sort` runtime (the pure-Rock FlatVec.sort co-emits instead).
+        ("sort", 2) => Some("__vec_sort($1, $2)"),
         // Coroutine consumers (stdlib inline(lua) readers of the frame object).
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has

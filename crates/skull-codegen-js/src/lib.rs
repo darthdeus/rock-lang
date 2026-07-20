@@ -113,6 +113,22 @@ function __vec_checked_set(vec, i, v) {
   if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
   vec._data[i + 1] = v;
 }
+// `Vec.sort(key_fn)`: the stdlib inline(lua) is `table.sort(_data, |a,b| key(a) <
+// key(b))`. Sort only the logical `1..len` slice (index 0 is the layout hole),
+// then write back, so the 1-indexed `_data` shape is preserved. `key_fn` is a fn
+// value invoked through `__rock_call`; keys compare with `<` (numbers/strings).
+// JS sort is stable where luajit's is not, so equal-key relative order can
+// differ -- capture-free key spec keeps this observable only for genuine ties.
+function __vec_sort(vec, key_fn) {
+  var n = vec.len;
+  var part = [];
+  for (var i = 1; i <= n; i++) part.push(vec._data[i]);
+  part.sort(function(a, b) {
+    var ka = __rock_call(key_fn, a), kb = __rock_call(key_fn, b);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+  for (var i = 0; i < n; i++) vec._data[i + 1] = part[i];
+}
 ";
 
 /// Runtime-polymorphic untyped table primitives. In Lua a `Map` IS a raw table,
