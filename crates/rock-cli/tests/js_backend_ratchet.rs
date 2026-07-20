@@ -51,6 +51,7 @@ fn corpus() -> Vec<String> {
         "tests/js_module_globals.rock",
         "tests/js_put.rock",
         "tests/js_log.rock",
+        "tests/js_deepcopy.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -138,8 +139,14 @@ fn js_runnable_coverage_ratchet() {
     // ports of the same name, `is_host_log_fn`; state in `__G.__stone_log_level`
     // + bare dedup/throttle vars; `__stone_emit` prints `[cat] msg` into the
     // shared buffer) added tests/js_log.rock -> 237 (full-suite 3424 -> 3447; the
-    // log_reset_dedup bucket of 16 collapsed).
-    const FLOOR: usize = 237;
+    // log_reset_dedup bucket of 16 collapsed). T8d deepcopy (the recursive
+    // `__rock_deepcopy_value` clone -> a JS runtime with a `seen` Map: shared refs
+    // copy once, cycles terminate; TypedArray `.slice()`, Map/array element-wise,
+    // structs/env-records/boxes own-key; primitives + `__fn` by identity so
+    // closure shared-box + cofn cyclic-env-record aliasing survive) added
+    // tests/js_deepcopy.rock -> 242 (full-suite 3447 -> 3459; the deepcopy bucket
+    // of 8 collapsed).
+    const FLOOR: usize = 242;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

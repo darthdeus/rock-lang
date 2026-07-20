@@ -203,6 +203,43 @@ function __op_eq(a, b) {
 }
 "#;
 
+/// `deepcopy`: the recursive `__rock_deepcopy_value` clone (stdlib/unified.rock).
+/// A `seen` Map (object identity) preserves the graph -- a shared reference copies
+/// ONCE, a cycle terminates. Primitives and bare functions (a closure's `__fn`)
+/// pass through by identity; a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a
+/// `Map` and an array (a Vec's `_data`) copy element-wise; every other object (a
+/// struct `{__ty,...}`, an env record `{__fn,...}`, a box) copies own keys. A
+/// copied env record keeps its `__fn` and its copied box, so `__rock_call` still
+/// dispatches and shared-box aliasing survives (the closures read captures from
+/// the record arg, not lexically).
+pub const JS_DEEPCOPY_RUNTIME: &str = r#"
+function __rock_deepcopy_value(obj, seen) {
+  if (obj === null || obj === undefined) return obj;
+  var t = typeof obj;
+  if (t !== "object" && t !== "function") return obj;
+  if (t === "function") return obj;
+  if (seen.has(obj)) return seen.get(obj);
+  if (ArrayBuffer.isView(obj)) { var tc = obj.slice(); seen.set(obj, tc); return tc; }
+  if (obj instanceof Map) {
+    var mc = new Map();
+    seen.set(obj, mc);
+    obj.forEach(function(v, k) { mc.set(__rock_deepcopy_value(k, seen), __rock_deepcopy_value(v, seen)); });
+    return mc;
+  }
+  if (Array.isArray(obj)) {
+    var ac = [];
+    seen.set(obj, ac);
+    for (var i = 0; i < obj.length; i++) ac[i] = __rock_deepcopy_value(obj[i], seen);
+    return ac;
+  }
+  var oc = {};
+  seen.set(obj, oc);
+  for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) oc[k] = __rock_deepcopy_value(obj[k], seen);
+  return oc;
+}
+function deepcopy(obj) { return __rock_deepcopy_value(obj, new Map()); }
+"#;
+
 /// The logging runtime: JS ports of the `@nomangle inline(lua)` dedup/throttle
 /// impls in `stdlib/logging.rock`. Rendered by their original names
 /// (`is_host_log_fn`), so `log_once`/`log_throttled` (macros -> `_log_once_impl`
