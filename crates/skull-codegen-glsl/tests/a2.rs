@@ -32,7 +32,7 @@ fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::
 /// A1 fragment entry -- for the GPU-builtin goldens.
 fn emit_entry(src: &str, root: &str) -> Result<String, String> {
     let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_entry(&ws, mid, root).map_err(|e| e.message)
+    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, GlslProfile::Core330).map_err(|e| e.message)
 }
 
 /// The A2 vertex+fragment pipeline.

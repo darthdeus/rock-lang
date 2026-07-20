@@ -614,11 +614,19 @@ fn let_float_annotation_cell_typing() {
 // --- A1: fragment-entry compilation (docs/shaders.md) -------------------
 
 fn emit_entry(src: &str, root: &str) -> Result<String, String> {
+    emit_entry_profile(src, root, skull_codegen_glsl::GlslProfile::Core330)
+}
+
+fn emit_entry_profile(
+    src: &str,
+    root: &str,
+    profile: skull_codegen_glsl::GlslProfile,
+) -> Result<String, String> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull_codegen_glsl::emit_shader_entry(&ws, mid, root).map_err(|e| e.message)
+    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, profile).map_err(|e| e.message)
 }
 
 /// The A1 scaffold: generated #version + PIXEL block (in/out, uniforms from the
@@ -661,6 +669,29 @@ fn fragment_entry_scaffold() {
     assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
     assert!(glsl.contains("gl_Position = vec4(aPos, 0.0, 1.0);"), "got:\n{glsl}");
     assert!(glsl.contains("TexCoord = aTexCoord;"), "got:\n{glsl}");
+}
+
+/// ES300 fullscreen entry: the profile header replaces the hardcoded 330
+/// version line, and BOTH stages carry the precision preamble (ES requires an
+/// explicit float precision in the fragment stage; the vertex declarations are
+/// harmless no-ops there).
+#[test]
+fn fragment_entry_es300_profile() {
+    let src = r#"
+        @shader(fragment)
+        fn blit(scene: Sampler2D, tc: Vec2) -> Vec4 {
+            return texture(scene, tc)
+        }
+    "#;
+    let glsl = emit_entry_profile(src, "blit", skull_codegen_glsl::GlslProfile::Es300).expect("emit");
+    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
+    let px = glsl.find("#ifdef PIXEL").expect("pixel block");
+    let vx = glsl.find("#ifdef VERTEX").expect("vertex block");
+    let pixel_block = &glsl[px..vx];
+    let vertex_block = &glsl[vx..];
+    assert!(pixel_block.contains("precision highp float;"), "got:\n{glsl}");
+    assert!(vertex_block.contains("precision highp float;"), "got:\n{glsl}");
+    assert!(!glsl.contains("330"), "no desktop version residue:\n{glsl}");
 }
 
 /// Entry with samplers only (no uniform struct) is legal.

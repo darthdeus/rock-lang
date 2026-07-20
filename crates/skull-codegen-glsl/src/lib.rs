@@ -1689,6 +1689,7 @@ pub fn emit_shader_entry(
     ws: &Workspace,
     mid: ModuleId,
     root: &str,
+    profile: GlslProfile,
 ) -> Result<String, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
     let overloaded = compute_overloaded_names(ws);
@@ -1763,8 +1764,12 @@ pub fn emit_shader_entry(
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
+    // Both stages carry the profile's precision preamble: ES requires an
+    // explicit fragment float precision, and the vertex declarations are
+    // harmless no-ops (highp is already the vertex default).
+    let (version, precision) = profile_header(profile);
     Ok(format!(
-        "#version 330 core\n\n#ifdef PIXEL\n\n{px}\n#endif\n\n#ifdef VERTEX\n\n{FULLSCREEN_VERTEX}\n#endif\n"
+        "{version}\n\n#ifdef PIXEL\n\n{precision}{px}\n#endif\n\n#ifdef VERTEX\n\n{precision}{FULLSCREEN_VERTEX}\n#endif\n"
     ))
 }
 
@@ -2329,10 +2334,7 @@ pub fn emit_shader_pipeline(
     let vertex_block = emit_vertex_stage(ws, &scx, &overloaded, vfref, &vshape, &varyings)?;
     let pixel_block = emit_fragment_stage(ws, &scx, &overloaded, ffref, &fshape, &varyings)?;
 
-    let (version, precision) = match profile {
-        GlslProfile::Core330 => ("#version 330 core", ""),
-        GlslProfile::Es300 => ("#version 300 es", "precision highp float;\n\n"),
-    };
+    let (version, precision) = profile_header(profile);
     Ok(format!(
         "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
     ))
@@ -2341,7 +2343,12 @@ pub fn emit_shader_pipeline(
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
 /// root compiles as a whole-shader fragment entry (exactly one root), plain
 /// roots as a fn library.
-pub fn emit_shader(ws: &Workspace, mid: ModuleId, roots: &[String]) -> Result<String, CompilerError> {
+pub fn emit_shader(
+    ws: &Workspace,
+    mid: ModuleId,
+    roots: &[String],
+    profile: GlslProfile,
+) -> Result<String, CompilerError> {
     let annotated = roots
         .iter()
         .filter(|r| {
@@ -2352,7 +2359,7 @@ pub fn emit_shader(ws: &Workspace, mid: ModuleId, roots: &[String]) -> Result<St
         .count();
     match annotated {
         0 => emit_shader_library(ws, mid, roots),
-        1 if roots.len() == 1 => emit_shader_entry(ws, mid, &roots[0]),
+        1 if roots.len() == 1 => emit_shader_entry(ws, mid, &roots[0], profile),
         _ => Err(err(
             Span::default(),
             "rock shader: a @shader(fragment) entry compiles alone -- pass exactly one root fn",
@@ -2476,6 +2483,15 @@ pub fn is_vertex_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool 
     resolve_root(ws, mid, root)
         .ok()
         .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("vertex"))
+}
+
+/// True iff `root` resolves to a `@shader(fragment)` fn -- the CLI uses this to
+/// admit `--profile` for the single-root fullscreen form while still rejecting
+/// it for the route-B fn library (which emits no `#version` line to switch).
+pub fn is_fragment_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool {
+    resolve_root(ws, mid, root)
+        .ok()
+        .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("fragment"))
 }
 
 /// The `@shader(<stage>)` annotation's stage argument, if the fn carries one.

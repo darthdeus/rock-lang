@@ -705,10 +705,12 @@ fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::GlslProfile
 }
 
 /// `rock shader <file.rock> <fn> [fn...] [--output <file.glsl>]` -- GLSL emission.
-/// Two forms:
-///   - fn-library / single `@shader(fragment)` entry (route B / A1): unchanged.
-///   - `<vert_fn> <frag_fn> [--profile 330core|300es]`: the A2 vertex+fragment
-///     pipeline (`docs/shaders.md`), selected when a root is `@shader(vertex)`.
+/// Three forms:
+///   - fn library (route B): plain roots, no `#version` line -- `--profile`
+///     rejects here (nothing for it to select).
+///   - single `@shader(fragment)` root (A1 fullscreen) and
+///     `<vert_fn> <frag_fn>` (A2 pipeline, selected when a root is
+///     `@shader(vertex)`): both take `[--profile 330core|300es]`.
 /// A profile violation renders spanned against the source and exits non-zero.
 pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<String>) -> Result<()> {
     let Some((path, roots)) = files.split_first() else {
@@ -760,10 +762,16 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             }
         }
     } else {
-        if profile.is_some() {
-            anyhow::bail!("rock shader: --profile only applies to the vertex+fragment pipeline form (<vert_fn> <frag_fn>)");
+        // The route-B fn library emits no `#version` line, so a profile cannot
+        // apply to it; the single-root fullscreen entry takes one like the
+        // pipeline form does.
+        let is_entry = roots.len() == 1
+            && skull_codegen_glsl::is_fragment_shader_root(&ws, user_mid, &roots[0]);
+        if profile.is_some() && !is_entry {
+            anyhow::bail!("rock shader: --profile applies to shader entries (pipeline or @shader(fragment) fullscreen), not the route-B fn library (it emits no #version line)");
         }
-        match skull_codegen_glsl::emit_shader(&ws, user_mid, &roots) {
+        let prof = parse_glsl_profile(profile.as_deref())?;
+        match skull_codegen_glsl::emit_shader(&ws, user_mid, &roots, prof) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
