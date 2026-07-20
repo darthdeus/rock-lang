@@ -34,6 +34,10 @@ value Vec4 {
     return Vec2 { x: a.x - b.x, y: a.y - b.y }
 }
 
+@pure operator -(a: Vec2, b: float) -> Vec2 {
+    return Vec2 { x: a.x - b, y: a.y - b }
+}
+
 @pure operator *(a: Vec2, b: float) -> Vec2 {
     return Vec2 { x: a.x * b, y: a.y * b }
 }
@@ -215,6 +219,10 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return v(a.x + b, a.y + b, a.z + b)
 }
 
+@pure operator -(a: Vec3, b: float) -> Vec3 {
+    return v(a.x - b, a.y - b, a.z - b)
+}
+
 @pure operator *(a: Vec3, b: Vec3) -> Vec3 {
     return v(a.x * b.x, a.y * b.y, a.z * b.z)
 }
@@ -289,6 +297,10 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 
 @pure operator +(a: Vec4, b: float) -> Vec4 {
     return v(a.x + b, a.y + b, a.z + b, a.w + b)
+}
+
+@pure operator -(a: Vec4, b: float) -> Vec4 {
+    return v(a.x - b, a.y - b, a.z - b, a.w - b)
 }
 
 @pure operator -(a: Vec4, b: Vec4) -> Vec4 {
