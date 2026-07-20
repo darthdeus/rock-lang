@@ -5,11 +5,12 @@
 //! readback regression that silently shrinks coverage goes red. Emitter growth
 //! (A1 fn-emission work) raises the floor.
 //!
-//! Skip-with-log when no GL context can be created here (headless CI without a
-//! display, or the `stone-glsl-runner` binary not built) -- mirroring the node
-//! gating in `js_backend_ratchet`. The runner is located as a sibling of the
-//! test binary (`target/<profile>/stone-glsl-runner`), so a prior `cargo build`
-//! is required for real enforcement, exactly like the game-integration tests.
+//! Skip-with-log ONLY when the runner is present but no GL context can be
+//! created (headless CI without a display, runner exit 2). A missing
+//! `stone-glsl-runner` binary is a hard error from `glsl_test_run` -- the gate
+//! must not read as green when its executor was never built. The runner is
+//! located as a sibling of the test binary (`target/<profile>/stone-glsl-runner`);
+//! `just t` and CI both build it before running this.
 
 fn corpus() -> Vec<String> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -28,14 +29,15 @@ fn corpus() -> Vec<String> {
 
 #[test]
 fn glsl_runnable_coverage_ratchet() {
-    let summary = rock_cli::glsl_test::glsl_test_run(&corpus(), false).expect("glsl test run");
+    let summary = rock_cli::glsl_test::glsl_test_run(&corpus(), false)
+        .unwrap_or_else(|e| panic!("glsl gate cannot run: {e:#}"));
 
-    // No GL context available (no display/driver, or the runner binary is not
-    // built) -> skip-with-log, like `node` being absent for the JS ratchet.
+    // Runner present but no GL context (headless CI) -> skip-with-log. A
+    // missing runner binary already panicked above.
     if summary.per_profile.iter().all(|p| !p.gl_available) {
         eprintln!(
-            "SKIP glsl_runnable_coverage_ratchet: no GL context available \
-             (build the workspace + ensure a display; stone-glsl-runner sibling of the test binary)"
+            "SKIP glsl_runnable_coverage_ratchet: runner present but no GL context \
+             (headless -- ensure a display for real enforcement)"
         );
         return;
     }
