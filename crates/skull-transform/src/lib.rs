@@ -30,6 +30,7 @@ use skull_mir::mir::*;
 mod closure;
 mod forl;
 mod inline;
+pub mod scope;
 pub use closure::convert_closures;
 pub use forl::recover_counted_loops;
 pub use inline::{
@@ -1103,8 +1104,8 @@ struct CoroLowered {
     /// The scope tree + ownership built (once) for frame membership, threaded to
     /// `emit_named_framed` so the step's hoist plan reuses them instead of
     /// rebuilding on the post-rewrite CFG (they are stable across the rewrite).
-    step_tree: skull_codegen_lua::scope::ScopeTree,
-    step_own: skull_codegen_lua::scope::Ownership,
+    step_tree: crate::scope::ScopeTree,
+    step_own: crate::scope::Ownership,
 }
 
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
@@ -1421,7 +1422,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
     // hoisted cell) are untouched, and the rewrite only ADDS ROOT-region blocks +
     // `s`-field accesses, which the frame collapses to `s` anyway. Byte-identity
     // of emitted Lua is the standing oracle for that stability.
-    let tree = skull_codegen_lua::scope::ScopeTree::build(&step);
+    let tree = crate::scope::ScopeTree::build(&step);
     let own = tree.analyze(&step);
     let frame_cells: HashSet<Idx<Cell>> = {
         // Ghost cells (cause B of the P2 finding): a cell referenced in NO block
@@ -1439,7 +1440,7 @@ fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::YieldC
             .map(|(id, _)| id)
             .filter(|&c| c != s_cell && c != resume_arg)
             .filter(|c| is_param.contains(c) || referenced.contains(c))
-            .filter(|c| own.owner.get(c).is_none_or(|&o| o == skull_codegen_lua::scope::ROOT))
+            .filter(|c| own.owner.get(c).is_none_or(|&o| o == crate::scope::ROOT))
             .collect()
     };
     // Dense per-frame slots: frame cells numbered 0.. in raw-id order. Both the
@@ -1697,7 +1698,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     let channel = ws.module(self_ref.module).functions[self_ref.func]
         .return_ty
         .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
-    let lowered = transform_coroutine(func, channel.as_ref());
+    let mut lowered = transform_coroutine(func, channel.as_ref());
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: lowered.frame_cells.iter().copied().collect(),
@@ -1758,15 +1759,43 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         ctx.mint_synthetic(format!("{name}__advance"));
     }
     let step_name = ctx.mint_synthetic(format!("{name}__step"));
-    let step_lua = emit_named_framed(
-        ws,
-        ctx,
+    // S3 (docs/closure-conversion-mir-plan.md): route the STEP's lambdas through
+    // the shared closure-conversion pass, with the frame so a captured frame cell
+    // collapses to a capture of `s` (D2/D4(b) of docs/coroutine-frame-lambda-plan.md).
+    // Each lambda becomes a `MakeEnv` record / bare `Global` + a hoisted sibling in
+    // `step.nested_fns` (emitted below). Detached hook/defer lambdas (unreachable
+    // from the step entry) are left as `Inst::Lambda` for their aux emission's
+    // inline arm -- `aux_frame` was built above, before the pass mutated the arena.
+    let frame_info = crate::closure::FrameInfo {
+        s_cell: lowered.s_cell,
+        fields: lowered.frame_cells.iter().copied().collect(),
+        slots: lowered.frame_slots.clone(),
+    };
+    let pre_nested = lowered.step.nested_fns.len();
+    crate::closure::convert_closures_framed(
+        &mut lowered.step,
         &step_name,
-        &lowered.step,
-        Some(&frame),
+        Some(&frame_info),
         Some((&lowered.step_tree, &lowered.step_own)),
-        None,
     );
+    // Route each pass-hoisted `<step>__lambda<k>` through the synthetic-name
+    // collision guard (a user fn colliding with the minted name must reject).
+    for nf in lowered.step.nested_fns[pre_nested..].iter() {
+        ctx.mint_synthetic(nf.name.to_string());
+    }
+    let step_lua = emit_named_framed(ws, ctx, &step_name, &lowered.step, Some(&frame), None);
+    // Hoisted lambda bodies: frame-free sibling fns (the pass materialized their
+    // frame accesses as `e.c<S>.c<slot>`, so they need no `FrameCtx`). cleanup
+    // drops the clone's dead ROOT-region insts; a co fn's loops are recovered by
+    // codegen's relooper (`recognize_counted_loops`), same as the step -- so no
+    // `recover_counted_loops` transform here (unlike an ordinary fn's nested_fns).
+    let mut nested_luas = String::new();
+    let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
+    for nf in hoisted[pre_nested..].iter_mut() {
+        cleanup(nf);
+        nested_luas.push_str(&skull_codegen_lua::emit_named(ws, ctx, nf.name.as_str(), nf));
+    }
+    lowered.step.nested_fns = hoisted;
     // Terminal-cleanup defers and lifecycle-hook lambdas
     // (`on_killed`/`on_resume`/`on_hot_reload`) share one emission shape: a
     // detached region of the step (`if flag { flag = false; <body> }` for a
@@ -1781,7 +1810,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     // `__rock_coroutine_run_defers` iterates the defers LIFO with per-body pcall.
     let s_params = [lowered.s_cell];
     let emit_aux = |aux_name: &str, entry: Idx<Block>| {
-        emit_named_framed(ws, ctx, aux_name, &lowered.step, Some(&aux_frame), None, Some((entry, &s_params)))
+        emit_named_framed(ws, ctx, aux_name, &lowered.step, Some(&aux_frame), Some((entry, &s_params)))
     };
     let mut defer_luas = String::new();
     for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {
@@ -1802,7 +1831,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     }
     let ctor = emit_constructor(&name, &step_name, &lowered, channel.as_ref());
     let _ = lowered.num_states;
-    format!("{step_lua}{defer_luas}{hook_luas}{ctor}")
+    format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}")
 }
 
 /// The constructor: build the state table (seed param fields + relocated

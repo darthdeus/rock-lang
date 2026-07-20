@@ -15,6 +15,10 @@ skull-mir = { path = "../skull-mir" }
 skull-codegen-lua = { path = "../skull-codegen-lua" }
 bone-semantic = { path = "../bone-semantic" }
 ustr = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+skull-parser = { path = "../skull-parser" }
 
 [lints]
 workspace = true

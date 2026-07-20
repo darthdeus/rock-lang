@@ -1,12 +1,12 @@
 //! P2 step 2 of `docs/closure-env-records-plan.md`: the scope ownership analysis
-//! (`skull_codegen_lua::scope`). Each snippet lowers ONE fn to raw MIR (no
+//! (`skull_transform::scope`). Each snippet lowers ONE fn to raw MIR (no
 //! cleanup, so `var`/`let` stores survive) and asserts the recovered scope tree,
 //! cell owners, and per-lambda captures. Covers the two shapes that break a naive
 //! "a Store in a lambda block is a lambda-local" reading: a nested lambda reading
 //! an enclosing-fn cell (captured by BOTH lambdas) and a cell mutated from inside
 //! a lambda (owned above, captured below).
 
-use skull_codegen_lua::scope::{ScopeTree, ROOT};
+use skull_transform::scope::{ScopeTree, ROOT};
 use skull_mir::mir::{Inst, MirFunc};
 
 /// Lower `fn_name` from `src` to raw MIR (no stdlib -- avoid arithmetic, which

@@ -1,16 +1,21 @@
-//! P1 of docs/coroutine-frame-lambda-plan.md: lambdas inside a `co fn` hoist
+//! P1 of docs/coroutine-frame-lambda-plan.md, delivered via the shared MIR pass
+//! (S3 of docs/closure-conversion-mir-plan.md): lambdas inside a `co fn` hoist
 //! exactly like non-frame lambdas -- capture-free to a bare top-level fn,
 //! capturing to an env record -- with coroutine state captured through the
-//! frame table `s` itself (record field `c<S> = c<S>`; body reads compose
-//! `__rock_env.c<S>.c<N>`). The lambda's own params/locals stay plain locals
-//! of the hoisted body, which is what fixes the nil-param miscompile pinned in
-//! tests/coroutine_lambda_param_sentinel.rock.
+//! frame table `s` itself (record field `c<S> = <s>`; body reads compose
+//! `<env>.c<S>.c<slot>`). Since S3 the conversion is materialized as MIR by
+//! `convert_closures`, so the env param is a COLORED cell (not the literal
+//! `__rock_env`) and the composed access is split across temps -- these pins
+//! discriminate the via-`s` collapse (body reads THROUGH the s-field) from a
+//! by-value loop-binding snapshot (body reads its own env field, never via `s`).
+//! The exact per-iteration/param VALUES are pinned on luajit by
+//! tests/closure_capture_semantics_cofn.rock; here we pin the emit SHAPE.
 
 mod common;
 use common::{emit_module, function_body};
 
 /// Scan for `needle` followed by one-or-more ASCII digits followed by `tail`
-/// (e.g. `__rock_env.c` + digits + `.c` pins the via-`s` composed read without
+/// (e.g. `= c` + digits + `.c` pins a frame-field read `= c<S>.c<slot>` without
 /// hardcoding the s cell's raw id).
 fn contains_digit_bridge(hay: &str, needle: &str, tail: &str) -> bool {
     let mut rest = hay;
@@ -23,6 +28,17 @@ fn contains_digit_bridge(hay: &str, needle: &str, tail: &str) -> bool {
         rest = &rest[p + needle.len()..];
     }
     false
+}
+
+/// The parameter names of `function <name>(...)` in the emitted Lua (post-pass a
+/// hoisted body's first param is its colored env cell, then the lambda's own
+/// params).
+fn fn_params(lua: &str, name: &str) -> Vec<String> {
+    let head = format!("function {name}(");
+    let p = lua.find(&head).unwrap_or_else(|| panic!("no `function {name}(` in:\n{lua}"));
+    let after = &lua[p + head.len()..];
+    let close = after.find(')').expect("param list closes");
+    after[..close].split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
 }
 
 const PARAM_CAPTURE: &str = r#"
@@ -49,13 +65,15 @@ fn main() {
 fn param_lambda_hoists_as_record_under_frame() {
     let lua = emit_module(PARAM_CAPTURE);
     let step = function_body(&lua, "worker__step");
+    // `s` is the step's first param cell; the frame capture collapses to it, so
+    // the record field is named `c<raw(s)>` == the step's first param name.
+    let s = fn_params(&lua, "worker__step").swap_remove(0);
+    // the co-fn lambda hoists to a sibling top-level fn taking (env, <param>).
+    let lp = fn_params(&lua, "worker__step__lambda0");
+    assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
     assert!(
-        lua.contains("function worker__step__lambda0(__rock_env, c"),
-        "the co-fn lambda must hoist to `worker__step__lambda0(__rock_env, c<param>)`:\n{lua}"
-    );
-    assert!(
-        step.contains("setmetatable({ __fn = worker__step__lambda0"),
-        "the step must build an env record for the capturing lambda:\n{step}"
+        step.contains(&format!("setmetatable({{ __fn = worker__step__lambda0, {s} =")),
+        "the step must build an env record collapsing the frame capture to `s` (field `{s}`):\n{step}"
     );
     assert!(
         !step.contains("function("),
@@ -63,16 +81,18 @@ fn param_lambda_hoists_as_record_under_frame() {
     );
 }
 
-/// The frame capture collapses to `s`: the hoisted body reads the captured
-/// co-fn local through the record's s field (`__rock_env.c<S>.c<N>`), and the
-/// lambda's own param stays a plain local (never a frame-field read).
+/// The frame capture collapses to `s`: the hoisted body reaches the captured
+/// co-fn local THROUGH the record's s field (`<env>` -> `.c<S>` -> `.c<slot>`,
+/// materialized via temps), so the body reads the s-field `.c<S>`. The lambda's
+/// own param stays a plain local (never a frame-field read).
 #[test]
 fn frame_capture_composes_env_then_frame() {
     let lua = emit_module(PARAM_CAPTURE);
+    let s = fn_params(&lua, "worker__step").swap_remove(0);
     let body = function_body(&lua, "worker__step__lambda0");
     assert!(
-        contains_digit_bridge(body, "__rock_env.c", ".c"),
-        "the hoisted body must read the frame capture as `__rock_env.c<S>.c<N>`:\n{body}"
+        body.contains(&format!(".{s}")),
+        "the hoisted body must reach the frame capture through the s-field `.{s}` (via-`s` collapse):\n{body}"
     );
 }
 
@@ -142,16 +162,17 @@ fn loop_binding_snapshots_by_value_into_record() {
         contains_digit_bridge(step, "= c", ".c"),
         "the record must snapshot the loop binding from the frame (`= c<S>.c<N>`):\n{step}"
     );
-    // The hoisted body reads its by-value env field directly -- no `.c` hop
-    // after the env access for the binding read.
+    // The hoisted body reads its by-value snapshot as a single `.c<slot>` field
+    // hop off its env, and NEVER through `s` at call time (the final-value bug
+    // D4(b) avoids -- a via-`s` capture would read the s-field `.c<S>`).
+    let s = fn_params(&lua, "looper__step").swap_remove(0);
     let body = function_body(&lua, "looper__step__lambda");
     assert!(
-        body.contains("__rock_env.c"),
-        "the hoisted body must read the snapshot from its env:\n{body}"
+        contains_digit_bridge(body, ".c", ""),
+        "the hoisted body must read a snapshot field `.c<slot>` from its env:\n{body}"
     );
     assert!(
-        !contains_digit_bridge(body, "__rock_env.c", ".c"),
-        "a read-only loop binding must NOT read through `s` at call time (that is \
-         the final-value bug):\n{body}"
+        !body.contains(&format!(".{s}")),
+        "a read-only loop binding must NOT read through the s-field `.{s}` at call time:\n{body}"
     );
 }

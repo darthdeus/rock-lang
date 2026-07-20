@@ -405,10 +405,17 @@ fn emit_decorator_unit(
         Ok(mut mf) => {
             let tc = Instant::now();
             skull_transform::cleanup(&mut mf);
+            // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
+            let pre_nested = mf.nested_fns.len();
+            skull_transform::convert_closures(&mut mf, &deco_name);
+            for nf in &mf.nested_fns[pre_nested..] {
+                cg.mint_synthetic(nf.name.to_string());
+            }
             out.times.cleanup = tc.elapsed();
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let lua = emit_named(ws, cg, &deco_name, &mf);
+            let mut lua = emit_named(ws, cg, &deco_name, &mf);
+            emit_pass_nested_fns(ws, cg, &mut mf.nested_fns, &mut lua);
             emit_lowered(ws, overloaded, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
@@ -436,11 +443,23 @@ fn emit_global_unit(
         Ok(Some(mut mf)) => {
             let tc = Instant::now();
             skull_transform::cleanup(&mut mf);
+            // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
+            // literal with fn fields) -- route them through the shared pass, same
+            // as an ordinary fn. Their global reads are NOT init-ordering
+            // constraints (the fn value is stored, not called at init), so `refs`
+            // is computed on the post-pass `mf` where those reads live in the
+            // hoisted siblings, not the main body.
+            let pre_nested = mf.nested_fns.len();
+            skull_transform::convert_closures(&mut mf, &init_name);
+            for nf in &mf.nested_fns[pre_nested..] {
+                cg.mint_synthetic(nf.name.to_string());
+            }
             out.times.cleanup = tc.elapsed();
             let key = Ustr::from(&init_name);
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
-            let lua = emit_named(ws, cg, &init_name, &mf);
+            let mut lua = emit_named(ws, cg, &init_name, &mf);
+            emit_pass_nested_fns(ws, cg, &mut mf.nested_fns, &mut lua);
             emit_lowered(ws, overloaded, &mut out, &mf, lua, Some(key), te.elapsed());
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
@@ -715,6 +734,19 @@ fn emit_nested_fns(
         out.push_str(&emit_named(ws, cg, nf.name.as_str(), nf));
         let mut children = std::mem::take(&mut nf.nested_fns);
         emit_nested_fns(ws, cg, &mut children, deps, statics, out);
+    }
+}
+
+/// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`
+/// appends one `MirFunc` per live lambda, nested ones included) as sibling
+/// top-level fns appended to `out`. Used by the decorator/global-init units, which
+/// -- unlike [`emit_nested_fns`] -- fold no deps/statics (their `UnitOut` tracks
+/// neither) and run no `recover_counted_loops` (their loops recover at codegen,
+/// same as the co-fn step).
+fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc], out: &mut String) {
+    for nf in nested.iter_mut() {
+        skull_transform::cleanup(nf);
+        out.push_str(&emit_named(ws, cg, nf.name.as_str(), nf));
     }
 }
 

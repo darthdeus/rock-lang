@@ -18,7 +18,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_mir::mir::*;
 
-use crate::reachable_blocks_from;
+use skull_codegen_lua::reachable_blocks_from;
 
 /// Index into [`ScopeTree::scopes`]. The enclosing fn is always [`ROOT`].
 pub type ScopeId = usize;
@@ -378,4 +378,99 @@ fn loop_binding_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
         .filter(|(_, cell)| cell.loop_binding)
         .map(|(id, _)| id)
         .collect()
+}
+
+/// Dominance rail (docs/closure-env-records-plan.md, "Capture classification"):
+/// a by-value capture snapshots the cell's value at the record's creation block,
+/// which is only sound if the cell's single write is guaranteed to have run by
+/// then. For a capture owned by the creating lambda's PARENT scope (a fresh local
+/// read directly at the creation site — transitive captures arrive as a
+/// parent-env field and are always available), require the write's block to
+/// dominate the creation block; a non-dominating shape (a transform artifact,
+/// never seen for well-formed lowering) falls back to a box. Returns the extra
+/// cells to box.
+///
+/// The dominator machinery (`dominators`/`dominates`) lives in `skull-codegen-lua`
+/// (shared with its relooper); this analysis reuses it so there is one dominator
+/// implementation. The JS path passes `frame = None`.
+pub fn non_dominating_by_value_captures(
+    func: &MirFunc,
+    tree: &ScopeTree,
+    own: &Ownership,
+    boxed: &HashSet<Idx<Cell>>,
+    frame: Option<&skull_codegen_lua::FrameCtx>,
+) -> HashSet<Idx<Cell>> {
+    let mut extra: HashSet<Idx<Cell>> = HashSet::default();
+    // block -> the `Inst::Lambda` creating a scope (its creation block).
+    let mut create_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
+    for (bid, b) in func.blocks.iter() {
+        for &iid in &b.insts {
+            if matches!(func.insts[iid], Inst::Lambda { .. }) {
+                create_block.insert(iid, bid);
+            }
+        }
+    }
+    // Cache idoms per parent-scope entry (small regions; recomputed at most once
+    // per distinct parent). Built LAZILY at the first cross-block dominance query:
+    // most lambda scopes filter out every capture below (boxed / loop-binding /
+    // frame / transitive / multi-write) or resolve same-block by inst position,
+    // so the classic fixpoint is never needed for them -- computing it up front
+    // per parent was pure waste.
+    let mut idoms: HashMap<Idx<Block>, HashMap<Idx<Block>, Idx<Block>>> = HashMap::default();
+    for s in &tree.scopes {
+        let Some(lid) = s.lambda else { continue };
+        let parent = s.parent.expect("a lambda scope has a parent");
+        let Some(&cblock) = create_block.get(&lid) else { continue };
+        let sid = tree.scope_of_block(cblock); // sanity: create block is in the parent region
+        debug_assert_eq!(sid, Some(parent), "a lambda's creation block lies in its parent scope");
+        let parent_entry = tree.scopes[parent].entry;
+        // captures of THIS scope owned by the parent: read directly at cblock.
+        let scope_id = (0..tree.scopes.len()).find(|&i| tree.scopes[i].lambda == Some(lid)).unwrap();
+        for &c in &own.captures[scope_id] {
+            if boxed.contains(&c) || own.loop_bindings.contains(&c) || extra.contains(&c) {
+                continue;
+            }
+            // Frame cells are table-mediated (via `s` or a loop-binding
+            // snapshot of a frame field) -- never box candidates.
+            if frame.is_some_and(|f| f.fields.contains(&c)) {
+                continue;
+            }
+            if own.owner[&c] != parent {
+                continue; // transitive -> arrives via the parent env, always available
+            }
+            let Some((wblock, wpos)) = own.single_write_site(c) else {
+                continue; // multi-write (already handled by boxed_cells) — skip
+            };
+            // Block granularity says a block dominates itself, but a same-block
+            // write must still PRECEDE the lambda creation inst for the snapshot to
+            // see it; compare inst positions when wblock == cblock.
+            let write_dominates = if wblock == cblock {
+                let cpos = func.blocks[cblock]
+                    .insts
+                    .iter()
+                    .position(|&i| i == lid)
+                    .expect("the creating Inst::Lambda lives in its creation block");
+                wpos < cpos
+            } else {
+                let idom = idoms
+                    .entry(parent_entry)
+                    .or_insert_with(|| skull_codegen_lua::dominators(func, parent_entry));
+                skull_codegen_lua::dominates(idom, wblock, cblock)
+            };
+            if !write_dominates {
+                // Box fallback FIRST so correctness never depends on the assert
+                // being compiled in (dead in release) -- keeps the fallback live in
+                // dev instead of dead code after an abort.
+                extra.insert(c);
+                debug_assert!(false, "by-value capture write must dominate its creation site (dominance rail)");
+                // Release: assert is compiled out, so surface the fallback (never
+                // swallow) -- a non-dominating shape is a transform artifact worth
+                // seeing.
+                log::warn!(
+                    "dominance rail: by-value capture cell {c:?} write does not dominate its creation site; boxing as fallback"
+                );
+            }
+        }
+    }
+    extra
 }
