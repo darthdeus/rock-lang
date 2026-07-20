@@ -734,10 +734,17 @@ impl FnEmit<'_> {
             self.folded_block.insert(b, rcell);
         }
 
-        // Bound temps (item 3): a counted loop's bound `t = <const>; for (; i < t;
-        // ..)` folds to `for (; i < <const>; ..)`, dropping the single-use temp.
-        // Only a CONST bound is provably loop-invariant -- a param/expr bound
-        // could be reassigned in the body, changing the count if re-read.
+        // Bound temps (item 3): a counted loop's bound `t = <expr>; for (; i < t;
+        // ..)` folds to `for (; i < <expr>; ..)`, dropping the single-use temp.
+        // The bound temp is a range-for's `hi`, evaluated once in the preheader
+        // (match_counted_loop only matches range-fors), so inlining is sound when
+        // `<expr>` is loop-invariant -- a const, or pure int arithmetic over cells
+        // that are stored exactly once (their store dominates the preheader, so
+        // re-reading in the folded condition yields the same value). Folding it
+        // is not just a cleanup: a GLES/GL driver miscompiles `t = radius + 1; for
+        // (; y < t; ..)` for a nested runtime-bounded kernel (the outline_detect
+        // classify loop found no neighbors), while the inlined `y < (radius + 1)`
+        // is correct -- pinned by bitgun `outline_classify_sim`.
         let bounds: Vec<Idx<Inst>> = self.counted.values().map(|li| li.bound).collect();
         for bound in bounds {
             let Inst::Load(bcell) = self.f.insts[bound] else { continue };
@@ -745,9 +752,27 @@ impl FnEmit<'_> {
                 continue;
             }
             let Some(v) = self.single_store_value(bcell) else { continue };
-            if matches!(self.f.insts[v], Inst::Const(_)) {
+            if self.bound_value_is_invariant(v) {
                 self.folded_bound.insert(bcell, v);
             }
+        }
+    }
+
+    /// Whether a counted-loop bound value is loop-invariant enough to inline into
+    /// the `for` header (see the fold in `precompute`). Conservative: a const, or
+    /// pure int arithmetic / int<->float casts over cells that are stored exactly
+    /// once in the fn (so re-reading in the folded condition can't change). The
+    /// loop counter is multi-store, so it can never sneak in. Anything else (a
+    /// call like `min(n, 16)`, a texture read) stays a temp -- the safe default.
+    fn bound_value_is_invariant(&self, v: Idx<Inst>) -> bool {
+        match self.f.insts[v] {
+            Inst::Const(_) => true,
+            Inst::Load(c) => !self.global_cells.contains(&c) && self.single_store_value(c).is_some(),
+            Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) => {
+                self.bound_value_is_invariant(a) && self.bound_value_is_invariant(b)
+            }
+            Inst::IntToFloat(x) | Inst::FloatToInt(x) => self.bound_value_is_invariant(x),
+            _ => false,
         }
     }
 
