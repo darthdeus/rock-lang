@@ -104,6 +104,21 @@ enum ValueRepr {
     Group { name: Ustr, parts: Vec<ValueRepr> },
 }
 
+/// The result repr of a swizzle: one selected component is the bare scalar;
+/// several become a fresh VecN Group in swizzle order.
+fn swizzle_group(parts: Vec<ValueRepr>) -> ValueRepr {
+    if parts.len() == 1 {
+        parts.into_iter().next().expect("len checked")
+    } else {
+        let name = match parts.len() {
+            2 => "Vec2",
+            3 => "Vec3",
+            _ => "Vec4",
+        };
+        ValueRepr::Group { name: Ustr::from(name), parts }
+    }
+}
+
 /// The `TypeExpr` of a `Static` TyId (declared types — struct fields, signature
 /// params/returns are all static). `None` for a `Local`/inference TyId.
 fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
@@ -2623,7 +2638,14 @@ impl Builder<'_> {
                     // `x?.0` on a transparent newtype is identity (see TupleIndex).
                     Ok(_) if self.expr_is_newtype(base) => bv,
                     Ok(index) => self.emit_cur(Inst::TupleIndex { base: bv, index }),
-                    Err(_) => self.emit_cur(Inst::Field { base: bv, field }),
+                    Err(_) => match self.swizzle_of(base, field) {
+                        // `v?.yx`: expand on the non-null arm, packed for the join cell.
+                        Some(idxs) => {
+                            let g = self.swizzle_from_packed(bv, &idxs);
+                            self.pack(g)
+                        }
+                        None => self.emit_cur(Inst::Field { base: bv, field }),
+                    },
                 };
                 self.store_and_join(result, fv, join);
 
@@ -3854,6 +3876,18 @@ impl Builder<'_> {
             // `base.field`: project a Group part directly (no cdata); else a
             // boxed field read off the packed base.
             Expr::FieldAccess { base, field } => {
+                // A swizzle read (docs/vec-swizzles-plan.md): select the
+                // components into a fresh VecN Group (len 1: the bare scalar) --
+                // scalarized end to end, so a swizzle never boxes by itself.
+                if let Some(idxs) = self.swizzle_of(base, field) {
+                    let br = self.lower_expr_repr(base)?;
+                    if let ValueRepr::Group { parts, .. } = &br {
+                        let sel: Vec<ValueRepr> = idxs.iter().map(|&i| parts[i].clone()).collect();
+                        return Ok(swizzle_group(sel));
+                    }
+                    let bv = self.pack(br);
+                    return Ok(self.swizzle_from_packed(bv, &idxs));
+                }
                 // A flattened enum field read as a WHOLE value re-materializes the
                 // box from the parent's slots (the single escape boundary).
                 if let Some(shape) = self.flat_field_of(base, field) {
@@ -6488,6 +6522,33 @@ impl Builder<'_> {
     /// `Some(shape)` iff `base.field` is a flattenable enum field: `base` is a
     /// non-`value` struct and the field's declared type is a [`flat_enum_shape`]
     /// enum. Drives the construct/store/match/materialize rewrites.
+    /// A swizzle read (`v.yx`, `c.rgb` -- docs/vec-swizzles-plan.md): the base's
+    /// inferred type is a float vec and `field` is a valid synthetic swizzle for
+    /// it. Bone already accepted the read, so this only distinguishes swizzles
+    /// from real fields (len-1 `x/y/z/w`) and non-vec bases.
+    fn swizzle_of(&self, base: Idx<Expr>, field: Ustr) -> Option<Vec<usize>> {
+        if field.len() == 1 && "xyzw".contains(field.as_str()) {
+            return None;
+        }
+        let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
+            return None;
+        };
+        bone_semantic::inference::vec_swizzle_components(sname.as_str(), field.as_str())
+    }
+
+    /// Component `Field` reads off an already-lowered (packed) vec value, grouped
+    /// per `swizzle_group`. The read order is the swizzle's component order.
+    fn swizzle_from_packed(&mut self, bv: Idx<Inst>, idxs: &[usize]) -> ValueRepr {
+        let comps = ["x", "y", "z", "w"];
+        let parts: Vec<ValueRepr> = idxs
+            .iter()
+            .map(|&i| {
+                ValueRepr::Scalar(self.emit_cur(Inst::Field { base: bv, field: Ustr::from(comps[i]) }))
+            })
+            .collect();
+        swizzle_group(parts)
+    }
+
     fn flat_field_of(&self, base: Idx<Expr>, field: Ustr) -> Option<EnumFlatShape> {
         let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
             return None;

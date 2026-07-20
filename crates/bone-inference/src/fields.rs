@@ -118,20 +118,123 @@ pub(crate) fn struct_field_ty(
 
     let def = &gamma.workspace.module(sid.module).structs[sid.def];
     let subs = struct_arg_subs(gamma, def, base_ty, params);
+    let field_ty = def.fields.iter().find(|f| f.name == field).map(|f| f.ty);
 
-    let field_ty = def
-        .fields
-        .iter()
-        .find(|f| f.name == field)
-        .map(|f| f.ty)
-        .ok_or_else(|| {
-            CompilerError::new_with_label(
-                span,
-                format!("struct `{}` has no field `{}`", struct_name, field),
-            )
-        })?;
+    let Some(field_ty) = field_ty else {
+        if let Some(res) = vec_swizzle_ty(gamma, struct_name, field, span) {
+            return res;
+        }
+        return Err(CompilerError::new_with_label(
+            span,
+            format!("struct `{}` has no field `{}`", struct_name, field),
+        ));
+    };
 
     substitute(gamma, field_ty, &subs, span)
+}
+
+/// GLSL-style swizzle read on the float vec structs (docs/vec-swizzles-plan.md):
+/// one alphabet (`xyzw` | `rgba`), every component within the receiver's arity,
+/// at most 4 components. Result: len 1 -> float, len N -> VecN. Reached only on
+/// a real-field miss, so len-1 `x/y/z/w` never arrive here (`r/g/b/a` do).
+/// `None` = not swizzle-shaped for this receiver (fall through to the plain
+/// missing-field error); `Some(Err)` = swizzle-shaped but invalid.
+pub(crate) fn vec_swizzle_ty(
+    gamma: &mut Gamma,
+    struct_name: Ustr,
+    field: Ustr,
+    span: Span,
+) -> Option<Result<TyId, CompilerError>> {
+    let arity = match struct_name.as_str() {
+        "Vec2" => 2,
+        "Vec3" => 3,
+        "Vec4" => 4,
+        _ => return None,
+    };
+    let s = field.as_str();
+    if s.is_empty() || !s.chars().all(|ch| "xyzwrgba".contains(ch)) {
+        return None;
+    }
+    if s.len() > 4 {
+        return Some(Err(CompilerError::new_with_label(
+            span,
+            format!("swizzle `{s}` has more than 4 components"),
+        )));
+    }
+    let xyzw: Option<Vec<usize>> = s.chars().map(|ch| "xyzw".find(ch)).collect();
+    let rgba: Option<Vec<usize>> = s.chars().map(|ch| "rgba".find(ch)).collect();
+    let idxs = match xyzw.or(rgba) {
+        Some(idxs) => idxs,
+        None => {
+            return Some(Err(CompilerError::new_with_label(
+                span,
+                format!("swizzle `{s}` mixes the `xyzw` and `rgba` alphabets"),
+            )))
+        }
+    };
+    if let Some(pos) = idxs.iter().position(|&i| i >= arity) {
+        let ch = s.chars().nth(pos).expect("swizzle component position in range");
+        return Some(Err(CompilerError::new_with_label(
+            span,
+            format!("`{struct_name}` has no `{ch}` component (swizzle `{s}`)"),
+        )));
+    }
+    let ty = match idxs.len() {
+        1 => gamma.workspace.builtins.float(),
+        n => gamma.nominal_app(Ustr::from(&format!("Vec{n}")), &[], span),
+    };
+    Some(Ok(ty))
+}
+
+/// Reject `v.yx = ...` / `v.yx += ...`: a swizzle types as a read, so without
+/// this pre-check an assignment target would infer as a plain field and emit a
+/// broken store. Real fields (incl. len-1 `x/y/z/w`) pass through; invalid
+/// swizzle shapes fall through to the read-path diagnostics.
+pub(crate) fn reject_swizzle_write(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    base: Idx<Expr>,
+    field: Ustr,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let base_ty = infer_expr(c, gamma, base)?;
+    let base_ty = resolve(gamma, base_ty, span);
+    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = *gamma.get(base_ty) else {
+        return Ok(());
+    };
+    if vec_swizzle_components(name.as_str(), field.as_str()).is_none() {
+        return Ok(());
+    }
+    let is_real_field = resolve_struct(gamma, name).is_some_and(|sid| {
+        gamma.workspace.module(sid.module).structs[sid.def]
+            .fields
+            .iter()
+            .any(|f| f.name == field)
+    });
+    if !is_real_field {
+        comp_error!(span, "cannot assign to swizzle `{}`: swizzles are read-only", field);
+    }
+    Ok(())
+}
+
+/// The component indices of a VALID swizzle read on `struct_name` -- the
+/// arity/alphabet rules of `vec_swizzle_ty` with the errors collapsed to None.
+/// Callers (assignment rejection, MIR expansion) key off "would this read as a
+/// swizzle"; invalid shapes surface through the read-path diagnostics instead.
+pub fn vec_swizzle_components(struct_name: &str, field: &str) -> Option<Vec<usize>> {
+    let arity = match struct_name {
+        "Vec2" => 2,
+        "Vec3" => 3,
+        "Vec4" => 4,
+        _ => return None,
+    };
+    if field.is_empty() || field.len() > 4 {
+        return None;
+    }
+    let xyzw: Option<Vec<usize>> = field.chars().map(|ch| "xyzw".find(ch)).collect();
+    let rgba: Option<Vec<usize>> = field.chars().map(|ch| "rgba".find(ch)).collect();
+    let idxs = xyzw.or(rgba)?;
+    idxs.iter().all(|&i| i < arity).then_some(idxs)
 }
 
 pub(crate) fn tuple_or_newtype_index_ty(
