@@ -116,6 +116,7 @@ function __vec_checked_set(vec, i, v) {
 pub const JS_TABLE_PRIM: &str = r#"
 function __table_get(t, k) { return (t instanceof Map) ? t.get(k) : t[k]; }
 function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v; }
+function __table_unset(t, k) { if (t instanceof Map) t.delete(k); else delete t[k]; }
 "#;
 
 /// The uniform indirect-call dispatch helper (`docs/closure-conversion-mir-plan.md`):

@@ -1806,6 +1806,9 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // `__table_get`/`__table_set` dispatch on `instanceof Map`.
         ("table_get", 2) => Some("__table_get($1, $2)"),
         ("table_set", 3) => Some("__table_set($1, $2, $3)"),
+        // `t[k] = nil`: a Map key delete or an array/object hole, dispatched on
+        // `instanceof Map`. Returns undefined -> Rock nil if the result is stored.
+        ("table_unset", 2) => Some("__table_unset($1, $2)"),
         ("table_new", 0) => Some("({})"),
         // Vec: `{_data, len, __ty}` 1-indexed. `vec_new` builds it; `vec_push`
         // increments `len` then writes `_data[len]` (comma operator so it stays
