@@ -22,8 +22,11 @@
 //! GL context, compiling the shader, drawing to a 1x1 R32I/R32F target and
 //! reading the pixel back -- lives in the standalone `stone-glsl-runner` binary
 //! (spawned per unit+profile), so the `rock` compiler/LSP binary never links
-//! SDL2. No GL context available -> skip-with-log, mirroring `node` being
-//! absent in the JS path. A GL error mid-run is a loud FAIL, never a silent skip.
+//! SDL2. The runner is a workspace artifact, so a missing/broken runner is a
+//! hard error (a gate that can't run must not read as green); only a genuine
+//! no-display/driver environment (runner exit 2) skips-with-log, and the CLI
+//! still exits non-zero when that leaves zero verdicts. A GL error mid-run is
+//! a loud FAIL, never a silent skip.
 
 use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{compare_value, parse_skull_markers, reason_histogram};
@@ -131,7 +134,14 @@ pub fn glsl_test(paths: &[String]) -> Result<()> {
             summary.unit_failures.to_string().red()
         );
     }
-    if total_failed > 0 || summary.unit_failures > 0 {
+    let zero_verdicts = summary.per_profile.iter().all(|p| !p.gl_available);
+    if zero_verdicts {
+        println!(
+            "{}",
+            "no GL context for any profile -- zero GLSL verdicts ran".red()
+        );
+    }
+    if total_failed > 0 || summary.unit_failures > 0 || zero_verdicts {
         std::process::exit(1);
     }
     Ok(())
@@ -142,19 +152,13 @@ pub fn glsl_test(paths: &[String]) -> Result<()> {
 pub fn glsl_test_run(paths: &[String], print: bool) -> Result<GlslSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
-    let runner = locate_runner();
-    // Probe once per profile: which can create a GL context here? Absent runner
-    // or exit-2 (no display/driver) -> that profile's verdicts skip-with-log.
+    // A missing runner is a hard error (workspace artifact -- build it). Probe
+    // once per profile: exit-2 (no display/driver) -> that profile's verdicts
+    // skip-with-log; any other probe anomaly is a hard error.
+    let runner = locate_runner()?;
     let mut gl_available: [bool; 2] = [false, false];
-    if let Some(runner) = &runner {
-        for (i, (_, _)) in PROFILES.iter().enumerate() {
-            gl_available[i] = probe_gl(runner, PROFILES[i].0);
-        }
-    } else {
-        log::warn!(
-            target: "GLSL",
-            "stone-glsl-runner binary not found (build the workspace); GLSL value verdicts skipped"
-        );
+    for (i, (pname, _)) in PROFILES.iter().enumerate() {
+        gl_available[i] = probe_gl(&runner, pname)?;
     }
 
     let mut summary = GlslSuiteSummary {
@@ -181,13 +185,13 @@ pub fn glsl_test_run(paths: &[String], print: bool) -> Result<GlslSuiteSummary> 
     let mut outcomes: Vec<(String, std::thread::Result<UnitOutcome>)> = Vec::new();
     for file in &files {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_file(file, runner.as_deref(), &gl_available)
+            build_file(file, &runner, &gl_available)
         }));
         outcomes.push((short_path(file), outcome));
     }
     for dir in &package_dirs {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_package(dir, runner.as_deref(), &gl_available)
+            build_package(dir, &runner, &gl_available)
         }));
         outcomes.push((short_path(dir), outcome));
     }
@@ -273,7 +277,7 @@ enum UnitOutcome {
 
 /// One isolated test file: parse + bone type-check, discover `@test` fns, then
 /// emit + run the value tests under both profiles.
-fn build_file(file: &str, runner: Option<&std::path::Path>, gl_available: &[bool; 2]) -> UnitOutcome {
+fn build_file(file: &str, runner: &std::path::Path, gl_available: &[bool; 2]) -> UnitOutcome {
     let src = match fs_err::read_to_string(file) {
         Ok(s) => s,
         Err(e) => return UnitOutcome::UnitFail { reason: e.to_string(), rendered: e.to_string() },
@@ -305,7 +309,7 @@ fn build_file(file: &str, runner: Option<&std::path::Path>, gl_available: &[bool
 
 /// A `stick.toml` package built as ONE workspace (tests included), mirroring
 /// the JS/luajit package path.
-fn build_package(dir: &str, runner: Option<&std::path::Path>, gl_available: &[bool; 2]) -> UnitOutcome {
+fn build_package(dir: &str, runner: &std::path::Path, gl_available: &[bool; 2]) -> UnitOutcome {
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
@@ -364,7 +368,7 @@ fn compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) -> 
 fn run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
-    runner: Option<&std::path::Path>,
+    runner: &std::path::Path,
     gl_available: &[bool; 2],
 ) -> UnitOutcome {
     let mut outside_value_class = 0usize;
@@ -410,7 +414,7 @@ fn run_tests(
         // No GL context for this profile -> the runnable ones are skipped with a
         // log; do NOT count them as pass or fail.
         if gl_available[pi] && !runnable.is_empty() {
-            match run_batch(runner.expect("runner present when gl_available"), pname, &runnable) {
+            match run_batch(runner, pname, &runnable) {
                 Ok(markers) => {
                     failed.extend(markers.fails);
                     passed += markers.passed;
@@ -497,21 +501,24 @@ fn jobs_json(runnable: &[(String, ValueExpect, ValueTestShaders)]) -> String {
 
 /// Probe: can the runner create a GL context for `profile` here? An empty job
 /// exercises context creation and exits 0 on success, 2 on no-display/driver.
-fn probe_gl(runner: &std::path::Path, profile: &str) -> bool {
+/// Exit 2 is the one sanctioned skip; a spawn failure or any other exit code is
+/// a broken harness -> hard error, never a skip.
+fn probe_gl(runner: &std::path::Path, profile: &str) -> Result<bool> {
     match spawn_runner(runner, profile, "[]") {
-        Ok((Some(0), _, _)) => true,
-        Ok((code, _, stderr)) => {
+        Ok((Some(0), _, _)) => Ok(true),
+        Ok((Some(2), _, stderr)) => {
             log::warn!(
                 target: "GLSL",
-                "no GL context for profile {profile} (runner exit {code:?}): {}; verdicts skipped",
+                "no GL context for profile {profile}: {}; verdicts skipped",
                 stderr.trim()
             );
-            false
+            Ok(false)
         }
-        Err(e) => {
-            log::warn!(target: "GLSL", "cannot spawn glsl runner: {e}; verdicts skipped");
-            false
-        }
+        Ok((code, _, stderr)) => crate::bail!(
+            "stone-glsl-runner probe for profile {profile} exited {code:?} (expected 0, or 2 for no GL context): {}",
+            stderr.trim()
+        ),
+        Err(e) => crate::bail!("cannot spawn stone-glsl-runner ({}): {e}", runner.display()),
     }
 }
 
@@ -560,19 +567,30 @@ fn runner_lib_path() -> String {
 
 /// Locate the `stone-glsl-runner` binary: `ROCK_GLSL_RUNNER` override, then a
 /// sibling of the running `rock` binary (production + release layout), then one
-/// level up (cargo test binaries live in `target/<profile>/deps/`).
-fn locate_runner() -> Option<std::path::PathBuf> {
+/// level up (cargo test binaries live in `target/<profile>/deps/`). Missing is
+/// a hard error: the runner is a workspace artifact, and a gate whose executor
+/// is absent must not read as green.
+fn locate_runner() -> Result<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("ROCK_GLSL_RUNNER") {
         let p = std::path::PathBuf::from(p);
-        return p.exists().then_some(p);
+        if !p.exists() {
+            crate::bail!(
+                "ROCK_GLSL_RUNNER points at a missing stone-glsl-runner: {}",
+                p.display()
+            );
+        }
+        return Ok(p);
     }
     let name = if cfg!(windows) { "stone-glsl-runner.exe" } else { "stone-glsl-runner" };
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
+    let exe = std::env::current_exe().map_err(|e| anyhow::anyhow!("current_exe: {e}"))?;
+    let dir = exe.parent().ok_or_else(|| anyhow::anyhow!("exe has no parent dir"))?;
     for cand in [dir.join(name), dir.parent().map(|d| d.join(name)).unwrap_or_default()] {
         if cand.exists() {
-            return Some(cand);
+            return Ok(cand);
         }
     }
-    None
+    crate::bail!(
+        "stone-glsl-runner not found next to {} -- build it (`cargo build -p stone-glsl-runner`) or set ROCK_GLSL_RUNNER",
+        dir.display()
+    )
 }
