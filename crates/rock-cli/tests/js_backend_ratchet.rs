@@ -54,6 +54,7 @@ fn corpus() -> Vec<String> {
         "tests/js_deepcopy.rock",
         "tests/js_inspect.rock",
         "tests/js_enum_boxes.rock",
+        "tests/js_vec_helpers.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -164,7 +165,13 @@ fn js_runnable_coverage_ratchet() {
     // faithfully: the walker recovers `E::V` and displays 0-based positional keys
     // as luajit's 1-based `[N]`, byte-matching; value-struct inspect stays gated)
     // added 4 byte-checked inspect cases -> 261 (full-suite 3537 -> 3541).
-    const FLOOR: usize = 261;
+    // T8f Vec-helper coverage (per-family byte-checked cases -- index read/write
+    // first+last, push/pop, sort, remove_at/swap_remove/clear drain, deepcopy,
+    // inspect, for-in + enumerate, Vec in an enum payload and a struct field)
+    // added tests/js_vec_helpers.rock -> 274 (13 runnable-green; suite pass count
+    // unchanged, this slice adds coverage only -- the 0-based `_data` repr change
+    // T8f originally scoped was falsified as JS-crate-only, see the plan entry).
+    const FLOOR: usize = 274;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
