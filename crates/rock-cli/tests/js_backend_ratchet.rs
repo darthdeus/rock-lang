@@ -48,6 +48,7 @@ fn corpus() -> Vec<String> {
         "tests/js_format_specs.rock",
         "tests/js_misc_intrinsics.rock",
         "tests/js_try_call.rock",
+        "tests/js_module_globals.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -119,8 +120,15 @@ fn js_runnable_coverage_ratchet() {
     // side-effect fix (an unused Vec/NativeBuffer OOB read is emitted, not
     // dropped, so its bounds check throws) added tests/js_try_call.rock -> 222
     // (full-suite 3209 -> 3218; the try_call bucket collapsed and 4 bounds tests
-    // that would have gone red are green).
-    const FLOOR: usize = 222;
+    // that would have gone red are green). T8d module globals (module-level
+    // `let`/`global` STATE renders into a scoped `__G` object with each
+    // initializer run once at load in dependency order; a top-level fn used as a
+    // VALUE co-emits and renders as its JS name; a global populated by decorator
+    // application rejects, since the per-test path does not emit module-load
+    // decorator side effects) added tests/js_module_globals.rock -> 228
+    // (full-suite 3223 -> 3421; the Global/StoreGlobal spread and fn-value reads
+    // collapsed).
+    const FLOOR: usize = 228;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

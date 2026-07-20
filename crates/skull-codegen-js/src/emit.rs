@@ -24,6 +24,21 @@ fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
 }
 
+/// The module-global surface an emitted body may reference through `Inst::Global`
+/// / `Inst::StoreGlobal`. Module-level `let`/`global` STATE renders into a scoped
+/// `__G` object (`__G.<name>`) so no user global can collide with or be shadowed
+/// by an emitted body local (`r<N>`/`v<N>`/`c<N>`/`__rock_env`); a top-level fn
+/// referenced as a VALUE renders as its co-emitted JS name (a bare function, so
+/// `__rock_call` invokes it directly). Built once per program in
+/// [`emit_with_closure`]; empty for the standalone [`emit_fn`] entry.
+#[derive(Default)]
+pub struct GlobalCtx {
+    /// Names that are module-level STATE (-> `__G.<name>`).
+    state: HashSet<ustr::Ustr>,
+    /// A top-level fn used as a value -> its co-emitted JS name.
+    fns: HashMap<ustr::Ustr, String>,
+}
+
 fn err(msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(Span::default(), msg.into())
 }
@@ -74,7 +89,7 @@ fn js_string_lit(s: &str) -> Result<String, CompilerError> {
 /// Emit `mf` as `function <js_name>(...) { ... }`. `js_name` is the caller's
 /// chosen JS identity (the S3/S4 harness names each fallback fn).
 pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, CompilerError> {
-    emit_fn_with_callees(ws, mf, js_name, &HashMap::new(), &HashSet::new())
+    emit_fn_with_callees(ws, mf, js_name, &HashMap::new(), &HashSet::new(), &GlobalCtx::default())
 }
 
 /// [`emit_fn`] with a set of known co-emitted plain-Rock callees: a call whose
@@ -87,6 +102,7 @@ pub fn emit_fn_with_callees(
     js_name: &str,
     callees: &HashMap<FuncRef, String>,
     hoisted: &HashSet<ustr::Ustr>,
+    globals: &GlobalCtx,
 ) -> Result<String, CompilerError> {
     if mf.is_coroutine {
         return Err(err("JS subset: coroutine fn not supported"));
@@ -117,6 +133,7 @@ pub fn emit_fn_with_callees(
         mf,
         callees,
         hoisted,
+        globals,
         use_count,
         inlinable,
         structure: st,
@@ -176,6 +193,7 @@ pub fn emit_fn_trampoline(
     js_name: &str,
     callees: &HashMap<FuncRef, String>,
     hoisted: &HashSet<ustr::Ustr>,
+    globals: &GlobalCtx,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
 ) -> Result<String, CompilerError> {
@@ -186,6 +204,7 @@ pub fn emit_fn_trampoline(
         mf,
         callees,
         hoisted,
+        globals,
         use_count,
         inlinable,
         structure: structure::Structure::empty(mf.blocks.len()),
@@ -268,6 +287,9 @@ struct Emitter<'a> {
     /// lambda creation site legitimately references. Any other global read (a
     /// module `let`, an enum name table, a named fn as a value) is out of subset.
     hoisted: &'a HashSet<ustr::Ustr>,
+    /// Module-global surface: state globals (`__G.<name>`) and fn-value globals
+    /// (co-emitted JS name). See [`GlobalCtx`].
+    globals: &'a GlobalCtx,
     /// Times each inst is used as an operand (by an inst or terminator), dense
     /// by raw inst id. 0 == statement-position (an effectful `Call`) or dead.
     use_count: Vec<u32>,
@@ -956,6 +978,19 @@ impl Emitter<'_> {
                     let call = format!("__rock_call({})", rendered.join(", "));
                     self.push(&self.multi_assign(dests, &call));
                 }
+                // Module-level `let`/`global` state write: `__G.<name> = value;`
+                // (scoped so no body local can collide). The name must be in the
+                // program's state set (`emit_with_closure` registers it before
+                // emit); an unregistered write is a backend bug, not a skip.
+                Inst::StoreGlobal { name, value } => {
+                    if !self.globals.state.contains(name) {
+                        return Err(err(format!(
+                            "JS subset: write to unregistered global `{name}`"
+                        )));
+                    }
+                    let v = self.render_val(*value)?;
+                    self.push(&format!("__G.{name} = {v};"));
+                }
                 // A checked Vec/NativeBuffer index whose value is UNUSED: its
                 // bounds check throws on OOB, so it must be emitted as a statement
                 // rather than dropped (luajit keeps the checked read -- dropping
@@ -1145,6 +1180,16 @@ impl Emitter<'_> {
             // `yield*`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
             Inst::Global(name) if self.hoisted.contains(name) || name.as_str() == "error" => {
                 name.to_string()
+            }
+            // A top-level fn referenced as a value: its co-emitted JS name (a
+            // bare function; `__rock_call` invokes it directly).
+            Inst::Global(name) if self.globals.fns.contains_key(name) => {
+                self.globals.fns[name].clone()
+            }
+            // Module-level `let`/`global` state: scoped so no body local can
+            // collide with or shadow it.
+            Inst::Global(name) if self.globals.state.contains(name) => {
+                format!("__G.{name}")
             }
             Inst::Global(name) => {
                 return Err(err(format!("JS subset: global read `{name}` not supported")))
@@ -1449,60 +1494,78 @@ pub fn emit_with_closure(
     let mut queue: Vec<FuncRef> = roots.iter().map(|(fr, _)| *fr).collect();
     let mut seen: HashSet<FuncRef> = queue.iter().copied().collect();
     let mut lowered: Vec<(FuncRef, MirFunc)> = Vec::new();
-    while let Some(fr) = queue.pop() {
-        let f = &ws.module(fr.module).functions[fr.func];
-        let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
-        // Coroutines never inline, mirroring the luajit path's coroutine branch
-        // (cleanup only, no inline / forl rewrite); the transform + trampoline
-        // emission run in `emit_coroutine_js` at emission time.
-        if mf.is_coroutine {
+
+    // Module-global surface. `state_index` maps every module-level `let`/`global`
+    // name to its definition site (for lowering the initializer); `gctx`
+    // accumulates the state names (-> `__G.<name>`) and fn-value names (-> a
+    // co-emitted JS name) the emitted bodies actually reference. Global inits are
+    // themselves lowered fns (`lower_global`) that can read more globals and call
+    // more fns, so they feed the same worklists.
+    let state_index = build_state_index(ws);
+    let deco_globals = decorator_populated_globals(ws);
+    let mut gctx = GlobalCtx::default();
+    let mut ginit_queue: Vec<(ustr::Ustr, GlobalSite)> = Vec::new();
+    let mut ginit_seen: HashSet<ustr::Ustr> = HashSet::new();
+    let mut ginits: Vec<GlobalInit> = Vec::new();
+
+    loop {
+        if let Some(fr) = queue.pop() {
+            let f = &ws.module(fr.module).functions[fr.func];
+            let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
+            // Coroutines never inline, mirroring the luajit path's coroutine branch
+            // (cleanup only, no inline / forl rewrite); the transform + trampoline
+            // emission run in `emit_coroutine_js` at emission time.
+            if mf.is_coroutine {
+                skull_transform::cleanup(&mut mf);
+            } else {
+                skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut cache)?;
+                skull_transform::cleanup(&mut mf);
+                // Shared closure conversion: every `Inst::Lambda` becomes an env
+                // record / bare global + a hoisted sibling fn in `nested_fns`. Runs
+                // BEFORE FORL recovery so a loop lifted into a lambda body is a plain
+                // fn loop the emitter structures normally. `names[&fr]` is the unique
+                // JS name -> collision-free `<name>__lambda<k>` hoisted names.
+                skull_transform::convert_closures(&mut mf, &names[&fr]);
+                skull_transform::recover_counted_loops(ws, &mut mf);
+                for nf in &mut mf.nested_fns {
+                    skull_transform::recover_counted_loops(ws, nf);
+                }
+            }
+            skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
+            discover_callees(ws, &mf, &mut names, &mut queue, &mut seen)?;
+            discover_globals(
+                ws, &mf, &state_index, &deco_globals, &mut gctx, &mut ginit_queue, &mut ginit_seen,
+                &mut names, &mut queue, &mut seen,
+            )?;
+            lowered.push((fr, mf));
+            continue;
+        }
+        if let Some((gname, site)) = ginit_queue.pop() {
+            let init_name = global_init_js_name(gname);
+            // A global initializer is a lowered fn returning the init value. It
+            // never inlines (the luajit global path does not either), but it needs
+            // closure conversion (a global can hold a fn value) and JS loop
+            // recovery (a comprehension init). A residual bound call (an iterator
+            // combinator init) rejects honestly rather than emit-and-hope.
+            let mut mf = match skull_mir::lower::lower_global(ws, scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()))? {
+                Some(mf) => mf,
+                None => continue,
+            };
             skull_transform::cleanup(&mut mf);
-        } else {
-            skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut cache)?;
-            skull_transform::cleanup(&mut mf);
-            // Shared closure conversion: every `Inst::Lambda` becomes an env
-            // record / bare global + a hoisted sibling fn in `nested_fns`. Runs
-            // BEFORE FORL recovery so a loop lifted into a lambda body is a plain
-            // fn loop the emitter structures normally. `names[&fr]` is the unique
-            // JS name -> collision-free `<name>__lambda<k>` hoisted names.
-            skull_transform::convert_closures(&mut mf, &names[&fr]);
+            skull_transform::convert_closures(&mut mf, &init_name);
             skull_transform::recover_counted_loops(ws, &mut mf);
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
+            discover_callees(ws, &mf, &mut names, &mut queue, &mut seen)?;
+            discover_globals(
+                ws, &mf, &state_index, &deco_globals, &mut gctx, &mut ginit_queue, &mut ginit_seen,
+                &mut names, &mut queue, &mut seen,
+            )?;
+            ginits.push(GlobalInit { name: gname, init_name, mf });
+            continue;
         }
-        skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
-        // Discover co-emit callees from the POST-inline residual calls only, so a
-        // spliced callee (its call inst dropped from its block) stops co-emitting.
-        for callee in call_targets(&mf) {
-            let cf = &ws.module(callee.module).functions[callee.func];
-            // Mirror `render_call`'s decision exactly: the `get`/2 receiver
-            // gate, then the intrinsic table (stdlib @intrinsic decls only),
-            // then co-emit for plain-Rock bodies.
-            // Mirror `render_call`: only the BUILTIN Map renders inline (skip its
-            // co-emission); NativeBuffer via the intrinsic table (below); Vec and
-            // user-struct `get` co-emit their pure-Rock bodies (fall through).
-            if cf.name.as_str() == "get"
-                && cf.param_decls.len() == 2
-                && first_param_is_builtin_map(ws, cf)
-            {
-                continue;
-            }
-            if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
-                continue;
-            }
-            if cf.lua_body.is_some() || cf.is_extern {
-                return Err(err(format!(
-                    "JS subset: call to `{}` is not a mapped JS intrinsic",
-                    cf.name
-                )));
-            }
-            if seen.insert(callee) {
-                names.insert(callee, callee_js_name(ws, callee));
-                queue.push(callee);
-            }
-        }
-        lowered.push((fr, mf));
+        break;
     }
     // Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values
     // at the call, but a co-emitted callee that uses the param as a WHOLE value
@@ -1514,7 +1577,7 @@ pub fn emit_with_closure(
     // `undefined`): accept down to the count of params WITHOUT a default.
     let arities: HashMap<FuncRef, usize> =
         lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
-    for (_, mf) in &lowered {
+    for mf in lowered.iter().map(|(_, mf)| mf).chain(ginits.iter().map(|g| &g.mf)) {
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
                 let (callee, argc) = match &mf.insts[iid] {
@@ -1540,25 +1603,223 @@ pub fn emit_with_closure(
     // Program-wide hoisted closure-body names -- the only globals a capture-free
     // lambda creation site may reference (every other `Inst::Global` read stays
     // out of subset). Flat: nesting is one level (all lambdas are siblings).
-    let hoisted: HashSet<ustr::Ustr> =
-        lowered.iter().flat_map(|(_, mf)| mf.nested_fns.iter().map(|nf| nf.name)).collect();
+    let hoisted: HashSet<ustr::Ustr> = lowered
+        .iter()
+        .map(|(_, mf)| mf)
+        .chain(ginits.iter().map(|g| &g.mf))
+        .flat_map(|mf| mf.nested_fns.iter().map(|nf| nf.name))
+        .collect();
     let mut out = String::new();
+    // Global initializers first (`function __ginit_<name>() {...}`), then the
+    // load-time assignment lines in dependency order.
+    for g in &ginits {
+        out.push_str(&emit_fn_with_callees(ws, &g.mf, &g.init_name, &names, &hoisted, &gctx)?);
+        for nf in &g.mf.nested_fns {
+            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &names, &hoisted, &gctx)?);
+        }
+    }
+    for line in order_global_inits(&ginits)? {
+        out.push_str(&line);
+    }
     for (fr, mf) in &lowered {
         if mf.is_coroutine {
             // The shared coroutine pipeline + trampoline step + JS ctor. Runs
             // its own closure conversion, so its hoisted names extend `hoisted`
             // locally inside.
-            out.push_str(&emit_coroutine_js(ws, *fr, mf, &names[fr], &names, &hoisted)?);
+            out.push_str(&emit_coroutine_js(ws, *fr, mf, &names[fr], &names, &hoisted, &gctx)?);
             continue;
         }
-        out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names, &hoisted)?);
+        out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names, &hoisted, &gctx)?);
         // Hoisted closure bodies (`convert_closures`): each is a normal fn named
         // by its `MakeEnv`/`Global` `__fn` reference, emitted as a sibling.
         for nf in &mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &names, &hoisted)?);
+            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &names, &hoisted, &gctx)?);
         }
     }
     Ok(out)
+}
+
+/// The definition site of a module-level global (for lowering its initializer).
+#[derive(Clone, Copy)]
+struct GlobalSite {
+    module: bone_semantic::prelude::ModuleId,
+    gid: Idx<bone_semantic::hir::GlobalDef>,
+}
+
+/// A lowered global initializer: `__G.<name> = <init_name>()` runs the `mf` body.
+struct GlobalInit {
+    name: ustr::Ustr,
+    init_name: String,
+    mf: MirFunc,
+}
+
+/// Deterministic init-fn name for a module global. Global names are unique
+/// workspace-wide (`Workspace::globals_by_name` is a flat map), so a bare
+/// `__ginit_<name>` cannot collide across independently-emitted test programs
+/// (byte-identical definitions dedup under JS function-decl hoisting).
+fn global_init_js_name(name: ustr::Ustr) -> String {
+    format!("__ginit_{name}")
+}
+
+/// Global names referenced by any `deco` body. A decorator runs at MODULE LOAD
+/// for each `@<deco>` application and typically mutates a registry global (e.g.
+/// `@system` -> `UPDATE_SYSTEMS.push(...)`); the per-test JS emission does NOT
+/// emit decorator applications, so a test reading such a global would see the
+/// un-populated init value -- an emit-and-hope divergence. Reads of these reject
+/// (SKIP) rather than silently diverge.
+fn decorator_populated_globals(ws: &Workspace) -> HashSet<ustr::Ustr> {
+    use bone_semantic::hir::{BodyOwner, Expr};
+    let mut set = HashSet::new();
+    for module in &ws.modules {
+        for (did, _) in module.decorators.iter() {
+            let Some(body) = module.bodies.get(&BodyOwner::Decorator(did)) else {
+                continue;
+            };
+            for (_, expr) in body.expr_arena.iter() {
+                if let Expr::Global(name) = expr {
+                    set.insert(*name);
+                }
+            }
+        }
+    }
+    set
+}
+
+/// Map every module-level `let`/`global` name to its definition site.
+fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
+    let mut m = HashMap::new();
+    for module in &ws.modules {
+        for (&name, &gid) in &module.global_by_name {
+            m.insert(name, GlobalSite { module: module.id, gid });
+        }
+    }
+    m
+}
+
+/// Discover the plain-Rock callees `mf` calls directly (post-inline residual
+/// calls), queueing each for co-emission under [`callee_js_name`]. Mirrors
+/// `render_call`'s dispatch so both agree on what NOT to reject.
+fn discover_callees(
+    ws: &Workspace,
+    mf: &MirFunc,
+    names: &mut HashMap<FuncRef, String>,
+    queue: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+) -> Result<(), CompilerError> {
+    for callee in call_targets(mf) {
+        let cf = &ws.module(callee.module).functions[callee.func];
+        // Only the BUILTIN Map renders inline (skip its co-emission); NativeBuffer
+        // via the intrinsic table; Vec and user-struct `get` co-emit (fall through).
+        if cf.name.as_str() == "get"
+            && cf.param_decls.len() == 2
+            && first_param_is_builtin_map(ws, cf)
+        {
+            continue;
+        }
+        if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
+            continue;
+        }
+        if cf.lua_body.is_some() || cf.is_extern {
+            return Err(err(format!(
+                "JS subset: call to `{}` is not a mapped JS intrinsic",
+                cf.name
+            )));
+        }
+        if seen.insert(callee) {
+            names.insert(callee, callee_js_name(ws, callee));
+            queue.push(callee);
+        }
+    }
+    Ok(())
+}
+
+/// Classify every `Inst::Global`/`StoreGlobal` name `mf` references: module-level
+/// STATE (registered for `__G.<name>` + its initializer queued) or a top-level fn
+/// used as a VALUE (registered under its co-emitted JS name + the fn queued).
+/// A name that is neither (a hoisted lambda, `error`, an enum name table) is left
+/// for the emitter to resolve or reject.
+#[allow(clippy::too_many_arguments)]
+fn discover_globals(
+    ws: &Workspace,
+    mf: &MirFunc,
+    state_index: &HashMap<ustr::Ustr, GlobalSite>,
+    deco_globals: &HashSet<ustr::Ustr>,
+    gctx: &mut GlobalCtx,
+    ginit_queue: &mut Vec<(ustr::Ustr, GlobalSite)>,
+    ginit_seen: &mut HashSet<ustr::Ustr>,
+    names: &mut HashMap<FuncRef, String>,
+    queue: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+) -> Result<(), CompilerError> {
+    for name in global_refs(mf) {
+        if let Some(&site) = state_index.get(&name) {
+            if deco_globals.contains(&name) {
+                return Err(err(format!(
+                    "JS subset: global `{name}` is populated by decorator application \
+                     (module-load side effect not emitted)"
+                )));
+            }
+            gctx.state.insert(name);
+            if ginit_seen.insert(name) {
+                ginit_queue.push((name, site));
+            }
+        } else if let Some(&[(module, func)]) =
+            ws.functions_by_name.get(&name).map(|l| l.as_slice())
+        {
+            // A NON-overloaded top-level fn used as a value; an overloaded name has
+            // no unique MIR resolution (as on luajit, which emits the bare name),
+            // so it is left rejecting.
+            let fr = FuncRef { module, func };
+            let jsname = callee_js_name(ws, fr);
+            gctx.fns.entry(name).or_insert_with(|| jsname.clone());
+            if seen.insert(fr) {
+                names.insert(fr, jsname);
+                queue.push(fr);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Order the global-init assignment lines so each global inits AFTER every global
+/// it (transitively) reads: `__G.<name> = <init_name>();`. A round-based topo sort
+/// over the init bodies' state-global reads; a self-read is ignored (`X = X or ..`
+/// style is not expressible here); a genuine cycle rejects.
+fn order_global_inits(ginits: &[GlobalInit]) -> Result<Vec<String>, CompilerError> {
+    let known: HashSet<ustr::Ustr> = ginits.iter().map(|g| g.name).collect();
+    let deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = ginits
+        .iter()
+        .map(|g| {
+            let ds = global_refs(&g.mf)
+                .into_iter()
+                .filter(|n| *n != g.name && known.contains(n))
+                .collect();
+            (g.name, ds)
+        })
+        .collect();
+    let mut emitted: HashSet<ustr::Ustr> = HashSet::new();
+    let mut lines = Vec::with_capacity(ginits.len());
+    let mut remaining: Vec<&GlobalInit> = ginits.iter().collect();
+    while !remaining.is_empty() {
+        let before = remaining.len();
+        remaining.retain(|g| {
+            if deps[&g.name].iter().all(|d| emitted.contains(d)) {
+                lines.push(format!("__G.{} = {}();\n", g.name, g.init_name));
+                emitted.insert(g.name);
+                false
+            } else {
+                true
+            }
+        });
+        if remaining.len() == before {
+            let names: Vec<&str> = remaining.iter().map(|g| g.name.as_str()).collect();
+            return Err(err(format!(
+                "JS subset: module globals are mutually recursive: {}",
+                names.join(", ")
+            )));
+        }
+    }
+    Ok(lines)
 }
 
 /// Emit a `co fn` for JS: the shared coroutine pipeline (`transform_coroutine`
@@ -1574,6 +1835,7 @@ fn emit_coroutine_js(
     js_name: &str,
     callees: &HashMap<FuncRef, String>,
     hoisted: &HashSet<ustr::Ustr>,
+    globals: &GlobalCtx,
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fr.module).functions[fr.func];
     let channel = f.return_ty.and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
@@ -1625,6 +1887,7 @@ fn emit_coroutine_js(
         &step_name,
         callees,
         &hoisted,
+        globals,
         lowered.step.entry,
         &[lowered.s_cell, resume_arg],
     )?;
@@ -1634,7 +1897,7 @@ fn emit_coroutine_js(
     for nf in nested.iter_mut() {
         skull_transform::cleanup(nf);
         skull_transform::recover_counted_loops(ws, nf);
-        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted)?);
+        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, globals)?);
     }
     lowered.step.nested_fns = nested;
     for (k, &entry) in defer_entries.iter().enumerate() {
@@ -1644,6 +1907,7 @@ fn emit_coroutine_js(
             &format!("{js_name}__defer{k}"),
             callees,
             &hoisted,
+            globals,
             entry,
             &[lowered.s_cell],
         )?);
@@ -1655,6 +1919,7 @@ fn emit_coroutine_js(
             &format!("{js_name}{slot}"),
             callees,
             &hoisted,
+            globals,
             entry,
             &[lowered.s_cell],
         )?);
@@ -1779,6 +2044,33 @@ fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     }
     let mut out = Vec::new();
     walk(mf, &mut out);
+    out
+}
+
+/// Every `Inst::Global` read + `Inst::StoreGlobal` write name in `mf` (main body
+/// and hoisted nested fns) -- the module-global surface the emitter must resolve
+/// (state, fn-value, or reject). Names are deduped in source order.
+fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
+    fn walk(mf: &MirFunc, out: &mut Vec<ustr::Ustr>, seen: &mut HashSet<ustr::Ustr>) {
+        for (_, block) in mf.blocks.iter() {
+            for &iid in &block.insts {
+                let name = match &mf.insts[iid] {
+                    Inst::Global(n) => *n,
+                    Inst::StoreGlobal { name, .. } => *name,
+                    _ => continue,
+                };
+                if seen.insert(name) {
+                    out.push(name);
+                }
+            }
+        }
+        for nf in &mf.nested_fns {
+            walk(nf, out, seen);
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    walk(mf, &mut out, &mut seen);
     out
 }
 

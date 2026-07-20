@@ -425,6 +425,7 @@ fn build_node_program(runnable: &[(String, String, String, Option<String>, bool)
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(
         r#"
+var __G = {};
 var __buf = [];
 function print() {
   var p = [];
