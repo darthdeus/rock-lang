@@ -275,11 +275,6 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     )
 }
 
-@inline
-@pure fn Vec3.xy(a) -> Vec2 {
-    return v(a.x, a.y)
-}
-
 // Vec4 algebra -- shader-facing (colors, homogeneous coords). No zero() ctor:
 // the near-zero normalize guard returns v(0, 0, 0, 0) inline, matching Vec3.
 
