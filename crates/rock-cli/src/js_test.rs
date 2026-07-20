@@ -432,6 +432,8 @@ function print() {
   for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));
   __buf.push(p.join("\t") + "\n");
 }
+// `put` = the test-local `io.write` idiom: append raw, no separators/newline.
+function put(s) { __buf.push(s); }
 "#,
     );
     for (_, _, defs, _, _) in runnable {

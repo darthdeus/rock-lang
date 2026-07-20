@@ -1364,6 +1364,9 @@ impl Emitter<'_> {
         if is_host_print(cf) {
             return Ok(format!("print({})", rargs.join(", ")));
         }
+        if is_host_put(cf) {
+            return Ok(format!("put({})", rargs.join(", ")));
+        }
         if let Some(tmpl) = host_fn_template(cf) {
             // A defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
             // materialized into the call args, so a template `$N` for it would
@@ -2106,6 +2109,17 @@ fn is_host_print(cf: &bone_semantic::hir::Function) -> bool {
     cf.is_extern && cf.name.as_str() == "print"
 }
 
+/// The test-local `put` idiom: `@inline inline(lua) fn put(s: string) =
+/// "io.write(s)"` -- a raw stdout write with no trailing newline. Rendered as the
+/// harness-provided `put` global (which appends to the same per-test buffer as
+/// `print`, raw), not co-emitted. Gated on the `io.write` body so a plain-Rock
+/// user `put` co-emits normally.
+fn is_host_put(cf: &bone_semantic::hir::Function) -> bool {
+    cf.name.as_str() == "put"
+        && cf.param_decls.len() == 1
+        && cf.lua_body.is_some_and(|b| b.as_str().contains("io.write"))
+}
+
 /// A fixed-arity, host-bodied stdlib fn (extern or inline(lua)) with a
 /// hand-written JS binding the emitter substitutes for the Lua body. The gate
 /// is the host-body flag PLUS the (name, arity) match, so a plain-Rock user fn
@@ -2213,7 +2227,7 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
 /// `print` global or one of the fixed-arity templates. Shared by `render_call`
 /// and the `emit_with_closure` callee walk so both agree on what NOT to reject.
 fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
-    is_host_print(cf) || host_fn_template(cf).is_some()
+    is_host_print(cf) || is_host_put(cf) || host_fn_template(cf).is_some()
 }
 
 /// `map_new()`: pure Rock (`transmute(table_new())`), but intercepted to a real

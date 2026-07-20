@@ -49,6 +49,7 @@ fn corpus() -> Vec<String> {
         "tests/js_misc_intrinsics.rock",
         "tests/js_try_call.rock",
         "tests/js_module_globals.rock",
+        "tests/js_put.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -127,8 +128,12 @@ fn js_runnable_coverage_ratchet() {
     // application rejects, since the per-test path does not emit module-load
     // decorator side effects) added tests/js_module_globals.rock -> 228
     // (full-suite 3223 -> 3421; the Global/StoreGlobal spread and fn-value reads
-    // collapsed).
-    const FLOOR: usize = 228;
+    // collapsed). T8d put (the test-local `io.write` idiom -> a harness `put`
+    // global appending raw to the same buffer as `print`) added tests/js_put.rock
+    // -> 231. (The 14 histogram `put` tests are native_buffer_value_* blocked
+    // downstream on `__nb_alloc_<value>` custom C-struct alloc, a divergence
+    // class; `put` is no longer their blocker.)
+    const FLOOR: usize = 231;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
