@@ -60,6 +60,12 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("__nb_alloc_u32", 1, "new Uint32Array($1)"),
     ("nb_get", 2, "$1.ptr[$2]"),
     ("nb_set", 3, "($1.ptr[$2] = $3)"),
+    // StringBuilder: a Lua table used as an array accumulator IS a JS array.
+    // `sb_new` -> `[]`, `sb_push` -> `.push` (Lua `sb[#sb+1] = s`; the returned
+    // length is discarded), `sb_build` -> `.join("")` (Lua `table.concat`).
+    ("sb_new", 0, "[]"),
+    ("sb_push", 2, "$1.push($2)"),
+    ("sb_build", 1, "$1.join(\"\")"),
     // The safe accessor: an IIFE so the receiver/index evaluate exactly once
     // (the template reads each twice), mirroring the inline(lua) body's
     // param-binding. Null on miss = Rock `T?` null.

@@ -41,6 +41,7 @@ fn corpus() -> Vec<String> {
         "tests/stackless_coroutines/phase1_linear.rock",
         "tests/stackless_coroutines/phase3_loops.rock",
         "tests/js_table_unset.rock",
+        "tests/js_string_builder.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -87,8 +88,11 @@ fn js_runnable_coverage_ratchet() {
     // 2756 -> 2876; the `resume`/`kill`/`coroutine fn` buckets collapsed).
     // T8d table_unset (`__table_unset`: Map delete / array hole, dispatched on
     // `instanceof Map`) added tests/js_table_unset.rock -> 165 (full-suite
-    // 2878 -> 2941; the table_unset bucket of 142 collapsed).
-    const FLOOR: usize = 165;
+    // 2878 -> 2941; the table_unset bucket of 142 collapsed). T8d string builder
+    // (sb_new/sb_push/sb_build -> `[]`/`.push`/`.join("")`) added
+    // tests/js_string_builder.rock -> 171 (full-suite 2941 -> 2951; the sb_new
+    // bucket of 44 collapsed).
+    const FLOOR: usize = 171;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
