@@ -1367,6 +1367,10 @@ impl Emitter<'_> {
         if is_host_put(cf) {
             return Ok(format!("put({})", rargs.join(", ")));
         }
+        // Logging dedup/throttle impls -> their JS runtime port, same name.
+        if is_host_log_fn(cf) {
+            return Ok(format!("{}({})", cf.name, rargs.join(", ")));
+        }
         if let Some(tmpl) = host_fn_template(cf) {
             // A defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
             // materialized into the call args, so a template `$N` for it would
@@ -2120,6 +2124,31 @@ fn is_host_put(cf: &bone_semantic::hir::Function) -> bool {
         && cf.lua_body.is_some_and(|b| b.as_str().contains("io.write"))
 }
 
+/// The logging dedup/throttle impls (`@nomangle inline(lua)` in
+/// `stdlib/logging.rock`): rendered by their original name to the JS runtime port
+/// (`crate::JS_LOG_RUNTIME`), not co-emitted. The (name, arity) set matches the
+/// stdlib decls; the host-body gate keeps a plain-Rock same-name user fn on the
+/// co-emit path. `log_error`/`log_warn`/... and `log_get_level` are pure Rock and
+/// co-emit over `__stone_log`/`__stone_log_init` normally.
+fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
+    const LOG_FNS: &[(&str, usize)] = &[
+        ("__stone_log_init", 0),
+        ("__stone_emit", 3),
+        ("__stone_log", 3),
+        ("log_set_level", 1),
+        ("_log_once_impl", 3),
+        ("_log_throttled_with_now_impl", 5),
+        ("stone_log_set_now", 1),
+        ("stone_log_clear_now", 0),
+        ("__stone_log_now", 0),
+        ("_log_throttled_impl", 4),
+        ("log_reset_dedup", 0),
+        ("log_dedup_count", 0),
+    ];
+    (cf.is_extern || cf.lua_body.is_some())
+        && LOG_FNS.iter().any(|(n, a)| *n == cf.name.as_str() && *a == cf.param_decls.len())
+}
+
 /// A fixed-arity, host-bodied stdlib fn (extern or inline(lua)) with a
 /// hand-written JS binding the emitter substitutes for the Lua body. The gate
 /// is the host-body flag PLUS the (name, arity) match, so a plain-Rock user fn
@@ -2227,7 +2256,7 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
 /// `print` global or one of the fixed-arity templates. Shared by `render_call`
 /// and the `emit_with_closure` callee walk so both agree on what NOT to reject.
 fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
-    is_host_print(cf) || is_host_put(cf) || host_fn_template(cf).is_some()
+    is_host_print(cf) || is_host_put(cf) || is_host_log_fn(cf) || host_fn_template(cf).is_some()
 }
 
 /// `map_new()`: pure Rock (`transmute(table_new())`), but intercepted to a real

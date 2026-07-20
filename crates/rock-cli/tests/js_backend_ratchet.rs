@@ -50,6 +50,7 @@ fn corpus() -> Vec<String> {
         "tests/js_try_call.rock",
         "tests/js_module_globals.rock",
         "tests/js_put.rock",
+        "tests/js_log.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -132,8 +133,13 @@ fn js_runnable_coverage_ratchet() {
     // global appending raw to the same buffer as `print`) added tests/js_put.rock
     // -> 231. (The 14 histogram `put` tests are native_buffer_value_* blocked
     // downstream on `__nb_alloc_<value>` custom C-struct alloc, a divergence
-    // class; `put` is no longer their blocker.)
-    const FLOOR: usize = 231;
+    // class; `put` is no longer their blocker.) T8d logging (the log_once /
+    // log_throttled dedup+throttle `@nomangle inline(lua)` impls -> JS runtime
+    // ports of the same name, `is_host_log_fn`; state in `__G.__stone_log_level`
+    // + bare dedup/throttle vars; `__stone_emit` prints `[cat] msg` into the
+    // shared buffer) added tests/js_log.rock -> 237 (full-suite 3424 -> 3447; the
+    // log_reset_dedup bucket of 16 collapsed).
+    const FLOOR: usize = 237;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

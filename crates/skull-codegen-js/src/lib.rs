@@ -203,6 +203,60 @@ function __op_eq(a, b) {
 }
 "#;
 
+/// The logging runtime: JS ports of the `@nomangle inline(lua)` dedup/throttle
+/// impls in `stdlib/logging.rock`. Rendered by their original names
+/// (`is_host_log_fn`), so `log_once`/`log_throttled` (macros -> `_log_once_impl`
+/// / `_log_throttled_*_impl`) route here. `__stone_emit`'s no-sink fallback is
+/// `print("[cat] msg")`, so lines land in the same per-test buffer as `print`.
+/// The one Rock global (`__stone_log_level`) lives in `__G` (unified with the
+/// module-globals path); dedup/throttle/now are bare vars (never Rock globals).
+/// `__stone_log_now` uses `Date.now()` as the os.clock() analog (the fallback
+/// test uses a huge interval, so the absolute value never matters).
+pub const JS_LOG_RUNTIME: &str = r#"
+function __stone_log_init() {
+  if (__G.__stone_log_level == null || __G.__stone_log_level < 0) __G.__stone_log_level = 2;
+}
+function __stone_emit(level, category, msg) {
+  if (category && category.length > 0) print("[" + category + "] " + msg);
+  else print(msg);
+}
+function __stone_log(level, category, msg) {
+  __stone_log_init();
+  if (level > __G.__stone_log_level) return;
+  __stone_emit(level, category, msg);
+}
+function log_set_level(level) { __G.__stone_log_level = level; }
+var __stone_log_dedup = {};
+var __stone_log_throttle = {};
+var __stone_log_now_override = null;
+function _log_once_impl(category, msg, site) {
+  __stone_log_init();
+  if (0 > __G.__stone_log_level) return;
+  if (__stone_log_dedup[site]) return;
+  __stone_log_dedup[site] = true;
+  __stone_emit(0, category, msg);
+}
+function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site) {
+  __stone_log_init();
+  if (0 > __G.__stone_log_level) return;
+  var last = __stone_log_throttle[site];
+  if (last != null && (now_sec - last) < interval_sec) return;
+  __stone_log_throttle[site] = now_sec;
+  __stone_emit(0, category, msg);
+}
+function stone_log_set_now(now_sec) { __stone_log_now_override = now_sec; }
+function stone_log_clear_now() { __stone_log_now_override = null; }
+function __stone_log_now() {
+  if (__stone_log_now_override != null) return __stone_log_now_override;
+  return Date.now() / 1000;
+}
+function _log_throttled_impl(category, msg, interval_sec, site) {
+  _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site);
+}
+function log_reset_dedup() { __stone_log_dedup = {}; __stone_log_throttle = {}; }
+function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
+"#;
+
 /// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
 /// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
 /// plus the `error` global backing the transform's `Inst::Global("error")` +
