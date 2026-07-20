@@ -56,6 +56,7 @@ fn corpus() -> Vec<String> {
         "tests/js_enum_boxes.rock",
         "tests/js_vec_helpers.rock",
         "tests/js_value_gc_eq.rock",
+        "tests/js_map_eq.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -179,8 +180,11 @@ fn js_runnable_coverage_ratchet() {
     // generic key walk; the GC-carrying `inspect` arm lifts, oracle-verified to
     // walk equals-format like the JS object, the GC-free/cdata arm stays gated)
     // added tests/js_value_gc_eq.rock -> 286 (12 runnable-green: 8 eq + 4 inspect;
-    // full-suite pass 3554 -> 3593, GC-carrying reject bucket 73 -> 0).
-    const FLOOR: usize = 286;
+    // full-suite pass 3554 -> 3593, GC-carrying reject bucket 73 -> 0). T8g(d)
+    // Map eq hole (JS `__op_eq` had no Map branch -- `Object.keys(map)` is `[]`, so
+    // unequal Maps behind an eq walk compared EQUAL; added a size + per-key `.get`
+    // branch, order-free) added tests/js_map_eq.rock -> 291.
+    const FLOOR: usize = 291;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

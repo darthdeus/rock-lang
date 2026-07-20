@@ -201,6 +201,16 @@ function __op_eq(a, b) {
     for (var i = 0; i < a.length; i++) if (!__op_eq(a[i], b[i])) return false;
     return true;
   }
+  // A JS `Map` (Rock's hash `Map`) has no own enumerable keys, so the generic
+  // key walk below would compare EVERY pair of Maps equal. Compare by size then
+  // per-key `.get` -- order-free (no reliance on iteration order / MapNext).
+  var am = (a instanceof Map), bm = (b instanceof Map);
+  if (am || bm) {
+    if (!am || !bm || a.size !== b.size) return false;
+    var eq = true;
+    a.forEach(function(v, k) { if (eq && !(b.has(k) && __op_eq(v, b.get(k)))) eq = false; });
+    return eq;
+  }
   var vt = a.__ty;
   if (vt !== undefined && vt === b.__ty && __rock_vt_eq[vt] !== undefined) {
     return __rock_vt_eq[vt](a, b);
