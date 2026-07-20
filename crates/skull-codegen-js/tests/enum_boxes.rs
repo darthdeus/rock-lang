@@ -42,7 +42,7 @@ fn preamble() -> String {
         skull_codegen_js::JS_TABLE_PRIM,
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_ENUM_RUNTIME,
-    )
+    ) + skull_codegen_js::JS_INSPECT_RUNTIME
 }
 
 fn eval(src: &str, root: &str, tail: &str) -> String {
@@ -147,6 +147,23 @@ fn nil_slot_rebox_eq() {
     let js = emit_closure(&ws, "root").expect("nil-slot rebox emits");
     assert!(js.contains("__rock_make_enum("), "reboxes via the ctor:\n{js}");
     eval_int(src, "root", 1);
+}
+
+// `inspect` of a boxed enum byte-matches luajit: positional payloads render with
+// luajit's 1-based `[N]` display over the native 0-based runtime keys; record
+// variants render `field = v`; a nested singleton renders `E::V`.
+#[test]
+fn inspect_byte_matches_luajit() {
+    let src = "enum Node { Nil, Leaf(int), Pair(int, Node) }\n\
+               enum Msg { Ping, Say(string), At { x: int, y: int } }\n\
+               fn leaf() -> string { inspect(Node::Leaf(5)) }\n\
+               fn pair() -> string { inspect(Node::Pair(1, Node::Nil)) }\n\
+               fn rec() -> string { inspect(Msg::At { x: 1, y: 2 }) }\n\
+               fn unit() -> string { inspect(Msg::Ping) }";
+    assert_eq!(eval(src, "leaf", "console.log(leaf());"), "Node::Leaf { [1] = 5 }");
+    assert_eq!(eval(src, "pair", "console.log(pair());"), "Node::Pair { [1] = 1, [2] = Node::Nil }");
+    assert_eq!(eval(src, "rec", "console.log(rec());"), "Msg::At { x = 1, y = 2 }");
+    assert_eq!(eval(src, "unit", "console.log(unit());"), "Msg::Ping");
 }
 
 // A payload-free enum keeps its int repr; `{x}` interpolation reads the

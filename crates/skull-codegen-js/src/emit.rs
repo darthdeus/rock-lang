@@ -1386,31 +1386,20 @@ impl Emitter<'_> {
 
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
-        // `inspect`/`inspect_formatted` of a VALUE STRUCT or an ENUM diverges from
-        // luajit's rendering: a value struct renders `Name { f: v }` (colon, via
-        // the cdata `__tostring`) where the generic table walker emits `f = v`
-        // (equals); a payload-bearing enum carries a numeric `__tag` (scalarized,
-        // T8b) with no `__variant` name, so the walker cannot recover `E::V`. Both
-        // need the value-struct / enum representation work (their own buckets), so
-        // reject at the box boundary rather than emit a wrong string. Reference
-        // structs (`MakeStruct`), Vecs, Maps, arrays, and scalars render faithfully
-        // and pass through.
+        // `inspect`/`inspect_formatted` of a VALUE STRUCT still diverges from luajit:
+        // a value struct renders `Name { f: v }` (colon, via the cdata `__tostring`)
+        // where the generic table walker emits `f = v` (equals), and the two struct
+        // kinds share the `{__ty,..}` JS shape -- so reject at the box boundary. A
+        // boxed ENUM renders faithfully now (T8e): the walker recovers the `E::V`
+        // header from `__variant`/`__ty` and displays 0-based positional keys as
+        // luajit's 1-based `[N]` (`JS_INSPECT_RUNTIME`), byte-matching luajit.
         if matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
-                match &self.mf.insts[arg0] {
-                    Inst::MakeValueStruct { name, .. } => {
-                        return Err(err(format!(
-                            "JS subset: `inspect` of value struct `{name}` \
-                             (colon-format cdata render; deferred to value-struct repr)"
-                        )));
-                    }
-                    Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } => {
-                        return Err(err(format!(
-                            "JS subset: `inspect` of enum `{ty}` \
-                             (numeric __tag has no variant name; deferred to enum repr)"
-                        )));
-                    }
-                    _ => {}
+                if let Inst::MakeValueStruct { name, .. } = &self.mf.insts[arg0] {
+                    return Err(err(format!(
+                        "JS subset: `inspect` of value struct `{name}` \
+                         (colon-format cdata render; deferred to value-struct repr)"
+                    )));
                 }
             }
         }

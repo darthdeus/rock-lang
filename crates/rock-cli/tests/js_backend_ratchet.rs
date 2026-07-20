@@ -160,8 +160,11 @@ fn js_runnable_coverage_ratchet() {
     // with a `__rock_enum_<E>_names` Map; the coroutine channel rebox goes 0-based)
     // added tests/js_enum_boxes.rock -> 257 (full-suite 3492 -> 3537; the MakeEnum
     // / MakeEnumDyn / __rock_enum_* buckets collapsed + chained JsonValue/recursive/
-    // record-variant unlocks).
-    const FLOOR: usize = 257;
+    // record-variant unlocks). The inspect gate lift (a boxed enum inspects
+    // faithfully: the walker recovers `E::V` and displays 0-based positional keys
+    // as luajit's 1-based `[N]`, byte-matching; value-struct inspect stays gated)
+    // added 4 byte-checked inspect cases -> 261 (full-suite 3537 -> 3541).
+    const FLOOR: usize = 261;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

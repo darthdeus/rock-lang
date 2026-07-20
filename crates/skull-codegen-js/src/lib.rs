@@ -300,7 +300,16 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   var header = (type_name !== undefined && variant !== undefined) ? (type_name + "::" + variant)
     : (type_name !== undefined ? type_name : "");
   var result;
-  var keyStr = function(k) { return typeof k === "string" ? k : ("[" + lua_tostring(k) + "]"); };
+  // A boxed enum's positional payload takes native 0-based keys ("0".., for `==`
+  // and `TupleIndex`); luajit's box uses 1-based array keys and inspect renders
+  // them `[1]`.. So display an enum-box numeric key as `[<n+1>]` -- byte-parity
+  // with luajit over a 0-based runtime. Record-variant fields (string keys) and
+  // struct fields are unaffected.
+  var enumBox = variant !== undefined;
+  var keyStr = function(k) {
+    if (enumBox && typeof k === "string" && /^[0-9]+$/.test(k)) return "[" + (parseInt(k, 10) + 1) + "]";
+    return typeof k === "string" ? k : ("[" + lua_tostring(k) + "]");
+  };
   if (pairs.length <= 2) {
     var cparts = pairs.map(function(kv) {
       return keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent, path + "." + lua_tostring(kv[0]), visited, precision);
