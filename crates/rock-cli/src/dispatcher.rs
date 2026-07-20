@@ -500,6 +500,11 @@ impl CommandContext {
                 self.args.profile.clone(),
             );
         }
+        // shader-validate compiles+links registered shader pairs on real GL
+        // contexts (both profiles); backend-agnostic like shader.
+        if self.args.command == CliCommand::ShaderValidate {
+            return crate::glsl_test::shader_validate(&self.args.files);
+        }
         // iter-parse is a front-end (tokenize+parse) profiling loop; the
         // front-end is backend-independent, so dispatch before the backend switch.
         if self.args.command == CliCommand::IterParse {
