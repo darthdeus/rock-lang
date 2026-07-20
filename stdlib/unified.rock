@@ -1241,12 +1241,23 @@ fn expect<T>(value: T?, message: string) -> T {
     return phantom()
 }
 
-// Common utility functions
-@intrinsic fn max<T>(a: T, b: T) -> T {
+// Common utility functions. min/max are concrete int/float overloads, not
+// generic: an unconstrained `min<T>` shape-matches every two-arg call and
+// ties with specialized overloads (`Vec2.min`), and its body only ever
+// worked for ordered primitives anyway.
+@intrinsic @pure fn max(a: int, b: int) -> int {
     if a > b { return a } else { return b }
 }
 
-@intrinsic fn min<T>(a: T, b: T) -> T {
+@intrinsic @pure fn max(a: float, b: float) -> float {
+    if a > b { return a } else { return b }
+}
+
+@intrinsic @pure fn min(a: int, b: int) -> int {
+    if a < b { return a } else { return b }
+}
+
+@intrinsic @pure fn min(a: float, b: float) -> float {
     if a < b { return a } else { return b }
 }
 

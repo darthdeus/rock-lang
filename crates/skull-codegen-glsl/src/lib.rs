@@ -1008,6 +1008,44 @@ impl FnEmit<'_> {
                 None => e.render_val(a),
             }
         };
+        // A `v(...)` ctor call with a vector param (the mixed ctors in
+        // stdlib/vec.rock, `v(rgb, 1.0)`) must not hit the arity-keyed scalar
+        // rows (`("v", 2)` -> vec2) -- the (name, arity) same-arity type-drift
+        // hazard. GLSL constructors take mixed components natively, so emit
+        // vecN(...) with N = the summed component count.
+        if name == "v"
+            && cf.param_decls.iter().any(|p| {
+                matches!(
+                    glsl_ty(self.ws, p.ty, cf.name_span, "ctor param").ok(),
+                    Some(GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)
+                )
+            })
+        {
+            let n: usize = cf
+                .param_decls
+                .iter()
+                .map(|p| match glsl_ty(self.ws, p.ty, cf.name_span, "ctor param").ok() {
+                    Some(GlslTy::Vec2) => 2,
+                    Some(GlslTy::Vec3) => 3,
+                    Some(GlslTy::Vec4) => 4,
+                    _ => 1,
+                })
+                .sum();
+            let ctor = match n {
+                2 => "vec2",
+                3 => "vec3",
+                4 => "vec4",
+                _ => {
+                    return Err(err(
+                        self.span(),
+                        format!("shader profile: v(...) ctor with {n} total components"),
+                    ))
+                }
+            };
+            let rargs: Result<Vec<String>, CompilerError> =
+                args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
+            return Ok(format!("{ctor}({})", rargs?.join(", ")));
+        }
         if let Some(Emission::Template(tmpl)) = GlslIntrinsics.lookup(cf) {
             let mut s = tmpl.to_string();
             for (i, a) in args.iter().enumerate() {
