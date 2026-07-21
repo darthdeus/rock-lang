@@ -22,9 +22,17 @@ fn emit_program(src: &str) -> String {
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
 }
 
+static UNIQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn run_luajit(prog: &str) -> String {
     use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_static_reload_{}.lua", std::process::id()));
+    // Unique per CALL, not just per process: these tests run in parallel in one
+    // binary and a pid-only path is shared, so one test's write raced another's
+    // luajit read (truncated -> "'=' expected near '<eof>'") and its cleanup
+    // deleted the other's file.
+    let n = UNIQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let path = std::env::temp_dir()
+        .join(format!("skull_static_reload_{}_{}.lua", std::process::id(), n));
     std::fs::write(&path, prog).expect("write program");
     let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
