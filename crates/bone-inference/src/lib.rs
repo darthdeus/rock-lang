@@ -384,6 +384,14 @@ pub fn check_function(
         }
     } else if let Some(ret) = f.return_ty {
         gamma.declared_ret_ty = Some(ret);
+    } else if !f.is_coroutine {
+        // No annotation: a top-level fn returns `()`. Its tail is discarded
+        // (the `f.return_ty`-gated branch below takes the `else`), but an
+        // explicit `return <value>` is a real error -- you cannot return a
+        // value from a unit fn. (A NESTED un-annotated fn is inferred-return
+        // instead: it takes/replaces `declared_ret_ty` in `infer_expr`, so
+        // this default only governs the enclosing top-level body.)
+        gamma.declared_ret_ty = Some(gamma.workspace.builtins.unit());
     }
 
     for param_binding in body.param_bindings {
