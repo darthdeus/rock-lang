@@ -1950,6 +1950,13 @@ pub fn relower_function_in_place(
     })
 }
 
+// Runtime marker keys: eq, inspect, deepcopy, and call dispatch duck-type on
+// their presence, and `__rock_create_struct` overwrites `__ty` -- a user field
+// with one of these names silently misbehaves, so reject at the declaration.
+fn is_reserved_runtime_field(name: &str) -> bool {
+    matches!(name, "__fn" | "__ty" | "__variant")
+}
+
 pub fn lower_struct_def(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -1974,6 +1981,15 @@ pub fn lower_struct_def(
             comp_error!(
                 field.name.span,
                 "Duplicate field `{}` in struct `{}`",
+                field.name.name,
+                s.name.name
+            );
+        }
+
+        if is_reserved_runtime_field(field.name.name.as_str()) {
+            comp_error!(
+                field.name.span,
+                "Reserved field name `{}` in struct `{}`: `__fn`, `__ty`, and `__variant` are runtime marker keys",
                 field.name.name,
                 s.name.name
             );
@@ -2050,6 +2066,15 @@ pub fn lower_enum_def(
                         comp_error!(
                             f.span,
                             "Duplicate field `{}` in variant `{}` of enum `{}`",
+                            f.name,
+                            v.name.name,
+                            e.name.name
+                        );
+                    }
+                    if is_reserved_runtime_field(f.name.as_str()) {
+                        comp_error!(
+                            f.span,
+                            "Reserved field name `{}` in variant `{}` of enum `{}`: `__fn`, `__ty`, and `__variant` are runtime marker keys",
                             f.name,
                             v.name.name,
                             e.name.name
