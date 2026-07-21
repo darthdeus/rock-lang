@@ -2589,7 +2589,9 @@ impl Parser {
             parts.push(InterpolatedPart::Literal(Ustr::from(&buf)));
         }
 
-        let kind = if parts.len() == 1 {
+        let kind = if parts.is_empty() {
+            ExprKind::String(Ustr::from(""))
+        } else if parts.len() == 1 {
             match &parts[0] {
                 InterpolatedPart::Literal(lit) => ExprKind::String(*lit),
                 _ => ExprKind::InterpolatedString(parts),

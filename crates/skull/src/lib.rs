@@ -251,14 +251,30 @@ pub fn module_tests_with_ids(
             }
             continue;
         }
-        let output = test_ann
+        let output = match test_ann
             .args
             .iter()
             .find(|arg| arg.name.as_ref().map_or(false, |n| n.name.as_str() == "output"))
-            .and_then(|arg| match &arg.value {
+        {
+            Some(arg) => match &arg.value {
                 bone_semantic::hir::AnnoValue::String(s) => Some(unescape_expected(s.as_str())),
-                _ => None,
-            });
+                // A lone `{` makes the literal an interpolation expression
+                // (AnnoValue::Other) -- dropping it to None silently un-pins
+                // the expectation, so reject instead.
+                _ => {
+                    return Err(CompilerError::new_with_label(
+                        test_ann.span,
+                        format!(
+                            "@test on `{}`: output expects a plain string literal \
+                             (use {{{{ and }}}} for literal braces -- a lone brace \
+                             is string interpolation)",
+                            f.name.as_str()
+                        ),
+                    ));
+                }
+            },
+            None => None,
+        };
         out.push((
             fid,
             SkullTest {
