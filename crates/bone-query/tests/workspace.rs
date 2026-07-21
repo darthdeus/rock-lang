@@ -947,6 +947,31 @@ fn inlay_hints_respect_the_requested_range() {
 }
 
 #[test]
+fn named_call_args_get_no_positional_param_hint() {
+    // `make(1, b: 2, d: 4)`: only the POSITIONAL arg `1` gets a `a:` param-name
+    // hint. A named arg already shows its name, so it gets no hint -- and the
+    // positional `param_decls.get(i)` mapping is WRONG for it (pre-fix: `d: 4`
+    // at arg-index 2 was labeled `c:`, the third param, misaligning every hint
+    // after a skipped/reordered named arg -- mag trail_new call).
+    let src = "fn make(a: int, b: int, c: int, d: int) -> int { return a }\n\
+               fn r() -> int {\n    return make(1, b: 2, d: 4)\n}\n";
+    let bone = fresh(src);
+    let hints = bone.inlay_hints(PATH, lsp_types::Range::new(Position::new(0, 0), Position::new(4, 0)));
+    let labels: Vec<String> = hints
+        .iter()
+        .map(|h| match &h.label {
+            lsp_types::InlayHintLabel::String(s) => s.clone(),
+            other => panic!("expected string label, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["a:".to_string()],
+        "only the positional arg gets a param hint; named args get none: {labels:?}"
+    );
+}
+
+#[test]
 fn completion_includes_in_scope_locals_and_params() {
     // body of `f`: param `count`, local `total` (declared line 1). Completing a
     // fresh `t` on line 2 -> the local `total` is offered.

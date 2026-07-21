@@ -2491,6 +2491,13 @@ pub fn call_param_hints(
             }
 
             for (i, arg) in args.clone().enumerate() {
+                // A NAMED arg (`b: 2`) already shows its name -- no hint, and its
+                // positional `param_decls.get(i)` mapping would be wrong anyway
+                // (a preceding named arg reorders/skips params). Positional args
+                // are a contiguous prefix, so index == param index for them.
+                if body.arg_names.contains_key(&arg) {
+                    continue;
+                }
                 let Some(param) = f.param_decls.get(i) else {
                     break;
                 };
