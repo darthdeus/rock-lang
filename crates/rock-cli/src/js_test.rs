@@ -384,6 +384,98 @@ fn js_run_tests(
     JsUnitOutcome::Ran { passed, fails, skips }
 }
 
+/// `rock run <file> --backend js`: emit the whole file (+ stdlib) as ONE node
+/// program via `emit_program`, prepend the runtime preludes + a DIRECT
+/// (unbuffered) `print`/`put`, append `<main>();` when the entry module defines a
+/// nullary `main` (D3), and STREAM it through node with no timeout (D5),
+/// propagating node's exit code. A bone rejection or emit reject prints the
+/// diagnostic and exits non-zero -- never a silent fallback.
+pub fn js_run(path: &str) -> Result<()> {
+    if std::path::Path::new(path).is_dir() {
+        anyhow::bail!(
+            "js backend: `rock run <dir>` (project mode) is not supported yet -- pass a single \
+             .rock file (M1 is headless single-file program emission)"
+        );
+    }
+    let src = match fs_err::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!(target: "JS", "cannot read {}: {}", path, e);
+            std::process::exit(1);
+        }
+    };
+    let user = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
+            std::process::exit(1);
+        }
+    };
+    let user_file = user.file;
+    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+        Ok(ws) => ws,
+        Err(errs) => {
+            eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &errs));
+            std::process::exit(1);
+        }
+    };
+    let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
+    let scx = ScalarCtx::new(&ws);
+    let emitted = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
+            std::process::exit(1);
+        }
+    };
+
+    let program = build_run_program(&emitted);
+    match rock_host::js_runner::run_node_code_streaming(&program) {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            log::error!(target: "JS", "node run failed: {}", e.message);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Assemble the streaming run program: the same runtime prelude set/order as the
+/// test harness (`build_node_program`), a scoped `var __G = {}`, a DIRECT
+/// `print`/`put` (unbuffered `process.stdout.write`, no `__buf`/`__SKULL__`
+/// protocol), the whole emitted program, then `<main>();` when the entry defines
+/// one. No `__rock_main_wrapper`: its HOT_RELOAD guard + Ctrl+C pcall are engine-
+/// specific (D3, revisited at M3) -- a bare call matches luajit's single-file path.
+fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
+    let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
+    p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
+    p.push_str(skull_codegen_js::JS_TABLE_PRIM);
+    p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
+    p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
+    p.push_str(skull_codegen_js::JS_CALL_HELPER);
+    p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
+    p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
+    p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
+    p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);
+    p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
+    p.push_str(
+        r#"
+var __G = {};
+function print() {
+  var p = [];
+  for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));
+  process.stdout.write(p.join("\t") + "\n");
+}
+function put(s) { process.stdout.write(s); }
+"#,
+    );
+    p.push_str(&emitted.program);
+    if let Some(main) = &emitted.main_js_name {
+        p.push_str(&format!("\n{main}();\n"));
+    }
+    p
+}
+
 /// A JS double-quoted string literal for a Rust string, escaping the control
 /// and non-ASCII chars a JS lexer needs (test output can carry arbitrary
 /// bytes). `{:?}` would emit Rust's `\u{XXXX}`, which JS rejects.

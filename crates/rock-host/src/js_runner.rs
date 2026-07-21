@@ -79,3 +79,45 @@ pub fn run_node_code_with_timeout(
         success: output.status.success(),
     })
 }
+
+/// `rock run --backend js`: pipe the program to node's stdin but INHERIT
+/// stdout/stderr (the program streams directly to the terminal) and wait with NO
+/// timeout, returning node's exit code. The captured-output timeout variant
+/// (`run_node_code_with_timeout`) stays test-only; a real program can run
+/// arbitrarily long and must not be truncated at 15s (D5).
+pub fn run_node_code_streaming(code: &str) -> Result<i32, CompilerError> {
+    let mut child = std::process::Command::new("node")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
+            CompilerError::new_no_location(if e.kind() == std::io::ErrorKind::NotFound {
+                "node not found on PATH (required for --backend js)".to_string()
+            } else {
+                format!("failed to spawn node: {e}")
+            })
+        })?;
+    let pid = child.id();
+    register_child_process(pid);
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("node stdin is piped");
+        if let Err(e) = stdin.write_all(code.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            unregister_child_process(pid);
+            return Err(CompilerError::new_no_location(format!(
+                "failed to write program to node process: {e}"
+            )));
+        }
+    }
+    drop(child.stdin.take());
+
+    let status = child.wait().map_err(|e| {
+        CompilerError::new_no_location(format!("failed to wait for node process: {e}"))
+    })?;
+    unregister_child_process(pid);
+    Ok(status.code().unwrap_or(1))
+}

@@ -351,7 +351,7 @@ impl Backend {
         match self {
             Self::Bone => "bone is a typechecker with no codegen/runtime",
             Self::Skull => "skull is a bone-HIR codegen",
-            Self::Js => "js is a JS-subset @test executor (node), not a program codegen",
+            Self::Js => "js is a JS-subset executor (node); no game/engine runtime",
         }
     }
 
@@ -376,7 +376,7 @@ impl Backend {
             Self::Skull => &[
                 Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, Perf, Sim,
             ],
-            Self::Js => &[Test],
+            Self::Js => &[Test, Run],
         }
     }
 
@@ -729,15 +729,18 @@ mod caps_tests {
     }
 
     #[test]
-    fn js_serves_test_only() {
+    fn js_serves_test_and_run() {
         use CliCommand::*;
         assert!(Backend::Js.serves(Test), "js serves test");
-        for cmd in [Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim] {
+        assert!(Backend::Js.serves(Run), "js serves run (M1: node program emission)");
+        // No game/engine surface: everything past headless program execution
+        // stays rejected.
+        for cmd in [Compile, CompileSingle, TestCompile, Watch, Stone, Frame, Perf, Sim] {
             assert!(!Backend::Js.serves(cmd), "js should reject {:?}", cmd);
         }
-        let msg = Backend::Js.reject_reason(CliCommand::Run).expect("js rejects run");
-        assert!(msg.contains("`js` backend cannot serve `run`"), "{msg}");
-        assert!(msg.contains("test"), "supported list names test: {msg}");
+        let msg = Backend::Js.reject_reason(CliCommand::Stone).expect("js rejects stone");
+        assert!(msg.contains("`js` backend cannot serve `stone`"), "{msg}");
+        assert!(msg.contains("run"), "supported list names run: {msg}");
     }
 
     #[test]

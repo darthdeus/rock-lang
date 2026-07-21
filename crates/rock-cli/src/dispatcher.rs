@@ -401,6 +401,10 @@ impl CommandContext {
                 let files = self.get_test_files()?;
                 crate::js_test::js_test(&files)
             }
+            CliCommand::Run => {
+                let file = self.get_required_file("run")?;
+                crate::js_test::js_run(file)
+            }
             other => unreachable!(
                 "js dispatch reached unsupported command {:?}; the capability \
                  gate should have rejected it — Backend::supported_commands and \
