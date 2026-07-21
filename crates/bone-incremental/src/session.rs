@@ -58,6 +58,12 @@ pub struct Session {
     /// arena in `rebuild_dependents`.
     pub dependents_iface: FxHashMap<Ustr, FxHashSet<ModuleId>>,
     pub registry: MacroRegistry,
+    /// Macros defined by the WARM (stdlib) modules, paired with their defining
+    /// file. `files` only covers user macros, so without this the stdlib ones
+    /// (`log_once`, `log_throttled`) are invisible to every consumer that reads
+    /// macro defs. Warm ASTs are fixed for the session's lifetime, so this is
+    /// computed once at construction rather than walked per query.
+    pub warm_macros: Vec<(Ustr, MacroDef)>,
 }
 
 #[derive(Clone, Debug)]
@@ -304,12 +310,29 @@ pub fn changed_names(old: &FxHashMap<Ustr, u64>, new: &FxHashMap<Ustr, u64>) -> 
 }
 
 impl Session {
+    /// Every macro visible in this session, user files AND stdlib, paired with
+    /// its defining file. Macros are erased by expansion before bone lowering,
+    /// so the workspace HIR has no record of them -- this is the only source.
+    /// Consumers (completion, ctags, semantic tokens) must read it rather than
+    /// `files` alone, or stdlib macros silently go missing.
+    pub fn all_macro_defs(&self) -> impl Iterator<Item = (Ustr, &MacroDef)> {
+        self.files
+            .iter()
+            .flat_map(|(path, uf)| uf.macros.iter().map(move |d| (Ustr::from(path), d)))
+            .chain(self.warm_macros.iter().map(|(f, d)| (*f, d)))
+    }
+
     pub fn new(warm: Vec<Ast>, files: Vec<(String, String)>) -> Result<Self, CompilerError> {
         let mut ws = Workspace::default();
 
         let warm_mids: FxHashSet<ModuleId> = warm
             .iter()
             .map(|m| ws.intern_module(m.file))
+            .collect();
+
+        let warm_macros: Vec<(Ustr, MacroDef)> = warm
+            .iter()
+            .flat_map(|m| macro_defs(m).into_iter().map(|d| (m.file, d)))
             .collect();
 
         let mut session = Session {
@@ -322,6 +345,7 @@ impl Session {
             module_dep_names: Default::default(),
             dependents_iface: Default::default(),
             registry: Default::default(),
+            warm_macros,
         };
 
         // Parse each file once for its prints/macros AND keep the module to feed

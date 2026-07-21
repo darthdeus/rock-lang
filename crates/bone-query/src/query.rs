@@ -4308,6 +4308,9 @@ fn format_variant_arm(enum_name: Ustr, v: &hir::EnumVariantDef) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymCat {
     Function,
+    /// Expanded away before bone lowering, so it has no HIR -- sourced from
+    /// the Session's parse-time capture (`UserFile.macros`), never `ws`.
+    Macro,
     Struct,
     Enum,
     Variant,

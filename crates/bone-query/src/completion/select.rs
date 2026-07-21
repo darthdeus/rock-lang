@@ -279,11 +279,11 @@ pub(crate) fn materialize_cand(
                 SymCat::Function if is_lifecycle_hook(c.name.as_str()) => {
                     (Some(format!("{} {{ $0 }}", c.name)), Some(InsertTextFormat::SNIPPET))
                 }
-                SymCat::Function if strip_call => (Some(c.name.to_string()), None),
-                SymCat::Function if c.takes_params => {
+                SymCat::Function | SymCat::Macro if strip_call => (Some(c.name.to_string()), None),
+                SymCat::Function | SymCat::Macro if c.takes_params => {
                     (Some(format!("{}($0)", c.name)), Some(InsertTextFormat::SNIPPET))
                 }
-                SymCat::Function => (Some(format!("{}()", c.name)), None),
+                SymCat::Function | SymCat::Macro => (Some(format!("{}()", c.name)), None),
                 SymCat::Variant if pattern => (None, None),
                 SymCat::Variant => match c.variant_shape {
                     Some(crate::query::VariantShape::Tuple) if strip_call => {
@@ -464,7 +464,9 @@ pub(crate) fn fn_or_type_label_details(kind: SymCat, detail: Option<&str>) -> Op
     let d = detail?;
     let inline = match kind {
         // `fn name(a: T) -> R` -> `(a: T) -> R`
-        SymCat::Function => d.find('(').map_or_else(|| d.to_string(), |i| d[i..].to_string()),
+        SymCat::Function | SymCat::Macro => {
+            d.find('(').map_or_else(|| d.to_string(), |i| d[i..].to_string())
+        }
         SymCat::Local | SymCat::Param | SymCat::Global => format!(": {d}"),
         _ => return None,
     };
@@ -473,7 +475,9 @@ pub(crate) fn fn_or_type_label_details(kind: SymCat, detail: Option<&str>) -> Op
 
 pub(crate) fn completion_kind(k: SymCat) -> CompletionItemKind {
     match k {
-        SymCat::Function => CompletionItemKind::FUNCTION,
+        // LSP has no macro kind; a macro is invoked like a call, so FUNCTION
+        // is the honest render.
+        SymCat::Function | SymCat::Macro => CompletionItemKind::FUNCTION,
         SymCat::Struct => CompletionItemKind::STRUCT,
         SymCat::Enum => CompletionItemKind::ENUM,
         SymCat::Variant => CompletionItemKind::ENUM_MEMBER,
