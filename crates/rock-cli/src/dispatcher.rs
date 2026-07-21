@@ -440,7 +440,10 @@ impl CommandContext {
             }
             CliCommand::Compile | CliCommand::CompileSingle | CliCommand::TestCompile => {
                 let file = self.get_required_file("compile")?;
-                skull_backend::skull_compile_single(file, self.get_compile_output()?)
+                // --profile selects the GLSL profile baked into shader
+                // registrations (docs/shader-mobile-port-plan.md A2).
+                let profile = skull_backend::parse_glsl_profile(self.args.profile.as_deref())?;
+                skull_backend::skull_compile_single(file, self.get_compile_output()?, profile)
             }
             CliCommand::Run => {
                 let file = self.get_required_file("run")?;
@@ -496,6 +499,11 @@ impl CommandContext {
                 self.args.output.clone(),
                 self.args.profile.clone(),
             );
+        }
+        // shader-validate compiles+links registered shader pairs on real GL
+        // contexts (both profiles); backend-agnostic like shader.
+        if self.args.command == CliCommand::ShaderValidate {
+            return crate::glsl_test::shader_validate(&self.args.files);
         }
         // iter-parse is a front-end (tokenize+parse) profiling loop; the
         // front-end is backend-independent, so dispatch before the backend switch.
