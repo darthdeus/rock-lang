@@ -8,6 +8,7 @@
 //! `skull-codegen-*`. Roadmap + premises under test:
 //! `docs/skull-bone-mir-faithful-plan.md`.
 
+pub mod decorator;
 pub mod display;
 pub mod intrinsics;
 pub mod lower;

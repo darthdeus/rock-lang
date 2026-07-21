@@ -1606,72 +1606,249 @@ pub fn emit_with_closure(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
-    // Same per-body pipeline the luajit path runs (`skull::mir_emit::emit_body_chunk`):
-    // lower -> inline_functions -> cleanup -> recover_counted_loops -> residual-
-    // bound-call validation. Inlining splices `@inline`/`@pure`/`Iterator`-bounded
-    // callees, so a combinator chain monomorphizes and the post-inline residual
-    // calls (below) drive co-emission of only the plain fns that survive. The
-    // cache is per-call (step-3-simplest scope); measured against the ~2x wall-time
-    // gate before considering a hoist.
-    let mut cache = skull_transform::InlineCache::default();
-    let mut names: HashMap<FuncRef, String> = roots.iter().cloned().collect();
-    let mut queue: Vec<FuncRef> = roots.iter().map(|(fr, _)| *fr).collect();
-    let mut seen: HashSet<FuncRef> = queue.iter().copied().collect();
-    let mut lowered: Vec<(FuncRef, MirFunc)> = Vec::new();
+    let mut st = WorklistState::new(ws, roots, false);
+    drain_worklists(ws, scx, &mut st)?;
+    let bodies = st.top_bodies();
+    check_scalar_abi(ws, &st.lowered, &bodies)?;
+    let hoisted = collect_hoisted(&bodies);
 
-    // Module-global surface. `state_index` maps every module-level `let`/`global`
-    // name to its definition site (for lowering the initializer); `gctx`
-    // accumulates the state names (-> `__G.<name>`) and fn-value names (-> a
-    // co-emitted JS name) the emitted bodies actually reference. Global inits are
-    // themselves lowered fns (`lower_global`) that can read more globals and call
-    // more fns, so they feed the same worklists.
-    let state_index = build_state_index(ws);
-    let deco_globals = decorator_populated_globals(ws);
-    let enum_defs = build_enum_global_defs(ws);
-    let mut gctx = GlobalCtx::default();
-    let mut ginit_queue: Vec<(ustr::Ustr, GlobalSite)> = Vec::new();
-    let mut ginit_seen: HashSet<ustr::Ustr> = HashSet::new();
-    let mut ginits: Vec<GlobalInit> = Vec::new();
+    let mut out = String::new();
+    out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
+    out.push_str(&emit_vt_eq(ws, &bodies)?);
+    // Global initializers first (`function __ginit_<name>() {...}`), then the
+    // load-time assignment lines in dependency order, then the fn defs. (The
+    // program path reorders these; per-test order is pinned by the JS suite.)
+    for g in &st.ginits {
+        out.push_str(&emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?);
+        for nf in &g.mf.nested_fns {
+            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+        }
+    }
+    for line in order_global_inits(&st.ginits)? {
+        out.push_str(&line);
+    }
+    for (fr, mf) in &st.lowered {
+        out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
+    }
+    Ok(out)
+}
 
+/// The whole workspace as ONE JS program (M1, `docs/js-deployment-plan.md`):
+/// module-driven assembly mirroring skull's Lua `assemble`, but reachability-
+/// driven (roots = `main` + every DECORATED fn + every `deco` body; the whole
+/// stdlib is NOT emitted, only what those roots reach). Emission order:
+/// singletons -> `__deco_<name>` def fns -> fn defs -> `__ginit_<name>` def fns
+/// -> load-time init lines (dep-ordered) -> decorator APPLICATION lines (after
+/// the inits so a deco body can push into a ginit-initialized registry). The
+/// driver prepends the runtime preludes + `var __G = {}` + a direct
+/// `print`/`put`, and appends `<main>();` when `main_js_name` is `Some`.
+///
+/// Unlike [`emit_with_closure`], a decorator-populated global read does NOT
+/// reject here -- the applications ARE emitted, so the registry is populated at
+/// module load exactly as on luajit.
+pub fn emit_program(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    user_mid: bone_semantic::prelude::ModuleId,
+) -> Result<JsProgram, CompilerError> {
+    let deco_names = decorator_names(ws);
+    // Roots: a nullary `main` in the entry module (the program entry), then every
+    // decorated fn workspace-wide (its application line names the fn as `func`, so
+    // it must be emitted even if `main` never calls it).
+    let mut roots: Vec<(FuncRef, String)> = Vec::new();
+    let mut root_set: HashSet<FuncRef> = HashSet::new();
+    let main_js_name = nullary_main(ws, user_mid).map(|fr| {
+        let nm = callee_js_name(ws, fr);
+        roots.push((fr, nm.clone()));
+        root_set.insert(fr);
+        nm
+    });
+    for module in ws.modules.iter() {
+        if module.id == bone_semantic::prelude::ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if f.annotations.iter().any(|a| deco_names.contains(&a.name.name)) {
+                let fr = FuncRef { module: module.id, func: fid };
+                if root_set.insert(fr) {
+                    roots.push((fr, callee_js_name(ws, fr)));
+                }
+            }
+        }
+    }
+
+    let mut st = WorklistState::new(ws, &roots, true);
+
+    // Decorator DEFINITION bodies (`deco <kind> <name> { .. }` -> `__deco_<name>`),
+    // for the APPLIED decorators only (D1 reachability: an unapplied `deco` -- e.g.
+    // stdlib `on_reload` -- contributes no application line and must not force its
+    // possibly-unsupported body into the program). Lowered via `BodyOwner::
+    // Decorator`, then the SAME per-body pipeline a normal fn runs (incl. inlining,
+    // so `@inline` no-ops like `transmute` splice away -- the luajit path leaves
+    // them as top-level calls it emits whole-stdlib, which JS cannot). Their
+    // callees/globals feed the shared worklists BEFORE the drain.
+    let applied = applied_decorator_names(ws, &deco_names);
+    let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
+    for module in ws.modules.iter() {
+        for (did, d) in module.decorators.iter() {
+            if !applied.contains(&d.name) {
+                continue;
+            }
+            let deco_name = decorator_js_name(d.name.as_str());
+            let mut mf =
+                skull_mir::lower::lower_decorator(ws, scx, module.id, did, ustr::Ustr::from(deco_name.as_str()))?;
+            let self_ref = safe_self_ref(ws, &mf);
+            skull_transform::inline_functions(ws, scx, self_ref, &mut mf, &mut st.cache)?;
+            skull_transform::cleanup(&mut mf);
+            skull_transform::convert_closures(&mut mf, &deco_name);
+            skull_transform::recover_counted_loops(ws, &mut mf);
+            for nf in &mut mf.nested_fns {
+                skull_transform::recover_counted_loops(ws, nf);
+            }
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
+            discover_globals(
+                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
+                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+            )?;
+            deco_bodies.push((deco_name, mf));
+        }
+    }
+
+    drain_worklists(ws, scx, &mut st)?;
+
+    let mut bodies = st.top_bodies();
+    bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
+    check_scalar_abi(ws, &st.lowered, &bodies)?;
+    let hoisted = collect_hoisted(&bodies);
+
+    let mut out = String::new();
+    out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
+    out.push_str(&emit_vt_eq(ws, &bodies)?);
+    // 1. deco def fns.
+    for (name, mf) in &deco_bodies {
+        out.push_str(&emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?);
+        for nf in &mf.nested_fns {
+            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+        }
+    }
+    // 2. fn defs (main, decorated fns, transitive callees).
+    for (fr, mf) in &st.lowered {
+        out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
+    }
+    // 3. ginit def fns.
+    for g in &st.ginits {
+        out.push_str(&emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?);
+        for nf in &g.mf.nested_fns {
+            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+        }
+    }
+    // 4. load-time init lines (dependency-ordered).
+    for line in order_global_inits(&st.ginits)? {
+        out.push_str(&line);
+    }
+    // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
+    //    initialized registry -- D4).
+    out.push_str(&decorator_application_lines_js(ws, &deco_names, &st.names)?);
+
+    Ok(JsProgram { program: out, main_js_name })
+}
+
+/// A whole-program JS emission plus the entry fn's JS name (`None` when the entry
+/// module has no nullary `main`; the driver then appends nothing and the program
+/// is module-load effects only, matching luajit).
+pub struct JsProgram {
+    pub program: String,
+    pub main_js_name: Option<String>,
+}
+
+/// The shared worklists driving [`emit_with_closure`] and [`emit_program`]:
+/// a fn queue (roots + transitively discovered plain-Rock callees) and a global-
+/// init queue (module globals the emitted bodies read), plus the accumulated
+/// `gctx`/`names` a body needs to render its `Inst::Global` reads.
+struct WorklistState {
+    cache: skull_transform::InlineCache,
+    names: HashMap<FuncRef, String>,
+    queue: Vec<FuncRef>,
+    seen: HashSet<FuncRef>,
+    lowered: Vec<(FuncRef, MirFunc)>,
+    state_index: HashMap<ustr::Ustr, GlobalSite>,
+    /// Empty in program mode (applications ARE emitted, so a registry read is
+    /// legitimate); the per-test reject set otherwise.
+    deco_globals: HashSet<ustr::Ustr>,
+    enum_defs: HashMap<ustr::Ustr, String>,
+    gctx: GlobalCtx,
+    ginit_queue: Vec<(ustr::Ustr, GlobalSite)>,
+    ginit_seen: HashSet<ustr::Ustr>,
+    ginits: Vec<GlobalInit>,
+}
+
+impl WorklistState {
+    fn new(ws: &Workspace, roots: &[(FuncRef, String)], program_mode: bool) -> Self {
+        WorklistState {
+            cache: skull_transform::InlineCache::default(),
+            names: roots.iter().cloned().collect(),
+            queue: roots.iter().map(|(fr, _)| *fr).collect(),
+            seen: roots.iter().map(|(fr, _)| *fr).collect(),
+            lowered: Vec::new(),
+            state_index: build_state_index(ws),
+            deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
+            enum_defs: build_enum_global_defs(ws),
+            gctx: GlobalCtx::default(),
+            ginit_queue: Vec::new(),
+            ginit_seen: HashSet::new(),
+            ginits: Vec::new(),
+        }
+    }
+
+    /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
+    /// cutting passes (arity guard, hoisted-name set, vt_eq). Excludes nested
+    /// (lambda) fns, matching the pre-refactor scan.
+    fn top_bodies(&self) -> Vec<&MirFunc> {
+        self.lowered
+            .iter()
+            .map(|(_, mf)| mf)
+            .chain(self.ginits.iter().map(|g| &g.mf))
+            .collect()
+    }
+}
+
+/// Drain the fn + ginit worklists: lower each queued fn (same per-body pipeline
+/// the luajit path runs -- lower -> inline -> cleanup -> closures -> FORL ->
+/// residual-bound-call validation; coroutines skip inline/FORL), discover its
+/// callees + module-global reads (feeding both queues), and record the lowered
+/// body. A ginit is a lowered `lower_global` returning the init value (never
+/// inlined, mirroring the luajit global path).
+fn drain_worklists(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    st: &mut WorklistState,
+) -> Result<(), CompilerError> {
     loop {
-        if let Some(fr) = queue.pop() {
+        if let Some(fr) = st.queue.pop() {
             let f = &ws.module(fr.module).functions[fr.func];
             let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
-            // Coroutines never inline, mirroring the luajit path's coroutine branch
-            // (cleanup only, no inline / forl rewrite); the transform + trampoline
-            // emission run in `emit_coroutine_js` at emission time.
             if mf.is_coroutine {
                 skull_transform::cleanup(&mut mf);
             } else {
-                skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut cache)?;
+                skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut st.cache)?;
                 skull_transform::cleanup(&mut mf);
-                // Shared closure conversion: every `Inst::Lambda` becomes an env
-                // record / bare global + a hoisted sibling fn in `nested_fns`. Runs
-                // BEFORE FORL recovery so a loop lifted into a lambda body is a plain
-                // fn loop the emitter structures normally. `names[&fr]` is the unique
-                // JS name -> collision-free `<name>__lambda<k>` hoisted names.
-                skull_transform::convert_closures(&mut mf, &names[&fr]);
+                skull_transform::convert_closures(&mut mf, &st.names[&fr]);
                 skull_transform::recover_counted_loops(ws, &mut mf);
                 for nf in &mut mf.nested_fns {
                     skull_transform::recover_counted_loops(ws, nf);
                 }
             }
             skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
-            discover_callees(ws, &mf, &mut names, &mut queue, &mut seen)?;
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
             discover_globals(
-                ws, &mf, &state_index, &deco_globals, &enum_defs, &mut gctx, &mut ginit_queue, &mut ginit_seen,
-                &mut names, &mut queue, &mut seen,
+                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
+                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
             )?;
-            lowered.push((fr, mf));
+            st.lowered.push((fr, mf));
             continue;
         }
-        if let Some((gname, site)) = ginit_queue.pop() {
+        if let Some((gname, site)) = st.ginit_queue.pop() {
             let init_name = global_init_js_name(gname);
-            // A global initializer is a lowered fn returning the init value. It
-            // never inlines (the luajit global path does not either), but it needs
-            // closure conversion (a global can hold a fn value) and JS loop
-            // recovery (a comprehension init). A residual bound call (an iterator
-            // combinator init) rejects honestly rather than emit-and-hope.
             let mut mf = match skull_mir::lower::lower_global(ws, scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()))? {
                 Some(mf) => mf,
                 None => continue,
@@ -1682,33 +1859,58 @@ pub fn emit_with_closure(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
-            discover_callees(ws, &mf, &mut names, &mut queue, &mut seen)?;
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
             discover_globals(
-                ws, &mf, &state_index, &deco_globals, &enum_defs, &mut gctx, &mut ginit_queue, &mut ginit_seen,
-                &mut names, &mut queue, &mut seen,
+                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
+                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
             )?;
-            ginits.push(GlobalInit { name: gname, init_name, mf });
+            st.ginits.push(GlobalInit { name: gname, init_name, mf });
             continue;
         }
         break;
     }
-    // Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values
-    // at the call, but a co-emitted callee that uses the param as a WHOLE value
-    // keeps a single (un-expanded) MIR param -- so `argc > arity` and leaves would
-    // be silently dropped. The residual co-emitted callees here were NOT inlined
-    // (value-struct-whole-value use blocks inlining eligibility), so reject rather
-    // than emit-and-hope. The legitimate `argc < arity` shape is an omitted
-    // defaulted param (callee-side `== nil` fill; the omitted arg arrives as JS
-    // `undefined`): accept down to the count of params WITHOUT a default.
+    Ok(())
+}
+
+/// Emit one lowered TOP body: a coroutine through the trampoline pipeline, else
+/// the ordinary fn path plus its hoisted (`convert_closures`) sibling bodies.
+fn emit_lowered_fn(
+    ws: &Workspace,
+    fr: FuncRef,
+    mf: &MirFunc,
+    js_name: &str,
+    names: &HashMap<FuncRef, String>,
+    hoisted: &HashSet<ustr::Ustr>,
+    gctx: &GlobalCtx,
+) -> Result<String, CompilerError> {
+    if mf.is_coroutine {
+        return emit_coroutine_js(ws, fr, mf, js_name, names, hoisted, gctx);
+    }
+    let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
+    for nf in &mf.nested_fns {
+        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
+    }
+    Ok(out)
+}
+
+/// Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values at
+/// the call, but a co-emitted callee that uses the param as a WHOLE value keeps
+/// a single MIR param -- so `argc > arity` would silently drop leaves. Residual
+/// co-emitted callees were NOT inlined (whole-value use blocks eligibility), so
+/// reject rather than emit-and-hope. `argc < arity` down to the count of params
+/// WITHOUT a default is the legitimate omitted-defaulted-arg shape.
+fn check_scalar_abi(
+    ws: &Workspace,
+    lowered: &[(FuncRef, MirFunc)],
+    bodies: &[&MirFunc],
+) -> Result<(), CompilerError> {
     let arities: HashMap<FuncRef, usize> =
         lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
-    for mf in lowered.iter().map(|(_, mf)| mf).chain(ginits.iter().map(|g| &g.mf)) {
+    for mf in bodies {
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
                 let (callee, argc) = match &mf.insts[iid] {
-                    Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
-                        (func, args.len())
-                    }
+                    Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (func, args.len()),
                     _ => continue,
                 };
                 if let Some(&arity) = arities.get(callee) {
@@ -1725,59 +1927,184 @@ pub fn emit_with_closure(
             }
         }
     }
-    // Program-wide hoisted closure-body names -- the only globals a capture-free
-    // lambda creation site may reference (every other `Inst::Global` read stays
-    // out of subset). Flat: nesting is one level (all lambdas are siblings).
-    let hoisted: HashSet<ustr::Ustr> = lowered
-        .iter()
-        .map(|(_, mf)| mf)
-        .chain(ginits.iter().map(|g| &g.mf))
-        .flat_map(|mf| mf.nested_fns.iter().map(|nf| nf.name))
-        .collect();
-    let mut out = String::new();
-    // Boxed-enum singleton / names-table defs the emitted bodies read, in name
-    // order (deterministic across programs; `var` redeclare is harmless on concat).
+    Ok(())
+}
+
+/// Program-wide hoisted closure-body names -- the only globals a capture-free
+/// lambda creation site may reference. Flat: nesting is one level.
+fn collect_hoisted(bodies: &[&MirFunc]) -> HashSet<ustr::Ustr> {
+    bodies.iter().flat_map(|mf| mf.nested_fns.iter().map(|nf| nf.name)).collect()
+}
+
+/// Boxed-enum singleton / names-table defs the emitted bodies read, in name
+/// order (deterministic; `var` redeclare is harmless on concat).
+fn emit_enum_singletons(gctx: &GlobalCtx, enum_defs: &HashMap<ustr::Ustr, String>) -> String {
     let mut enum_names: Vec<&ustr::Ustr> = gctx.enum_globals.iter().collect();
     enum_names.sort();
+    let mut out = String::new();
     for name in enum_names {
         out.push_str(&enum_defs[name]);
     }
-    // Per-type `__rock_vt_eq` registry for every GC-carrying value struct the
-    // program constructs (closed transitively over GC-carrying value-struct
-    // fields, so a nested type's entry always exists for the recursive
-    // `__op_eq`). `__op_eq` consults it before the generic key walk. Assignments
-    // are idempotent -- dup-safe across per-test concatenation, same rule as the
-    // enum singletons.
+    out
+}
+
+/// Per-type `__rock_vt_eq` registry for every GC-carrying value struct the
+/// program constructs (closed transitively over GC-carrying value-struct fields).
+fn emit_vt_eq(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
     let mut vt_names: BTreeSet<ustr::Ustr> = BTreeSet::new();
-    for mf in lowered.iter().map(|(_, mf)| mf).chain(ginits.iter().map(|g| &g.mf)) {
+    for mf in bodies {
         collect_gc_value_structs(ws, mf, &mut vt_names);
     }
     close_gc_value_struct_fields(ws, &mut vt_names);
-    out.push_str(&build_vt_eq_defs(ws, &vt_names)?);
-    // Global initializers first (`function __ginit_<name>() {...}`), then the
-    // load-time assignment lines in dependency order.
-    for g in &ginits {
-        out.push_str(&emit_fn_with_callees(ws, &g.mf, &g.init_name, &names, &hoisted, &gctx)?);
-        for nf in &g.mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &names, &hoisted, &gctx)?);
+    build_vt_eq_defs(ws, &vt_names)
+}
+
+/// The `__deco_<name>` JS identity for a decorator (matches skull's Lua
+/// `decorator_fn_name`; the two backends share the naming scheme).
+fn decorator_js_name(deco: &str) -> String {
+    format!("__deco_{deco}")
+}
+
+/// Every `deco`-definition name in the workspace -- the annotation names that are
+/// decorator APPLICATIONS (vs plain `@test`/`@sim`/... annotations).
+fn decorator_names(ws: &Workspace) -> HashSet<ustr::Ustr> {
+    let mut set = HashSet::new();
+    for module in ws.modules.iter() {
+        for (_, d) in module.decorators.iter() {
+            set.insert(d.name);
         }
     }
-    for line in order_global_inits(&ginits)? {
-        out.push_str(&line);
-    }
-    for (fr, mf) in &lowered {
-        if mf.is_coroutine {
-            // The shared coroutine pipeline + trampoline step + JS ctor. Runs
-            // its own closure conversion, so its hoisted names extend `hoisted`
-            // locally inside.
-            out.push_str(&emit_coroutine_js(ws, *fr, mf, &names[fr], &names, &hoisted, &gctx)?);
+    set
+}
+
+/// The decorator names actually APPLIED (some fn carries an `@<deco>`
+/// annotation) -- the reachable subset of [`decorator_names`]. An unapplied
+/// `deco` def is never emitted (D1).
+fn applied_decorator_names(ws: &Workspace, deco_names: &HashSet<ustr::Ustr>) -> HashSet<ustr::Ustr> {
+    let mut set = HashSet::new();
+    for module in ws.modules.iter() {
+        if module.id == bone_semantic::prelude::ModuleId::builtin() {
             continue;
         }
-        out.push_str(&emit_fn_with_callees(ws, mf, &names[fr], &names, &hoisted, &gctx)?);
-        // Hoisted closure bodies (`convert_closures`): each is a normal fn named
-        // by its `MakeEnv`/`Global` `__fn` reference, emitted as a sibling.
-        for nf in &mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &names, &hoisted, &gctx)?);
+        for (_, f) in module.functions.iter() {
+            for ann in &f.annotations {
+                if deco_names.contains(&ann.name.name) {
+                    set.insert(ann.name.name);
+                }
+            }
+        }
+    }
+    set
+}
+
+/// The entry module's nullary `main`, if it defines one -- the D3 program entry.
+fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> Option<FuncRef> {
+    ws.module(user_mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "main" && f.param_decls.is_empty())
+        .map(|(fid, _)| FuncRef { module: user_mid, func: fid })
+}
+
+/// A `self_ref` for inlining a body that is NOT a function (a `deco` def): any
+/// workspace `FuncRef` the body does not itself call, so [`inline_functions`]'s
+/// self-call skip (`fref != self_ref`) never suppresses a callee the body wants
+/// inlined. Deco bodies never call a decorated user fn, but computing the actual
+/// call set makes the choice provably safe regardless.
+fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
+    let targets: HashSet<FuncRef> = call_targets(mf).into_iter().collect();
+    ws.modules
+        .iter()
+        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
+        .flat_map(|m| m.functions.iter().map(move |(fid, _)| FuncRef { module: m.id, func: fid }))
+        .find(|fr| !targets.contains(fr))
+        .expect("workspace has a function the deco body does not call")
+}
+
+/// A JS literal for a `@deco` annotation arg value (the JS analog of skull's
+/// `annotation_value_lua`): the same value classes, rendered in JS syntax. A
+/// non-literal (`AnnoValue::Other`) yields `None` (the caller rejects).
+pub fn annotation_value_js(v: &bone_semantic::hir::AnnoValue) -> Option<String> {
+    use bone_semantic::hir::AnnoValue as A;
+    Some(match v {
+        A::Int(i) => i.to_string(),
+        A::Float(f) => js_number(*f).ok()?,
+        A::Bool(b) => b.to_string(),
+        A::String(s) => js_string_lit(s.as_str()).ok()?,
+        A::Ident(id) => id.name.as_str().to_string(),
+        A::Other => return None,
+    })
+}
+
+/// The JS argument list for one `@deco` application (the JS sibling of skull's
+/// `decorator_call_args`): the SELECTION (named arg / defaulted `null` / missing-
+/// required error) is the shared `skull_mir::decorator::select_decorator_args`;
+/// only literal rendering (`annotation_value_js`) and the `null` default token
+/// are JS-specific.
+fn decorator_call_args_js(
+    d: &bone_semantic::hir::DecoratorDef,
+    ann: &bone_semantic::hir::Annotation,
+) -> Result<Vec<String>, CompilerError> {
+    use skull_mir::decorator::DecoArg;
+    let mut args = Vec::new();
+    for choice in skull_mir::decorator::select_decorator_args(d, ann)? {
+        args.push(match choice {
+            DecoArg::Value(v) => annotation_value_js(v).ok_or_else(|| {
+                err(format!(
+                    "JS subset: decorator `{}` arg is a non-literal expression (unsupported)",
+                    d.name
+                ))
+            })?,
+            DecoArg::Default => "null".to_string(),
+        });
+    }
+    Ok(args)
+}
+
+/// Decorator APPLICATION lines for every decorated fn workspace-wide (the JS
+/// sibling of skull's Lua `decorator_application_lines`): one
+/// `__deco_<name>({name: "..", params: [], func: <js name>}, <args>);` per
+/// `@<deco>` annotation, in module then fn source order. The descriptor mirrors
+/// luajit's bare `{ name, params, func }` table (no `__ty`: reads render as plain
+/// `.name`/`.func`, and no deco body eq-compares `target`); `params` is an inert
+/// `[]` placeholder (never read by a deco body, same as luajit's `{}`).
+fn decorator_application_lines_js(
+    ws: &Workspace,
+    deco_names: &HashSet<ustr::Ustr>,
+    names: &HashMap<FuncRef, String>,
+) -> Result<String, CompilerError> {
+    let deco_map: HashMap<ustr::Ustr, (bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.decorators.iter().map(move |(did, d)| (d.name, (m.id, did))))
+        .collect();
+    let mut out = String::new();
+    for module in ws.modules.iter() {
+        if module.id == bone_semantic::prelude::ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            for ann in &f.annotations {
+                if !deco_names.contains(&ann.name.name) {
+                    continue;
+                }
+                let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
+                let d = &ws.module(dmid).decorators[did];
+                let fr = FuncRef { module: module.id, func: fid };
+                let js_fn = names.get(&fr).ok_or_else(|| {
+                    err(format!(
+                        "JS subset: decorated fn `{}` was not emitted (not a program root)",
+                        f.name
+                    ))
+                })?;
+                let descriptor = format!(
+                    "{{name: {}, params: [], func: {js_fn}}}",
+                    js_string_lit(f.name.as_str())?
+                );
+                let mut call_args = vec![descriptor];
+                call_args.extend(decorator_call_args_js(d, ann)?);
+                out.push_str(&format!("{}({});\n", decorator_js_name(ann.name.name.as_str()), call_args.join(", ")));
+            }
         }
     }
     Ok(out)

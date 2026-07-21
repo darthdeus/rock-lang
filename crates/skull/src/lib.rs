@@ -325,34 +325,26 @@ pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String>
 /// The Lua argument list for one `@deco` application: each `deco` param gets its
 /// named annotation arg if present, else its default (`nil` — filled callee-side
 /// in `__deco_<name>`'s prologue). Required params without an arg, and
-/// non-literal args/defaults, error.
+/// non-literal args/defaults, error. The selection (named/default/required) is
+/// the backend-agnostic `skull_mir::decorator::select_decorator_args`, shared
+/// with the JS backend's `decorator_call_args_js`; only the literal rendering
+/// (`annotation_value_lua`) and the `nil` default token are Lua-specific.
 pub fn decorator_call_args(
     d: &bone_semantic::hir::DecoratorDef,
     ann: &bone_semantic::hir::Annotation,
 ) -> Result<Vec<String>, CompilerError> {
+    use skull_mir::decorator::DecoArg;
     let mut args = Vec::new();
-    for pd in d.param_decls.iter() {
-        let pname = pd.name;
-        let named = ann
-            .args
-            .iter()
-            .find(|a| a.name.as_ref().map_or(false, |n| n.name == pname));
-        if let Some(a) = named {
-            let lua = annotation_value_lua(&a.value).ok_or_else(|| {
+    for choice in skull_mir::decorator::select_decorator_args(d, ann)? {
+        args.push(match choice {
+            DecoArg::Value(v) => annotation_value_lua(v).ok_or_else(|| {
                 CompilerError::new_no_location(format!(
-                    "skull: decorator `{}` arg `{}` is a non-literal expression (unsupported)",
-                    d.name, pname
+                    "skull: decorator `{}` arg is a non-literal expression (unsupported)",
+                    d.name
                 ))
-            })?;
-            args.push(lua);
-        } else if pd.has_default {
-            args.push("nil".to_string());
-        } else {
-            return Err(CompilerError::new_no_location(format!(
-                "skull: decorator `{}` is missing a value for required param `{}`",
-                d.name, pname
-            )));
-        }
+            })?,
+            DecoArg::Default => "nil".to_string(),
+        });
     }
     Ok(args)
 }

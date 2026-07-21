@@ -1,0 +1,87 @@
+//! Module-driven whole-program emission (`emit_program`, M1): the JS analog of
+//! skull's Lua `assemble` -- deco def fns, fn defs, ginit fns + ordered init
+//! lines, and decorator APPLICATION lines, assembled from the workspace (roots
+//! = `main` + every decorated fn + every `deco` body). Unlike the per-test
+//! `emit_with_closure`, a decorator-populated global read does NOT reject here
+//! (the applications ARE emitted). Node execution is the correctness oracle
+//! (`crates/rock-cli/tests/js_run_gate.rs`); this file pins the assembly ORDER
+//! and application-line CONTENT in the emitted string.
+
+use skull_mir::lower::ScalarCtx;
+
+mod common;
+use common::ws_with;
+
+fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
+    let scx = ScalarCtx::new(ws);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    skull_codegen_js::emit::emit_program(ws, &scx, mid)
+        .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message))
+        .program
+}
+
+/// `<a>` appears before `<b>` in `s` (both must be present).
+fn ordered(s: &str, a: &str, b: &str) {
+    let ia = s.find(a).unwrap_or_else(|| panic!("missing `{a}` in:\n{s}"));
+    let ib = s.find(b).unwrap_or_else(|| panic!("missing `{b}` in:\n{s}"));
+    assert!(ia < ib, "expected `{a}` before `{b}`:\n{s}");
+}
+
+const PROG: &str = r#"
+struct Sys { func: fn() -> (), name: string, stage: int }
+global SYSTEMS: [Sys] = []
+global BASE: int = 10
+global DERIVED: int = BASE * 2
+deco init system(stage: int = 100) {
+    SYSTEMS.push(Sys { func: transmute(target.func), name: transmute(target.name), stage: stage })
+}
+@system(stage = 5)
+fn alpha() { print("alpha") }
+@system
+fn beta() { print("beta") }
+fn main() {
+    print("derived={DERIVED}")
+    for s in SYSTEMS { s.func() }
+}
+"#;
+
+// Assembly order: deco def fn -> fn defs -> ginit fns -> init lines -> apps.
+#[test]
+fn assembly_order() {
+    let ws = ws_with(PROG);
+    let js = emit_program(&ws);
+    ordered(&js, "function __deco_system(", "function main__");
+    ordered(&js, "function main__", "function __ginit_DERIVED(");
+    ordered(&js, "function __ginit_DERIVED(", "__G.DERIVED = __ginit_DERIVED();");
+    // `__deco_system({` is the APPLICATION (descriptor obj); the bare
+    // `__deco_system(c0` definition sorts earlier and is matched above.
+    ordered(&js, "__G.DERIVED = __ginit_DERIVED();", "__deco_system({");
+}
+
+// Init lines are dependency-ordered: BASE before DERIVED (DERIVED reads BASE).
+#[test]
+fn init_dependency_order() {
+    let ws = ws_with(PROG);
+    let js = emit_program(&ws);
+    ordered(&js, "__G.BASE = __ginit_BASE();", "__G.DERIVED = __ginit_DERIVED();");
+}
+
+// Application lines: the descriptor `{name, params, func}` mirror + arg
+// selection (literal `stage = 5` -> `5`; defaulted `beta` -> `null`).
+#[test]
+fn application_line_content() {
+    let ws = ws_with(PROG);
+    let js = emit_program(&ws);
+    // The decorated-fn JS names are FuncRef-deterministic; match the stable
+    // `<name>__m<mid>_f<fid>` prefix instead of pinning the numeric suffix.
+    let alpha_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"alpha\""))
+        .unwrap_or_else(|| panic!("no alpha application line:\n{js}"));
+    assert!(alpha_app.contains("name: \"alpha\""), "descriptor name: {alpha_app}");
+    assert!(alpha_app.contains("params: []"), "descriptor params: {alpha_app}");
+    assert!(alpha_app.contains("func: alpha__m"), "descriptor func js-name: {alpha_app}");
+    assert!(alpha_app.trim_end().ends_with(", 5);"), "literal stage arg: {alpha_app}");
+
+    let beta_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"beta\""))
+        .unwrap_or_else(|| panic!("no beta application line:\n{js}"));
+    assert!(beta_app.trim_end().ends_with(", null);"), "defaulted stage -> null: {beta_app}");
+}
