@@ -167,7 +167,7 @@ pub fn emit_fn_with_callees(
     // emits, so declaring its cell would leave an unused `let`.
     for &b in &reachable_blocks(mf) {
         for &iid in &mf.blocks[b].insts {
-            for &cell in inst_writes(&mf.insts[iid]) {
+            for cell in inst_writes(&mf.insts[iid]) {
                 if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
                     declared.push(raw(cell));
                 }
@@ -250,7 +250,7 @@ pub fn emit_fn_trampoline(
     let mut seen = HashSet::new();
     for &b in &region {
         for &iid in &mf.blocks[b].insts {
-            for &cell in inst_writes(&mf.insts[iid]) {
+            for cell in inst_writes(&mf.insts[iid]) {
                 if !param_set.contains(&raw(cell)) && seen.insert(raw(cell)) {
                     declared.push(raw(cell));
                 }
@@ -991,6 +991,20 @@ impl Emitter<'_> {
                         ContainerKind::Map => format!("{b}.set({i}, {v});"),
                     };
                     self.push(&line);
+                }
+                // `k, v = next(t, k)` -- one step of Map iteration. JS has no
+                // `next`, so a cursor-cached shim (`__map_next`, JS_MAP_ITER_RUNTIME)
+                // returns the next key in the native Map's INSERTION order (null at
+                // exhaustion; Map order is backend-defined by doctrine). The value
+                // side reads `t.get(k)` -- no per-step pair allocation. The `table`
+                // operand renders to a Load/Global/Field (idempotent) or a
+                // materialized `v<N>` temp, so re-rendering it is safe.
+                Inst::MapNext { key_cell, val_cell, table } => {
+                    let t = self.render_val(*table)?;
+                    let k = cell_name(*key_cell);
+                    let v = cell_name(*val_cell);
+                    self.push(&format!("{k} = __map_next({t}, {k});"));
+                    self.push(&format!("{v} = ({k} === null ? null : {t}.get({k}));"));
                 }
                 // `base.field = value` (struct field / cursor mutation).
                 Inst::StoreField { base, field, value } => {
@@ -2930,13 +2944,15 @@ fn is_map_new(cf: &bone_semantic::hir::Function) -> bool {
 /// The cells an inst writes: a `Store`'s target, or a multi-value call's dests.
 /// These are the cells that need a hoisted `let` (the multi-assign / store binds
 /// them, and a later block may read them across a branch merge).
-fn inst_writes(inst: &Inst) -> &[Idx<Cell>] {
+fn inst_writes(inst: &Inst) -> Vec<Idx<Cell>> {
     match inst {
-        Inst::Store { cell, .. } => std::slice::from_ref(cell),
+        Inst::Store { cell, .. } => vec![*cell],
         Inst::CallMulti { dests, .. }
         | Inst::CallValueMulti { dests, .. }
-        | Inst::CallBoundMulti { dests, .. } => dests,
-        _ => &[],
+        | Inst::CallBoundMulti { dests, .. } => dests.clone(),
+        // MapNext writes both the cursor key cell (in place) and the value cell.
+        Inst::MapNext { key_cell, val_cell, .. } => vec![*key_cell, *val_cell],
+        _ => Vec::new(),
     }
 }
 

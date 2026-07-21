@@ -148,6 +148,37 @@ function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v
 function __table_unset(t, k) { if (t instanceof Map) t.delete(k); else delete t[k]; }
 "#;
 
+/// Map iteration (`Inst::MapNext`, the Lua `k, v = next(t, k)` protocol). JS has
+/// no stateless `next`, so `__map_next(m, k)` walks the native Map's keys in
+/// INSERTION order (Map order is backend-defined by doctrine -- Lua hash order vs
+/// JS insertion order), returning the next key after `k` (null at exhaustion).
+/// Backed by a per-map cursor cache (`WeakMap<Map, {it, lastKey}>`): `k === null`
+/// starts a fresh `m.keys()` iterator (a NEW loop over the map restarts); `k ===
+/// lastKey` is the O(1) common advance; any mismatch (nested / interleaved
+/// iteration over the same map, or a cache lost to GC) rescans from a fresh
+/// iterator to `k` then advances. Deletion/insertion mid-iteration follows the
+/// live JS keys iterator. The value side is read separately (`m.get(k)`), so no
+/// per-step pair is allocated.
+pub const JS_MAP_ITER_RUNTIME: &str = r#"
+var __map_cursor = new WeakMap();
+function __map_next(m, k) {
+  var c = __map_cursor.get(m);
+  if (k === null || k === undefined) {
+    c = { it: m.keys(), lastKey: null };
+    __map_cursor.set(m, c);
+  } else if (!c || c.lastKey !== k) {
+    var it = m.keys(), r;
+    do { r = it.next(); } while (!r.done && r.value !== k);
+    c = { it: it, lastKey: k };
+    __map_cursor.set(m, c);
+  }
+  var r = c.it.next();
+  if (r.done) { __map_cursor.delete(m); return null; }
+  c.lastKey = r.value;
+  return r.value;
+}
+"#;
+
 /// The uniform indirect-call dispatch helper (`docs/closure-conversion-mir-plan.md`):
 /// a fn value is either a raw JS function (a named fn / capture-free hoisted
 /// lambda, referenced by global name) or a closure ENV RECORD `{ __fn, .. }`

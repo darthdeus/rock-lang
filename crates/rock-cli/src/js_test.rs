@@ -502,6 +502,7 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_TABLE_PRIM);
+    p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
     p.push_str(skull_codegen_js::JS_CALL_HELPER);
@@ -575,6 +576,7 @@ fn build_node_program(
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_TABLE_PRIM);
+    p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
     p.push_str(skull_codegen_js::JS_CALL_HELPER);

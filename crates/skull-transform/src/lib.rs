@@ -1794,6 +1794,48 @@ pub fn materialize_frame(
                         new.extend([lt, sv, sf]);
                     }
                 }
+                // `key, val = next(t, key)` with a framed cursor/value cell:
+                // redirect both to fresh temps, SEED the key temp from its frame
+                // field first (the key cell is IN/OUT -- the cursor carried across
+                // iterations), then store both temps back to their fields. Without
+                // this a framed cursor would read from `s.c<slot>` (materialized
+                // `Load`) but be written to a bare local, so the loop never advances.
+                Inst::MapNext { key_cell, val_cell, table }
+                    if slots.contains_key(&key_cell) || slots.contains_key(&val_cell) =>
+                {
+                    let k_use = if slots.contains_key(&key_cell) {
+                        let t = mf.new_cell(None);
+                        minted.insert(t);
+                        let sv = mf.insts.alloc(Inst::Load(s_cell));
+                        let fld = mf.insts.alloc(Inst::Field { base: sv, field: field_of(slots[&key_cell]) });
+                        let st = mf.insts.alloc(Inst::Store { cell: t, value: fld });
+                        new.extend([sv, fld, st]);
+                        t
+                    } else {
+                        key_cell
+                    };
+                    let v_use = if slots.contains_key(&val_cell) {
+                        let t = mf.new_cell(None);
+                        minted.insert(t);
+                        t
+                    } else {
+                        val_cell
+                    };
+                    mf.insts[id] = Inst::MapNext { key_cell: k_use, val_cell: v_use, table };
+                    new.push(id);
+                    for (frame_cell, temp) in
+                        [(key_cell, k_use), (val_cell, v_use)].into_iter().filter(|(c, _)| slots.contains_key(c))
+                    {
+                        let lt = mf.insts.alloc(Inst::Load(temp));
+                        let sv = mf.insts.alloc(Inst::Load(s_cell));
+                        let sf = mf.insts.alloc(Inst::StoreField {
+                            base: sv,
+                            field: field_of(slots[&frame_cell]),
+                            value: lt,
+                        });
+                        new.extend([lt, sv, sf]);
+                    }
+                }
                 _ => new.push(id),
             }
         }
@@ -1808,6 +1850,8 @@ pub fn materialize_frame(
             let bad = match &mf.insts[id] {
                 Inst::Load(c) if !allowed(*c) => Some(*c),
                 Inst::Store { cell, .. } if !allowed(*cell) => Some(*cell),
+                Inst::MapNext { key_cell, .. } if !allowed(*key_cell) => Some(*key_cell),
+                Inst::MapNext { val_cell, .. } if !allowed(*val_cell) => Some(*val_cell),
                 _ => None,
             };
             if let Some(c) = bad {
