@@ -36,5 +36,5 @@ fn js_coroutines_run_green_under_node() {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    assert_eq!(summary.tests_passed, 7);
+    assert_eq!(summary.tests_passed, 8);
 }

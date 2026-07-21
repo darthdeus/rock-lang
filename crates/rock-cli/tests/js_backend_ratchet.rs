@@ -60,6 +60,9 @@ fn corpus() -> Vec<String> {
         "tests/js_trampoline_fallback.rock",
         "tests/engine_systems_test.rock",
         "tests/deco_v2_init_with_args.rock",
+        // Keeps the SKIP path alive: `from_codepoint` (UTF-8 bytes vs UTF-16) is a
+        // documented out-of-scope divergence, so this file always leaves >=1 skip.
+        "tests/strings_chars.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -201,7 +204,13 @@ fn js_runnable_coverage_ratchet() {
     // tests/deco_v2_init_with_args.rock (2) -> 308 (full-suite pass 3724 -> 3740,
     // decorator-populated bucket 16 -> 0; `rock run --backend js` gated separately
     // by crates/rock-cli/tests/js_run_gate.rs).
-    const FLOOR: usize = 308;
+    // M2 intrinsics (MapNext cursor-cached keys-iterator shim; RNG mulberry32 +
+    // env_var driver glue) mapped every unmapped surface the M1 corpus still
+    // exercised, dropping it to 0 skips -- so tests/strings_chars.rock was added
+    // (2 pass + 1 always-skip `from_codepoint`) to keep the SKIP path alive,
+    // lifting the corpus to 312 (full-suite pass 3740 -> 3835, MapNext 79 /
+    // random* 9 / env_var 2 skip buckets -> 0).
+    const FLOOR: usize = 312;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
