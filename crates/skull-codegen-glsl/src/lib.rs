@@ -41,6 +41,9 @@ enum GlslTy {
     Vec2,
     Vec3,
     Vec4,
+    /// Bool-vector; LOCAL/TEMP only (GLSL forbids bool interpolants, and the tier
+    /// has no bvec upload path -- rejected in attr/varying/uniform position).
+    Bvec3,
     Mat4,
     /// Opaque; param/uniform position only (GLSL forbids sampler locals/returns).
     Sampler2D,
@@ -55,6 +58,7 @@ impl GlslTy {
             GlslTy::Vec2 => "vec2",
             GlslTy::Vec3 => "vec3",
             GlslTy::Vec4 => "vec4",
+            GlslTy::Bvec3 => "bvec3",
             GlslTy::Mat4 => "mat4",
             GlslTy::Sampler2D => "sampler2D",
         }
@@ -83,6 +87,7 @@ fn glsl_ty(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<GlslTy, C
             "Vec2" => Ok(GlslTy::Vec2),
             "Vec3" => Ok(GlslTy::Vec3),
             "Vec4" => Ok(GlslTy::Vec4),
+            "Bvec3" => Ok(GlslTy::Bvec3),
             "Mat4" => Ok(GlslTy::Mat4),
             "Sampler2D" => Ok(GlslTy::Sampler2D),
             other => Err(err(span, format!("shader profile: {what} type `{other}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
@@ -306,6 +311,19 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
     // param renders as plain GLSL indexing of the declared uniform array.
     ("at", 2, "$1[$2]"),
+    // Bool-vector tier (docs/shaders.md). isnan/isinf are GLES 3.00 builtins.
+    // `any` here is arity-1 (Bvec3 reduction) -- distinct from the iterator
+    // `any` (arity-2, not a shader intrinsic). `greater_than`/`to_vec3` carry
+    // portable Rock bodies for luajit/JS; these templates render the native
+    // GLSL inline so the bodies never emit on the shader path.
+    ("isnan", 1, "isnan($1)"),
+    ("isinf", 1, "isinf($1)"),
+    // The native bvec3 ctor: inline, since a helper fn named `bvec3` would
+    // collide with the GLSL builtin type constructor.
+    ("bvec3", 3, "bvec3($1, $2, $3)"),
+    ("any", 1, "any($1)"),
+    ("greater_than", 2, "greaterThan($1, $2)"),
+    ("to_vec3", 1, "vec3($1)"),
 ];
 
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
@@ -865,6 +883,8 @@ impl FnEmit<'_> {
             Inst::Field { base, field } => {
                 if self.is_uniform_base(*base) {
                     self.uniform_fields.get(field).copied().unwrap_or(GlslTy::Float)
+                } else if self.ty_of(*base) == GlslTy::Bvec3 {
+                    GlslTy::Bool // bvec3 component read
                 } else {
                     GlslTy::Float // Vec component
                 }
@@ -873,6 +893,7 @@ impl FnEmit<'_> {
                 "Vec2" => GlslTy::Vec2,
                 "Vec3" => GlslTy::Vec3,
                 "Vec4" => GlslTy::Vec4,
+                "Bvec3" => GlslTy::Bvec3,
                 "Mat4" => GlslTy::Mat4,
                 _ => GlslTy::Float,
             },
@@ -996,14 +1017,17 @@ impl FnEmit<'_> {
                 }
             }
             Inst::MakeValueStruct { name, fields } => {
-                let ctor = match name.as_str() {
-                    "Vec2" => "vec2",
-                    "Vec3" => "vec3",
-                    "Vec4" => "vec4",
+                // Bvec3 components render at a bool context; the vecN ctors take
+                // float components (int operands materialize an IntToFloat).
+                let (ctor, comp_ty) = match name.as_str() {
+                    "Vec2" => ("vec2", GlslTy::Float),
+                    "Vec3" => ("vec3", GlslTy::Float),
+                    "Vec4" => ("vec4", GlslTy::Float),
+                    "Bvec3" => ("bvec3", GlslTy::Bool),
                     other => return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0"))),
                 };
                 let args: Result<Vec<String>, CompilerError> =
-                    fields.iter().map(|(_, v)| self.render_val_t(*v, GlslTy::Float)).collect();
+                    fields.iter().map(|(_, v)| self.render_val_t(*v, comp_ty)).collect();
                 format!("{ctor}({})", args?.join(", "))
             }
             Inst::Call { func, args } => self.render_call(*func, args)?,
@@ -1915,6 +1939,9 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
         if fty == GlslTy::Sampler2D {
             return Err(err(span, format!("shader: {what} field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
         }
+        if fty == GlslTy::Bvec3 {
+            return Err(err(span, format!("shader: {what} field `{}` cannot be a bvec3 -- bool-vector {what}s are unsupported (bvec3 is local/temp only)", fd.name)));
+        }
         out.push((fd.name, fty));
     }
     Ok(out)
@@ -1994,6 +2021,9 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
     let mut varyings = Vec::new();
     for fd in &sd.fields {
         let fty = glsl_ty(ws, fd.ty, span, &format!("varying `{}`", fd.name))?;
+        if fty == GlslTy::Bvec3 {
+            return Err(err(span, format!("shader: varying `{}` cannot be a bvec3 (GLSL forbids bool-vector interpolants) -- bvec3 is local/temp only", fd.name)));
+        }
         if fd.name.as_str() == "position" {
             if fty != GlslTy::Vec4 {
                 return Err(err(span, "shader: the varyings `position` field must be Vec4 (it becomes gl_Position)"));

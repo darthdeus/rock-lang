@@ -54,9 +54,10 @@ fn glsl_runnable_coverage_ratchet() {
 
     // Per-profile floor: GPU-executed green value tests over this corpus. RAISE
     // when A1 fn-emission growth makes more tests runnable; a drop below it is a
-    // silent-coverage regression. value_reference.rock (12) + js_loops_valuemodel
-    // (6) + js_collections (1 emits: `to_string_int_roundtrip`) = 19 per profile.
-    const FLOOR: usize = 19;
+    // silent-coverage regression. value_reference.rock (38, incl. the B2 bvec
+    // tier) + js_loops_valuemodel (6) + js_collections (1 emits:
+    // `to_string_int_roundtrip`) = 45 per profile.
+    const FLOOR: usize = 45;
     for p in &summary.per_profile {
         if !p.gl_available {
             eprintln!("SKIP profile [{}]: no GL context", p.profile);

@@ -644,3 +644,76 @@ fn reject_fwidth_in_vertex() {
     "#;
     reject_pipeline(src, "vt", "fr", "fragment");
 }
+
+// --- bool-vector tier (docs/shaders.md B2) -----------------------------------
+
+/// The emitted GLSL for the nonfinite-debug shape: bvec3 ctor + isnan/isinf +
+/// any + greaterThan + the vec3(bvec) bool->float cast, all rendered inline as
+/// native GLSL. The port (stone/engine/shaders/debug/nonfinite_shader.rock) is
+/// this fragment.
+#[test]
+fn bvec_nonfinite_entry_golden() {
+    let src = r#"
+        @shader(fragment)
+        fn nonfinite_frag(src_tex: Sampler2D, tc: Vec2) -> Vec4 {
+            let c = texture(src_tex, tc)
+            let bad = bvec3(
+                isinf(c.r) || isnan(c.r),
+                isinf(c.g) || isnan(c.g),
+                isinf(c.b) || isnan(c.b),
+            )
+            if any(bad) {
+                return v(to_vec3(bad), 1.0)
+            } else if any(greater_than(c.rgb.abs(), v(60000.0, 60000.0, 60000.0))) {
+                return v(1.0, 1.0, 0.0, 1.0)
+            } else {
+                let luma = c.rgb.dot(v(0.2126, 0.7152, 0.0722))
+                let d = luma * 0.05
+                return v(d, d, d, 1.0)
+            }
+        }
+    "#;
+    let glsl = emit_entry(src, "nonfinite_frag").expect("emit");
+    assert!(glsl.contains("bvec3("), "bvec3 ctor inline:\n{glsl}");
+    assert!(glsl.contains("isinf(") && glsl.contains("isnan("), "isinf/isnan:\n{glsl}");
+    assert!(glsl.contains("any("), "any reduction:\n{glsl}");
+    assert!(glsl.contains("greaterThan("), "greaterThan:\n{glsl}");
+    assert!(glsl.contains("vec3(bad)"), "to_vec3 bool->float cast:\n{glsl}");
+    // The bvec3 ctor renders as the native builtin, never a mangled helper fn.
+    assert!(!glsl.contains("bvec3__"), "no mangled bvec3 helper:\n{glsl}");
+}
+
+/// GLSL forbids bool-vector interpolants -- a Bvec3 varying field rejects at emit.
+#[test]
+fn reject_bvec_varying() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4, flags: Bvec3 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary {
+                position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
+                flags: bvec3(true, false, false),
+            }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "bvec3");
+}
+
+/// A Bvec3 attribute field rejects (GLSL has no bool vertex inputs).
+#[test]
+fn reject_bvec_attribute() {
+    let src = r#"
+        value QV { aPos: Vec2, flags: Bvec3 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 { return vary.position }
+    "#;
+    reject_pipeline(src, "vt", "fr", "bvec3");
+}
