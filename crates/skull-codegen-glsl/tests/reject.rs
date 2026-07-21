@@ -109,7 +109,8 @@ fn reject_entry(src: &str, root: &str, needle: &str) {
     modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
-    let err = skull_codegen_glsl::emit_shader_entry(&ws, mid, root).expect_err("must reject");
+    let err = skull_codegen_glsl::emit_shader_entry(&ws, mid, root, skull_codegen_glsl::GlslProfile::Core330)
+        .expect_err("must reject");
     assert!(
         err.message.contains(needle),
         "error `{}` should contain `{needle}`",

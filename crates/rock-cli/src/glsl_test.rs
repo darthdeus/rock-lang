@@ -565,6 +565,227 @@ fn runner_lib_path() -> String {
     value
 }
 
+// --- A3: compile-validate registered render shaders on real GL contexts ---
+// (`docs/shader-mobile-port-plan.md`). The value-test corpus above proves the
+// EMITTER on GLES; this proves the shaders games actually register.
+
+/// One profile's tallies over a `shader-validate` run.
+pub struct ValidateProfileSummary {
+    /// `"330core"` / `"300es"`.
+    pub profile: &'static str,
+    pub passed: usize,
+    /// FAIL detail lines (driver compile/link log, or a harness breach).
+    pub failed: Vec<String>,
+    /// False = no GL context for this profile (skipped-with-log).
+    pub gl_available: bool,
+}
+
+/// Whole-run tallies for `rock shader-validate` -- the testable core.
+pub struct ValidateSummary {
+    /// (project dir, registered shader-pair count).
+    pub projects: Vec<(String, usize)>,
+    pub per_profile: Vec<ValidateProfileSummary>,
+}
+
+/// `rock shader-validate <project>...`: print verdicts, exit non-zero on any
+/// FAIL or when zero verdicts ran (no GL for either profile).
+pub fn shader_validate(dirs: &[String]) -> Result<()> {
+    if dirs.is_empty() {
+        crate::bail!("rock shader-validate: usage: rock shader-validate <project-dir> [project-dir...]");
+    }
+    let start = Instant::now();
+    let summary = shader_validate_run(dirs, true)?;
+
+    let shader_total: usize = summary.projects.iter().map(|(_, n)| n).sum();
+    println!(
+        "\nshader-validate: {} registered pair(s) across {} project(s) ({:.2}s)",
+        shader_total,
+        summary.projects.len(),
+        start.elapsed().as_secs_f64(),
+    );
+    let mut any_failed = false;
+    for p in &summary.per_profile {
+        if !p.gl_available {
+            println!(
+                "  [{}] {} -- verdicts SKIPPED (no GL context)",
+                p.profile.cyan(),
+                "no display / driver".yellow()
+            );
+            continue;
+        }
+        println!(
+            "  [{}] {}/{} compiled+linked",
+            p.profile.cyan(),
+            p.passed.to_string().green(),
+            p.passed + p.failed.len(),
+        );
+        for detail in &p.failed {
+            any_failed = true;
+            println!("    {} {}", "FAIL".red(), detail);
+        }
+    }
+    let zero_verdicts = summary.per_profile.iter().all(|p| !p.gl_available);
+    if zero_verdicts {
+        println!("{}", "no GL context for any profile -- zero shader verdicts ran".red());
+    }
+    if any_failed || zero_verdicts {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Run the validation; public for the gate test (`print = false`). Hard errors
+/// (missing runner, a project that fails to build, a pair that fails to EMIT)
+/// are `Err` -- the same pairs emit inside every game build, so an emit failure
+/// here is a regression or a profile-specific emitter gap, never a skip.
+pub fn shader_validate_run(dirs: &[String], print: bool) -> Result<ValidateSummary> {
+    let runner = locate_runner()?;
+    let mut gl_available: [bool; 2] = [false, false];
+    for (i, (pname, _)) in PROFILES.iter().enumerate() {
+        gl_available[i] = probe_gl(&runner, pname)?;
+    }
+
+    let mut summary = ValidateSummary {
+        projects: Vec::new(),
+        per_profile: PROFILES
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| ValidateProfileSummary {
+                profile: name,
+                passed: 0,
+                failed: Vec::new(),
+                gl_available: gl_available[i],
+            })
+            .collect(),
+    };
+
+    for dir in dirs {
+        let ws = validate_workspace(dir)?;
+        let pairs = skull_mir::lower::collect_shader_pairs(&ws)
+            .map_err(|e| anyhow::anyhow!("{dir}: collect_shader_pairs: {}", e.message))?;
+        summary.projects.push((dir.clone(), pairs.len()));
+
+        for (pi, (pname, profile)) in PROFILES.iter().enumerate() {
+            if !gl_available[pi] {
+                continue;
+            }
+            let mut jobs: Vec<(String, String, String)> = Vec::with_capacity(pairs.len());
+            for pair in &pairs {
+                let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+                let glsl = match pair.vert {
+                    Some(vert) => {
+                        let vname = ws.module(vert.module).functions[vert.func].name;
+                        skull_codegen_glsl::emit_shader_pipeline(
+                            &ws, vert.module, vname.as_str(), fname.as_str(), *profile,
+                        )
+                    }
+                    None => skull_codegen_glsl::emit_shader_entry(
+                        &ws, pair.frag.module, fname.as_str(), *profile,
+                    ),
+                }
+                .map_err(|e| {
+                    anyhow::anyhow!("{dir}: `{}` failed to emit for {pname}: {}", pair.key, e.message)
+                })?;
+                let (vertex, fragment) = split_stages(&glsl);
+                jobs.push((format!("{dir}:{}", pair.key), vertex, fragment));
+            }
+            if jobs.is_empty() {
+                continue;
+            }
+            let (passed, failed) = compile_batch(&runner, pname, &jobs)?;
+            if print {
+                let status = if failed.is_empty() { "ok".green() } else { "FAILED".red() };
+                println!(
+                    "{:.<52} [{}] {}  ({} pass, {} fail)",
+                    dir,
+                    pname.cyan(),
+                    status,
+                    passed,
+                    failed.len(),
+                );
+            }
+            summary.per_profile[pi].passed += passed;
+            summary.per_profile[pi].failed.extend(failed);
+        }
+    }
+    Ok(summary)
+}
+
+/// Build a project directory into ONE type-checked workspace, tests included
+/// (sims may register their own `rock_shader` pairs -- validate those too).
+fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::Workspace> {
+    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
+    let sources = crate::unified_compile::discover_sources(&spec)
+        .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;
+    let (mut modules, _entry) = crate::skull_backend::skull_assemble_project(&sources)
+        .map_err(|errs| anyhow::anyhow!("{}", crate::skull_backend::render_project_errs(&sources, &errs)))?;
+    crate::bone_backend::check_modules(&mut modules)
+        .map_err(|errs| anyhow::anyhow!("{}", crate::skull_backend::render_project_errs(&sources, &errs)))
+}
+
+/// Split a single-file `#ifdef VERTEX` / `#ifdef PIXEL` shader into the two
+/// stage sources EXACTLY the way the engine loader does
+/// (`stone-rs/src/shader.rs`): inject `#define VERTEX` / `#define PIXEL` on the
+/// line after `#version`. Validating anything else would validate a shader the
+/// engine never compiles.
+fn split_stages(combined: &str) -> (String, String) {
+    let insert_point = combined
+        .find("#version")
+        .and_then(|vp| combined[vp..].find('\n').map(|p| vp + p + 1))
+        .unwrap_or(0);
+    let (prefix, suffix) = combined.split_at(insert_point);
+    (
+        format!("{prefix}#define VERTEX\n{suffix}"),
+        format!("{prefix}#define PIXEL\n{suffix}"),
+    )
+}
+
+/// One runner invocation with compile-only jobs; returns (passed, FAIL details).
+/// Marker-count and `compiled` payloads are verified -- a protocol drift is a
+/// loud error, never a silent pass.
+fn compile_batch(
+    runner: &std::path::Path,
+    profile: &str,
+    jobs: &[(String, String, String)],
+) -> Result<(usize, Vec<String>)> {
+    let items: Vec<serde_json::Value> = jobs
+        .iter()
+        .map(|(name, vertex, fragment)| {
+            serde_json::json!({ "name": name, "vertex": vertex, "fragment": fragment, "ret": "compile" })
+        })
+        .collect();
+    let payload = serde_json::Value::Array(items).to_string();
+    let (code, stdout, stderr) = spawn_runner(runner, profile, &payload)
+        .map_err(|e| anyhow::anyhow!("runner [{profile}]: {e}"))?;
+    if code != Some(0) {
+        crate::bail!("runner [{profile}] exited {code:?} mid-run: {}", stderr.trim());
+    }
+    let markers = parse_skull_markers(&stdout)
+        .filter(|m| m.passed + m.fails.len() + m.values.len() == jobs.len())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid runner output (expected {} markers): stdout=<{}> stderr=<{}>",
+                jobs.len(),
+                stdout.trim(),
+                stderr.trim()
+            )
+        })?;
+    let mut passed = 0usize;
+    let mut failed: Vec<String> = markers
+        .fails
+        .iter()
+        .map(|d| format!("{d} [{profile}]"))
+        .collect();
+    for (name, val) in &markers.values {
+        if val == "compiled" {
+            passed += 1;
+        } else {
+            failed.push(format!("harness breach: `{name}` returned `{val}`, expected `compiled` [{profile}]"));
+        }
+    }
+    Ok((passed, failed))
+}
+
 /// Locate the `stone-glsl-runner` binary: `ROCK_GLSL_RUNNER` override, then a
 /// sibling of the running `rock` binary (production + release layout), then one
 /// level up (cargo test binaries live in `target/<profile>/deps/`). Missing is

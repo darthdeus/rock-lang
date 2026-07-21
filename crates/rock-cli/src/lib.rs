@@ -229,6 +229,14 @@ pub enum CliCommand {
     /// profile (rejects anything above tier 0). Backend-agnostic: dispatched before
     /// the backend switch, like `fmt`/`completions`.
     Shader,
+    /// `rock shader-validate <project> [project...]` -- compile+link every
+    /// `rock_shader` pair the project(s) register, on REAL GL contexts in both
+    /// profiles (330core + 300es), via `stone-glsl-runner`'s compile-only mode
+    /// (`docs/shader-mobile-port-plan.md` A3). A driver rejection is a FAIL
+    /// carrying the compile log; a no-display environment skips-with-log
+    /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
+    /// See `glsl_test::shader_validate`.
+    ShaderValidate,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -258,6 +266,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterCascade,
             Self::BackendStats,
             Self::Shader,
+            Self::ShaderValidate,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -303,6 +312,7 @@ impl CliCommand {
             Self::IterCascade => "iter-cascade",
             Self::BackendStats => "backend-stats",
             Self::Shader => "shader",
+            Self::ShaderValidate => "shader-validate",
         }
     }
 }
