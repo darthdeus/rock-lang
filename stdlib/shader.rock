@@ -1,4 +1,4 @@
-// GPU-only shader surface (docs/glsl-a1-plan.md). Sampler2D is a phantom
+// GPU-only shader surface (docs/shaders.md). Sampler2D is a phantom
 // param type for @shader entry fns -- never constructed CPU-side. texture()
 // maps to the GLSL builtin; reaching it on the CPU is a hard error, never a
 // silent stub.
@@ -11,7 +11,13 @@ struct Sampler2D {
     error("texture() is GPU-only (shader fns are not CPU-callable)")
 """
 
-// GPU builtins (docs/glsl-a2-plan.md decision 5). Fragment-stage only; the
+// The sampler's mip-0 dimensions as a float Vec2 (`vec2(textureSize(s, 0))`).
+// Not stage-restricted -- textureSize is legal in every GLSL stage.
+@intrinsic @gpu_only inline(lua) fn texture_size(s: Sampler2D) -> Vec2 = """
+    error("texture_size() is GPU-only (shader fns are not CPU-callable)")
+"""
+
+// GPU builtins (docs/shaders.md). Fragment-stage only; the
 // emitter whitelists them per stage. CPU bodies error -- never a silent stub.
 @intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """
     error("frag_coord() is GPU-only (fragment-stage builtin)")
@@ -25,7 +31,65 @@ struct Sampler2D {
     error("discard() is GPU-only (fragment-stage builtin)")
 """
 
-// In-game shader compilation (docs/glsl-a3-integration-plan.md A3a). A call
+// Vertex-stage only (A2c): the per-vertex index within the draw call.
+@intrinsic @gpu_only inline(lua) fn vertex_id() -> int = """
+    error("vertex_id() is GPU-only (vertex-stage builtin)")
+"""
+
+// Uniform arrays (docs/shaders.md). Param-position-only
+// phantom, `@size(N)` required on the param, param name = GLSL uniform name.
+// CPU upload stays shader_set_*_array (declared N is capacity).
+struct UniformArray<T> { }
+
+@intrinsic @gpu_only inline(lua) fn at<T>(a: UniformArray<T>, i: int) -> T = """
+    error("at() is GPU-only (uniform-array indexing)")
+"""
+
+// IEEE non-finite predicates. GLES 3.00 has isnan/isinf natively (the GLSL
+// templates map straight through). NOT @gpu_only -- CPU-callable, so the
+// value-test corpus exercises them on luajit and JS; the inline(lua) body IS
+// the luajit mapping, JS gets a table row (crates/skull-codegen-js).
+@intrinsic inline(lua) fn isnan(x: float) -> bool = """
+    return x ~= x
+"""
+
+@intrinsic inline(lua) fn isinf(x: float) -> bool = """
+    return x == math.huge or x == -math.huge
+"""
+
+// Bool-vector tier (docs/shaders.md). A plain value struct -- luajit/JS get it
+// free as a value; the GLSL emitter maps it to `bvec3`, LOCAL/TEMP ONLY (bool
+// interpolants are rejected in attr/varying/uniform position). Built via
+// `bvec3(...)`, reduced via `any`, produced by `greater_than`, and cast to Vec3
+// via `to_vec3` (the GLSL `vec3(bvec)` per-channel bool->float select).
+value Bvec3 { x: bool, y: bool, z: bool }
+
+// Ctor: portable `Bvec3 { ... }` body for luajit/JS; a GLSL template renders the
+// native `bvec3(a, b, c)` inline (a helper fn would collide with the GLSL builtin
+// type name -- "recursive call to bvec3").
+@intrinsic fn bvec3(x: bool, y: bool, z: bool) -> Bvec3 {
+    return Bvec3 { x: x, y: y, z: z }
+}
+
+// The three below carry a portable Rock body (luajit/JS need nothing) AND a
+// GLSL template (crates/skull-codegen-glsl) so the shader path renders the
+// native builtin inline. `any` here is arity-1 (the iterator `any` is arity-2).
+@intrinsic fn any(b: Bvec3) -> bool {
+    return b.x || b.y || b.z
+}
+
+@intrinsic fn greater_than(a: Vec3, b: Vec3) -> Bvec3 {
+    return Bvec3 { x: a.x > b.x, y: a.y > b.y, z: a.z > b.z }
+}
+
+@intrinsic fn to_vec3(b: Bvec3) -> Vec3 {
+    let x = if b.x { 1.0 } else { 0.0 }
+    let y = if b.y { 1.0 } else { 0.0 }
+    let z = if b.z { 1.0 } else { 0.0 }
+    return v(x, y, z)
+}
+
+// In-game shader compilation (docs/shaders.md). A call
 // `rock_shader(vert, frag)` (two direct references to top-level @shader fns)
 // is expanded at MIR lowering to the pipeline key const "<vert>+<frag>" that
 // pipeline() looks up; the driver emits one __rock_shader_register(key, glsl)
@@ -36,7 +100,7 @@ struct Sampler2D {
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
 
-// Single-arg fullscreen form (docs/glsl-a3-integration-plan.md A3c): a direct
+// Single-arg fullscreen form (docs/shaders.md): a direct
 // reference to a top-level @shader(fragment) fn. Expands to the bare frag-name
 // key (never contains '+', so it cannot collide with a pair key); the driver
 // routes it to the A1 single-entry emitter (PIXEL body + fullscreen VERTEX

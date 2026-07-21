@@ -3,7 +3,7 @@ name = "skull-codegen-glsl"
 version = "0.1.0"
 edition = "2024"
 
-# skull-codegen-glsl: GLSL function-library emission (route B, docs/glsl-spike.md).
+# skull-codegen-glsl: the Rock->GLSL emitter (docs/shaders.md).
 # A second codegen backend over the shared skull-mir substrate (the sibling of
 # skull-codegen-lua). Given a typechecked workspace + a set of root fn names, it
 # emits GLSL function definitions for the roots + their reachable callees,

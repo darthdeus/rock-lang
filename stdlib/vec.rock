@@ -34,6 +34,10 @@ value Vec4 {
     return Vec2 { x: a.x - b.x, y: a.y - b.y }
 }
 
+@pure operator -(a: Vec2, b: float) -> Vec2 {
+    return Vec2 { x: a.x - b, y: a.y - b }
+}
+
 @pure operator *(a: Vec2, b: float) -> Vec2 {
     return Vec2 { x: a.x * b, y: a.y * b }
 }
@@ -52,6 +56,10 @@ value Vec4 {
 
 @pure operator *(a: Vec2, b: Vec2) -> Vec2 {
     return Vec2 { x: a.x * b.x, y: a.y * b.y }
+}
+
+@pure operator /(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x / b.x, y: a.y / b.y }
 }
 
 @pure operator /(a: Vec2, b: float) -> Vec2 {
@@ -110,6 +118,19 @@ fn Vec2.to_array(v) -> [float] {
 // Per-element sign/abs. UFCS: `d.sign()`, `d.abs()`.
 @pure fn Vec2.sign(a) -> Vec2 { return v(sign(a.x), sign(a.y)) }
 @pure fn Vec2.abs(a) -> Vec2 { return v(abs(a.x), abs(a.y)) }
+
+// Componentwise math, mirroring the GLSL builtins (docs/vec-swizzles-plan.md).
+// Pure tier-0 bodies: CPU and route-B GLSL share the same code.
+@pure fn Vec2.min(a, b: Vec2) -> Vec2 { return v(min(a.x, b.x), min(a.y, b.y)) }
+@pure fn Vec2.max(a, b: Vec2) -> Vec2 { return v(max(a.x, b.x), max(a.y, b.y)) }
+@pure fn Vec2.clamp(a, lo: float, hi: float) -> Vec2 {
+    return v(clamp(a.x, lo, hi), clamp(a.y, lo, hi))
+}
+@pure fn Vec2.clamp(a, lo: Vec2, hi: Vec2) -> Vec2 {
+    return v(clamp(a.x, lo.x, hi.x), clamp(a.y, lo.y, hi.y))
+}
+@pure fn Vec2.floor(a) -> Vec2 { return v(floor(a.x), floor(a.y)) }
+@pure fn Vec2.fract(a) -> Vec2 { return v(fract(a.x), fract(a.y)) }
 
 @pure fn vec2_from_angle(angle: float) -> Vec2 {
     return v(angle.cos(), angle.sin())
@@ -198,8 +219,16 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return v(a.x + b, a.y + b, a.z + b)
 }
 
+@pure operator -(a: Vec3, b: float) -> Vec3 {
+    return v(a.x - b, a.y - b, a.z - b)
+}
+
 @pure operator *(a: Vec3, b: Vec3) -> Vec3 {
     return v(a.x * b.x, a.y * b.y, a.z * b.z)
+}
+
+@pure operator /(a: Vec3, b: Vec3) -> Vec3 {
+    return v(a.x / b.x, a.y / b.y, a.z / b.z)
 }
 
 @pure fn Vec3.neg(a) -> Vec3 {
@@ -208,6 +237,21 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 
 @pure fn Vec3.sign(a) -> Vec3 { return v(sign(a.x), sign(a.y), sign(a.z)) }
 @pure fn Vec3.abs(a) -> Vec3 { return v(abs(a.x), abs(a.y), abs(a.z)) }
+
+@pure fn Vec3.min(a, b: Vec3) -> Vec3 {
+    return v(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z))
+}
+@pure fn Vec3.max(a, b: Vec3) -> Vec3 {
+    return v(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z))
+}
+@pure fn Vec3.clamp(a, lo: float, hi: float) -> Vec3 {
+    return v(clamp(a.x, lo, hi), clamp(a.y, lo, hi), clamp(a.z, lo, hi))
+}
+@pure fn Vec3.clamp(a, lo: Vec3, hi: Vec3) -> Vec3 {
+    return v(clamp(a.x, lo.x, hi.x), clamp(a.y, lo.y, hi.y), clamp(a.z, lo.z, hi.z))
+}
+@pure fn Vec3.floor(a) -> Vec3 { return v(floor(a.x), floor(a.y), floor(a.z)) }
+@pure fn Vec3.fract(a) -> Vec3 { return v(fract(a.x), fract(a.y), fract(a.z)) }
 
 @intrinsic @pure fn Vec3.dot(a, b: Vec3) -> float {
     return a.x * b.x + a.y * b.y + a.z * b.z
@@ -243,11 +287,6 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     )
 }
 
-@inline
-@pure fn Vec3.xy(a) -> Vec2 {
-    return v(a.x, a.y)
-}
-
 // Vec4 algebra -- shader-facing (colors, homogeneous coords). No zero() ctor:
 // the near-zero normalize guard returns v(0, 0, 0, 0) inline, matching Vec3.
 
@@ -264,6 +303,10 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
     return v(a.x + b, a.y + b, a.z + b, a.w + b)
 }
 
+@pure operator -(a: Vec4, b: float) -> Vec4 {
+    return v(a.x - b, a.y - b, a.z - b, a.w - b)
+}
+
 @pure operator -(a: Vec4, b: Vec4) -> Vec4 {
     return v(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w)
 }
@@ -278,6 +321,10 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 
 @pure operator *(a: Vec4, b: Vec4) -> Vec4 {
     return v(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w)
+}
+
+@pure operator /(a: Vec4, b: Vec4) -> Vec4 {
+    return v(a.x / b.x, a.y / b.y, a.z / b.z, a.w / b.w)
 }
 
 @pure operator /(a: Vec4, b: float) -> Vec4 {
@@ -306,3 +353,24 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
         a.w + (b.w - a.w) * t
     )
 }
+
+@pure fn Vec4.abs(a) -> Vec4 { return v(abs(a.x), abs(a.y), abs(a.z), abs(a.w)) }
+@pure fn Vec4.min(a, b: Vec4) -> Vec4 {
+    return v(min(a.x, b.x), min(a.y, b.y), min(a.z, b.z), min(a.w, b.w))
+}
+@pure fn Vec4.max(a, b: Vec4) -> Vec4 {
+    return v(max(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w))
+}
+@pure fn Vec4.clamp(a, lo: float, hi: float) -> Vec4 {
+    return v(clamp(a.x, lo, hi), clamp(a.y, lo, hi), clamp(a.z, lo, hi), clamp(a.w, lo, hi))
+}
+@pure fn Vec4.clamp(a, lo: Vec4, hi: Vec4) -> Vec4 {
+    return v(clamp(a.x, lo.x, hi.x), clamp(a.y, lo.y, hi.y), clamp(a.z, lo.z, hi.z), clamp(a.w, lo.w, hi.w))
+}
+@pure fn Vec4.floor(a) -> Vec4 { return v(floor(a.x), floor(a.y), floor(a.z), floor(a.w)) }
+@pure fn Vec4.fract(a) -> Vec4 { return v(fract(a.x), fract(a.y), fract(a.z), fract(a.w)) }
+
+// Mixed vector ctors -- the GLSL `vec4(v.rgb, 1.0)` idiom.
+@inline @pure fn v(xy: Vec2, z: float) -> Vec3 { return v(xy.x, xy.y, z) }
+@inline @pure fn v(xyz: Vec3, w: float) -> Vec4 { return v(xyz.x, xyz.y, xyz.z, w) }
+@inline @pure fn v(xy: Vec2, z: float, w: float) -> Vec4 { return v(xy.x, xy.y, z, w) }

@@ -102,14 +102,15 @@ fn reject_unknown_root() {
     reject(src, &["absent"], "not found");
 }
 
-// --- A1 entry-contract rejects (docs/glsl-a1-plan.md) ------------------------
+// --- A1 entry-contract rejects (docs/shaders.md) ------------------------
 
 fn reject_entry(src: &str, root: &str, needle: &str) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
-    let err = skull_codegen_glsl::emit_shader_entry(&ws, mid, root).expect_err("must reject");
+    let err = skull_codegen_glsl::emit_shader_entry(&ws, mid, root, skull_codegen_glsl::GlslProfile::Core330)
+        .expect_err("must reject");
     assert!(
         err.message.contains(needle),
         "error `{}` should contain `{needle}`",
@@ -195,7 +196,7 @@ fn reject_entry_not_fragment() {
     reject_entry(src, "f", "fragment");
 }
 
-// `pass_uniforms` (docs/pass-uniforms-design.md) returns `[(string, <enum>)]` --
+// `pass_uniforms` (docs/shaders.md) returns `[(string, <enum>)]` --
 // a CPU-side value, not a GPU-expressible type. The GLSL profile rejects it as
 // non-tier-0 before any expansion, so the intrinsic can never leak into shader
 // source (its `@struct_expand` annotation is inert here).

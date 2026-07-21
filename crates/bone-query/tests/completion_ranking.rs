@@ -900,6 +900,35 @@ fn local_rooted_reach_path_beats_right_type_global() {
 }
 
 #[test]
+fn direct_fn_beats_ufcs_method_reach_synths_of_itself() {
+    // A free fn `wisp_trail_new(tint: Color) -> Trail` produces the slot type
+    // both directly AND as a UFCS-method reach hop off every Color global
+    // (`RED.wisp_trail_new()`, ...). The reach synths are the SAME call with
+    // the first arg pre-filled -- a COMPUTED value, not a stored one -- so the
+    // single direct `wisp_trail_new($0)` must outrank the flood, not sink below
+    // it. RED pre-fix: method-final reach paths took value-tier 0 + root
+    // (global) locality and buried the direct fn dead last (mag magic.rock:33
+    // capture: `DRAG_TRAIL = wisptrailnew`).
+    let labels = labels_at(
+        "struct Trail { x: int }\n\
+         struct Color { r: int }\n\
+         global RED: Color = Color { r: 1 }\n\
+         global BLUE: Color = Color { r: 2 }\n\
+         global GREEN: Color = Color { r: 3 }\n\
+         global DRAG: Trail? = null\n\
+         fn wisp_trail_new(tint: Color) -> Trail { return Trail { x: 0 } }\n\
+         fn r() {\n  if DRAG == null {\n    DRAG = wisptrailn$0\n  }\n}\n",
+    );
+    let direct = rank_of(&labels, "wisp_trail_new");
+    let synth = labels.iter().position(|l| l.starts_with("RED.wisp_trail_new()"));
+    assert!(direct.is_some() && synth.is_some(), "both offered: {labels:?}");
+    assert!(
+        direct < synth,
+        "direct free fn must outrank its own UFCS-method reach synths: {labels:?}"
+    );
+}
+
+#[test]
 fn member_completion_type_directs_from_assignment_lhs() {
     // `mob.ai_state = other.$0` -- the slot-anchored expected type (assign
     // LHS) must reach the MEMBER path: `other`'s MobAiState-typed field ranks

@@ -1962,11 +1962,16 @@ impl BoneWorkspace {
                     if !sink.admit(&key) {
                         continue;
                     }
-                    // A reachability path IS a value of the expected type
-                    // (type_rank 0); the shared key folds in match quality
-                    // (prefix on the root beats a scattered subsequence), the
-                    // root locality, the hop distance, and field-before-method.
-                    let rk = arg_rank_key(0, root_kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
+                    // A FIELD-final reach path IS a stored value of the expected
+                    // type (type_rank 0, root locality). A METHOD-final path
+                    // COMPUTES the value via a UFCS call -- it is morally "a fn
+                    // returning the slot type" (type_rank 1, fn-kind 2), same
+                    // tier as the direct fn it wraps, so `RED.wisp_trail_new()`
+                    // can't bury the direct `wisp_trail_new($0)` (it loses on the
+                    // hop-distance rung instead). The shared key still folds in
+                    // match quality, the hop distance, and field-before-method.
+                    let (type_rank, kind) = if p.is_method { (1, 2) } else { (0, root_kind) };
+                    let rk = arg_rank_key(type_rank, kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
                     sink.push(Cand::new(
                         rk,
                         CandName::Owned(key),
@@ -2873,6 +2878,15 @@ fn classify_token(
             // A glued `@ident` the HIR didn't claim: statement/item-level
             // annotations (`@guarded`, `@global_write`) that never reach hir.
             .or_else(|| is_annotation.then_some((TT_DECORATOR, 0)))
+            // A named-argument label (`f(width: 3)`): an ident the HIR doesn't
+            // claim, directly followed by `:`. It names a PARAMETER -- classify
+            // it as one, BEFORE the workspace name map, which would otherwise
+            // color a label that collides with a global fn (`fn width`) as
+            // FUNCTION while non-colliding labels fell to VARIABLE (inconsistent).
+            // HIR-claimed `ident:` positions (struct-lit fields -> property,
+            // param/typed-let bindings) already returned above, so only genuine
+            // call labels reach here.
+            .or_else(|| matches!(next_kind, Some(T::Colon)).then_some((TT_PARAMETER, 0)))
             .or_else(|| names.get(n).map(|&t| (t, 0)))
             .unwrap_or((TT_VARIABLE, 0)),
         _ => return None,

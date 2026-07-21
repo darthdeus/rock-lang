@@ -32,6 +32,7 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("sin", 1, "Math.sin($1)"),
     ("cos", 1, "Math.cos($1)"),
     ("sqrt", 1, "Math.sqrt($1)"),
+    ("exp", 1, "Math.exp($1)"),
     ("abs", 1, "Math.abs($1)"),
     ("floor", 1, "Math.floor($1)"),
     ("ceil", 1, "Math.ceil($1)"),
@@ -46,6 +47,11 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // IEEE non-finite predicates (docs/shaders.md bvec tier). isinf excludes NaN
+    // (a NaN is neither finite nor infinite). any/greater_than/to_vec3 co-emit
+    // their portable Rock bodies -- no JS row.
+    ("isnan", 1, "Number.isNaN($1)"),
+    ("isinf", 1, "(!Number.isFinite($1) && !Number.isNaN($1))"),
     // NativeBuffer four-fn surface (docs/nativebuffer-portability-design.md):
     // `Ptr<T>` IS the TypedArray on JS, so `.ptr` indexes with brackets exactly
     // like the luajit cdata. TypedArray store conversion wraps mod 2^n, matching

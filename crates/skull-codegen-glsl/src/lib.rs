@@ -1,4 +1,4 @@
-//! skull-codegen-glsl -- GLSL function-library emission (route B, `docs/glsl-spike.md`).
+//! skull-codegen-glsl -- GLSL function-library emission (route B, `docs/shaders.md`).
 //!
 //! A second codegen backend over the shared `skull-mir` substrate (sibling of
 //! `skull-codegen-lua`). Given a typechecked [`Workspace`] and a set of root fn
@@ -14,7 +14,7 @@
 //!     skip-and-continue; never emit a guess.
 //!
 //! The tier-0 intrinsic mapping table ([`intrinsic_template`]) is the hand-written
-//! spec from `docs/glsl-spike.md`, keyed by the callee's mangled signature (name +
+//! spec from `docs/shaders.md`, keyed by the callee's mangled signature (name +
 //! GLSL param types) -- the future `@intrinsic` GLSL column.
 
 mod structure;
@@ -41,6 +41,9 @@ enum GlslTy {
     Vec2,
     Vec3,
     Vec4,
+    /// Bool-vector; LOCAL/TEMP only (GLSL forbids bool interpolants, and the tier
+    /// has no bvec upload path -- rejected in attr/varying/uniform position).
+    Bvec3,
     Mat4,
     /// Opaque; param/uniform position only (GLSL forbids sampler locals/returns).
     Sampler2D,
@@ -55,6 +58,7 @@ impl GlslTy {
             GlslTy::Vec2 => "vec2",
             GlslTy::Vec3 => "vec3",
             GlslTy::Vec4 => "vec4",
+            GlslTy::Bvec3 => "bvec3",
             GlslTy::Mat4 => "mat4",
             GlslTy::Sampler2D => "sampler2D",
         }
@@ -83,6 +87,7 @@ fn glsl_ty(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<GlslTy, C
             "Vec2" => Ok(GlslTy::Vec2),
             "Vec3" => Ok(GlslTy::Vec3),
             "Vec4" => Ok(GlslTy::Vec4),
+            "Bvec3" => Ok(GlslTy::Bvec3),
             "Mat4" => Ok(GlslTy::Mat4),
             "Sampler2D" => Ok(GlslTy::Sampler2D),
             other => Err(err(span, format!("shader profile: {what} type `{other}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
@@ -246,7 +251,7 @@ fn inst_kind(inst: &Inst) -> &'static str {
 
 // --- intrinsic mapping table ------------------------------------------------
 
-/// The GLSL tier-0 intrinsic table (`docs/glsl-spike.md`): one row per
+/// The GLSL tier-0 intrinsic table (`docs/shaders.md`): one row per
 /// (name, arity) -> `$1..$n` expression template. Single source for both
 /// [`GlslIntrinsics::lookup`] (call-site rendering) and
 /// [`GlslIntrinsics::entries`] (the fail-closed key surface), so the two can
@@ -259,6 +264,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("cos", 1, "cos($1)"),
     ("tan", 1, "tan($1)"),
     ("sqrt", 1, "sqrt($1)"),
+    ("exp", 1, "exp($1)"),
     ("abs", 1, "abs($1)"),
     ("floor", 1, "floor($1)"),
     ("ceil", 1, "ceil($1)"),
@@ -284,17 +290,40 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("dot", 2, "dot($1, $2)"),
     ("length", 1, "length($1)"),
     ("distance", 2, "distance($1, $2)"),
+    // NO normalize row: Rock's Vec2.normalize is zero-safe (returns zero()),
+    // GLSL's native normalize is undefined at 0 -- the Rock body emits as a
+    // helper fn instead (pinned by vec2_normalize_body).
     ("v", 2, "vec2($1, $2)"),
     ("v", 1, "vec2($1)"),
     ("v", 0, "vec2(0.0)"),
     ("zero", 0, "vec2(0.0)"),
     ("texture", 2, "texture($1, $2)"),
-    // GPU builtins (docs/glsl-a2-plan.md decision 5). frag_coord/discard take no
+    // textureSize returns ivec2; wrap in vec2(...) so the result is a float Vec2
+    // (matches Rock's `-> Vec2`, and the gl_FragCoord/size divides it feeds).
+    ("texture_size", 1, "vec2(textureSize($1, 0))"),
+    // GPU builtins (docs/shaders.md). frag_coord/discard take no
     // args -> bare builtins (discard renders as the statement `discard;`, see
     // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
     ("frag_coord", 0, "gl_FragCoord"),
     ("fwidth", 1, "fwidth($1)"),
     ("discard", 0, "discard"),
+    ("vertex_id", 0, "gl_VertexID"),
+    // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
+    // param renders as plain GLSL indexing of the declared uniform array.
+    ("at", 2, "$1[$2]"),
+    // Bool-vector tier (docs/shaders.md). isnan/isinf are GLES 3.00 builtins.
+    // `any` here is arity-1 (Bvec3 reduction) -- distinct from the iterator
+    // `any` (arity-2, not a shader intrinsic). `greater_than`/`to_vec3` carry
+    // portable Rock bodies for luajit/JS; these templates render the native
+    // GLSL inline so the bodies never emit on the shader path.
+    ("isnan", 1, "isnan($1)"),
+    ("isinf", 1, "isinf($1)"),
+    // The native bvec3 ctor: inline, since a helper fn named `bvec3` would
+    // collide with the GLSL builtin type constructor.
+    ("bvec3", 3, "bvec3($1, $2, $3)"),
+    ("any", 1, "any($1)"),
+    ("greater_than", 2, "greaterThan($1, $2)"),
+    ("to_vec3", 1, "vec3($1)"),
 ];
 
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
@@ -352,7 +381,7 @@ fn vec_op_symbol(name: &str) -> Option<&'static str> {
 // --- per-function emission ---------------------------------------------------
 
 /// A cosmetic-tier fold of a lowered `&&`/`||`/expression-`if` diamond back into
-/// one GLSL expression (`docs/glsl-relooper-plan.md`). The diamond stored its
+/// one GLSL expression (`docs/shaders.md`). The diamond stored its
 /// result into a single-use cell across two single-store arms; instead of
 /// emitting the diamond we render this expression at the cell's one use.
 #[derive(Clone, Copy)]
@@ -406,7 +435,7 @@ struct FnEmit<'a> {
     /// Entry mode: global field name -> GLSL type (for `ty_of` on those reads).
     /// Names are collision-checked unique, so one combined map covers all bases.
     uniform_fields: HashMap<Ustr, GlslTy>,
-    /// Cosmetic folds (`docs/glsl-relooper-plan.md`, cosmetic tier). A diamond's
+    /// Cosmetic folds (`docs/shaders.md`, cosmetic tier). A diamond's
     /// single-use result cell -> the expression it renders as; the diamond itself
     /// is skipped, its declaration + stores suppressed.
     folded_cond: HashMap<Idx<Cell>, FoldedDiamond>,
@@ -415,13 +444,25 @@ struct FnEmit<'a> {
     folded_block: HashMap<Idx<Block>, Idx<Cell>>,
     /// A counted-loop bound temp folded into the for-header -> its const value.
     folded_bound: HashMap<Idx<Cell>, Idx<Inst>>,
-    /// Vertex-entry mode: varyings field name -> GLSL type. When set, the fn is
-    /// emitted as `void main()` and its terminal `return <MakeValueStruct>`
-    /// becomes `gl_Position = <position>;` plus a `<varying> = <val>;` per field.
-    vertex_out: Option<HashMap<Ustr, GlslTy>>,
+    /// `void main()` mode: the fn is emitted as `void main()` and its terminal
+    /// `return <MakeValueStruct>` destructures into a named global assignment per
+    /// field (vertex varyings, or MRT fragment outputs).
+    main_out: Option<MainOut>,
     /// The fn's name span -- body-level emit errors anchor here (MIR insts carry
     /// no spans, so per-expression precision is not available).
     fn_span: Span,
+}
+
+/// A `void main()` entry that destructures its terminal `return <struct
+/// literal>` into named global assignments: vertex varyings (+ gl_Position) or
+/// MRT fragment outputs (`layout(location=N) out vec4`).
+#[derive(Clone)]
+struct MainOut {
+    /// Field name -> GLSL type (the assignment target's type).
+    fields: HashMap<Ustr, GlslTy>,
+    /// Vertex only: a `position` field becomes `gl_Position` (suppressed as a
+    /// named output). Fragment MRT has no such remap -- every field is an out.
+    position_is_gl: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -463,17 +504,17 @@ fn emit_fn_def_with(
     entry: Option<&EntryShape>,
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
-    let is_vertex = entry.is_some_and(|s| s.vertex_out.is_some());
-    let name = if is_vertex {
+    let emits_main = entry.is_some_and(|s| s.main_out.is_some());
+    let name = if emits_main {
         "main".to_string()
     } else if entry.is_some() {
         f.name.as_str().to_string()
     } else {
         mangle_fn(ws, f, overloaded)
     };
-    // A vertex entry returns the (non-tier-0) varyings struct, destructured into
-    // gl_Position + varying outs -- its GLSL fn is `void main()`, no signature ret.
-    let ret_ty = if is_vertex {
+    // A `void main()` entry destructures its returned struct into globals
+    // (gl_Position + varyings, or MRT outs) -- no signature return type.
+    let ret_ty = if emits_main {
         None
     } else {
         match f.return_ty {
@@ -522,25 +563,30 @@ fn emit_fn_def_with(
         folded_cond: HashMap::default(),
         folded_block: HashMap::default(),
         folded_bound: HashMap::default(),
-        vertex_out: entry.and_then(|s| s.vertex_out.as_ref().map(|v| v.iter().copied().collect())),
+        main_out: entry.and_then(|s| s.main_out.clone()),
         fn_span: f.name_span,
     };
     e.assign_cell_names();
-    // Global-base struct params + samplers are dropped from the GLSL signature.
+    // Global-base struct params + samplers + uniform arrays are dropped from the
+    // GLSL signature.
     let dropped: HashSet<usize> = entry
         .map(|s| {
             s.global_params
                 .iter()
                 .copied()
                 .chain(s.samplers.iter().map(|&(i, _)| i))
+                .chain(s.arrays.iter().copied())
                 .collect()
         })
         .unwrap_or_default();
     // A global-base struct param is not a tier-0 GLSL leaf (glsl_ty would reject
     // it); its reads render as bare globals. Samplers DO map (`sampler2D`), so
-    // they still get a cell type.
-    let struct_params: HashSet<usize> =
-        entry.map(|s| s.global_params.iter().copied().collect()).unwrap_or_default();
+    // they still get a cell type. Uniform-array params have no tier-0 type
+    // either -- their only legal use is as `at()`'s first arg, which renders the
+    // cell name (= the declared uniform array).
+    let struct_params: HashSet<usize> = entry
+        .map(|s| s.global_params.iter().copied().chain(s.arrays.iter().copied()).collect())
+        .unwrap_or_default();
     for (i, &c) in mf.params.iter().enumerate() {
         if struct_params.contains(&i) {
             continue;
@@ -649,7 +695,7 @@ impl FnEmit<'_> {
         }
     }
 
-    /// Detect the cosmetic-tier folds (`docs/glsl-relooper-plan.md`): `&&`/`||`
+    /// Detect the cosmetic-tier folds (`docs/shaders.md`): `&&`/`||`
     /// short-circuit diamonds collapse back to infix boolean expressions.
     fn compute_folds(&mut self) {
         let reach: HashSet<Idx<Block>> =
@@ -706,10 +752,17 @@ impl FnEmit<'_> {
             self.folded_block.insert(b, rcell);
         }
 
-        // Bound temps (item 3): a counted loop's bound `t = <const>; for (; i < t;
-        // ..)` folds to `for (; i < <const>; ..)`, dropping the single-use temp.
-        // Only a CONST bound is provably loop-invariant -- a param/expr bound
-        // could be reassigned in the body, changing the count if re-read.
+        // Bound temps (item 3): a counted loop's bound `t = <expr>; for (; i < t;
+        // ..)` folds to `for (; i < <expr>; ..)`, dropping the single-use temp.
+        // The bound temp is a range-for's `hi`, evaluated once in the preheader
+        // (match_counted_loop only matches range-fors), so inlining is sound when
+        // `<expr>` is loop-invariant -- a const, or pure int arithmetic over cells
+        // that are stored exactly once (their store dominates the preheader, so
+        // re-reading in the folded condition yields the same value). Folding it
+        // is not just a cleanup: a GLES/GL driver miscompiles `t = radius + 1; for
+        // (; y < t; ..)` for a nested runtime-bounded kernel (the outline_detect
+        // classify loop found no neighbors), while the inlined `y < (radius + 1)`
+        // is correct -- pinned by bitgun `outline_classify_sim`.
         let bounds: Vec<Idx<Inst>> = self.counted.values().map(|li| li.bound).collect();
         for bound in bounds {
             let Inst::Load(bcell) = self.f.insts[bound] else { continue };
@@ -717,9 +770,27 @@ impl FnEmit<'_> {
                 continue;
             }
             let Some(v) = self.single_store_value(bcell) else { continue };
-            if matches!(self.f.insts[v], Inst::Const(_)) {
+            if self.bound_value_is_invariant(v) {
                 self.folded_bound.insert(bcell, v);
             }
+        }
+    }
+
+    /// Whether a counted-loop bound value is loop-invariant enough to inline into
+    /// the `for` header (see the fold in `precompute`). Conservative: a const, or
+    /// pure int arithmetic / int<->float casts over cells that are stored exactly
+    /// once in the fn (so re-reading in the folded condition can't change). The
+    /// loop counter is multi-store, so it can never sneak in. Anything else (a
+    /// call like `min(n, 16)`, a texture read) stays a temp -- the safe default.
+    fn bound_value_is_invariant(&self, v: Idx<Inst>) -> bool {
+        match self.f.insts[v] {
+            Inst::Const(_) => true,
+            Inst::Load(c) => !self.global_cells.contains(&c) && self.single_store_value(c).is_some(),
+            Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) => {
+                self.bound_value_is_invariant(a) && self.bound_value_is_invariant(b)
+            }
+            Inst::IntToFloat(x) | Inst::FloatToInt(x) => self.bound_value_is_invariant(x),
+            _ => false,
         }
     }
 
@@ -812,6 +883,8 @@ impl FnEmit<'_> {
             Inst::Field { base, field } => {
                 if self.is_uniform_base(*base) {
                     self.uniform_fields.get(field).copied().unwrap_or(GlslTy::Float)
+                } else if self.ty_of(*base) == GlslTy::Bvec3 {
+                    GlslTy::Bool // bvec3 component read
                 } else {
                     GlslTy::Float // Vec component
                 }
@@ -820,13 +893,22 @@ impl FnEmit<'_> {
                 "Vec2" => GlslTy::Vec2,
                 "Vec3" => GlslTy::Vec3,
                 "Vec4" => GlslTy::Vec4,
+                "Bvec3" => GlslTy::Bvec3,
                 "Mat4" => GlslTy::Mat4,
                 _ => GlslTy::Float,
             },
-            Inst::Call { func, .. } => {
+            Inst::Call { func, args } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
                 match cf.return_ty.and_then(|rt| glsl_ty(self.ws, rt, cf.name_span, "return").ok()) {
                     Some(t) => t,
+                    // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
+                    // GLSL's result type is the argument type. Load-bearing under
+                    // ES300, which has no implicit int->float on assignment.
+                    None if matches!(cf.name.as_str(), "min" | "max" | "clamp" | "abs")
+                        && !args.is_empty() =>
+                    {
+                        self.ty_of(args[0])
+                    }
                     None => GlslTy::Float,
                 }
             }
@@ -844,7 +926,7 @@ impl FnEmit<'_> {
             return Err(err(
                 self.span(),
                 format!(
-                    "shader profile: int-typed value ({}) in a float context without an IntToFloat coercion -- a missed lowering sink (docs/typed-mir-coercion-plan.md)",
+                    "shader profile: int-typed value ({}) in a float context without an IntToFloat coercion -- a missed lowering sink (docs/shaders.md)",
                     inst_kind(&self.f.insts[iid])
                 ),
             ));
@@ -935,14 +1017,17 @@ impl FnEmit<'_> {
                 }
             }
             Inst::MakeValueStruct { name, fields } => {
-                let ctor = match name.as_str() {
-                    "Vec2" => "vec2",
-                    "Vec3" => "vec3",
-                    "Vec4" => "vec4",
+                // Bvec3 components render at a bool context; the vecN ctors take
+                // float components (int operands materialize an IntToFloat).
+                let (ctor, comp_ty) = match name.as_str() {
+                    "Vec2" => ("vec2", GlslTy::Float),
+                    "Vec3" => ("vec3", GlslTy::Float),
+                    "Vec4" => ("vec4", GlslTy::Float),
+                    "Bvec3" => ("bvec3", GlslTy::Bool),
                     other => return Err(err(self.span(), format!("shader profile: value struct `{other}` is not tier 0"))),
                 };
                 let args: Result<Vec<String>, CompilerError> =
-                    fields.iter().map(|(_, v)| self.render_val_t(*v, GlslTy::Float)).collect();
+                    fields.iter().map(|(_, v)| self.render_val_t(*v, comp_ty)).collect();
                 format!("{ctor}({})", args?.join(", "))
             }
             Inst::Call { func, args } => self.render_call(*func, args)?,
@@ -973,6 +1058,44 @@ impl FnEmit<'_> {
                 None => e.render_val(a),
             }
         };
+        // A `v(...)` ctor call with a vector param (the mixed ctors in
+        // stdlib/vec.rock, `v(rgb, 1.0)`) must not hit the arity-keyed scalar
+        // rows (`("v", 2)` -> vec2) -- the (name, arity) same-arity type-drift
+        // hazard. GLSL constructors take mixed components natively, so emit
+        // vecN(...) with N = the summed component count.
+        if name == "v"
+            && cf.param_decls.iter().any(|p| {
+                matches!(
+                    glsl_ty(self.ws, p.ty, cf.name_span, "ctor param").ok(),
+                    Some(GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)
+                )
+            })
+        {
+            let n: usize = cf
+                .param_decls
+                .iter()
+                .map(|p| match glsl_ty(self.ws, p.ty, cf.name_span, "ctor param").ok() {
+                    Some(GlslTy::Vec2) => 2,
+                    Some(GlslTy::Vec3) => 3,
+                    Some(GlslTy::Vec4) => 4,
+                    _ => 1,
+                })
+                .sum();
+            let ctor = match n {
+                2 => "vec2",
+                3 => "vec3",
+                4 => "vec4",
+                _ => {
+                    return Err(err(
+                        self.span(),
+                        format!("shader profile: v(...) ctor with {n} total components"),
+                    ))
+                }
+            };
+            let rargs: Result<Vec<String>, CompilerError> =
+                args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
+            return Ok(format!("{ctor}({})", rargs?.join(", ")));
+        }
         if let Some(Emission::Template(tmpl)) = GlslIntrinsics.lookup(cf) {
             let mut s = tmpl.to_string();
             for (i, a) in args.iter().enumerate() {
@@ -1172,27 +1295,27 @@ impl FnEmit<'_> {
     }
 
     fn emit_return(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
-        // Vertex entry: `return <VaryingsStruct { position, ... }>` destructures
-        // into `gl_Position = <position>;` + a `<varying> = <val>;` per field.
-        if self.vertex_out.is_some() {
-            let varyings = self.vertex_out.clone().unwrap();
+        // `void main()` mode: `return <Struct { field, ... }>` destructures into a
+        // named global assignment per field -- vertex varyings (a `position` field
+        // -> gl_Position) or MRT fragment outputs.
+        if let Some(mo) = self.main_out.clone() {
             let [v] = vs else {
-                return Err(err(self.span(), "shader vertex: entry must return the varyings struct"));
+                return Err(err(self.span(), "shader entry: a void-main entry must return its output struct"));
             };
             let fields: Vec<(Ustr, Idx<Inst>)> = match &self.f.insts[*v] {
                 Inst::MakeValueStruct { fields, .. } => fields.iter().map(|&(n, x)| (n, x)).collect(),
                 _ => {
                     return Err(err(
                         self.span(),
-                        "shader vertex: entry must return a varyings struct literal",
+                        "shader entry: a void-main entry must return an output struct literal",
                     ))
                 }
             };
             for (name, val) in fields {
-                let (target, want) = if name.as_str() == "position" {
+                let (target, want) = if mo.position_is_gl && name.as_str() == "position" {
                     ("gl_Position".to_string(), GlslTy::Vec4)
                 } else {
-                    (name.to_string(), varyings.get(&name).copied().unwrap_or(GlslTy::Float))
+                    (name.to_string(), mo.fields.get(&name).copied().unwrap_or(GlslTy::Float))
                 };
                 let s = self.render_val_t(val, want)?;
                 self.push(&format!("{target} = {s};"));
@@ -1489,7 +1612,7 @@ pub fn emit_shader_library(
     Ok(out)
 }
 
-// --- A1: fragment-entry compilation (docs/glsl-a1-plan.md) --------------------
+// --- A1: fragment-entry compilation (docs/shaders.md) --------------------
 
 /// A classified shader entry signature (A1 fragment, or an A2 pipeline stage).
 struct EntryShape {
@@ -1502,9 +1625,13 @@ struct EntryShape {
     uniform_fields: Vec<(Ustr, GlslTy)>,
     /// Sampler params: (param index, name). Also dropped, read as bare globals.
     samplers: Vec<(usize, Ustr)>,
-    /// Vertex-entry mode: varyings field name -> GLSL type (position included).
-    /// Presence switches emission to `void main()` with return-destructure.
-    vertex_out: Option<Vec<(Ustr, GlslTy)>>,
+    /// `UniformArray<T>` param indices. Dropped from the signature and referenced
+    /// by name (via `at()` -> indexing); NOT tier-0-typed, so they are skipped
+    /// when typing param cells.
+    arrays: Vec<usize>,
+    /// `void main()` mode: presence switches emission to `void main()` with a
+    /// return-struct destructure (vertex varyings, or MRT fragment outputs).
+    main_out: Option<MainOut>,
 }
 
 /// The default fullscreen vertex stage -- identical to the hand-written
@@ -1599,7 +1726,8 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
         global_params: uniform_param.into_iter().collect(),
         uniform_fields,
         samplers,
-        vertex_out: None,
+        arrays: Vec::new(),
+        main_out: None,
     })
 }
 
@@ -1610,6 +1738,7 @@ pub fn emit_shader_entry(
     ws: &Workspace,
     mid: ModuleId,
     root: &str,
+    profile: GlslProfile,
 ) -> Result<String, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
     let overloaded = compute_overloaded_names(ws);
@@ -1649,6 +1778,8 @@ pub fn emit_shader_entry(
     }
     reach.gray.remove(&fref);
 
+    reject_stage_violations(ws, Stage::Fragment, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
+
     let (mut uses_idiv, mut uses_imod) = (false, false);
     for body in reach.bodies.values().chain(std::iter::once(&mf)) {
         for (_, inst) in body.insts.iter() {
@@ -1682,12 +1813,16 @@ pub fn emit_shader_entry(
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
+    // Both stages carry the profile's precision preamble: ES requires an
+    // explicit fragment float precision, and the vertex declarations are
+    // harmless no-ops (highp is already the vertex default).
+    let (version, precision) = profile_header(profile);
     Ok(format!(
-        "#version 330 core\n\n#ifdef PIXEL\n\n{px}\n#endif\n\n#ifdef VERTEX\n\n{FULLSCREEN_VERTEX}\n#endif\n"
+        "{version}\n\n#ifdef PIXEL\n\n{precision}{px}\n#endif\n\n#ifdef VERTEX\n\n{precision}{FULLSCREEN_VERTEX}\n#endif\n"
     ))
 }
 
-/// Emission profile (docs/glsl-a2-plan.md decision 6): the `#version` line and
+/// Emission profile (docs/shaders.md): the `#version` line and
 /// any builtin/precision differences. `Core330` is the desktop default; `Es300`
 /// is the mobile GLES target. Threaded through every A2 emission path.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -1697,7 +1832,7 @@ pub enum GlslProfile {
     Es300,
 }
 
-// --- A2: vertex+fragment pipeline (docs/glsl-a2-plan.md) ---------------------
+// --- A2: vertex+fragment pipeline (docs/shaders.md) ---------------------
 
 /// The vertex stage: which shader stage a reachability walk is emitting (drives
 /// per-stage builtin gating).
@@ -1720,6 +1855,8 @@ struct VertexShape {
     uniforms: Vec<(Ustr, GlslTy)>,
     /// Sampler params (rare in vertex, but legal).
     samplers: Vec<(usize, Ustr)>,
+    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
+    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
     /// The varyings value-struct return type.
     varyings_ty: TyId,
 }
@@ -1737,10 +1874,51 @@ struct FragShape {
     uniform_params: Vec<usize>,
     uniforms: Vec<(Ustr, GlslTy)>,
     samplers: Vec<(usize, Ustr)>,
+    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
+    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
+    /// MRT outputs: `Some` when the entry returns a value struct of all-Vec4
+    /// fields -> one `layout(location=N) out vec4 <field>` per field, in
+    /// declaration order. `None` = the single implicit `FragColor` output.
+    outputs: Option<Vec<(Ustr, GlslTy)>>,
 }
 
 fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
     annos.iter().any(|a| a.name.name.as_str() == name)
+}
+
+/// The int argument of an `@name(N)` annotation, if present (arity/type are
+/// registry-validated upstream).
+fn anno_int(annos: &[bone_semantic::hir::Annotation], name: &str) -> Option<i64> {
+    annos
+        .iter()
+        .find(|a| a.name.name.as_str() == name)
+        .and_then(|a| a.args.first())
+        .and_then(|arg| match arg.value {
+            AnnoValue::Int(n) => Some(n),
+            _ => None,
+        })
+}
+
+/// The element type of a `UniformArray<T>`-typed param, or `None` when the type
+/// is not the uniform-array phantom. Elements are the corpus set (decision 3):
+/// float, int, Vec2, Vec4.
+fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<GlslTy>, CompilerError> {
+    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = ty_expr(ws, ty) else {
+        return Ok(None);
+    };
+    if n.as_str() != "UniformArray" {
+        return Ok(None);
+    }
+    let Some(first) = params.into_iter().next() else {
+        return Err(err(span, "shader: UniformArray needs an element type argument"));
+    };
+    match glsl_ty(ws, ty.with_idx(first), span, "uniform-array element")? {
+        t @ (GlslTy::Float | GlslTy::Int | GlslTy::Vec2 | GlslTy::Vec4) => Ok(Some(t)),
+        other => Err(err(span, format!(
+            "shader: UniformArray element type `{}` is not supported (allowed: float, int, Vec2, Vec4)",
+            other.name()
+        ))),
+    }
 }
 
 /// The [`StructDef`] behind a nominal type, if any.
@@ -1761,6 +1939,9 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
         if fty == GlslTy::Sampler2D {
             return Err(err(span, format!("shader: {what} field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
         }
+        if fty == GlslTy::Bvec3 {
+            return Err(err(span, format!("shader: {what} field `{}` cannot be a bvec3 -- bool-vector {what}s are unsupported (bvec3 is local/temp only)", fd.name)));
+        }
         out.push((fd.name, fty));
     }
     Ok(out)
@@ -1771,9 +1952,17 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
 /// return type is the varyings struct.
 fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, CompilerError> {
     let span = f.name_span;
-    let (mut per_vertex, mut instanced, mut uniform_params, mut samplers) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut per_vertex, mut instanced, mut uniform_params, mut samplers, mut arrays) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, pd) in f.param_decls.iter().enumerate() {
+        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
+            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
+                "shader vertex: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
+                pd.name
+            )))?;
+            arrays.push((i, pd.name, elem, n));
+            continue;
+        }
         match glsl_ty(ws, pd.ty, span, "parameter") {
             Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
             Ok(other) => {
@@ -1819,7 +2008,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let varyings_ty = f
         .return_ty
         .ok_or_else(|| err(span, "shader vertex: entry must return a varyings value struct"))?;
-    Ok(VertexShape { attr_params, attrs, uniform_params, uniforms, samplers, varyings_ty })
+    Ok(VertexShape { attr_params, attrs, uniform_params, uniforms, samplers, arrays, varyings_ty })
 }
 
 /// Classify the varyings struct: a required `position: Vec4` field (-> gl_Position,
@@ -1832,6 +2021,9 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
     let mut varyings = Vec::new();
     for fd in &sd.fields {
         let fty = glsl_ty(ws, fd.ty, span, &format!("varying `{}`", fd.name))?;
+        if fty == GlslTy::Bvec3 {
+            return Err(err(span, format!("shader: varying `{}` cannot be a bvec3 (GLSL forbids bool-vector interpolants) -- bvec3 is local/temp only", fd.name)));
+        }
         if fd.name.as_str() == "position" {
             if fty != GlslTy::Vec4 {
                 return Err(err(span, "shader: the varyings `position` field must be Vec4 (it becomes gl_Position)"));
@@ -1872,8 +2064,17 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     if nominal_name(ws, first.ty).is_none() || nominal_name(ws, first.ty) != nominal_name(ws, vert_varyings_ty) {
         return Err(err(span, "shader fragment: the first param must be the varyings struct (the vertex entry's return type) -- the pair's varyings types do not match"));
     }
-    let (mut uniform_params, mut uniforms, mut samplers) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut uniform_params, mut uniforms, mut samplers, mut arrays) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
+        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
+            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
+                "shader fragment: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
+                pd.name
+            )))?;
+            arrays.push((i, pd.name, elem, n));
+            continue;
+        }
         match glsl_ty(ws, pd.ty, span, "parameter") {
             Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
             Ok(other) => {
@@ -1891,30 +2092,55 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     if uniform_params.len() > 1 {
         return Err(err(span, "shader fragment: at most one @uniform struct param is allowed"));
     }
-    match f.return_ty.map(|rt| glsl_ty(ws, rt, span, "return")) {
-        Some(Ok(GlslTy::Vec4)) => {}
-        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor)")),
-    }
-    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers })
+    // Return: a single Vec4 (implicit FragColor) OR an all-Vec4 value struct
+    // (MRT -- one `layout(location=N) out vec4 <field>` per field, in order).
+    let outputs = match f.return_ty.map(|rt| (rt, glsl_ty(ws, rt, span, "return"))) {
+        Some((_, Ok(GlslTy::Vec4))) => None,
+        Some((rt, Err(_))) => {
+            let sd = struct_def_of(ws, rt).ok_or_else(|| {
+                err(span, "shader fragment: the return type must be Vec4 (FragColor) or a value struct of Vec4 fields (MRT outputs)")
+            })?;
+            let mut outs = Vec::new();
+            for fd in &sd.fields {
+                let fty = glsl_ty(ws, fd.ty, span, &format!("MRT output `{}`", fd.name))?;
+                if fty != GlslTy::Vec4 {
+                    return Err(err(span, format!(
+                        "shader fragment: MRT output `{}` ({}) must be Vec4 (each output is a `layout(location=N) out vec4`)",
+                        fd.name, fty.name()
+                    )));
+                }
+                outs.push((fd.name, fty));
+            }
+            if outs.is_empty() {
+                return Err(err(span, "shader fragment: the MRT output struct must have at least one Vec4 field"));
+            }
+            Some(outs)
+        }
+        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor) or a value struct of Vec4 fields (MRT outputs)")),
+    };
+    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers, arrays, outputs })
 }
 
-/// Reject fragment-only GPU builtins (frag_coord/fwidth/discard) reached from the
-/// vertex stage.
+/// Reject GPU builtins reached from the wrong stage: frag_coord/fwidth/discard
+/// are fragment-only, vertex_id is vertex-only.
 fn reject_stage_violations<'a>(
     ws: &Workspace,
     stage: Stage,
     bodies: impl Iterator<Item = &'a MirFunc>,
     span: Span,
 ) -> Result<(), CompilerError> {
-    if stage != Stage::Vertex {
-        return Ok(());
-    }
     for mf in bodies {
         for (_, inst) in mf.insts.iter() {
             if let Inst::Call { func, .. } = inst {
                 let n = ws.module(func.module).functions[func.func].name;
-                if matches!(n.as_str(), "fwidth" | "frag_coord" | "discard") {
-                    return Err(err(span, format!("shader vertex: `{n}()` is a fragment-stage builtin, not available in the vertex stage")));
+                match (stage, n.as_str()) {
+                    (Stage::Vertex, "fwidth" | "frag_coord" | "discard") => {
+                        return Err(err(span, format!("shader vertex: `{n}()` is a fragment-stage builtin, not available in the vertex stage")));
+                    }
+                    (Stage::Fragment, "vertex_id") => {
+                        return Err(err(span, format!("shader fragment: `{n}()` is a vertex-stage builtin, not available in the fragment stage")));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2003,7 +2229,11 @@ fn emit_vertex_stage(
         global_params: v.attr_params.iter().copied().chain(v.uniform_params.iter().copied()).collect(),
         uniform_fields: v.attrs.iter().copied().chain(v.uniforms.iter().copied()).collect(),
         samplers: v.samplers.clone(),
-        vertex_out: Some(varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect()),
+        arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
+        main_out: Some(MainOut {
+            fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect(),
+            position_is_gl: true,
+        }),
     };
     let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Vertex)?;
 
@@ -2012,9 +2242,12 @@ fn emit_vertex_stage(
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
     out.push('\n');
-    if !v.uniforms.is_empty() {
+    if !v.uniforms.is_empty() || !v.arrays.is_empty() {
         for (n, t) in &v.uniforms {
             out.push_str(&format!("uniform {} {};\n", t.name(), n));
+        }
+        for (_, n, t, cap) in &v.arrays {
+            out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
         }
         out.push('\n');
     }
@@ -2037,11 +2270,19 @@ fn emit_fragment_stage(
     varyings: &VaryingsShape,
 ) -> Result<String, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
+    // MRT: the entry is emitted as `void main()` destructuring its returned
+    // output struct into the `layout(location=N) out` globals (like the vertex
+    // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
+    let main_out = fs.outputs.as_ref().map(|outs| MainOut {
+        fields: outs.iter().copied().collect(),
+        position_is_gl: false,
+    });
     let shape = EntryShape {
         global_params: std::iter::once(fs.varyings_param).chain(fs.uniform_params.iter().copied()).collect(),
         uniform_fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).chain(fs.uniforms.iter().copied()).collect(),
         samplers: fs.samplers.clone(),
-        vertex_out: None,
+        arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
+        main_out,
     };
     let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Fragment)?;
     reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
@@ -2051,9 +2292,20 @@ fn emit_fragment_stage(
         let q = if *flat { "flat " } else { "" };
         out.push_str(&format!("{q}in {} {};\n", t.name(), n));
     }
-    out.push_str("out vec4 FragColor;\n\n");
+    match &fs.outputs {
+        None => out.push_str("out vec4 FragColor;\n\n"),
+        Some(outs) => {
+            for (loc, (n, _)) in outs.iter().enumerate() {
+                out.push_str(&format!("layout(location = {loc}) out vec4 {n};\n"));
+            }
+            out.push('\n');
+        }
+    }
     for (n, t) in &fs.uniforms {
         out.push_str(&format!("uniform {} {};\n", t.name(), n));
+    }
+    for (_, n, t, cap) in &fs.arrays {
+        out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
     }
     for (_, n) in &fs.samplers {
         out.push_str(&format!("uniform sampler2D {};\n", n));
@@ -2061,8 +2313,12 @@ fn emit_fragment_stage(
     out.push('\n');
     out.push_str(&helpers);
     out.push_str(&emit_fn_def_with(ws, overloaded, fref, &mf, Some(&shape))?);
-    out.push('\n');
-    out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
+    // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
+    // MRT: the entry IS `void main()` (destructured), so no wrapper.
+    if fs.outputs.is_none() {
+        out.push('\n');
+        out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
+    }
     Ok(out)
 }
 
@@ -2072,14 +2328,24 @@ fn emit_fragment_stage(
 /// a vertex/fragment same-name pair is a link error (or a silent alias), never
 /// two distinct bindings. Varyings are one name in both stages (inserted once).
 fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &FragShape, span: Span) -> Result<(), CompilerError> {
-    let mut seen: HashSet<Ustr> =
-        [Ustr::from("gl_Position"), Ustr::from("FragColor")].into_iter().collect();
+    // gl_Position is always reserved. `FragColor` is reserved only for the
+    // single-output form -- with MRT the outputs are explicit named fields (one
+    // of which may itself be `FragColor`), so they go through the collision check
+    // like any other name rather than being pre-seeded.
+    let mut seen: HashSet<Ustr> = [Ustr::from("gl_Position")].into_iter().collect();
+    if fs.outputs.is_none() {
+        seen.insert(Ustr::from("FragColor"));
+    }
+    let mrt_outputs = fs.outputs.iter().flatten().map(|&(n, _)| n);
     let names = v.attrs.iter().map(|&(n, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n)| n))
+        .chain(v.arrays.iter().map(|&(_, n, ..)| n))
         .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
-        .chain(fs.samplers.iter().map(|&(_, n)| n));
+        .chain(fs.samplers.iter().map(|&(_, n)| n))
+        .chain(fs.arrays.iter().map(|&(_, n, ..)| n))
+        .chain(mrt_outputs);
     for n in names {
         if !seen.insert(n) {
             return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
@@ -2089,7 +2355,7 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
 }
 
 /// A2: compile a `@shader(vertex)` + `@shader(fragment)` pair into one
-/// `#ifdef VERTEX`/`#ifdef PIXEL` file (docs/glsl-a2-plan.md). The vertex entry's
+/// `#ifdef VERTEX`/`#ifdef PIXEL` file (docs/shaders.md). The vertex entry's
 /// return type (the varyings value struct) must be exactly the fragment entry's
 /// first param type. Vertex params are classified by annotation: `@attr` (per-
 /// vertex attribute struct), `@instance` (per-instance attribute divisor), and
@@ -2123,10 +2389,7 @@ pub fn emit_shader_pipeline(
     let vertex_block = emit_vertex_stage(ws, &scx, &overloaded, vfref, &vshape, &varyings)?;
     let pixel_block = emit_fragment_stage(ws, &scx, &overloaded, ffref, &fshape, &varyings)?;
 
-    let (version, precision) = match profile {
-        GlslProfile::Core330 => ("#version 330 core", ""),
-        GlslProfile::Es300 => ("#version 300 es", "precision highp float;\n\n"),
-    };
+    let (version, precision) = profile_header(profile);
     Ok(format!(
         "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
     ))
@@ -2135,7 +2398,12 @@ pub fn emit_shader_pipeline(
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
 /// root compiles as a whole-shader fragment entry (exactly one root), plain
 /// roots as a fn library.
-pub fn emit_shader(ws: &Workspace, mid: ModuleId, roots: &[String]) -> Result<String, CompilerError> {
+pub fn emit_shader(
+    ws: &Workspace,
+    mid: ModuleId,
+    roots: &[String],
+    profile: GlslProfile,
+) -> Result<String, CompilerError> {
     let annotated = roots
         .iter()
         .filter(|r| {
@@ -2146,12 +2414,122 @@ pub fn emit_shader(ws: &Workspace, mid: ModuleId, roots: &[String]) -> Result<St
         .count();
     match annotated {
         0 => emit_shader_library(ws, mid, roots),
-        1 if roots.len() == 1 => emit_shader_entry(ws, mid, &roots[0]),
+        1 if roots.len() == 1 => emit_shader_entry(ws, mid, &roots[0], profile),
         _ => Err(err(
             Span::default(),
             "rock shader: a @shader(fragment) entry compiles alone -- pass exactly one root fn",
         )),
     }
+}
+
+/// The scalar return kind of a value-test fn -- selects the readback texture
+/// format on the GL side (int/bool -> R32I, float -> R32F) and the fragment
+/// output declaration.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ValueTestRet {
+    Int,
+    Float,
+    Bool,
+}
+
+impl ValueTestRet {
+    /// The GL runner's tag for this kind (matches the JSON job protocol).
+    pub fn tag(self) -> &'static str {
+        match self {
+            ValueTestRet::Int => "int",
+            ValueTestRet::Float => "float",
+            ValueTestRet::Bool => "bool",
+        }
+    }
+}
+
+/// A complete GLSL shader pair driving one `@test(returns = ...)` value test
+/// (`docs/multi-backend-testing-plan.md` G1). The fragment shader wraps the
+/// emitted root fn and writes its scalar result to `layout(location = 0)`; the
+/// vertex shader draws a fullscreen triangle (no vertex attributes). Both carry
+/// the profile's `#version` line so the GL runner compiles them as one program.
+#[derive(Debug)]
+pub struct ValueTestShaders {
+    pub vertex: String,
+    pub fragment: String,
+    pub ret: ValueTestRet,
+}
+
+/// The profile's `#version` line plus the fragment-stage precision preamble
+/// (ES needs an explicit float/int precision; core does not).
+fn profile_header(profile: GlslProfile) -> (&'static str, &'static str) {
+    match profile {
+        GlslProfile::Core330 => ("#version 330 core", ""),
+        GlslProfile::Es300 => ("#version 300 es", "precision highp float;\nprecision highp int;\n"),
+    }
+}
+
+/// Emit the vertex+fragment GLSL pair for a scalar-returning `@test(returns=)`
+/// fn under `profile`. The root must take no parameters (a `@test` fn) and
+/// return `int`/`float`/`bool`; anything else -- a non-tier-0 return, a param,
+/// or a body outside the tier-0 profile -- rejects with a spanned
+/// `CompilerError` (the G1 two-tier SKIP reason). No fallback: an unmappable
+/// intrinsic or non-scalar shape is a rejection, never a guess.
+pub fn emit_value_test(
+    ws: &Workspace,
+    mid: ModuleId,
+    root: &str,
+    profile: GlslProfile,
+) -> Result<ValueTestShaders, CompilerError> {
+    let fref = resolve_root(ws, mid, root)?;
+    let f = &ws.module(fref.module).functions[fref.func];
+    if !f.param_decls.is_empty() {
+        return Err(err(
+            f.name_span,
+            "value test: the root fn must take no parameters (a @test fn)",
+        ));
+    }
+    let ret = match f.return_ty.map(|rt| glsl_ty(ws, rt, f.name_span, "return")) {
+        Some(Ok(GlslTy::Int)) => ValueTestRet::Int,
+        Some(Ok(GlslTy::Float)) => ValueTestRet::Float,
+        Some(Ok(GlslTy::Bool)) => ValueTestRet::Bool,
+        Some(Ok(other)) => {
+            return Err(err(
+                f.name_span,
+                format!(
+                    "value test: return type `{}` is not a scalar (only int/float/bool return \
+                     values are read back today)",
+                    other.name()
+                ),
+            ))
+        }
+        _ => {
+            return Err(err(
+                f.name_span,
+                "value test: the root fn must return int/float/bool",
+            ))
+        }
+    };
+
+    // The fn library runs the strict tier-0 profile pass; a body outside the
+    // subset rejects here (the SKIP reason -- the A1 fn-emission work list).
+    let defs = emit_shader_library(ws, mid, std::slice::from_ref(&root.to_string()))?;
+    let overloaded = compute_overloaded_names(ws);
+    let call = mangle_fn(ws, f, &overloaded);
+
+    let (version, precision) = profile_header(profile);
+    let (out_ty, out_expr) = match ret {
+        ValueTestRet::Int => ("int", format!("{call}()")),
+        ValueTestRet::Float => ("float", format!("{call}()")),
+        ValueTestRet::Bool => ("int", format!("({call}() ? 1 : 0)")),
+    };
+    let fragment = format!(
+        "{version}\n{precision}\n{defs}\nlayout(location = 0) out {out_ty} _rock_value_out;\n\
+         void main() {{\n  _rock_value_out = {out_expr};\n}}\n"
+    );
+    // A fullscreen triangle from gl_VertexID -- no vertex buffers/attributes, so
+    // the runner binds only an empty VAO. gl_VertexID is core since 3.0 / ES 3.0.
+    let vertex = format!(
+        "{version}\nvoid main() {{\n  \
+         vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  \
+         gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n}}\n"
+    );
+    Ok(ValueTestShaders { vertex, fragment, ret })
 }
 
 /// True iff `root` resolves to a `@shader(vertex)` fn -- the CLI routes to the
@@ -2160,6 +2538,15 @@ pub fn is_vertex_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool 
     resolve_root(ws, mid, root)
         .ok()
         .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("vertex"))
+}
+
+/// True iff `root` resolves to a `@shader(fragment)` fn -- the CLI uses this to
+/// admit `--profile` for the single-root fullscreen form while still rejecting
+/// it for the route-B fn library (which emits no `#version` line to switch).
+pub fn is_fragment_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> bool {
+    resolve_root(ws, mid, root)
+        .ok()
+        .is_some_and(|fref| shader_stage(&ws.module(fref.module).functions[fref.func]) == Some("fragment"))
 }
 
 /// The `@shader(<stage>)` annotation's stage argument, if the fn carries one.
@@ -2228,5 +2615,87 @@ mod assertion_flip_tests {
         let r = emit_fn_def(&ws, &overloaded, fref, &mf);
         let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
         assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
+    }
+}
+
+#[cfg(test)]
+mod value_test_shader {
+    use super::*;
+    use ustr::Ustr;
+
+    fn build_ws(src: &str) -> (Workspace, ModuleId) {
+        let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|f| {
+                let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            })
+            .collect();
+        modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+        let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("mid");
+        (ws, mid)
+    }
+
+    #[test]
+    fn int_return_wraps_root_and_writes_int_output() {
+        let (ws, mid) = build_ws("fn t() -> int { return min(3, 5) }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
+        assert_eq!(s.ret, ValueTestRet::Int);
+        assert!(s.fragment.starts_with("#version 330 core\n"), "{}", s.fragment);
+        assert!(s.fragment.contains("layout(location = 0) out int _rock_value_out;"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
+        assert!(s.fragment.contains("int t()"), "callee def present: {}", s.fragment);
+        assert!(s.vertex.contains("gl_VertexID"), "{}", s.vertex);
+    }
+
+    #[test]
+    fn float_return_uses_r32f_shape() {
+        let (ws, mid) = build_ws("fn t() -> float { return clamp(9.0, 0.0, 5.0) }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
+        assert_eq!(s.ret, ValueTestRet::Float);
+        assert!(s.fragment.contains("out float _rock_value_out;"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
+    }
+
+    #[test]
+    fn bool_return_writes_zero_or_one_to_int_output() {
+        let (ws, mid) = build_ws("fn t() -> bool { return 3.0 == 3.0 }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
+        assert_eq!(s.ret, ValueTestRet::Bool);
+        assert!(s.fragment.contains("out int _rock_value_out;"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = (t() ? 1 : 0);"), "{}", s.fragment);
+    }
+
+    #[test]
+    fn es_profile_carries_version_and_precision() {
+        let (ws, mid) = build_ws("fn t() -> float { return abs(-6.5) }");
+        let s = emit_value_test(&ws, mid, "t", GlslProfile::Es300).expect("emit");
+        assert!(s.fragment.starts_with("#version 300 es\n"), "{}", s.fragment);
+        assert!(s.fragment.contains("precision highp float;"), "{}", s.fragment);
+        assert!(s.vertex.starts_with("#version 300 es\n"), "{}", s.vertex);
+    }
+
+    #[test]
+    fn parametered_root_rejects() {
+        let (ws, mid) = build_ws("fn t(x: int) -> int { return x }");
+        let e = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect_err("params reject");
+        assert!(e.message.contains("no parameters"), "{}", e.message);
+    }
+
+    #[test]
+    fn non_scalar_return_rejects() {
+        let (ws, mid) = build_ws("fn t() -> Vec2 { return vec2(1.0, 2.0) }");
+        let e = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect_err("vec reject");
+        assert!(e.message.contains("not a scalar"), "{}", e.message);
+    }
+
+    #[test]
+    fn body_outside_tier0_rejects_with_profile_reason() {
+        // A string is well above tier 0 -- the fn library profile pass rejects,
+        // surfacing the SKIP reason rather than emitting a guess.
+        let (ws, mid) = build_ws("fn t() -> int { let s = \"hi\"; return 1 }");
+        let e = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect_err("string reject");
+        assert!(!e.message.is_empty(), "reason present");
     }
 }

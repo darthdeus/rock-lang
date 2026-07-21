@@ -640,3 +640,27 @@ fn static_keyword_colors_as_keyword_not_variable() {
         "the `static` keyword must color as keyword: {toks:?}"
     );
 }
+
+#[test]
+fn named_arg_labels_color_as_parameter_not_a_colliding_function() {
+    // A named-argument label (`width:` in `make(width: 3, ..)`) names a
+    // PARAMETER, and must color as one consistently -- even when a same-named
+    // global fn exists (`fn width()`), which the workspace name-map would
+    // otherwise claim as FUNCTION. Pre-fix: `width:` colored FUNCTION while
+    // `height:` colored VARIABLE, so the labels were inconsistent (mag
+    // trail_new call: `width` differed from the rest). Both must be PARAMETER.
+    let src = "fn width() -> int { return 5 }\n\
+               fn make(width: int, height: int) -> int { return width + height }\n\
+               fn r() -> int {\n    return make(\n        width: 3,\n        height: 4,\n    )\n}\n";
+    let toks = decode(src);
+    assert_eq!(
+        type_at(&toks, Position::new(4, 8)),
+        Some(SemanticTokenType::PARAMETER),
+        "named-arg label `width:` must be PARAMETER, not the colliding fn: {toks:?}"
+    );
+    assert_eq!(
+        type_at(&toks, Position::new(5, 8)),
+        Some(SemanticTokenType::PARAMETER),
+        "named-arg label `height:` must be PARAMETER: {toks:?}"
+    );
+}

@@ -992,6 +992,36 @@ pub fn do_perf(
     Ok(())
 }
 
+/// Wall-clock watchdog for a `rock frame` run: a startup allowance plus a
+/// per-frame budget, so the ceiling tracks the work actually requested. A flat
+/// budget starved slow-booting games -- mag spends ~1.5s registering props and
+/// loading the level before frame 1, leaving `-n 100` at ~24ms/frame no room.
+/// ROCK_FRAME_TIMEOUT_SECS overrides it outright.
+fn frame_timeout(frames: usize, dump_state: bool, app_args: &[String]) -> Duration {
+    if let Some(secs) = std::env::var("ROCK_FRAME_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+
+    const STARTUP: Duration = Duration::from_secs(5);
+    const PER_FRAME: Duration = Duration::from_millis(50);
+
+    // app_args (headless video extraction) and dump_state (JSON-serializing
+    // every global) add work the frame count doesn't predict, so they raise the
+    // floor -- a big -n still outgrows it.
+    let floor = if !app_args.is_empty() {
+        Duration::from_secs(30)
+    } else if dump_state {
+        Duration::from_secs(15)
+    } else {
+        Duration::ZERO
+    };
+
+    (STARTUP + PER_FRAME * frames as u32).max(floor)
+}
+
 /// Run the game for a specified number of frames and take a screenshot
 ///
 /// This is useful for debugging and testing - compiles the game and runs it
@@ -1050,24 +1080,7 @@ pub fn do_one_frame(
     // Use spawn instead of output to implement timeout
     let mut child = cmd.spawn()?;
 
-    // Allow more time when app_args are present (the app may have its
-    // own work to do, e.g. headless video extraction), or when
-    // dump_state is set (JSON serialization of all globals can be slow).
-    // ROCK_FRAME_TIMEOUT_SECS overrides the wall-clock watchdog for known
-    // long-running `rock frame` jobs (e.g. `just pac bake`, which renders
-    // thousands of frames at ~60fps and legitimately exceeds 30s).
-    let timeout_duration = if let Some(secs) = std::env::var("ROCK_FRAME_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        Duration::from_secs(secs)
-    } else if !app_args.is_empty() {
-        Duration::from_secs(30)
-    } else if dump_state {
-        Duration::from_secs(15)
-    } else {
-        Duration::from_secs(3)
-    };
+    let timeout_duration = frame_timeout(frames, dump_state, app_args);
     let process_result = ProcessManager::wait_with_timeout(&mut child, timeout_duration)?;
 
     // Print stdout and stderr.
@@ -1185,7 +1198,8 @@ pub fn do_replay_window(
 mod tests {
     use super::{
         apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        flight_recorder_for, frame_exit_result, is_compiler_source, FlightRecorder,
+        flight_recorder_for, frame_exit_result, frame_timeout, is_compiler_source,
+        FlightRecorder,
     };
 
     /// `--no-record` disables the flight recorder outright: no config, and no
@@ -1357,5 +1371,33 @@ mod tests {
         assert!(!is_compiler_source("stone/engine/lib.rock"));
         // A crate whose name merely contains a prefix mid-path isn't matched.
         assert!(!is_compiler_source("some/rocky/src/x.rs"));
+    }
+
+    /// The `rock frame` watchdog scales with the frames requested: a flat
+    /// budget starved any slow-booting game (mag spends ~1.5s on prop
+    /// registration + level load before frame 1, so `-n 100` at ~24ms/frame
+    /// needs ~3.9s and died under the old flat 3s).
+    #[test]
+    fn frame_timeout_scales_with_frame_count() {
+        let secs = |n| frame_timeout(n, false, &[]).as_secs_f64();
+
+        // Startup allowance dominates a short run; still bounded, so a genuine
+        // hang on `-n 5` fails fast rather than waiting out a long budget.
+        assert_eq!(secs(1), 5.05, "1 frame = 5s startup + 50ms");
+        assert!(secs(5) < 6.0, "short runs stay tight");
+
+        // The case that regressed: mag's real numbers now fit.
+        assert_eq!(secs(100), 10.0, "5s startup + 100 * 50ms");
+        assert!(secs(100) > 3.9, "must exceed mag's measured -n 100 cost");
+
+        // Strictly increasing in frames -- no cap that reintroduces a flat wall.
+        assert!(secs(1000) > secs(100), "budget keeps growing with -n");
+
+        // dump_state / app_args floors still apply, and never shrink the budget.
+        assert!(frame_timeout(1, true, &[]) >= frame_timeout(1, false, &[]));
+        assert!(
+            frame_timeout(10_000, false, &[]) >= frame_timeout(10_000, true, &[]),
+            "a large -n outgrows the dump_state floor rather than being clamped to it"
+        );
     }
 }

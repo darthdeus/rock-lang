@@ -414,6 +414,24 @@ impl CommandContext {
         }
     }
 
+    /// Dispatch through the `glsl` value-test executor (bone type-check + GLSL
+    /// per-value-test emission, run headlessly on the GPU under both profiles).
+    /// Serves `test` only -- the `serves` table gates everything else.
+    fn run_command_glsl(&self) -> Result<()> {
+        match self.args.command {
+            CliCommand::Test => {
+                let files = self.get_test_files()?;
+                crate::glsl_test::glsl_test(&files)
+            }
+            other => unreachable!(
+                "glsl dispatch reached unsupported command {:?}; the capability \
+                 gate should have rejected it — Backend::supported_commands and \
+                 run_command_glsl have diverged",
+                other
+            ),
+        }
+    }
+
     /// Dispatch through the `skull` backend (bone type-check + skull codegen ->
     /// Lua, executed via luajit). Only the codegen-capable commands route here;
     /// anything else is rejected, like the bone path.
@@ -426,7 +444,10 @@ impl CommandContext {
             }
             CliCommand::Compile | CliCommand::CompileSingle | CliCommand::TestCompile => {
                 let file = self.get_required_file("compile")?;
-                skull_backend::skull_compile_single(file, self.get_compile_output()?)
+                // --profile selects the GLSL profile baked into shader
+                // registrations (docs/shader-mobile-port-plan.md A2).
+                let profile = skull_backend::parse_glsl_profile(self.args.profile.as_deref())?;
+                skull_backend::skull_compile_single(file, self.get_compile_output()?, profile)
             }
             CliCommand::Run => {
                 let file = self.get_required_file("run")?;
@@ -482,6 +503,11 @@ impl CommandContext {
                 self.args.output.clone(),
                 self.args.profile.clone(),
             );
+        }
+        // shader-validate compiles+links registered shader pairs on real GL
+        // contexts (both profiles); backend-agnostic like shader.
+        if self.args.command == CliCommand::ShaderValidate {
+            return crate::glsl_test::shader_validate(&self.args.files);
         }
         // iter-parse is a front-end (tokenize+parse) profiling loop; the
         // front-end is backend-independent, so dispatch before the backend switch.
@@ -635,6 +661,10 @@ impl CommandContext {
         if self.args.backend == crate::Backend::Js {
             self.require_backend_support()?;
             return self.run_command_js();
+        }
+        if self.args.backend == crate::Backend::Glsl {
+            self.require_backend_support()?;
+            return self.run_command_glsl();
         }
         self.require_backend_support()?;
         self.run_command_skull()

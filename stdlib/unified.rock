@@ -1241,12 +1241,23 @@ fn expect<T>(value: T?, message: string) -> T {
     return phantom()
 }
 
-// Common utility functions
-@intrinsic fn max<T>(a: T, b: T) -> T {
+// Common utility functions. min/max are concrete int/float overloads, not
+// generic: an unconstrained `min<T>` shape-matches every two-arg call and
+// ties with specialized overloads (`Vec2.min`), and its body only ever
+// worked for ordered primitives anyway.
+@intrinsic @pure fn max(a: int, b: int) -> int {
     if a > b { return a } else { return b }
 }
 
-@intrinsic fn min<T>(a: T, b: T) -> T {
+@intrinsic @pure fn max(a: float, b: float) -> float {
+    if a > b { return a } else { return b }
+}
+
+@intrinsic @pure fn min(a: int, b: int) -> int {
+    if a < b { return a } else { return b }
+}
+
+@intrinsic @pure fn min(a: float, b: float) -> float {
     if a < b { return a } else { return b }
 }
 
@@ -1744,6 +1755,7 @@ inline(lua) fn random_seed(seed: int) = """
 @intrinsic @pure @inline inline(lua) fn cos(x: float) -> float = "math.cos(x)"
 @intrinsic @pure @inline inline(lua) fn tan(x: float) -> float = "math.tan(x)"
 @intrinsic @pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
+@intrinsic @pure @inline inline(lua) fn exp(x: float) -> float = "math.exp(x)"
 @intrinsic @pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
 @intrinsic @pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"
 @intrinsic @pure fn round(x: float) -> float { return floor(x + 0.5) }
@@ -2603,6 +2615,7 @@ fn ease_in_out_circ(t: float) -> float {
 // ease_out_quad, ...) is applied by consumers at the read site.
 // Engine sugar stepping against the frame clock: Envelope.step (stone).
 
+// TODO: value type? or maybe even make this "flat included"? (like in Jai)
 struct Envelope {
     value: float = 0,
     attack: float,

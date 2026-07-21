@@ -1,5 +1,5 @@
 //! Coverage for the `rock shader <file> <vert> <frag> [--profile]` two-root
-//! vertex+fragment pipeline form (docs/glsl-a2-plan.md decision 7). Shells out
+//! vertex+fragment pipeline form (docs/shaders.md). Shells out
 //! to the real `rock` binary to exercise the full clap parse + dispatch path.
 //!
 //! The single-root A1 fragment form and the fn-library form stay unchanged

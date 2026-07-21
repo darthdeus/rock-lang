@@ -133,7 +133,7 @@ fn validate_one(
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
         }
-        // GLSL vertex-entry input roles (docs/glsl-a2-plan.md): the value-struct
+        // GLSL vertex-entry input roles (docs/shaders.md): the value-struct
         // param they mark is per-vertex attribute data (`@attr`) or a uniform
         // block (`@uniform`). `@instance` is the per-instance attribute divisor.
         "attr" | "uniform" => {

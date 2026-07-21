@@ -443,6 +443,9 @@ pub fn infer_expr_used(
         }
 
         Expr::IncDec { target, .. } => {
+            if let Expr::FieldAccess { base, field } = c.body.expr_arena[*target] {
+                reject_swizzle_write(c, gamma, base, field, expr_span)?;
+            }
             // Same const-rebind rejection as Expr::Assign/CompoundAssign;
             // `CONST++` is a write with extra steps.
             if let Expr::Global(name) = c.body.expr_arena[*target] {
@@ -1263,6 +1266,9 @@ pub fn infer_expr_used(
                     );
                 }
             }
+            if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
+                reject_swizzle_write(c, gamma, base, field, expr_span)?;
+            }
             // Writing any refined path (local field, global, or global field)
             // drops its refinement; re-established below if the stored value is
             // non-null. A whole local is handled via `binding_types` instead.
@@ -1458,6 +1464,10 @@ pub fn infer_expr_used(
                         name
                     );
                 }
+            }
+
+            if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
+                reject_swizzle_write(c, gamma, base, field, expr_span)?;
             }
 
             let target_ty = infer_expr(c, gamma, target)?;

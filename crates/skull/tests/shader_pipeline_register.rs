@@ -1,5 +1,5 @@
 //! Driver contract for the `rock_shader` in-game shader-pipeline intrinsic
-//! (docs/glsl-a3-integration-plan.md A3a). A call `rock_shader(vert, frag)`
+//! (docs/shaders.md). A call `rock_shader(vert, frag)`
 //! (two direct references to top-level `@shader` fns) collapses at emit to the
 //! pipeline key const `"<vert>+<frag>"`, and the driver emits exactly one
 //! top-level `__rock_shader_register("<key>", <glsl>)` per DISTINCT pair -- N
@@ -14,7 +14,8 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use common::{emit_module, function_body, ws_with_stdlib};
-use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+use skull::mir_emit::{emit_full, emit_full_with_profile, emit_incremental, emit_overlay};
+use skull_codegen_glsl::GlslProfile;
 
 /// One shared vertex + one fragment, referenced from TWO call sites (two fns).
 const SRC: &str = r#"
@@ -70,6 +71,47 @@ fn registration_carries_generated_glsl() {
 #[test]
 fn reemission_is_byte_identical() {
     assert_eq!(emit_module(SRC), emit_module(SRC), "re-emission must be byte-identical");
+}
+
+// -- Profile (docs/shader-mobile-port-plan.md A2): the GLSL profile is a
+// property of the whole build, chosen at emit time and held in the emit cache
+// so every reassembly path re-emits registrations under the same profile. --
+
+/// An ES300 build bakes `#version 300 es` + precision preambles into the
+/// registration; the default `emit_full` stays Core330 byte-for-byte.
+#[test]
+fn registration_es300_profile() {
+    let ws = ws_with_stdlib(SRC);
+    let mid = test_mid(&ws);
+    let es = emit_full_with_profile(&ws, mid, GlslProfile::Es300).expect("emit_full es300").0;
+    let at = es.lua.find("__rock_shader_register(").expect("a registration");
+    let reg = &es.lua[at..];
+    assert!(reg.contains("#version 300 es"), "es300 version line missing:\n{reg}");
+    assert!(reg.contains("precision highp float;"), "precision preamble missing:\n{reg}");
+    assert!(!reg.contains("#version 330 core"), "desktop version residue:\n{reg}");
+
+    let default = emit_full(&ws, mid).expect("emit_full default").0;
+    assert!(default.lua.contains("#version 330 core"), "default build must stay Core330");
+    assert_ne!(es.lua, default.lua);
+}
+
+/// A body edit under an ES300 build: the hot-reload overlay re-emits the
+/// registration under the BUILD's profile, not the default -- the cache carries
+/// the profile, so a reload can never flip a mobile chunk back to 330.
+#[test]
+fn overlay_reemits_under_build_profile() {
+    let ws1 = ws_with_stdlib(&src_with_frag("1.0"));
+    let mid1 = test_mid(&ws1);
+    let (_full1, mut cache) =
+        emit_full_with_profile(&ws1, mid1, GlslProfile::Es300).expect("emit_full es300");
+
+    let ws2 = ws_with_stdlib(&src_with_frag("0.5"));
+    let reinferred = vec![frag_body_id(&ws2)];
+    let overlay = emit_overlay(&ws2, &mut cache, &reinferred);
+    let at = overlay.lua.find("__rock_shader_register(").expect("overlay registration");
+    let reg = &overlay.lua[at..];
+    assert!(reg.contains("#version 300 es"), "overlay must keep the build profile:\n{reg}");
+    assert!(reg.contains("vec4(0.5, 0.0, 1.0, 1.0)"), "overlay must carry the edit:\n{reg}");
 }
 
 // -- Hot-reload parity: a reload re-`dofile`s the chunk (full) or the overlay

@@ -44,6 +44,7 @@ mod completion_sweep;
 mod iter_completion;
 mod iter_lsp;
 mod iter_parse;
+pub mod glsl_test;
 pub mod js_test;
 mod test_protocol;
 mod lsp_survey;
@@ -222,12 +223,20 @@ pub enum CliCommand {
     /// ignores `--backend`. See `backend_stats::do_backend_stats`.
     BackendStats,
     /// `rock shader <file.rock> <fn> [fn...] --output <file.glsl>` -- GLSL
-    /// function-library emission (route B, `docs/glsl-fn-emission.md`). Type-checks
+    /// function-library emission (route B, `docs/shaders.md`). Type-checks
     /// the file against the stdlib, then emits GLSL fn definitions for the named
     /// root fns + their reachable tier-0 callees, topologically ordered. Strict
     /// profile (rejects anything above tier 0). Backend-agnostic: dispatched before
     /// the backend switch, like `fmt`/`completions`.
     Shader,
+    /// `rock shader-validate <project> [project...]` -- compile+link every
+    /// `rock_shader` pair the project(s) register, on REAL GL contexts in both
+    /// profiles (330core + 300es), via `stone-glsl-runner`'s compile-only mode
+    /// (`docs/shader-mobile-port-plan.md` A3). A driver rejection is a FAIL
+    /// carrying the compile log; a no-display environment skips-with-log
+    /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
+    /// See `glsl_test::shader_validate`.
+    ShaderValidate,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -257,6 +266,7 @@ impl clap::ValueEnum for CliCommand {
             Self::IterCascade,
             Self::BackendStats,
             Self::Shader,
+            Self::ShaderValidate,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -302,6 +312,7 @@ impl CliCommand {
             Self::IterCascade => "iter-cascade",
             Self::BackendStats => "backend-stats",
             Self::Shader => "shader",
+            Self::ShaderValidate => "shader-validate",
         }
     }
 }
@@ -325,11 +336,18 @@ pub enum Backend {
     /// emitted via `skull-codegen-js` and run under node; tests outside the
     /// subset report SKIP(reason). Serves `test` only.
     Js,
+    /// `glsl` — the GLSL value-test executor (`docs/multi-backend-testing-plan.md`
+    /// G1): bone type-checks, then each `@test(returns = ...)` value test is
+    /// emitted as a fragment shader (both 330 core + 300 es profiles) and run on
+    /// the GPU headlessly, the returned scalar read back and compared host-side.
+    /// Tests with no `returns=` are outside the value class; tests whose GLSL
+    /// emission rejects report SKIP(reason). Serves `test` only.
+    Glsl,
 }
 
 impl clap::ValueEnum for Backend {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Bone, Self::Skull, Self::Js]
+        &[Self::Bone, Self::Skull, Self::Js, Self::Glsl]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
         Some(clap::builder::PossibleValue::new(self.name()))
@@ -343,6 +361,7 @@ impl Backend {
             Self::Bone => "bone",
             Self::Skull => "skull",
             Self::Js => "js",
+            Self::Glsl => "glsl",
         }
     }
 
@@ -352,6 +371,7 @@ impl Backend {
             Self::Bone => "bone is a typechecker with no codegen/runtime",
             Self::Skull => "skull is a bone-HIR codegen",
             Self::Js => "js is a JS-subset executor (node); no game/engine runtime",
+            Self::Glsl => "glsl is a GLSL value-test executor (GPU), not a program codegen",
         }
     }
 
@@ -377,6 +397,7 @@ impl Backend {
                 Test, Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Replay, Perf, Sim,
             ],
             Self::Js => &[Test, Run],
+            Self::Glsl => &[Test],
         }
     }
 
@@ -608,7 +629,7 @@ impl Args {
                 .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
-                .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), or `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset). Can also be set via ROCK_BACKEND=bone|skull|js."))
+                .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
             .arg(Arg::new("jv").long("jv").action(ArgAction::SetTrue)
                 .help("Run the game's luajit with -jv (verbose JIT trace log to stderr). Same as STONE_JV=1; works for stone/frame/run/perf/sim."))
             .arg(Arg::new("app_args").last(true).num_args(0..)
@@ -673,6 +694,7 @@ impl Args {
                         Some("bone") => Some(Backend::Bone),
                         Some("skull") => Some(Backend::Skull),
                         Some("js") => Some(Backend::Js),
+                        Some("glsl") => Some(Backend::Glsl),
                         _ => None,
                     }
                 });
@@ -741,6 +763,18 @@ mod caps_tests {
         let msg = Backend::Js.reject_reason(CliCommand::Stone).expect("js rejects stone");
         assert!(msg.contains("`js` backend cannot serve `stone`"), "{msg}");
         assert!(msg.contains("run"), "supported list names run: {msg}");
+    }
+
+    #[test]
+    fn glsl_serves_test_only() {
+        use CliCommand::*;
+        assert!(Backend::Glsl.serves(Test), "glsl serves test");
+        for cmd in [Compile, CompileSingle, TestCompile, Run, Watch, Stone, Frame, Perf, Sim] {
+            assert!(!Backend::Glsl.serves(cmd), "glsl should reject {:?}", cmd);
+        }
+        let msg = Backend::Glsl.reject_reason(CliCommand::Run).expect("glsl rejects run");
+        assert!(msg.contains("`glsl` backend cannot serve `run`"), "{msg}");
+        assert!(msg.contains("test"), "supported list names test: {msg}");
     }
 
     #[test]
