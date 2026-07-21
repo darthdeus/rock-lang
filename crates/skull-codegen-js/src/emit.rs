@@ -2854,6 +2854,13 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("string_char", 1) => Some("String.fromCharCode($1)"),
         // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
         ("parse_float", 1) => Some("__parse_float($1)"),
+        // RNG -> the `JS_RNG_RUNTIME` mulberry32 port (stream differs from Lua's
+        // splitmix by doctrine; the seedable/deterministic/serializable semantics
+        // hold). `env_var` -> the driver-provided node glue (`process.env`).
+        ("random", 0) => Some("__rock_random()"),
+        ("random_int", 2) => Some("__rock_random_int($1, $2)"),
+        ("random_seed", 1) => Some("__rock_rng_seed($1)"),
+        ("env_var", 1) => Some("__rock_env_var($1)"),
         // `deepcopy(obj)` -> the recursive clone runtime (`JS_DEEPCOPY_RUNTIME`).
         ("deepcopy", 1) => Some("deepcopy($1)"),
         ("__rock_deepcopy_value", 2) => Some("__rock_deepcopy_value($1, $2)"),

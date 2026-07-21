@@ -480,6 +480,18 @@ pub fn js_run(path: &str) -> Result<()> {
     }
 }
 
+/// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and
+/// `env_var`: `process.env` is node-only, so it lives in the DRIVER, not a
+/// prelude const (D3/D4, a browser bundle swaps a config object at M3). Seeding
+/// mirrors Lua's per-process rule (`crates/skull/src/lib.rs`): one seed after the
+/// preludes -- `ROCK_TEST_SEED` when set+finite else `Date.now()`; a test needing
+/// determinism calls `random_seed()` itself. `__rock_env_var` maps an unset var
+/// to Rock null (`undefined -> null`), matching `os.getenv`.
+const NODE_RNG_ENV_GLUE: &str = r#"
+function __rock_env_var(n) { var v = process.env[n]; return v === undefined ? null : v; }
+(function() { var s = Number(process.env.ROCK_TEST_SEED); __rock_rng_seed(Number.isFinite(s) ? s : Date.now()); })();
+"#;
+
 /// Assemble the streaming run program: the same runtime prelude set/order as the
 /// test harness (`build_node_program`), a scoped `var __G = {}`, a DIRECT
 /// `print`/`put` (unbuffered `process.stdout.write`, no `__buf`/`__SKULL__`
@@ -498,6 +510,8 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
     p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);
     p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
+    p.push_str(skull_codegen_js::JS_RNG_RUNTIME);
+    p.push_str(NODE_RNG_ENV_GLUE);
     p.push_str(
         r#"
 var __G = {};
@@ -569,6 +583,8 @@ fn build_node_program(
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
     p.push_str(skull_codegen_js::JS_DEEPCOPY_RUNTIME);
     p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
+    p.push_str(skull_codegen_js::JS_RNG_RUNTIME);
+    p.push_str(NODE_RNG_ENV_GLUE);
     p.push_str(
         r#"
 var __G = {};

@@ -459,6 +459,40 @@ function log_reset_dedup() { __stone_log_dedup = {}; __stone_log_throttle = {}; 
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 "#;
 
+/// The RNG runtime: mulberry32 over a single 32-bit state word (`>>> 0` keeps it
+/// unsigned; `Math.imul` for the 32-bit multiplies) -- zero allocation. The fn
+/// surface mirrors the Lua splitmix prelude (`crates/skull/src/lib.rs`):
+/// `__rock_rng_seed`, `__rock_rng_state_get`/`_set` (the single-word replay
+/// serialization surface), and the draw. Streams differ per backend by doctrine
+/// (Lua splitmix64, JS mulberry32) -- bit-parity is a non-goal; the SEMANTIC
+/// (seedable + deterministic + single serializable stream) is upheld. Engine-
+/// agnostic: seeding is done by the driver glue (it reads `ROCK_TEST_SEED`), not
+/// here. `random()` draws one 32-bit word / 2^32 in [0,1); `random_int(min,max)`
+/// is `[min,max)` exclusive (`r=max-min`, `r<=0 -> min`), single draw for
+/// `r<=2^32` else two draws composed into 53 bits then `% r` (range coverage is
+/// a semantic, not a nicety).
+pub const JS_RNG_RUNTIME: &str = r#"
+var __rock_rng_state = 0;
+function __rock_rng_seed(s) { __rock_rng_state = s >>> 0; }
+function __rock_rng_state_get() { return __rock_rng_state; }
+function __rock_rng_state_set(s) { __rock_rng_state = s >>> 0; }
+function __rock_rng_next32() {
+  __rock_rng_state = (__rock_rng_state + 0x6D2B79F5) >>> 0;
+  var t = __rock_rng_state;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t = (t + Math.imul(t ^ (t >>> 7), t | 61)) ^ t;
+  return (t ^ (t >>> 14)) >>> 0;
+}
+function __rock_random() { return __rock_rng_next32() / 4294967296; }
+function __rock_random_int(min, max) {
+  var r = max - min;
+  if (r <= 0) return min;
+  if (r <= 4294967296) return min + (__rock_rng_next32() % r);
+  var hi = __rock_rng_next32(), lo = __rock_rng_next32();
+  return min + ((hi * 2097152 + (lo >>> 11)) % r);
+}
+"#;
+
 /// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
 /// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
 /// plus the `error` global backing the transform's `Inst::Global("error")` +
