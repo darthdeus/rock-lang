@@ -1651,18 +1651,45 @@ pub fn emit_program(
     scx: &skull_mir::lower::ScalarCtx,
     user_mid: bone_semantic::prelude::ModuleId,
 ) -> Result<JsProgram, CompilerError> {
-    let deco_names = decorator_names(ws);
-    // Roots: a nullary `main` in the entry module (the program entry), then every
-    // decorated fn workspace-wide (its application line names the fn as `func`, so
-    // it must be emitted even if `main` never calls it).
-    let mut roots: Vec<(FuncRef, String)> = Vec::new();
-    let mut root_set: HashSet<FuncRef> = HashSet::new();
+    // The program entry: a nullary `main` in the entry module (D3). Passed as the
+    // one extra root; the module-load effects (deco applications, ginits) run
+    // regardless of whether a `main` exists.
+    let mut extra: Vec<(FuncRef, String)> = Vec::new();
     let main_js_name = nullary_main(ws, user_mid).map(|fr| {
         let nm = callee_js_name(ws, fr);
-        roots.push((fr, nm.clone()));
-        root_set.insert(fr);
+        extra.push((fr, nm.clone()));
         nm
     });
+    let program = emit_program_core(ws, scx, &extra)?;
+    Ok(JsProgram { program, main_js_name })
+}
+
+/// [`emit_program`] with EXPLICIT extra roots and no `main` handling -- the
+/// per-test path's whole-file emission (roots = the file's runnable `@test`
+/// fns), so decorator applications populate the registries a test reads. Returns
+/// just the program string; the caller invokes each root by the JS name it gave.
+pub fn emit_program_with_roots(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    roots: &[(FuncRef, String)],
+) -> Result<String, CompilerError> {
+    emit_program_core(ws, scx, roots)
+}
+
+/// The shared program assembly for [`emit_program`] / [`emit_program_with_roots`]:
+/// `extra_roots` (main, or the test fns) plus every DECORATED fn workspace-wide
+/// (its application line names the fn as `func`, so it must be emitted even if no
+/// extra root calls it), the APPLIED `deco` def bodies, ginits, and the
+/// application lines. `extra_roots` seed the `names` map FIRST so their chosen
+/// JS names win over the `callee_js_name` a discovery pass would assign.
+fn emit_program_core(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    extra_roots: &[(FuncRef, String)],
+) -> Result<String, CompilerError> {
+    let deco_names = decorator_names(ws);
+    let mut roots: Vec<(FuncRef, String)> = extra_roots.to_vec();
+    let mut root_set: HashSet<FuncRef> = extra_roots.iter().map(|(fr, _)| *fr).collect();
     for module in ws.modules.iter() {
         if module.id == bone_semantic::prelude::ModuleId::builtin() {
             continue;
@@ -1750,7 +1777,7 @@ pub fn emit_program(
     //    initialized registry -- D4).
     out.push_str(&decorator_application_lines_js(ws, &deco_names, &st.names)?);
 
-    Ok(JsProgram { program: out, main_js_name })
+    Ok(out)
 }
 
 /// A whole-program JS emission plus the entry fn's JS name (`None` when the entry

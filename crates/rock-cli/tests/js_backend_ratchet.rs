@@ -58,6 +58,8 @@ fn corpus() -> Vec<String> {
         "tests/js_value_gc_eq.rock",
         "tests/js_map_eq.rock",
         "tests/js_trampoline_fallback.rock",
+        "tests/engine_systems_test.rock",
+        "tests/deco_v2_init_with_args.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -192,7 +194,14 @@ fn js_runnable_coverage_ratchet() {
     // return arm is ported into the trampoline term printer, ordinary-body path
     // only) added tests/js_trampoline_fallback.rock -> 300 (the shared-branch-tail
     // bucket 115 -> 0 suite-wide; 3 corpus shared-tail tests + the 6 new cases).
-    const FLOOR: usize = 300;
+    // M1 program emission (module-driven `emit_program`: deco def fns + APPLICATION
+    // lines at module load + ginit topo, the per-test path lifting the
+    // decorator-populated-global skip via a whole-file emission when a test reads
+    // such a global) added tests/engine_systems_test.rock (6) +
+    // tests/deco_v2_init_with_args.rock (2) -> 308 (full-suite pass 3724 -> 3740,
+    // decorator-populated bucket 16 -> 0; `rock run --backend js` gated separately
+    // by crates/rock-cli/tests/js_run_gate.rs).
+    const FLOOR: usize = 308;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

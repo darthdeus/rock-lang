@@ -299,20 +299,23 @@ fn js_run_tests(
 ) -> JsUnitOutcome {
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, String)> = Vec::new();
-    // (display name, root JS name, emitted defs, expected output, value test?)
-    let mut runnable: Vec<(String, String, String, Option<String>, bool)> = Vec::new();
 
     let scx = ScalarCtx::new(ws);
+    // (test index, per-test isolated defs) for tests emittable in ISOLATION.
+    let mut supported: Vec<(usize, String)> = Vec::new();
+    // Test indices that reject ONLY because they read a decorator-populated
+    // global (the module-load side effect the per-test closure omits) -- lifted
+    // below by a whole-file emission that runs the applications once.
+    let mut deco_pending: Vec<usize> = Vec::new();
     for (i, (fr, t)) in tests.iter().enumerate() {
         let js_name = format!("__t{i}");
-        let roots = [(*fr, js_name.clone())];
+        let roots = [(*fr, js_name)];
         let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
         }));
         match emitted {
-            Ok(Ok(js)) => {
-                runnable.push((t.name.clone(), js_name, js, t.output.clone(), t.returns.is_some()))
-            }
+            Ok(Ok(js)) => supported.push((i, js)),
+            Ok(Err(e)) if is_decorator_populated_reject(&e.message) => deco_pending.push(i),
             Ok(Err(e)) => skips.push((t.name.clone(), e.message.clone())),
             Err(panic) => {
                 let msg = panic
@@ -325,11 +328,48 @@ fn js_run_tests(
         }
     }
 
-    if runnable.is_empty() {
+    // Assemble the shared defs + the runnable test index list (test order). With
+    // no deco-dependent test this is the per-test isolated concatenation
+    // (byte-identical to the pre-lift path); otherwise the whole file emits as
+    // ONE program (`emit_program_with_roots`) so decorator applications run once
+    // at load and populate the registries those tests read.
+    let mut run_idxs: Vec<usize> = supported.iter().map(|(i, _)| *i).collect();
+    let shared_defs = if deco_pending.is_empty() {
+        supported.iter().map(|(_, d)| d.as_str()).collect::<String>()
+    } else {
+        run_idxs.extend(deco_pending.iter().copied());
+        run_idxs.sort_unstable();
+        let roots: Vec<(FuncRef, String)> =
+            run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
+        match skull_codegen_js::emit::emit_program_with_roots(ws, &scx, &roots) {
+            Ok(blob) => blob,
+            Err(e) => {
+                // Whole-file emission rejected (a deco-dependent test also hits an
+                // unsupported construct past the deco-global read): keep the
+                // individually-supported tests, skip the deco-dependent ones.
+                for &i in &deco_pending {
+                    skips.push((tests[i].1.name.clone(), e.message.clone()));
+                }
+                run_idxs = supported.iter().map(|(i, _)| *i).collect();
+                supported.iter().map(|(_, d)| d.as_str()).collect::<String>()
+            }
+        }
+    };
+
+    if run_idxs.is_empty() {
         return JsUnitOutcome::Ran { passed: 0, fails, skips };
     }
 
-    let program = build_node_program(&runnable);
+    // (display name, root JS name, expected output, value test?) per runnable test.
+    let meta: Vec<(String, String, Option<String>, bool)> = run_idxs
+        .iter()
+        .map(|&i| {
+            let t = &tests[i].1;
+            (t.name.clone(), format!("__t{i}"), t.output.clone(), t.returns.is_some())
+        })
+        .collect();
+
+    let program = build_node_program(&shared_defs, &meta);
     let timeout = Some(std::time::Duration::from_secs(15));
     let run = match rock_host::js_runner::run_node_code_with_timeout(&program, timeout) {
         Ok(r) => r,
@@ -345,7 +385,7 @@ fn js_run_tests(
     // loaded. Missing/short markers = the emitted JS itself is bad (a backend
     // bug), surfaced with the program for diagnosis -- never silently absorbed.
     let markers = match parse_skull_markers(&run.stdout) {
-        Some(m) if m.passed + m.fails.len() + m.values.len() == runnable.len() => m,
+        Some(m) if m.passed + m.fails.len() + m.values.len() == meta.len() => m,
         _ => {
             return JsUnitOutcome::UnitFail {
                 reason: "invalid JS emitted (js backend bug)".to_string(),
@@ -500,14 +540,24 @@ fn js_str(s: &str) -> String {
     o
 }
 
+/// True for the per-test reject a decorator-populated global read raises
+/// (`emit.rs` `discover_globals`) -- the marker that a whole-file emission (which
+/// runs the applications once) would lift the test.
+fn is_decorator_populated_reject(msg: &str) -> bool {
+    msg.contains("is populated by decorator application")
+}
+
 /// Assemble the per-file node program: shim + string-runtime preamble, a
 /// buffer-capturing `print` (Lua-parity: args `lua_tostring`-joined by TAB, one
-/// trailing newline per call), each runnable test's closure-emitted defs
-/// (callee names are FuncRef-deterministic, so duplicate definitions across
-/// tests are byte-identical and redefinition is harmless), then the harness
-/// running each test with its buffer reset and comparing the captured stdout
-/// (trimmed) against the `output=` expectation -- one `__SKULL__` line per test.
-fn build_node_program(runnable: &[(String, String, String, Option<String>, bool)]) -> String {
+/// trailing newline per call), the shared emitted defs (per-test isolated
+/// closures concatenated, or one whole-file program when decorator applications
+/// must run at load), then the harness running each test with its buffer reset
+/// and comparing the captured stdout (trimmed) against the `output=` expectation
+/// -- one `__SKULL__` line per test.
+fn build_node_program(
+    shared_defs: &str,
+    tests: &[(String, String, Option<String>, bool)],
+) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_TABLE_PRIM);
@@ -532,11 +582,9 @@ function print() {
 function put(s) { __buf.push(s); }
 "#,
     );
-    for (_, _, defs, _, _) in runnable {
-        p.push_str(defs);
-    }
+    p.push_str(shared_defs);
     p.push_str("var __tests = [\n");
-    for (name, js_name, _, out, is_value) in runnable {
+    for (name, js_name, out, is_value) in tests {
         let out_js = match out {
             Some(s) => js_str(s),
             None => "null".to_string(),
