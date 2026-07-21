@@ -1022,7 +1022,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     if index < 0 || index >= vec.len {
         return null
     }
-    return cast(table_get(vec._data, index + 1))
+    return cast(__vec_data_get(vec, index))
 }
 
 // Safe accessor matching the unified `.get(i) -> T?` surface across all
@@ -1035,7 +1035,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     if index < 0 || index >= vec.len {
         error("Vec.set index out of bounds: index {index} is outside [0, {vec.len})")
     }
-    table_set(vec._data, index + 1, value)
+    __vec_data_set(vec, index, value)
 }
 
 // Bounds-checked indexing helpers, emitted by codegen for `xs[i]` reads and
@@ -1076,8 +1076,8 @@ fn Vec<T>.pop(vec) -> T? {
     if vec.len == 0 {
         return null
     }
-    let value: T? = cast(table_get(vec._data, vec.len))
-    table_unset(vec._data, vec.len)
+    let value: T? = cast(__vec_data_get(vec, vec.len - 1))
+    __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
     return value
 }
@@ -1088,7 +1088,7 @@ fn Vec<T>.is_empty(vec) -> bool {
 
 fn Vec<T>.clear(vec) {
     for i in 0..vec.len {
-        table_unset(vec._data, i + 1)
+        __vec_data_unset(vec, i)
     }
     vec.len = 0
 }
@@ -1097,11 +1097,11 @@ fn Vec<T>.remove_at(vec, index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
-    let value: T? = cast(table_get(vec._data, index + 1))
+    let value: T? = cast(__vec_data_get(vec, index))
     for i in index..(vec.len - 1) {
-        table_set(vec._data, i + 1, table_get(vec._data, i + 2))
+        __vec_data_set(vec, i, __vec_data_get(vec, i + 1))
     }
-    table_unset(vec._data, vec.len)
+    __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
     return value
 }
@@ -1110,11 +1110,11 @@ fn Vec<T>.swap_remove(vec, index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
-    let value: T? = cast(table_get(vec._data, index + 1))
+    let value: T? = cast(__vec_data_get(vec, index))
     if index + 1 < vec.len {
-        table_set(vec._data, index + 1, table_get(vec._data, vec.len))
+        __vec_data_set(vec, index, __vec_data_get(vec, vec.len - 1))
     }
-    table_unset(vec._data, vec.len)
+    __vec_data_unset(vec, vec.len - 1)
     vec.len = vec.len - 1
     return value
 }
@@ -1480,6 +1480,15 @@ inline(lua) fn table_new() -> any = """return {}"""
 @inline inline(lua) fn table_unset(tbl: any, index: any) = """
     tbl[index] = nil
 """
+
+// Base-agnostic Vec `_data` element accessors: a logical 0-based element index,
+// the storage base absorbed per-backend (luajit 1-based `[i + 1]`, JS 0-based
+// `[i]` via the intrinsic map) so the shared pure-Rock Vec ops stop hard-coding
+// the Lua base. `@inline` so hot `vec_get` / drain callsites still splice with
+// no call frame.
+@nomangle @inline inline(lua) fn __vec_data_get(vec: any, index: int) -> any = "return vec._data[index + 1]"
+@nomangle @inline inline(lua) fn __vec_data_set(vec: any, index: int, value: any) = "vec._data[index + 1] = value"
+@nomangle @inline inline(lua) fn __vec_data_unset(vec: any, index: int) = "vec._data[index + 1] = nil"
 
 inline(lua) fn table_clear(tbl: any) = """
     for k in pairs(tbl) do

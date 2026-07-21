@@ -2463,6 +2463,13 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // `t[k] = nil`: a Map key delete or an array/object hole, dispatched on
         // `instanceof Map`. Returns undefined -> Rock nil if the result is stored.
         ("table_unset", 2) => Some("__table_unset($1, $2)"),
+        // Base-agnostic Vec `_data` accessors (`__vec_data_*`): a logical 0-based
+        // element index, `_data` known to be a plain array (never a Map), so index
+        // directly. 1-based here to match the current hole repr; flipped 0-based
+        // with the hole deletion below.
+        ("__vec_data_get", 2) => Some("$1._data[$2 + 1]"),
+        ("__vec_data_set", 3) => Some("$1._data[$2 + 1] = $3"),
+        ("__vec_data_unset", 2) => Some("$1._data[$2 + 1] = undefined"),
         ("table_new", 0) => Some("({})"),
         // Vec: `{_data, len, __ty}` 1-indexed. `vec_new` builds it; `vec_push`
         // increments `len` then writes `_data[len]` (comma operator so it stays
