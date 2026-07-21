@@ -1,9 +1,9 @@
 //! `table_unset` emission (T8d). The stdlib `inline(lua)` primitive `t[k] = nil`
-//! backing Map.remove and the Vec drain ops. On JS it dispatches on
-//! `instanceof Map` (`__table_unset` in JS_TABLE_PRIM): `map.delete(k)` for the
-//! real-Map path, `delete arr[k]` for the 1-indexed Vec `_data` array. The
-//! node-executed checks are the correctness oracle; the corpus
-//! `tests/js_table_unset.rock` cross-checks against luajit.
+//! backs Map.remove; the Vec drain ops now route through `__vec_data_unset`
+//! (`_data[i] = undefined` on the 0-based hole-free array). `__table_unset`
+//! dispatches on `instanceof Map` for the Map path. The node-executed checks are
+//! the correctness oracle; the corpus `tests/js_table_unset.rock` cross-checks
+//! against luajit.
 
 use std::process::Command;
 
@@ -71,7 +71,8 @@ fn map_remove_deletes_key() {
     eval_int(&js, "root", 120); // key 1 gone (1), key 2 survives (20)
 }
 
-// Vec.pop drains the tail slot via `delete arr[len]`; the tracked len shrinks.
+// Vec.pop drains the tail slot; the tracked len shrinks. The `[1,2,3]` literal
+// is the 0-based hole-free `_data` (no leading `[null,`).
 #[test]
 fn vec_pop_drains_tail() {
     let src = "fn root() -> int {\n\
@@ -81,6 +82,7 @@ fn vec_pop_drains_tail() {
                }";
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("vec pop emits");
+    assert!(!js.contains("[null,"), "0-based hole-free Vec literal, no index-0 hole:\n{js}");
     eval_int(&js, "root", 32); // popped 3, len now 2
 }
 

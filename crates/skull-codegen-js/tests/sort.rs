@@ -1,7 +1,7 @@
 //! Vec.sort emission (T8d). The stdlib inline(lua) `table.sort(_data, |a,b|
 //! key(a) < key(b))` maps to the `__vec_sort` runtime: sort the logical
-//! `1..len` slice in place (index 0 is the 1-indexed layout hole), key_fn
-//! through `__rock_call`. The node-executed checks are the correctness oracle;
+//! `0..len` slice in place (0-based hole-free `_data`), key_fn through
+//! `__rock_call`. The node-executed checks are the correctness oracle;
 //! `tests/js_sort.rock` cross-checks against luajit (tie order is unspecified,
 //! so only order-invariant properties are asserted).
 
@@ -52,8 +52,8 @@ fn eval_str(defs: &str, root: &str, expect: &str) {
     assert_eq!(s.trim_end_matches('\n'), expect, "wrong result\n{program}");
 }
 
-// Ascending sort by the identity key preserves the 1-indexed layout (a stray
-// index-0 hole would corrupt the readback).
+// Ascending sort by the identity key over a 0-based hole-free `_data` (a stray
+// index-0 `[null,` hole would corrupt the readback).
 #[test]
 fn sort_ascending_by_identity() {
     let src = "fn root() -> string {\n\
@@ -66,6 +66,7 @@ fn sort_ascending_by_identity() {
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("sort emits");
     assert!(js.contains("__vec_sort"), "renders the slice-sort runtime:\n{js}");
+    assert!(!js.contains("[null,"), "0-based hole-free Vec literal, no index-0 hole:\n{js}");
     eval_str(&js, "root", "1 2 3 5 8");
 }
 

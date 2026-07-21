@@ -99,41 +99,40 @@ function __nb_checked_set(buf, i, v) {
 ";
 
 /// JS shims for the checked Vec indexing helpers codegen emits
-/// (`__vec_checked_get`/`__vec_checked_set`), mirroring the stdlib `inline(lua)`
-/// bodies: `_data` is 1-indexed (`_data[i + 1]`), bounds-erroring on miss. The
-/// error message shape follows the luajit stdlib (`f5efe7604`); it is not
-/// compared in-scope (an OOB index throws -> the harness reports FAIL, matching
-/// luajit -- `try_call` catching is out of scope).
+/// (`__vec_checked_get`/`__vec_checked_set`): `_data` is a 0-based dense array
+/// (`_data[i]`), bounds-erroring on miss. The error message shape follows the
+/// luajit stdlib (`f5efe7604`); it is not compared in-scope (an OOB index
+/// throws -> the harness reports FAIL, matching luajit -- `try_call` catching is
+/// out of scope).
 pub const JS_VEC_CHECK_SHIMS: &str = "\
 function __vec_checked_get(vec, i) {
   if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
-  return vec._data[i + 1];
+  return vec._data[i];
 }
 function __vec_checked_set(vec, i, v) {
   if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
-  vec._data[i + 1] = v;
+  vec._data[i] = v;
 }
 // `Vec.sort(key_fn)`: the stdlib inline(lua) is `table.sort(_data, |a,b| key(a) <
-// key(b))`. Sort only the logical `1..len` slice (index 0 is the layout hole),
-// then write back, so the 1-indexed `_data` shape is preserved. `key_fn` is a fn
+// key(b))`. Sort the logical `0..len` slice, then write back. `key_fn` is a fn
 // value invoked through `__rock_call`; keys compare with `<` (numbers/strings).
 // JS sort is stable where luajit's is not, so equal-key relative order can
 // differ -- capture-free key spec keeps this observable only for genuine ties.
 function __vec_sort(vec, key_fn) {
   var n = vec.len;
   var part = [];
-  for (var i = 1; i <= n; i++) part.push(vec._data[i]);
+  for (var i = 0; i < n; i++) part.push(vec._data[i]);
   part.sort(function(a, b) {
     var ka = __rock_call(key_fn, a), kb = __rock_call(key_fn, b);
     return ka < kb ? -1 : (ka > kb ? 1 : 0);
   });
-  for (var i = 0; i < n; i++) vec._data[i + 1] = part[i];
+  for (var i = 0; i < n; i++) vec._data[i] = part[i];
 }
 // `__range(a, b)`: the materialized half-open range `a..b` as a Vec-shaped
-// object (index 0 is the 1-indexed layout hole, `_data[1..len]` = a..b-1),
-// matching the stdlib inline(lua) `{_data, len}`.
+// object (0-based `_data[0..len)` = a..b-1), matching the stdlib inline(lua)
+// `{_data, len}`.
 function __range(a, b) {
-  var d = [null];
+  var d = [];
   for (var i = a; i < b; i++) d.push(i);
   return { _data: d, len: b - a };
 }
@@ -175,8 +174,10 @@ function __try_call(f) {
 /// `__op_eq` (verified on luajit: reference structs, value structs, tuples,
 /// enums, newtypes all compare BY CONTENTS; primitives by value). Lua `nil` maps
 /// to both JS `null` and `undefined` (an absent arg / an array hole), so both
-/// count as nil -- this also reconciles a Vec's index-0 placeholder (`null` in a
-/// literal vs a hole after `push`). Structs are `{__ty, ...}` plain objects (the
+/// count as nil. A Vec compares by its tracked `len` over `_data[0..len)`, not
+/// as a dense array -- mirroring luajit's `pairs`-walk, which is len-bounded, so
+/// a drained tail slot (`_data[len] = undefined` after pop/clear) is invisible.
+/// Structs are `{__ty, ...}` plain objects (the
 /// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
 /// key-walk that includes `__ty` covers the type check for free. A capturing
 /// lambda is a closure ENV RECORD `{ __fn, .. }` (`convert_closures`): a callable
@@ -195,6 +196,13 @@ function __op_eq(a, b) {
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object") return a === b;
   if (a.__fn !== undefined || b.__fn !== undefined) return a === b;
+  // A Vec compares by tracked `len` over `_data[0..len)` (len-bounded, like
+  // luajit's pairs-walk), so a drained tail slot beyond `len` never breaks eq.
+  if (a.__ty === "Vec" || b.__ty === "Vec") {
+    if (a.__ty !== "Vec" || b.__ty !== "Vec" || a.len !== b.len) return false;
+    for (var vi = 0; vi < a.len; vi++) if (!__op_eq(a._data[vi], b._data[vi])) return false;
+    return true;
+  }
   var aa = Array.isArray(a), ab = Array.isArray(b);
   if (aa || ab) {
     if (!aa || !ab || a.length !== b.length) return false;
@@ -244,7 +252,7 @@ function __rock_make_enum(variant, ty, kv) {
 /// `inspect` / `inspect_formatted`: a faithful port of `__rock_inspect_value`
 /// (stdlib/unified.rock). Adapts to the JS shapes: a struct/enum `{__ty, ...}`
 /// object (keys sorted by `lua_tostring`, `__ty`/`__variant`/`variant`/`__tag`
-/// skipped), a Vec `{_data (1-indexed), len, __ty:"Vec"}`, a JS `Map` (raw-table
+/// skipped), a Vec `{_data (0-based), len, __ty:"Vec"}`, a JS `Map` (raw-table
 /// analog), a JS array (Lua array-table analog), and scalars. A capturing-lambda
 /// env record (`__fn`) is an opaque callable LEAF (`String(fn)`), matching the
 /// luajit `__rock_fn_mt` rule; a `visited` Map detects cycles. NOTE: most inspect
@@ -282,8 +290,8 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   var type_name = t.__ty;
   if (type_name === "Vec" && t._data && t.len !== undefined) {
     var vparts = [];
-    for (var i = 1; i <= t.len; i++) {
-      vparts.push(__rock_inspect_value(t._data[i], indent, path + "[" + (i - 1) + "]", visited, precision));
+    for (var i = 0; i < t.len; i++) {
+      vparts.push(__rock_inspect_value(t._data[i], indent, path + "[" + i + "]", visited, precision));
     }
     if (visited) visited.delete(t);
     if (vparts.length === 0) return "Vec { }";

@@ -1336,18 +1336,14 @@ impl Emitter<'_> {
             Inst::TupleIndex { base, index } => {
                 format!("{}[{index}]", self.render_val(*base)?)
             }
-            // A Vec literal: `{_data, len, __ty}` with `_data` used 1-indexed
-            // (index 0 is an unused placeholder, matching the Lua 1-indexed
-            // backing table -- the stdlib helpers read `_data[i + 1]`).
+            // A Vec literal: `{_data, len, __ty}` with `_data` a 0-based dense
+            // array (the JS-native repr; the base-agnostic `__vec_data_*`
+            // accessors read `_data[i]`).
             Inst::MakeVec(elems) => {
                 let rendered: Result<Vec<String>, CompilerError> =
                     elems.iter().map(|e| self.render_val(*e)).collect();
                 let rendered = rendered?;
-                let data = if rendered.is_empty() {
-                    "[]".to_string()
-                } else {
-                    format!("[null, {}]", rendered.join(", "))
-                };
+                let data = format!("[{}]", rendered.join(", "));
                 format!("({{_data: {data}, len: {}, __ty: \"Vec\"}})", elems.len())
             }
             Inst::Index { base, index, kind } => {
@@ -2464,18 +2460,20 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // `instanceof Map`. Returns undefined -> Rock nil if the result is stored.
         ("table_unset", 2) => Some("__table_unset($1, $2)"),
         // Base-agnostic Vec `_data` accessors (`__vec_data_*`): a logical 0-based
-        // element index, `_data` known to be a plain array (never a Map), so index
-        // directly. 1-based here to match the current hole repr; flipped 0-based
-        // with the hole deletion below.
-        ("__vec_data_get", 2) => Some("$1._data[$2 + 1]"),
-        ("__vec_data_set", 3) => Some("$1._data[$2 + 1] = $3"),
-        ("__vec_data_unset", 2) => Some("$1._data[$2 + 1] = undefined"),
+        // element index over the 0-based hole-free `_data` array (never a Map, so
+        // index directly). `unset` writes `undefined` (the drain callers only
+        // touch the tail; the len-aware `__op_eq` Vec branch and len-bounded
+        // readers ignore the trailing slot, matching luajit's pairs-walk).
+        ("__vec_data_get", 2) => Some("$1._data[$2]"),
+        ("__vec_data_set", 3) => Some("$1._data[$2] = $3"),
+        ("__vec_data_unset", 2) => Some("$1._data[$2] = undefined"),
         ("table_new", 0) => Some("({})"),
-        // Vec: `{_data, len, __ty}` 1-indexed. `vec_new` builds it; `vec_push`
-        // increments `len` then writes `_data[len]` (comma operator so it stays
-        // an expression; `$1` is a cell load, safe to re-evaluate).
+        // Vec: `{_data, len, __ty}` 0-based. `vec_new` builds it; `vec_push`
+        // writes `_data[len]` (the new tail slot) THEN increments `len` -- the
+        // reverse of the 1-based Lua order (comma operator so it stays an
+        // expression; `$1` is a cell load, safe to re-evaluate).
         ("vec_new", 0) => Some("({_data: [], len: 0, __ty: \"Vec\"})"),
-        ("vec_push", 2) => Some("($1.len = $1.len + 1, $1._data[$1.len] = $2)"),
+        ("vec_push", 2) => Some("($1._data[$1.len] = $2, $1.len = $1.len + 1)"),
         // Structural equality (deep, matching Rock's `__op_eq`: structs, enums,
         // newtypes, tuples by contents; primitives by value). Runtime helper in
         // JS_STRUCTURAL_EQ.
@@ -2511,8 +2509,9 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // to `undefined` above and defaulted inside the runtime.
         ("inspect", 3) => Some("inspect($1, $2, $3)"),
         ("inspect_formatted", 2) => Some("inspect_formatted($1, $2)"),
-        // `Vec.sort(key_fn)`: sort the 1-indexed `_data` slice in place through
-        // the `__vec_sort` runtime (the pure-Rock FlatVec.sort co-emits instead).
+        // `Vec.sort(key_fn)`: sort the 0-based `_data[0..len)` slice in place
+        // through the `__vec_sort` runtime (the pure-Rock FlatVec.sort co-emits
+        // instead).
         ("sort", 2) => Some("__vec_sort($1, $2)"),
         // The `{x:spec}` interpolation format helpers -> their JS runtime ports.
         ("__rock_fmt_pad", 4) => Some("__rock_fmt_pad($1, $2, $3, $4)"),
