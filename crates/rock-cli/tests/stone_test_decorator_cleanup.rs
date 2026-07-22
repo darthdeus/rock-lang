@@ -163,7 +163,7 @@ fn shutdown_systems_clear_contract_via_real_engine() {
 fn sims_clear_contract_via_real_engine() {
     let seed_owned = make_seed(
         "@sim\n\
-         co fn dummy_sim() -> Coroutine<CoFrame> {\n\
+         co fn dummy_sim() -> Coroutine<Wait> {\n\
              yield wait_frame()\n\
          }\n\n\
          fn main() {\n\
@@ -180,7 +180,7 @@ fn sims_clear_contract_via_real_engine() {
     let main_lua_path = h.compiled_lua_path();
     let main_lua_path = main_lua_path.display().to_string();
 
-    // SIMS is `Map<string, () -> Coroutine<CoFrame>>` which compiles down
+    // SIMS is `Map<string, () -> Coroutine<Wait>>` which compiles down
     // to a plain Lua table (no `.len` field — Map's `.len()` UFCS walks
     // the table). From Lua we count entries directly via `pairs`.
     let script = format!(

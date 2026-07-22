@@ -1924,40 +1924,40 @@ impl BoneWorkspace {
                 ));
             }
         }
-        // Coroutine ergonomics: `CoFrame` is the dominant Stone yield type
+        // Coroutine ergonomics: `Wait` is the dominant Stone yield type
         // (~75% of `Coroutine<..>` annotations), so surface it. All gated on a
-        // `CoFrame` struct existing (stone projects); otherwise the generic
+        // `Wait` struct existing (stone projects); otherwise the generic
         // `Coroutine<$0>` snippet stands in.
-        let coframe = struct_exists(ws, "CoFrame");
+        let has_wait = struct_exists(ws, "Wait");
         let coroutine_slot = cx.coroutine_generic;
         if coroutine_slot {
-            // (a) first generic arg of `Coroutine<..>` -> `CoFrame` ranks #0,
+            // (a) first generic arg of `Coroutine<..>` -> `Wait` ranks #0,
             // superseding the plain struct symbol.
-            if coframe && admit(b"CoFrame", prefix.as_bytes()) {
-                sink.retain_not_named("CoFrame");
+            if has_wait && admit(b"Wait", prefix.as_bytes()) {
+                sink.retain_not_named("Wait");
                 let key = RankKey {
-                    len: RankKey::len_key(9999, "CoFrame".len()),
+                    len: RankKey::len_key(9999, "Wait".len()),
                     ..Default::default()
                 };
                 sink.push(Cand::new(
                     key,
-                    CandName::Owned("CoFrame".to_string()),
-                    CandShape::CoFrame,
+                    CandName::Owned("Wait".to_string()),
+                    CandShape::Wait,
                 ));
             }
         } else if !expr_position && !prefix.is_empty() && admit(b"Coroutine", prefix.as_bytes()) {
             // (b) completing the `Coroutine` type name -> snippet forms replace
-            // the bare type: `Coroutine<CoFrame>` first, `Coroutine<$0>` second.
+            // the bare type: `Coroutine<Wait>` first, `Coroutine<$0>` second.
             sink.retain_not_named("Coroutine");
-            if coframe {
+            if has_wait {
                 let key = RankKey {
-                    len: RankKey::len_key(9999, "Coroutine<CoFrame>".len()),
+                    len: RankKey::len_key(9999, "Coroutine<Wait>".len()),
                     ..Default::default()
                 };
                 sink.push(Cand::new(
                     key,
-                    CandName::Owned("Coroutine<CoFrame>".to_string()),
-                    CandShape::Coroutine { with_coframe: true },
+                    CandName::Owned("Coroutine<Wait>".to_string()),
+                    CandShape::Coroutine { with_wait: true },
                 ));
             }
             let key = RankKey {
@@ -1968,13 +1968,13 @@ impl BoneWorkspace {
             sink.push(Cand::new(
                 key,
                 CandName::Owned("Coroutine<>".to_string()),
-                CandShape::Coroutine { with_coframe: false },
+                CandShape::Coroutine { with_wait: false },
             ));
         }
         // (c) `co fn NAME()|` with no return type -> offer the `-> Coroutine<..>`
         // return type to the right of `)`.
         if prefix.is_empty() && co_fn_return_slot(src.as_bytes(), offset) {
-            let label = if coframe { "-> Coroutine<CoFrame>" } else { "-> Coroutine<>" };
+            let label = if has_wait { "-> Coroutine<Wait>" } else { "-> Coroutine<>" };
             let key = RankKey {
                 len: RankKey::len_key(9999, label.len()),
                 ..Default::default()
@@ -1982,7 +1982,7 @@ impl BoneWorkspace {
             sink.push(Cand::new(
                 key,
                 CandName::Owned(label.to_string()),
-                CandShape::CoReturn { coframe },
+                CandShape::CoReturn { has_wait },
             ));
         }
         let rank_ms = t_build.elapsed().as_secs_f64() * 1000.0;

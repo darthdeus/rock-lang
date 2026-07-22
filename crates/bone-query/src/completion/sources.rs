@@ -1185,7 +1185,7 @@ fn field_ref_insert(name: &str, f: &bone_semantic::hir::Function, field_arg_idx:
 /// `recv_struct` has a field of type `V`. `mob.kill_co(.attack_co)` is UFCS-
 /// legal, but the receiver is generic so `ufcs_methods` (nominal-match) never
 /// surfaces it -- this fills that gap. Gated on a matching field existing, so a
-/// struct with no `PolledCo?` field never sees `kill_co` (and generic helpers
+/// struct with no `Task?` field never sees `kill_co` (and generic helpers
 /// like `min`/`max`, which carry no FieldOf param, never leak in). Deduped by
 /// name, first-wins. Returns `(fn, arg_idx, field names)`.
 fn field_ref_methods<'a>(

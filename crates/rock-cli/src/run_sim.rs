@@ -1430,9 +1430,9 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
 
     #[test]
     fn src_declares_sim_matches_co_fn_decl() {
-        // Real shape: `co fn smoke() -> Coroutine<CoFrame> { ... }`.
+        // Real shape: `co fn smoke() -> Coroutine<Wait> { ... }`.
         // Regression: prior needle `co {name}(` missed every sim.
-        let src = "@sim_render\n@sim\nco fn smoke() -> Coroutine<CoFrame> {\n}\n";
+        let src = "@sim_render\n@sim\nco fn smoke() -> Coroutine<Wait> {\n}\n";
         assert!(src_declares_sim(src, "smoke"));
         assert!(!src_declares_sim(src, "other"));
     }
@@ -1455,7 +1455,7 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
     fn src_declares_sim_does_not_match_substring_or_call_site() {
         // `co fn smoke_alt(` must not match `smoke`. Plain calls to the
         // sim name (e.g. `smoke()` from another fn) must not match either.
-        let src = "co fn smoke_alt() -> Coroutine<CoFrame> {\n  smoke()\n}\n";
+        let src = "co fn smoke_alt() -> Coroutine<Wait> {\n  smoke()\n}\n";
         assert!(!src_declares_sim(src, "smoke"));
         assert!(src_declares_sim(src, "smoke_alt"));
     }

@@ -817,7 +817,7 @@ impl CursorAst {
 
     /// True when the probe sits in the FIRST generic argument of a
     /// `Coroutine<..>` type (`Coroutine<|`, `Coroutine<Co|`). Drives the
-    /// CoFrame-first boost.
+    /// Wait-first boost.
     pub(crate) fn coroutine_first_generic_arg(&self) -> bool {
         use skull_parser::ast::TypeExprKind;
         self.ast.types.iter().any(|(_, t)| {

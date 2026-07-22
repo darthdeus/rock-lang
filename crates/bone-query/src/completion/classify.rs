@@ -22,7 +22,7 @@ pub(crate) fn leading_dot(src: &str, offset: usize) -> bool {
 
 /// True when `offset` sits just after the `)` of a `co fn NAME(..)` signature
 /// with no return type yet (`co fn spawn()|`). Pure byte heuristic; drives the
-/// `-> Coroutine<CoFrame>` return-type snippet.
+/// `-> Coroutine<Wait>` return-type snippet.
 pub(crate) fn co_fn_return_slot(src: &[u8], offset: usize) -> bool {
     let mut i = offset.min(src.len());
     while i > 0 && src[i - 1].is_ascii_whitespace() {
@@ -494,7 +494,7 @@ pub(crate) struct CompletionCx {
     pub(crate) param_type: Option<(String, String)>,
     /// Direct-call named-arg slot (`f(na|)` offers `name:` items).
     pub(crate) named_arg: Option<crate::cursor_context::NamedArgSlot>,
-    /// First generic arg of `Coroutine<|>` (CoFrame synth).
+    /// First generic arg of `Coroutine<|>` (Wait synth).
     pub(crate) coroutine_generic: bool,
     /// Match-arm pattern HEAD: the byte anchor of the enclosing `match`'s
     /// scrutinee (its last byte). The slot expects the scrutinee's enum --

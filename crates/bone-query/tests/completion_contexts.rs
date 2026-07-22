@@ -1175,7 +1175,7 @@ fn enum_qualifier_matching_prefix_still_narrows() {
 #[test]
 fn type_slot_offers_coroutine_builtin() {
     // `-> Co|` in a return-type slot expands the `Coroutine` builtin to its
-    // generic snippet (`Coroutine<$0>`); the bare name is replaced (no CoFrame
+    // generic snippet (`Coroutine<$0>`); the bare name is replaced (no Wait
     // struct here, so only the generic form is offered).
     let src = "co fn f() -> Co {\n}\n";
     let l = labels(src, 0, 15);
@@ -1267,16 +1267,16 @@ fn await_ranks_coroutine_fn_first() {
     assert!(pframe < pfrag, "coroutine `frame` must rank above `fragment`: {items:?}");
 }
 
-// -- Coroutine<CoFrame> ergonomics -----------------------------------------
-// `CoFrame` is the dominant yield type in Stone games (~75% of all
+// -- Coroutine<Wait> ergonomics -----------------------------------------
+// `Wait` is the dominant yield type in Stone games (~75% of all
 // `Coroutine<..>` annotations), so completion surfaces it: it ranks first in
 // the first generic arg slot, the `Coroutine` type name expands to
-// `Coroutine<CoFrame>`/`Coroutine<$0>` snippets, and a `co fn ()` signature
-// offers the `-> Coroutine<CoFrame>` return type. All gated on a `CoFrame`
+// `Coroutine<Wait>`/`Coroutine<$0>` snippets, and a `co fn ()` signature
+// offers the `-> Coroutine<Wait>` return type. All gated on a `Wait`
 // struct existing (stone projects); otherwise the generic `Coroutine<$0>` form
 // stands in.
 
-const COFRAME: &str = "struct CoFrame { wait_frame: bool }\n";
+const COFRAME: &str = "struct Wait { wait_frame: bool }\n";
 
 #[test]
 fn coframe_ranks_first_in_empty_coroutine_generic_slot() {
@@ -1285,19 +1285,19 @@ fn coframe_ranks_first_in_empty_coroutine_generic_slot() {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src);
     let items: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
-    assert_eq!(items.first().map(String::as_str), Some("CoFrame"),
-        "CoFrame must rank first in Coroutine<|>: {:?}", &items[..items.len().min(8)]);
+    assert_eq!(items.first().map(String::as_str), Some("Wait"),
+        "Wait must rank first in Coroutine<|>: {:?}", &items[..items.len().min(8)]);
 }
 
 #[test]
 fn coframe_not_synthesized_without_a_cofframe_struct() {
-    // No CoFrame struct -> no special boost; normal type completion.
+    // No Wait struct -> no special boost; normal type completion.
     let src = "co fn f() -> Coroutine<> {\n  yield 0\n}\n";
     let col = "co fn f() -> Coroutine<".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     let items: Vec<String> = bone.completion(PATH, Position::new(0, col)).into_iter().map(|c| c.label).collect();
-    assert!(items.first().map(String::as_str) != Some("CoFrame"), "no CoFrame boost without the struct: {items:?}");
+    assert!(items.first().map(String::as_str) != Some("Wait"), "no Wait boost without the struct: {items:?}");
 }
 
 #[test]
@@ -1308,14 +1308,14 @@ fn coroutine_name_expands_to_cofframe_and_generic_snippets() {
     bone.update(PATH, src);
     let items = bone.completion(PATH, Position::new(1, col));
     let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels.first(), Some(&"Coroutine<CoFrame>"), "first: {labels:?}");
+    assert_eq!(labels.first(), Some(&"Coroutine<Wait>"), "first: {labels:?}");
     assert_eq!(labels.get(1), Some(&"Coroutine<>"), "second: {labels:?}");
     assert!(!labels.contains(&"Coroutine"), "bare Coroutine must be suppressed: {labels:?}");
     let snip = items.iter().find(|c| c.label == "Coroutine<>").unwrap();
     assert_eq!(snip.insert_text.as_deref(), Some("Coroutine<$0>"), "{snip:?}");
     assert_eq!(snip.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{snip:?}");
-    let cf = items.iter().find(|c| c.label == "Coroutine<CoFrame>").unwrap();
-    assert_eq!(cf.insert_text.as_deref(), Some("Coroutine<CoFrame>"), "{cf:?}");
+    let cf = items.iter().find(|c| c.label == "Coroutine<Wait>").unwrap();
+    assert_eq!(cf.insert_text.as_deref(), Some("Coroutine<Wait>"), "{cf:?}");
 }
 
 #[test]
@@ -1326,22 +1326,22 @@ fn coroutine_name_without_cofframe_offers_only_generic_snippet() {
     bone.update(PATH, src.to_string());
     let labels: Vec<String> = bone.completion(PATH, Position::new(0, col)).into_iter().map(|c| c.label).collect();
     assert!(labels.iter().any(|s| s == "Coroutine<>"), "generic snippet present: {labels:?}");
-    assert!(!labels.iter().any(|s| s == "Coroutine<CoFrame>"), "no CoFrame snippet without the struct: {labels:?}");
+    assert!(!labels.iter().any(|s| s == "Coroutine<Wait>"), "no Wait snippet without the struct: {labels:?}");
     assert!(!labels.iter().any(|s| s == "Coroutine"), "bare Coroutine suppressed: {labels:?}");
 }
 
 #[test]
 fn co_fn_signature_offers_coroutine_return_type() {
-    // `co fn spawn() |` (no return type) -> `-> Coroutine<CoFrame>` to the right.
+    // `co fn spawn() |` (no return type) -> `-> Coroutine<Wait>` to the right.
     let src = format!("{COFRAME}co fn spawn() {{\n  yield 0\n}}\n");
     let col = "co fn spawn() ".len() as u32;
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src);
     let items = bone.completion(PATH, Position::new(1, col));
     let labels: Vec<&str> = items.iter().map(|c| c.label.as_str()).collect();
-    assert_eq!(labels.first(), Some(&"-> Coroutine<CoFrame>"), "return-type snippet must rank first: {labels:?}");
-    let it = items.iter().find(|c| c.label == "-> Coroutine<CoFrame>").unwrap();
-    assert_eq!(it.insert_text.as_deref(), Some("-> Coroutine<CoFrame>"), "{it:?}");
+    assert_eq!(labels.first(), Some(&"-> Coroutine<Wait>"), "return-type snippet must rank first: {labels:?}");
+    let it = items.iter().find(|c| c.label == "-> Coroutine<Wait>").unwrap();
+    assert_eq!(it.insert_text.as_deref(), Some("-> Coroutine<Wait>"), "{it:?}");
 }
 
 #[test]

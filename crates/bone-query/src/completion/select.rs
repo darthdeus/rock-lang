@@ -157,12 +157,12 @@ pub(crate) enum CandShape {
     EntitySynth { payload: Option<ustr::Ustr> },
     /// A callee param offered as `name:` at a direct call-arg slot.
     NamedArg { pname: ustr::Ustr, pty: String },
-    /// `CoFrame` in the first generic slot of `Coroutine<..>`.
-    CoFrame,
-    /// `Coroutine<CoFrame>` / `Coroutine<$0>` replacing the bare type name.
-    Coroutine { with_coframe: bool },
+    /// `Wait` in the first generic slot of `Coroutine<..>`.
+    Wait,
+    /// `Coroutine<Wait>` / `Coroutine<$0>` replacing the bare type name.
+    Coroutine { with_wait: bool },
     /// `-> Coroutine<..>` return type offered after `co fn name()`.
-    CoReturn { coframe: bool },
+    CoReturn { has_wait: bool },
     /// A reachability path; the cand name is the access form `root.suffix`.
     Reach { final_ty: String, is_method: bool, takes_args: bool },
     /// A synthesized whole call; the cand name is `fname(arg)`.
@@ -216,7 +216,7 @@ impl Sink {
     }
 
     /// Drop an already-emitted candidate a synth supersedes (e.g. the plain
-    /// `CoFrame` struct symbol when the coroutine-slot synth takes over).
+    /// `Wait` struct symbol when the coroutine-slot synth takes over).
     pub(crate) fn retain_not_named(&mut self, name: &str) {
         self.cands.retain(|c| c.name.as_str() != name);
     }
@@ -336,15 +336,15 @@ pub(crate) fn materialize_cand(
             sort_text,
             ..Default::default()
         },
-        CandShape::CoFrame => CompletionItem {
-            label: "CoFrame".to_string(),
+        CandShape::Wait => CompletionItem {
+            label: "Wait".to_string(),
             kind: Some(CompletionItemKind::STRUCT),
             sort_text,
             ..Default::default()
         },
-        CandShape::Coroutine { with_coframe } => {
-            let (label, insert, fmt) = if with_coframe {
-                ("Coroutine<CoFrame>", "Coroutine<CoFrame>", None)
+        CandShape::Coroutine { with_wait } => {
+            let (label, insert, fmt) = if with_wait {
+                ("Coroutine<Wait>", "Coroutine<Wait>", None)
             } else {
                 ("Coroutine<>", "Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
             };
@@ -357,9 +357,9 @@ pub(crate) fn materialize_cand(
                 ..Default::default()
             }
         }
-        CandShape::CoReturn { coframe } => {
-            let (label, insert, fmt) = if coframe {
-                ("-> Coroutine<CoFrame>", "-> Coroutine<CoFrame>", None)
+        CandShape::CoReturn { has_wait } => {
+            let (label, insert, fmt) = if has_wait {
+                ("-> Coroutine<Wait>", "-> Coroutine<Wait>", None)
             } else {
                 ("-> Coroutine<>", "-> Coroutine<$0>", Some(InsertTextFormat::SNIPPET))
             };
