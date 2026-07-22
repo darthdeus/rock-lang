@@ -47,6 +47,9 @@ enum GlslTy {
     Mat4,
     /// Opaque; param/uniform position only (GLSL forbids sampler locals/returns).
     Sampler2D,
+    /// Integer sampler (the R32I entity-id tier). Same opacity rules as
+    /// Sampler2D; read via texture_id().
+    ISampler2D,
 }
 
 impl GlslTy {
@@ -61,6 +64,21 @@ impl GlslTy {
             GlslTy::Bvec3 => "bvec3",
             GlslTy::Mat4 => "mat4",
             GlslTy::Sampler2D => "sampler2D",
+            GlslTy::ISampler2D => "isampler2D",
+        }
+    }
+
+    fn is_sampler(self) -> bool {
+        matches!(self, GlslTy::Sampler2D | GlslTy::ISampler2D)
+    }
+
+    /// Uniform-declaration spelling. isampler2D carries `highp`: GLSL ES 3.00
+    /// gives integer samplers NO default precision (an unqualified declaration
+    /// is a compile error there); desktop GLSL accepts and ignores it.
+    fn uniform_decl(self) -> &'static str {
+        match self {
+            GlslTy::ISampler2D => "highp isampler2D",
+            other => other.name(),
         }
     }
 }
@@ -90,6 +108,7 @@ fn glsl_ty(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<GlslTy, C
             "Bvec3" => Ok(GlslTy::Bvec3),
             "Mat4" => Ok(GlslTy::Mat4),
             "Sampler2D" => Ok(GlslTy::Sampler2D),
+            "ISampler2D" => Ok(GlslTy::ISampler2D),
             other => Err(err(span, format!("shader profile: {what} type `{other}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
         },
         _ => Err(err(span, format!("shader profile: {what} type is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
@@ -178,7 +197,7 @@ fn check_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
         glsl_ty(ws, pd.ty, f.name_span, &format!("parameter `{}`", pd.name))?;
     }
     if let Some(rt) = f.return_ty {
-        if glsl_ty(ws, rt, f.name_span, "return")? == GlslTy::Sampler2D {
+        if glsl_ty(ws, rt, f.name_span, "return")?.is_sampler() {
             return Err(err(f.name_span, "shader profile: a sampler cannot be returned (GLSL forbids sampler locals/returns)"));
         }
     }
@@ -298,6 +317,9 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("v", 0, "vec2(0.0)"),
     ("zero", 0, "vec2(0.0)"),
     ("texture", 2, "texture($1, $2)"),
+    // Integer-sampler id read (R32I tier): texture() on isampler2D returns
+    // ivec4; the id is the only channel anyone reads.
+    ("texture_id", 2, "texture($1, $2).r"),
     // textureSize returns ivec2; wrap in vec2(...) so the result is a float Vec2
     // (matches Rock's `-> Vec2`, and the gl_FragCoord/size divides it feeds).
     ("texture_size", 1, "vec2(textureSize($1, 0))"),
@@ -574,7 +596,7 @@ fn emit_fn_def_with(
             s.global_params
                 .iter()
                 .copied()
-                .chain(s.samplers.iter().map(|&(i, _)| i))
+                .chain(s.samplers.iter().map(|&(i, _, _)| i))
                 .chain(s.arrays.iter().copied())
                 .collect()
         })
@@ -1624,7 +1646,7 @@ struct EntryShape {
     /// reads). Names are collision-checked unique across all global structs.
     uniform_fields: Vec<(Ustr, GlslTy)>,
     /// Sampler params: (param index, name). Also dropped, read as bare globals.
-    samplers: Vec<(usize, Ustr)>,
+    samplers: Vec<(usize, Ustr, GlslTy)>,
     /// `UniformArray<T>` param indices. Dropped from the signature and referenced
     /// by name (via `at()` -> indexing); NOT tier-0-typed, so they are skipped
     /// when typing param cells.
@@ -1663,11 +1685,11 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
     let span = f.name_span;
     let mut uniform_param = None;
     let mut uniform_fields: Vec<(Ustr, GlslTy)> = Vec::new();
-    let mut samplers: Vec<(usize, Ustr)> = Vec::new();
+    let mut samplers: Vec<(usize, Ustr, GlslTy)> = Vec::new();
     let mut tc = None;
     for (i, pd) in f.param_decls.iter().enumerate() {
         match glsl_ty(ws, pd.ty, span, "parameter") {
-            Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
+            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
             Ok(GlslTy::Vec2) => {
                 if tc.is_some() {
                     return Err(err(span, "shader entry: exactly one Vec2 param (the fullscreen TexCoord varying) is allowed"));
@@ -1698,7 +1720,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
                 let sd = &ws.modules[sid.module.index()].structs[sid.def];
                 for fd in &sd.fields {
                     let fty = glsl_ty(ws, fd.ty, span, &format!("uniform field `{}`", fd.name))?;
-                    if fty == GlslTy::Sampler2D {
+                    if fty.is_sampler() {
                         return Err(err(span, format!("shader entry: uniform field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
                     }
                     uniform_fields.push((fd.name, fty));
@@ -1717,7 +1739,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
     // Uniform names are GLSL globals: fields + samplers + the reserved
     // TexCoord/FragColor must be pairwise distinct.
     let mut seen: HashSet<Ustr> = [Ustr::from("TexCoord"), Ustr::from("FragColor")].into_iter().collect();
-    for name in uniform_fields.iter().map(|&(n, _)| n).chain(samplers.iter().map(|&(_, n)| n)) {
+    for name in uniform_fields.iter().map(|&(n, _)| n).chain(samplers.iter().map(|&(_, n, _)| n)) {
         if !seen.insert(name) {
             return Err(err(span, format!("shader entry: uniform name `{name}` would collide (fields, samplers, TexCoord and FragColor share the GLSL global namespace)")));
         }
@@ -1796,8 +1818,8 @@ pub fn emit_shader_entry(
     for (n, t) in &shape.uniform_fields {
         px.push_str(&format!("uniform {} {};\n", t.name(), n));
     }
-    for (_, n) in &shape.samplers {
-        px.push_str(&format!("uniform sampler2D {};\n", n));
+    for (_, n, t) in &shape.samplers {
+        px.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
     }
     px.push('\n');
     let prelude = helper_prelude(uses_idiv, uses_imod);
@@ -1854,7 +1876,7 @@ struct VertexShape {
     /// Uniform fields, declaration order.
     uniforms: Vec<(Ustr, GlslTy)>,
     /// Sampler params (rare in vertex, but legal).
-    samplers: Vec<(usize, Ustr)>,
+    samplers: Vec<(usize, Ustr, GlslTy)>,
     /// `UniformArray<T>` params: (index, name, element type, @size capacity).
     arrays: Vec<(usize, Ustr, GlslTy, i64)>,
     /// The varyings value-struct return type.
@@ -1873,13 +1895,16 @@ struct FragShape {
     varyings_param: usize,
     uniform_params: Vec<usize>,
     uniforms: Vec<(Ustr, GlslTy)>,
-    samplers: Vec<(usize, Ustr)>,
+    samplers: Vec<(usize, Ustr, GlslTy)>,
     /// `UniformArray<T>` params: (index, name, element type, @size capacity).
     arrays: Vec<(usize, Ustr, GlslTy, i64)>,
-    /// MRT outputs: `Some` when the entry returns a value struct of all-Vec4
-    /// fields -> one `layout(location=N) out vec4 <field>` per field, in
+    /// MRT outputs: `Some` when the entry returns a value struct of Vec4/int
+    /// fields -> one `layout(location=N) out <ty> <field>` per field, in
     /// declaration order. `None` = the single implicit `FragColor` output.
     outputs: Option<Vec<(Ustr, GlslTy)>>,
+    /// Single-output type (Vec4, or Int for an R32I-only target). Vec4 when
+    /// `outputs` is `Some` (unused there).
+    single_out: GlslTy,
 }
 
 fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
@@ -1936,7 +1961,7 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
     let mut out = Vec::new();
     for fd in &sd.fields {
         let fty = glsl_ty(ws, fd.ty, span, &format!("{what} field `{}`", fd.name))?;
-        if fty == GlslTy::Sampler2D {
+        if fty.is_sampler() {
             return Err(err(span, format!("shader: {what} field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
         }
         if fty == GlslTy::Bvec3 {
@@ -1964,7 +1989,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
             continue;
         }
         match glsl_ty(ws, pd.ty, span, "parameter") {
-            Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
+            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
             Ok(other) => {
                 return Err(err(span, format!(
                     "shader vertex: param `{}` ({}) must be an @attr/@instance/@uniform value struct or a Sampler2D",
@@ -2076,7 +2101,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
             continue;
         }
         match glsl_ty(ws, pd.ty, span, "parameter") {
-            Ok(GlslTy::Sampler2D) => samplers.push((i, pd.name)),
+            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
             Ok(other) => {
                 return Err(err(span, format!("shader fragment: param `{}` ({}) must be @uniform or a Sampler2D", pd.name, other.name())));
             }
@@ -2092,33 +2117,36 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     if uniform_params.len() > 1 {
         return Err(err(span, "shader fragment: at most one @uniform struct param is allowed"));
     }
-    // Return: a single Vec4 (implicit FragColor) OR an all-Vec4 value struct
-    // (MRT -- one `layout(location=N) out vec4 <field>` per field, in order).
-    let outputs = match f.return_ty.map(|rt| (rt, glsl_ty(ws, rt, span, "return"))) {
-        Some((_, Ok(GlslTy::Vec4))) => None,
+    // Return: a single Vec4 (implicit FragColor), a single int (an R32I-only
+    // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
+    // (MRT -- one `layout(location=N) out <ty> <field>` per field, in order;
+    // int fields feed R32I attachments).
+    let (outputs, single_out) = match f.return_ty.map(|rt| (rt, glsl_ty(ws, rt, span, "return"))) {
+        Some((_, Ok(GlslTy::Vec4))) => (None, GlslTy::Vec4),
+        Some((_, Ok(GlslTy::Int))) => (None, GlslTy::Int),
         Some((rt, Err(_))) => {
             let sd = struct_def_of(ws, rt).ok_or_else(|| {
-                err(span, "shader fragment: the return type must be Vec4 (FragColor) or a value struct of Vec4 fields (MRT outputs)")
+                err(span, "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)")
             })?;
             let mut outs = Vec::new();
             for fd in &sd.fields {
                 let fty = glsl_ty(ws, fd.ty, span, &format!("MRT output `{}`", fd.name))?;
-                if fty != GlslTy::Vec4 {
+                if fty != GlslTy::Vec4 && fty != GlslTy::Int {
                     return Err(err(span, format!(
-                        "shader fragment: MRT output `{}` ({}) must be Vec4 (each output is a `layout(location=N) out vec4`)",
+                        "shader fragment: MRT output `{}` ({}) must be Vec4 or int (each output is a `layout(location=N) out <ty>`)",
                         fd.name, fty.name()
                     )));
                 }
                 outs.push((fd.name, fty));
             }
             if outs.is_empty() {
-                return Err(err(span, "shader fragment: the MRT output struct must have at least one Vec4 field"));
+                return Err(err(span, "shader fragment: the MRT output struct must have at least one field"));
             }
-            Some(outs)
+            (Some(outs), GlslTy::Vec4)
         }
-        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor) or a value struct of Vec4 fields (MRT outputs)")),
+        _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)")),
     };
-    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers, arrays, outputs })
+    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers, arrays, outputs, single_out })
 }
 
 /// Reject GPU builtins reached from the wrong stage: frag_coord/fwidth/discard
@@ -2293,10 +2321,10 @@ fn emit_fragment_stage(
         out.push_str(&format!("{q}in {} {};\n", t.name(), n));
     }
     match &fs.outputs {
-        None => out.push_str("out vec4 FragColor;\n\n"),
+        None => out.push_str(&format!("out {} FragColor;\n\n", fs.single_out.name())),
         Some(outs) => {
-            for (loc, (n, _)) in outs.iter().enumerate() {
-                out.push_str(&format!("layout(location = {loc}) out vec4 {n};\n"));
+            for (loc, (n, t)) in outs.iter().enumerate() {
+                out.push_str(&format!("layout(location = {loc}) out {} {n};\n", t.name()));
             }
             out.push('\n');
         }
@@ -2307,8 +2335,8 @@ fn emit_fragment_stage(
     for (_, n, t, cap) in &fs.arrays {
         out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
     }
-    for (_, n) in &fs.samplers {
-        out.push_str(&format!("uniform sampler2D {};\n", n));
+    for (_, n, t) in &fs.samplers {
+        out.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
     }
     out.push('\n');
     out.push_str(&helpers);
@@ -2339,11 +2367,11 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
     let mrt_outputs = fs.outputs.iter().flatten().map(|&(n, _)| n);
     let names = v.attrs.iter().map(|&(n, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
-        .chain(v.samplers.iter().map(|&(_, n)| n))
+        .chain(v.samplers.iter().map(|&(_, n, _)| n))
         .chain(v.arrays.iter().map(|&(_, n, ..)| n))
         .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
-        .chain(fs.samplers.iter().map(|&(_, n)| n))
+        .chain(fs.samplers.iter().map(|&(_, n, _)| n))
         .chain(fs.arrays.iter().map(|&(_, n, ..)| n))
         .chain(mrt_outputs);
     for n in names {
