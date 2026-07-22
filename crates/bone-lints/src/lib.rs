@@ -5,7 +5,8 @@
 //! Plan + catalog: `docs/lint-future-plan.md`, spec `docs/linter.md`.
 
 use bone_core::hir::{
-    BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module, Statement,
+    BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module, Statement, TyId,
+    TypeExpr,
 };
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
@@ -523,4 +524,124 @@ pub fn unused_pure_exprs(ws: &Workspace) -> Vec<UnusedPureExpr> {
         .flat_map(|m| m.bodies.values())
         .flat_map(unused_pure_exprs_in_body)
         .collect()
+}
+
+/// A `transmute_of_nullable` finding: a `cast`/`transmute` call that strips a
+/// nullable argument to a non-nullable result -- laundering a real
+/// null-on-failure (e.g. `stone_load_image` -> `int?`) into an apparently-valid
+/// handle. `inner_type` is the argument's rendered type (`int?`, `Mob?`); the
+/// diagnostic names it so the fix (`?? default` / a null check) is obvious.
+#[derive(Clone, Debug)]
+pub struct TransmuteOfNullable {
+    pub fn_name: Ustr,
+    pub inner_type: String,
+    pub span: Span,
+}
+
+impl TransmuteOfNullable {
+    pub fn to_diagnostic(&self) -> CompilerError {
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "`{}` strips nullability from a `{}` -- a null-on-failure silently \
+                 becomes a valid value; use `?? default` or an explicit null check instead",
+                self.fn_name, self.inner_type
+            ),
+        )
+        .with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+/// Canonical lint name for suppression: `// rock: allow(transmute_of_nullable)`.
+pub const TRANSMUTE_OF_NULLABLE: &str = "transmute_of_nullable";
+
+impl LintFinding for TransmuteOfNullable {
+    const LINT: &'static str = TRANSMUTE_OF_NULLABLE;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+}
+
+/// `cast`/`transmute` calls in one body whose argument is nullable and whose
+/// result is non-nullable. Both are the stdlib nullability-erasers; a call
+/// whose result KEEPS the `?` is preserving (adding/round-tripping a `?` is not
+/// laundering) and stays clean. Nesting needs no special-casing: each call is
+/// judged on its own arg/result pair, so an inner cast that preserves
+/// nullability inside an outer strip is clean at the inner site and flagged only
+/// at the outer one. Reads the body's inference (`bi`) for both types; without
+/// it nothing is judgeable. Matched by callee NAME -- user overloads named
+/// `cast`/`transmute` that strip a `?` are the same bug shape, so flagging them
+/// too is intended.
+pub fn transmute_of_nullable_in_body(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    body: &Body,
+) -> Vec<TransmuteOfNullable> {
+    let Some(bi) = bi else { return Vec::new() };
+    let cast = Ustr::from("cast");
+    let transmute = Ustr::from("transmute");
+
+    let mut out = Vec::new();
+    for (idx, expr) in body.expr_arena.iter() {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else { continue };
+        if (*name != cast && *name != transmute) || args.len() != 1 {
+            continue;
+        }
+        let arg = (*args).into_iter().next().expect("len == 1");
+        let (Some(arg_ty), Some(result_ty)) =
+            (bi.expr_types.get(arg).copied(), bi.expr_types.get(idx).copied())
+        else {
+            continue;
+        };
+        if !is_nullable(ws, bi, arg_ty) || is_nullable(ws, bi, result_ty) {
+            continue;
+        }
+        out.push(TransmuteOfNullable {
+            fn_name: *name,
+            inner_type: ws.render(Some(bi), arg_ty),
+            span: body.expr_spans[idx],
+        });
+    }
+    out
+}
+
+fn is_nullable(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
+    matches!(head_type(ws, bi, ty), TypeExpr::Nullable(_))
+}
+
+/// Follow inference-var substitutions to a type's head constructor (mirrors
+/// `Workspace::render`'s `Infer` arm). An unbound var resolves to itself, so a
+/// genuinely-unknown type reads as non-nullable -- the conservative side (a
+/// missed warning, never a false strip).
+fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
+    let mut cur = ty;
+    loop {
+        let te = match cur {
+            TyId::Static(mid, i) => ws.module(mid).ty_arena[i],
+            TyId::Local(i) => bi.ty_arena[i],
+        };
+        match te {
+            TypeExpr::Infer(var, _) => match bi.substitutions.get(var) {
+                Some(sub) => cur = sub,
+                None => return te,
+            },
+            _ => return te,
+        }
+    }
+}
+
+/// `transmute_of_nullable` findings across every non-stdlib body in the
+/// workspace. Convenience for tests and whole-workspace CLI runs; the LSP path
+/// lints a single file's bodies (reading that module's inference) instead.
+pub fn transmute_of_nullable(ws: &Workspace) -> Vec<TransmuteOfNullable> {
+    let warm = FxHashSet::default();
+    let mut out = Vec::new();
+    for module in user_modules(ws, &warm) {
+        let inf = ws.inference(module.id);
+        for (owner, body) in module.bodies.iter() {
+            let bi = inf.and_then(|i| i.per_fn.get(owner));
+            out.extend(transmute_of_nullable_in_body(ws, bi, body));
+        }
+    }
+    out
 }

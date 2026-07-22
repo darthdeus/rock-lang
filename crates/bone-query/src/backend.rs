@@ -129,6 +129,15 @@ struct BoneProject {
     /// the cache for every other tracked file. Gives whole-project coverage
     /// cheaply. Invalidated for the edited file in `update`, dropped on remove.
     lint_cache: HashMap<String, Vec<Diagnostic>>,
+    /// Per-file `transmute_of_nullable` lint diagnostics, cached across edits.
+    /// This lint READS inference (arg/result nullability), so unlike
+    /// `lint_cache` a finding can change when a *dependency* edit re-infers this
+    /// file even though its own text is unchanged -- a return type flipping to
+    /// `int?` newly strips at an untouched `cast` site. So it invalidates on the
+    /// hole-cache rule (edited file + reinferred dependents = `changed`), never
+    /// the text-only rule; and a finding-free dependent can gain findings, so
+    /// (unlike holes) an empty cache entry grants no skip.
+    transmute_cache: HashMap<String, Vec<Diagnostic>>,
     /// Type-reachability index for type-directed completion paths. A pure
     /// function of the type graph (struct fields + fn signatures), so it is
     /// rebuilt only on a non-`BodyOnly` edit and reused across body keystrokes.
@@ -371,6 +380,7 @@ impl BoneWorkspace {
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(),
+                transmute_cache: HashMap::new(),
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
@@ -450,7 +460,7 @@ impl BoneWorkspace {
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 self.projects.insert(
                     root,
-                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, module_touched },
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), transmute_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, module_touched },
                 );
             }
             Err(e) => {
@@ -693,6 +703,27 @@ impl BoneWorkspace {
             diags.extend(lints);
         }
 
+        // `transmute_of_nullable` lint diagnostics. Reads inference, so a
+        // finding can change in any re-inferred file (`changed` = edited file +
+        // reinferred dependents), not just the edited one -- recompute those,
+        // serve the cache for everything else. A finding-free entry grants no
+        // skip: a dependency edit can newly strip at an untouched call site.
+        for (p, diags) in by_file.iter_mut() {
+            if p == path && this_file_parse_err.is_some() {
+                proj.transmute_cache.remove(p);
+                continue;
+            }
+            let must_recompute = changed.contains(p.as_str()) || !proj.transmute_cache.contains_key(p);
+            let lints = if must_recompute {
+                let v = transmute_diagnostics_for(proj, p);
+                proj.transmute_cache.insert(p.clone(), v.clone());
+                v
+            } else {
+                proj.transmute_cache.get(p).cloned().unwrap_or_default()
+            };
+            diags.extend(lints);
+        }
+
         // `unused_fn` lint (bin projects only). Unlike `unused_var`, reachability
         // is whole-project: a finding in ANY file can flip from an edit ANYWHERE
         // (adding or removing a call keeps or kills a function), so there is no
@@ -736,6 +767,7 @@ impl BoneWorkspace {
             proj.texts.remove(path);
             proj.hole_cache.remove(path);
             proj.lint_cache.remove(path);
+            proj.transmute_cache.remove(path);
             let _ = proj.session.remove_file(path);
         }
     }
@@ -858,6 +890,7 @@ impl BoneWorkspace {
             return Vec::new();
         };
         let mut diags = lint_diagnostics_for(proj, path);
+        diags.extend(transmute_diagnostics_for(proj, path));
         if proj.is_bin {
             diags.extend(fn_lint_diagnostics_for(proj, path));
         }
@@ -4031,6 +4064,35 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
             .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic())),
     );
     out
+}
+
+/// `transmute_of_nullable` lint diagnostics (warnings) for one file: run the
+/// lint over the target module's bodies -- reading that module's per-body
+/// inference for arg/result nullability -- then drop
+/// `// rock: allow(transmute_of_nullable)`-suppressed findings.
+fn transmute_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
+    let ws = proj.session.workspace();
+    let Some(mid) = user_module_for_path(ws, path) else {
+        return Vec::new();
+    };
+    if proj.session.warm_mids.contains(&mid) {
+        return Vec::new();
+    }
+    let module = &ws.modules[mid.index()];
+    let inf = ws.inference(mid);
+    let findings: Vec<_> = module
+        .bodies
+        .iter()
+        .flat_map(|(owner, body)| {
+            let bi = inf.and_then(|i| i.per_fn.get(owner));
+            bone_lints::transmute_of_nullable_in_body(ws, bi, body)
+        })
+        .collect();
+    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
+    bone_lints::filter_suppressed(findings, src)
+        .iter()
+        .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic()))
+        .collect()
 }
 
 /// `unused_fn` lint diagnostics for one file. Reachability is whole-project, so
