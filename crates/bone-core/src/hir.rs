@@ -114,6 +114,16 @@ impl TypeCtor {
     }
 }
 
+/// A default for a trailing generic param (`struct Pair<T, U = int>`).
+/// Deliberately index-free (a builtin or a bare named type) so a use site in
+/// ANY module can synthesize the padded `TypeExpr` into its own arena without
+/// cross-arena copying; richer default shapes are rejected at the decl.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GenericDefault {
+    Builtin(BuiltinTy),
+    Named(Ustr),
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TypeExpr {
     Builtin(BuiltinTy),

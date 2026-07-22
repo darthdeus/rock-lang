@@ -308,34 +308,45 @@ pub fn lower_type_expr_in(
                     .copied()
                     .unwrap_or(0);
 
-                if generic_arity > 0 {
+                // Fully-defaulted generics make the bare name legal
+                // (`Holder` == `Holder<Marker>`): synthesize every param from
+                // its default. A non-defaulted prefix still requires args.
+                let defaults = generic_defaults(ctx.workspace, name.name);
+                let min_arity = generic_arity - defaults.len();
+
+                if min_arity > 0 {
+                    let msg = if defaults.is_empty() {
+                        format!(
+                            "Generic type `{}` requires {} type argument(s)",
+                            name.name, generic_arity
+                        )
+                    } else {
+                        format!(
+                            "Generic type `{}` requires at least {} type argument(s)",
+                            name.name, min_arity
+                        )
+                    };
                     match pos {
                         TyPos::Iface => {
                             ctx.module
                                 .interface_errors
-                                .push(CompilerError::new_with_label(
-                                    name.span,
-                                    format!(
-                                        "Generic type `{}` requires {} type argument(s)",
-                                        name.name, generic_arity
-                                    ),
-                                ));
+                                .push(CompilerError::new_with_label(name.span, msg));
 
                             return Ok(ctx.workspace.builtins.error());
                         }
 
                         TyPos::Body => {
-                            comp_error!(
-                                name.span,
-                                "Generic type `{}` requires {} type argument(s)",
-                                name.name,
-                                generic_arity
-                            );
+                            return Err(CompilerError::new_with_label(name.span, msg));
                         }
                     }
                 }
 
-                let params = IdxRange::new_empty();
+                let params = alloc_tys_contiguous(
+                    ctx,
+                    body,
+                    pos,
+                    defaults.iter().map(|d| default_type_expr(*d)).collect::<Vec<_>>(),
+                );
 
                 alloc_ty(
                     ctx,
@@ -439,25 +450,44 @@ pub fn lower_type_expr_in(
                 .try_vec()?;
 
             if ctor.name.as_str() == "Coroutine" {
+                // Builtin dual-arity Coroutine<Y[, R[, N]]>: same
+                // fill-from-right mechanism as user defaults, all slots Unit.
                 while lowered.len() < 3 {
                     lowered.push(TypeExpr::Builtin(hir::BuiltinTy::Unit));
                 }
             }
 
-            // Wrong generic-argument count for a user nominal (`G<int, int>` for
-            // `struct G<T>`, or too few). Builtins (Coroutine, Map,
-            // Vec/Array) aren't in `type_generic_arity`, so they keep their own
-            // arity logic. Cross-module via the workspace map. The bare (0-arg)
-            // case is handled in the Ident arm.
+            // Generic-argument count for a user nominal. Trailing defaulted
+            // params (workspace map, built pre-lowering) fill from the right:
+            // `Pair<string>` on `struct Pair<T, U = int>` pads to
+            // `Pair<string, int>`. Builtins (Coroutine, Map, Vec/Array) aren't
+            // in `type_generic_arity`, so they keep their own arity logic.
+            // Cross-module via the workspace map. The bare (0-arg) case is
+            // handled in the Ident arm.
             if let Some(&arity) = ctx.workspace.type_generic_arity.get(&ctor.name) {
-                if args.len() != arity {
+                let defaults = generic_defaults(ctx.workspace, ctor.name);
+                let min = arity - defaults.len();
+                if args.len() < min || args.len() > arity {
+                    if defaults.is_empty() {
+                        comp_error!(
+                            te.span,
+                            "Generic type `{}` expects {} type argument(s), found {}",
+                            ctor.name,
+                            arity,
+                            args.len()
+                        );
+                    }
                     comp_error!(
                         te.span,
-                        "Generic type `{}` expects {} type argument(s), found {}",
+                        "Generic type `{}` expects {} to {} type argument(s), found {}",
                         ctor.name,
+                        min,
                         arity,
                         args.len()
                     );
+                }
+                while lowered.len() < arity {
+                    lowered.push(default_type_expr(defaults[lowered.len() - min]));
                 }
             }
 
@@ -1605,6 +1635,119 @@ fn reject_generic_bounds(
     Ok(())
 }
 
+/// The trailing generic defaults recorded for `name` (empty when none).
+/// Borrowed from the workspace ('w), so callers can keep the slice across
+/// later `&mut LowerCtx` uses.
+fn generic_defaults(ws: &Workspace, name: Ustr) -> &[hir::GenericDefault] {
+    ws.type_generic_defaults.get(&name).map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// Synthesize the `TypeExpr` a default pads in at a use site: exactly what the
+/// source form would have lowered to (a builtin, or a bare nominal `App`).
+fn default_type_expr(d: hir::GenericDefault) -> TypeExpr {
+    match d {
+        hir::GenericDefault::Builtin(b) => TypeExpr::Builtin(b),
+        hir::GenericDefault::Named(n) => TypeExpr::App {
+            ctor: hir::TypeCtor::for_name(n),
+            params: IdxRange::new_empty(),
+        },
+    }
+}
+
+/// Defaults are supported on type-decl generics only; call-site defaulting for
+/// fn generics needs inference work, so a fn default rejects (fail closed, not
+/// silently ignored).
+fn reject_generic_defaults(
+    what: &str,
+    generics: &[skull_parser::Generic],
+) -> Result<(), CompilerError> {
+    for g in generics {
+        if g.default.is_some() {
+            comp_error!(
+                g.name.span,
+                "default type params are not supported on {}; only struct/enum/newtype generics may carry defaults",
+                what
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Name-RESOLUTION check for a decl's generic defaults: lower each default
+/// normally (result discarded) so an unknown type name or a bare generic type
+/// (`= Entity` for `Entity<T>`) errors at the DECL's span rather than at some
+/// distant use site's pad. Runs after `validate_generic_defaults`, so sibling
+/// refs never reach the generics-in-scope lookup.
+fn lower_generic_defaults_for_check(
+    ctx: &mut LowerCtx,
+    a: &Ast,
+    body: &mut Body,
+    generics: &[skull_parser::Generic],
+) -> Result<(), CompilerError> {
+    for g in generics {
+        if let Some(d) = &g.default {
+            lower_type_expr(ctx, a, body, a.te(d))?;
+        }
+    }
+    Ok(())
+}
+
+/// Decl-side validation for type-decl generic defaults (the authoritative,
+/// spanned counterpart of the pre-pass classification): defaults must be
+/// trailing, index-free (a builtin or a bare named type), and must not
+/// reference a sibling type parameter. Name RESOLUTION of a `Named` default is
+/// checked by the caller lowering the default expr (unknown / bare-generic
+/// names error there with the decl's span).
+fn validate_generic_defaults(
+    what: &str,
+    generics: &[skull_parser::Generic],
+    a: &Ast,
+) -> Result<(), CompilerError> {
+    let mut first_defaulted: Option<Ustr> = None;
+    for g in generics {
+        let Some(d) = &g.default else {
+            if let Some(prev) = first_defaulted {
+                comp_error!(
+                    g.name.span,
+                    "type parameter `{}` without a default follows defaulted `{}`; defaults must be trailing",
+                    g.name.name,
+                    prev
+                );
+            }
+            continue;
+        };
+        first_defaulted.get_or_insert(g.name.name);
+
+        let te = a.te(d);
+        use skull_parser::TypeExprKind as K;
+        let ok = !te.is_nullable
+            && match &te.kind {
+                K::Int | K::Float | K::Bool | K::String | K::Unit | K::Any => true,
+                K::Ident(n) => {
+                    if generics.iter().any(|s| s.name.name == n.name) {
+                        comp_error!(
+                            te.span,
+                            "default for type parameter `{}` may not reference sibling type parameter `{}`",
+                            g.name.name,
+                            n.name
+                        );
+                    }
+                    n.name.as_str() != "_"
+                }
+                _ => false,
+            };
+        if !ok {
+            comp_error!(
+                te.span,
+                "unsupported default for type parameter `{}` on {}: only builtin types and bare type names are supported",
+                g.name.name,
+                what
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn build_function(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -1612,6 +1755,7 @@ pub fn build_function(
     annotations: &[Annotation],
 ) -> Result<(Function, Option<Body>, Vec<CompilerError>), CompilerError> {
     ctx.generics_in_scope.clear();
+    reject_generic_defaults("fn generics", &f.generics)?;
     let generic_var_ids = ctx.declare_generics(&f.generics);
     let mut body = Body::default();
     let generic_bounds = lower_generic_bounds(ctx, a, &mut body, &f.generics)?;
@@ -1963,8 +2107,10 @@ pub fn lower_struct_def(
     s: &skull_parser::StructDef,
 ) -> Result<(), CompilerError> {
     reject_generic_bounds("a struct", &s.generics)?;
+    validate_generic_defaults("a struct", &s.generics, a)?;
     let generic_var_ids = ctx.declare_generics(&s.generics);
     let mut body = Body::default();
+    lower_generic_defaults_for_check(ctx, a, &mut body, &s.generics)?;
 
     let mut fields = Vec::new();
     let def_scope = body.alloc_root_scope();
@@ -2031,8 +2177,10 @@ pub fn lower_enum_def(
     e: &skull_parser::EnumDef,
 ) -> Result<(), CompilerError> {
     reject_generic_bounds("an enum", &e.generics)?;
+    validate_generic_defaults("an enum", &e.generics, a)?;
     let generic_var_ids = ctx.declare_generics(&e.generics);
     let mut body = Body::default();
+    lower_generic_defaults_for_check(ctx, a, &mut body, &e.generics)?;
 
     let mut variants = Vec::new();
 
@@ -2122,8 +2270,10 @@ pub fn lower_newtype_def(
     n: &skull_parser::NewtypeDef,
 ) -> Result<(), CompilerError> {
     reject_generic_bounds("a newtype", &n.generics)?;
+    validate_generic_defaults("a newtype", &n.generics, a)?;
     let generic_var_ids = ctx.declare_generics(&n.generics);
     let mut body = Body::default();
+    lower_generic_defaults_for_check(ctx, a, &mut body, &n.generics)?;
 
     let idx = ctx.module.newtypes_by_name[&n.name.name];
 

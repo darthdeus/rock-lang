@@ -10,6 +10,47 @@ struct LowerItem<'a> {
     rock_module: &'a Ast,
 }
 
+/// Best-effort classification of a decl's trailing generic defaults for the
+/// workspace map: walk from the last param backwards while each default
+/// classifies as index-free (a builtin or a bare named type that is not a
+/// sibling param), stop at the first param without one. Authoritative
+/// validation with spans is bone-lower's `validate_generic_defaults` -- an
+/// invalid decl stores a shorter (or empty) run here and rejects there.
+fn trailing_generic_defaults(
+    ast: &Ast,
+    generics: &[skull_parser::Generic],
+) -> Vec<bone_core::hir::GenericDefault> {
+    use bone_core::hir::{BuiltinTy, GenericDefault};
+    use skull_parser::TypeExprKind;
+
+    let mut out = Vec::new();
+    for g in generics.iter().rev() {
+        let Some(d) = &g.default else { break };
+        let te = ast.te(d);
+        if te.is_nullable {
+            break;
+        }
+        let classified = match &te.kind {
+            TypeExprKind::Int => GenericDefault::Builtin(BuiltinTy::Int),
+            TypeExprKind::Float => GenericDefault::Builtin(BuiltinTy::Float),
+            TypeExprKind::Bool => GenericDefault::Builtin(BuiltinTy::Bool),
+            TypeExprKind::String => GenericDefault::Builtin(BuiltinTy::String),
+            TypeExprKind::Unit => GenericDefault::Builtin(BuiltinTy::Unit),
+            TypeExprKind::Any => GenericDefault::Builtin(BuiltinTy::Any),
+            TypeExprKind::Ident(n)
+                if n.name.as_str() != "_"
+                    && !generics.iter().any(|s| s.name.name == n.name) =>
+            {
+                GenericDefault::Named(n.name)
+            }
+            _ => break,
+        };
+        out.push(classified);
+    }
+    out.reverse();
+    out
+}
+
 pub fn expand_and_desugar(ws: &mut Workspace, cooked: &mut [Ast]) -> Result<(), CompilerError> {
     let _span = tracing::info_span!("expand_and_desugar").entered();
 
@@ -52,12 +93,18 @@ pub fn lower_modules(
             match &item.kind {
                 ItemKind::Struct(s) => {
                     ws.type_generic_arity.insert(s.name.name, s.generics.len());
+                    ws.type_generic_defaults
+                        .insert(s.name.name, trailing_generic_defaults(rock_mod, &s.generics));
                 }
                 ItemKind::Enum(e) => {
                     ws.type_generic_arity.insert(e.name.name, e.generics.len());
+                    ws.type_generic_defaults
+                        .insert(e.name.name, trailing_generic_defaults(rock_mod, &e.generics));
                 }
                 ItemKind::Newtype(n) => {
                     ws.type_generic_arity.insert(n.name.name, n.generics.len());
+                    ws.type_generic_defaults
+                        .insert(n.name.name, trailing_generic_defaults(rock_mod, &n.generics));
                 }
                 ItemKind::Decorator(d) => {
                     ws.decorator_names.insert(d.name.name);
