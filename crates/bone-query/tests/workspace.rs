@@ -544,6 +544,30 @@ fn unused_fn_is_silent_for_lib() {
     );
 }
 
+// The `transmute_of_nullable` lint reads inference and resolves the REAL stdlib
+// `cast`; the live `update` path must publish its warning for the edited file.
+#[test]
+fn update_publishes_transmute_of_nullable_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"g\"\n").unwrap();
+    let src = "fn maybe() -> int? {\n  return 1\n}\nfn main() -> int {\n  let _x: int = cast(maybe())\n  3\n}\n";
+    std::fs::write(dir.path().join("m.rock"), src).unwrap();
+    let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
+    let diags: Vec<_> = per_file
+        .into_iter()
+        .filter(|(p, _)| p == &m)
+        .flat_map(|(_, d)| d)
+        .collect();
+    assert!(
+        diags.iter().any(|d| d.message.contains("strips nullability")
+            && d.message.contains("int?")
+            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
+        "update() must publish the transmute_of_nullable warning: {diags:?}"
+    );
+}
+
 // `rock/modules` recency: modules are baselined at load, then RE-stamped as
 // they re-infer. So after a delay, a module just edited must read fresher than
 // an untouched sibling -- the incremental-perf watch view. (Asserting merely

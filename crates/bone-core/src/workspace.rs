@@ -23,6 +23,14 @@ pub struct Workspace {
     /// lowering the other modules aren't in `ws.modules` yet -- this map is).
     /// Names are unique workspace-wide (duplicate-type-name is rejected).
     pub type_generic_arity: FxHashMap<Ustr, usize>,
+    /// Trailing defaulted generic params per nominal, keyed by name (the
+    /// `type_generic_arity` pattern: built from the raw AST in `lower_modules`
+    /// BEFORE lowering, insert-not-clear for incremental). `defaults.len() <=
+    /// arity`; a use site supplying `arity - defaults.len()..=arity` args pads
+    /// the missing tail from here, fill-from-right. Best-effort: only cleanly
+    /// classifiable trailing defaults are stored -- the authoritative
+    /// validation (with spans) is bone-lower's `validate_generic_defaults`.
+    pub type_generic_defaults: FxHashMap<Ustr, Vec<hir::GenericDefault>>,
     pub interface_names: FxHashSet<Ustr>,
     pub globals_by_name: FxHashMap<Ustr, TyId>,
     /// Names of `const` globals (read-only). A whole-global assignment to one of
@@ -87,6 +95,7 @@ impl Workspace {
             enums_by_name: Default::default(),
             newtypes_by_name: Default::default(),
             type_generic_arity: Default::default(),
+            type_generic_defaults: Default::default(),
             interface_names: Default::default(),
             globals_by_name: Default::default(),
             const_globals: Default::default(),

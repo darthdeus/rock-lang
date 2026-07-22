@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use lsp_types::{
-    CompletionItem, Diagnostic, DiagnosticSeverity,
-    DocumentHighlight,
+    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity,
+    DocumentHighlight, NumberOrString,
     DocumentSymbol, Hover,
     HoverContents, InlayHint, InlayHintKind, InlayHintLabel, Location, MarkupContent, MarkupKind,
     ParameterInformation, ParameterLabel, Position, Range, SemanticToken, SemanticTokenModifier,
@@ -30,6 +30,7 @@ use lsp_types::{
     Uri, WorkspaceEdit,
 };
 
+use bone_lints::LintFinding;
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{BodyInference, InferenceResult, ModuleId, Span, TyId, Workspace};
 use bone_incremental::session::{Session, UpdateTier};
@@ -129,6 +130,15 @@ struct BoneProject {
     /// the cache for every other tracked file. Gives whole-project coverage
     /// cheaply. Invalidated for the edited file in `update`, dropped on remove.
     lint_cache: HashMap<String, Vec<Diagnostic>>,
+    /// Per-file `transmute_of_nullable` lint diagnostics, cached across edits.
+    /// This lint READS inference (arg/result nullability), so unlike
+    /// `lint_cache` a finding can change when a *dependency* edit re-infers this
+    /// file even though its own text is unchanged -- a return type flipping to
+    /// `int?` newly strips at an untouched `cast` site. So it invalidates on the
+    /// hole-cache rule (edited file + reinferred dependents = `changed`), never
+    /// the text-only rule; and a finding-free dependent can gain findings, so
+    /// (unlike holes) an empty cache entry grants no skip.
+    transmute_cache: HashMap<String, Vec<Diagnostic>>,
     /// Type-reachability index for type-directed completion paths. A pure
     /// function of the type graph (struct fields + fn signatures), so it is
     /// rebuilt only on a non-`BodyOnly` edit and reused across body keystrokes.
@@ -371,6 +381,7 @@ impl BoneWorkspace {
                     .expect("bone session warm-init (stdlib) must succeed"),
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(),
+                transmute_cache: HashMap::new(),
                 reach: None,
                 fn_sigs: None,
                 call_through: None,
@@ -450,7 +461,7 @@ impl BoneWorkspace {
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 self.projects.insert(
                     root,
-                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, module_touched },
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), transmute_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, module_touched },
                 );
             }
             Err(e) => {
@@ -693,6 +704,27 @@ impl BoneWorkspace {
             diags.extend(lints);
         }
 
+        // `transmute_of_nullable` lint diagnostics. Reads inference, so a
+        // finding can change in any re-inferred file (`changed` = edited file +
+        // reinferred dependents), not just the edited one -- recompute those,
+        // serve the cache for everything else. A finding-free entry grants no
+        // skip: a dependency edit can newly strip at an untouched call site.
+        for (p, diags) in by_file.iter_mut() {
+            if p == path && this_file_parse_err.is_some() {
+                proj.transmute_cache.remove(p);
+                continue;
+            }
+            let must_recompute = changed.contains(p.as_str()) || !proj.transmute_cache.contains_key(p);
+            let lints = if must_recompute {
+                let v = transmute_diagnostics_for(proj, p);
+                proj.transmute_cache.insert(p.clone(), v.clone());
+                v
+            } else {
+                proj.transmute_cache.get(p).cloned().unwrap_or_default()
+            };
+            diags.extend(lints);
+        }
+
         // `unused_fn` lint (bin projects only). Unlike `unused_var`, reachability
         // is whole-project: a finding in ANY file can flip from an edit ANYWHERE
         // (adding or removing a call keeps or kills a function), so there is no
@@ -713,7 +745,7 @@ impl BoneWorkspace {
                 };
                 let src = proj.texts.get(p).map(String::as_str).unwrap_or("");
                 let kept = bone_lints::filter_suppressed(findings.clone(), src);
-                diags.extend(kept.iter().map(|f| compiler_error_to_diagnostic(&f.to_diagnostic())));
+                diags.extend(kept.iter().map(lint_finding_diagnostic));
             }
         }
 
@@ -736,6 +768,7 @@ impl BoneWorkspace {
             proj.texts.remove(path);
             proj.hole_cache.remove(path);
             proj.lint_cache.remove(path);
+            proj.transmute_cache.remove(path);
             let _ = proj.session.remove_file(path);
         }
     }
@@ -858,6 +891,7 @@ impl BoneWorkspace {
             return Vec::new();
         };
         let mut diags = lint_diagnostics_for(proj, path);
+        diags.extend(transmute_diagnostics_for(proj, path));
         if proj.is_bin {
             diags.extend(fn_lint_diagnostics_for(proj, path));
         }
@@ -1263,6 +1297,13 @@ impl BoneWorkspace {
         // not a real space-after-token context: suppress the popup.
         if space_triggered && line_prefix_is_blank(src, offset) {
             return Vec::new();
+        }
+        // Inside a `// rock: ...` magic comment: a separate early-exit context
+        // (the `allow` verb / known lint names), NOT a name-gate through `admit`.
+        // A comment is not code, so generic symbol/type completion is
+        // short-circuited here.
+        if let Some(items) = magic_comment_completions(src, offset) {
+            return items;
         }
         let prefix_raw = ident_prefix(src, offset).to_string();
         // A token starting with a digit is a numeric literal, never an identifier
@@ -2679,6 +2720,14 @@ impl BoneWorkspace {
             ) else {
                 continue;
             };
+            // A `// rock: ...` directive comment colors as MACRO so themes set
+            // it apart from a plain comment.
+            let token_type = match &tok.kind {
+                rock_tokenizer::TokenKind::Comment(body) if is_magic_rock_directive(body.as_str()) => {
+                    TT_MACRO
+                }
+                _ => token_type,
+            };
             let line = tok.span.line_range.0 as u32;
             let start = tok.span.col_range.0 as u32;
             let length = tok.span.col_range.1.saturating_sub(tok.span.col_range.0) as u32;
@@ -3993,9 +4042,92 @@ pub fn compiler_error_to_diagnostics(e: &CompilerError) -> Vec<(Ustr, Diagnostic
         .collect()
 }
 
-/// `unused_var` lint diagnostics (warnings) for one file: run the lint over the
-/// target module's bodies, drop `// rock: allow(unused_var)`-suppressed
-/// findings, and render each as a warning.
+/// Render a lint finding as an LSP warning tagged with its lint name in the
+/// `code` field, so the "Suppress with `// rock: allow(<lint>)`" code action
+/// identifies lint squiggles robustly (by `code`, not by message-sniffing).
+fn lint_finding_diagnostic<F: LintFinding>(f: &F) -> Diagnostic {
+    let mut d = compiler_error_to_diagnostic(&f.to_diagnostic());
+    d.code = Some(NumberOrString::String(F::LINT.to_string()));
+    d
+}
+
+/// Completion inside a `// rock: ...` magic comment. `Some(items)` when the
+/// cursor sits in such a directive -- the `allow` verb after `// rock: `, or the
+/// known lint names inside `// rock: allow(`. `None` when the cursor isn't in a
+/// magic comment, so the caller runs normal completion.
+fn magic_comment_completions(src: &str, offset: usize) -> Option<Vec<CompletionItem>> {
+    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let before = &src[line_start..offset];
+    // The LAST `//` before the cursor, so a trailing `x() // rock: allow(` works.
+    let after_slashes = before.rsplit_once("//")?.1;
+    let body = after_slashes.trim_start().strip_prefix("rock")?;
+    let body = body.trim_start().strip_prefix(':')?.trim_start();
+    if let Some(args) = allow_open_args(body) {
+        return Some(lint_name_items(current_lint_token(args)));
+    }
+    Some(directive_verb_items(body))
+}
+
+/// True iff a `//` comment body (the text after `//`) opens a `rock:` directive
+/// (`// rock: allow(...)`). Shared by semantic-token coloring.
+fn is_magic_rock_directive(comment_body: &str) -> bool {
+    comment_body
+        .trim_start()
+        .strip_prefix("rock")
+        .and_then(|s| s.trim_start().strip_prefix(':'))
+        .is_some()
+}
+
+/// The argument text after `allow(` while the parens are still open (no `)`
+/// before the cursor). `body` is the text after `// rock: `.
+fn allow_open_args(body: &str) -> Option<&str> {
+    let args = body.strip_prefix("allow")?.trim_start().strip_prefix('(')?;
+    (!args.contains(')')).then_some(args)
+}
+
+/// The partial lint name being typed inside `allow(a, b, c|)`: the tail after
+/// the last comma, leading identifier chars only.
+fn current_lint_token(args: &str) -> &str {
+    let tail = args.rsplit(',').next().unwrap_or(args).trim_start();
+    let end = tail.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(tail.len());
+    &tail[..end]
+}
+
+fn lint_name_items(typed: &str) -> Vec<CompletionItem> {
+    let typed_lc = typed.to_lowercase();
+    bone_lints::KNOWN_LINTS
+        .iter()
+        .filter(|name| name.to_lowercase().starts_with(&typed_lc))
+        .enumerate()
+        .map(|(i, name)| CompletionItem {
+            label: name.to_string(),
+            kind: Some(CompletionItemKind::ENUM_MEMBER),
+            sort_text: Some(format!("{i:03}")),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn directive_verb_items(typed: &str) -> Vec<CompletionItem> {
+    // Only `allow` is ported to bone; the accept-inserts `allow(` open-paren.
+    ["allow"]
+        .into_iter()
+        .filter(|verb| verb.starts_with(typed))
+        .map(|verb| CompletionItem {
+            label: verb.to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            insert_text: Some(format!("{verb}(")),
+            sort_text: Some("000".to_string()),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Per-file lint diagnostics (warnings): run the flat-HIR lints over the target
+/// module's bodies, drop `// rock: allow(<lint>)`-suppressed findings, and
+/// render each as a warning. Both the live `update` path and the one-shot
+/// `diagnostics_for` share this, so a new flat-HIR lint added here reaches every
+/// path and the `lint_cache` automatically.
 fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     let ws = proj.session.workspace();
     let Some(mid) = user_module_for_path(ws, path) else {
@@ -4008,15 +4140,49 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     }
     let module = &ws.modules[mid.index()];
     let variants = bone_lints::enum_variant_names(ws, &proj.session.warm_mids);
-    let findings: Vec<_> = module
+    let unused_vars: Vec<_> = module
         .bodies
         .values()
         .flat_map(|b| bone_lints::unused_vars_in_body(b, &variants))
         .collect();
+    let unused_pure: Vec<_> = module
+        .bodies
+        .values()
+        .flat_map(bone_lints::unused_pure_exprs_in_body)
+        .collect();
+    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
+    let mut out: Vec<Diagnostic> =
+        bone_lints::filter_suppressed(unused_vars, src).iter().map(lint_finding_diagnostic).collect();
+    out.extend(bone_lints::filter_suppressed(unused_pure, src).iter().map(lint_finding_diagnostic));
+    out
+}
+
+/// `transmute_of_nullable` lint diagnostics (warnings) for one file: run the
+/// lint over the target module's bodies -- reading that module's per-body
+/// inference for arg/result nullability -- then drop
+/// `// rock: allow(transmute_of_nullable)`-suppressed findings.
+fn transmute_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
+    let ws = proj.session.workspace();
+    let Some(mid) = user_module_for_path(ws, path) else {
+        return Vec::new();
+    };
+    if proj.session.warm_mids.contains(&mid) {
+        return Vec::new();
+    }
+    let module = &ws.modules[mid.index()];
+    let inf = ws.inference(mid);
+    let findings: Vec<_> = module
+        .bodies
+        .iter()
+        .flat_map(|(owner, body)| {
+            let bi = inf.and_then(|i| i.per_fn.get(owner));
+            bone_lints::transmute_of_nullable_in_body(ws, bi, body)
+        })
+        .collect();
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
     bone_lints::filter_suppressed(findings, src)
         .iter()
-        .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic()))
+        .map(lint_finding_diagnostic)
         .collect()
 }
 
@@ -4033,7 +4199,7 @@ fn fn_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
     bone_lints::filter_suppressed(findings.clone(), src)
         .iter()
-        .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic()))
+        .map(lint_finding_diagnostic)
         .collect()
 }
 

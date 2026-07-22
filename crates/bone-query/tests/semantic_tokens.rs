@@ -664,3 +664,24 @@ fn named_arg_labels_color_as_parameter_not_a_colliding_function() {
         "named-arg label `height:` must be PARAMETER: {toks:?}"
     );
 }
+
+#[test]
+fn magic_rock_directive_comment_colors_as_macro_not_comment() {
+    // A `// rock: allow(...)` directive comment is highlighted as MACRO so
+    // themes distinguish it from a plain comment; an ordinary comment stays
+    // COMMENT.
+    let src = "fn run() {\n  // rock: allow(unused_var)\n  // just a note\n  let x = 1\n}\n";
+    let toks = decode(src);
+    assert_eq!(
+        type_at(&toks, Position::new(1, 2)),
+        Some(SemanticTokenType::MACRO),
+        "magic rock directive should be MACRO, got {:?}",
+        type_at(&toks, Position::new(1, 2))
+    );
+    assert_eq!(
+        type_at(&toks, Position::new(2, 2)),
+        Some(SemanticTokenType::COMMENT),
+        "a plain comment stays COMMENT, got {:?}",
+        type_at(&toks, Position::new(2, 2))
+    );
+}

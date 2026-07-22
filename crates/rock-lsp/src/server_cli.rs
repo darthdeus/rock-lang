@@ -41,6 +41,28 @@ fn build_cli() -> Command {
         .subcommand(file_subcmd("diagnostics", "Get diagnostics for a Rock file"))
         .subcommand(file_subcmd("lint", "Run lints (unused_var, unused_fn) over a Rock file or directory"))
         .subcommand(
+            Command::new("inline-lua-census")
+                .about("Census of inline(lua) fn bodies (meaningful Lua lines) per file, to track and ratchet down raw Lua")
+                .arg(Arg::new("file").required(true).num_args(1..).help("Rock file(s) or director(ies) to census (all merged into one report)"))
+                .arg(
+                    Arg::new("ignore")
+                        .long("ignore")
+                        .action(ArgAction::Append)
+                        .help(
+                            "Plain substring (repeatable, not a glob): a match against a file's \
+                             displayed path drops the whole file (e.g. --ignore stdlib/), a match \
+                             against a fn name drops that fn.",
+                        ),
+                )
+                .arg(
+                    Arg::new("summary")
+                        .long("summary")
+                        .action(ArgAction::SetTrue)
+                        .help("Print only the one-line TOTAL (for tracking the number over time)."),
+                )
+                .arg(trace_flag()),
+        )
+        .subcommand(
             Command::new("semantic-tokens")
                 .about("Get semantic tokens for a Rock file")
                 .arg(Arg::new("file").required(true).help("The Rock file to analyze"))
@@ -178,6 +200,17 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
         None | Some(("serve", _)) => crate::run_lsp_server(),
         Some(("diagnostics", m)) => cli::bone_lsp::diagnostics(arg_str(m, "file")),
         Some(("lint", m)) => cli::bone_lsp::lint(arg_str(m, "file")),
+        Some(("inline-lua-census", m)) => {
+            let paths: Vec<String> = m
+                .get_many::<String>("file")
+                .map(|v| v.cloned().collect())
+                .unwrap_or_default();
+            let ignores: Vec<String> = m
+                .get_many::<String>("ignore")
+                .map(|v| v.cloned().collect())
+                .unwrap_or_default();
+            cli::inline_lua_census::inline_lua_census(&paths, &ignores, m.get_flag("summary"))
+        }
         Some(("semantic-tokens", m)) => cli::bone_lsp::semantic_tokens(arg_str(m, "file")),
         Some(("hover", m)) => {
             let (file, line, col) = bone_position(m)?;
