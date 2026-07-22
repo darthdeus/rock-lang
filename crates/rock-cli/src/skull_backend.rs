@@ -25,12 +25,8 @@ use std::time::{Duration, Instant};
 /// Lua for the user module via skull. The stdlib module isn't emitted — its
 /// symbols are referenced by name (resolved at runtime by a real stdlib
 /// prelude, or simply not called under the load-only validity gate).
-fn skull_emit(
-    file: &str,
-    src: &str,
-    profile: skull_codegen_glsl::GlslProfile,
-) -> std::result::Result<String, Vec<CompilerError>> {
-    Ok(skull_emit_full(file, src, profile).map_err(EmitFullErr::into_errs)?.0)
+fn skull_emit(file: &str, src: &str) -> std::result::Result<String, Vec<CompilerError>> {
+    Ok(skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?.0)
 }
 
 /// A [`skull_emit_full`] failure. `Discovery` (a malformed `@test` annotation on
@@ -57,14 +53,13 @@ impl EmitFullErr {
 fn skull_emit_full(
     file: &str,
     src: &str,
-    profile: skull_codegen_glsl::GlslProfile,
 ) -> std::result::Result<(String, Vec<skull::SkullTest>), EmitFullErr> {
     let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
     let ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let emit = skull::mir_emit::emit_workspace_mir_with_profile(&ws, user_mid, profile)
+    let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let (lua, skipped) = (emit.lua, emit.skipped);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
@@ -475,7 +470,7 @@ enum SkullOutcome {
 fn skull_build(file: &str, src: &str) -> std::result::Result<SkullOutcome, SkullFailure> {
     // bone type-check + skull emit. Errors here are bone's (most files) or a
     // skull codegen gap; both carry a `CompilerError`.
-    let (lua, tests) = match skull_emit_full(file, src, skull_codegen_glsl::GlslProfile::default()) {
+    let (lua, tests) = match skull_emit_full(file, src) {
         Ok(v) => v,
         Err(EmitFullErr::Compile(errs)) => {
             // A file whose `@test`s ALL expect failure is supposed to fail to
@@ -695,9 +690,10 @@ fn truncate(s: &str) -> String {
     }
 }
 
-/// Parse the `--profile` value (`rock shader` entry forms, `rock compile`'s
-/// baked shader registrations). No fallback: an unknown value rejects listing
-/// the valid ones.
+/// Parse the `--profile` value for the `rock shader` entry forms -- the only
+/// command that selects a profile (in-game source is emitted once and adapted
+/// to the live GL context by the engine). No fallback: an unknown value rejects
+/// listing the valid ones.
 pub(crate) fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::GlslProfile> {
     use skull_codegen_glsl::GlslProfile;
     match s {
@@ -818,13 +814,9 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
     Ok(())
 }
 
-pub fn skull_compile_single(
-    path: &str,
-    output: Option<String>,
-    profile: skull_codegen_glsl::GlslProfile,
-) -> Result<()> {
+pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
-        return skull_compile_project(path, output, profile);
+        return skull_compile_project(path, output);
     }
     let src = match fs_err::read_to_string(path) {
         Ok(s) => s,
@@ -833,7 +825,7 @@ pub fn skull_compile_single(
             std::process::exit(1);
         }
     };
-    match skull_emit(path, &src, profile) {
+    match skull_emit(path, &src) {
         Ok(lua) => {
             match output {
                 Some(out) => {
@@ -1041,7 +1033,7 @@ pub fn skull_run(path: &str) -> Result<()> {
             std::process::exit(1);
         }
     };
-    let lua = match skull_emit(path, &src, skull_codegen_glsl::GlslProfile::default()) {
+    let lua = match skull_emit(path, &src) {
         Ok(l) => l,
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
@@ -1104,7 +1096,7 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// differs — `run` wraps `main()` and execs, `compile` writes the string out.
 /// Renders against the project sources and exits 1 on any discovery / type /
 /// emit failure.
-fn skull_emit_project(dir: &str, profile: skull_codegen_glsl::GlslProfile) -> String {
+fn skull_emit_project(dir: &str) -> String {
     use std::path::PathBuf;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
@@ -1141,7 +1133,7 @@ fn skull_emit_project(dir: &str, profile: skull_codegen_glsl::GlslProfile) -> St
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
-    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir_with_profile(&ws, user_mid, profile) {
+    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir(&ws, user_mid) {
         Ok(e) => (e.lua, e.skipped),
         Err(e) => {
             eprintln!("{}", render_project_err(&sources, &e));
@@ -1313,13 +1305,9 @@ pub fn skull_compile_game_and_collect_sims(
 /// the whole project to Lua and write it to `output` (or stdout). The directory
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
-fn skull_compile_project(
-    dir: &str,
-    output: Option<String>,
-    profile: skull_codegen_glsl::GlslProfile,
-) -> Result<()> {
+fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
     use std::path::PathBuf;
-    let emit = skull_emit_project(dir, profile);
+    let emit = skull_emit_project(dir);
     // A game's runnable main.lua is the same shape run/stone produce via
     // write_full_main: preamble (cimgui bindings + game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble the fire build is missing
@@ -1343,7 +1331,7 @@ fn skull_compile_project(
 
 fn skull_run_project(dir: &str) -> Result<()> {
     use std::path::PathBuf;
-    let lua = skull_emit_project(dir, skull_codegen_glsl::GlslProfile::default());
+    let lua = skull_emit_project(dir);
 
     // Game projects need the rock backend's run recipe, not a bare stdin
     // pipe: stage libstone into tmp/ (build_engine_libs), run luajit on a

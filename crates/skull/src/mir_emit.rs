@@ -521,23 +521,12 @@ fn merge_units(
 /// Emit the whole workspace via the new (cell-model) path. `user_mid` is the
 /// entry module (kept for signature parity with the old `emit_workspace`; the
 /// new path is uniformly lenient across all modules today). Registered shaders
-/// emit for the desktop profile (Core330); mobile chunks go through
-/// [`emit_workspace_mir_with_profile`].
+/// always emit Core330: the profile is a property of the GL context, not the
+/// build, and the engine rewrites the version line + precision preamble for
+/// GLES at shader-compile time (stone-gl `adapt_source_for_gles`) -- which is
+/// the only thing the two profiles differ by.
 pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit, CompilerError> {
     emit_full(ws, user_mid).map(|(emit, _cache)| emit)
-}
-
-/// [`emit_workspace_mir`] with an explicit GLSL profile for the baked
-/// `__rock_shader_register` strings (docs/shader-mobile-port-plan.md A2). The
-/// profile is a property of the whole build: it lands in the emit cache, so
-/// incremental reassembly and the hot-reload overlay re-emit registrations
-/// under the SAME profile the build was created with.
-pub fn emit_workspace_mir_with_profile(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    profile: skull_codegen_glsl::GlslProfile,
-) -> Result<MirEmit, CompilerError> {
-    emit_full_with_profile(ws, user_mid, profile).map(|(emit, _cache)| emit)
 }
 
 /// One emitted ordinary/coroutine function definition plus the facts incremental
@@ -609,11 +598,6 @@ pub struct SkullEmitCache {
     /// guard preserves the live value, and their value edits stay interface-tier).
     /// Reset to empty by `emit_full`. `docs/skull-const-hot-reload-plan.md`.
     changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
-    /// GLSL profile the build was created with -- baked into every
-    /// `__rock_shader_register` string. Held here so incremental reassembly and
-    /// the hot-reload overlay can never re-emit registrations under a different
-    /// profile than the full build (hot-reload parity).
-    glsl_profile: skull_codegen_glsl::GlslProfile,
     /// Baseline `static` cell keys (`type@init_hash`) from the last full build,
     /// keyed by cell name. `assemble_overlay` compares each changed fn's current
     /// cell key against this and emits an UNGUARDED reset (nil cell + clear
@@ -985,10 +969,12 @@ fn lua_long_bracket(s: &str) -> String {
 /// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
 /// violation, stage/collision) is a spanned `CompilerError` failing the compile,
 /// never skip-and-continue.
-fn shader_registration_lines(
-    ws: &Workspace,
-    profile: skull_codegen_glsl::GlslProfile,
-) -> Result<String, CompilerError> {
+fn shader_registration_lines(ws: &Workspace) -> Result<String, CompilerError> {
+    // Always Core330. The profile is a property of the GL context, which a build
+    // cannot know: the engine rewrites #version + precision for GLES at
+    // shader-compile time (stone-gl `adapt_source_for_gles`), and that header is
+    // the ONLY difference between the two profiles.
+    let profile = skull_codegen_glsl::GlslProfile::Core330;
     let pairs = skull_mir::lower::collect_shader_pairs(ws)?;
     if pairs.is_empty() {
         return Ok(String::new());
@@ -1242,7 +1228,7 @@ fn assemble(
     // `rock_shader` pipeline registrations (docs/shaders.md):
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
-    out.push_str(&shader_registration_lines(ws, cache.glsl_profile)?);
+    out.push_str(&shader_registration_lines(ws)?);
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -1310,16 +1296,9 @@ fn validate_on_reload_nomangle(ws: &Workspace) -> Result<(), CompilerError> {
     Ok(())
 }
 
-pub fn emit_full(ws: &Workspace, user_mid: ModuleId) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_with_profile(ws, user_mid, skull_codegen_glsl::GlslProfile::default())
-}
-
-/// [`emit_full`] with an explicit GLSL profile for baked shader registrations
-/// (docs/shader-mobile-port-plan.md A2). See `SkullEmitCache::glsl_profile`.
-pub fn emit_full_with_profile(
+pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,
-    glsl_profile: skull_codegen_glsl::GlslProfile,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     validate_on_reload_nomangle(ws)?;
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
@@ -1408,7 +1387,6 @@ pub fn emit_full_with_profile(
         inline_cache: skull_transform::InlineCache::default(),
         dependents,
         changed_consts_since_full: FxHashSet::default(),
-        glsl_profile,
         static_key_baseline,
     };
     let emit = assemble(ws, &cache.cg, &cache.scx, cache.cg.overloaded(), &cache)?;
@@ -1731,7 +1709,7 @@ fn assemble_overlay(
     // watch fast path), so warn loudly (never-swallow) -- the next full rebuild
     // rejects it authoritatively via `assemble` (same pattern as the collision
     // warning above).
-    match shader_registration_lines(ws, cache.glsl_profile) {
+    match shader_registration_lines(ws) {
         Ok(lines) => out.push_str(&lines),
         Err(err) => eprintln!("skull overlay emit: rock_shader registration -- {}", err.message),
     }
