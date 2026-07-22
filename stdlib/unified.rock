@@ -1395,6 +1395,20 @@ inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
     return c.__error
 """
 
+// Generators-as-iterators: a `Coroutine<Y, R, Unit>` iterates as itself via
+// the structural `next` protocol. Resume, then key liveness off `status()`
+// (NOT a null-sentinel), so a body that `yield null`s (nullable `Y`) still
+// produces real null elements. `N != Unit` has no overload -- a `for` head
+// can't supply a resume-arg -- so a resume-taking coroutine rejects at the
+// loop naturally.
+fn next<Y, R>(c: Coroutine<Y, R, Unit>) -> (bool, Y) {
+    let y = resume(c)
+    if status(c) == "suspended" {
+        return (true, cast(y))
+    }
+    return (false, phantom())
+}
+
 // Kill a coroutine. Fires the on_killed hook (if registered) and
 // transitions state to terminal. Further resumes return nil. Idempotent:
 // calling kill twice only fires the hook once.
