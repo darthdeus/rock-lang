@@ -3993,9 +3993,11 @@ pub fn compiler_error_to_diagnostics(e: &CompilerError) -> Vec<(Ustr, Diagnostic
         .collect()
 }
 
-/// `unused_var` lint diagnostics (warnings) for one file: run the lint over the
-/// target module's bodies, drop `// rock: allow(unused_var)`-suppressed
-/// findings, and render each as a warning.
+/// Per-file lint diagnostics (warnings): run the flat-HIR lints over the target
+/// module's bodies, drop `// rock: allow(<lint>)`-suppressed findings, and
+/// render each as a warning. Both the live `update` path and the one-shot
+/// `diagnostics_for` share this, so a new flat-HIR lint added here reaches every
+/// path and the `lint_cache` automatically.
 fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     let ws = proj.session.workspace();
     let Some(mid) = user_module_for_path(ws, path) else {
@@ -4008,16 +4010,27 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     }
     let module = &ws.modules[mid.index()];
     let variants = bone_lints::enum_variant_names(ws, &proj.session.warm_mids);
-    let findings: Vec<_> = module
+    let unused_vars: Vec<_> = module
         .bodies
         .values()
         .flat_map(|b| bone_lints::unused_vars_in_body(b, &variants))
         .collect();
+    let unused_pure: Vec<_> = module
+        .bodies
+        .values()
+        .flat_map(bone_lints::unused_pure_exprs_in_body)
+        .collect();
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    bone_lints::filter_suppressed(findings, src)
+    let mut out: Vec<Diagnostic> = bone_lints::filter_suppressed(unused_vars, src)
         .iter()
         .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic()))
-        .collect()
+        .collect();
+    out.extend(
+        bone_lints::filter_suppressed(unused_pure, src)
+            .iter()
+            .map(|f| compiler_error_to_diagnostic(&f.to_diagnostic())),
+    );
+    out
 }
 
 /// `unused_fn` lint diagnostics for one file. Reachability is whole-project, so

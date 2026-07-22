@@ -4,7 +4,9 @@
 //!
 //! Plan + catalog: `docs/lint-future-plan.md`, spec `docs/linter.md`.
 
-use bone_core::hir::{BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module};
+use bone_core::hir::{
+    BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module, Statement,
+};
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use rock_core::errors::CompilerErrorLevel;
@@ -389,5 +391,136 @@ pub fn unused_vars(ws: &Workspace) -> Vec<UnusedVar> {
     user_modules(ws, &warm)
         .flat_map(|m| m.bodies.values())
         .flat_map(|b| unused_vars_in_body(b, &variants))
+        .collect()
+}
+
+/// An `unused-pure-expr` finding: a statement-position expression whose result
+/// is discarded and whose evaluation is side-effect-free. `is_comparison`
+/// tailors the message toward the canonical `==`-for-`=` typo.
+#[derive(Clone, Debug)]
+pub struct UnusedPureExpr {
+    pub span: Span,
+    pub is_comparison: bool,
+}
+
+impl UnusedPureExpr {
+    pub fn to_diagnostic(&self) -> CompilerError {
+        let msg = if self.is_comparison {
+            "result of this comparison is unused -- did you mean `=`?".to_string()
+        } else {
+            "result of pure expression is unused".to_string()
+        };
+        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+/// Canonical lint name for suppression: `// rock: allow(unused_pure_expr)`.
+pub const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
+
+impl LintFinding for UnusedPureExpr {
+    const LINT: &'static str = UNUSED_PURE_EXPR;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+}
+
+/// Statement-position expressions whose result is discarded but whose
+/// evaluation is side-effect-free. A flat HIR walk with no inference: only
+/// `Statement::Expr` is a true discard position -- a block's trailing
+/// expression lowers to `Body::root`/`Expr::Block.tail` (a VALUE position),
+/// never a statement, so tails and expression-position blocks are never
+/// touched. `is_pure` gates on the whole subtree, so a comparison with a call
+/// operand (`g() == x`) is not flagged.
+pub fn unused_pure_exprs_in_body(body: &Body) -> Vec<UnusedPureExpr> {
+    let mut out = Vec::new();
+    for (_, stmt) in body.statement_arena.iter() {
+        let Statement::Expr(e) = stmt else { continue };
+        let Some(is_comparison) = reportable_root(body, *e) else { continue };
+        if is_pure(body, *e) {
+            out.push(UnusedPureExpr { span: body.expr_spans[*e], is_comparison });
+        }
+    }
+    out
+}
+
+/// `Some(is_comparison)` iff `e`'s ROOT is a shape worth reporting when
+/// discarded. Comparisons carry the `==`-vs-`=` hint. The set is deliberately
+/// narrow: constructors (struct/array/enum literals), `if`/`match`/`block`, and
+/// anything with its own statement positions are excluded so we never
+/// double-report or flag an intentional expression-statement block.
+fn reportable_root(body: &Body, e: Idx<Expr>) -> Option<bool> {
+    match &body.expr_arena[e] {
+        Expr::BinOp { op, .. } => Some(is_comparison_op(*op)),
+        Expr::Not(_) | Expr::BitNot(_) | Expr::UnaryMinus(_) => Some(false),
+        Expr::Var(_) => Some(false),
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) => Some(false),
+        Expr::Unit | Expr::Null => Some(false),
+        Expr::FieldAccess { .. } | Expr::SafeNav { .. } | Expr::TupleIndex { .. } => Some(false),
+        Expr::Tuple(_) => Some(false),
+        _ => None,
+    }
+}
+
+fn is_comparison_op(op: BinOp) -> bool {
+    matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Leq | BinOp::Gt | BinOp::Geq)
+}
+
+/// Whole-subtree side-effect freedom. Conservative: any construct that can run
+/// user code (calls, UFCS/method calls, safe-nav calls), mutate (assign,
+/// compound assign, inc/dec), error (index -- OOB), or divert control
+/// (return/break/yield) makes the expression impure. Literals, reads, field
+/// projections, operators, and casts are pure iff their operands are.
+fn is_pure(body: &Body, e: Idx<Expr>) -> bool {
+    match &body.expr_arena[e] {
+        Expr::Unit
+        | Expr::Null
+        | Expr::Hole(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Var(_)
+        | Expr::Global(_)
+        | Expr::SiblingRef(_) => true,
+
+        Expr::Not(x) | Expr::BitNot(x) | Expr::UnaryMinus(x) => is_pure(body, *x),
+        Expr::As { value, .. } => is_pure(body, *value),
+        Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => is_pure(body, *base),
+        Expr::TupleIndex { tuple, .. } => is_pure(body, *tuple),
+        Expr::BinOp { lhs, rhs, .. } => is_pure(body, *lhs) && is_pure(body, *rhs),
+        Expr::Tuple(elems) | Expr::Array(elems) => (*elems).into_iter().all(|x| is_pure(body, x)),
+
+        // Constructors: side-effect-free (allocation is not an observable
+        // effect), pure iff every operand is. Covers the canonical bug's RHS:
+        // `x == MobAiState::Wander` where `MobAiState::Wander` is an EnumVariant.
+        Expr::EnumVariant { args, .. } => variant_args_pure(body, args),
+        Expr::StructLiteral { fields, bases, .. } => {
+            (*bases).into_iter().all(|b| is_pure(body, b))
+                && (*fields).into_iter().all(|f| is_pure(body, body.struct_lit_field_arena[f].value))
+        }
+
+        _ => false,
+    }
+}
+
+fn variant_args_pure(body: &Body, args: &bone_core::hir::VariantArgs) -> bool {
+    use bone_core::hir::VariantArgs;
+    match args {
+        VariantArgs::Unit => true,
+        VariantArgs::Tuple(elems) => (*elems).into_iter().all(|x| is_pure(body, x)),
+        VariantArgs::Record(fields) => {
+            (*fields).into_iter().all(|f| is_pure(body, body.struct_lit_field_arena[f].value))
+        }
+    }
+}
+
+/// Unused-pure-expr findings across every non-stdlib body in the workspace. A
+/// convenience for tests and whole-workspace CLI runs; the LSP path lints a
+/// single file's bodies instead.
+pub fn unused_pure_exprs(ws: &Workspace) -> Vec<UnusedPureExpr> {
+    let warm = FxHashSet::default();
+    user_modules(ws, &warm)
+        .flat_map(|m| m.bodies.values())
+        .flat_map(unused_pure_exprs_in_body)
         .collect()
 }
