@@ -6,6 +6,7 @@ mod bone_completion_spread;
 mod bone_diagnostics_dir;
 mod bone_generate_function_action;
 mod bone_inline_local_action;
+mod bone_inline_lua_census;
 mod bone_match_arms_action;
 mod bone_semantic_tokens;
 mod bone_server_highlight;

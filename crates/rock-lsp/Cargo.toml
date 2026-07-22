@@ -20,6 +20,7 @@ workspace = true
 [dependencies]
 rock-host = { path = "../rock-host" }
 bone-query = { path = "../bone-query" }
+skull-parser = { path = "../skull-parser" }
 
 anyhow = { workspace = true }
 fs-err = { workspace = true }
