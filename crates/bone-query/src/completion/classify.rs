@@ -487,7 +487,7 @@ pub(crate) struct CompletionCx {
     pub(crate) bool_chain: bool,
     /// Value slot vs type-annotation slot (governs the enum universe).
     pub(crate) expr_position: bool,
-    /// After `yield`/`yield*` -- coroutine fns promote. Expr position only.
+    /// After `yield`/`await` -- coroutine fns promote. Expr position only.
     pub(crate) after_yield: bool,
     /// Param TYPE slot `fn f(name: Ty|)`: (param name, enclosing fn name)
     /// -- the Entity<T> idiom input. Type position only.

@@ -1219,17 +1219,23 @@ fn expr_slot_does_not_offer_coroutine_builtin() {
     assert!(!l.contains(&"Coroutine".to_string()), "type builtin leaked into expr slot: {l:?}");
 }
 
-// -- yield / yield* inside a coroutine body --------------------------------
-// `yield` and `yield*` are keywords usable only inside a `co fn`. Offer them as
+// -- yield / await inside a coroutine body ---------------------------------
+// `yield` and `await` are keywords usable only inside a `co fn`. Offer them as
 // keyword completions there (and NOT inside a plain `fn`). After the keyword,
-// coroutine-returning functions rank first (`yield* frame(1)` delegation).
+// coroutine-returning functions rank first (`await frame(1)` delegation).
 
 #[test]
 fn co_fn_body_offers_yield_keyword() {
     let src = "co fn f() -> Coroutine<int> {\n  yi\n}\n";
     let l = labels(src, 1, 4);
     assert!(l.contains(&"yield".to_string()), "{l:?}");
-    assert!(l.contains(&"yield*".to_string()), "{l:?}");
+}
+
+#[test]
+fn co_fn_body_offers_await_keyword() {
+    let src = "co fn f() -> Coroutine<int> {\n  aw\n}\n";
+    let l = labels(src, 1, 4);
+    assert!(l.contains(&"await".to_string()), "{l:?}");
 }
 
 #[test]
@@ -1237,21 +1243,21 @@ fn plain_fn_body_does_not_offer_yield_keyword() {
     let src = "fn f() -> int {\n  yi\n}\n";
     let l = labels(src, 1, 4);
     assert!(!l.contains(&"yield".to_string()), "yield leaked into plain fn: {l:?}");
-    assert!(!l.contains(&"yield*".to_string()), "yield* leaked into plain fn: {l:?}");
+    assert!(!l.contains(&"await".to_string()), "await leaked into plain fn: {l:?}");
 }
 
 #[test]
-fn yield_star_ranks_coroutine_fn_first() {
-    // `yield* fr|` -- a coroutine fn (`frame`) ranks above a same-prefix
+fn await_ranks_coroutine_fn_first() {
+    // `await fr|` -- a coroutine fn (`frame`) ranks above a same-prefix
     // non-coroutine fn (`fragment`). Both match the prefix; the co fn wins.
     let src = "co fn frame(n: int) -> Coroutine<int> {\n  yield 0\n}\n\
                fn fragment(n: int) -> int { n }\n\
-               co fn g() -> Coroutine<int> {\n  yield* fr\n}\n";
-    // line 5 (0-based): `  yield* fr`, cursor after `fr` = col 11.
+               co fn g() -> Coroutine<int> {\n  await fr\n}\n";
+    // line 5 (0-based): `  await fr`, cursor after `fr` = col 10.
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     let items: Vec<String> = bone
-        .completion(PATH, Position::new(5, 11))
+        .completion(PATH, Position::new(5, 10))
         .into_iter()
         .map(|c| c.label)
         .collect();

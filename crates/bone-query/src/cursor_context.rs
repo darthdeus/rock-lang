@@ -233,7 +233,7 @@ impl CursorAst {
         v.into_iter().map(|(_, i)| i).collect()
     }
 
-    /// `yield <cursor>` / `yield* <cursor>`: the cursor node is the DIRECT
+    /// `yield <cursor>` / `await <cursor>`: the cursor node is the DIRECT
     /// operand of a yield (matching the byte scanner's "immediately after
     /// `yield`" semantics -- `yield foo.b|` is member context, not this).
     pub(crate) fn after_yield(&self) -> bool {

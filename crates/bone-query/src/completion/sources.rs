@@ -691,7 +691,7 @@ pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
 /// `expected`. Used to rank functions returning the wanted type just below
 /// variables of that type.
 /// Whether any function named `name` in the workspace is a `co fn`. Drives
-/// coroutine-fn ranking after a `yield`/`yield*`.
+/// coroutine-fn ranking after a `yield`/`await`.
 pub(crate) fn fn_is_coroutine(ws: &Workspace, name: &str) -> bool {
     let n = Ustr::from(name);
     ws.modules.iter().any(|m| {

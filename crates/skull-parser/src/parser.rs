@@ -172,6 +172,7 @@ impl Parser {
                 | TokenKind::While
                 | TokenKind::Loop
                 | TokenKind::Yield
+                | TokenKind::Await
                 | TokenKind::Break
                 | TokenKind::Continue
                 | TokenKind::OpenCurly
@@ -2409,7 +2410,7 @@ impl Parser {
             TokenKind::Yield => {
                 self.advance();
                 if self.eat(TokenKind::Mul) {
-                    // `yield* coro` delegation.
+                    // Legacy `yield* coro` spelling of `await`.
                     let inner = self.parse_expr(0)?;
                     return Ok(self.ast.expr(self.span_from(start), ExprKind::YieldDelegate(inner)));
                 }
@@ -2419,6 +2420,11 @@ impl Parser {
                     Some(self.parse_expr(0)?)
                 };
                 Ok(self.ast.expr(self.span_from(start), ExprKind::Yield(v)))
+            }
+            TokenKind::Await => {
+                self.advance();
+                let inner = self.parse_expr(0)?;
+                Ok(self.ast.expr(self.span_from(start), ExprKind::YieldDelegate(inner)))
             }
             other => Err(self.err(format!("unexpected token in expression: {:?}", other))),
         }

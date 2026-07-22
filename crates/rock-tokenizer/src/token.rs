@@ -12,6 +12,7 @@ pub enum TokenKind {
     Defer,
 
     Yield,
+    Await,
 
     Struct,
     Newtype,
@@ -302,6 +303,7 @@ impl TokenKind {
             TokenKind::Type => "type",
             TokenKind::As => "as",
             TokenKind::Yield => "yield",
+            TokenKind::Await => "await",
             TokenKind::Let => "let",
             TokenKind::Return => "return",
             TokenKind::Defer => "defer",
@@ -332,133 +334,109 @@ impl TokenKind {
     }
 
     pub fn to_code(&self) -> String {
-        if let Some(text) = self.fixed_spelling() { return text.to_owned(); }
+        if let Some(fixed) = self.fixed_spelling() {
+            return fixed.to_owned();
+        }
         match self {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-            TokenKind::Comment(ustr) => format!("//{}", ustr),
-            TokenKind::Ident(ustr) => ustr.to_string(),
-            TokenKind::Float(num) => num.to_string(),
-            TokenKind::Int(_, original_text) => original_text.to_string(),
-            TokenKind::String(ustr) => ustr.to_string(),
-            TokenKind::RawString(ustr) => ustr.to_string(),
-            _ => unreachable!("fixed token spelling handled above"),
+            Self::Comment(body) => format!("//{body}"),
+            Self::Ident(name) => name.to_string(),
+            Self::Float(val) => val.to_string(),
+            Self::Int(_, kept) => kept.to_string(),
+            Self::String(body) => body.to_string(),
+            Self::RawString(body) => body.to_string(),
+            _ => self.fixed_spelling().unwrap_or("").to_owned(),
         }
     }
 
     fn fixed_spelling(&self) -> Option<&'static str> {
         Some(match self {
-            TokenKind::Fn => "fn",
-            TokenKind::Operator => "operator",
-            TokenKind::Table => "table",
-            TokenKind::Type => "type",
-            TokenKind::As => "as",
-            TokenKind::DirectiveIf => "#if",
-            TokenKind::DirectiveElseIf => "#elseif",
-            TokenKind::DirectiveElse => "#else",
-            TokenKind::DirectiveEnd => "#end",
-            TokenKind::Yield => "yield",
-            TokenKind::Let => "let",
-            TokenKind::Return => "return",
-            TokenKind::Defer => "defer",
-            TokenKind::Struct => "struct",
-            TokenKind::Newtype => "newtype",
-            TokenKind::If => "if",
-            TokenKind::Else => "else",
-            TokenKind::For => "for",
-            TokenKind::In => "in",
-            TokenKind::Loop => "loop",
-            TokenKind::While => "while",
-            TokenKind::Break => "break",
-            TokenKind::Continue => "continue",
-            TokenKind::Null => "null",
-            TokenKind::Enum => "enum",
-            TokenKind::Match => "match",
-            TokenKind::Extern => "extern",
-            TokenKind::Global => "global",
-            TokenKind::Const => "const",
-            TokenKind::Deco => "deco",
-            TokenKind::Macro => "macro",
-            TokenKind::Arrow => "->",
-            TokenKind::FatArrow => "=>",
-            TokenKind::Assign => "=",
-            TokenKind::AddAssign => "+=",
-            TokenKind::SubAssign => "-=",
-            TokenKind::MulAssign => "*=",
-            TokenKind::DivAssign => "/=",
-            TokenKind::And => "and",
-            TokenKind::Or => "or",
-            TokenKind::Equals => "==",
-            TokenKind::NotEquals => "!=",
-            TokenKind::OpenParen => "(",
-            TokenKind::CloseParen => ")",
-            TokenKind::OpenSquare => "[",
-            TokenKind::CloseSquare => "]",
-            TokenKind::OpenCurly => "{",
-            TokenKind::CloseCurly => "}",
-            TokenKind::LessThan => "<",
-            TokenKind::LessThanEqual => "<=",
-            TokenKind::GreaterThan => ">",
-            TokenKind::GreaterThanEqual => ">=",
-            TokenKind::Semicolon => ";",
-            TokenKind::Comma => ",",
-            TokenKind::Colon => ":",
-            TokenKind::DoubleColon => "::",
-            TokenKind::Dot => ".",
-            TokenKind::DoubleDot => "..",
-            TokenKind::TripleDot => "...",
-            TokenKind::At => "@",
-            TokenKind::Bang => "!",
-            TokenKind::True => "true",
-            TokenKind::False => "false",
-            TokenKind::Plus => "+",
-            TokenKind::PlusPlus => "++",
-            TokenKind::Minus => "-",
-            TokenKind::MinusMinus => "--",
-            TokenKind::Mul => "*",
-            TokenKind::Div => "/",
-            TokenKind::IntDiv => "./",
-            TokenKind::Mod => "%",
-            TokenKind::BitAnd => "&",
-            TokenKind::BitOr => "|",
-            TokenKind::BitXor => "^",
-            TokenKind::BitNot => "~",
-            TokenKind::LeftShift => "<<",
-            TokenKind::RightShift => ">>",
-            TokenKind::SingleQuote => "'",
-            TokenKind::DoubleQuote => "\"",
-            TokenKind::QuestionMark => "?",
-            TokenKind::QuestionDot => "?.",
-            TokenKind::DoubleQuestionMark => "??",
-            TokenKind::TripleQuestionMark => "???",
-            TokenKind::Dollar => "$",
-            TokenKind::Newline => "\n",
-            TokenKind::EOF => "EOF",
+            Self::Dollar => "$",
+            Self::At => "@",
+            Self::Bang => "!",
+            Self::QuestionMark => "?",
+            Self::QuestionDot => "?.",
+            Self::DoubleQuestionMark => "??",
+            Self::TripleQuestionMark => "???",
+            Self::SingleQuote => "'",
+            Self::DoubleQuote => "\"",
+            Self::Dot => ".",
+            Self::DoubleDot => "..",
+            Self::TripleDot => "...",
+            Self::Colon => ":",
+            Self::DoubleColon => "::",
+            Self::Semicolon => ";",
+            Self::Comma => ",",
+            Self::OpenCurly => "{",
+            Self::CloseCurly => "}",
+            Self::OpenSquare => "[",
+            Self::CloseSquare => "]",
+            Self::OpenParen => "(",
+            Self::CloseParen => ")",
+            Self::LessThan => "<",
+            Self::LessThanEqual => "<=",
+            Self::LeftShift => "<<",
+            Self::GreaterThan => ">",
+            Self::GreaterThanEqual => ">=",
+            Self::RightShift => ">>",
+            Self::Equals => "==",
+            Self::NotEquals => "!=",
+            Self::Assign => "=",
+            Self::FatArrow => "=>",
+            Self::Arrow => "->",
+            Self::AddAssign => "+=",
+            Self::SubAssign => "-=",
+            Self::MulAssign => "*=",
+            Self::DivAssign => "/=",
+            Self::Plus => "+",
+            Self::PlusPlus => "++",
+            Self::Minus => "-",
+            Self::MinusMinus => "--",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::IntDiv => "./",
+            Self::Mod => "%",
+            Self::BitAnd => "&",
+            Self::And => "and",
+            Self::BitOr => "|",
+            Self::Or => "or",
+            Self::BitXor => "^",
+            Self::BitNot => "~",
+            Self::Fn => "fn",
+            Self::Operator => "operator",
+            Self::Table => "table",
+            Self::Type => "type",
+            Self::As => "as",
+            Self::Yield => "yield",
+            Self::Await => "await",
+            Self::Let => "let",
+            Self::Return => "return",
+            Self::Defer => "defer",
+            Self::Struct => "struct",
+            Self::Newtype => "newtype",
+            Self::If => "if",
+            Self::Else => "else",
+            Self::For => "for",
+            Self::Loop => "loop",
+            Self::In => "in",
+            Self::While => "while",
+            Self::Break => "break",
+            Self::Continue => "continue",
+            Self::Null => "null",
+            Self::Enum => "enum",
+            Self::Match => "match",
+            Self::Extern => "extern",
+            Self::Global => "global",
+            Self::Const => "const",
+            Self::Deco => "deco",
+            Self::Macro => "macro",
+            Self::True => "true",
+            Self::False => "false",
+            Self::DirectiveIf => "#if",
+            Self::DirectiveElseIf => "#elseif",
+            Self::DirectiveElse => "#else",
+            Self::DirectiveEnd => "#end",
+            Self::Newline => "\n",
+            Self::EOF => "EOF",
             _ => return None,
         })
     }
@@ -479,7 +457,7 @@ impl TokenKind {
 /// excluded — they're identifiers outside their specific syntactic
 /// context, recognized by parser lookahead rather than the lexer.
 pub const KEYWORDS: &[&str] = &[
-    "fn", "operator", "table", "type", "as", "yield",
+    "fn", "operator", "table", "type", "as", "yield", "await",
     "if", "else", "for", "in", "while", "loop", "break", "continue",
     "let", "return", "defer",
     "struct", "newtype",

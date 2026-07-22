@@ -4595,10 +4595,10 @@ pub fn completion(
         }
     }
 
-    // `yield` / `yield*` keywords, only inside a `co fn` body in an expression
+    // `yield` / `await` keywords, only inside a `co fn` body in an expression
     // slot. Outside a coroutine they're not valid, so don't offer them.
     if expr_position && enclosing_is_coroutine(ws, mid, offset) {
-        for kw in ["yield", "yield*"] {
+        for kw in ["yield", "await"] {
             let n = ustr::Ustr::from(kw);
             if matches(kw) && seen.insert(n) {
                 out.push(CompletionEntry {

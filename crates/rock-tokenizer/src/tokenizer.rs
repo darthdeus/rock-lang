@@ -662,6 +662,7 @@ impl<'a> Tokenizer<'a> {
             "as" => Ok(TokenKind::As),
 
             "yield" => Ok(TokenKind::Yield),
+            "await" => Ok(TokenKind::Await),
 
             "if" => Ok(TokenKind::If),
 

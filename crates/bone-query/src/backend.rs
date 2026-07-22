@@ -1526,8 +1526,8 @@ impl BoneWorkspace {
         // Type-vs-expression slot governs enum completion (bare `Enum` in a type
         // slot, qualified `Enum::Variant` values in an expression slot).
         let expr_position = cx.expr_position;
-        // After a `yield`/`yield*`, coroutine-returning fns rank first (the
-        // `yield* frame(1)` delegation pattern).
+        // After a `yield`/`await`, coroutine-returning fns rank first (the
+        // `await frame(1)` delegation pattern).
         let after_yield = cx.after_yield;
         // Test-scoped symbols demote outside test files (kind bucket 4).
         let demote_tests = !crate::query::is_test_path(path);
@@ -1728,7 +1728,7 @@ impl BoneWorkspace {
                     // surfaces them (docs/completion-v2-design.md heuristics).
                     _ if demote_tests && c.test_scoped => 4,
                     SymCat::Local | SymCat::Param => 0,
-                    // After `yield`/`yield*`, a coroutine fn is the expected
+                    // After `yield`/`await`, a coroutine fn is the expected
                     // operand -- promote it above plain fns/types.
                     SymCat::Function if after_yield && fn_is_coroutine(ws, c.name.as_str()) => 0,
                     SymCat::Global => 1,
@@ -2941,7 +2941,7 @@ fn classify_token(
         {
             (TT_MACRO, 0)
         }
-        T::Fn | T::Operator | T::Table | T::Let | T::Return | T::Defer | T::Yield
+        T::Fn | T::Operator | T::Table | T::Let | T::Return | T::Defer | T::Yield | T::Await
         | T::Struct | T::Newtype | T::If | T::Else | T::For | T::Loop | T::In | T::While
         | T::Break | T::Continue | T::Null | T::Enum | T::Match | T::Extern | T::Global
         | T::Const | T::Type | T::As | T::Deco | T::Macro | T::True | T::False

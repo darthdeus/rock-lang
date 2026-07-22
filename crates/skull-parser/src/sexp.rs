@@ -386,7 +386,7 @@ impl Ast {
             ExprKind::ContinueExpr => "(continue)".to_string(),
             ExprKind::Yield(None) => "(yield)".to_string(),
             ExprKind::Yield(Some(e)) => format!("(yield {})", self.expr_sexp(*e)),
-            ExprKind::YieldDelegate(e) => format!("(yield* {})", self.expr_sexp(*e)),
+            ExprKind::YieldDelegate(e) => format!("(await {})", self.expr_sexp(*e)),
             ExprKind::SiblingFieldRef(id) => format!(".{}", id.name),
             ExprKind::FunctionRef(id) => format!("&{}", id.name),
             ExprKind::AnaphoricIdent(id) => id.name.to_string(),
