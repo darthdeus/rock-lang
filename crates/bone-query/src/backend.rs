@@ -1580,7 +1580,53 @@ impl BoneWorkspace {
         // The prefix filter happens inside `crate::query::completion`, before per-candidate
         // detail rendering -- so typing narrows the work, not just the result.
         let t_cands = std::time::Instant::now();
-        let cands = crate::query::completion(ws, mid, inf, offset, &prefix, expr_position);
+        let mut cands = crate::query::completion(ws, mid, inf, offset, &prefix, expr_position);
+        // Macros are expanded away before bone lowering, so `ws` has no record
+        // of them -- without this every macro in the tree is invisible to
+        // completion. The Session's parse-time capture is the only source (the
+        // same one ctags and semantic tokens read). Value-position only: a macro
+        // invocation is an expression, never a type.
+        if expr_position {
+            let show_private = prefix.starts_with('_');
+            let pfx = prefix.as_bytes();
+            let mut already: std::collections::HashSet<Ustr> =
+                cands.iter().map(|c| c.name).collect();
+            for (def_file, md) in proj.session.all_macro_defs() {
+                let name = md.name;
+                if name.as_str().starts_with('_') && !show_private {
+                    continue;
+                }
+                if !crate::completion::match_policy::admit(name.as_str().as_bytes(), pfx) {
+                    continue;
+                }
+                // Overloaded macros (`log_once` has a 2- and a 3-param form)
+                // share one name -- offer the first, like an overloaded fn.
+                if !already.insert(name) {
+                    continue;
+                }
+                let params: Vec<String> = md
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let variadic = if p.is_variadic { "..." } else { "" };
+                        format!("{}: {}{}", p.name, variadic, p.ty)
+                    })
+                    .collect();
+                let ret = md.ret.as_ref().map_or_else(String::new, |r| format!(" -> {r}"));
+                cands.push(crate::query::CompletionEntry {
+                    name,
+                    kind: SymCat::Macro,
+                    detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
+                    ty: None,
+                    takes_params: !md.params.is_empty(),
+                    variant_shape: None,
+                    test_scoped: crate::query::is_test_path(def_file.as_str())
+                        || name.as_str().starts_with("test_"),
+                    def_file,
+                    rec: 0,
+                });
+            }
+        }
         let cands_ms = t_cands.elapsed().as_secs_f64() * 1000.0;
         let n_cands = cands.len();
         // Type-directed ranking: inside `f(|)` with a known expected param type,
@@ -2649,10 +2695,8 @@ impl BoneWorkspace {
         // Macros are expanded away before bone lowering, so the workspace HIR
         // has no record of them; the Session's parse-time capture supplies the
         // names (def sites and call sites are both bare ident tokens).
-        for uf in proj.session.files.values() {
-            for md in &uf.macros {
-                names.entry(md.name).or_insert(TT_MACRO);
-            }
+        for (_, md) in proj.session.all_macro_defs() {
+            names.entry(md.name).or_insert(TT_MACRO);
         }
         let names_ms = t.elapsed().as_secs_f64() * 1000.0;
         let t = std::time::Instant::now();
@@ -4334,6 +4378,7 @@ pub(crate) fn user_module_for_path(ws: &Workspace, path: &str) -> Option<ModuleI
 fn ctags_kind(k: SymCat) -> Option<char> {
     match k {
         SymCat::Function => Some('f'),
+        SymCat::Macro => Some('M'),
         SymCat::Struct => Some('s'),
         SymCat::Enum => Some('e'),
         SymCat::Newtype => Some('t'),
@@ -4345,6 +4390,7 @@ fn ctags_kind(k: SymCat) -> Option<char> {
 fn symbol_kind(k: SymCat) -> SymbolKind {
     match k {
         SymCat::Function => SymbolKind::FUNCTION,
+        SymCat::Macro => SymbolKind::FUNCTION,
         SymCat::Struct => SymbolKind::STRUCT,
         SymCat::Enum => SymbolKind::ENUM,
         SymCat::Variant => SymbolKind::ENUM_MEMBER,
