@@ -19,16 +19,6 @@ pub struct UnusedVar {
     pub span: Span,
 }
 
-impl UnusedVar {
-    pub fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(
-            self.span,
-            format!("unused variable `{}` (prefix with `_` to silence)", self.name),
-        )
-        .with_level(CompilerErrorLevel::Warning)
-    }
-}
-
 /// Unused local bindings in a single body. A binding is "used" iff some `Var`
 /// read or local callee references it; resolution is already baked into the
 /// HIR (`Expr::Var(Idx<BindingInfo>)`), so this is a flat arena walk with no
@@ -126,12 +116,18 @@ fn collect_write_targets(body: &Body, target: Idx<Expr>, out: &mut FxHashSet<Idx
 /// Canonical lint name for suppression: `// rock: allow(unused_var)`.
 pub const UNUSED_VAR: &str = "unused_var";
 
+/// Every lint name the suppression/completion/code-action machinery knows. The
+/// single source: the LSP code action and the magic-comment completion both
+/// read this so they never drift a hardcoded name apart.
+pub const KNOWN_LINTS: &[&str] = &[UNUSED_VAR, UNUSED_FN, UNUSED_PURE_EXPR, TRANSMUTE_OF_NULLABLE];
+
 /// A finding that carries its lint name and source line, so one suppression
 /// pass serves every lint. `LINT` is the name matched inside
 /// `// rock: allow(<LINT>)`.
 pub trait LintFinding {
     const LINT: &'static str;
     fn line(&self) -> usize;
+    fn to_diagnostic(&self) -> CompilerError;
 }
 
 impl LintFinding for UnusedVar {
@@ -139,12 +135,23 @@ impl LintFinding for UnusedVar {
     fn line(&self) -> usize {
         self.span.line_range.0
     }
+    fn to_diagnostic(&self) -> CompilerError {
+        CompilerError::new_with_label(
+            self.span,
+            format!("unused variable `{}` (prefix with `_` to silence)", self.name),
+        )
+        .with_level(CompilerErrorLevel::Warning)
+    }
 }
 
 impl LintFinding for UnusedFn {
     const LINT: &'static str = UNUSED_FN;
     fn line(&self) -> usize {
         self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        CompilerError::new_with_label(self.span, format!("unused function `{}`", self.name))
+            .with_level(CompilerErrorLevel::Warning)
     }
 }
 
@@ -200,13 +207,6 @@ fn allow_body_matches(s: &str, lint_name: &str) -> bool {
 pub struct UnusedFn {
     pub name: Ustr,
     pub span: Span,
-}
-
-impl UnusedFn {
-    pub fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(self.span, format!("unused function `{}`", self.name))
-            .with_level(CompilerErrorLevel::Warning)
-    }
 }
 
 /// Canonical lint name for suppression: `// rock: allow(unused_fn)`.
@@ -404,17 +404,6 @@ pub struct UnusedPureExpr {
     pub is_comparison: bool,
 }
 
-impl UnusedPureExpr {
-    pub fn to_diagnostic(&self) -> CompilerError {
-        let msg = if self.is_comparison {
-            "result of this comparison is unused -- did you mean `=`?".to_string()
-        } else {
-            "result of pure expression is unused".to_string()
-        };
-        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Warning)
-    }
-}
-
 /// Canonical lint name for suppression: `// rock: allow(unused_pure_expr)`.
 pub const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
 
@@ -422,6 +411,14 @@ impl LintFinding for UnusedPureExpr {
     const LINT: &'static str = UNUSED_PURE_EXPR;
     fn line(&self) -> usize {
         self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let msg = if self.is_comparison {
+            "result of this comparison is unused -- did you mean `=`?".to_string()
+        } else {
+            "result of pure expression is unused".to_string()
+        };
+        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Warning)
     }
 }
 
@@ -538,8 +535,15 @@ pub struct TransmuteOfNullable {
     pub span: Span,
 }
 
-impl TransmuteOfNullable {
-    pub fn to_diagnostic(&self) -> CompilerError {
+/// Canonical lint name for suppression: `// rock: allow(transmute_of_nullable)`.
+pub const TRANSMUTE_OF_NULLABLE: &str = "transmute_of_nullable";
+
+impl LintFinding for TransmuteOfNullable {
+    const LINT: &'static str = TRANSMUTE_OF_NULLABLE;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
         CompilerError::new_with_label(
             self.span,
             format!(
@@ -549,16 +553,6 @@ impl TransmuteOfNullable {
             ),
         )
         .with_level(CompilerErrorLevel::Warning)
-    }
-}
-
-/// Canonical lint name for suppression: `// rock: allow(transmute_of_nullable)`.
-pub const TRANSMUTE_OF_NULLABLE: &str = "transmute_of_nullable";
-
-impl LintFinding for TransmuteOfNullable {
-    const LINT: &'static str = TRANSMUTE_OF_NULLABLE;
-    fn line(&self) -> usize {
-        self.span.line_range.0
     }
 }
 

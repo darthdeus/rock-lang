@@ -12,3 +12,4 @@ mod bone_semantic_tokens;
 mod bone_server_highlight;
 mod bone_server_symbols;
 mod bone_struct_fields_action;
+mod bone_suppress_lint_action;
