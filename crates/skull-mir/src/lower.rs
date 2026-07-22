@@ -1760,7 +1760,7 @@ struct Builder<'a> {
     /// the splice clears it so kill/error never double-run a completed defer.
     defers: Vec<Vec<(Idx<Expr>, Option<Idx<Cell>>)>>,
     /// True while lowering a `defer` body (inline splice or terminal copy) --
-    /// `yield`/`yield*` inside a defer body is a compile error.
+    /// `yield`/`await` inside a defer body is a compile error.
     in_defer_body: bool,
     /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
     /// the next `resume(arg)`). `None` outside a coroutine.
@@ -2558,7 +2558,7 @@ impl Builder<'_> {
             }
             Expr::YieldDelegate(sub) => {
                 if self.in_defer_body {
-                    return Err(gap("`yield*` inside a `defer` body is not allowed"));
+                    return Err(gap("`await` inside a `defer` body is not allowed"));
                 }
                 self.lower_yield_delegate(sub)
             }
@@ -2596,7 +2596,7 @@ impl Builder<'_> {
                 // and, when the defer body was what created the lambda, recursed
                 // forever (run_all_defers re-splices the still-pending defer ->
                 // re-lowers the lambda). `in_defer_body` resets to false: the
-                // lambda body is not the defer body's code (a `yield`/`yield*`
+                // lambda body is not the defer body's code (a `yield`/`await`
                 // there is already rejected by bone as yield-in-plain-lambda, so
                 // the reset unmasks no diagnostic -- it just makes the flag honest).
                 let saved_defers = std::mem::take(&mut self.defers);
@@ -4117,12 +4117,12 @@ impl Builder<'_> {
         }
     }
 
-    /// `yield* sub` — drive the inner coroutine `sub` through its `.resume()`,
+    /// `await sub` — drive the inner coroutine `sub` through its `.resume()`,
     /// re-yielding each value; the expression's value is `sub`'s return value.
     /// Built as a normal pump loop with a `yield` inside, so the coroutine
     /// transform splits it like any other yield. Mirrors rock-codegen / old skull.
     fn lower_yield_delegate(&mut self, sub_expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let rac = self.resume_arg.ok_or_else(|| gap("yield* outside a coroutine"))?;
+        let rac = self.resume_arg.ok_or_else(|| gap("await outside a coroutine"))?;
         let sub = self.lower_expr(sub_expr)?;
         // Register `sub` as the active inner (kill() chains into it).
         self.emit_cur(Inst::CoroSetInner(sub));
@@ -4165,12 +4165,12 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(header));
 
         // exit: clear the active inner, re-raise the inner's error if any, then
-        // the `yield*` value is the inner's return.
+        // the `await` value is the inner's return.
         self.cur = exit;
         self.yield_delegate_exit(sub)
     }
 
-    /// The `yield*` epilogue (shared by the boxed + flat channels): clear the
+    /// The `await` epilogue (shared by the boxed + flat channels): clear the
     /// active inner, re-raise the inner's error if any, evaluate to its return.
     /// The inner object IS its frame, so `__error`/`__return` are direct field
     /// reads (what the `__last_error`/`__result` methods read). Emitted into the
@@ -4194,7 +4194,7 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Field { base: sub, field: Ustr::from("__return") }))
     }
 
-    /// `yield* sub` where `sub` yields a flat enum: drive the inner via its
+    /// `await sub` where `sub` yields a flat enum: drive the inner via its
     /// frame-slot channel (`__advance` + the `__y*` slots on the object, which IS
     /// its frame) and re-yield the leaves through THIS coroutine's frame slots.
     /// Zero boxes on either side -- the outer transform copies `sub.__y*` into
@@ -7293,7 +7293,7 @@ impl Builder<'_> {
     }
 
     /// The `EnumFlatShape` of `Y` when `e`'s type is `Coroutine<Y, ..>` and `Y` is
-    /// a flat enum -- the shape flowing through a `yield*` delegation to a flat-enum
+    /// a flat enum -- the shape flowing through a `await` delegation to a flat-enum
     /// coroutine (so the delegate threads the inner's leaves instead of a box).
     fn coroutine_yield_flat_shape(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;

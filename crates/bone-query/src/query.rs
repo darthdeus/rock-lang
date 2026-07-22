@@ -4625,7 +4625,7 @@ pub fn completion(
 const BUILTIN_TYPE_NAMES: &[&str] =
     &["Coroutine", "Map", "int", "float", "string", "bool", "any"];
 
-/// Whether the body enclosing `offset` is a `co fn`. Drives `yield`/`yield*`
+/// Whether the body enclosing `offset` is a `co fn`. Drives `yield`/`await`
 /// keyword completion (and -- in the facade -- coroutine-fn ranking after a
 /// `yield`).
 fn enclosing_is_coroutine(ws: &Workspace, mid: ModuleId, offset: usize) -> bool {

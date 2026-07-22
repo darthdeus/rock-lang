@@ -2409,10 +2409,10 @@ impl Parser {
             }
             TokenKind::Yield => {
                 self.advance();
-                if self.eat(TokenKind::Mul) {
-                    // Legacy `yield* coro` spelling of `await`.
-                    let inner = self.parse_expr(0)?;
-                    return Ok(self.ast.expr(self.span_from(start), ExprKind::YieldDelegate(inner)));
+                if self.kind() == TokenKind::Mul {
+                    return Err(self.err(
+                        "`await` delegation was renamed to `await`: write `await expr`".to_string(),
+                    ));
                 }
                 let v = if self.expr_terminates() {
                     None

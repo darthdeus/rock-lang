@@ -346,7 +346,7 @@ pub enum Inst {
         value: Idx<Inst>,
         kind: ContainerKind,
     },
-    /// `yield*` bookkeeping: register/clear the inner coroutine being delegated
+    /// `await` bookkeeping: register/clear the inner coroutine being delegated
     /// to (so `kill()` on the outer chains into it). Appears ONLY in a `co fn`
     /// pre-transform; `skull-transform`'s coroutine pass rewrites it to
     /// `s.__inner = value`. A `nil` value clears it.

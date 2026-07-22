@@ -1256,7 +1256,7 @@ impl Emitter<'_> {
             // Any OTHER global read (module `let`, enum name table, named fn as a
             // value) is not emitted, so it stays out of subset. `error` is the
             // one runtime global: the coroutine transform's layout raise and
-            // `yield*`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
+            // `await`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
             Inst::Global(name) if self.hoisted.contains(name) || name.as_str() == "error" => {
                 name.to_string()
             }

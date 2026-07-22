@@ -376,18 +376,18 @@ fn struct_field_value_offers_expected_enum_variant() {
 
 #[test]
 fn yield_operand_ranks_coroutine_fn_first() {
-    // Positive control for the comment case below: after a real `yield*`,
+    // Positive control for the comment case below: after a real `await`,
     // the coroutine fn must outrank the plain fn that would otherwise win
     // (shorter name, same prefix).
     let labels = labels_at(
         "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\n\
          fn frame() {}\n\
-         co fn t() -> Coroutine<int> {\n  yield* fr$0\n}\n",
+         co fn t() -> Coroutine<int> {\n  await fr$0\n}\n",
     );
     let co = rank_of(&labels, "frame_co");
     let plain = rank_of(&labels, "frame");
     assert!(co.is_some() && plain.is_some(), "both offered: {labels:?}");
-    assert!(co < plain, "coroutine fn must rank first after `yield*`: {labels:?}");
+    assert!(co < plain, "coroutine fn must rank first after `await`: {labels:?}");
 }
 
 #[test]

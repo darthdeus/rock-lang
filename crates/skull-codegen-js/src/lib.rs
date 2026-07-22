@@ -533,7 +533,7 @@ function __rock_random_int(min, max) {
 /// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
 /// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
 /// plus the `error` global backing the transform's `Inst::Global("error")` +
-/// `CallValue` raise shape (layout-stamp check, `yield*` re-raise). Defer
+/// `CallValue` raise shape (layout-stamp check, `await` re-raise). Defer
 /// failures go to STDERR, never stdout -- the harness output-compare must not
 /// see them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.

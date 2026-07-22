@@ -1264,14 +1264,14 @@ mod tests {
 
     #[test]
     fn exec_coroutine_yield_delegate() {
-        // `yield* inner()` pumps the inner coroutine's values outward.
+        // `await inner()` pumps the inner coroutine's values outward.
         exec_eq("co fn inner() -> Coroutine<int> {\n\
                        yield 1\n\
                        yield 2\n\
                    }\n\
                    co fn outer() -> Coroutine<int> {\n\
                        yield 0\n\
-                       yield* inner()\n\
+                       await inner()\n\
                        yield 9\n\
                    }", "local c = outer(); for i=1,4 do print(c.__resume(c)) end", "0\n1\n2\n9");
     }

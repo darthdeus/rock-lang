@@ -3,15 +3,15 @@
 //! constructor, per `docs/stackless-coroutines.md` (decision 6). No LuaJIT
 //! coroutines.
 //!
-//! The cell model SIMPLIFIES this vs the old SSA backend: **only cells cross a
-//! yield** (values are single-block), so there is NO value spill/reload and NO
+//! The cell model SIMPLIFIES this vs the old SSA backend: **only cells cross an
+//! await** (values are single-block), so there is NO value spill/reload and NO
 //! "block-param value crossing a suspend" case. The frame (state-table fields)
 //! is just cells — rendered as `s.<field>` by `skull-codegen-lua`'s `FrameCtx`,
 //! so the transform doesn't even rewrite cell Load/Store; it only:
 //!   1. turns each `Term::Yield { value, resume }` block into `s.__state = k;
 //!      return value` (the `resume` block becomes a dispatch target),
 //!   2. turns a normal `return v` into `s.__return = v; s.__state = -1; return`,
-//!   3. rewrites `CoroSetInner(x)` (the `yield*` pseudo-op) to `s.__inner = x`,
+//!   3. rewrites `CoroSetInner(x)` (the `await` pseudo-op) to `s.__inner = x`,
 //!   4. prepends a dispatch entry that branches on `s.__state` to the resume
 //!      block for each state (falling through to the original entry for state 0).
 //!

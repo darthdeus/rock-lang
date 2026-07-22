@@ -1412,7 +1412,7 @@ inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
 """
 
 // Recursive kill core: terminal-mark, chain into the delegated inner
-// (`yield*` stores it at `__inner`), run pending terminal defers, fire the
+// (`await` stores it at `__inner`), run pending terminal defers, fire the
 // on_killed hook. @nomangle: calls ITSELF by name and is called from kill()'s
 // inline(lua) body.
 @nomangle inline(lua) fn __rock_coroutine_kill(c: any) = """

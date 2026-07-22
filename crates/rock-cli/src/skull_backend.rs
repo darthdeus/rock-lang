@@ -3117,7 +3117,7 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// `yield*` under hot reload: a live outer+inner delegation chain must pick up
+    /// `await` under hot reload: a live outer+inner delegation chain must pick up
     /// a BodyOnly edit to the INNER co fn's body. The chain is advance-by-field
     /// (outer holds the inner object) + step-by-global-name (inner's stale advance
     /// resolves `inner__step` at call time), and both mechanisms must compose
@@ -3130,7 +3130,7 @@ mod overlay_runtime_tests {
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn inner() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Tick({b})\n}}\n\
-                 co fn outer() -> Coroutine<Ev> {{\n  yield* inner()\n}}\n\
+                 co fn outer() -> Coroutine<Ev> {{\n  await inner()\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
                  fn start() {{ GEN = outer() }}\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
@@ -3159,13 +3159,13 @@ mod overlay_runtime_tests {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
                 "1\n20\n-1",
-                "a live yield* chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)"
+                "a live await chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)"
             ),
-            ExecOutcome::Errored => panic!("live yield* delegation reload fixture failed to run"),
+            ExecOutcome::Errored => panic!("live await delegation reload fixture failed to run"),
         }
     }
 
-    /// A stamp-kill (or ANY error) of an outer coroutine suspended mid-`yield*`
+    /// A stamp-kill (or ANY error) of an outer coroutine suspended mid-`await`
     /// must chain into the delegated inner: explicit `kill()` recurses through
     /// `__inner` (firing the inner's on_killed), and the error path must match --
     /// otherwise the inner is orphaned and its cleanup hook silently never runs
@@ -3180,7 +3180,7 @@ mod overlay_runtime_tests {
                  fn mk(n: int) -> int {{ return n }}\n\
                  fn note_inner_killed() {{ INNER_KILLED = INNER_KILLED + 1 }}\n\
                  co fn inner() -> Coroutine<Ev> {{\n  on_killed(() => note_inner_killed())\n  yield Ev::Tick(1)\n  yield Ev::Tick(2)\n}}\n\
-                 co fn outer() -> Coroutine<Ev> {{\n{extra}  yield* inner()\n}}\n\
+                 co fn outer() -> Coroutine<Ev> {{\n{extra}  await inner()\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
                  fn start() {{ GEN = outer() }}\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
