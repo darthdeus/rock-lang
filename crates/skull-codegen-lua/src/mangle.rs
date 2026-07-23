@@ -17,12 +17,20 @@ use bone_semantic::hir::{self, Function, TyId, TypeExpr};
 use bone_semantic::inference::Workspace;
 use ustr::Ustr;
 
-/// Names with more than one definition across the workspace — the ones that
-/// need mangling to disambiguate. A uniquely-named fn keeps its surface name.
+/// Names with more than one LUA-EMITTABLE definition across the workspace —
+/// the ones that need mangling to disambiguate. A uniquely-named fn keeps its
+/// surface name. A `Js`-backend variant (inline(js)/extern(js)) is a backend
+/// SIBLING, not an overload: this backend never emits it, so it cannot
+/// collide — counting it silently renamed every definition and call site of a
+/// previously-unique name the moment a web sibling was declared (caught by
+/// the match3 byte-identity gate, stone-web arc 2).
 pub fn compute_overloaded_names(ws: &Workspace) -> HashSet<Ustr> {
     let mut counts: HashMap<Ustr, usize> = HashMap::default();
     for module in ws.modules.iter() {
         for (_, f) in module.functions.iter() {
+            if f.backend == hir::FnBackend::Js {
+                continue;
+            }
             *counts.entry(f.name).or_insert(0) += 1;
         }
     }
