@@ -1130,6 +1130,28 @@ pub fn scalar_abi_lua_param_names(
     Some(names)
 }
 
+/// Per-declared-param LEAF width under the scalar ABI (a value-struct param's
+/// flattened leaf count, 1 for everything else); `None` when `fref` does not
+/// use the scalar ABI. Pairs with `scalar_abi_lua_param_names` -- the JS arity
+/// guard needs widths per DECLARED param so a defaulted value-struct param
+/// counts as its whole leaf group, not one slot.
+pub fn scalar_abi_param_leaf_widths(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+) -> Option<Vec<usize>> {
+    if !fn_uses_scalar_abi(ws, scx, fref) {
+        return None;
+    }
+    let f = &ws.module(fref.module).functions[fref.func];
+    Some(
+        f.param_decls
+            .iter()
+            .map(|pd| sig_value_shape(ws, pd.ty).map(|s| s.leaf_count()).unwrap_or(1))
+            .collect(),
+    )
+}
+
 /// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first
 /// (same traversal as `repr_to_leaves`/`cdata_leaves`).
 fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {

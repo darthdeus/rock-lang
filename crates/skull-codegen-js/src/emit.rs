@@ -64,9 +64,11 @@ fn js_number(f: f64) -> Result<String, CompilerError> {
 }
 
 /// A JS double-quoted string literal escaping the control chars a JS lexer
-/// needs. Non-ASCII-printable bytes reject rather than guessing an encoding
-/// (the Lua backend passes UTF-8 through verbatim; JS source is UTF-16, so a
-/// raw copy would diverge -- out of the T2 subset).
+/// needs. Non-ASCII chars encode as `\u` escapes (UTF-16 code units, the same
+/// scheme the driver's `js_str` uses) -- JS string LENGTH then counts UTF-16
+/// units where Lua counts bytes, a known cross-backend divergence for
+/// non-ASCII content; rejecting outright bricked whole game builds over an
+/// em-dash in a log message.
 fn js_string_lit(s: &str) -> Result<String, CompilerError> {
     let mut o = String::from("\"");
     for c in s.chars() {
@@ -77,11 +79,10 @@ fn js_string_lit(s: &str) -> Result<String, CompilerError> {
             '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),
             c if c.is_ascii() && !c.is_ascii_control() => o.push(c),
-            _ => {
-                return Err(err(format!(
-                    "JS subset: non-ASCII-printable char in string literal (U+{:04X})",
-                    c as u32
-                )))
+            c => {
+                for u in c.encode_utf16(&mut [0u16; 2]) {
+                    o.push_str(&format!("\\u{:04x}", u));
+                }
             }
         }
     }
@@ -1642,7 +1643,7 @@ pub fn emit_with_closure(
     let mut st = WorklistState::new(ws, roots, false);
     drain_worklists(ws, scx, &mut st)?;
     let bodies = st.top_bodies();
-    check_scalar_abi(ws, &st.lowered, &bodies)?;
+    check_scalar_abi(ws, scx, &st.lowered, &bodies)?;
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -1664,7 +1665,7 @@ pub fn emit_with_closure(
         out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
     }
     for fr in &st.inline_js {
-        out.push_str(&emit_inline_js_fn(ws, *fr, &st.names[fr]));
+        out.push_str(&emit_inline_js_fn(ws, scx, *fr, &st.names[fr]));
     }
     Ok(out)
 }
@@ -1770,6 +1771,7 @@ fn emit_program_core(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
+            register_statics(&mf, &mut st.gctx);
             discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
@@ -1783,7 +1785,7 @@ fn emit_program_core(
 
     let mut bodies = st.top_bodies();
     bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
-    check_scalar_abi(ws, &st.lowered, &bodies)?;
+    check_scalar_abi(ws, scx, &st.lowered, &bodies)?;
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -1802,7 +1804,7 @@ fn emit_program_core(
     }
     // 2b. inline(js) fns, emitted verbatim.
     for fr in &st.inline_js {
-        out.push_str(&emit_inline_js_fn(ws, *fr, &st.names[fr]));
+        out.push_str(&emit_inline_js_fn(ws, scx, *fr, &st.names[fr]));
     }
     // 3. ginit def fns.
     for g in &st.ginits {
@@ -1840,16 +1842,27 @@ fn force_shader_register_sibling(
     }
     let name = ustr::Ustr::from("__rock_shader_register");
     let cands = ws.functions_by_name.get(&name).map(|l| l.as_slice()).unwrap_or(&[]);
-    let js_sibling = cands.iter().find(|(m, f)| {
-        let cf = &ws.module(*m).functions[*f];
-        cf.backend == bone_semantic::hir::FnBackend::Js
-            && (matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) || cf.is_extern)
-    });
-    let &(m, f) = js_sibling.ok_or_else(|| {
+    // Exact-JS sibling first (the intrinsics precedence doctrine), else the
+    // portable plain-Rock body (the engine's real watcher.rock registration
+    // path, JS-emittable once its inline(lua) helpers have js siblings).
+    let target = cands
+        .iter()
+        .find(|(m, f)| {
+            let cf = &ws.module(*m).functions[*f];
+            cf.backend == bone_semantic::hir::FnBackend::Js
+                && (matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) || cf.is_extern)
+        })
+        .or_else(|| {
+            cands.iter().find(|(m, f)| {
+                let cf = &ws.module(*m).functions[*f];
+                cf.inline_body.is_none() && !cf.is_extern
+            })
+        });
+    let &(m, f) = target.ok_or_else(|| {
         err(
             "JS: `rock_shader` pipelines emit `__rock_shader_register` calls, but no \
-             inline(js)/extern(js) `__rock_shader_register` sibling is reachable (the web \
-             engine layer must supply it); refusing to drop the shader registration",
+             JS-servable `__rock_shader_register` is reachable (inline(js)/extern(js) \
+             sibling or a plain-Rock body); refusing to drop the shader registration",
         )
     })?;
     let fr = FuncRef { module: m, func: f };
@@ -1860,6 +1873,8 @@ fn force_shader_register_sibling(
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             st.inline_js.push(fr);
             scan_inline_js_body(ws, fr, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js);
+        } else if cf.inline_body.is_none() && !cf.is_extern {
+            st.queue.push(fr);
         }
         // extern(js): runtime provides the global -- no def emitted.
     }
@@ -1931,14 +1946,25 @@ impl WorklistState {
 /// Emit an `inline(js)` fn verbatim: `function <js_name>(p1, p2) { <raw js> }`.
 /// The body is the author's raw JS, spliced unchanged (mirrors the luajit path's
 /// verbatim `inline(lua)` emission in `skull::mir_emit`).
-fn emit_inline_js_fn(ws: &Workspace, fr: FuncRef, js_name: &str) -> String {
+fn emit_inline_js_fn(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fr: FuncRef,
+    js_name: &str,
+) -> String {
     let f = &ws.module(fr.module).functions[fr.func];
-    let params = f
-        .param_decls
-        .iter()
-        .map(|p| p.name.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
+    // A @scalar_abi fn's value-struct params explode into their
+    // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
+    // sites and the raw body's leaf names agree.
+    let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, fr) {
+        Some(names) => names.join(", "),
+        None => f
+            .param_decls
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
     let src = match f.inline_body {
         Some((bone_semantic::hir::FnBackend::Js, s)) => s.to_string(),
         _ => String::new(),
@@ -1952,6 +1978,20 @@ fn emit_inline_js_fn(ws: &Workspace, fr: FuncRef, js_name: &str) -> String {
 /// callees + module-global reads (feeding both queues), and record the lowered
 /// body. A ginit is a lowered `lower_global` returning the init value (never
 /// inlined, mirroring the luajit global path).
+/// Register a body's `static` locals as `__G` state: each lowers to a private
+/// `__static_*` cell + done-flag global (`lower_static`). No initializer line
+/// is needed -- an undefined done-flag is falsy, so the first-reach guard runs
+/// the init exactly as Lua's nil does.
+fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
+    for sc in &mf.statics {
+        gctx.state.insert(sc.cell);
+        gctx.state.insert(sc.done_flag);
+    }
+    for nf in &mf.nested_fns {
+        register_statics(nf, gctx);
+    }
+}
+
 fn drain_worklists(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -1973,6 +2013,7 @@ fn drain_worklists(
                 }
             }
             skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
+            register_statics(&mf, &mut st.gctx);
             discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
@@ -1993,6 +2034,7 @@ fn drain_worklists(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
+            register_statics(&mf, &mut st.gctx);
             discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
@@ -2035,6 +2077,7 @@ fn emit_lowered_fn(
 /// WITHOUT a default is the legitimate omitted-defaulted-arg shape.
 fn check_scalar_abi(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     lowered: &[(FuncRef, MirFunc)],
     bodies: &[&MirFunc],
 ) -> Result<(), CompilerError> {
@@ -2048,7 +2091,7 @@ fn check_scalar_abi(
                     _ => continue,
                 };
                 if let Some(&arity) = arities.get(callee) {
-                    let required = required_arg_count(ws, *callee, arity);
+                    let required = required_arg_count(ws, scx, *callee, arity);
                     if argc < required || argc > arity {
                         let cf = &ws.module(callee.module).functions[callee.func];
                         return Err(err(format!(
@@ -2910,14 +2953,31 @@ fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
 /// MIR param slot. A GC value-struct default would break the 1:1 assumption, but
 /// value-struct construction rejects at emit independently, so no such call is
 /// admitted here.
-fn required_arg_count(ws: &Workspace, fr: FuncRef, arity: usize) -> usize {
+fn required_arg_count(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fr: FuncRef,
+    arity: usize,
+) -> usize {
     use bone_semantic::hir::BodyOwner;
-    let n_defaults = ws
+    let defaults: Vec<bool> = ws
         .module(fr.module)
         .bodies
         .get(&BodyOwner::Function(fr.func))
-        .map(|b| b.param_defaults.iter().filter(|d| d.is_some()).count())
-        .unwrap_or(0);
+        .map(|b| b.param_defaults.iter().map(|d| d.is_some()).collect())
+        .unwrap_or_default();
+    // Scalar ABI: a defaulted value-struct param explodes to N leaf slots and
+    // all N are omittable together -- subtract per-param LEAF widths, not 1.
+    if let Some(widths) = skull_mir::lower::scalar_abi_param_leaf_widths(ws, scx, fr) {
+        let omittable: usize = widths
+            .iter()
+            .zip(defaults.iter().chain(std::iter::repeat(&false)))
+            .filter(|(_, d)| **d)
+            .map(|(w, _)| w)
+            .sum();
+        return arity.saturating_sub(omittable);
+    }
+    let n_defaults = defaults.iter().filter(|d| **d).count();
     arity.saturating_sub(n_defaults)
 }
 

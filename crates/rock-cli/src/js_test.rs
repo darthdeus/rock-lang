@@ -432,7 +432,7 @@ fn js_run_tests(
 /// diagnostic and exits non-zero -- never a silent fallback.
 pub fn js_run(path: &str) -> Result<()> {
     let emitted = if std::path::Path::new(path).is_dir() {
-        emit_js_program_project(path)
+        emit_js_program_project(path).0
     } else {
         emit_js_program_single(path)
     };
@@ -489,8 +489,11 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
 /// module set, bone-check, resolve the entry module, then the SAME
 /// `emit_program` the single-file path runs (module-loop-driven, order fixed by
 /// `project.rs` file-name sort). Game projects drop test-only files. Any
-/// rejection prints the project diagnostic and exits.
-pub(crate) fn emit_js_program_project(dir: &str) -> skull_codegen_js::emit::JsProgram {
+/// rejection prints the project diagnostic and exits. Also returns the checked
+/// workspace -- the web assembler collects `rock_shader` pairs from it.
+pub(crate) fn emit_js_program_project(
+    dir: &str,
+) -> (skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace) {
     use std::path::PathBuf;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
@@ -522,14 +525,15 @@ pub(crate) fn emit_js_program_project(dir: &str) -> skull_codegen_js::emit::JsPr
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_project_err(&sources, &e));
             log::error!(target: "JS", "js emit failed for project {}", dir);
             std::process::exit(1);
         }
-    }
+    };
+    (prog, ws)
 }
 
 /// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and
@@ -586,7 +590,7 @@ function put(s) { process.stdout.write(s); }
 /// A JS double-quoted string literal for a Rust string, escaping the control
 /// and non-ASCII chars a JS lexer needs (test output can carry arbitrary
 /// bytes). `{:?}` would emit Rust's `\u{XXXX}`, which JS rejects.
-fn js_str(s: &str) -> String {
+pub(crate) fn js_str(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {
         match c {

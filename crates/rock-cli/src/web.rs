@@ -25,8 +25,9 @@ pub fn build_web(project: &str, out: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(&out_dir)?;
 
     // Project-mode emission (diagnoses + exits on any rejection, like the run path).
-    let emitted = crate::js_test::emit_js_program_project(project);
-    let game_js = assemble_web_program(&emitted);
+    let (emitted, ws) = crate::js_test::emit_js_program_project(project);
+    let register_lines = shader_register_lines_js(&ws)?;
+    let game_js = assemble_web_program(&emitted, &register_lines);
     let title = Path::new(project)
         .file_name()
         .and_then(|s| s.to_str())
@@ -41,11 +42,44 @@ pub fn build_web(project: &str, out: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// One `__rock_shader_register("<key>", "<glsl>")` line per distinct
+/// `rock_shader` pair -- the JS mirror of skull's Lua `shader_registration_lines`
+/// (same collector, same Core330 profile: the profile is a property of the GL
+/// context, and the web `stone_create_shader_from_combined` shim does the ES
+/// rewrite at shader-compile time, like the native GLES path). Emitted after
+/// the program (module load), before the boot line, so registrations queue in
+/// PENDING_SHADER_SRCS pre-GL exactly as on a native cold start.
+fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<String> {
+    use std::fmt::Write as _;
+    let pairs = skull_mir::lower::collect_shader_pairs(ws).map_err(|e| anyhow::anyhow!(e.message))?;
+    let mut out = String::new();
+    let profile = skull_codegen_glsl::GlslProfile::Core330;
+    for pair in pairs {
+        let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+        let glsl = match pair.vert {
+            Some(vert) => {
+                let vname = ws.module(vert.module).functions[vert.func].name;
+                skull_codegen_glsl::emit_shader_pipeline(ws, vert.module, vname.as_str(), fname.as_str(), profile)
+            }
+            None => skull_codegen_glsl::emit_shader_entry(ws, pair.frag.module, fname.as_str(), profile),
+        }
+        .map_err(|e| anyhow::anyhow!(e.message))?;
+        let _ = writeln!(
+            out,
+            "__rock_shader_register({}, {});",
+            crate::js_test::js_str(&pair.key),
+            crate::js_test::js_str(&glsl)
+        );
+    }
+    Ok(out)
+}
+
 /// Assemble `game.js`: the shared runtime preludes (same set/order as the node
 /// path) + `JS_WEB_RUNTIME` (browser print/config, in place of the node RNG/env
-/// glue) + a scoped `var __G = {}` + the emitted program, then a boot line that
-/// seeds the RNG and calls `main` when the entry defines one.
-fn assemble_web_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
+/// glue) + a scoped `var __G = {}` + the emitted program + the shader
+/// registration lines, then a boot line that seeds the RNG and calls `main`
+/// when the entry defines one.
+fn assemble_web_program(emitted: &skull_codegen_js::emit::JsProgram, register_lines: &str) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_TABLE_PRIM);
@@ -65,6 +99,7 @@ fn assemble_web_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     // Date.now() matches the node path's non-deterministic default.
     p.push_str("__rock_rng_seed(Date.now());\n");
     p.push_str(&emitted.program);
+    p.push_str(register_lines);
     if let Some(main) = &emitted.main_js_name {
         // The engine web runner (MB) replaces this bare call with an rAF arm; at
         // MA a nullary main runs module-load-then-main, matching the node path.

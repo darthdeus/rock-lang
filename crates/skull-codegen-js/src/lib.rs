@@ -533,11 +533,17 @@ function __rock_random_int(min, max) {
 /// The static browser runtime prelude for `rock web` (stone-web Arc 2). A leaf
 /// layer only: it owns the raw-JS globals the engine's `extern(js)`/`inline(js)`
 /// web leaves bind to (WebGL2 context boot, the DOM event queue, the rAF driver,
-/// the canvas2d glyph-atlas rasterizer, fetch preload) -- everything that CAN be
-/// Rock stays Rock (unfuck stance: no parallel engine in raw JS). This skeleton
-/// (Arc 2 MA) establishes the const + the browser `print`/config shape; the
-/// WebGL2 / DOM / text leaves land in MB/MC as the engine web layer is written.
-pub const JS_WEB_RUNTIME: &str = r#"
+/// fetch preload) -- everything that CAN be Rock stays Rock (unfuck stance: no
+/// parallel engine in raw JS). The canvas2d glyph rasterizer lands in MC; MB
+/// carries a loud fake-font stub (`stone_load_font` returns id 1, every glyph
+/// invalid) so `stone_init_done`'s font gate passes and rects render.
+///
+/// Environment seam: `__sw_env()` returns the GL/DOM facade. The REAL one boots
+/// WebGL2 + DOM listeners; a test harness may predefine
+/// `globalThis.__STONE_WEB_FAKE_ENV` (the node fake-GL smoke) and everything
+/// below runs against it unchanged -- the per-frame GL sequence is then a
+/// recorded-call assertion, not a mock of the engine.
+pub const JS_WEB_RUNTIME: &str = r##"
 // --- browser print/put (no node process.*) ---
 function print() {
   var p = [];
@@ -555,7 +561,687 @@ function __rock_env_var(n) {
 // --- asset preload registry: the boot line fetches declared assets into memory
 // BEFORE main() runs, so the sync `stone_file_read`-shape reads stay sync. ---
 var __ROCK_WEB_ASSETS = (typeof globalThis.__ROCK_WEB_ASSETS === "object" && globalThis.__ROCK_WEB_ASSETS) || {};
-"#;
+
+// ===========================================================================
+// stone web runtime state
+// ===========================================================================
+var __SW = {
+  gl: null, canvas: null,
+  logicalW: 0, logicalH: 0, dpr: 1,
+  initialized: false, quitReq: false, resized: false,
+  events: [], mouseX: 0, mouseY: 0,
+  texFilter: 0, // 0 nearest, 1 linear
+  // one handle space for images AND canvas textures: handle -> WebGLTexture
+  textures: {}, nextTex: 1, whiteImage: 0,
+  canvases: {}, nextCanvas: 1, boundCanvas: 0, // 0 = default framebuffer
+  shaders: {}, nextShader: 1, curShader: 0,
+  meshVbo: null, // shared STREAM_DRAW vertex buffer
+  rafId: 0,
+};
+
+function __sw_gl() { return __SW.gl; }
+
+// SDL keycode from a DOM KeyboardEvent (lib.rock sdl_keycode_to_string is the
+// inverse table games compare against).
+function __sw_sdl_keycode(e) {
+  var k = e.key;
+  if (k.length === 1) {
+    var c = k.charCodeAt(0);
+    if (c >= 65 && c <= 90) return c + 32; // letters arrive lowercase in SDL
+    if (c >= 32 && c <= 126) return c;
+    return 0;
+  }
+  switch (k) {
+    case "Escape": return 27;
+    case "Enter": return 13;
+    case "Tab": return 9;
+    case "Backspace": return 8;
+    case "Delete": return 127;
+    case "ArrowRight": return 1073741903;
+    case "ArrowLeft": return 1073741904;
+    case "ArrowDown": return 1073741905;
+    case "ArrowUp": return 1073741906;
+    case "Shift": return e.location === 2 ? 1073742053 : 1073742049;
+    case "Control": return e.location === 2 ? 1073742052 : 1073742048;
+    case "Alt": return e.location === 2 ? 1073742054 : 1073742050;
+  }
+  if (k.length >= 2 && k[0] === "F") {
+    var n = parseInt(k.slice(1), 10);
+    if (n >= 1 && n <= 12) return 0x4000003A + (n - 1);
+  }
+  return 0;
+}
+
+function __sw_push_event(type, key, btn, x, y) {
+  __SW.events.push({ type: type, key: key, mouse_button: btn, mouse_x: x, mouse_y: y });
+}
+
+// --- lifecycle ---
+function stone_init() { return true; }
+function stone_audio_init() { return true; }
+function stone_audio_quit() {}
+function stone_teardown() {}
+function stone_quit() { __SW.quitReq = true; }
+function stone_quit_requested() { return __SW.quitReq; }
+function stone_is_initialized() { return __SW.initialized; }
+function stone_get_backend_name_js() { return "stone-web"; }
+
+function stone_create_window_ex(title, x, y, width, height, display, resizable) {
+  var fake = globalThis.__STONE_WEB_FAKE_ENV;
+  if (fake) {
+    __SW.gl = fake.gl;
+    __SW.logicalW = width; __SW.logicalH = height; __SW.dpr = 1;
+    __SW.initialized = true;
+    return { __sw_window: true };
+  }
+  var canvas = document.getElementById("stone-canvas");
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.id = "stone-canvas";
+    document.body.appendChild(canvas);
+  }
+  var dpr = window.devicePixelRatio || 1;
+  canvas.style.width = width + "px";
+  canvas.style.height = height + "px";
+  canvas.width = Math.round(width * dpr);
+  canvas.height = Math.round(height * dpr);
+  var gl = canvas.getContext("webgl2", { alpha: false, antialias: false, preserveDrawingBuffer: true });
+  if (!gl) { console.error("[STONE-WEB] WebGL2 unavailable"); return null; }
+  gl.getExtension("EXT_color_buffer_float");
+  __SW.canvas = canvas; __SW.gl = gl;
+  __SW.logicalW = width; __SW.logicalH = height; __SW.dpr = dpr;
+  if (title) document.title = title;
+
+  window.addEventListener("keydown", function (e) {
+    var kc = __sw_sdl_keycode(e);
+    if (kc !== 0) { __sw_push_event(2, kc, 0, 0, 0); e.preventDefault(); }
+  });
+  window.addEventListener("keyup", function (e) {
+    var kc = __sw_sdl_keycode(e);
+    if (kc !== 0) { __sw_push_event(3, kc, 0, 0, 0); }
+  });
+  canvas.addEventListener("mousemove", function (e) {
+    var r = canvas.getBoundingClientRect();
+    __SW.mouseX = e.clientX - r.left; __SW.mouseY = e.clientY - r.top;
+  });
+  canvas.addEventListener("mousedown", function (e) {
+    __sw_push_event(4, 0, e.button + 1, Math.round(__SW.mouseX), Math.round(__SW.mouseY));
+  });
+  canvas.addEventListener("mouseup", function (e) {
+    __sw_push_event(5, 0, e.button + 1, Math.round(__SW.mouseX), Math.round(__SW.mouseY));
+  });
+  canvas.addEventListener("wheel", function (e) {
+    // No MOUSEWHEEL member in the C enum: the delta rides in mouse_y (type=6).
+    // DOM deltaY<0 = scroll up = SDL +1.
+    __sw_push_event(6, 0, 0, 0, e.deltaY < 0 ? 1 : -1);
+    e.preventDefault();
+  }, { passive: false });
+  window.addEventListener("beforeunload", function () { __SW.quitReq = true; });
+
+  __SW.initialized = true;
+  return { __sw_window: true };
+}
+function stone_destroy_window(w) {}
+
+// --- events / input ---
+function stone_poll_event(ev) {
+  var q = __SW.events;
+  if (q.length === 0) return false;
+  var e = q.shift();
+  ev.type = e.type; ev.key = e.key; ev.mouse_button = e.mouse_button;
+  ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  return true;
+}
+function stone_get_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
+
+// --- window / time ---
+function stone_get_window_size(pw, ph) { pw[0] = __SW.logicalW; ph[0] = __SW.logicalH; }
+function stone_get_drawable_size(pw, ph) {
+  pw[0] = Math.round(__SW.logicalW * __SW.dpr); ph[0] = Math.round(__SW.logicalH * __SW.dpr);
+}
+function stone_get_dpi_scale() { return __SW.dpr; }
+function stone_take_window_resized() { var r = __SW.resized; __SW.resized = false; return r; }
+function stone_take_window_moved() { return false; }
+function stone_take_window_display_changed() { return false; }
+function stone_save_window_geometry(title) {}
+function stone_get_time() { return (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000; }
+function stone_swap_window(w) {} // browser presents at rAF return
+function stone_gl_finish() { if (__SW.gl && __SW.gl.finish) __SW.gl.finish(); }
+function stone_gl_flush() { if (__SW.gl && __SW.gl.flush) __SW.gl.flush(); }
+function stone_vsync_active() { return false; } // present_sync stays a no-op; rAF is the sync
+function stone_set_vsync(v) {}
+function stone_force_vsync_off(v) {}
+function stone_reset_frame_stats() {}
+function stone_set_default_texture_filter(f) { __SW.texFilter = f; }
+
+// --- sprite system / mesh draw ---
+function stone_sprite_init() {
+  var gl = __SW.gl;
+  if (!gl) return false;
+  __SW.meshVbo = gl.createBuffer();
+  gl.disable(gl.DEPTH_TEST);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  return true;
+}
+function stone_sprite_shutdown() {}
+
+// The 10-float/40B vertex layout, lockstep with sprite.rs:582-586:
+// 0 pos vec2 @0B, 1 uv vec2 @8B, 2 color vec4 @16B, 3 pivot_y float @32B,
+// 4 entity_id float @36B. Fails closed if no program bound (sprite.rs:621-627).
+function stone_draw_mesh(data, count, stride, tex) {
+  var gl = __SW.gl;
+  if (!gl || count <= 0) return;
+  var sh = __SW.shaders[__SW.curShader];
+  if (!sh) {
+    __sw_log_once("stone_draw_mesh: no shader bound; skipping");
+    return;
+  }
+  gl.useProgram(sh.prog);
+  var t = __SW.textures[tex];
+  if (t) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    var lt = __sw_uloc(sh, "uTexture");
+    if (lt) gl.uniform1i(lt, 0);
+  }
+  var lc = __sw_uloc(sh, "uColor");
+  if (lc) gl.uniform4f(lc, 1, 1, 1, 1);
+  var ltr = __sw_uloc(sh, "uTransform");
+  if (ltr) gl.uniformMatrix4fv(ltr, false, __SW_IDENTITY);
+  gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count * stride), gl.STREAM_DRAW);
+  var sb = stride * 4;
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, sb, 0);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, sb, 8);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(2, 4, gl.FLOAT, false, sb, 16);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(3, 1, gl.FLOAT, false, sb, 32);
+  gl.enableVertexAttribArray(3);
+  gl.vertexAttribPointer(4, 1, gl.FLOAT, false, sb, 36);
+  gl.enableVertexAttribArray(4);
+  gl.drawArrays(gl.TRIANGLES, 0, count);
+}
+
+var __SW_IDENTITY = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+var __sw_logged = {};
+function __sw_log_once(msg) {
+  if (__sw_logged[msg]) return;
+  __sw_logged[msg] = true;
+  console.error("[STONE-WEB] " + msg);
+}
+
+function __sw_target_size() {
+  if (__SW.boundCanvas !== 0) {
+    var c = __SW.canvases[__SW.boundCanvas];
+    if (c) return [c.w, c.h];
+  }
+  return [Math.round(__SW.logicalW * __SW.dpr), Math.round(__SW.logicalH * __SW.dpr)];
+}
+
+// Ortho uProjection (2/w, -2/h Y-down, sized to the bound target), uView =
+// translate(ox*scale, oy*scale)*scale, uTransform identity (sprite.rs:223-282).
+function stone_set_camera(shader, ox, oy, scale) {
+  var gl = __SW.gl, sh = __SW.shaders[shader];
+  if (!gl || !sh) return;
+  var wh = __sw_target_size(), w = wh[0], h = wh[1];
+  var proj = new Float32Array([2/w,0,0,0, 0,-2/h,0,0, 0,0,-1,0, -1,1,0,1]);
+  var view = new Float32Array([scale,0,0,0, 0,scale,0,0, 0,0,1,0, ox*scale,oy*scale,0,1]);
+  var prev = __SW.curShader;
+  gl.useProgram(sh.prog);
+  var lp = __sw_uloc(sh, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
+  var lv = __sw_uloc(sh, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, view);
+  var lt = __sw_uloc(sh, "uTransform"); if (lt) gl.uniformMatrix4fv(lt, false, __SW_IDENTITY);
+  if (prev !== 0 && __SW.shaders[prev]) gl.useProgram(__SW.shaders[prev].prog);
+}
+function stone_reset_camera(shader) { stone_set_camera(shader, 0, 0, 1.0); }
+
+// --- textures / images ---
+function __sw_new_texture() {
+  var gl = __SW.gl;
+  var t = gl.createTexture();
+  var h = __SW.nextTex++;
+  __SW.textures[h] = t;
+  return h;
+}
+function stone_get_white_image() {
+  if (__SW.whiteImage !== 0) return __SW.whiteImage;
+  var gl = __SW.gl;
+  var h = __sw_new_texture();
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[h]);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255,255,255,255]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  __SW.whiteImage = h;
+  return h;
+}
+function stone_get_image_size(img, pw, ph) { pw[0] = 1; ph[0] = 1; }
+
+// --- image / ImageData CPU stubs (editor/dev-only; real load_image is mag-tier) ---
+function stone_load_image(path, filterMode) {
+  __sw_log_once("stone_load_image: not implemented on web yet (" + path + ")");
+  return 0;
+}
+function stone_image_set_wrap(h, repeat) { return false; }
+function stone_unload_image(h) {}
+function stone_reload_image(h, path) { return false; }
+function stone_create_image_data(w, h) { return 0; }
+function stone_destroy_image_data(h) {}
+function stone_image_data_clone(src) { return 0; }
+function stone_image_data_copy_into(dst, src) { return false; }
+function stone_image_data_set_pixel(h, x, y, r, g, b, a) {}
+function stone_image_data_get_pixel(h, x, y, pr, pg, pb, pa) { pr[0] = 0; pg[0] = 0; pb[0] = 0; pa[0] = 0; }
+function stone_image_data_fill_rgba(h, rgba, n) {}
+function stone_image_data_load_png(path) { return 0; }
+function stone_image_data_save_png(h, path) { return false; }
+function stone_image_update_from_data(ih, dh) { return false; }
+function stone_new_image_from_data(dh, fm) { return 0; }
+function stone_save_png_rgba8(path, w, h, pixels) { return false; }
+
+// --- canvases (FBOs) ---
+function stone_create_canvas(w, h, format, depth) {
+  var gl = __SW.gl;
+  var fbo = gl.createFramebuffer();
+  var texHandle = __sw_new_texture();
+  var tex = __SW.textures[texHandle];
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  // formats: 0 rgba8, 1 rgba16f, 2 rgba32f, 3 r32i (bindings.rock codes)
+  var internal = gl.RGBA8, fmt = gl.RGBA, type = gl.UNSIGNED_BYTE;
+  if (format === 1) { internal = gl.RGBA16F; fmt = gl.RGBA; type = gl.HALF_FLOAT; }
+  else if (format === 2) { internal = gl.RGBA32F; fmt = gl.RGBA; type = gl.FLOAT; }
+  else if (format === 3) { internal = gl.R32I; fmt = gl.RED_INTEGER; type = gl.INT; }
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, fmt, type, null);
+  var filter = (__SW.texFilter === 1 && format !== 3) ? gl.LINEAR : gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  var rb = null;
+  if (depth) {
+    rb = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+  }
+  var ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (!ok) { __sw_log_once("stone_create_canvas: incomplete FBO (format " + format + ")"); }
+  var handle = __SW.nextCanvas++;
+  __SW.canvases[handle] = { fbo: fbo, tex: texHandle, w: w, h: h, format: format };
+  return handle;
+}
+function stone_destroy_canvas(h) {
+  var c = __SW.canvases[h];
+  if (!c) return;
+  var gl = __SW.gl;
+  gl.deleteFramebuffer(c.fbo);
+  gl.deleteTexture(__SW.textures[c.tex]);
+  delete __SW.textures[c.tex];
+  delete __SW.canvases[h];
+}
+function stone_set_canvas(h) {
+  var gl = __SW.gl;
+  if (h === 0) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    __SW.boundCanvas = 0;
+  } else {
+    var c = __SW.canvases[h];
+    if (!c) { __sw_log_once("stone_set_canvas: unknown canvas " + h); return; }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
+    __SW.boundCanvas = h;
+  }
+  var wh = __sw_target_size();
+  gl.viewport(0, 0, wh[0], wh[1]);
+}
+function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
+function stone_clear_canvas(r, g, b, a) {
+  var gl = __SW.gl;
+  gl.clearColor(r, g, b, a);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+}
+function stone_clear_canvas_int(drawBuffer, value) {}
+function stone_canvas_attach_id_target(canvasH, idH) { return false; } // single-buffer fallback on web
+function stone_set_present_viewport(active, x, y, w, h) {
+  var gl = __SW.gl;
+  if (active) gl.viewport(x, y, w, h);
+  else { var wh = __sw_target_size(); gl.viewport(0, 0, wh[0], wh[1]); }
+}
+function stone_supports_float_canvas() {
+  var gl = __SW.gl;
+  return !!(gl && gl.getExtension && gl.getExtension("EXT_color_buffer_float"));
+}
+function stone_clear_depth(depth) { var gl = __SW.gl; gl.clearDepth(depth); gl.clear(gl.DEPTH_BUFFER_BIT); }
+function stone_set_depth_mode(compareMode, write) {
+  var gl = __SW.gl;
+  if (compareMode === "always" && !write) { gl.disable(gl.DEPTH_TEST); gl.depthMask(false); }
+  else if (compareMode === "always") { gl.disable(gl.DEPTH_TEST); gl.depthMask(true); }
+  else {
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(compareMode === "less" ? gl.LESS : compareMode === "lequal" ? gl.LEQUAL : gl.ALWAYS);
+    gl.depthMask(!!write);
+  }
+}
+
+// --- blend (lib.rs:2095-2138) ---
+function stone_set_blend_mode_i(mode) {
+  var gl = __SW.gl;
+  if (!gl) return;
+  gl.blendEquation(gl.FUNC_ADD);
+  if (mode === 0) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); }
+  else if (mode === 1) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE); }
+  else if (mode === 2) { gl.enable(gl.BLEND); gl.blendFunc(gl.DST_COLOR, gl.ZERO); }
+  else if (mode === 3) { gl.enable(gl.BLEND); gl.blendEquation(gl.MAX); gl.blendFunc(gl.ONE, gl.ONE); }
+  else if (mode === 4) { gl.disable(gl.BLEND); }
+}
+
+// --- shaders ---
+// Split the combined source at the #version line (#define VERTEX / PIXEL,
+// shader.rs:59-111) and do the ES rewrite (adapt_source_for_gles: WebGL2 IS
+// GLSL ES 3.00): '#version 330 core' -> '#version 300 es' + precision.
+// Web-only extra rewrite: ANGLE enforces the ES reserved-identifier rule
+// (no `__` anywhere in an identifier), which the Rock-mangled GLSL helper
+// names (`normalize__Vec3_ret_Vec3`) violate; desktop drivers tolerate them.
+// Rewriting `__` -> `_Z` at shader-compile time keeps the generated GLSL
+// (and the Lua build's embedded copies) byte-identical everywhere else; a
+// collision would fail the link loudly, never silently.
+function __sw_adapt_es(src) {
+  src = src.replace(/__/g, "_Z");
+  if (src.indexOf("#version 330 core") === 0) {
+    return "#version 300 es\nprecision highp float;\nprecision highp int;" + src.slice("#version 330 core".length);
+  }
+  return src;
+}
+function __sw_compile_stage(gl, type, src) {
+  var s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    console.error("[STONE-WEB] shader compile failed:\n" + gl.getShaderInfoLog(s) + "\n--- source ---\n" + src);
+    gl.deleteShader(s);
+    return null;
+  }
+  return s;
+}
+function stone_create_shader_from_combined(src) {
+  var gl = __SW.gl;
+  if (!gl) return 0;
+  var nl = src.indexOf("\n");
+  var prefix = nl >= 0 ? src.slice(0, nl + 1) : "";
+  var suffix = nl >= 0 ? src.slice(nl + 1) : src;
+  var vertSrc = __sw_adapt_es(prefix + "#define VERTEX\n" + suffix);
+  var fragSrc = __sw_adapt_es(prefix + "#define PIXEL\n" + suffix);
+  var vs = __sw_compile_stage(gl, gl.VERTEX_SHADER, vertSrc);
+  if (!vs) return 0;
+  var fs = __sw_compile_stage(gl, gl.FRAGMENT_SHADER, fragSrc);
+  if (!fs) { gl.deleteShader(vs); return 0; }
+  var prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error("[STONE-WEB] shader link failed:\n" + gl.getProgramInfoLog(prog));
+    gl.deleteProgram(prog);
+    return 0;
+  }
+  var h = __SW.nextShader++;
+  __SW.shaders[h] = { prog: prog, ulocs: {} };
+  return h;
+}
+function stone_destroy_shader(h) {
+  var sh = __SW.shaders[h];
+  if (!sh) return;
+  __SW.gl.deleteProgram(sh.prog);
+  delete __SW.shaders[h];
+}
+function __sw_uloc(sh, name) {
+  if (!(name in sh.ulocs)) sh.ulocs[name] = __SW.gl.getUniformLocation(sh.prog, name);
+  return sh.ulocs[name];
+}
+function stone_set_shader(h) {
+  if (h === 0) { __SW.gl.useProgram(null); __SW.curShader = 0; return; } // unbind, matching native
+  var sh = __SW.shaders[h];
+  if (!sh) { __sw_log_once("stone_set_shader: unknown shader " + h); return; }
+  __SW.gl.useProgram(sh.prog);
+  __SW.curShader = h;
+}
+function __sw_with_shader_uniform(h, name, f) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh) return;
+  var prev = __SW.curShader;
+  gl.useProgram(sh.prog);
+  var loc = __sw_uloc(sh, name);
+  if (loc) f(gl, loc);
+  if (prev !== 0 && prev !== h && __SW.shaders[prev]) gl.useProgram(__SW.shaders[prev].prog);
+}
+function stone_shader_has_uniform(h, name) {
+  var sh = __SW.shaders[h];
+  return !!(sh && __sw_uloc(sh, name));
+}
+function stone_shader_set_float(h, name, v) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1f(l, v); }); }
+function stone_shader_set_int(h, name, v) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1i(l, v); }); }
+function stone_shader_set_bool(h, name, v) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1i(l, v ? 1 : 0); }); }
+function stone_shader_set_vec2(h, name, x, y) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform2f(l, x, y); }); }
+function stone_shader_set_vec3(h, name, x, y, z) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform3f(l, x, y, z); }); }
+function stone_shader_set_vec4(h, name, x, y, z, w) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4f(l, x, y, z, w); }); }
+function stone_shader_set_mat4(h, name, m) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniformMatrix4fv(l, false, m.subarray ? m.subarray(0, 16) : m); }); }
+function stone_shader_set_texture(h, name, unit) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1i(l, unit); }); }
+function stone_shader_set_float_array(h, name, values, count) {
+  __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1fv(l, values.subarray ? values.subarray(0, count) : values); });
+}
+function stone_shader_set_int_array(h, name, values, count) {
+  __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1iv(l, values.subarray ? values.subarray(0, count) : values); });
+}
+function stone_shader_set_vec2_array(h, name, values, count) {
+  __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform2fv(l, values.subarray ? values.subarray(0, count * 2) : values); });
+}
+function stone_shader_set_vec4_array(h, name, values, count) {
+  __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4fv(l, values.subarray ? values.subarray(0, count * 4) : values); });
+}
+function stone_bind_texture_to_unit(tex, unit) {
+  var gl = __SW.gl, t = __SW.textures[tex];
+  if (!gl || !t) return;
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.activeTexture(gl.TEXTURE0);
+}
+
+// --- fullscreen quad (post-processing passes) ---
+var __sw_fsq = null;
+function stone_draw_fullscreen_quad() {
+  var gl = __SW.gl;
+  var sh = __SW.shaders[__SW.curShader];
+  if (!gl || !sh) return;
+  if (!__sw_fsq) {
+    __sw_fsq = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq);
+    // pos(2)+uv(2) two-triangle quad, matching the native fullscreen pass
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1, 0, 0,  1, -1, 1, 0,  1, 1, 1, 1,
+      -1, -1, 0, 0,  1, 1, 1, 1,  -1, 1, 0, 1,
+    ]), gl.STATIC_DRAW);
+  }
+  gl.useProgram(sh.prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  gl.enableVertexAttribArray(1);
+  gl.disableVertexAttribArray(2);
+  gl.disableVertexAttribArray(3);
+  gl.disableVertexAttribArray(4);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+// --- MB fake font (MC replaces with the canvas2d glyph atlas) ---
+function stone_load_font(path, pixelSize) {
+  __sw_log_once("stone_load_font: MB fake font (id 1, no glyphs) -- text is invisible until MC lands the canvas2d atlas");
+  __SW.fontEm = pixelSize;
+  return 1;
+}
+function stone_get_font_atlas_image_for(fontId) { return stone_get_white_image(); }
+function stone_get_font_pixel_size_for(fontId) { return __SW.fontEm || 48; }
+function stone_get_glyph_info_for(fontId, ch, out) { return false; }
+function stone_measure_text_for(fontId, text, scale, ow, oh) { ow[0] = 0; oh[0] = 0; }
+function stone_measure_text_js(fontId, text, scale) { return [0, 0]; }
+function stone_get_text_baseline_for(fontId, scale) { return 0; }
+function stone_text_init() { return true; }
+function stone_text_shutdown() {}
+
+// --- filesystem (registry-backed reads, in-memory writes, dir ops no-op) ---
+var __ROCK_WEB_FILES = (globalThis.__ROCK_WEB_FILES = globalThis.__ROCK_WEB_FILES || {});
+function __sw_file_get(path) {
+  if (path in __ROCK_WEB_FILES) return __ROCK_WEB_FILES[path];
+  if (path in __ROCK_WEB_ASSETS) return __ROCK_WEB_ASSETS[path];
+  return undefined;
+}
+function stone_file_exists(path) { return __sw_file_get(path) !== undefined; }
+function stone_is_directory(path) { return false; }
+function stone_file_size(path) {
+  var c = __sw_file_get(path);
+  return c === undefined ? -1 : (c.byteLength !== undefined ? c.byteLength : c.length);
+}
+function stone_file_mtime(path) { return 0; }
+function stone_file_modtime(path) { return 0; }
+function stone_create_directory(path) { return true; }
+function stone_copy_file(src, dst) {
+  var c = __sw_file_get(src);
+  if (c === undefined) return false;
+  __ROCK_WEB_FILES[dst] = c;
+  return true;
+}
+function stone_copy_recursive(src, dst) { return false; }
+function stone_rename(src, dst) {
+  var c = __sw_file_get(src);
+  if (c === undefined) return false;
+  __ROCK_WEB_FILES[dst] = c;
+  delete __ROCK_WEB_FILES[src];
+  return true;
+}
+function stone_remove_file(path) { delete __ROCK_WEB_FILES[path]; return true; }
+function stone_remove_dir(path) { return false; }
+function stone_file_sync(path) { return true; }
+function stone_watch_asset(path) {}
+function stone_poll_changed_assets() { return 0; }
+function __sw_bytes_to_string(b) {
+  var u8 = b instanceof Uint8Array ? b : new Uint8Array(b);
+  var s = "";
+  for (var i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return s;
+}
+
+// --- camera state / immediate sprite path (MB: batches only; the immediate
+// sprite quad lands with the MD canvas-present blit) ---
+var __sw_cameraActive = false;
+function stone_is_camera_active() { return __sw_cameraActive; }
+function stone_current_shader_bound() { return __SW.curShader !== 0; }
+function stone_gl_error_count() { return 0; }
+function stone_get_camera_scale() { return 1; }
+function stone_sprite_begin(shader) { if (shader) stone_set_shader(shader); }
+function stone_sprite_end() {}
+function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
+  __sw_log_once("stone_sprite_draw: immediate sprite path not implemented on web yet");
+}
+function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
+  __sw_log_once("stone_sprite_draw_texture: MD lands the canvas-present blit");
+}
+
+// --- audio (silent stubs; WebAudio lands with the chess tier) ---
+function stone_load_sound(path) { return 0; }
+function stone_unload_sound(h) { return true; }
+function stone_reload_sound(h, path) { return false; }
+function stone_load_music(path) { return 0; }
+function stone_play_sound(h) {}
+function stone_stop_sound(h) {}
+function stone_play_music(h) {}
+function stone_stop_music() {}
+function stone_set_music_volume(v) {}
+function stone_set_sound_volume(v) {}
+function stone_set_reverb(e, rs, d, w, dr, wi) {}
+
+// --- uniform introspection / gpu timer / delay / cursors / retained mesh ---
+function stone_shader_uniform_count(h) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh || !gl.getProgramParameter) return 0;
+  var n = gl.getProgramParameter(sh.prog, gl.ACTIVE_UNIFORMS);
+  return typeof n === "number" ? n : 0;
+}
+function stone_shader_uniform_type(h, i) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh || !gl.getActiveUniform) return 0;
+  var u = gl.getActiveUniform(sh.prog, i);
+  return u ? u.type : 0;
+}
+function __sw_shader_uniform_name(h, i) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh || !gl.getActiveUniform) return "";
+  var u = gl.getActiveUniform(sh.prog, i);
+  // strip the GLSL array suffix ([0]) like the native side does
+  return u ? u.name.replace(/\[0\]$/, "") : "";
+}
+function stone_gpu_timer_begin() {}
+function stone_gpu_timer_end() {}
+function stone_gpu_timer_poll_ms() { return 0; }
+function stone_delay(ms) {} // cannot block the browser main thread
+function stone_show_cursor(show) {}
+function stone_is_cursor_visible() { return true; }
+function stone_set_cursor(id) {}
+function stone_reset_cursor() {}
+function stone_free_cursor(id) {}
+function stone_mesh_create(mode, verts, vc, stride, sizes, ac) {
+  __sw_log_once("stone_mesh_create: retained instanced mesh not implemented on web yet");
+  return 0;
+}
+function stone_mesh_set_instances(h, data, count, stride, sizes, ac) {}
+function stone_mesh_draw(h, tex, count) {}
+function stone_mesh_free(h) {}
+
+function stone_draw_polygon(mode, verts, n, r, g, b, a) {
+  __sw_log_once("stone_draw_polygon: immediate shapes not implemented on web yet");
+}
+
+function stone_set_color_mask(r, g, b, a) { var gl = __SW.gl; if (gl) gl.colorMask(r, g, b, a); }
+function stone_set_draw_buffers(count) {}
+function stone_get_canvas_fbo(h) { return h; }
+function stone_canvas_save_png(h, path) { return false; }
+function stone_canvas_read_rgba8(h, out, cap) { return 0; }
+function stone_read_canvas_pixel(h, x, y) { return 0; }
+function stone_read_depth_pixel(h, x, y) { return 0; }
+
+function stone_pixel_readback_new(isDepth) { return 0; }
+function stone_pixel_readback_destroy(id) {}
+function stone_pixel_readback_submit(id, ch, x, y) {}
+function stone_pixel_readback_consume(id) { return 0; }
+function stone_pixel_readback_read(id, ch, x, y) { return 0; }
+
+// --- window management (fixed canvas on web) ---
+function stone_set_fullscreen(mode) {}
+function stone_set_window_title(w, title) { if (typeof document !== "undefined") document.title = title; }
+function stone_set_window_position(x, y) {}
+function stone_get_window_position(px, py) { px[0] = 0; py[0] = 0; }
+function stone_set_window_size(w, h) {}
+function stone_set_window_display(i) {}
+function stone_set_display_mode(w, h) {}
+function stone_get_window_borders(pt, pl, pb, pr) { pt[0] = 0; pl[0] = 0; pb[0] = 0; pr[0] = 0; }
+function stone_get_display_count() { return 1; }
+
+// --- rAF driver ---
+function __rock_web_arm_raf(frameFn) {
+  var fake = globalThis.__STONE_WEB_FAKE_ENV;
+  if (fake && fake.driveFrames) return; // harness drives frames itself
+  function tick() {
+    var running = true;
+    try { running = frameFn(); }
+    catch (e) { console.error("[STONE-WEB] frame error:", e); running = false; }
+    if (running) __SW.rafId = requestAnimationFrame(tick);
+    else console.log("[STONE-WEB] game loop ended");
+  }
+  __SW.rafId = requestAnimationFrame(tick);
+}
+"##;
 
 /// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
 /// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),

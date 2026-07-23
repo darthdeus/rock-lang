@@ -58,6 +58,30 @@ fn rock_shader_pair_without_js_register_sibling_rejects() {
 }
 
 #[test]
+fn rock_shader_pair_with_plain_rock_register_emits_it_bare() {
+    // The engine's real `__rock_shader_register` (watcher.rock) is a plain-Rock
+    // @nomangle fn -- portable on JS once its two inline(lua) helpers have js
+    // siblings. A reachable plain-Rock register fn must be rooted under its
+    // bare name (the driver register lines call it verbatim), not rejected.
+    let mut src = String::from(SHADER_SRC);
+    src.push_str(
+        r#"
+global WEB_SHADER_SRCS: Map<string, string> = map_new()
+
+@nomangle fn __rock_shader_register(key: string, src: string) {
+    WEB_SHADER_SRCS.insert(key, src)
+}
+"#,
+    );
+    let ws = ws_with(&src);
+    let prog = emit_program_js(&ws).expect("emit js program with plain-rock register");
+    assert!(
+        prog.contains("function __rock_shader_register("),
+        "plain-Rock register fn must emit under its bare name:\n{prog}"
+    );
+}
+
+#[test]
 fn rock_shader_pair_with_inline_js_register_sibling_emits() {
     // The web layer supplies the sibling; the register fn is forced into the
     // program under its bare @nomangle name so driver register lines resolve.
