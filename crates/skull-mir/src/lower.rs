@@ -2234,16 +2234,32 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// One inline defer splice: run the body, then clear the co-fn terminal
-    /// flag (if any) so a later kill/error never double-runs a completed defer.
+    /// One inline defer splice. With a co-fn terminal flag the splice is
+    /// `if flag { flag = false; <body> }` — the SAME guarded shape as the
+    /// detached kill copy, so kill-then-splice and splice-then-kill both run
+    /// the defer exactly once (a body that kills its own handle mid-run
+    /// otherwise double-fires on the trailing scope exit). Flagless (plain fn)
+    /// defers splice unguarded.
     fn lower_defer_splice(&mut self, body: Idx<Expr>, flag: Option<Idx<Cell>>) -> Result<(), CompilerError> {
-        let was = std::mem::replace(&mut self.in_defer_body, true);
-        let res = self.lower_stmt_expr(body);
-        self.in_defer_body = was;
-        res?;
         if let Some(f) = flag {
+            let b_body = self.f.new_block();
+            let b_done = self.f.new_block();
+            let fv = self.emit_cur(Inst::Load(f));
+            self.f.set_term(self.cur, Term::Branch { cond: fv, then_bb: b_body, else_bb: b_done });
+            self.cur = b_body;
             let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
             self.emit_cur(Inst::Store { cell: f, value: off });
+            let was = std::mem::replace(&mut self.in_defer_body, true);
+            let res = self.lower_stmt_expr(body);
+            self.in_defer_body = was;
+            res?;
+            self.f.set_term(self.cur, Term::Goto(b_done));
+            self.cur = b_done;
+        } else {
+            let was = std::mem::replace(&mut self.in_defer_body, true);
+            let res = self.lower_stmt_expr(body);
+            self.in_defer_body = was;
+            res?;
         }
         Ok(())
     }

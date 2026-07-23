@@ -1251,10 +1251,11 @@ mod tests {
             lua.contains("pcall(counter__step,"),
             "expected name-referenced pcall, got:\n{lua}"
         );
-        // State machine: writes to the state field + a terminal -1, over an
-        // ordinary goto-CFG — NOT the emit-time goto-into-block re-entry labels.
+        // State machine: writes to the state field + a completed terminal -3
+        // (killed is -1, errored -2), over an ordinary goto-CFG — NOT the
+        // emit-time goto-into-block re-entry labels.
         assert!(lua.contains(".__state ="), "expected state-saving write, got:\n{lua}");
-        assert!(lua.contains("__state = (-1)"), "expected terminal transition, got:\n{lua}");
+        assert!(lua.contains("__state = (-3)"), "expected completed-terminal transition, got:\n{lua}");
         assert!(lua.contains("goto bb"), "expected ordinary goto CFG, got:\n{lua}");
         assert!(
             !lua.contains("__co_resume_"),

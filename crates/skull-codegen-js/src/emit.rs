@@ -2912,6 +2912,7 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("resume", 2) => Some("(function(c,a){var v=c.__resume(c,a);return v===undefined?null:v;})($1, $2)"),
         ("result", 1) => Some("(function(c){var v=c.__return;return v===undefined?null:v;})($1)"),
         ("status", 1) => Some("(function(c){return c.__state === -2 ? \"errored\" : (c.__state < 0 ? \"dead\" : \"suspended\");})($1)"),
+        ("completed", 1) => Some("($1.__state === -3)"),
         ("last_error", 1) => Some("(function(c){var v=c.__error;return v===undefined?null:v;})($1)"),
         ("kill", 1) => Some("__rock_coroutine_kill($1)"),
         ("fire_hot_reload", 1) => Some("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) c.__on_hot_reload(c); })($1)"),

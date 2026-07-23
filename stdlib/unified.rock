@@ -1378,6 +1378,15 @@ inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
     if c.__state == -2 then return "errored" elseif c.__state < 0 then return "dead" else return "suspended" end
 """
 
+// Ran to its natural end (`return` / fall-off; terminal -3), as opposed to
+// killed (-1) or errored (-2) -- the only state where `result()` is
+// trustworthy: for a completed coroutine `__return` holds the body's return
+// value (nil iff R = ()), so `cast<R>(result(c))` is sound. `status()` keeps
+// reporting "dead" for both completed and killed.
+inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
+    return c.__state == -3
+"""
+
 // D6b: read the error message captured when a step-fn raised during a
 // `.resume()`. Returns `null` when the coroutine is suspended, dead
 // (killed), or completed normally. The runtime puts the coroutine into

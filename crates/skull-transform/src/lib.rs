@@ -10,7 +10,10 @@
 //! so the transform doesn't even rewrite cell Load/Store; it only:
 //!   1. turns each `Term::Yield { value, resume }` block into `s.__state = k;
 //!      return value` (the `resume` block becomes a dispatch target),
-//!   2. turns a normal `return v` into `s.__return = v; s.__state = -1; return`,
+//!   2. turns a normal `return v` into `s.__return = v; s.__state = -3; return`
+//!      (-3 = completed normally, distinct from killed -1 / errored -2 so
+//!      `completed()` can tell a natural finish from a kill; every runtime
+//!      guard tests `< 0`, never an exact terminal),
 //!   3. rewrites `CoroSetInner(x)` (the `await` pseudo-op) to `s.__inner = x`,
 //!   4. prepends a dispatch entry that branches on `s.__state` to the resume
 //!      block for each state (falling through to the original entry for state 0).
@@ -1513,7 +1516,11 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     }
     let num_states = resume_of_state.len();
 
-    // 3. Normal returns -> stash `s.__return`, mark terminal (-1), bare return.
+    // 3. Normal returns -> stash `s.__return`, mark completed (-3), bare
+    // return. The stamp is guarded on `state >= 0`: a body that killed its own
+    // handle mid-run (state already -1) must STAY killed -- neither clobber
+    // the terminal to -3 (completed() would lie) nor keep a stashed result a
+    // kill promised not to have.
     for &bid in &orig_blocks {
         if yield_blocks.contains(&bid) {
             continue;
@@ -1528,10 +1535,25 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
                 let sv = emit(&mut step, bid, Inst::Load(s_cell));
                 emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from("__return"), value: v });
             }
-            let dc = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
-            let sv2 = emit(&mut step, bid, Inst::Load(s_cell));
-            emit(&mut step, bid, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: dc });
-            step.blocks[bid].term = Term::Return(Vec::new());
+            let sv = emit(&mut step, bid, Inst::Load(s_cell));
+            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let zero = emit(&mut step, bid, Inst::Const(Lit::Int(0)));
+            let already_terminal = emit(&mut step, bid, Inst::IntLt(st, zero));
+            let killed_bb = step.new_block();
+            let stamp_bb = step.new_block();
+            step.blocks[bid].term = Term::Branch { cond: already_terminal, then_bb: killed_bb, else_bb: stamp_bb };
+
+            let dc = emit(&mut step, stamp_bb, Inst::Const(Lit::Int(-3)));
+            let sv2 = emit(&mut step, stamp_bb, Inst::Load(s_cell));
+            emit(&mut step, stamp_bb, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: dc });
+            step.blocks[stamp_bb].term = Term::Return(Vec::new());
+
+            if v0.is_some() {
+                let nil = emit(&mut step, killed_bb, Inst::Const(Lit::Nil));
+                let sv3 = emit(&mut step, killed_bb, Inst::Load(s_cell));
+                emit(&mut step, killed_bb, Inst::StoreField { base: sv3, field: ustr::Ustr::from("__return"), value: nil });
+            }
+            step.blocks[killed_bb].term = Term::Return(Vec::new());
         }
     }
 
