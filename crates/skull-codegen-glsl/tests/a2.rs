@@ -717,3 +717,116 @@ fn reject_bvec_attribute() {
     "#;
     reject_pipeline(src, "vt", "fr", "bvec3");
 }
+
+// --- R32I entity-id tier: int fragment outputs + ISampler2D ------------------
+// The GLES entity-id path (docs/gles-entity-id-plan.md M1): ids live in R32I
+// attachments, so fragment entries write `int` outputs and readers sample an
+// `isampler2D` via texture_id(). ES300 note: isampler2D has NO default
+// precision in GLSL ES 3.00, so the declaration itself carries `highp`
+// (accepted-and-ignored on desktop GLSL).
+
+const INT_MRT_SRC: &str = r#"
+    value QV   { aPos: Vec2, aEntityId: float }
+    value Vary { position: Vec4, TexCoord: Vec2, @flat EntityId: float }
+    value IdOut { FragColor: Vec4, FragId: int }
+    @shader(vertex)
+    fn vt(@attr a: QV) -> Vary {
+        return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos, EntityId: a.aEntityId }
+    }
+    @shader(fragment)
+    fn fr(vary: Vary, uTexture: Sampler2D) -> IdOut {
+        let c = texture(uTexture, vary.TexCoord)
+        return IdOut { FragColor: c, FragId: vary.EntityId as int }
+    }
+"#;
+
+/// An MRT out-struct field may be `int` -> `layout(location=N) out int`.
+#[test]
+fn mrt_int_output_field() {
+    let glsl = emit_pipeline(INT_MRT_SRC, "vt", "fr").expect("emit");
+    assert!(glsl.contains("layout(location = 0) out vec4 FragColor;"), "got:\n{glsl}");
+    assert!(glsl.contains("layout(location = 1) out int FragId;"), "got:\n{glsl}");
+    assert!(glsl.contains("FragId = "), "got:\n{glsl}");
+}
+
+/// Same outputs under ES300 (the profile whose driver this tier exists for).
+#[test]
+fn mrt_int_output_es300() {
+    let glsl = emit_pipeline_profile(INT_MRT_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
+    assert!(glsl.starts_with("#version 300 es\n"), "got:\n{glsl}");
+    assert!(glsl.contains("layout(location = 1) out int FragId;"), "got:\n{glsl}");
+}
+
+/// A single bare `int` fragment return is a lone `out int` (the silhouette
+/// mask pass writes only the id).
+#[test]
+fn single_int_fragment_output() {
+    let src = r#"
+        value QV   { aPos: Vec2, aEntityId: float }
+        value Vary { position: Vec4, @flat entity_id: float }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, entity_id: a.aEntityId }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary) -> int {
+            if vary.entity_id <= 0.0 { discard() }
+            return vary.entity_id as int
+        }
+    "#;
+    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
+    assert!(glsl.contains("out int FragColor;"), "got:\n{glsl}");
+    assert!(glsl.contains("FragColor = fr("), "got:\n{glsl}");
+}
+
+const ISAMPLER_SRC: &str = r#"
+    value QV   { aPos: Vec2 }
+    value Vary { position: Vec4, TexCoord: Vec2 }
+    @shader(vertex)
+    fn vt(@attr a: QV) -> Vary {
+        return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos }
+    }
+    @shader(fragment)
+    fn fr(vary: Vary, ids: ISampler2D) -> Vec4 {
+        let id = texture_id(ids, vary.TexCoord)
+        let ts = texture_size(ids)
+        if id <= 0 { discard() }
+        return Vec4 { x: 1.0, y: ts.x, z: 0.0, w: 1.0 }
+    }
+"#;
+
+/// ISampler2D binds like Sampler2D; texture_id() samples `.r` as int;
+/// texture_size() overloads. The declaration carries `highp` (no ES default).
+#[test]
+fn isampler_texture_id() {
+    let glsl = emit_pipeline(ISAMPLER_SRC, "vt", "fr").expect("emit");
+    assert!(glsl.contains("uniform highp isampler2D ids;"), "got:\n{glsl}");
+    assert!(glsl.contains("texture(ids, TexCoord).r"), "got:\n{glsl}");
+    assert!(glsl.contains("vec2(textureSize(ids, 0))"), "got:\n{glsl}");
+}
+
+/// ES300 profile compiles the same isampler declaration (precision comes from
+/// the declaration-site `highp`, not the preamble).
+#[test]
+fn isampler_es300() {
+    let glsl = emit_pipeline_profile(ISAMPLER_SRC, "vt", "fr", GlslProfile::Es300).expect("emit");
+    assert!(glsl.contains("uniform highp isampler2D ids;"), "got:\n{glsl}");
+}
+
+/// ISampler2D is opaque like Sampler2D: illegal as a return type.
+#[test]
+fn reject_isampler_return() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
+        @pure fn pick(s: ISampler2D) -> ISampler2D { return s }
+        @shader(fragment)
+        fn fr(vary: Vary, ids: ISampler2D) -> Vec4 {
+            let s = pick(ids)
+            return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    reject_pipeline(src, "vt", "fr", "sampler");
+}

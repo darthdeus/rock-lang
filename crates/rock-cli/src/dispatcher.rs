@@ -14,6 +14,20 @@ impl CommandContext {
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
+        // `--profile` is global in the clap definition but only `rock shader`
+        // acts on it: the profile is a property of the GL context, and the
+        // engine adapts the header per context at shader-compile time. Every
+        // other command would accept-and-ignore it, which reads as "ES was
+        // selected" while emitting desktop headers.
+        if self.args.profile.is_some() && self.args.command != CliCommand::Shader {
+            anyhow::bail!(
+                "rock {}: --profile applies only to `rock shader` (offline GLSL emission). \
+                 In-game shader source is emitted once and adapted to the live GL context by \
+                 the engine, so no other command selects a profile. `rock shader-validate` \
+                 gates both profiles and takes no flag.",
+                self.args.command.cli_name(),
+            );
+        }
         self.run_command()
     }
 
@@ -444,10 +458,7 @@ impl CommandContext {
             }
             CliCommand::Compile | CliCommand::CompileSingle | CliCommand::TestCompile => {
                 let file = self.get_required_file("compile")?;
-                // --profile selects the GLSL profile baked into shader
-                // registrations (docs/shader-mobile-port-plan.md A2).
-                let profile = skull_backend::parse_glsl_profile(self.args.profile.as_deref())?;
-                skull_backend::skull_compile_single(file, self.get_compile_output()?, profile)
+                skull_backend::skull_compile_single(file, self.get_compile_output()?)
             }
             CliCommand::Run => {
                 let file = self.get_required_file("run")?;

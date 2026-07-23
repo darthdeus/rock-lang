@@ -17,6 +17,22 @@ struct Sampler2D {
     error("texture_size() is GPU-only (shader fns are not CPU-callable)")
 """
 
+// Integer sampler (the R32I entity-id tier, docs/gles-entity-id-plan.md).
+// Phantom like Sampler2D. texture_id() reads the id channel as int
+// (`texture(s, uv).r`); GLSL ES gives isampler2D no default precision, so the
+// emitter declares it `highp` at the use site.
+struct ISampler2D {
+    __handle: int,
+}
+
+@intrinsic @gpu_only inline(lua) fn texture_id(s: ISampler2D, uv: Vec2) -> int = """
+    error("texture_id() is GPU-only (shader fns are not CPU-callable)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn texture_size(s: ISampler2D) -> Vec2 = """
+    error("texture_size() is GPU-only (shader fns are not CPU-callable)")
+"""
+
 // GPU builtins (docs/shaders.md). Fragment-stage only; the
 // emitter whitelists them per stage. CPU bodies error -- never a silent stub.
 @intrinsic @gpu_only inline(lua) fn frag_coord() -> Vec4 = """
