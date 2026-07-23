@@ -190,7 +190,7 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 // Vec3 algebra. Fake-3D convention across games: xy is the ground plane, z is
 // height.
 
-@inline
+@intrinsic @inline
 @pure fn v(x: float, y: float, z: float) -> Vec3 {
     return Vec3 { x: x, y: y, z: z }
 }
@@ -290,7 +290,7 @@ fn random_around(position: Vec2, min: float, max: float) -> Vec2 {
 // Vec4 algebra -- shader-facing (colors, homogeneous coords). No zero() ctor:
 // the near-zero normalize guard returns v(0, 0, 0, 0) inline, matching Vec3.
 
-@inline
+@intrinsic @inline
 @pure fn v(x: float, y: float, z: float, w: float) -> Vec4 {
     return Vec4 { x: x, y: y, z: z, w: w }
 }
