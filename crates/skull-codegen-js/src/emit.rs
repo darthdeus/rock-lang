@@ -1383,11 +1383,21 @@ impl Emitter<'_> {
             Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
-                other => {
-                    return Err(err(format!(
-                        "JS subset: native_buffer_alloc element ctype `{other}` has no TypedArray"
-                    )))
-                }
+                // An all-float value struct (e.g. the vertex pool) has no per-struct
+                // ctype on JS: back it onto one flat Float32Array of `n * k` floats
+                // (k = flattened float leaf count). The `.ptr` is that array; the
+                // hot path reads it through a cached `Ptr<float>` view (a js sibling
+                // of `__vbo_as_float_ptr` returns `.ptr` itself). A value struct with
+                // any non-float leaf still rejects.
+                other => match skull_mir::lower::value_struct_all_float_leaf_count(self.ws, *ctype) {
+                    Some(k) => format!("new Float32Array(({}) * {k})", self.render_val(*count)?),
+                    None => {
+                        return Err(err(format!(
+                            "JS subset: native_buffer_alloc element ctype `{other}` has no \
+                             TypedArray (only int, float, and all-float value structs map)"
+                        )))
+                    }
+                },
             },
             // A general field read is JS property access. NativeBuffer `.ptr`/
             // `.len` and Vec `._data`/`.len` are the same shape.

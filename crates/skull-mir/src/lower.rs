@@ -43,6 +43,46 @@ fn gap(msg: impl std::fmt::Display) -> CompilerError {
 // threads the unboxed form through lowering; `pack` is the single place a Group
 // becomes a real `<name>_ct(...)` cdata (an escape). See the plan doc.
 
+/// `Some(k)` iff `name` is a GC-free `value` struct whose every flattened
+/// primitive leaf is `float` (recursively), where `k` is the leaf count; `None`
+/// otherwise (not such a struct, or any int/bool/enum leaf). The JS backend uses
+/// it to lower a `NativeBuffer<Vertex>` (all-float value struct, e.g. the vertex
+/// pool) to one flat `Float32Array(n * k)` -- JS has no per-struct ctype.
+pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<usize> {
+    all_float_leaf_count_rec(ws, name, &mut Vec::new())
+}
+
+fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !sd.is_value || visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
+    let mut total = 0usize;
+    for f in &sd.fields {
+        let n = match static_ty(ws, f.ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float) => 1,
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                match all_float_leaf_count_rec(ws, n, visiting) {
+                    Some(k) => k,
+                    None => {
+                        visiting.pop();
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                visiting.pop();
+                return None;
+            }
+        };
+        total += n;
+    }
+    visiting.pop();
+    Some(total)
+}
+
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
 #[derive(Clone, Debug)]
