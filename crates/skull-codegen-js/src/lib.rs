@@ -533,10 +533,8 @@ function __rock_random_int(min, max) {
 /// The static browser runtime prelude for `rock web` (stone-web Arc 2). A leaf
 /// layer only: it owns the raw-JS globals the engine's `extern(js)`/`inline(js)`
 /// web leaves bind to (WebGL2 context boot, the DOM event queue, the rAF driver,
-/// fetch preload) -- everything that CAN be Rock stays Rock (unfuck stance: no
-/// parallel engine in raw JS). The canvas2d glyph rasterizer lands in MC; MB
-/// carries a loud fake-font stub (`stone_load_font` returns id 1, every glyph
-/// invalid) so `stone_init_done`'s font gate passes and rects render.
+/// fetch preload, the canvas2d glyph-atlas rasterizer) -- everything that CAN
+/// be Rock stays Rock (unfuck stance: no parallel engine in raw JS).
 ///
 /// Environment seam: `__sw_env()` returns the GL/DOM facade. The REAL one boots
 /// WebGL2 + DOM listeners; a test harness may predefine
@@ -1050,22 +1048,33 @@ function stone_bind_texture_to_unit(tex, unit) {
 }
 
 // --- fullscreen quad (post-processing passes) ---
-var __sw_fsq = null;
+// Orientation picked by the BOUND TARGET, never the call site (sprite.rs
+// stone_draw_fullscreen_quad): the default framebuffer gets the present quad
+// (the one constant V-flip), a canvas target gets the identity quad (1:1,
+// preserves content) -- so no pass chooses an orientation and the
+// mirrored-window class can't recur.
+var __sw_fsq_identity = null;
+var __sw_fsq_present = null;
+function __sw_fsq_buffer(gl, flipped) {
+  var b = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  var v0 = flipped ? 1 : 0, v1 = flipped ? 0 : 1;
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1, -1, 0, v0,  1, -1, 1, v0,  1, 1, 1, v1,
+    -1, -1, 0, v0,  1, 1, 1, v1,  -1, 1, 0, v1,
+  ]), gl.STATIC_DRAW);
+  return b;
+}
 function stone_draw_fullscreen_quad() {
   var gl = __SW.gl;
   var sh = __SW.shaders[__SW.curShader];
   if (!gl || !sh) return;
-  if (!__sw_fsq) {
-    __sw_fsq = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq);
-    // pos(2)+uv(2) two-triangle quad, matching the native fullscreen pass
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-      -1, -1, 0, 0,  1, -1, 1, 0,  1, 1, 1, 1,
-      -1, -1, 0, 0,  1, 1, 1, 1,  -1, 1, 0, 1,
-    ]), gl.STATIC_DRAW);
+  if (!__sw_fsq_identity) {
+    __sw_fsq_identity = __sw_fsq_buffer(gl, false);
+    __sw_fsq_present = __sw_fsq_buffer(gl, true);
   }
   gl.useProgram(sh.prog);
-  gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq);
+  gl.bindBuffer(gl.ARRAY_BUFFER, __SW.boundCanvas === 0 ? __sw_fsq_present : __sw_fsq_identity);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
@@ -1076,18 +1085,163 @@ function stone_draw_fullscreen_quad() {
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
-// --- MB fake font (MC replaces with the canvas2d glyph atlas) ---
+// --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
+// The boot preload registered each shipped TTF as a FontFace; the bake here
+// is synchronous canvas2d against that family. Eager + immutable, mirroring
+// native: all of ASCII 32..126 bakes once at stone_load_font (16 glyphs/row,
+// text.rs:261), no lazy glyphs, no mid-frame atlas mutation. Atlas pixels are
+// coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
+// raw white fillText would give (1,1,1,cov), wrong rgb under tinting).
+// Metric bit-parity with fontdue is a NON-goal; invariants only.
+function __sw_font_path_key(path) { return String(path).replace(/^\.?\//, ""); }
 function stone_load_font(path, pixelSize) {
-  __sw_log_once("stone_load_font: MB fake font (id 1, no glyphs) -- text is invisible until MC lands the canvas2d atlas");
-  __SW.fontEm = pixelSize;
-  return 1;
+  // The node fake-GL env has no DOM/canvas2d: fall back to a glyphless font
+  // (id, atlas = white pixel) so the boot's font gate passes headlessly.
+  if (globalThis.__STONE_WEB_FAKE_ENV || typeof document === "undefined") {
+    __sw_log_once("stone_load_font: no canvas2d in this environment -- glyphless fallback font");
+    __SW.fonts = __SW.fonts || {};
+    var fid0 = (__SW.nextFont = (__SW.nextFont || 0) + 1);
+    __SW.fonts[fid0] = { em: pixelSize, atlas: 0, glyphs: {}, maxH: pixelSize, fake: true };
+    return fid0;
+  }
+  var fams = __SW.fontFamilies || {};
+  var fam = fams[__sw_font_path_key(path)];
+  if (!fam) {
+    for (var k in fams) { fam = fams[k]; break; } // shipped fallback font, like native's embedded DroidSans
+    if (fam) __sw_log_once("stone_load_font: no FontFace for '" + path + "'; using the shipped fallback font");
+  }
+  if (!fam) {
+    __sw_log_once("stone_load_font: no fonts were preloaded; text will not render");
+    return 0;
+  }
+
+  var mcanvas = document.createElement("canvas");
+  var mctx = mcanvas.getContext("2d", { willReadFrequently: true });
+  var fontSpec = pixelSize + "px " + fam;
+  mctx.font = fontSpec;
+  mctx.textBaseline = "alphabetic";
+
+  // Pass 1: metrics for all 95 glyphs -> cell size.
+  var infos = [];
+  var cellW = 1, cellH = 1;
+  for (var cp = 32; cp <= 126; cp++) {
+    var ch = String.fromCharCode(cp);
+    var m = mctx.measureText(ch);
+    var left = m.actualBoundingBoxLeft || 0;
+    var right = m.actualBoundingBoxRight || 0;
+    var ascent = m.actualBoundingBoxAscent || 0;
+    var descent = m.actualBoundingBoxDescent || 0;
+    var gw = Math.ceil(left + right);
+    var gh = Math.ceil(ascent + descent);
+    infos.push({ cp: cp, ch: ch, left: left, ascent: ascent, w: gw, h: gh, advance: m.width });
+    if (gw > cellW) cellW = gw;
+    if (gh > cellH) cellH = gh;
+  }
+  var PAD = 2;
+  cellW += PAD * 2;
+  cellH += PAD * 2;
+  var COLS = 16; // mirror native text.rs grid
+  var rows = Math.ceil(infos.length / COLS);
+  var aw = COLS * cellW, ah = rows * cellH;
+
+  var canvas = document.createElement("canvas");
+  canvas.width = aw; canvas.height = ah;
+  var ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.font = fontSpec;
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#ffffff";
+
+  var glyphs = {};
+  var maxH = 1;
+  for (var i = 0; i < infos.length; i++) {
+    var g = infos[i];
+    var cx = (i % COLS) * cellW + PAD;
+    var cy = Math.floor(i / COLS) * cellH + PAD;
+    // Pen at (cx + left, cy + ascent): ink box lands at [cx, cy, w, h].
+    ctx.fillText(g.ch, cx + g.left, cy + g.ascent);
+    // 9-float glyph info: [u0 v0 u1 v1 width height bearing_x bearing_y advance];
+    // bearing_y is TOP-based (ink top above baseline = actualBoundingBoxAscent).
+    glyphs[g.cp] = new Float32Array([
+      cx / aw, cy / ah, (cx + g.w) / aw, (cy + g.h) / ah,
+      g.w, g.h, -g.left, g.ascent, g.advance,
+    ]);
+    if (g.h > maxH) maxH = g.h;
+  }
+
+  // Coverage-RGBA from the alpha channel.
+  var src = ctx.getImageData(0, 0, aw, ah).data;
+  var rgba = new Uint8Array(aw * ah * 4);
+  for (var p = 0; p < aw * ah; p++) {
+    var cov = src[p * 4 + 3];
+    rgba[p * 4] = cov; rgba[p * 4 + 1] = cov; rgba[p * 4 + 2] = cov; rgba[p * 4 + 3] = cov;
+  }
+  var gl = __SW.gl;
+  var texHandle = __sw_new_texture();
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[texHandle]);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, aw, ah, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+  var filter = __SW.texFilter === 1 ? gl.LINEAR : gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+  __SW.fonts = __SW.fonts || {};
+  var fid = (__SW.nextFont = (__SW.nextFont || 0) + 1);
+  __SW.fonts[fid] = { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH };
+  console.log("[STONE-WEB] font atlas baked: " + infos.length + " glyphs @ " + pixelSize + "px (" + aw + "x" + ah + ")");
+  return fid;
 }
-function stone_get_font_atlas_image_for(fontId) { return stone_get_white_image(); }
-function stone_get_font_pixel_size_for(fontId) { return __SW.fontEm || 48; }
-function stone_get_glyph_info_for(fontId, ch, out) { return false; }
-function stone_measure_text_for(fontId, text, scale, ow, oh) { ow[0] = 0; oh[0] = 0; }
-function stone_measure_text_js(fontId, text, scale) { return [0, 0]; }
-function stone_get_text_baseline_for(fontId, scale) { return 0; }
+function __sw_font(fontId) { return (__SW.fonts || {})[fontId]; }
+function stone_get_font_atlas_image_for(fontId) {
+  var f = __sw_font(fontId);
+  return f && f.atlas ? f.atlas : stone_get_white_image();
+}
+function stone_get_font_pixel_size_for(fontId) {
+  var f = __sw_font(fontId);
+  return f ? f.em : 48;
+}
+function stone_get_glyph_info_for(fontId, ch, out) {
+  var f = __sw_font(fontId);
+  if (!f) return false;
+  var g = f.glyphs[ch];
+  if (!g) return false;
+  for (var i = 0; i < 9; i++) out[i] = g[i];
+  return true;
+}
+// Shim-side measure, from the shim's OWN advances (native-formula drift is
+// the bug class this avoids): width = max line sum(advance)*scale; height
+// single-line = max glyph height*scale, multi-line adds (lines-1)*em*1.2.
+function stone_measure_text_js(fontId, text, scale) {
+  var f = __sw_font(fontId);
+  if (!f) return [0, 0];
+  var s = String(text);
+  var lines = 1, w = 0, lineW = 0;
+  for (var i = 0; i < s.length; i++) {
+    if (s[i] === "\n") { lines++; if (lineW > w) w = lineW; lineW = 0; continue; }
+    var g = f.glyphs[s.charCodeAt(i)];
+    if (g) lineW += g[8];
+  }
+  if (lineW > w) w = lineW;
+  var h = f.maxH * Math.abs(scale);
+  if (lines > 1) h = (lines - 1) * f.em * Math.abs(scale) * 1.2 + f.maxH * Math.abs(scale);
+  return [w * scale, h];
+}
+function stone_measure_text_for(fontId, text, scale, ow, oh) {
+  var r = stone_measure_text_js(fontId, text, scale);
+  ow[0] = r[0]; oh[0] = r[1];
+}
+// Baseline = max TOP-based bearing_y over the text's glyphs, * |scale|.
+function stone_get_text_baseline_for(fontId, text, scale) {
+  var f = __sw_font(fontId);
+  if (!f) return 0;
+  var s = String(text);
+  var b = 0;
+  for (var i = 0; i < s.length; i++) {
+    var g = f.glyphs[s.charCodeAt(i)];
+    if (g && g[7] > b) b = g[7];
+  }
+  return b * Math.abs(scale);
+}
 function stone_text_init() { return true; }
 function stone_text_shutdown() {}
 
@@ -1145,8 +1299,61 @@ function stone_sprite_end() {}
 function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
   __sw_log_once("stone_sprite_draw: immediate sprite path not implemented on web yet");
 }
+// The canvas-present blit (sparkle trail et al): a rotated textured quad in
+// pixel space through the bound program, else the passed basic-sprite handle
+// with default uniforms -- mirrors sprite.rs stone_sprite_draw_texture
+// (8-float pos2/uv2/color4 layout, prefer-current-shader rule, default
+// pixel-ortho only when nothing was bound).
 function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
-  __sw_log_once("stone_sprite_draw_texture: MD lands the canvas-present blit");
+  var gl = __SW.gl;
+  if (!gl) return;
+  var t = __SW.textures[tex];
+  if (!t) { __sw_log_once("stone_sprite_draw_texture: unknown texture " + tex); return; }
+  var cur = __SW.curShader;
+  var sh2 = cur !== 0 ? __SW.shaders[cur] : __SW.shaders[shader];
+  if (!sh2) { __sw_log_once("stone_sprite_draw_texture: no shader bound and handle " + shader + " not in registry; skipping"); return; }
+  gl.useProgram(sh2.prog);
+  var u0 = sx / tw, v0 = sy / th, u1 = (sx + sw) / tw, v1 = (sy + sh) / th;
+  var qw = w * scx, qh = h * scy;
+  var cr = Math.cos(rot), sr = Math.sin(rot);
+  var xs = [0, qw, qw, 0], ys = [0, 0, qh, qh];
+  var px = [], py = [];
+  for (var i = 0; i < 4; i++) {
+    px.push(x + xs[i] * cr - ys[i] * sr);
+    py.push(y + xs[i] * sr + ys[i] * cr);
+  }
+  var verts = new Float32Array([
+    px[0], py[0], u0, v0, r, g, b, a,
+    px[1], py[1], u1, v0, r, g, b, a,
+    px[2], py[2], u1, v1, r, g, b, a,
+    px[0], py[0], u0, v0, r, g, b, a,
+    px[2], py[2], u1, v1, r, g, b, a,
+    px[3], py[3], u0, v1, r, g, b, a,
+  ]);
+  if (cur === 0) {
+    // Standalone caller: bound-target pixel ortho + identity view/transform
+    // (native set_default_sprite_uniforms).
+    var wh = __sw_target_size();
+    var proj = new Float32Array([2 / wh[0], 0, 0, 0, 0, -2 / wh[1], 0, 0, 0, 0, -1, 0, -1, 1, 0, 1]);
+    var lp = __sw_uloc(sh2, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
+    var lv = __sw_uloc(sh2, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, __SW_IDENTITY);
+    var ltr2 = __sw_uloc(sh2, "uTransform"); if (ltr2) gl.uniformMatrix4fv(ltr2, false, __SW_IDENTITY);
+  }
+  var lc2 = __sw_uloc(sh2, "uColor"); if (lc2) gl.uniform4f(lc2, 1, 1, 1, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  var ltx = __sw_uloc(sh2, "uTexture"); if (ltx) gl.uniform1i(ltx, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 32, 0);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 32, 8);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(2, 4, gl.FLOAT, false, 32, 16);
+  gl.enableVertexAttribArray(2);
+  gl.disableVertexAttribArray(3);
+  gl.disableVertexAttribArray(4);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
 // --- audio (silent stubs; WebAudio lands with the chess tier) ---
@@ -1227,6 +1434,41 @@ function stone_set_window_display(i) {}
 function stone_set_display_mode(w, h) {}
 function stone_get_window_borders(pt, pl, pb, pr) { pt[0] = 0; pl[0] = 0; pb[0] = 0; pr[0] = 0; }
 function stone_get_display_count() { return 1; }
+
+// --- boot: preload assets, register fonts, then main (spec boot step 2) ---
+// __ROCK_WEB_PRELOAD is emitted by the `rock web` assembler. Each entry is
+// fetched into __ROCK_WEB_ASSETS (keeping the sync file_read-shape reads
+// sync); .ttf/.otf entries also register as a FontFace so stone_load_font's
+// canvas2d bake is synchronous. A preload failure is LOUD but still boots --
+// the font path then falls back exactly like native's embedded-fallback rung.
+function __rock_web_boot(mainFn) {
+  var pre = typeof __ROCK_WEB_PRELOAD !== "undefined" ? __ROCK_WEB_PRELOAD : [];
+  if (globalThis.__STONE_WEB_FAKE_ENV || typeof fetch === "undefined" || pre.length === 0) {
+    if (mainFn) mainFn();
+    return;
+  }
+  Promise.all(pre.map(function (path) {
+    return fetch(path).then(function (r) {
+      if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+      return r.arrayBuffer();
+    }).then(function (buf) {
+      __ROCK_WEB_ASSETS[path] = new Uint8Array(buf);
+      if (/\.(ttf|otf)$/i.test(path) && typeof FontFace !== "undefined") {
+        var fam = "__sw_font_" + path.replace(/[^A-Za-z0-9]/g, "_");
+        var face = new FontFace(fam, buf);
+        return face.load().then(function (loaded) {
+          document.fonts.add(loaded);
+          (__SW.fontFamilies = __SW.fontFamilies || {})[path] = fam;
+        });
+      }
+    });
+  })).then(function () {
+    if (mainFn) mainFn();
+  }).catch(function (e) {
+    console.error("[STONE-WEB] asset preload failed:", e);
+    if (mainFn) mainFn();
+  });
+}
 
 // --- rAF driver ---
 function __rock_web_arm_raf(frameFn) {

@@ -55,33 +55,60 @@ fn web_fake_gl_smoke() {
 }
 
 #[test]
-fn web_chrome_screenshot_nonblank() {
+fn web_chrome_screenshot_nonblank_with_text() {
     let chrome = ["google-chrome", "google-chrome-stable", "chromium"]
         .iter()
         .find(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false));
     let Some(chrome) = chrome else {
-        eprintln!("SKIP web_chrome_screenshot_nonblank: no chrome on PATH");
+        eprintln!("SKIP web_chrome_screenshot_nonblank_with_text: no chrome on PATH");
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
     build_match3_web(dir.path());
+
+    // Serve over HTTP: `fetch` of the preloaded TTF is CORS-blocked on file://
+    // ("serve with any static file server" is the deliverable's contract).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut server = Command::new("python3")
+        .args(["-m", "http.server", &port.to_string(), "-d"])
+        .arg(dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn http.server");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
     let shot = dir.path().join("shot.png");
-    let url = format!("file://{}/index.html", dir.path().display());
-    let status = Command::new(chrome)
+    let out = Command::new(chrome)
         .args([
             "--headless=new",
             "--no-sandbox",
             "--enable-unsafe-swiftshader",
+            "--enable-logging=stderr",
+            "--v=0",
             "--window-size=1280,720",
             // 10s virtual budget: software-WebGL (swiftshader) boot can outlast
             // a smaller budget and yield a blank pre-first-frame capture.
             "--virtual-time-budget=10000",
         ])
         .arg(format!("--screenshot={}", shot.display()))
-        .arg(&url)
-        .status()
+        .arg(format!("http://127.0.0.1:{port}/index.html"))
+        .output()
         .expect("spawn chrome");
-    assert!(status.success(), "chrome exited non-zero");
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(out.status.success(), "chrome exited non-zero");
+
+    // MC observable: the canvas2d atlas bake ran (real TTF fetched + baked).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("font atlas baked"),
+        "canvas2d glyph atlas did not bake (no 'font atlas baked' console line).\nchrome stderr tail:\n{}",
+        &stderr[stderr.len().saturating_sub(2000)..]
+    );
+
     let img = image::open(&shot).expect("read screenshot").to_rgba8();
     let mut colors = std::collections::HashSet::new();
     for p in img.pixels() {

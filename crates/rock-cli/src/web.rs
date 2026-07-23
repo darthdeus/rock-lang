@@ -27,7 +27,8 @@ pub fn build_web(project: &str, out: Option<&str>) -> Result<()> {
     // Project-mode emission (diagnoses + exits on any rejection, like the run path).
     let (emitted, ws) = crate::js_test::emit_js_program_project(project);
     let register_lines = shader_register_lines_js(&ws)?;
-    let game_js = assemble_web_program(&emitted, &register_lines);
+    let preload = stage_assets(project, &out_dir)?;
+    let game_js = assemble_web_program(&emitted, &register_lines, &preload);
     let title = Path::new(project)
         .file_name()
         .and_then(|s| s.to_str())
@@ -40,6 +41,55 @@ pub fn build_web(project: &str, out: Option<&str>) -> Result<()> {
     rock_host::project::write_atomic(&index_path, &index_html)?;
     log::info!(target: "WEB", "{} -> {} ({} + game.js)", project, out_dir.display(), index_path.display());
     Ok(())
+}
+
+/// Stage the v1 asset set into the build dir and return the boot-preload list
+/// (paths relative to index.html, fetched into `__ROCK_WEB_ASSETS` before
+/// `main()` runs). v1 ships fonts only: every `.ttf`/`.otf` under the
+/// project's `assets/`, plus the engine-bundled DroidSans as the fallback the
+/// runner default config names -- the web mirror of stone-rs's embedded
+/// fallback font (`text.rs` `FALLBACK_FONT`).
+fn stage_assets(project: &str, out_dir: &Path) -> Result<Vec<String>> {
+    let mut preload: Vec<String> = Vec::new();
+    let assets = Path::new(project).join("assets");
+    if assets.is_dir() {
+        for entry in walkdir::WalkDir::new(&assets).sort_by_file_name() {
+            let entry = entry?;
+            let p = entry.path();
+            let is_font = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
+            if !is_font {
+                continue;
+            }
+            let rel = p.strip_prefix(Path::new(project)).expect("under project");
+            let dst = out_dir.join(rel);
+            std::fs::create_dir_all(dst.parent().expect("parent"))?;
+            std::fs::copy(p, &dst)?;
+            preload.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    let fallback_rel = "assets/fonts/DroidSans.ttf";
+    if !preload.iter().any(|p| p == fallback_rel) {
+        let src = repo_relative("stone-rs/fonts/DroidSans.ttf");
+        if src.is_file() {
+            let dst = out_dir.join(fallback_rel);
+            std::fs::create_dir_all(dst.parent().expect("parent"))?;
+            std::fs::copy(&src, &dst)?;
+            preload.push(fallback_rel.to_string());
+        } else {
+            log::warn!(target: "WEB", "engine fallback font missing at {}; text will not render", src.display());
+        }
+    }
+    Ok(preload)
+}
+
+/// A path relative to the workspace root (the compile runs from anywhere).
+fn repo_relative(rel: &str) -> PathBuf {
+    rock_host::project::find_workspace_root(&std::env::current_dir().unwrap_or_default())
+        .map(|r| r.join(rel))
+        .unwrap_or_else(|| PathBuf::from(rel))
 }
 
 /// One `__rock_shader_register("<key>", "<glsl>")` line per distinct
@@ -77,9 +127,15 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
 /// Assemble `game.js`: the shared runtime preludes (same set/order as the node
 /// path) + `JS_WEB_RUNTIME` (browser print/config, in place of the node RNG/env
 /// glue) + a scoped `var __G = {}` + the emitted program + the shader
-/// registration lines, then a boot line that seeds the RNG and calls `main`
-/// when the entry defines one.
-fn assemble_web_program(emitted: &skull_codegen_js::emit::JsProgram, register_lines: &str) -> String {
+/// registration lines, then the boot line: `__rock_web_boot(main)` fetches the
+/// preload manifest (the TTF) into the in-memory registry and registers each
+/// font as a FontFace BEFORE `main()` runs, so the sync file/font reads stay
+/// sync (spec boot step 2).
+fn assemble_web_program(
+    emitted: &skull_codegen_js::emit::JsProgram,
+    register_lines: &str,
+    preload: &[String],
+) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_TABLE_PRIM);
@@ -100,10 +156,11 @@ fn assemble_web_program(emitted: &skull_codegen_js::emit::JsProgram, register_li
     p.push_str("__rock_rng_seed(Date.now());\n");
     p.push_str(&emitted.program);
     p.push_str(register_lines);
-    if let Some(main) = &emitted.main_js_name {
-        // The engine web runner (MB) replaces this bare call with an rAF arm; at
-        // MA a nullary main runs module-load-then-main, matching the node path.
-        p.push_str(&format!("\n{main}();\n"));
+    let manifest: Vec<String> = preload.iter().map(|s| crate::js_test::js_str(s)).collect();
+    p.push_str(&format!("\nvar __ROCK_WEB_PRELOAD = [{}];\n", manifest.join(", ")));
+    match &emitted.main_js_name {
+        Some(main) => p.push_str(&format!("__rock_web_boot({main});\n")),
+        None => p.push_str("__rock_web_boot(null);\n"),
     }
     p
 }
