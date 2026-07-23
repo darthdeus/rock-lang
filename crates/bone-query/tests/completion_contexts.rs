@@ -1355,6 +1355,24 @@ fn plain_fn_signature_does_not_offer_coroutine_return_type() {
     assert!(!labels.iter().any(|s| s.starts_with("-> Coroutine")), "plain fn must not offer the return type: {labels:?}");
 }
 
+// The real Stone `Wait` is an ENUM, not a struct -- the ergonomics must fire
+// for the shape that actually ships, not just the throwaway struct above.
+const WAIT_ENUM: &str = "enum Wait { Frame, Secs(float) }\n";
+
+#[test]
+fn wait_ergonomics_fire_for_an_enum_wait() {
+    // `Coroutine<Wait>` / `-> Coroutine<Wait>` snippets are the unambiguous
+    // synth signal -- ordinary type completion can never produce them (unlike a
+    // bare `Wait`, which the enum symbol itself offers in a type slot).
+    let src = format!("{WAIT_ENUM}co fn f() -> Cor {{\n  yield 0\n}}\n");
+    let col = "co fn f() -> Cor".len() as u32;
+    let mut bone = BoneWorkspace::new();
+    bone.update(PATH, src);
+    let labels: Vec<String> = bone.completion(PATH, Position::new(1, col)).into_iter().map(|c| c.label).collect();
+    assert_eq!(labels.first().map(String::as_str), Some("Coroutine<Wait>"),
+        "Coroutine<Wait> snippet must synth for an enum Wait: {labels:?}");
+}
+
 // -- param-name + fn-prefix type heuristics --------------------------------
 // In a param TYPE slot, a param named `e`/`entity` suggests the `Entity` type,
 // and the enclosing fn's name prefix picks the payload: `mob_attack_co` -> a

@@ -701,10 +701,12 @@ pub(crate) fn fn_is_coroutine(ws: &Workspace, name: &str) -> bool {
     })
 }
 
-/// Whether a struct named `name` is defined anywhere in the workspace.
-pub(crate) fn struct_exists(ws: &Workspace, name: &str) -> bool {
+/// Whether a nominal type (struct OR enum) named `name` is defined anywhere in
+/// the workspace. The Stone `Wait` yield type is an enum, so the coroutine
+/// ergonomics probe both.
+pub(crate) fn nominal_exists(ws: &Workspace, name: &str) -> bool {
     let u = Ustr::from(name);
-    ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u))
+    ws.modules.iter().any(|m| m.struct_by_name.contains_key(&u) || m.enums_by_name.contains_key(&u))
 }
 
 /// The struct named by a fn-name's first `_`-segment, capitalized (`mob_attack_co`

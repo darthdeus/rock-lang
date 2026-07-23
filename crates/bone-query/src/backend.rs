@@ -1926,9 +1926,9 @@ impl BoneWorkspace {
         }
         // Coroutine ergonomics: `Wait` is the dominant Stone yield type
         // (~75% of `Coroutine<..>` annotations), so surface it. All gated on a
-        // `Wait` struct existing (stone projects); otherwise the generic
-        // `Coroutine<$0>` snippet stands in.
-        let has_wait = struct_exists(ws, "Wait");
+        // `Wait` type existing (the Stone `Wait` is an enum); otherwise the
+        // generic `Coroutine<$0>` snippet stands in.
+        let has_wait = nominal_exists(ws, "Wait");
         let coroutine_slot = cx.coroutine_generic;
         if coroutine_slot {
             // (a) first generic arg of `Coroutine<..>` -> `Wait` ranks #0,
