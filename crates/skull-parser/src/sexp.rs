@@ -564,7 +564,7 @@ impl Ast {
         }
     }
 
-    /// Render a type as SURFACE syntax (`Coroutine<int, Unit, int>`, `[T]`,
+    /// Render a type as SURFACE syntax (`Coroutine<int, (), int>`, `[T]`,
     /// `(a, b) -> c`, `T?`) for human-facing output (ctags, hover). Unlike
     /// `type_sexp`, `App`/`Tuple`/`Function` use surface delimiters rather than
     /// s-expr parens -- this is NOT the oracle form, so it must not be fed to the

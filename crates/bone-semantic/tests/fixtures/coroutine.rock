@@ -1,7 +1,7 @@
 //! Coroutine typecheck (Step 1): `co fn ... -> Coroutine<Y>` + `yield e`.
 //! `yield e` checks `e` against the yield type Y (first param of the declared
-//! Coroutine return type). `Coroutine<Y>` synthesizes to `Coroutine<Y, Unit,
-//! Unit>` so it matches the stdlib `resume<Y,R,N>` signature (resume/.resume()
+//! Coroutine return type). `Coroutine<Y>` synthesizes to `Coroutine<Y, (),
+//! ()>` so it matches the stdlib `resume<Y,R,N>` signature (resume/.resume()
 //! itself is exercised by the full suite, which has stdlib).
 
 //- co_fn_yield_ok

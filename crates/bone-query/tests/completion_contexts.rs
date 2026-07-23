@@ -1170,7 +1170,7 @@ fn enum_qualifier_matching_prefix_still_narrows() {
 // `Coroutine` and `Map` are compiler builtins (not stdlib structs), so the
 // workspace name-index can't surface them. In a TYPE slot the type-name
 // builtins (`Coroutine`, `Map`, `int`, `float`, `string`, `bool`, `any`,
-// `Unit`, NativeBuffer, `Ptr`) are first-class candidates.
+// NativeBuffer, `Ptr`) are first-class candidates.
 
 #[test]
 fn type_slot_offers_coroutine_builtin() {

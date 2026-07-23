@@ -367,20 +367,7 @@ pub fn check_function(
         if let Some(ret) = f.return_ty {
             let (_y, r, _n) = coroutine_yrn(&mut gamma, ret, f.span)?;
             gamma.coroutine_ret = Some(ret);
-
-            let r_resolved = resolve(&mut gamma, r, f.span);
-
-            // TODO: this should go once we finish the port and unify Unit and ()
-            let is_unit_struct = matches!(
-                *gamma.get(r_resolved),
-                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n == "Unit"
-            );
-
-            gamma.declared_ret_ty = Some(if is_unit_struct {
-                gamma.workspace.builtins.unit()
-            } else {
-                r
-            });
+            gamma.declared_ret_ty = Some(r);
         }
     } else if let Some(ret) = f.return_ty {
         gamma.declared_ret_ty = Some(ret);

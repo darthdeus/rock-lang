@@ -1,10 +1,5 @@
 // Rock standard library
 
-// Empty type used as the default `R` for `Coroutine<Y, R = Unit>`.
-// See docs/yield-star-and-dual-arity-plan.md (PR-β / D3a). Future
-// work may replace this with a compiler-builtin keyword (D3b).
-struct Unit {}
-
 // The `target` object available inside a `deco init` body. The runtime
 // table skull emits (name/params/func) is shaped to match; bone types the
 // magic `target` binding as this struct so `target.name`/`target.func`
@@ -1348,22 +1343,22 @@ inline(lua) fn float_to_int(value: float) -> int = """
 // Type parameters: Y = yield type, R = return type (returned via
 // `.result()`), N = resume-arg type (lands with resume-with-value
 // per docs/coroutine-resume-with-value-plan.md).
-// `Coroutine<Y>` resolves to `Coroutine<Y, Unit, Unit>` via PR-α
+// `Coroutine<Y>` resolves to `Coroutine<Y, (), ()>` via PR-α
 // default-type-params + PR-A arity bump; `.resume()` shape stays
-// `Y?` regardless of R (D2a Unit-elision), with the typed return
+// `Y?` regardless of R (D2a unit-elision), with the typed return
 // value on `.result()`.
 inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>) -> Y? = """
     return c.__resume(c)
 """
 
-// Unified resume: 2-arg overload for `N != Unit`. Same name as the
+// Unified resume: 2-arg overload for `N != ()`. Same name as the
 // arg-less form -- Rock's overload-by-arity picks the right one at
 // the call site (`c.resume()` -> 1-arg; `c.resume(arg)` -> 2-arg).
 // The body's `let x = yield V` reads `arg` here on the next pump.
 //
-// Polish B (`b06199ca0`) rejects the arg-less form when N != Unit
+// Polish B (`b06199ca0`) rejects the arg-less form when N != ()
 // at compile time -- the 2-arg form is the only valid resume there.
-// For N = Unit, both forms compile; the 2-arg form is rarely useful
+// For N = (), both forms compile; the 2-arg form is rarely useful
 // (no `let x = yield V` exists for the body to bind), so prefer the
 // arg-less form there.
 inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
@@ -1373,7 +1368,7 @@ inline(lua) fn resume<Y, R, N>(c: Coroutine<Y, R, N>, arg: N) -> Y? = """
 // PR-γ: read the value stashed by `return expr` at a co fn's
 // terminal. Returns null when the coroutine is still suspended, was
 // killed, or fell off without a value-bearing return. For
-// `R = Unit` coroutines (the default), `R?` is `Unit?` and is always
+// `R = ()` coroutines (the default), `R?` is `()?` and is always
 // null in practice — same observable as before.
 inline(lua) fn result<Y, R, N>(c: Coroutine<Y, R, N>) -> R? = """
     return c.__return
@@ -1395,13 +1390,13 @@ inline(lua) fn last_error<Y, R, N>(c: Coroutine<Y, R, N>) -> string? = """
     return c.__error
 """
 
-// Generators-as-iterators: a `Coroutine<Y, R, Unit>` iterates as itself via
+// Generators-as-iterators: a `Coroutine<Y, R, ()>` iterates as itself via
 // the structural `next` protocol. Resume, then key liveness off `status()`
 // (NOT a null-sentinel), so a body that `yield null`s (nullable `Y`) still
-// produces real null elements. `N != Unit` has no overload -- a `for` head
+// produces real null elements. `N != ()` has no overload -- a `for` head
 // can't supply a resume-arg -- so a resume-taking coroutine rejects at the
 // loop naturally.
-fn next<Y, R>(c: Coroutine<Y, R, Unit>) -> (bool, Y) {
+fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
     let y = resume(c)
     if status(c) == "suspended" {
         return (true, cast(y))

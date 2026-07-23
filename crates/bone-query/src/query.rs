@@ -4574,8 +4574,8 @@ pub fn completion(
     // Builtin type names, in a TYPE slot only. `Coroutine`/`Map` are compiler
     // builtins with no entry in the workspace name-index, and the scalar
     // primitives aren't nominal types at all -- neither flows through the loops
-    // above. (Stdlib structs like `Vec`/`Entity`/`Arena`/`NativeBuffer*`/`Ptr*`/
-    // `Unit` already come through `struct_by_name`.)
+    // above. (Stdlib structs like `Vec`/`Entity`/`Arena`/`NativeBuffer*`/`Ptr*`
+    // already come through `struct_by_name`.)
     if !expr_position {
         for name in BUILTIN_TYPE_NAMES {
             let n = ustr::Ustr::from(*name);
