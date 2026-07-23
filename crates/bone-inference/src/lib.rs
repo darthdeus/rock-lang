@@ -52,6 +52,8 @@ static Q_R: LazyLock<Ustr> = LazyLock::new(|| ustr("?R"));
 
 static Q_LAM: LazyLock<Ustr> = LazyLock::new(|| ustr("?lam"));
 
+static Q_FIELDREF: LazyLock<Ustr> = LazyLock::new(|| ustr("?fieldref"));
+
 static VEC: LazyLock<Ustr> = LazyLock::new(|| ustr("Vec"));
 
 static ENTITY: LazyLock<Ustr> = LazyLock::new(|| ustr("Entity"));

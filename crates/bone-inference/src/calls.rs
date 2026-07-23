@@ -939,8 +939,14 @@ pub(crate) fn resolve_named_call_inner(
         }
 
         for a in args {
+            // A `.field` arg needs a FieldOf expected type to infer, so like a
+            // lambda it gets a fresh var (fits any candidate, stops
+            // discriminating) and stays out of `preinferred` -- so post-selection
+            // it falls through to `check_expr` against the winner's param.
             let t = if matches!(c.body.expr_arena[a], Expr::Lambda { .. }) {
                 gamma.fresh_callsite_var(*Q_LAM, span)
+            } else if matches!(c.body.expr_arena[a], Expr::SiblingRef(_)) {
+                gamma.fresh_callsite_var(*Q_FIELDREF, span)
             } else {
                 let t = infer_expr(c, gamma, a)?;
                 let t = resolve(gamma, t, span);
