@@ -43,6 +43,13 @@ fn gap(msg: impl std::fmt::Display) -> CompilerError {
 // threads the unboxed form through lowering; `pack` is the single place a Group
 // becomes a real `<name>_ct(...)` cdata (an escape). See the plan doc.
 
+/// Whether a fn with backend `b` can serve codegen `target`: an `Any` (portable
+/// Rock) body serves every target, else the backend must match exactly.
+fn serves_target(b: bone_semantic::hir::FnBackend, target: bone_semantic::hir::FnBackend) -> bool {
+    use bone_semantic::hir::FnBackend;
+    b == FnBackend::Any || b == target
+}
+
 /// `Some(k)` iff `name` is a GC-free `value` struct whose every flattened
 /// primitive leaf is `float` (recursively), where `k` is the leaf count; `None`
 /// otherwise (not such a struct, or any int/bool/enum leaf). The JS backend uses
@@ -4300,6 +4307,22 @@ impl Builder<'_> {
         if rep_backend == target {
             return Ok(rep);
         }
+        // A backend sibling can exist ONLY when the name has >=2 candidates
+        // (bone collapsed a backend-variant group to `rep`). The overwhelmingly
+        // common single-candidate call skips the sibling scan entirely, keeping
+        // the `Any`-serves-everything fast path off the hot overload-select path.
+        let has_variants = self
+            .ws
+            .functions_by_name
+            .get(&name)
+            .is_some_and(|l| l.len() >= 2);
+        if !has_variants {
+            return if serves_target(rep_backend, target) {
+                Ok(rep)
+            } else {
+                self.reject_or_defer(e, name, rep, target)
+            };
+        }
         // An exact-target sibling outranks an `Any` representative: backend
         // mapping beats the portable fallback (the intrinsics precedence
         // doctrine). Without this an `inline(js)` variant of a portable-bodied
@@ -4315,6 +4338,21 @@ impl Builder<'_> {
         if let Some(sib) = self.find_sibling_variant(rep, target, false) {
             return Ok(sib);
         }
+        self.reject_or_defer(e, name, rep, target)
+    }
+
+    /// No servable binding for `target` was found: a `Lua` target REJECTS (a
+    /// js-only decl reached from lua-reachable code); a `Js` target defers `rep`
+    /// to the JS emitter (which may host-map a lua-bodied stdlib primitive, or
+    /// reject with its own message).
+    fn reject_or_defer(
+        &self,
+        e: Idx<Expr>,
+        name: ustr::Ustr,
+        rep: FuncRef,
+        target: bone_semantic::hir::FnBackend,
+    ) -> Result<FuncRef, CompilerError> {
+        use bone_semantic::hir::FnBackend;
         match target {
             FnBackend::Lua => Err(CompilerError::new_with_label(
                 self.body.expr_spans[e],
@@ -4322,15 +4360,15 @@ impl Builder<'_> {
                     "call to `{name}` has no luajit binding: its only declaration targets the `js` backend"
                 ),
             )),
-            // Js: defer to the JS emitter (it may host-map a lua-bodied stdlib
-            // primitive, or reject with its own message).
             _ => Ok(rep),
         }
     }
 
     /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
     /// Signature match is param-type equality (rendered, inference-free) -- the
-    /// same key bone's `collapse_backend_variants` groups on.
+    /// same key bone's `collapse_backend_variants` groups on. The caller has
+    /// already established the name has >=2 candidates, so `rep_sig` (a per-param
+    /// render) is only built when a sibling could exist.
     fn find_sibling_variant(
         &self,
         rep: FuncRef,
