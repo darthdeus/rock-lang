@@ -132,6 +132,19 @@ fn collapse_backend_variants(
     if candidates.len() <= 1 {
         return candidates.to_vec();
     }
+    // Fast path: a cross-backend collapse is only possible when candidates span
+    // >= 2 distinct backends. If they all share one backend (the overwhelmingly
+    // common case -- an all-`Any` portable overload set, or an all-`Lua`
+    // inline(lua)/operator set), no group is ever "all distinct", so the result
+    // equals the input. Skip the signature rendering entirely -- this keeps the
+    // collapse off the hot overload path unless a backend variant is in play.
+    let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
+    if candidates
+        .iter()
+        .all(|&(mid, fid)| gamma.workspace.module(mid).functions[fid].backend == first_backend)
+    {
+        return candidates.to_vec();
+    }
     // Preserve input order for determinism; group indices by signature key.
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     for (i, &(mid, fid)) in candidates.iter().enumerate() {
