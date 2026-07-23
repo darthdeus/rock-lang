@@ -46,6 +46,7 @@ mod iter_lsp;
 mod iter_parse;
 pub mod glsl_test;
 pub mod js_test;
+pub mod web;
 mod test_protocol;
 mod lsp_survey;
 mod lsp_test;
@@ -237,6 +238,13 @@ pub enum CliCommand {
     /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
     /// See `glsl_test::shader_validate`.
     ShaderValidate,
+    /// `rock web <project> [--out <dir>]` -- emit a static browser build
+    /// (`index.html` + `game.js`) for a Rock project via the JS backend. A
+    /// `CliCommand` dispatched pre-backend-switch (like `fmt`/`shader`): it runs
+    /// project-mode JS emission and assembles the browser bundle (runtime
+    /// preludes + `JS_WEB_RUNTIME` + emitted program + a boot line). Serve the
+    /// out dir with any static file server. See `docs/stone-web-plan.md` Arc 2.
+    Web,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -267,6 +275,7 @@ impl clap::ValueEnum for CliCommand {
             Self::BackendStats,
             Self::Shader,
             Self::ShaderValidate,
+            Self::Web,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -313,6 +322,7 @@ impl CliCommand {
             Self::BackendStats => "backend-stats",
             Self::Shader => "shader",
             Self::ShaderValidate => "shader-validate",
+            Self::Web => "web",
         }
     }
 }
@@ -547,7 +557,7 @@ impl Args {
                     .value_parser(clap::value_parser!(CliCommand)),
             )
             .arg(Arg::new("files").num_args(0..))
-            .arg(Arg::new("output").long("output"))
+            .arg(Arg::new("output").long("output").alias("out"))
             .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
                 .help("Compile without the standard library"))

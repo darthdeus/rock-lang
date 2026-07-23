@@ -530,6 +530,33 @@ function __rock_random_int(min, max) {
 }
 "#;
 
+/// The static browser runtime prelude for `rock web` (stone-web Arc 2). A leaf
+/// layer only: it owns the raw-JS globals the engine's `extern(js)`/`inline(js)`
+/// web leaves bind to (WebGL2 context boot, the DOM event queue, the rAF driver,
+/// the canvas2d glyph-atlas rasterizer, fetch preload) -- everything that CAN be
+/// Rock stays Rock (unfuck stance: no parallel engine in raw JS). This skeleton
+/// (Arc 2 MA) establishes the const + the browser `print`/config shape; the
+/// WebGL2 / DOM / text leaves land in MB/MC as the engine web layer is written.
+pub const JS_WEB_RUNTIME: &str = r#"
+// --- browser print/put (no node process.*) ---
+function print() {
+  var p = [];
+  for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));
+  console.log(p.join("\t"));
+}
+function put(s) { console.log(s); }
+// --- env/config: a browser bundle has no process.env; a config object is
+// swapped in by the boot line (M3+). Unset -> Rock null, matching os.getenv. ---
+var __ROCK_WEB_CONFIG = (typeof globalThis.__ROCK_WEB_CONFIG === "object" && globalThis.__ROCK_WEB_CONFIG) || {};
+function __rock_env_var(n) {
+  var v = __ROCK_WEB_CONFIG[n];
+  return v === undefined ? null : v;
+}
+// --- asset preload registry: the boot line fetches declared assets into memory
+// BEFORE main() runs, so the sync `stone_file_read`-shape reads stay sync. ---
+var __ROCK_WEB_ASSETS = (typeof globalThis.__ROCK_WEB_ASSETS === "object" && globalThis.__ROCK_WEB_ASSETS) || {};
+"#;
+
 /// The coroutine runtime: JS ports of the stdlib `__rock_coroutine_kill` /
 /// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
 /// plus the `error` global backing the transform's `Inst::Global("error")` +
