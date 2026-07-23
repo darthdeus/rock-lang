@@ -46,14 +46,14 @@ pub fn game_requests_video(game_path: &str) -> Result<bool> {
 /// out to cargo then copies + renames the cdylib via `stage_cdylib`.
 fn cargo_build_and_stage_lib(
     display_name: &str,
-    cargo_package: &str,
+    cargo_args: &[&str],
     src_stem: &str,
     dst_stem: &str,
 ) -> Result<()> {
     if crate::project::is_release_layout() {
         return Ok(());
     }
-    run_cargo(&["build", "-p", cargo_package], &format!("Failed to build {}", display_name))?;
+    run_cargo(cargo_args, &format!("Failed to build {}", display_name))?;
     stage_cdylib(src_stem, dst_stem)
 }
 
@@ -149,7 +149,7 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
 /// have a specific game in scope; this raw form is fine for callers that
 /// have no game (REPL, library compiles).
 pub fn build_libstone() -> Result<()> {
-    cargo_build_and_stage_lib("stone-rs", "stone-rs", "stone_rs", "stone")?;
+    cargo_build_and_stage_lib("stone-rs", &["build", "--lib"], "stone_rs", "stone")?;
     Ok(())
 }
 
@@ -161,7 +161,12 @@ pub fn build_stone_video() -> Result<()> {
     if !std::path::Path::new("stone-video").exists() {
         return Ok(());
     }
-    cargo_build_and_stage_lib("stone-video", "stone-video", "stone_video", "stone_video")
+    cargo_build_and_stage_lib(
+        "stone-video",
+        &["build", "-p", "stone-video"],
+        "stone_video",
+        "stone_video",
+    )
 }
 
 /// Build the engine cdylibs required for a specific game. Always builds
