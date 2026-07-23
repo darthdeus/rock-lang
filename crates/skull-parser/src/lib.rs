@@ -490,6 +490,82 @@ mod tests {
     }
 
     #[test]
+    fn interpolation_hole_colon_inside_brackets_is_not_a_format_spec() {
+        // A `:` nested inside `()`/`{}`/`[]` in the hole belongs to the
+        // expression, not the `:spec` split -- named args, struct literals,
+        // etc. must survive. The split only fires at bracket-depth 0.
+        // Named-arg call:
+        assert_eq!(
+            body_sexp(r#"fn f() { let x = "{add2(2, b: 5)}" }"#),
+            r#"(block (let x () "(call add2 2 b: 5)"))"#,
+        );
+        // Struct literal (colon AND the closing `}` are both depth>0):
+        assert_eq!(
+            body_sexp(r#"fn f() { let x = "{P { v: 1 }}" }"#),
+            r#"(block (let x () "(struct P (data v 1))"))"#,
+        );
+        // Nested-call named arg deeper in:
+        assert_eq!(
+            body_sexp(r#"fn f() { let x = "{g(h(a: 1), b: 2)}" }"#),
+            r#"(block (let x () "(call g (call h a: 1) b: 2)"))"#,
+        );
+    }
+
+    #[test]
+    fn interpolation_hole_string_literal_brackets_and_colons_are_opaque() {
+        // A string literal inside the hole is opaque: its brackets must not move
+        // the bracket-depth counter and its `:` must not trigger the spec split.
+        // Regression guard -- a naive char-level depth counter miscounts `(`/`[`
+        // inside inner strings (broke tests/strings_characterization split cases).
+        assert_eq!(
+            body_sexp(r#"fn f() { let x = "{join("a[b]c".split("["), "|")}" }"#),
+            r#"(block (let x () "(call join (call (. "a[b]c" split) "[") "|")"))"#,
+        );
+        // A `:` inside an inner string is text, not a format-spec separator.
+        assert_eq!(
+            body_sexp(r#"fn f() { let x = "{greet("a:b")}" }"#),
+            r#"(block (let x () "(call greet "a:b")"))"#,
+        );
+    }
+
+    #[test]
+    fn interpolation_depth0_colon_is_still_a_format_spec() {
+        // The fix must NOT break real format specs: a `:` at bracket-depth 0
+        // still splits expr from spec, and a bracketed expr followed by a
+        // depth-0 spec keeps both.
+        assert_eq!(
+            body_sexp(r#"fn f() { let x = "{v:.3}" }"#),
+            body_sexp(r#"fn f() { let x = "{v}" }"#),
+        );
+        // `xs[0]` closes its bracket, THEN `:3` is a genuine width spec.
+        let (ast, v) = let_value(r#""{xs[0]:3}""#);
+        let ExprKind::InterpolatedString(parts) = &ast.exprs[v].kind else {
+            panic!("expected interpolated string, got {:?}", ast.exprs[v].kind);
+        };
+        let InterpolatedPart::Expr(e, spec) = &parts[0] else {
+            panic!("expected embedded expr part");
+        };
+        assert!(matches!(&ast.exprs[*e].kind, ExprKind::Index(..)), "expr is the index, not truncated");
+        assert_eq!(spec.as_ref().expect("width spec dropped").width, Some(3));
+    }
+
+    #[test]
+    fn interpolation_malformed_hole_is_rejected_not_emitted_literally() {
+        // A hole whose expression genuinely fails to parse must surface a
+        // spanned error, never silently fall back to literal brace text
+        // ("reject, don't fall back"). `add2(2,` is an unterminated call.
+        let ast = parse_module(
+            r#"fn f() { let x = "{add2(2,}" }"#,
+            Ustr::from("test.rock"),
+        );
+        let rejected = match ast {
+            Err(_) => true,
+            Ok(a) => !a.recovery_errors.is_empty(),
+        };
+        assert!(rejected, "malformed hole must be rejected, not emitted as literal text");
+    }
+
+    #[test]
     fn expr_hole_sexp_matches_rock_numbering() {
         // Bare anonymous hole renders `?0`; a named one renders `?name`.
         assert_eq!(body_sexp("fn f() { let x = ? }"), "(block (let x () ?0))");
