@@ -62,9 +62,11 @@ impl Ast {
                     .unwrap_or_else(|| "()".to_string());
                 let body = match &f.body {
                     FunctionBody::Rock(b) => self.block_sexp(*b),
-                    FunctionBody::Lua(_) => "(lua)".to_string(),
+                    FunctionBody::Inline(FnBackend::Js, _) => "(js)".to_string(),
+                    FunctionBody::Inline(_, _) => "(lua)".to_string(),
                     FunctionBody::ExternC => "(extern)".to_string(),
                     FunctionBody::ExternLua => "(extern-lua)".to_string(),
+                    FunctionBody::ExternJs => "(extern-js)".to_string(),
                     FunctionBody::Ffi(lib) => format!("(ffi {:?})", lib.as_str()),
                 };
                 format!(

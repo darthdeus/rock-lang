@@ -1644,6 +1644,9 @@ pub fn emit_with_closure(
     for (fr, mf) in &st.lowered {
         out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
     }
+    for fr in &st.inline_js {
+        out.push_str(&emit_inline_js_fn(ws, *fr, &st.names[fr]));
+    }
     Ok(out)
 }
 
@@ -1746,7 +1749,7 @@ fn emit_program_core(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
@@ -1775,6 +1778,10 @@ fn emit_program_core(
     // 2. fn defs (main, decorated fns, transitive callees).
     for (fr, mf) in &st.lowered {
         out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
+    }
+    // 2b. inline(js) fns, emitted verbatim.
+    for fr in &st.inline_js {
+        out.push_str(&emit_inline_js_fn(ws, *fr, &st.names[fr]));
     }
     // 3. ginit def fns.
     for g in &st.ginits {
@@ -1812,6 +1819,8 @@ struct WorklistState {
     queue: Vec<FuncRef>,
     seen: HashSet<FuncRef>,
     lowered: Vec<(FuncRef, MirFunc)>,
+    /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
+    inline_js: Vec<FuncRef>,
     state_index: HashMap<ustr::Ustr, GlobalSite>,
     /// Empty in program mode (applications ARE emitted, so a registry read is
     /// legitimate); the per-test reject set otherwise.
@@ -1831,6 +1840,7 @@ impl WorklistState {
             queue: roots.iter().map(|(fr, _)| *fr).collect(),
             seen: roots.iter().map(|(fr, _)| *fr).collect(),
             lowered: Vec::new(),
+            inline_js: Vec::new(),
             state_index: build_state_index(ws),
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
@@ -1851,6 +1861,24 @@ impl WorklistState {
             .chain(self.ginits.iter().map(|g| &g.mf))
             .collect()
     }
+}
+
+/// Emit an `inline(js)` fn verbatim: `function <js_name>(p1, p2) { <raw js> }`.
+/// The body is the author's raw JS, spliced unchanged (mirrors the luajit path's
+/// verbatim `inline(lua)` emission in `skull::mir_emit`).
+fn emit_inline_js_fn(ws: &Workspace, fr: FuncRef, js_name: &str) -> String {
+    let f = &ws.module(fr.module).functions[fr.func];
+    let params = f
+        .param_decls
+        .iter()
+        .map(|p| p.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let src = match f.inline_body {
+        Some((bone_semantic::hir::FnBackend::Js, s)) => s.to_string(),
+        _ => String::new(),
+    };
+    format!("function {js_name}({params}) {{\n{src}\n}}\n")
 }
 
 /// Drain the fn + ginit worklists: lower each queued fn (same per-body pipeline
@@ -1880,7 +1908,7 @@ fn drain_worklists(
                 }
             }
             skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
@@ -1900,7 +1928,7 @@ fn drain_worklists(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
@@ -2217,6 +2245,7 @@ fn discover_callees(
     names: &mut HashMap<FuncRef, String>,
     queue: &mut Vec<FuncRef>,
     seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
     for callee in call_targets(mf) {
         let cf = &ws.module(callee.module).functions[callee.func];
@@ -2231,7 +2260,23 @@ fn discover_callees(
         if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
             continue;
         }
-        if cf.lua_body.is_some() || cf.is_extern {
+        // `inline(js)`: co-emit its raw JS body verbatim (never MIR-lowered). The
+        // FuncRef is already the JS variant of a same-name pair (`resolve_funcref`
+        // swapped it at lowering).
+        if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+            if seen.insert(callee) {
+                names.insert(callee, callee_js_name(ws, callee));
+                inline_js.push(callee);
+            }
+            continue;
+        }
+        // `extern(js)`: a JS runtime-/driver-provided global, called by its bare
+        // name (the `__rock_env_var` glue pattern). No def is emitted here.
+        if cf.is_extern && cf.backend == bone_semantic::hir::FnBackend::Js {
+            names.entry(callee).or_insert_with(|| cf.name.to_string());
+            continue;
+        }
+        if cf.inline_body.is_some() || cf.is_extern {
             return Err(err(format!(
                 "JS subset: call to `{}` is not a mapped JS intrinsic",
                 cf.name
@@ -2771,7 +2816,7 @@ fn is_host_print(cf: &bone_semantic::hir::Function) -> bool {
 fn is_host_put(cf: &bone_semantic::hir::Function) -> bool {
     cf.name.as_str() == "put"
         && cf.param_decls.len() == 1
-        && cf.lua_body.is_some_and(|b| b.as_str().contains("io.write"))
+        && cf.inline_body.is_some_and(|(_, b)| b.as_str().contains("io.write"))
 }
 
 /// The logging dedup/throttle impls (`@nomangle inline(lua)` in
@@ -2795,7 +2840,7 @@ fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
         ("log_reset_dedup", 0),
         ("log_dedup_count", 0),
     ];
-    (cf.is_extern || cf.lua_body.is_some())
+    (cf.is_extern || cf.inline_body.is_some())
         && LOG_FNS.iter().any(|(n, a)| *n == cf.name.as_str() && *a == cf.param_decls.len())
 }
 
@@ -2804,7 +2849,7 @@ fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
 /// is the host-body flag PLUS the (name, arity) match, so a plain-Rock user fn
 /// of the same name co-emits normally and is never captured here.
 fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
-    if !(cf.is_extern || cf.lua_body.is_some()) {
+    if !(cf.is_extern || cf.inline_body.is_some()) {
         return None;
     }
     match (cf.name.as_str(), cf.param_decls.len()) {

@@ -823,8 +823,9 @@ fn structurally_equal_compounds_reassign_is_ok() {
         param_decls: vec![],
         num_required: 0,
         return_ty: None,
-        lua_body: None,
+        inline_body: None,
         is_extern: false,
+        backend: bone_semantic::hir::FnBackend::Any,
         annotations: vec![],
         ffi_lib: None,
     });

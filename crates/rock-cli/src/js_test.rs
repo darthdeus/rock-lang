@@ -300,7 +300,7 @@ fn js_run_tests(
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, String)> = Vec::new();
 
-    let scx = ScalarCtx::new(ws);
+    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
     let mut supported: Vec<(usize, String)> = Vec::new();
     // Test indices that reject ONLY because they read a decorator-populated
@@ -460,7 +460,7 @@ pub fn js_run(path: &str) -> Result<()> {
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let scx = ScalarCtx::new(&ws);
+    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let emitted = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
         Ok(p) => p,
         Err(e) => {

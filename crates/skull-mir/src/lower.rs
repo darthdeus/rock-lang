@@ -441,7 +441,7 @@ fn compute_call_spec(
     enclosing: &SpecSubst,
 ) -> Option<(SpecKey, SpecSubst)> {
     let f = &ws.module(func.module).functions[func.func];
-    if f.generics.is_empty() || f.is_extern || f.lua_body.is_some() || f.is_coroutine {
+    if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
     if !f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure")) {
@@ -907,6 +907,12 @@ pub struct ScalarCtx {
     /// [`fn_uses_scalar_abi`] is the single gate the definition and every call site
     /// both consult, so flipping it here can never drift the two ABIs apart.
     values_first_class: bool,
+    /// The codegen backend this lowering feeds. Drives backend-variant selection
+    /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
+    /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
+    /// when the collapsed representative is a luajit-native variant. `Any`
+    /// disables the filtering entirely (the GLSL backend + generic/test callers).
+    target: bone_semantic::hir::FnBackend,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -941,15 +947,33 @@ impl ScalarCtx {
                 }
             }
         }
-        Self { taken_by_ref, per_body, ref_counts, values_first_class: false }
+        // Default target is Lua: skull-codegen-lua is the primary consumer and its
+        // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
+        // GLSL backend override via `with_target`.
+        Self {
+            taken_by_ref,
+            per_body,
+            ref_counts,
+            values_first_class: false,
+            target: bone_semantic::hir::FnBackend::Lua,
+        }
+    }
+
+    /// Set the codegen backend this lowering feeds (see [`target`]).
+    pub fn with_target(mut self, target: bone_semantic::hir::FnBackend) -> Self {
+        self.target = target;
+        self
     }
 
     /// Like [`new`](Self::new) but with the scalarized value ABI disabled: value
     /// structs stay first-class single values everywhere (the GLSL backend's
     /// requirement -- a `vecN` is not scalar leaves). See [`values_first_class`].
+    /// The GLSL backend does not participate in Lua/JS backend-variant selection,
+    /// so its target is `Any` (filtering disabled).
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         let mut scx = Self::new(ws);
         scx.values_first_class = true;
+        scx.target = bone_semantic::hir::FnBackend::Any;
         scx
     }
 
@@ -1022,7 +1046,7 @@ fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst
     if !has_scalar_abi {
         // Implicit scalarization is limited to ordinary rock-bodied fns reachable
         // only by direct call. `@scalar_abi` overrides all of these gates.
-        if f.lua_body.is_some()
+        if f.inline_body.is_some()
             || f.name.as_str() == "main"
             || scx.taken_by_ref.contains(&f.name)
             || f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "nomangle" | "test"))
@@ -1543,7 +1567,7 @@ pub fn lower_function_spec(
 ) -> Result<MirFunc, CompilerError> {
     let module = ws.module(mid);
     let func = &module.functions[fid];
-    if func.lua_body.is_some() {
+    if func.inline_body.is_some() {
         return Err(gap("inline(lua) body"));
     }
     let body = module
@@ -4185,22 +4209,104 @@ impl Builder<'_> {
         e: Idx<Expr>,
         name: ustr::Ustr,
     ) -> Result<FuncRef, CompilerError> {
-        if let Some(&(module, func)) = self
+        let rep = if let Some(&(module, func)) = self
             .inf
             .and_then(|i| i.resolved_overload_calls.get(&e))
         {
-            return Ok(FuncRef { module, func });
+            FuncRef { module, func }
+        } else {
+            match self.ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
+                Some([(module, func)]) => FuncRef {
+                    module: *module,
+                    func: *func,
+                },
+                Some([]) | None => return Err(gap(format!("unresolved call `{name}`"))),
+                Some(_) => {
+                    return Err(gap(format!(
+                        "overloaded call `{name}` with no recorded resolution"
+                    )))
+                }
+            }
+        };
+        self.select_backend_variant(e, name, rep)
+    }
+
+    /// Pick the backend-variant of a collapsed call `rep` that serves the current
+    /// codegen [`target`](ScalarCtx::target). bone typechecks one backend-agnostic
+    /// HIR and records ONE representative per overload; codegen selects here:
+    ///
+    /// - `Any` target (GLSL / generic): no filtering, `rep` as-is.
+    /// - `rep` already serves the target: `rep` as-is (the common Lua path).
+    /// - a same-signature sibling serves the target: use it (the JS side of a
+    ///   same-name pair -- the representative is the luajit variant, the sibling
+    ///   the `inline(js)`/`extern(js)` one).
+    /// - `Lua` target, no lua/any binding: REJECT (a JS-only decl called from
+    ///   lua-reachable code).
+    /// - `Js` target, no js/any binding and no sibling: leave `rep` for the JS
+    ///   emitter's own host-mapping / reject (a `inline(lua)` stdlib primitive with
+    ///   a hand-written JS template must still resolve there).
+    fn select_backend_variant(
+        &self,
+        e: Idx<Expr>,
+        name: ustr::Ustr,
+        rep: FuncRef,
+    ) -> Result<FuncRef, CompilerError> {
+        use bone_semantic::hir::FnBackend;
+        let target = self.scx.target;
+        if target == FnBackend::Any {
+            return Ok(rep);
         }
-        match self.ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
-            Some([(module, func)]) => Ok(FuncRef {
-                module: *module,
-                func: *func,
-            }),
-            Some([]) | None => Err(gap(format!("unresolved call `{name}`"))),
-            Some(_) => Err(gap(format!(
-                "overloaded call `{name}` with no recorded resolution"
-            ))),
+        let serves = |b: FnBackend| b == FnBackend::Any || b == target;
+        let rep_backend = self.ws.module(rep.module).functions[rep.func].backend;
+        if serves(rep_backend) {
+            return Ok(rep);
         }
+        if let Some(sib) = self.find_sibling_variant(rep, target) {
+            return Ok(sib);
+        }
+        match target {
+            FnBackend::Lua => Err(CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "call to `{name}` has no luajit binding: its only declaration targets the `js` backend"
+                ),
+            )),
+            // Js: defer to the JS emitter (it may host-map a lua-bodied stdlib
+            // primitive, or reject with its own message).
+            _ => Ok(rep),
+        }
+    }
+
+    /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
+    /// Signature match is param-type equality (rendered, inference-free) -- the
+    /// same key bone's `collapse_backend_variants` groups on.
+    fn find_sibling_variant(
+        &self,
+        rep: FuncRef,
+        target: bone_semantic::hir::FnBackend,
+    ) -> Option<FuncRef> {
+        use bone_semantic::hir::FnBackend;
+        let serves = |b: FnBackend| b == FnBackend::Any || b == target;
+        let rf = &self.ws.module(rep.module).functions[rep.func];
+        let name = rf.name;
+        let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| self.ws.render(None, p.ty)).collect();
+        let cands = self.ws.functions_by_name.get(&name)?;
+        for &(mid, fid) in cands.iter() {
+            if mid == rep.module && fid == rep.func {
+                continue;
+            }
+            let f = &self.ws.module(mid).functions[fid];
+            if !serves(f.backend) {
+                continue;
+            }
+            if f.param_decls.len() != rep_sig.len() {
+                continue;
+            }
+            if f.param_decls.iter().zip(&rep_sig).all(|(p, r)| self.ws.render(None, p.ty) == *r) {
+                return Some(FuncRef { module: mid, func: fid });
+            }
+        }
+        None
     }
 
     /// `await sub` — drive the inner coroutine `sub` through its `.resume()`,
@@ -7590,7 +7696,7 @@ fn native_buffer_elem_is_generic(ws: &Workspace, inf: &BodyInference, ret: TyId)
 /// check its specialization resolves the element ctype. `None` otherwise.
 fn fn_opaque_intrinsic_ret(ws: &Workspace, fref: FuncRef) -> Option<TyId> {
     let f = &ws.module(fref.module).functions[fref.func];
-    if f.generics.is_empty() || f.lua_body.is_some() {
+    if f.generics.is_empty() || f.inline_body.is_some() {
         return None;
     }
     let body = ws.module(fref.module).bodies.get(&BodyOwner::Function(fref.func))?;
@@ -7631,7 +7737,7 @@ fn fn_opaque_intrinsic_transitive(
         return true;
     }
     let f = &ws.module(fref.module).functions[fref.func];
-    if f.generics.is_empty() || f.lua_body.is_some() {
+    if f.generics.is_empty() || f.inline_body.is_some() {
         return false;
     }
     let Some(inf) = ws

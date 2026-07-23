@@ -967,10 +967,80 @@ mod tests {
         let ItemKind::Function(f) = &ast.items[0].kind else {
             panic!("expected fn");
         };
-        let FunctionBody::Lua(src) = &f.body else {
+        let FunctionBody::Inline(FnBackend::Lua, src) = &f.body else {
             panic!("expected inline-lua body, got {:?}", f.body);
         };
         assert_eq!(src.as_str(), "return a + b");
+    }
+
+    #[test]
+    fn inline_js_body_captures_backend_and_source() {
+        let ast = parse_module(
+            "inline(js) fn add(a: int, b: int) -> int = \"\"\"return a + b\"\"\"",
+            Ustr::from("test.rock"),
+        )
+        .expect("parse failed");
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn");
+        };
+        let FunctionBody::Inline(FnBackend::Js, src) = &f.body else {
+            panic!("expected inline-js body, got {:?}", f.body);
+        };
+        assert_eq!(src.as_str(), "return a + b");
+    }
+
+    #[test]
+    fn bare_inline_defaults_to_lua() {
+        let ast = parse_module(
+            "inline fn add(a: int) -> int = \"\"\"return a\"\"\"",
+            Ustr::from("test.rock"),
+        )
+        .expect("parse failed");
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn");
+        };
+        assert!(matches!(&f.body, FunctionBody::Inline(FnBackend::Lua, _)), "got {:?}", f.body);
+    }
+
+    #[test]
+    fn extern_js_is_its_own_variant() {
+        let ast = parse_module(
+            "extern(js) fn now() -> float",
+            Ustr::from("test.rock"),
+        )
+        .expect("parse failed");
+        let ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn");
+        };
+        assert!(matches!(&f.body, FunctionBody::ExternJs), "got {:?}", f.body);
+    }
+
+    #[test]
+    fn unknown_inline_backend_rejects() {
+        let ast = parse_module(
+            "inline(wasm) fn add(a: int) -> int = \"\"\"return a\"\"\"",
+            Ustr::from("test.rock"),
+        )
+        .expect("parse recovers");
+        assert!(
+            ast.recovery_errors.iter().any(|e| e.message.contains("unknown inline backend")),
+            "unknown inline backend must surface a recovery error, got {:?}",
+            ast.recovery_errors
+        );
+    }
+
+    #[test]
+    fn unknown_extern_backend_rejects() {
+        let ast = parse_module(
+            "extern(wasm) fn now() -> float",
+            Ustr::from("test.rock"),
+        )
+        .expect("parse recovers");
+        assert!(
+            ast.recovery_errors.iter().any(|e| e.message.contains("unknown extern backend")),
+            "unknown extern backend must surface a recovery error, got {:?}",
+            ast.recovery_errors
+        );
     }
 
     /// Every block with recorded brace spans must have them sitting on literal

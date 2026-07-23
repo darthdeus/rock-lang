@@ -403,43 +403,42 @@ impl Parser {
 
     fn parse_item_inner(&mut self) -> PResult<Item> {
         match self.kind() {
-            TokenKind::Fn => self.parse_fn(false, None),
+            TokenKind::Fn => self.parse_fn(false, None, FnBackend::Lua),
             // `co fn name(...)` — coroutine; body may use `yield`. `co` is a
             // contextual keyword: only reserved immediately before `fn`.
             TokenKind::Ident(n) if n.as_str() == "co" && matches!(self.peek_kind(), TokenKind::Fn) => {
                 self.advance();
-                self.parse_fn(true, None)
+                self.parse_fn(true, None, FnBackend::Lua)
             }
-            TokenKind::Operator => self.parse_operator(false, None),
+            TokenKind::Operator => self.parse_operator(false, None, FnBackend::Lua),
             // `macro name(params) [-> ret] { body }` — rock folds these to
             // `Function` items (block body = expansion template).
             TokenKind::Macro => {
                 let start = self.span();
                 self.advance();
                 let name = self.expect_ident()?;
-                self.finish_fn_def(name, start, true, false, None)
+                self.finish_fn_def(name, start, true, false, None, FnBackend::Lua)
             }
-            // `extern [(ffi, "lib") | (lua)] fn ..` — body-less declaration.
+            // `extern [(ffi, "lib") | (lua) | (js)] fn ..` — body-less declaration.
             TokenKind::Extern => {
                 self.advance();
-                let extern_body = self.parse_extern_specifier();
-                self.parse_fn(false, Some(extern_body))
+                let extern_body = self.parse_extern_specifier()?;
+                self.parse_fn(false, Some(extern_body), FnBackend::Lua)
             }
-            // `inline(<backend>) fn|operator ..` — Lua body (`= """..."""`).
+            // `inline(<backend>) fn|operator ..` — a backend body (`= """..."""`).
+            // Bare `inline` defaults to Lua; an unknown backend name rejects.
             TokenKind::Ident(n) if n.as_str() == "inline" => {
                 self.advance();
-                if self.kind() == TokenKind::OpenParen {
-                    self.skip_balanced_parens();
-                }
-                // The Lua source is captured by `finish_fn_def` from the
-                // `= """..."""` body, so no body marker is needed here.
+                let backend = self.parse_inline_backend()?;
+                // The source is captured by `finish_fn_def` from the `= """..."""`
+                // body; we thread the backend it belongs to.
                 match self.kind() {
-                    TokenKind::Operator => self.parse_operator(false, None),
+                    TokenKind::Operator => self.parse_operator(false, None, backend),
                     TokenKind::Ident(n) if n.as_str() == "co" => {
                         self.advance();
-                        self.parse_fn(true, None)
+                        self.parse_fn(true, None, backend)
                     }
-                    _ => self.parse_fn(false, None),
+                    _ => self.parse_fn(false, None, backend),
                 }
             }
             TokenKind::Struct => self.parse_struct(false),
@@ -629,11 +628,12 @@ impl Parser {
         }
     }
 
-    /// After `extern`, read the optional `(ffi, "lib")` / `(lua)` specifier and
-    /// return the body kind for the (body-less) declaration.
-    fn parse_extern_specifier(&mut self) -> FunctionBody {
+    /// After `extern`, read the optional `(ffi, "lib")` / `(lua)` / `(js)`
+    /// specifier and return the body kind for the (body-less) declaration. A bare
+    /// `extern` is C; an unknown backend name rejects fail-closed.
+    fn parse_extern_specifier(&mut self) -> PResult<FunctionBody> {
         if self.kind() != TokenKind::OpenParen {
-            return FunctionBody::ExternC;
+            return Ok(FunctionBody::ExternC);
         }
         self.advance(); // `(`
         let kind = match self.kind() {
@@ -648,15 +648,31 @@ impl Parser {
                     _ => FunctionBody::Ffi(Ustr::from("")),
                 }
             }
-            TokenKind::Ident(n) if n.as_str() == "lua" => FunctionBody::ExternLua,
-            _ => FunctionBody::ExternC,
+            TokenKind::Ident(n) if n.as_str() == "lua" => {
+                self.advance();
+                FunctionBody::ExternLua
+            }
+            TokenKind::Ident(n) if n.as_str() == "js" => {
+                self.advance();
+                FunctionBody::ExternJs
+            }
+            TokenKind::Ident(n) if n.as_str() == "c" => {
+                self.advance();
+                FunctionBody::ExternC
+            }
+            other => {
+                return Err(self.err(format!(
+                    "unknown extern backend {:?}; expected `ffi`, `lua`, `js`, or `c`",
+                    other
+                )));
+            }
         };
         // Consume to the closing `)`.
         while !matches!(self.kind(), TokenKind::CloseParen | TokenKind::EOF) {
             self.advance();
         }
         self.eat(TokenKind::CloseParen);
-        kind
+        Ok(kind)
     }
 
     /// Parse leading item annotations: `@name` / `@name(arg, name=arg, ...)`,
@@ -699,44 +715,56 @@ impl Parser {
         Ok(anns)
     }
 
-    /// Skip a balanced `( .. )` starting at the current `(`.
-    fn skip_balanced_parens(&mut self) {
-        let mut depth = 0i32;
-        loop {
-            match self.kind() {
-                TokenKind::OpenParen => depth += 1,
-                TokenKind::CloseParen => {
-                    depth -= 1;
-                    self.advance();
-                    if depth <= 0 {
-                        return;
-                    }
-                    continue;
-                }
-                TokenKind::EOF => return,
-                _ => {}
-            }
-            self.advance();
+    /// Read the backend of an `inline(<backend>)` prefix (the `inline` keyword is
+    /// already consumed). `(lua)` / `(js)` name the target; a bare `inline` (no
+    /// parens) defaults to Lua; any other name rejects fail-closed.
+    fn parse_inline_backend(&mut self) -> PResult<FnBackend> {
+        if self.kind() != TokenKind::OpenParen {
+            return Ok(FnBackend::Lua);
         }
+        self.advance(); // `(`
+        let backend = match self.kind() {
+            TokenKind::Ident(n) if n.as_str() == "lua" => FnBackend::Lua,
+            TokenKind::Ident(n) if n.as_str() == "js" => FnBackend::Js,
+            other => {
+                return Err(self.err(format!(
+                    "unknown inline backend {:?}; expected `lua` or `js`",
+                    other
+                )));
+            }
+        };
+        self.advance(); // backend name
+        self.expect(TokenKind::CloseParen)?;
+        Ok(backend)
     }
 
-    fn parse_fn(&mut self, is_coroutine: bool, extern_body: Option<FunctionBody>) -> PResult<Item> {
+    fn parse_fn(
+        &mut self,
+        is_coroutine: bool,
+        extern_body: Option<FunctionBody>,
+        inline_backend: FnBackend,
+    ) -> PResult<Item> {
         let start = self.span();
         self.expect(TokenKind::Fn)?;
         let name = self.expect_ident()?;
-        self.finish_fn_def(name, start, false, is_coroutine, extern_body)
+        self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)
     }
 
     /// `operator [(<backend>)] <sym>(params) -> ret { body }` folds to a
     /// function named `__op_<sym>` (rock's `OperatorSymbol::function_name`),
     /// so the body s-expr lines up with rock's.
-    fn parse_operator(&mut self, is_coroutine: bool, extern_body: Option<FunctionBody>) -> PResult<Item> {
+    fn parse_operator(
+        &mut self,
+        is_coroutine: bool,
+        extern_body: Option<FunctionBody>,
+        inline_backend: FnBackend,
+    ) -> PResult<Item> {
         self.last_was_operator = true;
         let start = self.span();
         self.expect(TokenKind::Operator)?;
-        // Optional backend specifier `operator(lua)`. A non-block body (`= "..."`)
-        // is captured as Lua by `finish_fn_def` regardless, so the specifier only
-        // needs consuming, not interpreting.
+        // Optional backend specifier `operator(lua)`. The inline body's backend is
+        // threaded via `inline_backend` (from an `inline(..)` prefix), so this
+        // specifier only needs consuming, not interpreting.
         if self.kind() == TokenKind::OpenParen {
             self.advance();
             while self.kind() != TokenKind::CloseParen && !self.at_end() {
@@ -776,13 +804,14 @@ impl Parser {
         };
         self.advance(); // the symbol token (or `]` for index)
         let name = Ident { span: sym_span, name: Ustr::from(op_name) };
-        self.finish_fn_def(name, start, false, is_coroutine, extern_body)
+        self.finish_fn_def(name, start, false, is_coroutine, extern_body, inline_backend)
     }
 
     /// Generic params + `(params)` + optional `-> ret` + body, shared by
     /// `parse_fn` and `parse_operator`. The body is `Rock` for a `{ }` block,
-    /// `Lua` for an `= "..."` inline body, else `extern_body` (a body-less
-    /// extern decl) — `None` for the non-extern callers, who never reach it.
+    /// `Inline(inline_backend, ..)` for an `= "..."` inline body, else
+    /// `extern_body` (a body-less extern decl) — `None` for the non-extern
+    /// callers, who never reach it.
     fn finish_fn_def(
         &mut self,
         name: Ident,
@@ -790,6 +819,7 @@ impl Parser {
         is_macro: bool,
         is_coroutine: bool,
         extern_body: Option<FunctionBody>,
+        inline_backend: FnBackend,
     ) -> PResult<Item> {
         let generics = self.parse_generics();
 
@@ -872,7 +902,7 @@ impl Parser {
                         Ustr::from("")
                     }
                 };
-                FunctionBody::Lua(src)
+                FunctionBody::Inline(inline_backend, src)
             } else {
                 extern_body.unwrap_or(FunctionBody::ExternC)
             };

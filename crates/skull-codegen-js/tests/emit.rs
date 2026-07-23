@@ -148,7 +148,7 @@ fn vec_overload_rejects() {
         for (fid, f) in module.functions.iter() {
             // Vec overloads only: skip the 3-float scalar fallback (it emits).
             if f.name.as_str() == "lerp"
-                && f.lua_body.is_none()
+                && f.inline_body.is_none()
                 && !f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
             {
                 let Ok(mf) = lower_function(&ws, &scx, mid, fid) else { continue };

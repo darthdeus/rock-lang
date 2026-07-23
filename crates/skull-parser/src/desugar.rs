@@ -119,7 +119,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
                     generics: Vec::new(),
                     params: vec![mk_param(pa_ty, "a"), mk_param(pb_ty, "b")],
                     return_ty: Some(return_ty),
-                    body: FunctionBody::Lua(Ustr::from(format!("return {inner}").as_str())),
+                    body: FunctionBody::Inline(FnBackend::Lua, Ustr::from(format!("return {inner}").as_str())),
                     is_macro: false,
                     is_coroutine: false,
                     is_synthetic: true,

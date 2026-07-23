@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use rust_lapper::Interval;
 use skull_parser::Ident;
+pub use skull_parser::FnBackend;
 
 use crate::prelude::*;
 
@@ -476,8 +477,19 @@ pub struct Function {
     pub num_required: usize,
 
     pub return_ty: Option<TyId>,
-    pub lua_body: Option<Ustr>,
+    /// An `inline(<backend>)` body: its target backend + the verbatim source. The
+    /// backend disambiguates which codegen emits it (`inline(lua)` vs
+    /// `inline(js)`); it is always concrete (`Lua`/`Js`, never `Any`) when set.
+    pub inline_body: Option<(FnBackend, Ustr)>,
     pub is_extern: bool,
+    /// Which backend this decl targets, the single source of truth for
+    /// backend-variant selection at codegen. `Any` = a portable Rock body (any
+    /// backend emits it from HIR). `Lua` = luajit-native binding/body
+    /// (`inline(lua)` / `extern(lua)` / `extern(ffi,..)` / plain `extern` C).
+    /// `Js` = `inline(js)` / `extern(js)`. Two same-name same-signature decls that
+    /// differ only in `backend` are collapsed to one overload candidate
+    /// (`select_overload`); each backend then emits its own variant.
+    pub backend: FnBackend,
     pub annotations: Vec<Annotation>,
     pub ffi_lib: Option<Ustr>,
 }

@@ -759,7 +759,7 @@ fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc],
 /// NEITHER: it exists only monomorphized-by-inlining at its call sites (its
 /// body holds placeholder bound-calls that have no standalone emission).
 fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
-    !f.is_extern && f.lua_body.is_none() && !fn_has_bounds(f)
+    !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f)
 }
 
 /// Whether the fn declares any `Iterator` bound on its generics.
@@ -1063,6 +1063,12 @@ fn assemble(
         let mid = module.id;
         for (fid, f) in module.functions.iter() {
             let self_ref = FuncRef { module: mid, func: fid };
+            // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
+            // its lua sibling (if any) carries the binding, and a js-only call from
+            // lua-reachable code is rejected at call lowering (resolve_funcref).
+            if f.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
@@ -1085,9 +1091,10 @@ fn assemble(
                 }
                 continue;
             }
-            if let Some(body) = f.lua_body {
+            if let Some((_, body)) = f.inline_body {
                 // inline(lua): emit the hand-written body verbatim, wrapping a
                 // value-returning bodyless-`return` and prepending default fills.
+                // (Js inline bodies were skipped above via the backend guard.)
                 let name = mangle_fn(ws, f, overloaded);
                 let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, self_ref) {
                     Some(names) => names.join(", "),

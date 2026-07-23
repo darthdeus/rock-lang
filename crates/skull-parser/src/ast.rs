@@ -506,19 +506,36 @@ pub struct Generic {
     pub default: Option<Idx<TypeExprData>>,
 }
 
+/// Which backend a function's body / extern binding targets. `Lua` and `Js` are
+/// the concrete codegen targets; a backend-specific body (`inline(lua)` /
+/// `inline(js)`) or extern (`extern(lua)` / `extern(js)`) is emitted only by its
+/// backend and inert on the others. `Any` is not produced by the parser (a plain
+/// Rock body / `extern` / `extern(ffi,..)` carries no explicit backend tag here);
+/// it exists so the HIR-side [`FnBackend`] the bone layer reuses can mark portable
+/// decls that any backend may emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FnBackend {
+    Any,
+    Lua,
+    Js,
+}
+
 /// How a function's body is provided. Mirrors rock's `BodySource`: a Rock body
-/// IS its block; non-Rock bodies (inline-lua / extern) carry their own data and
+/// IS its block; non-Rock bodies (inline / extern) carry their own data and
 /// have no block at all (no placeholder). Only Rock functions have a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FunctionBody {
     /// `fn f() { .. }` — the Rock block (also a macro's expansion template).
     Rock(Idx<BlockData>),
-    /// `inline(lua) fn .. = """<src>"""` — raw Lua source, emitted verbatim.
-    Lua(Ustr),
+    /// `inline(<backend>) fn .. = """<src>"""` — raw backend source, emitted
+    /// verbatim by that backend. Bare `inline` defaults to [`FnBackend::Lua`].
+    Inline(FnBackend, Ustr),
     /// `extern fn` — C cdef.
     ExternC,
     /// `extern(lua) fn` — named global Lua symbol.
     ExternLua,
+    /// `extern(js) fn` — JS runtime-provided global symbol.
+    ExternJs,
     /// `extern(ffi, "lib") fn` — FFI lib wrapper.
     Ffi(Ustr),
 }

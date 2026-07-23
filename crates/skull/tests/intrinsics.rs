@@ -176,6 +176,6 @@ fn stdlib_native_required_set_has_luajit_mapping() {
         let f = stdlib_fn(&ws, n);
         assert!(is_native_required(f), "`{n}` must be @native_required");
         assert!(is_intrinsic(f), "`{n}` must be @intrinsic");
-        assert!(f.lua_body.is_some(), "`{n}` (native-required) must have an inline(lua) luajit mapping");
+        assert!(f.inline_body.is_some(), "`{n}` (native-required) must have an inline(lua) luajit mapping");
     }
 }

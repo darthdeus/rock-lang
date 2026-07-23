@@ -157,7 +157,7 @@ fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Op
 /// `return` inside the caller). `@inline` bypasses the size caps only.
 fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Option<CalleeBody> {
     let f = &ws.module(fref.module).functions[fref.func];
-    if f.is_extern || f.lua_body.is_some() || f.is_coroutine {
+    if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
@@ -919,7 +919,7 @@ fn fold_nil_body_calls(ws: &Workspace, func: &mut MirFunc) {
             continue;
         }
         let f = &ws.module(fref.module).functions[fref.func];
-        if f.lua_body.is_some_and(|b| b.trim() == "return nil") {
+        if f.inline_body.is_some_and(|(_, b)| b.trim() == "return nil") {
             func.insts[i] = Inst::Const(Lit::Nil);
         }
     }

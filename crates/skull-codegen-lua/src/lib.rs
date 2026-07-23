@@ -1525,7 +1525,9 @@ impl Emitter<'_> {
         args: &[Idx<Inst>],
         result: Idx<Inst>,
     ) -> bool {
-        let Some(body) = callee.lua_body else {
+        // Only a lua-targeted inline body can splice into lua output (a js body
+        // would be nonsense here).
+        let Some((bone_semantic::hir::FnBackend::Lua, body)) = callee.inline_body else {
             return false;
         };
         let ann = |n: &str| callee.annotations.iter().any(|a| a.name.name.as_str() == n);

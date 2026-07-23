@@ -154,7 +154,7 @@ impl Reach<'_> {
             self.black.insert(fref);
             return Ok(());
         }
-        if f.is_extern || f.lua_body.is_some() {
+        if f.is_extern || f.inline_body.is_some() {
             return Err(err(
                 f.name_span,
                 format!(
