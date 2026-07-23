@@ -72,6 +72,24 @@ fn vec_returning_and_intrinsics() {
 }
 
 #[test]
+fn vec3_vec4_constructors() {
+    // A shader that computes a color from scratch needs vecN construction --
+    // v(r,g,b) / v(r,g,b,a) must lower to GLSL vec3()/vec4(), not a struct.
+    let src = r#"
+        @pure fn tint(t: float) -> Vec4 {
+            let rgb = v(sin(t), cos(t), 0.5)
+            return v(rgb.x, rgb.y, rgb.z, 1.0)
+        }
+    "#;
+    let glsl = emit(src, &["tint"]).expect("emit");
+    assert!(glsl.starts_with("vec4 tint(float t) {"), "got:\n{glsl}");
+    // v(...) maps to native vecN construction, not a helper fn.
+    assert!(glsl.contains("vec3(sin(t), cos(t), 0.5)"), "got:\n{glsl}");
+    assert!(glsl.contains("return vec4(rgb.x, rgb.y, rgb.z, 1.0);"), "got:\n{glsl}");
+    assert!(!glsl.contains("v__float"), "v() should inline, not emit a helper fn:\n{glsl}");
+}
+
+#[test]
 fn nested_counted_loops() {
     let src = r#"
         @pure fn random2(p: Vec2) -> Vec2 {

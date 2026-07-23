@@ -293,6 +293,8 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     // NO normalize row: Rock's Vec2.normalize is zero-safe (returns zero()),
     // GLSL's native normalize is undefined at 0 -- the Rock body emits as a
     // helper fn instead (pinned by vec2_normalize_body).
+    ("v", 4, "vec4($1, $2, $3, $4)"),
+    ("v", 3, "vec3($1, $2, $3)"),
     ("v", 2, "vec2($1, $2)"),
     ("v", 1, "vec2($1)"),
     ("v", 0, "vec2(0.0)"),
