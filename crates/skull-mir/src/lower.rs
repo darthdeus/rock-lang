@@ -4256,12 +4256,23 @@ impl Builder<'_> {
         if target == FnBackend::Any {
             return Ok(rep);
         }
-        let serves = |b: FnBackend| b == FnBackend::Any || b == target;
         let rep_backend = self.ws.module(rep.module).functions[rep.func].backend;
-        if serves(rep_backend) {
+        if rep_backend == target {
             return Ok(rep);
         }
-        if let Some(sib) = self.find_sibling_variant(rep, target) {
+        // An exact-target sibling outranks an `Any` representative: backend
+        // mapping beats the portable fallback (the intrinsics precedence
+        // doctrine). Without this an `inline(js)` variant of a portable-bodied
+        // fn is unreachable, since `Any` serves every target.
+        if let Some(sib) = self.find_sibling_variant(rep, target, true) {
+            return Ok(sib);
+        }
+        if rep_backend == FnBackend::Any {
+            return Ok(rep);
+        }
+        // rep is the other concrete backend (e.g. lua while target is js): an
+        // `Any` sibling can still serve as the portable fallback.
+        if let Some(sib) = self.find_sibling_variant(rep, target, false) {
             return Ok(sib);
         }
         match target {
@@ -4284,9 +4295,9 @@ impl Builder<'_> {
         &self,
         rep: FuncRef,
         target: bone_semantic::hir::FnBackend,
+        exact: bool,
     ) -> Option<FuncRef> {
         use bone_semantic::hir::FnBackend;
-        let serves = |b: FnBackend| b == FnBackend::Any || b == target;
         let rf = &self.ws.module(rep.module).functions[rep.func];
         let name = rf.name;
         let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| self.ws.render(None, p.ty)).collect();
@@ -4296,7 +4307,12 @@ impl Builder<'_> {
                 continue;
             }
             let f = &self.ws.module(mid).functions[fid];
-            if !serves(f.backend) {
+            let ok = if exact {
+                f.backend == target
+            } else {
+                f.backend == FnBackend::Any || f.backend == target
+            };
+            if !ok {
                 continue;
             }
             if f.param_decls.len() != rep_sig.len() {

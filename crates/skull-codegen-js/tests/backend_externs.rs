@@ -38,6 +38,27 @@ fn main() {
 }
 
 #[test]
+fn portable_body_plus_inline_js_sibling_picks_js() {
+    // P1: a portable Rock-bodied fn (backend Any) + a same-signature inline(js)
+    // sibling. The Any body serves every target, so it is the collapse
+    // representative; under the JS target codegen must still pick the js sibling.
+    let ws = ws_with(
+        r#"
+fn dbl(x: int) -> int { return x + x }
+inline(js) fn dbl(x: int) -> int = """return x * 3"""
+
+fn main() {
+    let a = dbl(21)
+    print("{a}")
+}
+"#,
+    );
+    let prog = emit_program_js(&ws).expect("emit js program");
+    assert!(prog.contains("return x * 3"), "js sibling body must win over the Any rep:\n{prog}");
+    assert!(!prog.contains("x + x"), "portable Any body must NOT emit under js:\n{prog}");
+}
+
+#[test]
 fn extern_js_emits_bare_call_no_def() {
     let ws = ws_with(
         r#"
