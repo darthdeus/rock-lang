@@ -1723,6 +1723,8 @@ fn emit_program_core(
 
     let mut st = WorklistState::new(ws, &roots, true);
 
+    force_shader_register_sibling(ws, &mut st)?;
+
     // Decorator DEFINITION bodies (`deco <kind> <name> { .. }` -> `__deco_<name>`),
     // for the APPLIED decorators only (D1 reachability: an unapplied `deco` -- e.g.
     // stdlib `on_reload` -- contributes no application line and must not force its
@@ -1799,6 +1801,49 @@ fn emit_program_core(
     out.push_str(&decorator_application_lines_js(ws, &deco_names, &st.names)?);
 
     Ok(out)
+}
+
+/// `rock_shader(vert, frag)` collapses to a pipeline key const; the driver emits
+/// one top-level `__rock_shader_register(key, glsl)` per distinct pair (the JS
+/// assembler mirrors skull's Lua `shader_registration_lines`). Those calls are
+/// raw driver text, not MIR, so the register fn is never discovered
+/// transitively -- force its js sibling into the program under its bare
+/// `@nomangle` name whenever a pair exists, so the register lines resolve. The
+/// native Rock body (WATCHER lookup + GL compile) is not JS-emittable, so a
+/// program with a shader pair but no reachable js sibling REJECTS rather than
+/// silently dropping the registration (P2, docs/stone-web-plan.md).
+fn force_shader_register_sibling(
+    ws: &Workspace,
+    st: &mut WorklistState,
+) -> Result<(), CompilerError> {
+    if skull_mir::lower::collect_shader_pairs(ws)?.is_empty() {
+        return Ok(());
+    }
+    let name = ustr::Ustr::from("__rock_shader_register");
+    let cands = ws.functions_by_name.get(&name).map(|l| l.as_slice()).unwrap_or(&[]);
+    let js_sibling = cands.iter().find(|(m, f)| {
+        let cf = &ws.module(*m).functions[*f];
+        cf.backend == bone_semantic::hir::FnBackend::Js
+            && (matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) || cf.is_extern)
+    });
+    let &(m, f) = js_sibling.ok_or_else(|| {
+        err(
+            "JS: `rock_shader` pipelines emit `__rock_shader_register` calls, but no \
+             inline(js)/extern(js) `__rock_shader_register` sibling is reachable (the web \
+             engine layer must supply it); refusing to drop the shader registration",
+        )
+    })?;
+    let fr = FuncRef { module: m, func: f };
+    if st.seen.insert(fr) {
+        // Bare @nomangle name: the driver register lines call it verbatim.
+        st.names.insert(fr, name.to_string());
+        let cf = &ws.module(m).functions[f];
+        if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+            st.inline_js.push(fr);
+        }
+        // extern(js): runtime provides the global -- no def emitted.
+    }
+    Ok(())
 }
 
 /// A whole-program JS emission plus the entry fn's JS name (`None` when the entry
