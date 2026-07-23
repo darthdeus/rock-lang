@@ -13,7 +13,9 @@
 //!   2. turns a normal `return v` into `s.__return = v; s.__state = -3; return`
 //!      (-3 = completed normally, distinct from killed -1 / errored -2 so
 //!      `completed()` can tell a natural finish from a kill; every runtime
-//!      guard tests `< 0`, never an exact terminal),
+//!      guard tests `< 0`, never an exact terminal). Both stamps (yield and
+//!      completion) are guarded on `state >= 0`: a body that killed its own
+//!      handle mid-run stays killed,
 //!   3. rewrites `CoroSetInner(x)` (the `await` pseudo-op) to `s.__inner = x`,
 //!   4. prepends a dispatch entry that branches on `s.__state` to the resume
 //!      block for each state (falling through to the original entry for state 0).
@@ -1508,10 +1510,23 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
                     emit(&mut step, bid, Inst::StoreField { base: sv, field: skull_mir::lower::yield_slot(i), value: v });
                 }
             }
-            let kc = emit(&mut step, bid, Inst::Const(Lit::Int(k)));
+            // The stamp is guarded on `state >= 0` (mirror the completion
+            // stamp): a body that killed its own handle mid-run must stay
+            // killed, not resurrect via a positive resume state. The killed
+            // arm returns nothing -- a dead coroutine's resume yields nil.
             let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            emit(&mut step, bid, Inst::StoreField { base: sv, field: ustr::Ustr::from(STATE), value: kc });
-            step.blocks[bid].term = if frame_slot_channel { Term::Return(Vec::new()) } else { Term::Return(values) };
+            let st = emit(&mut step, bid, Inst::Field { base: sv, field: ustr::Ustr::from(STATE) });
+            let zero = emit(&mut step, bid, Inst::Const(Lit::Int(0)));
+            let already_terminal = emit(&mut step, bid, Inst::IntLt(st, zero));
+            let killed_bb = step.new_block();
+            let stamp_bb = step.new_block();
+            step.blocks[bid].term = Term::Branch { cond: already_terminal, then_bb: killed_bb, else_bb: stamp_bb };
+
+            let kc = emit(&mut step, stamp_bb, Inst::Const(Lit::Int(k)));
+            let sv2 = emit(&mut step, stamp_bb, Inst::Load(s_cell));
+            emit(&mut step, stamp_bb, Inst::StoreField { base: sv2, field: ustr::Ustr::from(STATE), value: kc });
+            step.blocks[stamp_bb].term = if frame_slot_channel { Term::Return(Vec::new()) } else { Term::Return(values) };
+            step.blocks[killed_bb].term = Term::Return(Vec::new());
         }
     }
     let num_states = resume_of_state.len();
