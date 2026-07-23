@@ -1283,18 +1283,15 @@ fn expect<T>(value: T?, message: string) -> T {
 // with zero runtime cost. `float(int)` is the canonical name.
 @intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
 @intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
-@pure @inline inline(js) fn int_to_float(value: int) -> float = "return value;"
-@pure @inline inline(js) fn to_float(value: int) -> float = "return value;"
 
+// JS: host-template mapped (`host_fn_template` in skull-codegen-js), NOT
+// inline(js) siblings -- a same-sig sibling makes a fn-VALUE reference
+// ambiguous in bone (`float_to_int` is taken as a value in user code).
 inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
     return math.floor(value)
-"""
-inline(js) fn float_to_int(value: float) -> int = """
-    if (typeof value !== "number") throw new Error("Expected a number, got " + typeof value);
-    return Math.floor(value);
 """
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }

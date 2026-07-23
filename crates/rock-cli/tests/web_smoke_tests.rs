@@ -73,7 +73,9 @@ fn web_chrome_screenshot_nonblank() {
             "--no-sandbox",
             "--enable-unsafe-swiftshader",
             "--window-size=1280,720",
-            "--virtual-time-budget=4000",
+            // 10s virtual budget: software-WebGL (swiftshader) boot can outlast
+            // a smaller budget and yield a blank pre-first-frame capture.
+            "--virtual-time-budget=10000",
         ])
         .arg(format!("--screenshot={}", shot.display()))
         .arg(&url)
