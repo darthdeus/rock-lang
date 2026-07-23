@@ -102,6 +102,33 @@ fn js_run_matches_luajit_end_to_end() {
     assert_eq!(js_out, lua_out, "js and luajit `rock run` output must be byte-identical");
 }
 
+// Arc 2 MA: `rock run <dir> --backend js` (project mode) -- a multi-file
+// project (main + a sibling module) emits via the deterministic module walk and
+// runs `main` end to end, byte-identical to the luajit `rock run` of the dir.
+#[test]
+fn js_run_project_dir_matches_luajit() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join("rock_js_run_gate_proj");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("stick.toml"), "[package]\nname = \"proj\"\n").unwrap();
+    std::fs::write(dir.join("math.rock"), "fn square(x: int) -> int { return x * x }\n").unwrap();
+    std::fs::write(
+        dir.join("main.rock"),
+        "fn main() {\n  let t = 0\n  for i in 0..5 { t = t + square(i) }\n  print(\"sum={t}\")\n}\n",
+    )
+    .unwrap();
+
+    let (lua_out, lua_ok) = run(None, &dir);
+    assert!(lua_ok, "luajit project run failed:\n{lua_out}");
+    let (js_out, js_ok) = run(Some("js"), &dir);
+    assert!(js_ok, "js project run failed:\n{js_out}");
+    assert_eq!(js_out.trim(), "sum=30", "js project output drifted");
+    assert_eq!(js_out.trim(), lua_out.trim(), "js and luajit project run must agree");
+}
+
 // A file with no nullary `main` runs module-load effects only (ginit + deco
 // applications), matching luajit -- and prints nothing, exiting cleanly.
 #[test]

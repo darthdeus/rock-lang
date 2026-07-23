@@ -1060,7 +1060,7 @@ pub fn skull_run(path: &str) -> Result<()> {
 /// Render a bone `CompilerError` against a whole project's source set, so spans
 /// resolve to the right file. Every discovered source is registered under its
 /// id-path (the same id used when parsing into a module).
-fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
+pub(crate) fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
     render_project_errs(sources, std::slice::from_ref(e))
 }
 
