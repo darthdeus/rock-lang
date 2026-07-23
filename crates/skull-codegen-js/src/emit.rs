@@ -1612,11 +1612,20 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
 }
 
 /// Deterministic JS name for a co-emitted callee, unique per `FuncRef`
-/// (`<name>__m<module>_f<fn>`): concatenating independently emitted closure
-/// programs can only ever collide on byte-identical definitions.
+/// (`<name>__m<module>_f<fn>`) -- except `@nomangle` fns, which keep their bare
+/// name: the discipline is "called by original name from inline bodies /
+/// compiler codegen", and on JS an inline(js) body or a driver-injected line is
+/// verbatim text that can only use the bare name (same rule as the lua backend).
 pub fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
     let f = &ws.module(fr.module).functions[fr.func];
+    if is_nomangle(f) {
+        return f.name.to_string();
+    }
     format!("{}__m{}_f{}", f.name, fr.module.index(), raw(fr.func))
+}
+
+fn is_nomangle(f: &bone_semantic::hir::Function) -> bool {
+    f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
 }
 
 /// Emit `roots` (each under its given JS name) plus the transitive plain-Rock
@@ -1850,6 +1859,7 @@ fn force_shader_register_sibling(
         let cf = &ws.module(m).functions[f];
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             st.inline_js.push(fr);
+            scan_inline_js_body(ws, fr, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js);
         }
         // extern(js): runtime provides the global -- no def emitted.
     }
@@ -2322,6 +2332,7 @@ fn discover_callees(
             if seen.insert(callee) {
                 names.insert(callee, callee_js_name(ws, callee));
                 inline_js.push(callee);
+                scan_inline_js_body(ws, callee, names, queue, seen, inline_js);
             }
             continue;
         }
@@ -2343,6 +2354,67 @@ fn discover_callees(
         }
     }
     Ok(())
+}
+
+/// Scan an emitted `inline(js)` fn's verbatim body for identifiers naming a
+/// workspace `@nomangle` fn, and root each match under its BARE name -- the JS
+/// half of the `@nomangle` discipline. A verbatim body is invisible to the MIR
+/// callee walk, so without this the web boot seam (`stone_run_game` inline(js)
+/// variant -> `@nomangle` Rock `web_run_game`/`web_run_frame`) never emits its
+/// targets. Plain-Rock matches queue for normal lowering; inline(js) matches
+/// co-emit verbatim (and are scanned recursively); extern(js) matches need no
+/// def (prelude-provided); host-lua-only matches are skipped (a textual match
+/// in a comment must not force an unemittable body -- the reject loop or the
+/// missing-global runtime error catches a real call).
+fn scan_inline_js_body(
+    ws: &Workspace,
+    fr: FuncRef,
+    names: &mut HashMap<FuncRef, String>,
+    queue: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
+) {
+    let f = &ws.module(fr.module).functions[fr.func];
+    let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else { return };
+    let mut idents: HashSet<&str> = HashSet::new();
+    let s = body.as_str();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < bytes.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            idents.insert(&s[start..i]);
+        } else {
+            i += 1;
+        }
+    }
+    for ident in idents {
+        let name = ustr::Ustr::from(ident);
+        let Some(cands) = ws.functions_by_name.get(&name) else { continue };
+        for &(m, fid) in cands.iter() {
+            let cf = &ws.module(m).functions[fid];
+            if !is_nomangle(cf) {
+                continue;
+            }
+            let target = FuncRef { module: m, func: fid };
+            if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+                if seen.insert(target) {
+                    names.insert(target, cf.name.to_string());
+                    inline_js.push(target);
+                    scan_inline_js_body(ws, target, names, queue, seen, inline_js);
+                }
+            } else if cf.inline_body.is_none() && !cf.is_extern {
+                if seen.insert(target) {
+                    names.insert(target, cf.name.to_string());
+                    queue.push(target);
+                }
+            }
+        }
+    }
 }
 
 /// Classify every `Inst::Global`/`StoreGlobal` name `mf` references: module-level
