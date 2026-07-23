@@ -1586,6 +1586,7 @@ pub fn lower_function_spec(
         cur,
         binds: HashMap::new(),
         loop_targets: Vec::new(),
+        used_break_targets: HashSet::default(),
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg,
@@ -1596,6 +1597,7 @@ pub fn lower_function_spec(
         ret_shape,
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         ret_ty: func.return_ty,
+        fn_name_span: Some(func.name_span),
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
@@ -1655,6 +1657,7 @@ pub fn lower_global(
         cur,
         binds: HashMap::new(),
         loop_targets: Vec::new(),
+        used_break_targets: HashSet::default(),
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg: None,
@@ -1664,6 +1667,7 @@ pub fn lower_global(
         ret_shape: None,
         ret_tuple: None,
         ret_ty: None,
+        fn_name_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -1711,6 +1715,7 @@ pub fn lower_decorator(
         cur,
         binds: HashMap::new(),
         loop_targets: Vec::new(),
+        used_break_targets: HashSet::default(),
         defers: Vec::new(),
         in_defer_body: false,
         resume_arg: None,
@@ -1720,6 +1725,7 @@ pub fn lower_decorator(
         ret_shape: None,
         ret_tuple: None,
         ret_ty: None,
+        fn_name_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -1754,6 +1760,11 @@ struct Builder<'a> {
     binds: HashMap<u32, Idx<Cell>>,
     /// Innermost-last stack of `(continue_target, break_target)` blocks.
     loop_targets: Vec<(Idx<Block>, Idx<Block>)>,
+    /// Break targets some `break` actually jumped to. A `while true` whose exit
+    /// was never targeted terminates the statement list (its fall-through is
+    /// unreachable), which is what lets a `while true { ... return ... }` co fn
+    /// body pass the non-unit fall-off rejection.
+    used_break_targets: HashSet<Idx<Block>>,
     /// Innermost-last stack of pending `defer` bodies per block scope; spliced
     /// (LIFO) at block exit and before every `return`. In a co fn each entry
     /// also carries its terminal-cleanup flag cell (see `MirFunc::coro_defers`);
@@ -1787,6 +1798,9 @@ struct Builder<'a> {
     /// The fn's declared return type -- the expected type at a scalar `return`
     /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
     ret_ty: Option<TyId>,
+    /// The fn's name span, for spanned emit-time rejections that have no better
+    /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
+    fn_name_span: Option<Span>,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1915,6 +1929,13 @@ impl Builder<'_> {
                 self.defers.pop();
                 return Ok(());
             }
+            // A coroutine result comes ONLY from explicit `return` statements
+            // (bone discards a co fn's body tail without coercing it to R), so
+            // ANY reachable body end -- bare fall-off or unchecked tail -- is a
+            // fall-off for the non-unit-R rejection below.
+            if self.f.is_coroutine {
+                self.reject_nonunit_coroutine_falloff()?;
+            }
             let leaves = self.return_leaves(tail)?;
             self.run_top_frame()?; // splice this scope's defers before the return
             self.defers.pop();
@@ -1925,6 +1946,49 @@ impl Builder<'_> {
             self.f.set_term(self.cur, Term::Return(leaves));
             Ok(())
         }
+    }
+
+    /// Reject a REACHABLE fall-off in a `co fn` whose declared result R is a
+    /// concrete non-unit, non-nullable type: bone coerces only explicit
+    /// `return <expr>` statements to R (a coroutine's body tail is discarded,
+    /// never coerced), so a fall-off would stamp the completed terminal with
+    /// `__return` nil and `result()`/`take_result` would hand out a nil typed
+    /// as R. Unit R (the default), nullable R (nil is a legal value), and
+    /// generic R (unknown at the shared lowering; explicit `return` sites in
+    /// instantiations are still checked by bone) all stay admitted. Called only
+    /// when the body's end is reachable, so `while true` bodies never trip it.
+    fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
+        let Some(ret) = self.ret_ty else { return Ok(()) };
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = static_ty(self.ws, ret)
+        else {
+            return Ok(());
+        };
+        if n.as_str() != "Coroutine" {
+            return Ok(());
+        }
+        let TyId::Static(m, _) = ret else { return Ok(()) };
+        // Fewer than two args means R was default-filled to `()`.
+        let Some(r_idx) = params.into_iter().nth(1) else { return Ok(()) };
+        let nonunit_concrete = match self.ws.module(m).ty_arena[r_idx] {
+            TypeExpr::Builtin(BuiltinTy::Unit | BuiltinTy::Error) => false,
+            TypeExpr::Tuple { elements } if elements.into_iter().count() == 0 => false,
+            TypeExpr::Nullable(_) => false,
+            TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
+            _ => true,
+        };
+        if nonunit_concrete {
+            let msg = format!(
+                "co fn `{}` can fall off the end of its body, but its coroutine result type is not `()` -- \
+                 a completed coroutine would hand `result()` a nil typed as the declared result; \
+                 add an explicit `return <value>` on every path",
+                self.f.name
+            );
+            return Err(match self.fn_name_span {
+                Some(span) => CompilerError::new_with_label(span, msg),
+                None => CompilerError::new_no_location(msg),
+            });
+        }
+        Ok(())
     }
 
     /// The return-value list for `opt`: under the scalar value ABI a value return
@@ -2050,6 +2114,7 @@ impl Builder<'_> {
             cur: entry,
             binds: HashMap::new(),
             loop_targets: Vec::new(),
+            used_break_targets: HashSet::default(),
             defers: Vec::new(),
             in_defer_body: false,
             resume_arg: None,
@@ -2063,6 +2128,7 @@ impl Builder<'_> {
             // GLSL callee (referenced indirectly), so a return coercion here is
             // Lua-identity only; leaving it off matches today's emitted text.
             ret_ty: None,
+            fn_name_span: None,
             group_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
@@ -2184,7 +2250,9 @@ impl Builder<'_> {
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {
-                    self.lower_while(cond, body)?;
+                    if self.lower_while(cond, body)? {
+                        return Ok(true);
+                    }
                 }
                 Statement::For { vars, iter, body } => {
                     self.lower_for(vars, iter, body)?;
@@ -2198,6 +2266,7 @@ impl Builder<'_> {
                 }
                 Statement::Break => {
                     let (_, brk) = self.loop_target("break")?;
+                    self.used_break_targets.insert(brk);
                     self.f.set_term(self.cur, Term::Goto(brk));
                     return Ok(true);
                 }
@@ -2451,6 +2520,7 @@ impl Builder<'_> {
             // (never read — the block diverges) then a goto to the loop target.
             Expr::Break => {
                 let (_, brk) = self.loop_target("break")?;
+                self.used_break_targets.insert(brk);
                 let v = self.emit_cur(Inst::Const(Lit::Nil));
                 self.f.set_term(self.cur, Term::Goto(brk));
                 Ok(v)
@@ -4836,22 +4906,33 @@ impl Builder<'_> {
 
     /// `while cond { body }`: header (test) -> body -> back-edge to header; exit
     /// on false. `continue` -> header, `break` -> exit.
-    fn lower_while(&mut self, cond: Idx<Expr>, body: Idx<Expr>) -> Result<(), CompilerError> {
+    /// Returns true when the statement TERMINATES the enclosing list: a
+    /// `while true` (constant cond) whose exit no `break` ever targeted -- its
+    /// fall-through is unreachable, so the caller must not lower trailing
+    /// statements into it (and a co fn body ending in one is not a fall-off).
+    fn lower_while(&mut self, cond: Idx<Expr>, body: Idx<Expr>) -> Result<bool, CompilerError> {
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
         let exit = self.f.new_block();
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = header;
-        let cond_v = self.lower_expr(cond)?;
-        self.f.set_term(
-            self.cur,
-            Term::Branch {
-                cond: cond_v,
-                then_bb: body_bb,
-                else_bb: exit,
-            },
-        );
+        let const_true = matches!(self.body.expr_arena[cond], Expr::Bool(true));
+        if const_true {
+            // `while true`: no branch to exit -- exit is reachable only via
+            // `break`, which is exactly what `used_break_targets` records.
+            self.f.set_term(self.cur, Term::Goto(body_bb));
+        } else {
+            let cond_v = self.lower_expr(cond)?;
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: cond_v,
+                    then_bb: body_bb,
+                    else_bb: exit,
+                },
+            );
+        }
 
         self.cur = body_bb;
         self.loop_targets.push((header, exit));
@@ -4861,8 +4942,14 @@ impl Builder<'_> {
             self.f.set_term(self.cur, Term::Goto(header)); // back-edge
         }
 
+        let diverges = const_true && !self.used_break_targets.contains(&exit);
         self.cur = exit;
-        Ok(())
+        if diverges {
+            // Unreachable: give the dead exit a harmless terminator so every
+            // block ends terminated even though nothing jumps here.
+            self.f.set_term(self.cur, Term::Goto(header));
+        }
+        Ok(diverges)
     }
 
     fn lower_for(

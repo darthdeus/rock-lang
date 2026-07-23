@@ -1380,9 +1380,11 @@ inline(lua) fn status<Y, R, N>(c: Coroutine<Y, R, N>) -> string = """
 
 // Ran to its natural end (`return` / fall-off; terminal -3), as opposed to
 // killed (-1) or errored (-2) -- the only state where `result()` is
-// trustworthy: for a completed coroutine `__return` holds the body's return
-// value (nil iff R = ()), so `cast<R>(result(c))` is sound. `status()` keeps
-// reporting "dead" for both completed and killed.
+// trustworthy: explicit `return`s are bone-coerced to R and a reachable
+// fall-off in a concrete non-unit co fn rejects at emit, so for a completed
+// coroutine `__return` holds the body's return value (nil iff R is unit or a
+// null-valued nullable). `status()` keeps reporting "dead" for both completed
+// and killed.
 inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
     return c.__state == -3
 """
