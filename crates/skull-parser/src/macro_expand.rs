@@ -20,8 +20,8 @@ use crate::clone::clone_expr;
 use crate::desugar::{child_blocks, child_exprs, BlockEdges, ExprEdges};
 use smallvec::smallvec;
 use crate::graft::{graft_block, graft_expr, graft_item, graft_type};
-use rock_core::Span;
-use std::collections::HashMap;
+use rock_core::{CompilerError, Span};
+use std::collections::{HashMap, HashSet};
 use ustr::Ustr;
 
 const MAX_MACRO_DEPTH: usize = 64;
@@ -97,6 +97,46 @@ impl MacroRegistry {
 /// so the caller keeps its un-expanded ASTs intact for later re-cooking.
 pub fn collect_registry(modules: &[Ast]) -> MacroRegistry {
     MacroRegistry(build_registry(modules))
+}
+
+/// A macro name must be UNIQUE against top-level FUNCTION names across the whole
+/// module set: `foo(...)` in call position is ambiguous when both a `macro foo`
+/// and a `fn foo` exist (expansion would silently claim the call and shadow the
+/// fn), so it is rejected -- a macro always has exactly one meaning. Macro
+/// OVERLOADS (same name, different arity) stay legal; a same-named LOCAL binding
+/// (param, nested fn, `let`) legally shadows a macro and is not a top-level fn,
+/// so it never collides. Cross-module: stdlib + engine + game are one namespace,
+/// so this runs over the full parsed set before expansion erases the macro defs.
+/// Run on the pre-expansion modules (expansion drops the `is_macro` items).
+pub fn check_macro_name_uniqueness(modules: &[Ast]) -> Vec<CompilerError> {
+    let mut fn_names: HashSet<Ustr> = HashSet::new();
+    for m in modules {
+        for item in &m.items {
+            if let ItemKind::Function(f) = &item.kind {
+                if !f.is_macro {
+                    fn_names.insert(f.name.name);
+                }
+            }
+        }
+    }
+    let mut errs = Vec::new();
+    let mut reported: HashSet<Ustr> = HashSet::new();
+    for m in modules {
+        for item in &m.items {
+            if let ItemKind::Function(f) = &item.kind {
+                if f.is_macro && fn_names.contains(&f.name.name) && reported.insert(f.name.name) {
+                    errs.push(CompilerError::new_with_label(
+                        f.name.span,
+                        format!(
+                            "macro `{0}` collides with a function named `{0}` -- a macro name must be unique in call position (`{0}(...)` would be ambiguous between the two). Rename the macro or the function.",
+                            f.name.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    errs
 }
 
 /// Expand every macro call in a SINGLE module against a prebuilt `registry`,
@@ -1438,8 +1478,6 @@ fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
 // same node shapes but one is `&mut Ast` (rewrite) and one is `&Ast` (read), so
 // the borrow checker keeps them separate, exactly like `clone.rs`/`graft.rs`.
 // Keep them in sync.
-
-use std::collections::HashSet;
 
 /// Per parameter, its declaration span + every use span in the macro template.
 pub fn index_macro_param_refs(
