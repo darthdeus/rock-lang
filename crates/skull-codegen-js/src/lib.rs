@@ -574,6 +574,10 @@ var __SW = {
   texFilter: 0, // 0 nearest, 1 linear
   // one handle space for images AND canvas textures: handle -> WebGLTexture
   textures: {}, nextTex: 1, whiteImage: 0,
+  // images: boot decodes path -> ImageBitmap (no GL yet); stone_load_image
+  // creates the GL texture lazily+synchronously (GL exists by @init) and caches
+  // path -> handle; handle -> {w,h} feeds get_image_size.
+  imageBitmaps: {}, imageHandles: {}, imageSizes: {},
   canvases: {}, nextCanvas: 1, boundCanvas: 0, // 0 = default framebuffer
   shaders: {}, nextShader: 1, curShader: 0,
   meshVbo: null, // shared STREAM_DRAW vertex buffer
@@ -898,15 +902,54 @@ function stone_get_white_image() {
   __SW.whiteImage = h;
   return h;
 }
-function stone_get_image_size(img, pw, ph) { pw[0] = 1; ph[0] = 1; }
-
-// --- image / ImageData CPU stubs (editor/dev-only; real load_image is mag-tier) ---
-function stone_load_image(path, filterMode) {
-  __sw_log_once("stone_load_image: not implemented on web yet (" + path + ")");
-  return 0;
+function stone_get_image_size(img, pw, ph) {
+  var s = __SW.imageSizes[img];
+  if (s) { pw[0] = s.w; ph[0] = s.h; return; }
+  pw[0] = 1; ph[0] = 1; // white fallback / canvas texture default
 }
-function stone_image_set_wrap(h, repeat) { return false; }
-function stone_unload_image(h) {}
+
+// Sync texture creation from a boot-decoded ImageBitmap (handle IS the texture,
+// js_ffi.rock:stone_get_image_texture identity). A registry miss is LOUD and
+// non-fatal -- returns the white pixel so image_set_wrap/get_image_size/draws
+// stay valid (the node fake-GL env has no fetch, so every load hits this rung).
+function stone_load_image(path, filterMode) {
+  var cached = __SW.imageHandles[path];
+  if (cached !== undefined) return cached;
+  var bmp = __SW.imageBitmaps[path];
+  if (bmp === undefined) {
+    __sw_log_once("stone_load_image: no preloaded image for " + path + " (white fallback)");
+    return stone_get_white_image();
+  }
+  var gl = __SW.gl;
+  var h = __sw_new_texture();
+  var filt = (filterMode === 0) ? gl.NEAREST : gl.LINEAR;
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[h]);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  __SW.imageHandles[path] = h;
+  __SW.imageSizes[h] = { w: bmp.width, h: bmp.height };
+  return h;
+}
+function stone_image_set_wrap(h, repeat) {
+  var gl = __SW.gl, t = __SW.textures[h];
+  if (!t) return false;
+  var mode = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, mode);
+  return true;
+}
+function stone_unload_image(h) {
+  var t = __SW.textures[h];
+  if (t && __SW.gl) __SW.gl.deleteTexture(t);
+  delete __SW.textures[h];
+  delete __SW.imageSizes[h];
+  for (var p in __SW.imageHandles) { if (__SW.imageHandles[p] === h) delete __SW.imageHandles[p]; }
+}
 function stone_reload_image(h, path) { return false; }
 function stone_create_image_data(w, h) { return 0; }
 function stone_destroy_image_data(h) {}
@@ -1606,6 +1649,16 @@ function __rock_web_boot(mainFn) {
         return face.load().then(function (loaded) {
           document.fonts.add(loaded);
           (__SW.fontFamilies = __SW.fontFamilies || {})[path] = fam;
+        });
+      }
+      // Decode images to ImageBitmaps now (no GL context yet); stone_load_image
+      // uploads the GL texture lazily at @init. A per-image decode failure is
+      // loud but non-fatal -- that path falls back to the white pixel at load.
+      if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(path) && typeof createImageBitmap !== "undefined") {
+        return createImageBitmap(new Blob([buf])).then(function (bmp) {
+          __SW.imageBitmaps[path] = bmp;
+        }).catch(function (e) {
+          console.warn("[STONE-WEB] image decode failed:", path, e && e.message);
         });
       }
     });
