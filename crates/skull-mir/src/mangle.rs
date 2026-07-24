@@ -101,13 +101,25 @@ fn encode_ty(ws: &Workspace, ty: TyId) -> String {
             }
         }
         TypeExpr::Function { params, ret } => {
+            let r = encode_ty(ws, ty.with_idx(ret));
             let ps = params.into_iter().map(enc).collect::<Vec<_>>().join(SEP);
-            format!("fn{SEP}{ps}{SEP}ret{SEP}{}", encode_ty(ws, ty.with_idx(ret)))
+            // A nullary fn type (`fn() -> X`) has no param segment; joining an
+            // empty `ps` with SEP on both sides would produce `fn__ret_X` -- the
+            // one `__` this scheme must never emit. Drop the empty segment.
+            if ps.is_empty() {
+                format!("fn{SEP}ret{SEP}{r}")
+            } else {
+                format!("fn{SEP}{ps}{SEP}ret{SEP}{r}")
+            }
         }
         TypeExpr::Tuple { elements } => {
             let n = elements.into_iter().count();
             let ps = elements.into_iter().map(enc).collect::<Vec<_>>().join(SEP);
-            format!("tuple{n}{SEP}{ps}")
+            if ps.is_empty() {
+                format!("tuple{n}")
+            } else {
+                format!("tuple{n}{SEP}{ps}")
+            }
         }
     }
 }

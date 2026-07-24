@@ -84,13 +84,22 @@ fn encode_ty(ws: &Workspace, ty: TyId, sep: &str) -> String {
             }
         }
         TypeExpr::Function { params, ret } => {
+            let r = encode_ty(ws, ty.with_idx(ret), sep);
             let ps = params.into_iter().map(enc).collect::<Vec<_>>().join(sep);
-            format!("fn{sep}{ps}{sep}ret{sep}{}", encode_ty(ws, ty.with_idx(ret), sep))
+            if ps.is_empty() {
+                format!("fn{sep}ret{sep}{r}")
+            } else {
+                format!("fn{sep}{ps}{sep}ret{sep}{r}")
+            }
         }
         TypeExpr::Tuple { elements } => {
             let n = elements.into_iter().count();
             let ps = elements.into_iter().map(enc).collect::<Vec<_>>().join(sep);
-            format!("tuple{n}{sep}{ps}")
+            if ps.is_empty() {
+                format!("tuple{n}")
+            } else {
+                format!("tuple{n}{sep}{ps}")
+            }
         }
     }
 }
@@ -245,6 +254,8 @@ struct WsScan {
     a_groups: HashMap<String, HashSet<String>>,
     b_groups: HashMap<String, HashSet<String>>,
     exempt_names: HashSet<String>,
+    /// A-scheme mangled names that (illegally) contain `__`.
+    a_double_underscore: Vec<String>,
 }
 
 fn scan_ws(ws: &Workspace) -> WsScan {
@@ -253,6 +264,7 @@ fn scan_ws(ws: &Workspace) -> WsScan {
         a_groups: HashMap::new(),
         b_groups: HashMap::new(),
         exempt_names: HashSet::new(),
+        a_double_underscore: Vec::new(),
     };
     for module in ws.modules.iter() {
         for (_, f) in module.functions.iter() {
@@ -262,7 +274,15 @@ fn scan_ws(ws: &Workspace) -> WsScan {
             }
             s.fns += 1;
             let key = sig_key(ws, f);
-            s.a_groups.entry(mangle(ws, f, "_")).or_default().insert(key.clone());
+            let a = mangle(ws, f, "_");
+            // A `__` the SCHEME introduced (empty segment / a `name_` boundary),
+            // as opposed to a `__` already in the author's chosen name (the
+            // `__rock_*`/`__debug_*` runtime namespace, which the author owns and
+            // which only errors if it reaches GLSL -- the __sw_adapt_es assert).
+            if a.contains("__") && !f.name.as_str().contains("__") {
+                s.a_double_underscore.push(a.clone());
+            }
+            s.a_groups.entry(a).or_default().insert(key.clone());
             s.b_groups.entry(mangle(ws, f, "_Z")).or_default().insert(key);
         }
     }
@@ -302,10 +322,12 @@ fn corpus_mangle_collision_scan() {
     let mut b_sig_total = 0usize;
     let mut b_exempt_total = 0usize;
     let mut a_examples: Vec<String> = Vec::new();
+    let mut a_du: Vec<String> = Vec::new();
 
     for (label, ws) in &workspaces {
         let s = scan_ws(ws);
         total_fns += s.fns;
+        a_du.extend(s.a_double_underscore.iter().cloned());
         let (a_sig, a_exempt) = collisions(&s.a_groups, &s.exempt_names);
         let (b_sig, b_exempt) = collisions(&s.b_groups, &s.exempt_names);
         a_sig_total += a_sig;
@@ -339,6 +361,16 @@ fn corpus_mangle_collision_scan() {
     // Every game + stone must have loaded -- a scan that silently skipped them is
     // not the corpus the decision claims to cover.
     assert!(skipped.is_empty(), "corpora failed to load: {skipped:?} (scan is not corpus-wide)");
+
+    // The scheme must be `__`-free by construction (ANGLE/GLSL ES reserves `__`).
+    a_du.sort();
+    a_du.dedup();
+    assert!(
+        a_du.is_empty(),
+        "(A) produced {} mangled names containing `__` (must be zero): {:?}",
+        a_du.len(),
+        &a_du[..a_du.len().min(10)]
+    );
 
     // B is the safe fallback and MUST be clean.
     assert_eq!(b_sig_total, 0, "(B) '_Z' must have zero signature collisions in the corpus");
