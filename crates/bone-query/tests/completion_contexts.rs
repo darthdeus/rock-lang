@@ -1835,6 +1835,69 @@ fn field_ref_empty_arg_offers_fields_and_inserts_dot() {
     assert!(!l.iter().any(|s| s == "poll_slot"), "no global dump in a FieldOf slot: {l:?}");
 }
 
+// UFCS field-ref args: typing `.field` INSIDE a UFCS call's parens must offer
+// the FieldOf field-set, resolving the owner through the receiver -- symmetric
+// with the method-selection prefill above. `p.stop(.co)` binds the FieldOf `T`
+// to the receiver, not a paren sibling.
+#[test]
+fn field_ref_ufcs_generic_receiver_offers_fields() {
+    // `stop<T>(o: T, f: FieldOf<T, int?>)` on a `Player` receiver: T binds to
+    // Player via the receiver, so the FieldOf offers Player's int? fields.
+    let src = "struct Player { hp: int, cast_co: int? }\n\
+               fn stop<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
+    let col = "  p.stop(.".len() as u32;
+    let l = labels(src, 4, col);
+    assert!(l.contains(&".cast_co: int?".to_string()), "cast_co offered: {l:?}");
+    assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded by invariance: {l:?}");
+    assert!(!l.iter().any(|s| s == "stop" || s == "Player"), "no global dump in a FieldOf slot: {l:?}");
+}
+
+#[test]
+fn field_ref_ufcs_second_overload_supplies_the_fieldof_slot() {
+    // `stop` has a 1-param non-FieldOf overload FIRST and the 2-param FieldOf
+    // overload second; the arg-position field-ref must consult ALL overloads,
+    // or `p.stop(.co)` sees no FieldOf slot and dumps globals.
+    let src = "struct Player { hp: int, cast_co: int? }\n\
+               fn stop(t: int) {}\n\
+               fn stop<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
+    let col = "  p.stop(.".len() as u32;
+    let l = labels(src, 5, col);
+    assert!(l.contains(&".cast_co: int?".to_string()), "second-overload FieldOf resolved: {l:?}");
+    assert!(!l.iter().any(|s| s == "stop"), "no global dump: {l:?}");
+}
+
+#[test]
+fn field_ref_ufcs_entity_receiver_offers_fields() {
+    // `run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int)` on an
+    // `Entity<Glyph>` receiver: the FieldOf owner `T` binds through the ctor to
+    // the element struct `Glyph`, so `e.run_into(.co)` offers Glyph's int? field.
+    let src = "struct Glyph { life: int, co: int? }\n\
+               struct Entity<T> { i: int }\n\
+               fn run_into<T>(o: T, f: FieldOf<T, int?>, co: int) {}\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r() {\n  let e: Entity<Glyph> = Entity { i: 0 }\n  e.run_into(.)\n}\n";
+    let col = "  e.run_into(.".len() as u32;
+    let l = labels(src, 6, col);
+    assert!(l.contains(&".co: int?".to_string()), "co offered via Entity<Glyph> element: {l:?}");
+    assert!(!l.iter().any(|s| s.starts_with(".life")), "life (int) excluded by invariance: {l:?}");
+    assert!(!l.iter().any(|s| s == "run_into"), "no global dump: {l:?}");
+}
+
+// A non-FieldOf UFCS call arg keeps NORMAL completion -- the resolver returning
+// None must remain the fall-through signal (no false-positive field-ref).
+#[test]
+fn field_ref_ufcs_non_fieldof_arg_falls_through() {
+    let src = "struct Player { hp: int }\n\
+               fn take(o: Player, n: int) {}\n\
+               fn helper_val() -> int { 0 }\n\
+               fn r() {\n  let p: Player = Player { hp: 0 }\n  p.take(hel)\n}\n";
+    let col = "  p.take(hel".len() as u32;
+    let l = labels(src, 5, col);
+    assert!(l.iter().any(|s| s == "helper_val"), "normal completion still fires: {l:?}");
+}
+
 // -- locality outranks case: a lowercase query still surfaces globals ---------
 // Typing lowercase `jlog` fuzzy-matches the all-caps global
 // `JIT_TRACE_LOG_ENABLED` and the lowercase fn `journal_log` in the same band.

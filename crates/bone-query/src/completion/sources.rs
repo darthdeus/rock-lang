@@ -68,12 +68,121 @@ pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v_str: &str) -> Vec<U
     out
 }
 
-/// Field-ref completions for a call-arg slot. `None` if the slot's expected
-/// param isn't `FieldOf<Struct, V>` (caller falls through to normal
-/// completion); `Some(items)` when it is -- offering the struct's fields whose
-/// declared type is exactly V (the typechecker's invariance), whether or not
-/// the leading `.` is typed. A generic `T` is resolved from a preceding sibling
-/// arg's inferred type.
+/// The generic var (if any) the receiver binds on overload `f`'s first param,
+/// plus the owner struct that var resolves to -- the shared owner-binding step
+/// for BOTH the arg-position field-ref path and the method-selection prefill.
+/// A bare-generic `o: T` receiver IS the owner (`recv_struct`); a wrapper
+/// `Ctor<T>` whose ctor is the receiver struct binds `T` to the receiver's sole
+/// type-arg element (`Entity<Glyph>` -> owner `Glyph`). `(None, recv_struct)`
+/// for a non-generic first param. Both `recv_struct`/`recv_elem` are `None` for
+/// a non-UFCS prefix call -- the FieldOf owner then binds from a sibling arg.
+fn receiver_owner_binding(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+    recv_struct: Option<Ustr>,
+    recv_elem: Option<Ustr>,
+) -> (Option<bone_semantic::hir::VarId>, Option<Ustr>) {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    let Some(p0) = f.param_decls.first() else {
+        return (None, recv_struct);
+    };
+    match ty_of(ws, None, p0.ty) {
+        TypeExpr::Generic(v, _) => (Some(v), recv_struct),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
+            if Some(n) == recv_struct && params.len() == 1 =>
+        {
+            let arg_idx = params.into_iter().next().unwrap();
+            match (ty_of(ws, None, p0.ty.with_idx(arg_idx)), recv_elem) {
+                (TypeExpr::Generic(v, _), Some(e)) => (Some(v), Some(e)),
+                _ => (None, recv_struct),
+            }
+        }
+        _ => (None, recv_struct),
+    }
+}
+
+/// Resolve the `FieldOf<owner, V>` at param `pi` of overload `f` to its owner
+/// struct + rendered V. The owner comes from: a literal nominal first arg; the
+/// receiver, when the FieldOf's generic matches the var the receiver bound
+/// (`recv_var`/`recv_owner` from `receiver_owner_binding`); or `sibling_owner`
+/// (a preceding-arg binding, the non-UFCS prefix-call path). `None` when the
+/// param isn't a `FieldOf`, or its generic owner can't be resolved. The shared
+/// FieldOf-slot resolver -- both the arg-completion path and the prefill synth
+/// consume it, so their owner/slot logic cannot drift.
+fn fieldof_slot_owner(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+    pi: usize,
+    recv_var: Option<bone_semantic::hir::VarId>,
+    recv_owner: Option<Ustr>,
+    sibling_owner: impl FnOnce(Ustr) -> Option<Ustr>,
+) -> Option<(Ustr, String)> {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    let p = f.param_decls.get(pi)?;
+    let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
+            if n.as_str() == "FieldOf" && params.len() == 2 =>
+        {
+            let mut it = params.into_iter();
+            (it.next().unwrap(), it.next().unwrap())
+        }
+        _ => return None,
+    };
+    let v_str = ws.render(None, p.ty.with_idx(v_idx));
+    let owner = match ty_of(ws, None, p.ty.with_idx(t_idx)) {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+        TypeExpr::Generic(tv, gname) => {
+            if recv_var == Some(tv) {
+                recv_owner?
+            } else {
+                sibling_owner(gname)?
+            }
+        }
+        _ => return None,
+    };
+    Some((owner, v_str))
+}
+
+/// Bind a generic named `gname` from a PRECEDING paren arg's inferred type --
+/// the non-UFCS prefix-call owner path (`poll_slot(e, .co)` binds `T` = Mob
+/// from `e`). `recv_offset` shifts the param index for a UFCS receiver (paren
+/// arg `j` is `param_decls[j + recv_offset]`).
+fn sibling_owner_bind(
+    ws: &Workspace,
+    path: &str,
+    src: &str,
+    offset: usize,
+    arg_idx: usize,
+    recv_offset: usize,
+    f: &bone_semantic::hir::Function,
+    gname: Ustr,
+) -> Option<Ustr> {
+    let mid = user_module_for_path(ws, path)?;
+    let inf = ws.inference(mid)?;
+    let starts = preceding_arg_starts(src, offset);
+    for (j, &aoff) in starts.iter().enumerate().take(arg_idx.saturating_sub(recv_offset)) {
+        let Some(pty) = f.param_decls.get(j + recv_offset).map(|p| p.ty) else {
+            continue;
+        };
+        let Some(at) = bone_semantic::query::type_at(ws, mid, inf, aoff) else {
+            continue;
+        };
+        if let Some(bound) = bind_generic(ws, gname, None, pty, at.body, at.ty) {
+            if let Some(sn) = nominal_base(ws, at.body, bound) {
+                return Some(sn);
+            }
+        }
+    }
+    None
+}
+
+/// Field-ref completions for a call-arg slot. `None` if no overload's slot at
+/// `arg_idx` is a resolvable `FieldOf<Struct, V>` (caller falls through to
+/// normal completion); `Some(items)` when one is -- offering the struct's
+/// fields whose declared type is exactly V (the typechecker's invariance),
+/// whether or not the leading `.` is typed. ALL overloads are consulted; the
+/// FieldOf owner resolves from the UFCS receiver (`recv_end`), a literal
+/// nominal, or a preceding sibling arg (`fieldof_slot_owner`).
 pub(crate) fn field_ref_arg_completions(
     ws: &Workspace,
     path: &str,
@@ -83,54 +192,31 @@ pub(crate) fn field_ref_arg_completions(
     arg_idx: usize,
     prefix: &str,
     lead_dot: bool,
+    recv_end: Option<usize>,
 ) -> Option<Vec<CompletionItem>> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
     let name = Ustr::from(callee);
-    let (fmid, fid) = ws
-        .modules
-        .iter()
-        .find_map(|m| m.functions_by_name.get(&name).and_then(|l| l.first()).copied())?;
-    let f = &ws.modules[fmid.index()].functions[fid];
-    let param = f.param_decls.get(arg_idx)?.ty;
-
-    // The slot must be `FieldOf<T, V>`.
-    let (t_idx, v_idx) = match ty_of(ws, None, param) {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if n.as_str() == "FieldOf" && params.len() == 2 =>
-        {
-            let mut it = params.into_iter();
-            (it.next().unwrap(), it.next().unwrap())
-        }
-        _ => return None,
-    };
-    let v_str = ws.render(None, param.with_idx(v_idx));
-
-    // Resolve T -> a concrete struct name (directly, or via a sibling arg).
-    let t_name = match ty_of(ws, None, param.with_idx(t_idx)) {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-        TypeExpr::Generic(_, gname) => {
+    // UFCS receiver struct + sole-type-arg element (`Entity<Glyph>` ->
+    // `("Entity", Some("Glyph"))`); `(None, None)` for a non-UFCS prefix call.
+    let (recv_struct, recv_elem) = recv_end
+        .and_then(|e| {
             let mid = user_module_for_path(ws, path)?;
-            let inf = ws.inference(mid)?;
-            let starts = preceding_arg_starts(src, offset);
-            let mut resolved = None;
-            for (i, &aoff) in starts.iter().enumerate().take(arg_idx) {
-                let Some(pty) = f.param_decls.get(i).map(|p| p.ty) else {
-                    continue;
-                };
-                let Some(at) = bone_semantic::query::type_at(ws, mid, inf, aoff) else {
-                    continue;
-                };
-                if let Some(bound) = bind_generic(ws, gname, None, pty, at.body, at.ty) {
-                    if let Some(sn) = nominal_base(ws, at.body, bound) {
-                        resolved = Some(sn);
-                        break;
-                    }
-                }
-            }
-            resolved?
-        }
-        _ => return None,
-    };
+            let (_, sname, _, sole) = crate::query::struct_members_of_receiver_expr(ws, mid, e)?;
+            Some((Some(sname), sole))
+        })
+        .unwrap_or((None, None));
+    let recv_offset = usize::from(recv_end.is_some());
+
+    // First overload whose `arg_idx` slot resolves to a FieldOf with >=1 field.
+    let (t_name, v_str) = ws.modules.iter().find_map(|m| {
+        m.functions_by_name.get(&name)?.iter().find_map(|(fmid, fid)| {
+            let f = &ws.modules[fmid.index()].functions[*fid];
+            let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
+            let (owner, v_str) = fieldof_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
+                sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
+            })?;
+            (!fields_of_type(ws, owner, &v_str).is_empty()).then_some((owner, v_str))
+        })
+    })?;
 
     let pfx = prefix.as_bytes();
     let mut out = Vec::new();
@@ -1134,48 +1220,24 @@ fn field_ref_slot(
     recv_elem: Option<Ustr>,
     f: &bone_semantic::hir::Function,
 ) -> Option<(usize, Vec<Ustr>)> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let p0 = f.param_decls.first()?;
-    // The generic var the receiver binds, plus the struct whose fields the
-    // FieldOf owner enumerates. A bare-generic `o: T` receiver IS the owner
-    // (`stop<T>(o: T, ..)`). A wrapper `e: Entity<T>` binds `T` to the
-    // receiver's element (`Entity<Glyph>` -> `Glyph`), so the owner is that
-    // element -- resolving the FieldOf through the ctor.
-    let (recv_var, owner) = match ty_of(ws, None, p0.ty) {
-        TypeExpr::Generic(v, _) => (Some(v), recv_struct),
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if n == recv_struct && params.len() == 1 =>
-        {
-            let arg_idx = params.into_iter().next().unwrap();
-            match (ty_of(ws, None, p0.ty.with_idx(arg_idx)), recv_elem) {
-                (TypeExpr::Generic(v, _), Some(e)) => (Some(v), e),
-                _ => (None, recv_struct),
-            }
-        }
-        _ => (None, recv_struct),
-    };
-    for (i, p) in f.param_decls.iter().enumerate().skip(1) {
-        let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-                if n.as_str() == "FieldOf" && params.len() == 2 =>
-            {
-                let mut it = params.into_iter();
-                (it.next().unwrap(), it.next().unwrap())
-            }
-            _ => continue,
+    // A UFCS receiver always binds the owner; a sibling arg never contributes
+    // here (that path serves the non-UFCS prefix call). The FieldOf's owner must
+    // be the receiver's own struct -- a literal `FieldOf<Other, V>` on a `recv`
+    // method isn't a `recv.method(.field)` slot, so gate nominal owners on that.
+    let (recv_var, recv_owner) = receiver_owner_binding(ws, f, Some(recv_struct), recv_elem);
+    let recv_owner = recv_owner?;
+    for pi in 1..f.param_decls.len() {
+        let Some((owner, v_str)) =
+            fieldof_slot_owner(ws, f, pi, recv_var, Some(recv_owner), |_| None)
+        else {
+            continue;
         };
-        let t_ok = match ty_of(ws, None, p.ty.with_idx(t_idx)) {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n == owner,
-            TypeExpr::Generic(tv, _) => recv_var == Some(tv),
-            _ => false,
-        };
-        if !t_ok {
+        if owner != recv_owner {
             continue;
         }
-        let v_str = ws.render(None, p.ty.with_idx(v_idx));
         let fields = fields_of_type(ws, owner, &v_str);
         if !fields.is_empty() {
-            return Some((i - 1, fields));
+            return Some((pi - 1, fields));
         }
     }
     None

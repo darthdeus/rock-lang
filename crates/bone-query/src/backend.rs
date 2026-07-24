@@ -1407,7 +1407,7 @@ impl BoneWorkspace {
         // field ref (live signature says FieldOf, or a `.` is already typed);
         // `field_ref_arg_completions` returns None -> falls through to normal
         // completion (e.g. enum-shorthand `.Variant` in an arg).
-        if let Some((callee, arg_idx, _)) = cx.arg_call.clone() {
+        if let Some((callee, arg_idx, recv_end)) = cx.arg_call.clone() {
             let lead_dot = leading_dot(src, offset);
             // Skip the variant only when the live signature is KNOWN and clearly
             // not a field ref. If the callee is unknown live (the incomplete arg
@@ -1425,6 +1425,7 @@ impl BoneWorkspace {
                     let attempt = analyze_variant(&mut proj.session, path, &munged, |ws| {
                         field_ref_arg_completions(
                             ws, path, src, offset, &callee, arg_idx as usize, &prefix, lead_dot,
+                            recv_end,
                         )
                     });
                     if let Some(Some(items)) = attempt {
