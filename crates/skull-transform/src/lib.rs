@@ -296,16 +296,20 @@ fn term_targets_each(term: &Term, f: &mut impl FnMut(Idx<Block>)) {
 /// `MakeValueStruct`s fall to DCE. Only fires when the stored value is a literal
 /// `MakeValueStruct` -- an opaque cdata (a variable) is copied whole as before.
 pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
-    // (store inst, base, index, value-MakeValueStruct) for each rewritable store.
-    let targets: Vec<(Idx<Inst>, Idx<Inst>, Idx<Inst>, Idx<Inst>)> = func
+    // (store inst, base, index, value-MakeValueStruct, kind) for each rewritable
+    // store. Both NativeBuffer flavors: a value-element buffer arrives as
+    // `NativeBufferValue` (carried through to the slot so the JS emitter keeps
+    // the flat-slot element info).
+    let targets: Vec<(Idx<Inst>, Idx<Inst>, Idx<Inst>, Idx<Inst>, ContainerKind)> = func
         .blocks
         .iter()
         .flat_map(|(_, b)| b.insts.iter().copied())
         .filter_map(|i| match &func.insts[i] {
-            Inst::StoreIndex { base, index, value, kind: ContainerKind::NativeBuffer }
-                if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) =>
+            Inst::StoreIndex { base, index, value, kind }
+                if kind.is_native_buffer()
+                    && matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) =>
             {
-                Some((i, *base, *index, *value))
+                Some((i, *base, *index, *value, *kind))
             }
             _ => None,
         })
@@ -314,8 +318,8 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
         return;
     }
     let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
-    for (store_i, base, index, value) in targets {
-        let slot = func.insts.alloc(Inst::Index { base, index, kind: ContainerKind::NativeBuffer });
+    for (store_i, base, index, value, kind) in targets {
+        let slot = func.insts.alloc(Inst::Index { base, index, kind });
         let mut new = vec![slot];
         gen_leaf_stores(func, slot, value, &mut new);
         replacement.insert(store_i, new);

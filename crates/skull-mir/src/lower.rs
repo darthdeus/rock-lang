@@ -90,6 +90,52 @@ fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>
     Some(total)
 }
 
+/// One immediate field of an all-float value struct in its flattened float-slot
+/// layout: `offset` in float units from the struct's start, and whether it is a
+/// float leaf or a nested value struct (named, for recursive descent).
+pub struct ValueSlotField {
+    pub name: Ustr,
+    pub offset: usize,
+    /// `None` = float leaf (width 1); `Some(n)` = nested value struct `n`.
+    pub nested: Option<Ustr>,
+}
+
+/// Immediate fields of all-float value STRUCT `name` with their flattened
+/// float-slot offsets, declaration order (the C layout / Float32Array order).
+/// `None` unless `name` is a value struct proper whose every leaf is float --
+/// the exact set `FfiNewArray` lowers to a flat `Float32Array` on JS.
+pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueSlotField>> {
+    value_struct_all_float_leaf_count(ws, name)?;
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    let mut out = Vec::with_capacity(sd.fields.len());
+    let mut offset = 0usize;
+    for f in &sd.fields {
+        match static_ty(ws, f.ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float) => {
+                out.push(ValueSlotField { name: f.name, offset, nested: None });
+                offset += 1;
+            }
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                let w = value_struct_all_float_leaf_count(ws, n)?;
+                out.push(ValueSlotField { name: f.name, offset, nested: Some(n) });
+                offset += w;
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Whether `name` is an FFI-clean value STRUCT proper (C-layout cdata array
+/// element on luajit) -- the element predicate for
+/// [`ContainerKind::NativeBufferValue`](crate::mir::ContainerKind). Struct-only:
+/// a cdata-eligible enum's value shape does not qualify (its element access
+/// goes through match lowering, not `Field`).
+pub fn is_ffi_clean_value_struct(ws: &Workspace, name: Ustr) -> bool {
+    value_shape_rec(ws, name, &mut Vec::new()).is_some()
+}
+
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
 #[derive(Clone, Debug)]
@@ -5284,7 +5330,9 @@ impl Builder<'_> {
             ContainerKind::Vec => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
             )),
-            ContainerKind::NativeBuffer => self.lower_for_array(vars, iter, body),
+            ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
+                self.lower_for_array(vars, iter, body)
+            }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
         }
     }
@@ -5815,10 +5863,11 @@ impl Builder<'_> {
         // `for v in fv` over FlatVec: numeric loop bounded by the `len` FIELD
         // (not the buffer capacity), elements via the `buf` NativeBuffer.
         let (kind, arr_v, len_v) = if self.expr_is_flat_vec(iter) {
+            let kind = self.nb_kind(iter);
             let fv = self.lower_expr(iter)?;
             let buf = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("buf") });
             let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
-            (ContainerKind::NativeBuffer, buf, len)
+            (kind, buf, len)
         } else {
             let kind = self.coll_kind(iter);
             let arr_v = self.lower_expr(iter)?;
@@ -7212,6 +7261,36 @@ impl Builder<'_> {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "FlatVec")
     }
 
+    /// The value-STRUCT element of `e`'s `NativeBuffer<E>` / `FlatVec<E>` type,
+    /// or `None` when `E` is a primitive / unresolved generic / not value-shaped.
+    /// Drives [`ContainerKind::NativeBufferValue`]; an opaque generic `E` stays
+    /// plain `NativeBuffer` (matching the alloc intrinsic, which also requires a
+    /// concrete element).
+    fn nb_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = self.ty_node(ty)? else {
+            return None;
+        };
+        if !matches!(n.as_str(), "NativeBuffer" | "FlatVec") {
+            return None;
+        }
+        let p = params.into_iter().next()?;
+        let elem = self.resolve_tyid(ty.with_idx(p))?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(en), .. } = self.ty_node(elem)? else {
+            return None;
+        };
+        is_ffi_clean_value_struct(self.ws, en).then_some(en)
+    }
+
+    /// The NativeBuffer container kind for base expr `e`: value-struct elements
+    /// carry their name so the JS emitter can lower flat slots (Lua identical).
+    fn nb_kind(&self, e: Idx<Expr>) -> ContainerKind {
+        match self.nb_value_elem(e) {
+            Some(elem) => ContainerKind::NativeBufferValue(elem),
+            None => ContainerKind::NativeBuffer,
+        }
+    }
+
     /// Lower an index-expr base to `(base inst, container kind)`. A
     /// `FlatVec<T>` base indexes its `buf` NativeBuffer storage -- project the
     /// field and index with NativeBuffer semantics, so the value-element slot
@@ -7223,9 +7302,10 @@ impl Builder<'_> {
         base: Idx<Expr>,
     ) -> Result<(Idx<Inst>, ContainerKind), CompilerError> {
         if self.expr_is_flat_vec(base) {
+            let kind = self.nb_kind(base);
             let b = self.lower_expr(base)?;
             let buf = self.emit_cur(Inst::Field { base: b, field: Ustr::from("buf") });
-            return Ok((buf, ContainerKind::NativeBuffer));
+            return Ok((buf, kind));
         }
         let kind = self.coll_kind(base);
         let b = self.lower_expr(base)?;
@@ -7249,7 +7329,7 @@ impl Builder<'_> {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
-            }) if is_native_buffer(name.as_str()) => ContainerKind::NativeBuffer,
+            }) if is_native_buffer(name.as_str()) => self.nb_kind(base),
             _ => {
                 let rendered = self
                     .inf

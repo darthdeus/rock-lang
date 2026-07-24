@@ -151,6 +151,7 @@ pub fn emit_fn_with_callees(
         shared_tail_reject: false,
         pack_multi_return: false,
         hoisted_temps: HashSet::new(),
+        nbv_bypass: compute_nbv_bypass(mf, &reachable_blocks(mf)),
         out: String::new(),
         indent: 1,
     };
@@ -241,6 +242,7 @@ pub fn emit_fn_trampoline(
         shared_tail_reject: false,
         pack_multi_return,
         hoisted_temps,
+        nbv_bypass: compute_nbv_bypass(mf, &region),
         out: String::new(),
         indent: 1,
     };
@@ -369,6 +371,12 @@ struct Emitter<'a> {
     /// their per-case `let`. Empty for the structured path (block nesting keeps a
     /// temp in scope) and the spilled coroutine step (no cross-block temps).
     hoisted_temps: HashSet<u32>,
+    /// Value-element NativeBuffer slot refs (raw inst ids) whose EVERY use is a
+    /// `Field`/`StoreField` base: those consumers render flat-slot access from
+    /// the ref's own operands, so the ref itself emits no statement (its Lua
+    /// analogue is a cdata slot local; on JS there is no per-element view to
+    /// bind). A ref with any OTHER use materializes as a whole-element COPY.
+    nbv_bypass: HashSet<u32>,
     out: String,
     indent: usize,
 }
@@ -429,6 +437,9 @@ impl Emitter<'_> {
     /// Inlinable and dead-pure insts emit nothing.
     fn inst_emits(&self, iid: Idx<Inst>) -> bool {
         let inst = &self.mf.insts[iid];
+        if self.nbv_bypass.contains(&raw(iid)) {
+            return false;
+        }
         if matches!(inst, Inst::Store { .. } | Inst::StoreIndex { .. }) {
             return true;
         }
@@ -988,6 +999,12 @@ impl Emitter<'_> {
                     );
                     let line = match kind {
                         ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
+                        // Whole value-struct element write: per-leaf stores into
+                        // the flat backing from the value object (a MakeValueStruct
+                        // renders as an object literal; a copy read is an object).
+                        ContainerKind::NativeBufferValue(elem) => {
+                            self.nbv_write_stmt(&b, &i, &v, *elem, 0, *elem)?
+                        }
                         ContainerKind::Vec => format!("__vec_checked_set({b}, {i}, {v});"),
                         ContainerKind::Map => format!("{b}.set({i}, {v});"),
                     };
@@ -1007,8 +1024,32 @@ impl Emitter<'_> {
                     self.push(&format!("{k} = __map_next({t}, {k});"));
                     self.push(&format!("{v} = ({k} === null ? null : {t}.get({k}));"));
                 }
-                // `base.field = value` (struct field / cursor mutation).
+                // `base.field = value` (struct field / cursor mutation). A base
+                // that projects a value-element NativeBuffer slot (the scalarized
+                // element-store shape) writes the flat backing instead: a float
+                // leaf via `__nbv_set`, a nested value-struct field via the
+                // per-leaf write IIFE (matching Lua's whole-cdata field assign).
                 Inst::StoreField { base, field, value } => {
+                    if let Some((b_iid, i_iid, root, off, cur)) = self.nbv_proj(*base)? {
+                        let (k, fields) = self.nbv_layout(cur)?;
+                        let _ = k;
+                        let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
+                            err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
+                        })?;
+                        let (root_k, _) = self.nbv_layout(root)?;
+                        let b = self.render_val(b_iid)?;
+                        let i = self.render_val(i_iid)?;
+                        let v = self.render_val(*value)?;
+                        let line = match f.nested {
+                            None => format!(
+                                "__nbv_set({b}, {i}, {root_k}, {}, {v});",
+                                off + f.offset
+                            ),
+                            Some(n) => self.nbv_write_stmt(&b, &i, &v, root, off + f.offset, n)?,
+                        };
+                        self.push(&line);
+                        continue;
+                    }
                     let line = format!(
                         "{}.{field} = {};",
                         self.render_val(*base)?,
@@ -1060,12 +1101,19 @@ impl Emitter<'_> {
                 // it would silently lose the OOB error, diverging under
                 // `try_call(|| xs[oob])`). Map index is a raw miss-returns-nil VM
                 // op with no side effect, so it stays droppable below.
-                Inst::Index { kind: ContainerKind::Vec | ContainerKind::NativeBuffer, .. }
-                    if self.use_count[raw(iid) as usize] == 0 =>
+                Inst::Index { kind, .. }
+                    if (matches!(kind, ContainerKind::Vec) || kind.is_native_buffer())
+                        && self.use_count[raw(iid) as usize] == 0 =>
                 {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
+                // A value-element slot ref consumed entirely by Field/StoreField
+                // renders through its consumers -- no statement here (the copy
+                // materialize would be dead work per scalarized element store).
+                Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. }
+                    if self.nbv_bypass.contains(&raw(iid)) => {}
+                Inst::Field { .. } if self.nbv_bypass.contains(&raw(iid)) => {}
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
@@ -1365,6 +1413,13 @@ impl Emitter<'_> {
                 let (b, i) = (self.render_val(*base)?, self.render_val(*index)?);
                 match kind {
                     ContainerKind::NativeBuffer => format!("__nb_checked_get({b}, {i})"),
+                    // A whole value-struct element read materializes a COPY object
+                    // from the flat slots (immutable in Rock, so indistinguishable
+                    // from Lua's cdata ref). Field/StoreField consumers never see
+                    // this render -- they lower flat access from the operands.
+                    ContainerKind::NativeBufferValue(elem) => {
+                        self.nbv_copy_expr(&b, &i, *elem, 0, *elem)?
+                    }
                     ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
                     // Map miss returns nil (raw VM op in Lua); JS Map.get returns
                     // undefined on miss, which `== null` treats as nil.
@@ -1372,7 +1427,9 @@ impl Emitter<'_> {
                 }
             }
             Inst::Len { base, kind } => match kind {
-                ContainerKind::NativeBuffer | ContainerKind::Vec => {
+                ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferValue(_)
+                | ContainerKind::Vec => {
                     format!("{}.len", self.render_val(*base)?)
                 }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
@@ -1401,8 +1458,24 @@ impl Emitter<'_> {
                 },
             },
             // A general field read is JS property access. NativeBuffer `.ptr`/
-            // `.len` and Vec `._data`/`.len` are the same shape.
+            // `.len` and Vec `._data`/`.len` are the same shape. A base that
+            // projects a value-element NativeBuffer slot lowers to flat-slot
+            // access instead: a float leaf reads `__nbv_get`, a nested value
+            // struct materializes its sub-object copy.
             Inst::Field { base, field } => {
+                if let Some((b_iid, i_iid, root, off, cur)) = self.nbv_proj(*base)? {
+                    let (_, fields) = self.nbv_layout(cur)?;
+                    let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
+                        err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
+                    })?;
+                    let (root_k, _) = self.nbv_layout(root)?;
+                    let b = self.render_val(b_iid)?;
+                    let i = self.render_val(i_iid)?;
+                    return Ok(match f.nested {
+                        None => format!("__nbv_get({b}, {i}, {root_k}, {})", off + f.offset),
+                        Some(n) => self.nbv_copy_expr(&b, &i, root, off + f.offset, n)?,
+                    });
+                }
                 format!("{}.{field}", self.render_val(*base)?)
             }
             // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
@@ -1458,6 +1531,131 @@ impl Emitter<'_> {
             "__rock_make_enum({tag_expr}, {}, [{}])",
             js_string_lit(ty.as_str())?,
             kv.join(", ")
+        ))
+    }
+
+    /// Flat-slot layout of value-element `elem`: `(stride k, immediate fields)`.
+    /// Errs (fail-closed) when `elem` has a non-float leaf -- such a buffer cannot
+    /// be allocated on JS (`FfiNewArray` rejects), so access to one is a backend
+    /// gap, never a silent scalar read.
+    fn nbv_layout(
+        &self,
+        elem: ustr::Ustr,
+    ) -> Result<(usize, Vec<skull_mir::lower::ValueSlotField>), CompilerError> {
+        let k = skull_mir::lower::value_struct_all_float_leaf_count(self.ws, elem);
+        let fields = skull_mir::lower::value_struct_slot_fields(self.ws, elem);
+        match (k, fields) {
+            (Some(k), Some(fields)) => Ok((k, fields)),
+            _ => Err(err(format!(
+                "JS subset: NativeBuffer element `{elem}` is not an all-float value \
+                 struct -- no flat Float32Array layout to index"
+            ))),
+        }
+    }
+
+    /// Resolve `iid` as a value-element NativeBuffer projection: the root
+    /// `Index{NativeBufferValue}` or a nested-struct `Field` chain off one.
+    /// `Ok(None)` = not NBV-related; `Err` = NBV but unlowerable (fail-closed).
+    /// Returns `(buf inst, index inst, root elem, cumulative offset, cur struct)`.
+    fn nbv_proj(
+        &self,
+        iid: Idx<Inst>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ustr::Ustr, usize, ustr::Ustr)>, CompilerError> {
+        match &self.mf.insts[iid] {
+            Inst::Index { base, index, kind: ContainerKind::NativeBufferValue(e) } => {
+                self.nbv_layout(*e)?;
+                Ok(Some((*base, *index, *e, 0, *e)))
+            }
+            Inst::Field { base, field } => {
+                let Some((b, i, root, off, cur)) = self.nbv_proj(*base)? else {
+                    return Ok(None);
+                };
+                let (_, fields) = self.nbv_layout(cur)?;
+                let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
+                    err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
+                })?;
+                match f.nested {
+                    Some(n) => Ok(Some((b, i, root, off + f.offset, n))),
+                    // A float leaf terminates the projection chain -- the Field
+                    // render handles it directly; it is never itself a base.
+                    None => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `{__ty: "S", f: __b.ptr[__o + N], nested: {...}}` -- the object literal
+    /// reading struct `cur`'s leaves from the flat backing, relative to the free
+    /// vars `__b` (buffer) and `__o` (element base slot). `base` is the cumulative
+    /// float offset of `cur` within the root element.
+    fn nbv_obj_literal(&self, cur: ustr::Ustr, base: usize) -> Result<String, CompilerError> {
+        let (_, fields) = self.nbv_layout(cur)?;
+        let mut parts = vec![format!("__ty: {}", js_string_lit(cur.as_str())?)];
+        for f in &fields {
+            let part = match f.nested {
+                Some(n) => self.nbv_obj_literal(n, base + f.offset)?,
+                None => format!("__b.ptr[__o + {}]", base + f.offset),
+            };
+            parts.push(format!("{}: {part}", f.name));
+        }
+        Ok(format!("{{{}}}", parts.join(", ")))
+    }
+
+    /// Whole-element (or nested sub-struct) COPY read: a bounds-checked IIFE
+    /// materializing the value-struct object from the flat slots. Value structs
+    /// are immutable in Rock, so a copy is indistinguishable from Lua's cdata ref.
+    fn nbv_copy_expr(
+        &self,
+        b: &str,
+        i: &str,
+        root: ustr::Ustr,
+        off: usize,
+        cur: ustr::Ustr,
+    ) -> Result<String, CompilerError> {
+        let (k, _) = self.nbv_layout(root)?;
+        let obj = self.nbv_obj_literal(cur, off)?;
+        Ok(format!(
+            "(function(__b, __i) {{ __nbv_check(__b, __i); var __o = __i * {k}; return {obj}; }})({b}, {i})"
+        ))
+    }
+
+    /// Leaf-store lines writing struct `cur` (at cumulative offset `base`) from
+    /// the object expression `__v{path}` -- used by the whole-element write IIFE.
+    fn nbv_store_lines(
+        &self,
+        cur: ustr::Ustr,
+        base: usize,
+        path: &str,
+        out: &mut Vec<String>,
+    ) -> Result<(), CompilerError> {
+        let (_, fields) = self.nbv_layout(cur)?;
+        for f in &fields {
+            match f.nested {
+                Some(n) => self.nbv_store_lines(n, base + f.offset, &format!("{path}.{}", f.name), out)?,
+                None => out.push(format!("__b.ptr[__o + {}] = __v{path}.{};", base + f.offset, f.name)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whole-element (or nested sub-struct) write: bounds-checked IIFE storing
+    /// every leaf of `cur` (at offset `off` within root) from the value object.
+    fn nbv_write_stmt(
+        &self,
+        b: &str,
+        i: &str,
+        v: &str,
+        root: ustr::Ustr,
+        off: usize,
+        cur: ustr::Ustr,
+    ) -> Result<String, CompilerError> {
+        let (k, _) = self.nbv_layout(root)?;
+        let mut lines = Vec::new();
+        self.nbv_store_lines(cur, off, "", &mut lines)?;
+        Ok(format!(
+            "(function(__b, __i, __v) {{ __nbv_check(__b, __i); var __o = __i * {k}; {} }})({b}, {i}, {v});",
+            lines.join(" ")
         ))
     }
 
@@ -3567,6 +3765,66 @@ fn for_each_term_operand(term: &Term, f: &mut impl FnMut(Idx<Inst>)) {
         Term::Yield { values, .. } => values.iter().for_each(|&i| f(i)),
         Term::Unreachable | Term::Goto(_) => {}
     }
+}
+
+/// Value-element NativeBuffer refs to suppress: an `Index{NativeBufferValue}`
+/// (or a nested-struct `Field` chained off one) whose every use is a `Field`/
+/// `StoreField` BASE. Those consumers render flat-slot access from the chain's
+/// own operands, so the ref emits nothing; any other use (a `Store` into a cell,
+/// a call arg, a `StoreIndex` value) forces the whole-element COPY materialize.
+fn compute_nbv_bypass(mf: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<u32> {
+    let mut cand: HashSet<u32> = HashSet::new();
+    for &b in blocks {
+        for &id in &mf.blocks[b].insts {
+            match &mf.insts[id] {
+                Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. } => {
+                    cand.insert(raw(id));
+                }
+                // A Field chained off a candidate (nested value-struct descent).
+                // Blocks are in traversal order and a Field always follows its
+                // base textually, so a single pass suffices for chains.
+                Inst::Field { base, .. } if cand.contains(&raw(*base)) => {
+                    cand.insert(raw(id));
+                }
+                _ => {}
+            }
+        }
+    }
+    if cand.is_empty() {
+        return cand;
+    }
+    let mut other_use: HashSet<u32> = HashSet::new();
+    let mut used: HashSet<u32> = HashSet::new();
+    for &b in blocks {
+        for &id in &mf.blocks[b].insts {
+            match &mf.insts[id] {
+                Inst::Field { base, .. } => {
+                    used.insert(raw(*base));
+                }
+                Inst::StoreField { base, value, .. } => {
+                    used.insert(raw(*base));
+                    used.insert(raw(*value));
+                    if cand.contains(&raw(*value)) {
+                        other_use.insert(raw(*value));
+                    }
+                }
+                other => for_each_operand(other, &mut |u| {
+                    used.insert(raw(u));
+                    if cand.contains(&raw(u)) {
+                        other_use.insert(raw(u));
+                    }
+                }),
+            }
+        }
+        for_each_term_operand(&mf.blocks[b].term, &mut |u| {
+            used.insert(raw(u));
+            if cand.contains(&raw(u)) {
+                other_use.insert(raw(u));
+            }
+        });
+    }
+    cand.retain(|id| used.contains(id) && !other_use.contains(id));
+    cand
 }
 
 /// A pure, position-independent value inst that folds into its single use site.

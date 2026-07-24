@@ -1355,7 +1355,7 @@ impl Emitter<'_> {
         if self.inlinable[raw(slot) as usize]
             || !matches!(
                 &self.func.insts[slot],
-                Inst::Index { kind: ContainerKind::NativeBuffer, .. }
+                Inst::Index { kind, .. } if kind.is_native_buffer()
             )
         {
             return None;
@@ -1828,7 +1828,9 @@ impl Emitter<'_> {
 
             Inst::Index { base, index, kind } => self.write_index(out, *base, *index, *kind),
             Inst::Len { base, kind } => match kind {
-                ContainerKind::Vec | ContainerKind::NativeBuffer => {
+                ContainerKind::Vec
+                | ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferValue(_) => {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
                 }
@@ -1928,7 +1930,7 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
-            ContainerKind::NativeBuffer => {
+            ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 out.push_str("__nb_checked_get(");
                 self.write_opnd(out, base);
                 out.push_str(", ");
@@ -1968,7 +1970,7 @@ impl Emitter<'_> {
             } => {
                 match kind {
                     // NativeBuffer write -> debug-mode bounds-checked helper.
-                    ContainerKind::NativeBuffer => {
+                    ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                         out.push_str("  __nb_checked_set(");
                         self.write_opnd(out, *base);
                         out.push_str(", ");
@@ -2013,7 +2015,9 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
-                    ContainerKind::NativeBuffer | ContainerKind::Map => {
+                    ContainerKind::NativeBuffer
+                    | ContainerKind::NativeBufferValue(_)
+                    | ContainerKind::Map => {
                         unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }
                 }

@@ -71,6 +71,11 @@ fn corpus() -> Vec<String> {
         // sibling): before the fn-value collapse + JS per-target selection these
         // skipped ("lowering gap: inline(lua) body"); now they run.
         "tests/function_ref_cross_module.rock",
+        // FlatVec<value> flat-slot lowering (mag web tier): element access over
+        // the flat Float32Array backing (push/get/set/sort/iterate). Failed at
+        // runtime (NaN reads) before `ContainerKind::NativeBufferValue`.
+        "tests/flat_vec_value.rock",
+        "tests/flat_vec_sugar.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -224,7 +229,10 @@ fn js_runnable_coverage_ratchet() {
     // Chess web tier (Arc 3): a byte-faithful `from_codepoint` JS mapping lets
     // tests/strings_chars.rock's multibyte test run (was the skip sentinel) -> 315;
     // tests/vec_direct_ty_tag.rock joins as the replacement skip sentinel (0 pass).
-    const FLOOR: usize = 315;
+    // mag web tier (Arc 4): value-element NativeBuffer flat-slot lowering
+    // (`ContainerKind::NativeBufferValue`) makes tests/flat_vec_value.rock +
+    // tests/flat_vec_sugar.rock run green (were runtime-FAIL, kept out) -> 319.
+    const FLOOR: usize = 319;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

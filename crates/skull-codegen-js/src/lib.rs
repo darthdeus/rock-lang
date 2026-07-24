@@ -102,6 +102,19 @@ function __nb_checked_set(buf, i, v) {
   }
   buf.ptr[i] = v;
 }
+function __nbv_check(buf, i) {
+  if (i < 0 || i >= buf.len) {
+    throw new Error(\"NativeBuffer index out of bounds: index \" + i + \" is outside [0, \" + buf.len + \")\");
+  }
+}
+function __nbv_get(buf, i, k, off) {
+  __nbv_check(buf, i);
+  return buf.ptr[i * k + off];
+}
+function __nbv_set(buf, i, k, off, v) {
+  __nbv_check(buf, i);
+  buf.ptr[i * k + off] = v;
+}
 ";
 
 /// JS shims for the checked Vec indexing helpers codegen emits
