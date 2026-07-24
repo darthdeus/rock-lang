@@ -32,6 +32,13 @@ fn build_web(game: &str, out: &std::path::Path) {
 }
 
 fn run_fake_gl_smoke(game: &str) {
+    run_fake_gl_smoke_dpr(game, "1");
+}
+
+// dpr != 1 additionally asserts default-FB orthos are LOGICAL-sized (the
+// fractional-scaling bug: backing-sized ortho renders at 1/dpr while
+// input/hit-testing stay logical, so clicks land on the wrong element).
+fn run_fake_gl_smoke_dpr(game: &str, dpr: &str) {
     if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
         eprintln!("SKIP fake_gl_smoke ({game}): node not on PATH");
         return;
@@ -43,19 +50,25 @@ fn run_fake_gl_smoke(game: &str) {
         .arg(&harness)
         .arg(dir.path().join("game.js"))
         .arg("10")
+        .arg(dpr)
         .output()
         .expect("spawn node smoke");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success() && stdout.contains("PASS"),
-        "fake-GL smoke ({game}) failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "fake-GL smoke ({game}, dpr={dpr}) failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
 
 #[test]
 fn web_fake_gl_smoke() {
     run_fake_gl_smoke("games/match3");
+}
+
+#[test]
+fn web_fake_gl_smoke_hidpi() {
+    run_fake_gl_smoke_dpr("games/match3", "2");
 }
 
 // Chess: the fake-GL harness is game-agnostic (drives web_run_frame). Chess

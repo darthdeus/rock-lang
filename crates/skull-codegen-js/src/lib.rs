@@ -670,7 +670,7 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable) 
   var fake = globalThis.__STONE_WEB_FAKE_ENV;
   if (fake) {
     __SW.gl = fake.gl;
-    __SW.logicalW = width; __SW.logicalH = height; __SW.dpr = 1;
+    __SW.logicalW = width; __SW.logicalH = height; __SW.dpr = fake.dpr || 1;
     __SW.initialized = true;
     return { __sw_window: true };
   }
@@ -820,13 +820,24 @@ function __sw_target_size() {
   }
   return [Math.round(__SW.logicalW * __SW.dpr), Math.round(__SW.logicalH * __SW.dpr)];
 }
+// Ortho size for the bound target. The default FB is LOGICAL, not backing:
+// geometry, screen_size() and mouse are all logical units, and the viewport
+// (backing-sized) does the dpr upscale. A backing-sized ortho here renders the
+// scene at 1/dpr and desyncs clicks from pixels on any dpr != 1 display.
+function __sw_ortho_size() {
+  if (__SW.boundCanvas !== 0) {
+    var c = __SW.canvases[__SW.boundCanvas];
+    if (c) return [c.w, c.h];
+  }
+  return [__SW.logicalW, __SW.logicalH];
+}
 
 // Ortho uProjection (2/w, -2/h Y-down, sized to the bound target), uView =
 // translate(ox*scale, oy*scale)*scale, uTransform identity (sprite.rs:223-282).
 function stone_set_camera(shader, ox, oy, scale) {
   var gl = __SW.gl, sh = __SW.shaders[shader];
   if (!gl || !sh) return;
-  var wh = __sw_target_size(), w = wh[0], h = wh[1];
+  var wh = __sw_ortho_size(), w = wh[0], h = wh[1];
   var proj = new Float32Array([2/w,0,0,0, 0,-2/h,0,0, 0,0,-1,0, -1,1,0,1]);
   var view = new Float32Array([scale,0,0,0, 0,scale,0,0, 0,0,1,0, ox*scale,oy*scale,0,1]);
   var prev = __SW.curShader;
@@ -947,7 +958,10 @@ function stone_clear_canvas_int(drawBuffer, value) {}
 function stone_canvas_attach_id_target(canvasH, idH) { return false; } // single-buffer fallback on web
 function stone_set_present_viewport(active, x, y, w, h) {
   var gl = __SW.gl;
-  if (active) gl.viewport(x, y, w, h);
+  // Args arrive in logical units (PRESENT_OFFSET/SIZE, computed from
+  // screen_size()); GL viewports are backing pixels.
+  var d = __SW.dpr;
+  if (active) gl.viewport(Math.round(x * d), Math.round(y * d), Math.round(w * d), Math.round(h * d));
   else { var wh = __sw_target_size(); gl.viewport(0, 0, wh[0], wh[1]); }
 }
 function stone_supports_float_canvas() {
@@ -1408,7 +1422,7 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   if (cur === 0) {
     // Standalone caller: bound-target pixel ortho + identity view/transform
     // (native set_default_sprite_uniforms).
-    var wh = __sw_target_size();
+    var wh = __sw_ortho_size();
     var proj = new Float32Array([2 / wh[0], 0, 0, 0, 0, -2 / wh[1], 0, 0, 0, 0, -1, 0, -1, 1, 0, 1]);
     var lp = __sw_uloc(sh2, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
     var lv = __sw_uloc(sh2, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, __SW_IDENTITY);
