@@ -509,23 +509,30 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
     let needs_video = rock_host::engine_build::game_requests_video(game_path)?
         && std::path::Path::new("stone-video").exists();
 
-    // Two invocations are required. A single `cargo build -p stone-rs
-    // -p rock-cli --bin rock` builds only the `rock` bin (the `--bin`
-    // filter narrows to that target across all listed packages), so
-    // stone-rs's cdylib never gets compiled and the subsequent
-    // stage_cdylib trips on a missing libstone_rs.dylib in fresh
-    // checkouts / worktrees. Build the engine libs (no --bin filter)
-    // first, then the compiler bin.
+    // Two invocations are required. A single `cargo build --lib --bin rock`
+    // builds only the `rock` bin (the `--bin` filter narrows targets across
+    // the whole selection), so stone-rs's cdylib never gets compiled and the
+    // subsequent stage_cdylib trips on a missing libstone_rs.dylib in fresh
+    // checkouts / worktrees. Build the engine libs (no --bin filter) first,
+    // then the compiler bin.
+    //
+    // Neither call passes `-p`: resolver-2 unifies features over the SELECTED
+    // packages only, so a narrower selection is a distinct feature resolution
+    // and rebuilds every shared dep plus the whole compiler stack under a
+    // second -C metadata. Keeping both on the default-member selection matches
+    // the justfile's `cargo run --bin rock` and keeps one set of artifacts.
     info!("Building engine + compiler (cargo)...");
 
-    let mut lib_args: Vec<&str> = vec!["build", "-p", "stone-rs"];
+    rock_host::engine_build::run_cargo(&["build", "--lib"], "Failed to build engine libs")?;
     if needs_video {
-        lib_args.extend(["-p", "stone-video"]);
+        rock_host::engine_build::run_cargo(
+            &["build", "-p", "stone-video"],
+            "Failed to build stone-video",
+        )?;
     }
-    rock_host::engine_build::run_cargo(&lib_args, "Failed to build engine libs")?;
 
     rock_host::engine_build::run_cargo(
-        &["build", "-p", "rock-cli", "--bin", "rock"],
+        &["build", "--bin", "rock"],
         "Failed to build rock compiler",
     )?;
 
