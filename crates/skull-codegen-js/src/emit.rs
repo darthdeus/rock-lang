@@ -3115,29 +3115,14 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
     match (cf.name.as_str(), cf.param_decls.len()) {
         ("tostring", 1) => Some("lua_tostring($1)"),
         ("__rock_format_float", 1) => Some("__rock_format_float($1)"),
-        // Numeric casts: host-mapped, NOT inline(js) siblings -- a same-sig
-        // sibling makes a fn-VALUE reference ambiguous in bone (these are
-        // taken as values in user code, e.g. tests/function_ref_cross_module).
+        // `int_to_float`/`to_float` are pure `$1` identities (JS numbers are all
+        // doubles): a call-site host template inlines with zero cost and neither
+        // is ever taken as a value, so a co-emitted identity fn would be strictly
+        // worse. `float_to_int` (taken as a value in tests/function_ref_cross_module)
+        // is an inline(js) sibling in the stdlib instead -- the fn-value path now
+        // collapses backend siblings, so it needs a real bound fn, not a template.
         ("int_to_float", 1) => Some("$1"),
         ("to_float", 1) => Some("$1"),
-        ("float_to_int", 1) => Some("Math.floor($1)"),
-        // stone-web: fn-VALUE-taken externs (anvil's FmFs adapter takes the fs
-        // cluster + get_time as values) -- an extern(js) sibling would make
-        // the reference ambiguous in bone; the prelude globals are called by
-        // bare name via these templates instead.
-        ("stone_is_directory", 1) => Some("stone_is_directory($1)"),
-        ("stone_file_exists", 1) => Some("stone_file_exists($1)"),
-        ("stone_file_size", 1) => Some("stone_file_size($1)"),
-        ("stone_file_mtime", 1) => Some("stone_file_mtime($1)"),
-        ("stone_file_modtime", 1) => Some("stone_file_modtime($1)"),
-        ("stone_create_directory", 1) => Some("stone_create_directory($1)"),
-        ("stone_copy_file", 2) => Some("stone_copy_file($1, $2)"),
-        ("stone_copy_recursive", 2) => Some("stone_copy_recursive($1, $2)"),
-        ("stone_rename", 2) => Some("stone_rename($1, $2)"),
-        ("stone_remove_file", 1) => Some("stone_remove_file($1)"),
-        ("stone_remove_dir", 1) => Some("stone_remove_dir($1)"),
-        ("stone_file_sync", 1) => Some("stone_file_sync($1)"),
-        ("stone_get_time", 0) => Some("stone_get_time()"),
         // `phantom<T>()` is a nil placeholder (iterator `done`, post-`error`
         // unreachable). `__debug_traceback` is error-message-only (never on
         // stdout, so an empty string suffices). `is_null` mirrors `== nil`.

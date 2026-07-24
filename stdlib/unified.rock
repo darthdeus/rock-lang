@@ -1284,15 +1284,17 @@ fn expect<T>(value: T?, message: string) -> T {
 @intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
 @intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
 
-// JS: host-template mapped (`host_fn_template` in skull-codegen-js), NOT
-// inline(js) siblings -- a same-sig sibling makes a fn-VALUE reference
-// ambiguous in bone (`float_to_int` is taken as a value in user code).
+// `float_to_int` is taken as a fn VALUE (tests/function_ref_cross_module), so
+// it needs a real bound JS fn, not a call-site template: an inline(js) sibling
+// of the inline(lua) body. bone collapses the same-name backend pair to one
+// logical fn in the value path, so the reference / call binds the right variant.
 inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
     return math.floor(value)
 """
+inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
 
