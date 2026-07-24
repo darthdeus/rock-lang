@@ -125,7 +125,7 @@ fn signature_key(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
 /// group whose backends are all distinct collapses to its lowest-rank member; a
 /// group with a repeated backend (a genuine duplicate) is kept whole so the tie
 /// still surfaces as an "Ambiguous overload" error.
-fn collapse_backend_variants(
+pub(crate) fn collapse_backend_variants(
     gamma: &Gamma,
     candidates: &[(ModuleId, Idx<Function>)],
 ) -> Vec<(ModuleId, Idx<Function>)> {

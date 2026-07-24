@@ -617,7 +617,13 @@ pub fn infer_expr_used(
 
             Some(ty) => ty,
 
-            None => match resolve_callee(gamma, *name).as_slice() {
+            // A backend-variant sibling pair (same name, same signature,
+            // different `backend`) is ONE logical fn; collapse it to a single
+            // representative before deciding value-ness, exactly as the call
+            // path does. Genuine overloads (different signatures) survive and
+            // still reject below.
+            None => match collapse_backend_variants(gamma, &resolve_callee(gamma, *name)).as_slice()
+            {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();
 

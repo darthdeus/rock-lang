@@ -1,0 +1,40 @@
+//! A backend-variant sibling pair (same name, same param signature, different
+//! `backend`) is ONE logical function -- taking it as a VALUE must collapse to
+//! one candidate exactly as the call path does (`collapse_backend_variants` in
+//! calls.rs). Before the fn-value collapse landed this rejected with "ambiguous
+//! fn-value reference (overloaded)", which broke the NATIVE anvil FmFs adapter
+//! (it stores `stone_*` externs -- each with an extern(js) sibling -- as struct
+//! fields). Genuinely overloaded names (different signatures) still reject as
+//! fn-values: see `fn_value_overload_rejects` in the structural tests.
+
+// a portable Rock fn + a same-signature extern(js) sibling, taken as a value.
+//- portable_plus_extern_js_sibling
+fn now() -> float { return 1.0 }
+extern(js) fn now() -> float
+fn use_it() -> float {
+    let g = now
+      //^ fn() -> float
+    return g()
+}
+
+// an ffi-style extern + a same-signature extern(js) sibling, taken as an arg to
+// a higher-order fn (the FmFs field-store shape).
+//- extern_pair_as_argument
+extern(ffi, "stone") fn get_time() -> float
+extern(js) fn get_time() -> float
+fn call_it(f: fn() -> float) -> float { return f() }
+fn use_it() -> float {
+    let t = call_it(get_time)
+      //^ float
+    return t
+}
+
+// an inline(lua) fn + a same-signature inline(js) sibling, taken as a value.
+//- inline_pair_as_value
+inline(lua) fn dbl(x: int) -> int = """return x + x"""
+inline(js) fn dbl(x: int) -> int = """return x * 2"""
+fn use_it() -> int {
+    let g = dbl
+      //^ fn(int) -> int
+    return g(21)
+}

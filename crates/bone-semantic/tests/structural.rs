@@ -1710,3 +1710,28 @@ fn main() {
         "T must resolve to the concrete instantiation per call site"
     );
 }
+
+// A genuine overload (same name, DIFFERENT signatures) taken as a fn-value must
+// STILL reject -- the backend-variant collapse only merges same-signature
+// cross-backend siblings, never real overloads (which have no single value type).
+#[test]
+fn fn_value_genuine_overload_rejects() {
+    let src = r#"
+fn pick(x: int) -> int { return x }
+fn pick(x: float) -> float { return x }
+fn use_it() -> int {
+    let g = pick
+    return g(1)
+}
+"#;
+    let msgs = check(src)
+        .expect("semantic_pass")
+        .inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten().cloned().collect::<Vec<_>>())
+        .map(|e| e.message)
+        .collect::<Vec<_>>();
+    assert!(
+        msgs.iter().any(|m| m.contains("ambiguous fn-value reference `pick`")),
+        "a real overload as a value must stay ambiguous, got: {msgs:?}"
+    );
+}
