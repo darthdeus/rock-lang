@@ -80,20 +80,26 @@ fn web_fake_gl_smoke_chess() {
     run_fake_gl_smoke("games/chess");
 }
 
-#[test]
-fn web_chrome_screenshot_nonblank_with_text() {
+// One headless-Chrome screenshot smoke: build the game's web dir, serve it over
+// HTTP (`fetch` of preloaded assets is CORS-blocked on file:// -- "serve with
+// any static file server" is the deliverable's contract), screenshot after
+// `budget_ms` of virtual time, and assert (a) the canvas2d glyph atlas baked
+// (real TTF fetched + baked) and (b) the frame clears the >=8-quantized-color
+// blank bar. Budget note: software-WebGL (swiftshader) boot can outlast a small
+// budget (blank pre-first-frame capture), while a much larger one over-runs
+// swiftshader's staging pool after the frame is already captured -- 10s works
+// for match3/chess; mag's larger preload gets 30s.
+fn run_chrome_screenshot(game: &str, budget_ms: u32, subject: &str) {
     let chrome = ["google-chrome", "google-chrome-stable", "chromium"]
         .iter()
         .find(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false));
     let Some(chrome) = chrome else {
-        eprintln!("SKIP web_chrome_screenshot_nonblank_with_text: no chrome on PATH");
+        eprintln!("SKIP chrome screenshot ({game}): no chrome on PATH");
         return;
     };
     let dir = tempfile::tempdir().expect("tempdir");
-    build_web("games/match3", dir.path());
+    build_web(game, dir.path());
 
-    // Serve over HTTP: `fetch` of the preloaded TTF is CORS-blocked on file://
-    // ("serve with any static file server" is the deliverable's contract).
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -115,23 +121,20 @@ fn web_chrome_screenshot_nonblank_with_text() {
             "--enable-logging=stderr",
             "--v=0",
             "--window-size=1280,720",
-            // 10s virtual budget: software-WebGL (swiftshader) boot can outlast
-            // a smaller budget and yield a blank pre-first-frame capture.
-            "--virtual-time-budget=10000",
         ])
+        .arg(format!("--virtual-time-budget={budget_ms}"))
         .arg(format!("--screenshot={}", shot.display()))
         .arg(format!("http://127.0.0.1:{port}/index.html"))
         .output()
         .expect("spawn chrome");
     let _ = server.kill();
     let _ = server.wait();
-    assert!(out.status.success(), "chrome exited non-zero");
+    assert!(out.status.success(), "chrome exited non-zero ({game})");
 
-    // MC observable: the canvas2d atlas bake ran (real TTF fetched + baked).
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("font atlas baked"),
-        "canvas2d glyph atlas did not bake (no 'font atlas baked' console line).\nchrome stderr tail:\n{}",
+        "canvas2d glyph atlas did not bake ({game}).\nchrome stderr tail:\n{}",
         &stderr[stderr.len().saturating_sub(2000)..]
     );
 
@@ -145,78 +148,38 @@ fn web_chrome_screenshot_nonblank_with_text() {
     }
     assert!(
         colors.len() >= 8,
-        "screenshot looks blank ({} distinct quantized colors); match3 tiles should produce many",
+        "screenshot looks blank ({} distinct quantized colors); {subject} should produce many",
         colors.len()
     );
 }
 
-// Chess in real headless Chrome: serves the build over HTTP (14 MB of book/
-// opening/sound assets + font are fetched before main), bakes the glyph atlas,
-// and the rendered board (light/dark tiles + pieces + side panels) must clear
-// the >=8-color bar. The 10s virtual budget matches match3 -- a larger budget
-// over-runs software-WebGL (swiftshader exhausts its staging pool and loses the
-// context, exiting non-zero) after the frame is already captured.
+#[test]
+fn web_chrome_screenshot_nonblank_with_text() {
+    run_chrome_screenshot("games/match3", 10000, "match3 tiles");
+}
+
+// Chess in real headless Chrome: 14 MB of book/opening/sound assets + font are
+// fetched before main; the rendered board (light/dark tiles + pieces + side
+// panels) must clear the color bar.
 #[test]
 fn web_chrome_screenshot_nonblank_chess() {
-    let chrome = ["google-chrome", "google-chrome-stable", "chromium"]
-        .iter()
-        .find(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false));
-    let Some(chrome) = chrome else {
-        eprintln!("SKIP web_chrome_screenshot_nonblank_chess: no chrome on PATH");
-        return;
-    };
-    let dir = tempfile::tempdir().expect("tempdir");
-    build_web("games/chess", dir.path());
+    run_chrome_screenshot("games/chess", 10000, "the chess board");
+}
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    let mut server = Command::new("python3")
-        .args(["-m", "http.server", &port.to_string(), "-d"])
-        .arg(dir.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn http.server");
-    std::thread::sleep(std::time::Duration::from_millis(300));
+// mag (v2 tier) in the node fake-GL env: boots through global init, the whole
+// @init image-load phase (no fetch -> every stone_load_image takes the loud
+// white-pixel fallback rung), and runs 10 full frames of the world render.
+#[test]
+fn web_fake_gl_smoke_mag() {
+    run_fake_gl_smoke("mag");
+}
 
-    let shot = dir.path().join("shot.png");
-    let out = Command::new(chrome)
-        .args([
-            "--headless=new",
-            "--no-sandbox",
-            "--enable-unsafe-swiftshader",
-            "--enable-logging=stderr",
-            "--v=0",
-            "--window-size=1280,720",
-            "--virtual-time-budget=10000",
-        ])
-        .arg(format!("--screenshot={}", shot.display()))
-        .arg(format!("http://127.0.0.1:{port}/index.html"))
-        .output()
-        .expect("spawn chrome");
-    let _ = server.kill();
-    let _ = server.wait();
-    assert!(out.status.success(), "chrome exited non-zero");
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("font atlas baked"),
-        "canvas2d glyph atlas did not bake (no 'font atlas baked' console line).\nchrome stderr tail:\n{}",
-        &stderr[stderr.len().saturating_sub(2000)..]
-    );
-
-    let img = image::open(&shot).expect("read screenshot").to_rgba8();
-    let mut colors = std::collections::HashSet::new();
-    for p in img.pixels() {
-        colors.insert((p[0] / 16, p[1] / 16, p[2] / 16));
-        if colors.len() >= 8 {
-            break;
-        }
-    }
-    assert!(
-        colors.len() >= 8,
-        "screenshot looks blank ({} distinct quantized colors); the chess board should produce many",
-        colors.len()
-    );
+// mag in real headless Chrome: ~250 MB of sprite sheets/audio/levels preload
+// before main(), textures decode to ImageBitmaps and upload at @init, and the
+// rendered scene (tile floor, walls, characters, glyph HUD) must clear the
+// color bar. 30s virtual budget: the preload + first frame outlast the 10s the
+// small games use.
+#[test]
+fn web_chrome_screenshot_nonblank_mag() {
+    run_chrome_screenshot("mag", 30000, "the mag scene");
 }
