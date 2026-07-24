@@ -1928,6 +1928,7 @@ function __rock_web_arm_raf(frameFn) {
   var fake = globalThis.__STONE_WEB_FAKE_ENV;
   if (fake && fake.driveFrames) return; // harness drives frames itself
   function tick() {
+    __SW.frames = (__SW.frames | 0) + 1; // driver-observable frame count (CDP smoke)
     var running = true;
     try { running = frameFn(); }
     catch (e) { console.error("[STONE-WEB] frame error:", e); running = false; }

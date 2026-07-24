@@ -174,12 +174,73 @@ fn web_fake_gl_smoke_mag() {
     run_fake_gl_smoke("mag");
 }
 
-// mag in real headless Chrome: ~250 MB of sprite sheets/audio/levels preload
-// before main(), textures decode to ImageBitmaps and upload at @init, and the
-// rendered scene (tile floor, walls, characters, glyph HUD) must clear the
-// color bar. 30s virtual budget: the preload + first frame outlast the 10s the
-// small games use.
+// mag in real headless Chrome, CDP-driven: the virtual-time screenshot path
+// deterministically races mag's first present (~175 MB preload; frame 1 does
+// every shader compile + texture upload under swiftshader), so the driver
+// (tools/web/chrome_cdp_smoke.js) waits for 30 REAL frames instead, then
+// verifies PICKING end-to-end -- an injected click on the player must flow
+// MRT FragId write -> R32I attachment -> async PBO readback -> SELECTION ->
+// `last_click_target == ClickTarget::Player` -- and captures the screenshot
+// for the non-blank color bar.
 #[test]
-fn web_chrome_screenshot_nonblank_mag() {
-    run_chrome_screenshot("mag", 30000, "the mag scene");
+fn web_chrome_screenshot_and_click_pick_mag() {
+    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("SKIP web_chrome_screenshot_and_click_pick_mag: node not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_web("mag", dir.path());
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut server = Command::new("python3")
+        .args(["-m", "http.server", &port.to_string(), "-d"])
+        .arg(dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn http.server");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let shot = dir.path().join("shot.png");
+    let driver = repo_root().join("tools/web/chrome_cdp_smoke.js");
+    let out = Command::new("node")
+        .arg(&driver)
+        .arg(format!("http://127.0.0.1:{port}/index.html"))
+        .arg(&shot)
+        .args(["--frames", "30"])
+        // The player renders at ~(950, 465) in the fixed level's boot camera
+        // (1280x720 window crop of the 1920x1080 canvas).
+        .args(["--click", "950", "465"])
+        .args(["--expect", "__G.last_click_target && __G.last_click_target.__variant"])
+        .args(["--value", "Player"])
+        .output()
+        .expect("spawn cdp driver");
+    let _ = server.kill();
+    let _ = server.wait();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("SKIP: no chrome") {
+        eprintln!("SKIP web_chrome_screenshot_and_click_pick_mag: no chrome on PATH");
+        return;
+    }
+    assert!(
+        out.status.success() && stdout.contains("PASS"),
+        "mag CDP smoke failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let img = image::open(&shot).expect("read screenshot").to_rgba8();
+    let mut colors = std::collections::HashSet::new();
+    for p in img.pixels() {
+        colors.insert((p[0] / 16, p[1] / 16, p[2] / 16));
+        if colors.len() >= 8 {
+            break;
+        }
+    }
+    assert!(
+        colors.len() >= 8,
+        "screenshot looks blank ({} distinct quantized colors); the mag scene should produce many",
+        colors.len()
+    );
 }
