@@ -2693,7 +2693,7 @@ fn order_global_inits(
 
     // Transitive closure: closure[f] |= closure[callee], to a fixpoint.
     let mut id_of: HashMap<ustr::Ustr, usize> = HashMap::new();
-    let mut intern = |s: ustr::Ustr, id_of: &mut HashMap<ustr::Ustr, usize>| -> usize {
+    let intern = |s: ustr::Ustr, id_of: &mut HashMap<ustr::Ustr, usize>| -> usize {
         let next = id_of.len();
         *id_of.entry(s).or_insert(next)
     };
