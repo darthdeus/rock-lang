@@ -29,10 +29,12 @@ fn emit_program(src: &str) -> String {
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit").lua
 }
 
-fn run_luajit(prog: &str) -> String {
+fn run_luajit(test: &str, prog: &str) -> String {
     use std::process::Command;
+    // Keyed per TEST, not per process: `cargo test` runs both tests
+    // concurrently in one process, so a pid-only name races.
     let path =
-        std::env::temp_dir().join(format!("skull_mangle_reload_{}.lua", std::process::id()));
+        std::env::temp_dir().join(format!("skull_mangle_reload_{}_{}.lua", test, std::process::id()));
     std::fs::write(&path, prog).expect("write program");
     let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
@@ -89,7 +91,7 @@ fn body_edit_without_overload_hot_reloads_running_code() {
          _G.HOT_RELOAD = true\n{after}\n\
          print('old_probe=' .. old_probe())\n"
     );
-    let out = run_luajit(&script);
+    let out = run_luajit("control", &script);
     assert_eq!(
         out, "old_probe=52",
         "control: a bare-name body edit must reach surviving GETGLOBAL callers; got: {out}"
@@ -128,7 +130,7 @@ fn overload_add_orphans_running_global_sentinel() {
          print('canonical=' .. foo__int_ret_int(5))\n\
          print('bare_foo_present=' .. tostring(_G.foo ~= nil))\n"
     );
-    let out = run_luajit(&script);
+    let out = run_luajit("overload", &script);
     let stale = out.lines().find(|l| l.starts_with("stale=")).unwrap();
     let canon = out.lines().find(|l| l.starts_with("canonical=")).unwrap();
     let bare = out.lines().find(|l| l.starts_with("bare_foo_present=")).unwrap();
