@@ -2557,9 +2557,15 @@ impl Builder<'_> {
             // A bare name resolving to a FUNCTION taken by value (`let f = adder`,
             // passing `adder` as an arg, a `func: adder` field) must reference the
             // fn's MANGLED emitted symbol -- every non-exempt fn mangles, so a bare
-            // `Inst::Global(name)` would read a nil global. A real global variable
-            // keeps its bare name.
-            Expr::Global(name) if self.ws.functions_by_name.contains_key(&name) => {
+            // `Inst::Global(name)` would read a nil global. The JS backend is the
+            // exception: it resolves fn-values through its own discovery keyed on
+            // the SURFACE name (`discover_globals` -> `callee_js_name`), so it keeps
+            // the bare name and mangles at its own emit boundary. A real global
+            // variable keeps its bare name on every target.
+            Expr::Global(name)
+                if self.scx.target != bone_semantic::hir::FnBackend::Js
+                    && self.ws.functions_by_name.contains_key(&name) =>
+            {
                 let sym = self.fn_value_symbol(e, name)?;
                 Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
             }
