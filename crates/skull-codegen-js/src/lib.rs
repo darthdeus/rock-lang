@@ -1686,8 +1686,53 @@ function stone_mesh_set_instances(h, data, count, stride, sizes, ac) {}
 function stone_mesh_draw(h, tex, count) {}
 function stone_mesh_free(h) {}
 
+// Immediate polygon (shapes.rs port): fan-triangulate into the 10-float mesh
+// format and submit through stone_draw_mesh under the caller's bound program
+// (the shadowmap visibility fans + glow quads ride this). "fill" fans from
+// vertex 0; outline mode draws 1px-wide rotated line quads per edge.
+function __sw_fill_shape_vertex(out, o, x, y, u, v, r, g, b, a) {
+  out[o] = x; out[o+1] = y; out[o+2] = u; out[o+3] = v;
+  out[o+4] = r; out[o+5] = g; out[o+6] = b; out[o+7] = a;
+  out[o+8] = 0; out[o+9] = 0;
+}
+function __sw_draw_line_quad(x1, y1, x2, y2, w, r, g, b, a) {
+  var dx = x2 - x1, dy = y2 - y1;
+  var len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 0.001) return;
+  var ang = Math.atan2(dy, dx), ca = Math.cos(ang), sa = Math.sin(ang);
+  var cx = (x1 + x2) * 0.5, cy = (y1 + y2) * 0.5;
+  var hl = len * 0.5, hw = w * 0.5;
+  var ox = cx - (hl * ca - hw * sa), oy = cy - (hl * sa + hw * ca);
+  var corners = [[0, 0], [len, 0], [len, w], [0, w]];
+  var uvs = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  var rot = corners.map(function (c) { return [ox + c[0] * ca - c[1] * sa, oy + c[0] * sa + c[1] * ca]; });
+  var idx = [0, 1, 2, 0, 2, 3];
+  var out = new Float32Array(6 * 10);
+  for (var i = 0; i < 6; i++) {
+    var k = idx[i];
+    __sw_fill_shape_vertex(out, i * 10, rot[k][0], rot[k][1], uvs[k][0], uvs[k][1], r, g, b, a);
+  }
+  stone_draw_mesh(out, 6, 10, stone_get_white_image());
+}
 function stone_draw_polygon(mode, verts, n, r, g, b, a) {
-  __sw_log_once("stone_draw_polygon: immediate shapes not implemented on web yet");
+  if (!verts || n < 3) return;
+  if (mode === "fill" || mode == null) {
+    var tris = n - 2;
+    var out = new Float32Array(tris * 3 * 10);
+    var vi = 0;
+    var v0x = verts[0], v0y = verts[1];
+    for (var i = 0; i < tris; i++) {
+      __sw_fill_shape_vertex(out, vi, v0x, v0y, 0.5, 0.5, r, g, b, a); vi += 10;
+      __sw_fill_shape_vertex(out, vi, verts[(i + 1) * 2], verts[(i + 1) * 2 + 1], 0.5, 0.5, r, g, b, a); vi += 10;
+      __sw_fill_shape_vertex(out, vi, verts[(i + 2) * 2], verts[(i + 2) * 2 + 1], 0.5, 0.5, r, g, b, a); vi += 10;
+    }
+    stone_draw_mesh(out, tris * 3, 10, stone_get_white_image());
+  } else {
+    for (var j = 0; j < n; j++) {
+      var next = (j + 1) % n;
+      __sw_draw_line_quad(verts[j * 2], verts[j * 2 + 1], verts[next * 2], verts[next * 2 + 1], 1.0, r, g, b, a);
+    }
+  }
 }
 
 function stone_set_color_mask(r, g, b, a) { var gl = __SW.gl; if (gl) gl.colorMask(r, g, b, a); }
