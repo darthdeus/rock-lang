@@ -1776,6 +1776,7 @@ fn emit_program_core(
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+                &mut st.inline_js,
             )?;
             deco_bodies.push((deco_name, mf));
         }
@@ -2018,6 +2019,7 @@ fn drain_worklists(
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+                &mut st.inline_js,
             )?;
             st.lowered.push((fr, mf));
             continue;
@@ -2039,6 +2041,7 @@ fn drain_worklists(
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+                &mut st.inline_js,
             )?;
             st.ginits.push(GlobalInit { name: gname, init_name, mf });
             continue;
@@ -2478,6 +2481,7 @@ fn discover_globals(
     names: &mut HashMap<FuncRef, String>,
     queue: &mut Vec<FuncRef>,
     seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
     for name in global_refs(mf) {
         if enum_defs.contains_key(&name) {
@@ -2496,9 +2500,7 @@ fn discover_globals(
         } else if let Some(&[(module, func)]) =
             ws.functions_by_name.get(&name).map(|l| l.as_slice())
         {
-            // A NON-overloaded top-level fn used as a value; an overloaded name has
-            // no unique MIR resolution (as on luajit, which emits the bare name),
-            // so it is left rejecting.
+            // A NON-overloaded top-level fn used as a value.
             let fr = FuncRef { module, func };
             let jsname = callee_js_name(ws, fr);
             gctx.fns.entry(name).or_insert_with(|| jsname.clone());
@@ -2506,9 +2508,80 @@ fn discover_globals(
                 names.insert(fr, jsname);
                 queue.push(fr);
             }
+        } else if let Some(cands) = ws.functions_by_name.get(&name) {
+            // A backend-variant sibling pair (same name, same signature,
+            // different backend) used as a VALUE. bone accepts it (collapses to
+            // one logical fn) exactly as the call path does; JS resolves to the
+            // variant serving this target, mirroring `select_backend_variant`. A
+            // real overload (distinct signatures) is rejected by bone before
+            // emit, so `select_js_value_variant` only ever sees a sibling group
+            // here; it returns `None` (leave rejecting) for a lua-only group.
+            if let Some(fr) = select_js_value_variant(ws, &cands) {
+                register_fn_value_variant(ws, name, fr, gctx, names, queue, seen, inline_js);
+            }
         }
     }
     Ok(())
+}
+
+/// The variant of a same-name backend-sibling group that serves the JS target:
+/// an exact `Js` decl (inline(js)/extern(js)) wins, else the portable `Any`
+/// fallback. `None` means the group has neither -- a lua-only fn taken as a
+/// value from JS-reachable code, which stays rejecting (no JS binding).
+fn select_js_value_variant(
+    ws: &Workspace,
+    cands: &[(bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::Function>)],
+) -> Option<FuncRef> {
+    use bone_semantic::hir::FnBackend;
+    let backend_of =
+        |&(m, f): &(bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::Function>)| {
+            ws.module(m).functions[f].backend
+        };
+    cands
+        .iter()
+        .find(|c| backend_of(c) == FnBackend::Js)
+        .or_else(|| cands.iter().find(|c| backend_of(c) == FnBackend::Any))
+        .map(|&(module, func)| FuncRef { module, func })
+}
+
+/// Register a fn-value variant `fr` (already selected for this target) the same
+/// way `discover_callees` registers a callee by kind: an inline(js) body co-emits
+/// verbatim, an extern(js) decl binds its bare driver name (no def), a plain-Rock
+/// fn lowers normally. In every case `gctx.fns[name]` maps the surface name (what
+/// the `Inst::Global` read carries) to the emitted JS identifier.
+#[allow(clippy::too_many_arguments)]
+fn register_fn_value_variant(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    fr: FuncRef,
+    gctx: &mut GlobalCtx,
+    names: &mut HashMap<FuncRef, String>,
+    queue: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
+) {
+    use bone_semantic::hir::FnBackend;
+    let cf = &ws.module(fr.module).functions[fr.func];
+    if matches!(cf.inline_body, Some((FnBackend::Js, _))) {
+        let jsname = callee_js_name(ws, fr);
+        gctx.fns.entry(name).or_insert_with(|| jsname.clone());
+        if seen.insert(fr) {
+            names.insert(fr, jsname);
+            inline_js.push(fr);
+            scan_inline_js_body(ws, fr, names, queue, seen, inline_js);
+        }
+    } else if cf.is_extern && cf.backend == FnBackend::Js {
+        gctx.fns.entry(name).or_insert_with(|| cf.name.to_string());
+        names.entry(fr).or_insert_with(|| cf.name.to_string());
+    } else {
+        // A portable (`Any`) Rock body -- lower it to JS like any other callee.
+        let jsname = callee_js_name(ws, fr);
+        gctx.fns.entry(name).or_insert_with(|| jsname.clone());
+        if seen.insert(fr) {
+            names.insert(fr, jsname);
+            queue.push(fr);
+        }
+    }
 }
 
 /// Order the global-init assignment lines so each global inits AFTER every global
