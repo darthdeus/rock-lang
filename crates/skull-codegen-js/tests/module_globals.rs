@@ -92,6 +92,25 @@ fn derived_global_init_order() {
     eval_int(&js, "root", 105);
 }
 
+// TRANSITIVE init order: `global ACT = register(..)` where the `REG` read lives
+// inside `register`, NOT the init expression. The order must still place REG's
+// init first -- a shallow "reads in the init body" edge misses it (mag's
+// ACTIONS / action_new boot crash, `__G.ACTIONS undefined` at load).
+#[test]
+fn transitive_global_init_order_through_call() {
+    let src = "global REG: Map<string, int> = map_new()\n\
+               fn register(k: string) -> int { REG[k] = 1; return 42 }\n\
+               global ACT: int = register(\"x\")\n\
+               fn root() -> int { ACT }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("transitive global emits");
+    // REG's init line must precede ACT's.
+    let reg_at = js.find("__G.REG = ").expect("REG init emitted");
+    let act_at = js.find("__G.ACT = ").expect("ACT init emitted");
+    assert!(reg_at < act_at, "REG must init before ACT (transitive dep):\n{js}");
+    eval_int(&js, "root", 42);
+}
+
 // A top-level fn referenced as a value: Inst::Global naming a function.
 #[test]
 fn fn_as_value() {

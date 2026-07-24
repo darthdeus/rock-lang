@@ -1710,7 +1710,7 @@ pub fn emit_with_closure(
             out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
         }
     }
-    for line in order_global_inits(&st.ginits)? {
+    for line in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
         out.push_str(&line);
     }
     for (fr, mf) in &st.lowered {
@@ -1867,7 +1867,7 @@ fn emit_program_core(
         }
     }
     // 4. load-time init lines (dependency-ordered).
-    for line in order_global_inits(&st.ginits)? {
+    for line in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
         out.push_str(&line);
     }
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
@@ -2636,29 +2636,147 @@ fn register_fn_value_variant(
     }
 }
 
+/// Static callee emit-names of `mf` (`Call`/`CallMulti`), resolved through
+/// `names` (+ nested fns). Indirect (fn-value) and bound calls are not statically
+/// resolvable and contribute no ordering edge -- parity with the luajit backend's
+/// direct-call facts (`skull::mir_emit::direct_calls`).
+fn direct_callees(mf: &MirFunc, names: &HashMap<FuncRef, String>) -> Vec<ustr::Ustr> {
+    fn walk(mf: &MirFunc, names: &HashMap<FuncRef, String>, out: &mut Vec<ustr::Ustr>) {
+        for (_, block) in mf.blocks.iter() {
+            for &iid in &block.insts {
+                let fr = match &mf.insts[iid] {
+                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
+                    _ => continue,
+                };
+                if let Some(n) = names.get(&fr) {
+                    out.push(ustr::Ustr::from(n.as_str()));
+                }
+            }
+        }
+        for nf in &mf.nested_fns {
+            walk(nf, names, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(mf, names, &mut out);
+    out
+}
+
 /// Order the global-init assignment lines so each global inits AFTER every global
-/// it (transitively) reads: `__G.<name> = <init_name>();`. A round-based topo sort
-/// over the init bodies' state-global reads; a self-read is ignored (`X = X or ..`
-/// style is not expressible here); a genuine cycle rejects.
-fn order_global_inits(ginits: &[GlobalInit]) -> Result<Vec<String>, CompilerError> {
+/// it TRANSITIVELY reads through its call graph: `__G.<name> = <init_name>();`.
+/// A shallow "reads in the init body" edge misses `ACT_UI_CONFIRM = action_new(..)`
+/// where the `ACTIONS` read is inside `action_new`, not the init body -- so build
+/// the transitive global-read closure over every emitted fn (ginits + lowered),
+/// exactly the luajit backend's `transitive_global_reads`. A genuine cycle rejects.
+fn order_global_inits(
+    ginits: &[GlobalInit],
+    lowered: &[(FuncRef, MirFunc)],
+    names: &HashMap<FuncRef, String>,
+) -> Result<Vec<String>, CompilerError> {
+    // Per-fn direct facts, keyed by emit name (ginit = init_name, lowered = js name).
+    let mut direct_globals: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
+    let mut direct_calls: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
+    let mut record = |key: ustr::Ustr, mf: &MirFunc| {
+        direct_globals.insert(key, global_refs(mf));
+        direct_calls.insert(key, direct_callees(mf, names));
+    };
+    for g in ginits {
+        record(ustr::Ustr::from(g.init_name.as_str()), &g.mf);
+    }
+    // Key by the EMIT name (`names[fr]`, mangled) -- that is what `direct_callees`
+    // resolves a call to, NOT the unmangled `mf.name`.
+    for (fr, mf) in lowered {
+        if let Some(emit_name) = names.get(fr) {
+            record(ustr::Ustr::from(emit_name.as_str()), mf);
+        }
+    }
+
+    // Transitive closure: closure[f] |= closure[callee], to a fixpoint.
+    let mut id_of: HashMap<ustr::Ustr, usize> = HashMap::new();
+    let mut intern = |s: ustr::Ustr, id_of: &mut HashMap<ustr::Ustr, usize>| -> usize {
+        let next = id_of.len();
+        *id_of.entry(s).or_insert(next)
+    };
+    for (f, gs) in direct_globals.iter() {
+        intern(*f, &mut id_of);
+        for g in gs {
+            intern(*g, &mut id_of);
+        }
+    }
+    for (f, cs) in direct_calls.iter() {
+        intern(*f, &mut id_of);
+        for c in cs {
+            intern(*c, &mut id_of);
+        }
+    }
+    let n = id_of.len();
+    let mut closure: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (f, gs) in direct_globals.iter() {
+        let fi = id_of[f];
+        for g in gs {
+            closure[fi].insert(id_of[g]);
+        }
+    }
+    for (f, cs) in direct_calls.iter() {
+        let fi = id_of[f];
+        callees[fi].extend(cs.iter().map(|c| id_of[c]));
+    }
+    let mut add: Vec<usize> = Vec::new();
+    loop {
+        let mut changed = false;
+        for fi in 0..n {
+            if callees[fi].is_empty() {
+                continue;
+            }
+            add.clear();
+            for &c in &callees[fi] {
+                for &g in &closure[c] {
+                    if !closure[fi].contains(&g) {
+                        add.push(g);
+                    }
+                }
+            }
+            for &g in &add {
+                if closure[fi].insert(g) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Round-based topo sort over each init's transitive global reads (restricted to
+    // globals that themselves have an init line); source order kept within a round.
+    let mut names_by_id: Vec<ustr::Ustr> = vec![ustr::Ustr::from(""); n];
+    for (&k, &v) in id_of.iter() {
+        names_by_id[v] = k;
+    }
     let known: HashSet<ustr::Ustr> = ginits.iter().map(|g| g.name).collect();
-    let deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = ginits
+    let init_deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = ginits
         .iter()
         .map(|g| {
-            let ds = global_refs(&g.mf)
-                .into_iter()
-                .filter(|n| *n != g.name && known.contains(n))
-                .collect();
+            let ds: HashSet<ustr::Ustr> = match id_of.get(&ustr::Ustr::from(g.init_name.as_str())) {
+                Some(&fi) => closure[fi]
+                    .iter()
+                    .map(|&gid| names_by_id[gid])
+                    .filter(|d| *d != g.name && known.contains(d))
+                    .collect(),
+                None => HashSet::new(),
+            };
             (g.name, ds)
         })
         .collect();
+
     let mut emitted: HashSet<ustr::Ustr> = HashSet::new();
     let mut lines = Vec::with_capacity(ginits.len());
     let mut remaining: Vec<&GlobalInit> = ginits.iter().collect();
     while !remaining.is_empty() {
         let before = remaining.len();
         remaining.retain(|g| {
-            if deps[&g.name].iter().all(|d| emitted.contains(d)) {
+            if init_deps[&g.name].iter().all(|d| emitted.contains(d)) {
                 lines.push(format!("__G.{} = {}();\n", g.name, g.init_name));
                 emitted.insert(g.name);
                 false
