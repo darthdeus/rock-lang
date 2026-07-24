@@ -909,14 +909,24 @@ impl BoneWorkspace {
         let ws = proj.session.workspace();
         let mid = user_module_for_path(ws, path)?;
         let inf = ws.inference(mid)?;
-        // Enum-variant match patterns resolve from the raw AST FIRST (the HIR
-        // pattern node isn't in `node_index`), mirroring the hover path.
-        let pat_def = proj
+        // Raw-AST resolutions run FIRST (the HIR node isn't in `node_index`):
+        // a macro INVOCATION name (erased by expansion -- otherwise the cursor
+        // lands on a spliced body token), then enum-variant match patterns.
+        let raw = proj
             .session
             .files
             .get(path)
-            .and_then(|uf| reparse_user_file(uf, path))
-            .and_then(|ast| crate::query::enum_variant_pattern_def(ws, &ast, offset));
+            .and_then(|uf| reparse_user_file(uf, path));
+        if let Some(ast) = &raw {
+            if let Some(span) =
+                macro_refs::macro_invocation_def(ast, &proj.session.registry, offset)
+            {
+                return self.location_from_span(proj, &span);
+            }
+        }
+        let pat_def = raw
+            .as_ref()
+            .and_then(|ast| crate::query::enum_variant_pattern_def(ws, ast, offset));
         let span = pat_def.or_else(|| gaps::definition(ws, mid, inf, offset))?;
         self.location_from_span(proj, &span)
     }
