@@ -46,26 +46,38 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
     if is_exempt(f) {
         return f.name.to_string();
     }
-    let mut parts: Vec<String> = f.param_decls.iter().map(|pd| encode_ty(ws, pd.ty)).collect();
-    parts.push("ret".to_string());
-    parts.push(match f.return_ty {
-        Some(ty) => encode_ty(ws, ty),
-        None => "unit".to_string(),
-    });
-    format!("{}{SEP}{}", f.name.as_str(), parts.join(SEP))
+    // Append directly into one buffer -- no per-fragment `String`/`Vec` (this is
+    // on the per-call-site codegen path; the old collect+join allocated N+2
+    // strings + a vec per reference).
+    let mut out = String::with_capacity(f.name.len() + 16);
+    out.push_str(f.name.as_str());
+    for pd in &f.param_decls {
+        out.push_str(SEP);
+        encode_into(ws, pd.ty, &mut out);
+    }
+    out.push_str(SEP);
+    out.push_str("ret");
+    out.push_str(SEP);
+    match f.return_ty {
+        Some(ty) => encode_into(ws, ty, &mut out),
+        None => out.push_str("unit"),
+    }
+    out
 }
 
-/// Encode a type into a mangling fragment. No `__` is ever produced: the
-/// separator is `SEP` everywhere (generic nominal `{name}_{args}`, fn types
-/// `fn_{ps}_ret_{r}`, tuples `tupleN_{ps}`).
-fn encode_ty(ws: &Workspace, ty: TyId) -> String {
+/// Append a type's mangling fragment to `out`. Generic nominal `{name}_{args}`,
+/// fn types `fn_{ps}_ret_{r}` (empty `ps` collapses so no `__`), tuples
+/// `tupleN_{ps}`.
+fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
     let te = match ty {
         TyId::Static(m, idx) => ws.module(m).ty_arena[idx],
-        TyId::Local(_) => return "any".to_string(),
+        TyId::Local(_) => {
+            out.push_str("any");
+            return;
+        }
     };
-    let enc = |child| encode_ty(ws, ty.with_idx(child));
     match te {
-        TypeExpr::Builtin(b) => match b {
+        TypeExpr::Builtin(b) => out.push_str(match b {
             hir::BuiltinTy::Any => "any",
             hir::BuiltinTy::Unit => "unit",
             hir::BuiltinTy::Int => "int",
@@ -76,49 +88,64 @@ fn encode_ty(ws: &Workspace, ty: TyId) -> String {
             // Inference-recovery poison; never reaches a real (mangled)
             // signature, but the match must stay exhaustive.
             hir::BuiltinTy::Error => "error",
+        }),
+        TypeExpr::Generic(_, name) | TypeExpr::Infer(_, name) => out.push_str(name.as_str()),
+        TypeExpr::Nullable(inner) => {
+            encode_into(ws, ty.with_idx(inner), out);
+            out.push_str(SEP);
+            out.push_str("opt");
         }
-        .to_string(),
-        TypeExpr::Generic(_, name) | TypeExpr::Infer(_, name) => name.to_string(),
-        TypeExpr::Nullable(inner) => format!("{}{SEP}opt", enc(inner)),
         TypeExpr::App { ctor, params } => {
-            let args = params.into_iter().map(enc).collect::<Vec<_>>().join(SEP);
+            let append_args = |out: &mut String| {
+                for (i, p) in params.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(SEP);
+                    }
+                    encode_into(ws, ty.with_idx(p), out);
+                }
+            };
             match ctor {
                 hir::TypeCtor::Array => {
-                    if args.is_empty() {
-                        "arr".to_string()
-                    } else {
-                        format!("arr{SEP}{args}")
+                    out.push_str("arr");
+                    if !params.is_empty() {
+                        out.push_str(SEP);
+                        append_args(out);
                     }
                 }
-                hir::TypeCtor::Map => format!("map{SEP}{args}"),
+                hir::TypeCtor::Map => {
+                    out.push_str("map");
+                    out.push_str(SEP);
+                    append_args(out);
+                }
                 hir::TypeCtor::Nominal(name) => {
-                    if params.is_empty() {
-                        name.to_string()
-                    } else {
-                        format!("{name}{SEP}{args}")
+                    out.push_str(name.as_str());
+                    if !params.is_empty() {
+                        out.push_str(SEP);
+                        append_args(out);
                     }
                 }
             }
         }
         TypeExpr::Function { params, ret } => {
-            let r = encode_ty(ws, ty.with_idx(ret));
-            let ps = params.into_iter().map(enc).collect::<Vec<_>>().join(SEP);
-            // A nullary fn type (`fn() -> X`) has no param segment; joining an
-            // empty `ps` with SEP on both sides would produce `fn__ret_X` -- the
-            // one `__` this scheme must never emit. Drop the empty segment.
-            if ps.is_empty() {
-                format!("fn{SEP}ret{SEP}{r}")
-            } else {
-                format!("fn{SEP}{ps}{SEP}ret{SEP}{r}")
+            out.push_str("fn");
+            // A nullary fn type (`fn() -> X`) drops the empty param segment so the
+            // result never contains `__`.
+            for p in params {
+                out.push_str(SEP);
+                encode_into(ws, ty.with_idx(p), out);
             }
+            out.push_str(SEP);
+            out.push_str("ret");
+            out.push_str(SEP);
+            encode_into(ws, ty.with_idx(ret), out);
         }
         TypeExpr::Tuple { elements } => {
             let n = elements.into_iter().count();
-            let ps = elements.into_iter().map(enc).collect::<Vec<_>>().join(SEP);
-            if ps.is_empty() {
-                format!("tuple{n}")
-            } else {
-                format!("tuple{n}{SEP}{ps}")
+            out.push_str("tuple");
+            out.push_str(&n.to_string());
+            for e in elements {
+                out.push_str(SEP);
+                encode_into(ws, ty.with_idx(e), out);
             }
         }
     }
@@ -214,8 +241,10 @@ fn ty_key(ws: &Workspace, ty: TyId, out: &mut String) {
 /// deterministic ordering across the rayon-scheduled emit.
 pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     use std::collections::HashMap;
-    // mangled name -> (first sig_key, name_span) for a non-exempt fn.
-    let mut seen: HashMap<String, (String, Span)> = HashMap::new();
+    // mangled name -> (a representative Function, name_span) for a non-exempt fn.
+    // `sig_key` (the structural distinctness check) is computed LAZILY -- only
+    // when two fns hash to the same mangled name, which the corpus proves rare.
+    let mut seen: HashMap<String, (&Function, Span)> = HashMap::new();
     let mut exempt_names: HashMap<String, Span> = HashMap::new();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
 
@@ -226,9 +255,8 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
                 continue;
             }
             let name = mangle_fn(ws, f);
-            let key = sig_key(ws, f);
             match seen.get(&name) {
-                Some((prev_key, _)) if *prev_key != key => {
+                Some((prev, _)) if sig_key(ws, prev) != sig_key(ws, f) => {
                     let msg = format!(
                         "mangled name `{name}` is produced by two distinct function signatures; \
                          the emitted symbol would resolve to the wrong body -- rename one of the \
@@ -238,7 +266,7 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
                 }
                 Some(_) => {} // same overload (backend variant / re-decl): fine.
                 None => {
-                    seen.insert(name, (key, f.name_span));
+                    seen.insert(name, (f, f.name_span));
                 }
             }
         }
