@@ -1050,7 +1050,7 @@ function stone_clear_canvas(r, g, b, a) {
   var c = __SW.canvases[__SW.boundCanvas];
   var narrow = c && c.idTex !== undefined && c.drawBufs === 2;
   if (narrow) gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.clear(gl.COLOR_BUFFER_BIT);
   if (narrow) gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
 }
 // Clear one INTEGER draw buffer of the currently bound FBO (glClear is
@@ -1093,7 +1093,12 @@ function stone_supports_float_canvas() {
   var gl = __SW.gl;
   return !!(gl && gl.getExtension && gl.getExtension("EXT_color_buffer_float"));
 }
-function stone_clear_depth(depth) { var gl = __SW.gl; gl.clearDepth(depth); gl.clear(gl.DEPTH_BUFFER_BIT); }
+function stone_clear_depth(depth) {
+  var gl = __SW.gl;
+  gl.depthMask(true);
+  gl.clearDepth(depth);
+  gl.clear(gl.DEPTH_BUFFER_BIT);
+}
 function stone_set_depth_mode(compareMode, write) {
   var gl = __SW.gl;
   if (compareMode === "always" && !write) { gl.disable(gl.DEPTH_TEST); gl.depthMask(false); }
