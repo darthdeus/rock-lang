@@ -1506,6 +1506,48 @@ fn main() {
     );
 }
 
+/// A cost TIE (the ambiguous case) must list the tied candidate signatures,
+/// same as the no-fit case: "Ambiguous overload for `pick` with argument
+/// types (int)" alone doesn't tell the user WHICH candidates tied or why --
+/// the classic offender is a bare-`T` catch-all tying with a concrete
+/// overload (a generic var unifies with anything at equal cost).
+#[test]
+fn ambiguous_overload_error_lists_tied_candidates() {
+    let src = r#"
+fn pick(x: int) -> string { return "int" }
+fn pick<T>(x: T) -> string { return "generic" }
+fn main() {
+    let _ = pick(5)
+}
+"#;
+    let ws = check(src).expect("body errors are collected, not aborted");
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let inf = ws.inference(mid).expect("user module inferred");
+    let msgs: Vec<&str> = inf
+        .errors
+        .values()
+        .flatten()
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("Ambiguous overload for `pick`")),
+        "the call must be ambiguous: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("pick(x: int) -> string")),
+        "tied candidate 1 must be listed: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("pick(x: T) -> string")),
+        "tied candidate 2 must be listed: {msgs:?}"
+    );
+}
+
 /// Unfuck #32: when every overload is rejected and the only near-miss is an
 /// `Iterator`-bounded candidate that failed CONFORMANCE (params fit, bounds
 /// did not), the error surfaces `check_iterator_bounds`' precise reason

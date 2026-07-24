@@ -107,8 +107,9 @@ pub(crate) fn select_overload(
     name: Ustr,
     span: Span,
 ) -> Result<(ModuleId, Idx<Function>), SelectError> {
-    let mut best: Option<(usize, (ModuleId, Idx<Function>))> = None;
-    let mut tied = false;
+    let mut best_cost: Option<usize> = None;
+    // Every candidate at `best_cost`, so a tie can NAME the tied signatures.
+    let mut best_set: SmallVec<[(ModuleId, Idx<Function>); 4]> = SmallVec::new();
     // The bound-conformance failure of an otherwise-fitting `Iterator`-bounded
     // candidate (params fit, bounds did not). When EVERY candidate rejects,
     // this is the near-miss the user needs to see -- the generic "No overload"
@@ -119,37 +120,45 @@ pub(crate) fn select_overload(
         if let Some(cost) =
             score_candidate(c, gamma, mid, fid, recv_ty, args, arg_ty, span, &mut bound_fail)
         {
-            match best {
+            match best_cost {
                 None => {
-                    best = Some((cost, (mid, fid)));
-                    tied = false;
+                    best_cost = Some(cost);
+                    best_set.clear();
+                    best_set.push((mid, fid));
                 }
-                Some((bc, _)) if cost < bc => {
-                    best = Some((cost, (mid, fid)));
-                    tied = false;
+                Some(bc) if cost < bc => {
+                    best_cost = Some(cost);
+                    best_set.clear();
+                    best_set.push((mid, fid));
                 }
-                Some((bc, _)) if cost == bc => {
-                    tied = true;
+                Some(bc) if cost == bc => {
+                    best_set.push((mid, fid));
                 }
                 _ => {}
             }
         }
     }
 
-    match best {
-        Some((_, pick)) if !tied => Ok(pick),
-        Some(_) => Err(SelectError::Tied(CompilerError::new_with_label(
-            span,
-            format!(
-                "Ambiguous overload for `{name}` with argument types ({})",
-                arg_tys_msg
-                    .iter()
-                    .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
-                    .join(", ")
-            ),
-        ))),
+    match best_set.len() {
+        1 => Ok(best_set[0]),
+        n if n > 1 => {
+            let tied = best_set
+                .iter()
+                .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
+                .join("\n");
+            Err(SelectError::Tied(CompilerError::new_with_label(
+                span,
+                format!(
+                    "Ambiguous overload for `{name}` with argument types ({})\ntied candidates (equally-ranked matches):\n{tied}",
+                    arg_tys_msg
+                        .iter()
+                        .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
+                        .join(", ")
+                ),
+            )))
+        }
 
-        None => {
+        _ => {
             let args_msg = arg_tys_msg
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
