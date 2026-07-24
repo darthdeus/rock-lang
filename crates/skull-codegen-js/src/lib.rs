@@ -1676,7 +1676,7 @@ function __sw_shader_uniform_name(h, i) {
 }
 function stone_gpu_timer_begin() {}
 function stone_gpu_timer_end() {}
-function stone_gpu_timer_poll_ms() { return 0; }
+function stone_gpu_timer_poll_ms() { return -2; }
 function stone_delay(ms) {} // cannot block the browser main thread
 function stone_show_cursor(show) {}
 function stone_is_cursor_visible() { return true; }
