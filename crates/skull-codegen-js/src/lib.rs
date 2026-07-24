@@ -575,6 +575,10 @@ var __SW = {
   shaders: {}, nextShader: 1, curShader: 0,
   meshVbo: null, // shared STREAM_DRAW vertex buffer
   rafId: 0,
+  // WebAudio: lazily-created context + decoded-buffer handle table. Absent in a
+  // no-AudioContext env (node fake-GL) -> every audio fn stays a silent stub.
+  audio: { ctx: null, unavailable: false, resumeArmed: false, sounds: {}, nextSound: 1,
+           sfxGain: null, musicGain: null, sfxVol: 1, musicVol: 1, musicSrc: null, sfxSources: {} },
 };
 
 function __sw_gl() { return __SW.gl; }
@@ -616,7 +620,45 @@ function __sw_push_event(type, key, btn, x, y) {
 
 // --- lifecycle ---
 function stone_init() { return true; }
-function stone_audio_init() { return true; }
+// Lazily create the AudioContext + sfx/music gain graph. Returns null (and
+// pins `unavailable`) in a no-AudioContext env so every audio fn stays silent.
+function __sw_audio_ctx() {
+  var A = __SW.audio;
+  if (A.ctx || A.unavailable) return A.ctx;
+  var AC = (typeof AudioContext !== "undefined" && AudioContext) ||
+           (typeof webkitAudioContext !== "undefined" && webkitAudioContext) || null;
+  if (!AC) { A.unavailable = true; __sw_log_once("audio: no AudioContext in this environment; sound disabled"); return null; }
+  A.ctx = new AC();
+  A.sfxGain = A.ctx.createGain(); A.sfxGain.gain.value = A.sfxVol; A.sfxGain.connect(A.ctx.destination);
+  A.musicGain = A.ctx.createGain(); A.musicGain.gain.value = A.musicVol; A.musicGain.connect(A.ctx.destination);
+  // Autoplay policy: the context starts suspended; resume on the first user
+  // gesture (the game's own DOM listeners fire independently).
+  if (typeof window !== "undefined" && !A.resumeArmed) {
+    A.resumeArmed = true;
+    var resume = function () { if (A.ctx && A.ctx.state === "suspended") A.ctx.resume(); };
+    window.addEventListener("pointerdown", resume);
+    window.addEventListener("keydown", resume);
+  }
+  return A.ctx;
+}
+// Decode registry bytes into an AudioBuffer behind `id`. decodeAudioData
+// DETACHES its input ArrayBuffer, so decode a COPY (the registry Uint8Array is
+// shared with file_read). Async: the buffer fills in before first playback
+// (loads happen at @early_init, plays on later input).
+function __sw_audio_decode(id, path) {
+  var ctx = __sw_audio_ctx();
+  if (!ctx) return 0;
+  var bytes = __sw_file_get(path);
+  if (bytes === undefined) { __sw_log_once("stone_load_sound: no preloaded bytes for " + path); return 0; }
+  var A = __SW.audio;
+  if (!A.sounds[id]) A.sounds[id] = { buffer: null };
+  var u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  ctx.decodeAudioData(u8.slice().buffer,
+    function (buf) { A.sounds[id].buffer = buf; },
+    function (e) { __sw_log_once("stone_load_sound: decode failed for " + path + " (" + (e && e.message) + ")"); });
+  return id;
+}
+function stone_audio_init() { __sw_audio_ctx(); return true; }
 function stone_audio_quit() {}
 function stone_teardown() {}
 function stone_quit() { __SW.quitReq = true; }
@@ -1250,6 +1292,26 @@ function stone_text_shutdown() {}
 
 // --- filesystem (registry-backed reads, in-memory writes, dir ops no-op) ---
 var __ROCK_WEB_FILES = (globalThis.__ROCK_WEB_FILES = globalThis.__ROCK_WEB_FILES || {});
+// Seed persisted writes (SRS saves, settings) from localStorage under the
+// "rockfile:" namespace. localStorage may be absent (node fake-GL) or throw
+// (private mode) -- persistence is optional, so skip seeding in that case.
+(function () {
+  if (typeof localStorage === "undefined") return;
+  try {
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k && k.indexOf("rockfile:") === 0) __ROCK_WEB_FILES[k.slice(9)] = localStorage.getItem(k);
+    }
+  } catch (e) { console.error("[STONE-WEB] localStorage seed skipped:", e && e.message); }
+})();
+function __sw_file_write(path, content) {
+  __ROCK_WEB_FILES[path] = content;
+  if (typeof localStorage !== "undefined") {
+    try { localStorage.setItem("rockfile:" + path, content); }
+    catch (e) { __sw_log_once("stone_file_write: localStorage mirror failed for " + path + " (" + (e && e.message) + ")"); }
+  }
+  return true;
+}
 function __sw_file_get(path) {
   if (path in __ROCK_WEB_FILES) return __ROCK_WEB_FILES[path];
   if (path in __ROCK_WEB_ASSETS) return __ROCK_WEB_ASSETS[path];
@@ -1283,6 +1345,16 @@ function stone_remove_dir(path) { return false; }
 function stone_file_sync(path) { return true; }
 function stone_watch_asset(path) {}
 function stone_poll_changed_assets() { return 0; }
+
+// --- subprocess (chess UCI): no child processes in a browser; the spawn is a
+// loud stub returning 0 so sf_start drops to the built-in engine. ---
+function stone_proc_spawn(path) {
+  __sw_log_once("stone_proc_spawn: subprocess unavailable on web (" + path + "); falling back to the built-in engine");
+  return 0;
+}
+function stone_proc_send(h, line) {}
+function stone_proc_alive(h) { return false; }
+function stone_proc_kill(h) {}
 function __sw_bytes_to_string(b) {
   var u8 = b instanceof Uint8Array ? b : new Uint8Array(b);
   var s = "";
@@ -1359,17 +1431,45 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
-// --- audio (silent stubs; WebAudio lands with the chess tier) ---
-function stone_load_sound(path) { return 0; }
-function stone_unload_sound(h) { return true; }
-function stone_reload_sound(h, path) { return false; }
-function stone_load_music(path) { return 0; }
-function stone_play_sound(h) {}
-function stone_stop_sound(h) {}
-function stone_play_music(h) {}
-function stone_stop_music() {}
-function stone_set_music_volume(v) {}
-function stone_set_sound_volume(v) {}
+// --- audio (WebAudio; silent no-op in a no-AudioContext env) ---
+function stone_load_sound(path) {
+  var ctx = __sw_audio_ctx();
+  if (!ctx) return 0;
+  return __sw_audio_decode(__SW.audio.nextSound++, path);
+}
+function stone_load_music(path) { return stone_load_sound(path); }
+function stone_reload_sound(h, path) {
+  if (!__sw_audio_ctx()) return false;
+  return __sw_audio_decode(h, path) !== 0;
+}
+function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
+function stone_play_sound(h) {
+  var A = __SW.audio, s = A.sounds[h];
+  if (!A.ctx || !s || !s.buffer) return;
+  var src = A.ctx.createBufferSource();
+  src.buffer = s.buffer; src.connect(A.sfxGain); src.start();
+  A.sfxSources[h] = src;
+}
+function stone_stop_sound(h) {
+  var src = __SW.audio.sfxSources[h];
+  // stop() on an already-ended source throws InvalidStateError -- benign here.
+  if (src) { try { src.stop(); } catch (e) {} __SW.audio.sfxSources[h] = null; }
+}
+function stone_play_music(h) {
+  var A = __SW.audio, s = A.sounds[h];
+  if (!A.ctx || !s || !s.buffer) return;
+  stone_stop_music();
+  var src = A.ctx.createBufferSource();
+  src.buffer = s.buffer; src.loop = true; src.connect(A.musicGain); src.start();
+  A.musicSrc = src;
+}
+function stone_stop_music() {
+  var A = __SW.audio;
+  if (A.musicSrc) { try { A.musicSrc.stop(); } catch (e) {} A.musicSrc = null; }
+}
+function stone_set_music_volume(v) { var A = __SW.audio; A.musicVol = v; if (A.musicGain) A.musicGain.gain.value = v; }
+function stone_set_sound_volume(v) { var A = __SW.audio; A.sfxVol = v; if (A.sfxGain) A.sfxGain.gain.value = v; }
+// No convolver graph on web v1 (zero game callers); silent stub.
 function stone_set_reverb(e, rs, d, w, dr, wi) {}
 
 // --- uniform introspection / gpu timer / delay / cursors / retained mesh ---
@@ -1609,6 +1709,17 @@ function __parse_float(s) {
   if (typeof s !== "string" || s.trim() === "") return null;
   var n = Number(s);
   return n !== n ? null : n;
+}
+// Byte-faithful UTF-8 encoder (stdlib from_codepoint): each output char code is
+// one UTF-8 byte, so the result is a luajit-shaped byte-string that `chars()`
+// decodes back to the same code point on both backends.
+function __from_codepoint(cp) {
+  if (cp < 0 || cp > 0x10FFFF) throw new Error("from_codepoint: codepoint out of range: " + cp);
+  if (cp >= 0xD800 && cp <= 0xDFFF) throw new Error("from_codepoint: surrogate is not a code point: " + cp);
+  if (cp < 0x80) return String.fromCharCode(cp);
+  if (cp < 0x800) return String.fromCharCode(0xC0 + Math.floor(cp / 0x40), 0x80 + (cp % 0x40));
+  if (cp < 0x10000) return String.fromCharCode(0xE0 + Math.floor(cp / 0x1000), 0x80 + (Math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40));
+  return String.fromCharCode(0xF0 + Math.floor(cp / 0x40000), 0x80 + (Math.floor(cp / 0x1000) % 0x40), 0x80 + (Math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40));
 }
 // The `{x:spec}` string-interpolation format helpers (stdlib/strings.rock,
 // @nomangle inline(lua)). ASCII fill/sep. `__rock_fmt_pad` pads `s` to `width`

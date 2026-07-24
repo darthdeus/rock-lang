@@ -3180,6 +3180,11 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("upper", 1) => Some("$1.toUpperCase()"),
         ("lower", 1) => Some("$1.toLowerCase()"),
         ("string_char", 1) => Some("String.fromCharCode($1)"),
+        // `from_codepoint(cp)` -> the byte-faithful UTF-8 encoder in
+        // JS_STRING_RUNTIME: each output JS char code is one UTF-8 byte, matching
+        // luajit's byte-string, so `chars()` (which UTF-8-decodes over `unit_at`)
+        // round-trips a code point identically on both backends.
+        ("from_codepoint", 1) => Some("__from_codepoint($1)"),
         // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
         ("parse_float", 1) => Some("__parse_float($1)"),
         // RNG -> the `JS_RNG_RUNTIME` mulberry32 port (stream differs from Lua's
