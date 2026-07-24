@@ -27,8 +27,9 @@ pub fn build_web(project: &str, out: Option<&str>) -> Result<()> {
     // Project-mode emission (diagnoses + exits on any rejection, like the run path).
     let (emitted, ws) = crate::js_test::emit_js_program_project(project);
     let register_lines = shader_register_lines_js(&ws)?;
-    let preload = stage_assets(project, &out_dir)?;
-    let game_js = assemble_web_program(&emitted, &register_lines, &preload);
+    let game_dir = project.trim_end_matches('/');
+    let preload = stage_assets(game_dir, &out_dir)?;
+    let game_js = assemble_web_program(&emitted, &register_lines, &preload, game_dir);
     let title = Path::new(project)
         .file_name()
         .and_then(|s| s.to_str())
@@ -43,46 +44,94 @@ pub fn build_web(project: &str, out: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Stage the v1 asset set into the build dir and return the boot-preload list
-/// (paths relative to index.html, fetched into `__ROCK_WEB_ASSETS` before
-/// `main()` runs). v1 ships fonts only: every `.ttf`/`.otf` under the
-/// project's `assets/`, plus the engine-bundled DroidSans as the fallback the
-/// runner default config names -- the web mirror of stone-rs's embedded
-/// fallback font (`text.rs` `FALLBACK_FONT`).
-fn stage_assets(project: &str, out_dir: &Path) -> Result<Vec<String>> {
+/// Stage the project's release asset set into the build dir and return the
+/// boot-preload list -- registry keys fetched into `__ROCK_WEB_ASSETS` before
+/// `main()` runs (each key doubles as the fetch URL relative to index.html).
+///
+/// Driven by stick.toml `[release].assets` (default `["assets"]`), mirroring
+/// `tools/release/collect_assets.py`: each entry is staged under
+/// `out_dir/{game_dir}/{rel}` and keyed `{game_dir}/{rel}` -- the exact string
+/// the runtime builds (`{GAME_SOURCE_DIR}/{rel}` with GAME_SOURCE_DIR = the
+/// repo-relative game dir on web, matching FIRE_GAME_DIR on native release).
+/// `file_read` literals that already carry the `games/x/` prefix (chess's book
+/// tables) resolve directly; asset_path-routed loads (sounds, fonts) match
+/// because GAME_SOURCE_DIR is set from the same string.
+///
+/// The engine-bundled DroidSans is staged under `{game_dir}/assets/fonts/` as
+/// the fallback the runner default config names (`assets/fonts/DroidSans.ttf`)
+/// -- the web mirror of stone-rs's embedded `FALLBACK_FONT`.
+fn stage_assets(game_dir: &str, out_dir: &Path) -> Result<Vec<String>> {
+    let project = Path::new(game_dir);
     let mut preload: Vec<String> = Vec::new();
-    let assets = Path::new(project).join("assets");
-    if assets.is_dir() {
-        for entry in walkdir::WalkDir::new(&assets).sort_by_file_name() {
-            let entry = entry?;
-            let p = entry.path();
-            let is_font = p
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
-            if !is_font {
-                continue;
+    let stage_one = |src: &Path, key: &str, preload: &mut Vec<String>| -> Result<()> {
+        let dst = out_dir.join(key);
+        std::fs::create_dir_all(dst.parent().expect("parent"))?;
+        std::fs::copy(src, &dst)?;
+        preload.push(key.to_string());
+        Ok(())
+    };
+
+    for rel in release_assets(project) {
+        let src = project.join(&rel);
+        if !src.exists() {
+            log::warn!(target: "WEB", "[release].assets: {} does not exist, skipping", src.display());
+            continue;
+        }
+        if src.is_dir() {
+            for entry in walkdir::WalkDir::new(&src).sort_by_file_name() {
+                let entry = entry?;
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let rel_to_game = entry.path().strip_prefix(project).expect("under project");
+                let key = format!("{}/{}", game_dir, rel_to_game.to_string_lossy().replace('\\', "/"));
+                stage_one(entry.path(), &key, &mut preload)?;
             }
-            let rel = p.strip_prefix(Path::new(project)).expect("under project");
-            let dst = out_dir.join(rel);
-            std::fs::create_dir_all(dst.parent().expect("parent"))?;
-            std::fs::copy(p, &dst)?;
-            preload.push(rel.to_string_lossy().replace('\\', "/"));
+        } else {
+            let key = format!("{}/{}", game_dir, rel.replace('\\', "/"));
+            stage_one(&src, &key, &mut preload)?;
         }
     }
-    let fallback_rel = "assets/fonts/DroidSans.ttf";
-    if !preload.iter().any(|p| p == fallback_rel) {
+
+    let fallback_key = format!("{}/assets/fonts/DroidSans.ttf", game_dir);
+    if !preload.iter().any(|p| p == &fallback_key) {
         let src = repo_relative("stone-rs/fonts/DroidSans.ttf");
         if src.is_file() {
-            let dst = out_dir.join(fallback_rel);
-            std::fs::create_dir_all(dst.parent().expect("parent"))?;
-            std::fs::copy(&src, &dst)?;
-            preload.push(fallback_rel.to_string());
+            stage_one(&src, &fallback_key, &mut preload)?;
         } else {
             log::warn!(target: "WEB", "engine fallback font missing at {}; text will not render", src.display());
         }
     }
     Ok(preload)
+}
+
+/// The `[release].assets` staging list from a project's stick.toml. Defaults to
+/// `["assets"]` (plus `level.txt` when present) when the table is absent,
+/// mirroring `tools/release/collect_assets.py`. A malformed stick.toml
+/// propagates as an error rather than silently defaulting.
+fn release_assets(project: &Path) -> Vec<String> {
+    let path = project.join("stick.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return default_release_assets(project),
+    };
+    let value: serde_json::Value = basic_toml::from_str(&content)
+        .unwrap_or_else(|e| panic!("web: failed to parse {}: {}", path.display(), e));
+    match value.get("release").and_then(|r| r.get("assets")).and_then(|a| a.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        None => default_release_assets(project),
+    }
+}
+
+fn default_release_assets(project: &Path) -> Vec<String> {
+    let mut items = vec!["assets".to_string()];
+    if project.join("level.txt").exists() {
+        items.push("level.txt".to_string());
+    }
+    items
 }
 
 /// A path relative to the workspace root (the compile runs from anywhere).
@@ -135,6 +184,7 @@ fn assemble_web_program(
     emitted: &skull_codegen_js::emit::JsProgram,
     register_lines: &str,
     preload: &[String],
+    game_dir: &str,
 ) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
@@ -150,6 +200,13 @@ fn assemble_web_program(
     p.push_str(skull_codegen_js::JS_LOG_RUNTIME);
     p.push_str(skull_codegen_js::JS_RNG_RUNTIME);
     p.push_str(skull_codegen_js::JS_WEB_RUNTIME);
+    // GAME_SOURCE_DIR on web = the repo-relative game dir, so asset_path-routed
+    // loads key as "{game_dir}/{rel}" -- the same key space stage_assets writes
+    // and file_read literals ("games/chess/book.txt") already use.
+    p.push_str(&format!(
+        "\nvar __ROCK_WEB_GAME_DIR = {};\n",
+        crate::js_test::js_str(game_dir)
+    ));
     p.push_str("\nvar __G = {};\n");
     // Deterministic default seed (a game re-seeds via random_seed() itself);
     // Date.now() matches the node path's non-deterministic default.

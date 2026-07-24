@@ -42,6 +42,7 @@ clap_complete = { workspace = true }
 anyhow = { workspace = true }
 colored = { workspace = true }
 serde_json = { workspace = true }
+basic-toml = "0.1"
 fs-err = { workspace = true }
 walkdir = { workspace = true }
 tempfile = "3.0"
