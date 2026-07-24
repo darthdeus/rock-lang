@@ -388,8 +388,10 @@ for _, t in ipairs(__skull_T) do
   local rp = print
   local rw = io.write
   -- Model real stdout byte-faithfully: `print` joins args with TAB and adds a
-  -- trailing newline; `io.write` appends raw fragments. One accumulator, one
-  -- trailing newline stripped at the end (matches how @test(output=..) expects).
+  -- trailing newline; `io.write` appends raw fragments. One accumulator; only
+  -- TRAILING whitespace stripped (eats print's `\n` + trailing-space separators
+  -- like `{i} ` loops). Leading whitespace is significant so a right-aligned /
+  -- space-padded `{x:5}` -> `   42` is testable via @test(output=..).
   print = function(...)
     local p = {}
     for i = 1, select('#', ...) do p[i] = tostring((select(i, ...))) end
@@ -401,7 +403,7 @@ for _, t in ipairs(__skull_T) do
   local ok, ret = pcall(t.f)
   print = rp
   io.write = rw
-  local got = table.concat(buf, ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local got = table.concat(buf, ""):gsub("%s+$", "")
   if not ok then
     io.write("\n__SKULL__\tFAIL\t", t.name, ": error: ", __esc(tostring(ret)), "\n")
   elseif t.out ~= nil and got ~= t.out then

@@ -448,6 +448,43 @@ fn field_ref_method_prefills_nontrailing_fieldof_arg() {
     assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
 }
 
+// An `Entity<T>`-receiver FieldOf method resolves the owner struct through the
+// Entity's type argument: `e.run_` (e: Entity<Mob>) fills the field of the
+// ELEMENT struct (`Mob`), symmetric with the value-owner overload. The p0 is
+// nominal `Entity<T>`, so `ufcs_methods` DOES surface it -- the prefill must
+// rewrite that item (not double it) with the element's matching field.
+
+#[test]
+fn field_ref_method_entity_receiver_prefills_single_field() {
+    let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r(e: Entity<Mob>) {\n  e.run\n}\n";
+    let it = item(src, 3, 7, "run_into");
+    assert_eq!(it.insert_text.as_deref(), Some("run_into(.attack_co, ${1:co})"), "{it:?}");
+    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
+#[test]
+fn field_ref_method_entity_receiver_prefills_choice_on_multiple_fields() {
+    let src = "struct Mob { health: int, attack_co: int?, cast_co: int?, name: string }\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r(e: Entity<Mob>) {\n  e.run\n}\n";
+    let it = item(src, 3, 7, "run_into");
+    assert_eq!(it.insert_text.as_deref(), Some("run_into(${1|.attack_co,.cast_co|}, ${2:co})"), "{it:?}");
+    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
+#[test]
+fn field_ref_method_entity_receiver_no_duplicate_item() {
+    // The Entity overload is nominal, so it surfaces once via `ufcs_methods`;
+    // the prefill rewrites that single item rather than appending a second.
+    let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r(e: Entity<Mob>) {\n  e.run\n}\n";
+    let l = labels(src, 3, 7);
+    assert_eq!(l.iter().filter(|s| s.as_str() == "run_into").count(), 1, "exactly one run_into item: {l:?}");
+}
+
 #[test]
 fn member_completion_resolves_a_cross_file_receiver_type() {
     // a.rock defines IVec2; b.rock has a param of that type. Completing `g.` in
@@ -1796,6 +1833,69 @@ fn field_ref_empty_arg_offers_fields_and_inserts_dot() {
     let l = labels(src, 3, col);
     assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded: {l:?}");
     assert!(!l.iter().any(|s| s == "poll_slot"), "no global dump in a FieldOf slot: {l:?}");
+}
+
+// UFCS field-ref args: typing `.field` INSIDE a UFCS call's parens must offer
+// the FieldOf field-set, resolving the owner through the receiver -- symmetric
+// with the method-selection prefill above. `p.stop(.co)` binds the FieldOf `T`
+// to the receiver, not a paren sibling.
+#[test]
+fn field_ref_ufcs_generic_receiver_offers_fields() {
+    // `stop<T>(o: T, f: FieldOf<T, int?>)` on a `Player` receiver: T binds to
+    // Player via the receiver, so the FieldOf offers Player's int? fields.
+    let src = "struct Player { hp: int, cast_co: int? }\n\
+               fn stop<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
+    let col = "  p.stop(.".len() as u32;
+    let l = labels(src, 4, col);
+    assert!(l.contains(&".cast_co: int?".to_string()), "cast_co offered: {l:?}");
+    assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded by invariance: {l:?}");
+    assert!(!l.iter().any(|s| s == "stop" || s == "Player"), "no global dump in a FieldOf slot: {l:?}");
+}
+
+#[test]
+fn field_ref_ufcs_second_overload_supplies_the_fieldof_slot() {
+    // `stop` has a 1-param non-FieldOf overload FIRST and the 2-param FieldOf
+    // overload second; the arg-position field-ref must consult ALL overloads,
+    // or `p.stop(.co)` sees no FieldOf slot and dumps globals.
+    let src = "struct Player { hp: int, cast_co: int? }\n\
+               fn stop(t: int) {}\n\
+               fn stop<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
+    let col = "  p.stop(.".len() as u32;
+    let l = labels(src, 5, col);
+    assert!(l.contains(&".cast_co: int?".to_string()), "second-overload FieldOf resolved: {l:?}");
+    assert!(!l.iter().any(|s| s == "stop"), "no global dump: {l:?}");
+}
+
+#[test]
+fn field_ref_ufcs_entity_receiver_offers_fields() {
+    // `run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int)` on an
+    // `Entity<Glyph>` receiver: the FieldOf owner `T` binds through the ctor to
+    // the element struct `Glyph`, so `e.run_into(.co)` offers Glyph's int? field.
+    let src = "struct Glyph { life: int, co: int? }\n\
+               struct Entity<T> { i: int }\n\
+               fn run_into<T>(o: T, f: FieldOf<T, int?>, co: int) {}\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r() {\n  let e: Entity<Glyph> = Entity { i: 0 }\n  e.run_into(.)\n}\n";
+    let col = "  e.run_into(.".len() as u32;
+    let l = labels(src, 6, col);
+    assert!(l.contains(&".co: int?".to_string()), "co offered via Entity<Glyph> element: {l:?}");
+    assert!(!l.iter().any(|s| s.starts_with(".life")), "life (int) excluded by invariance: {l:?}");
+    assert!(!l.iter().any(|s| s == "run_into"), "no global dump: {l:?}");
+}
+
+// A non-FieldOf UFCS call arg keeps NORMAL completion -- the resolver returning
+// None must remain the fall-through signal (no false-positive field-ref).
+#[test]
+fn field_ref_ufcs_non_fieldof_arg_falls_through() {
+    let src = "struct Player { hp: int }\n\
+               fn take(o: Player, n: int) {}\n\
+               fn helper_val() -> int { 0 }\n\
+               fn r() {\n  let p: Player = Player { hp: 0 }\n  p.take(hel)\n}\n";
+    let col = "  p.take(hel".len() as u32;
+    let l = labels(src, 5, col);
+    assert!(l.iter().any(|s| s == "helper_val"), "normal completion still fires: {l:?}");
 }
 
 // -- locality outranks case: a lowercase query still surfaces globals ---------

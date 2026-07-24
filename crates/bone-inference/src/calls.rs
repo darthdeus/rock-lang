@@ -25,11 +25,54 @@ pub(crate) fn resolve_callee(gamma: &Gamma, name: Ustr) -> FnList {
     //     .collect()
 }
 
+/// True if `ty` contains an unbound generic hole (an `Infer`/`Generic` node)
+/// anywhere in its structure -- resolved so already-bound vars read through.
+fn ty_has_generic_hole(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
+    let r = resolve(gamma, ty, span);
+    let node = *gamma.get(r);
+    match node {
+        TypeExpr::Infer(..) | TypeExpr::Generic(..) => true,
+        TypeExpr::Nullable(inner) => ty_has_generic_hole(gamma, r.with_idx(inner), span),
+        TypeExpr::App { params, .. } | TypeExpr::Tuple { elements: params } => params
+            .into_iter()
+            .any(|c| ty_has_generic_hole(gamma, r.with_idx(c), span)),
+        TypeExpr::Function { params, ret } => {
+            ty_has_generic_hole(gamma, r.with_idx(ret), span)
+                || params
+                    .into_iter()
+                    .any(|c| ty_has_generic_hole(gamma, r.with_idx(c), span))
+        }
+        TypeExpr::Builtin(_) => false,
+    }
+}
+
+/// Genericity penalty of a param, measured BEFORE unification binds its vars: a
+/// bare hole (`T`) costs 2, a ctor/tuple/fn CONTAINING a hole (`[T]`, `Wrap<T>`,
+/// `(T, int)`) costs 1, a fully concrete param costs 0. Grades overload
+/// specificity -- `int` beats `[T]` beats `T` -- so a concrete overload always
+/// outranks a catch-all that also fits. The `Iterator`-bounded case is one
+/// instance (a bounded `it: I` is a bare hole -> 2), so bounds add no separate
+/// cost.
+fn param_genericity(gamma: &mut Gamma, param: TyId, span: Span) -> usize {
+    let p = resolve(gamma, param, span);
+    if matches!(*gamma.get(p), TypeExpr::Infer(..) | TypeExpr::Generic(..)) {
+        return 2;
+    }
+    if ty_has_generic_hole(gamma, p, span) {
+        1
+    } else {
+        0
+    }
+}
+
 pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) -> Option<usize> {
+    // Measured before the trial: a successful unify binds the param's holes, so
+    // its genericity has to be read here or it always looks concrete afterward.
+    let penalty = param_genericity(gamma, param, span);
     let snap = gamma.out.checkpoint();
 
     if gamma.trial(|g| unify(g, arg, param, span).is_ok()) {
-        return Some(0);
+        return Some(penalty);
     }
 
     gamma.out.rollback_to(snap);
@@ -211,8 +254,9 @@ pub(crate) fn select_overload(
     let collapsed = collapse_backend_variants(gamma, candidates);
     let candidates: &[(ModuleId, Idx<Function>)] = &collapsed;
 
-    let mut best: Option<(usize, (ModuleId, Idx<Function>))> = None;
-    let mut tied = false;
+    let mut best_cost: Option<usize> = None;
+    // Every candidate at `best_cost`, so a tie can NAME the tied signatures.
+    let mut best_set: SmallVec<[(ModuleId, Idx<Function>); 4]> = SmallVec::new();
     // The bound-conformance failure of an otherwise-fitting `Iterator`-bounded
     // candidate (params fit, bounds did not). When EVERY candidate rejects,
     // this is the near-miss the user needs to see -- the generic "No overload"
@@ -223,37 +267,45 @@ pub(crate) fn select_overload(
         if let Some(cost) =
             score_candidate(c, gamma, mid, fid, recv_ty, args, arg_ty, span, &mut bound_fail)
         {
-            match best {
+            match best_cost {
                 None => {
-                    best = Some((cost, (mid, fid)));
-                    tied = false;
+                    best_cost = Some(cost);
+                    best_set.clear();
+                    best_set.push((mid, fid));
                 }
-                Some((bc, _)) if cost < bc => {
-                    best = Some((cost, (mid, fid)));
-                    tied = false;
+                Some(bc) if cost < bc => {
+                    best_cost = Some(cost);
+                    best_set.clear();
+                    best_set.push((mid, fid));
                 }
-                Some((bc, _)) if cost == bc => {
-                    tied = true;
+                Some(bc) if cost == bc => {
+                    best_set.push((mid, fid));
                 }
                 _ => {}
             }
         }
     }
 
-    match best {
-        Some((_, pick)) if !tied => Ok(pick),
-        Some(_) => Err(SelectError::Tied(CompilerError::new_with_label(
-            span,
-            format!(
-                "Ambiguous overload for `{name}` with argument types ({})",
-                arg_tys_msg
-                    .iter()
-                    .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
-                    .join(", ")
-            ),
-        ))),
+    match best_set.len() {
+        1 => Ok(best_set[0]),
+        n if n > 1 => {
+            let tied = best_set
+                .iter()
+                .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
+                .join("\n");
+            Err(SelectError::Tied(CompilerError::new_with_label(
+                span,
+                format!(
+                    "Ambiguous overload for `{name}` with argument types ({})\ntied candidates (equally-ranked matches):\n{tied}",
+                    arg_tys_msg
+                        .iter()
+                        .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
+                        .join(", ")
+                ),
+            )))
+        }
 
-        None => {
+        _ => {
             let args_msg = arg_tys_msg
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
@@ -512,9 +564,8 @@ pub(crate) fn score_candidate(
             gamma.out.rollback_to(snap);
             return None;
         }
-        // Bounds that fit only structurally still rank below an exact concrete
-        // overload -- prefer the specialized fn when both match.
-        total += 1;
+        // A bounded `it: I` is a bare generic hole, so `param_genericity` already
+        // ranked it below any concrete overload -- no separate bounds cost here.
     }
 
     // for (dty, &aty) in declared.iter().zip(arg_tys) {

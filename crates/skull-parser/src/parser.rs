@@ -2537,20 +2537,21 @@ impl Parser {
                 let mut format_str = String::new();
                 let mut in_format = false;
                 let mut spec_depth: i32 = 0;
+                // Bracket depth WITHIN the expression half, so a `:` or `}` that
+                // belongs to a nested `(...)`/`[...]`/`{...}` (named args, struct
+                // literals) isn't mistaken for the `:spec` split or the hole
+                // terminator. The split/terminator only fire at depth 0.
+                let mut expr_depth: i32 = 0;
                 let mut inner_char_count = 0usize;
                 let mut inner_byte_count = 0usize;
                 while let Some(&nc) = chars.peek() {
                     chars.next();
                     inner_char_count += 1;
                     inner_byte_count += nc.len_utf8();
-                    if nc == '}' && spec_depth == 0 {
-                        break;
-                    }
-                    if nc == ':' && !in_format {
-                        in_format = true;
-                        continue;
-                    }
                     if in_format {
+                        if nc == '}' && spec_depth == 0 {
+                            break;
+                        }
                         if nc == '{' {
                             spec_depth += 1;
                         } else if nc == '}' {
@@ -2558,6 +2559,42 @@ impl Parser {
                         }
                         format_str.push(nc);
                     } else {
+                        if nc == '}' && expr_depth == 0 {
+                            break;
+                        }
+                        if nc == ':' && expr_depth == 0 {
+                            in_format = true;
+                            continue;
+                        }
+                        // A string literal inside the hole is opaque: its
+                        // brackets/colons/braces must not move `expr_depth` or
+                        // trigger the split. Skip to the closing quote, mirroring
+                        // the tokenizer's inner-string handling (`\`-escapes).
+                        if nc == '"' {
+                            expr_str.push(nc);
+                            while let Some(&q) = chars.peek() {
+                                chars.next();
+                                inner_char_count += 1;
+                                inner_byte_count += q.len_utf8();
+                                expr_str.push(q);
+                                if q == '\\' {
+                                    if let Some(&e) = chars.peek() {
+                                        chars.next();
+                                        inner_char_count += 1;
+                                        inner_byte_count += e.len_utf8();
+                                        expr_str.push(e);
+                                    }
+                                } else if q == '"' {
+                                    break;
+                                }
+                            }
+                            continue;
+                        }
+                        match nc {
+                            '(' | '[' | '{' => expr_depth += 1,
+                            ')' | ']' | '}' => expr_depth -= 1,
+                            _ => {}
+                        }
                         expr_str.push(nc);
                     }
                 }
@@ -2579,40 +2616,28 @@ impl Parser {
                 } else {
                     col_in_line + 1
                 };
-                match self.parse_interp_subexpr(
+                // A hole that fails to parse is a spanned error, not literal
+                // text: silent fallback ("emit the braces verbatim") shipped
+                // wrong output for any `:`-bearing hole. Reject, don't fall back.
+                let e = self.parse_interp_subexpr(
                     &expr_str,
                     file,
                     expr_start_offset,
                     expr_line,
                     expr_col,
-                ) {
-                    Ok(e) => {
-                        // Parse the `:spec` into a FormatSpec (incl. dynamic
-                        // `{w}`/`{p}` sub-expressions). The spec never renders in
-                        // the s-expr, but capturing it keeps those embedded
-                        // exprs from being lost. Positions are best-effort
-                        // (spec spans feed diagnostics only, not the oracle).
-                        let spec = if format_str.is_empty() {
-                            None
-                        } else {
-                            let fmt_offset = expr_start_offset + expr_str.len() + 1;
-                            let fmt_col = expr_col + expr_str.chars().count() + 1;
-                            Some(self.parse_format_spec(&format_str, file, fmt_offset, expr_line, fmt_col)?)
-                        };
-                        parts.push(InterpolatedPart::Expr(e, spec));
-                    }
-                    Err(_) => {
-                        // Couldn't parse the embedded expression — emit the
-                        // braces and contents verbatim, like rock.
-                        buf.push('{');
-                        buf.push_str(&expr_str);
-                        if !format_str.is_empty() {
-                            buf.push(':');
-                            buf.push_str(&format_str);
-                        }
-                        buf.push('}');
-                    }
-                }
+                )?;
+                // Parse the `:spec` into a FormatSpec (incl. dynamic `{w}`/`{p}`
+                // sub-expressions). The spec never renders in the s-expr, but
+                // capturing it keeps those embedded exprs from being lost.
+                // Positions are best-effort (spec spans feed diagnostics only).
+                let spec = if format_str.is_empty() {
+                    None
+                } else {
+                    let fmt_offset = expr_start_offset + expr_str.len() + 1;
+                    let fmt_col = expr_col + expr_str.chars().count() + 1;
+                    Some(self.parse_format_spec(&format_str, file, fmt_offset, expr_line, fmt_col)?)
+                };
+                parts.push(InterpolatedPart::Expr(e, spec));
                 char_pos += inner_char_count + 1; // +1 for the opening `{`
                 byte_pos += inner_byte_count + 1;
                 continue;

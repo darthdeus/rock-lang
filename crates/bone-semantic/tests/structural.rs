@@ -1507,6 +1507,52 @@ fn main() {
     );
 }
 
+/// A cost TIE (the ambiguous case) must list the tied candidate signatures,
+/// same as the no-fit case: "Ambiguous overload for `two` with argument
+/// types (int, int)" alone doesn't tell the user WHICH candidates tied.
+/// The tie must be GENUINELY incomparable now that overload ranking has a
+/// genericity cost (`int` beats `[T]` beats `T`, `param_genericity` in
+/// bone-inference): `two(T, int)` and `two(int, T)` each pay one bare-hole
+/// slot against `(int, int)`, so neither wins -- the bare-`T`-catch-all-vs-
+/// concrete case (`pick(int)` + `pick<T>(T)`) now resolves to the concrete
+/// overload (pinned as a positive test in `tests/overload_genericity_cost`).
+#[test]
+fn ambiguous_overload_error_lists_tied_candidates() {
+    let src = r#"
+fn two<T>(a: T, b: int) -> string { return "left" }
+fn two<T>(a: int, b: T) -> string { return "right" }
+fn main() {
+    let _ = two(1, 2)
+}
+"#;
+    let ws = check(src).expect("body errors are collected, not aborted");
+    let mid = ws
+        .modules
+        .iter()
+        .find(|m| m.id != ModuleId::builtin())
+        .expect("one user module")
+        .id;
+    let inf = ws.inference(mid).expect("user module inferred");
+    let msgs: Vec<&str> = inf
+        .errors
+        .values()
+        .flatten()
+        .map(|e| e.message.as_str())
+        .collect();
+    assert!(
+        msgs.iter().any(|m| m.contains("Ambiguous overload for `two`")),
+        "the call must be ambiguous: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("two(a: T, b: int) -> string")),
+        "tied candidate 1 must be listed: {msgs:?}"
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("two(a: int, b: T) -> string")),
+        "tied candidate 2 must be listed: {msgs:?}"
+    );
+}
+
 /// Unfuck #32: when every overload is rejected and the only near-miss is an
 /// `Iterator`-bounded candidate that failed CONFORMANCE (params fit, bounds
 /// did not), the error surfaces `check_iterator_bounds`' precise reason

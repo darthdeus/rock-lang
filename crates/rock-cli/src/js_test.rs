@@ -682,7 +682,9 @@ for (var i = 0; i < __tests.length; i++) {
   __buf = [];
   try {
     var ret = t.f();
-    var got = __buf.join("").replace(/^\s+/, "").replace(/\s+$/, "");
+    // Only TRAILING whitespace stripped (parity with the luajit harness): a
+    // leading-padded `{x:5}` -> `   42` stays significant for @test(output=..).
+    var got = __buf.join("").replace(/\s+$/, "");
     if (t.out !== null && got !== t.out) {
       process.stdout.write("\n__SKULL__\tFAIL\t" + t.name + ": output mismatch: expected <" + __esc(t.out) + "> got <" + __esc(got) + ">\n");
     } else if (t.val) {

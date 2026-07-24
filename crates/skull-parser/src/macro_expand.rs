@@ -39,6 +39,10 @@ struct MacroTemplate {
     /// Item declarations the macro emits when invoked at module scope.
     items: Vec<Item>,
     tmpl: Ast,
+    /// The macro DEFINITION's name-ident span (carries its own file). Expansion
+    /// erases the invocation name, so IDE goto-def on an invocation reads the
+    /// target off the registry -- `MacroRegistry::def_name_span`.
+    def_name_span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +79,16 @@ pub struct MacroRegistry(Registry);
 impl MacroRegistry {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// The definition name-span of the macro overload that `name(<argc args>)`
+    /// expands to, selected by the SAME arity rule as expansion
+    /// (`select_overload`), or None if no macro overload matches this arity --
+    /// so a same-named FN call (a different arity, e.g. the 3-arg `run_into`
+    /// fns beside the 2-arg macro) returns None and falls through to normal
+    /// definition resolution. Drives IDE goto-def on a macro invocation name.
+    pub fn def_name_span(&self, name: Ustr, argc: usize) -> Option<Span> {
+        select_overload(self.0.get(&name)?, argc).map(|t| t.def_name_span)
     }
 }
 
@@ -184,7 +198,7 @@ fn build_registry(modules: &[Ast]) -> Registry {
                 .collect();
             reg.entry(f.name.name)
                 .or_default()
-                .push(MacroTemplate { params, body, return_ty, items, tmpl });
+                .push(MacroTemplate { params, body, return_ty, items, tmpl, def_name_span: f.name.span });
         }
     }
     reg

@@ -2808,12 +2808,13 @@ pub(crate) fn struct_members_of_receiver_expr(
     ws: &Workspace,
     mid: ModuleId,
     recv_end: usize,
-) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr, Option<String>)> {
+) -> Option<(Vec<(String, String, Option<TyId>)>, Ustr, Option<String>, Option<Ustr>)> {
     let inf = ws.inference(mid)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end.checked_sub(1)?)?;
     let (fields, sname) = struct_fields_of_ty(ws, ta.body, ta.ty)?;
     let vec_elem = array_elem_ty(ws, ta.body, ta.ty).map(|e| ws.render(ta.body, e));
-    Some((fields, sname, vec_elem))
+    let sole_arg = sole_type_arg_struct(ws, ta.body, ta.ty);
+    Some((fields, sname, vec_elem, sole_arg))
 }
 
 /// Rendered ELEMENT type of a Vec receiver (`POS_HIST: [Vec2]` -> "Vec2"), for
@@ -2890,6 +2891,40 @@ fn struct_app_args(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<(Ustr
         hir::TypeExpr::Nullable(inner) => struct_app_args(ws, bi, ty.with_idx(*inner)),
         _ => None,
     }
+}
+
+/// The struct name of a single-type-argument nominal's SOLE argument
+/// (`Entity<Glyph>` -> "Glyph"), peeling a `Nullable`. `None` for a non-nominal,
+/// a multi-arg nominal, or an argument that isn't a nominal struct. Feeds
+/// FieldOf method completion on wrapper-receiver overloads (`e.run_into(.co)`),
+/// where the FieldOf owner `T` binds through the receiver's `Entity<T>`.
+fn sole_type_arg_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
+    match deref_ty(ws, bi, ty)? {
+        hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(_), params } if params.len() == 1 => {
+            let arg = ty.with_idx(params.into_iter().next()?);
+            match deref_ty(ws, bi, arg)? {
+                hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(n), .. } => Some(*n),
+                _ => None,
+            }
+        }
+        hir::TypeExpr::Nullable(inner) => sole_type_arg_struct(ws, bi, ty.with_idx(*inner)),
+        _ => None,
+    }
+}
+
+/// The sole-type-arg struct of a name-path receiver (`e` : `Entity<Glyph>` ->
+/// "Glyph"), for the structural-walk completion path. Single-segment head only
+/// (the common wrapper receiver: a param/local/global binding); a multi-segment
+/// receiver degrades to `None`, same as `receiver_vec_elem`.
+pub(crate) fn receiver_sole_arg_struct(
+    ws: &Workspace,
+    mid: ModuleId,
+    offset: usize,
+    segments: &[String],
+) -> Option<Ustr> {
+    let [head] = segments else { return None };
+    let (ty, bi) = receiver_head_ty(ws, mid, offset, head)?;
+    sole_type_arg_struct(ws, bi, ty)
 }
 
 /// Resolve a `TyId` to its `TypeExpr`: module arena for `Static`, the body
