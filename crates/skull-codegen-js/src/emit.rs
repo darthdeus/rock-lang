@@ -1612,19 +1612,20 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
     false
 }
 
-/// Deterministic JS name for a co-emitted callee, unique per `FuncRef`
-/// (`<name>__m<module>_f<fn>`) -- except `@nomangle` fns, which keep their bare
-/// name: the discipline is "called by original name from inline bodies /
-/// compiler codegen", and on JS an inline(js) body or a driver-injected line is
-/// verbatim text that can only use the bare name (same rule as the lua backend).
+/// Deterministic JS name for a co-emitted callee -- the SHARED mangle keyed on
+/// `(name, declared signature)`, identical to the Lua and GLSL backends. Exempt
+/// (`extern`/`@nomangle`/`@test`/`main`/`test_*`) fns keep their bare name: the
+/// discipline is "called by original name from inline bodies / compiler
+/// codegen", and on JS an inline(js) body or a driver-injected line is verbatim
+/// text that can only use the bare name (same rule as the lua backend).
 pub fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
     let f = &ws.module(fr.module).functions[fr.func];
-    if is_nomangle(f) {
-        return f.name.to_string();
-    }
-    format!("{}__m{}_f{}", f.name, fr.module.index(), raw(fr.func))
+    skull_mir::mangle::mangle_fn(ws, f)
 }
 
+/// A `@nomangle` fn keeps its bare name, so an inline(js) body referencing it by
+/// its literal source name resolves to that bare global (the verbatim-name
+/// discipline).
 fn is_nomangle(f: &bone_semantic::hir::Function) -> bool {
     f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
 }

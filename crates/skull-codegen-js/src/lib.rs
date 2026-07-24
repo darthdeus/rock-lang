@@ -940,14 +940,17 @@ function stone_set_blend_mode_i(mode) {
 // Split the combined source at the #version line (#define VERTEX / PIXEL,
 // shader.rs:59-111) and do the ES rewrite (adapt_source_for_gles: WebGL2 IS
 // GLSL ES 3.00): '#version 330 core' -> '#version 300 es' + precision.
-// Web-only extra rewrite: ANGLE enforces the ES reserved-identifier rule
-// (no `__` anywhere in an identifier), which the Rock-mangled GLSL helper
-// names (`normalize__Vec3_ret_Vec3`) violate; desktop drivers tolerate them.
-// Rewriting `__` -> `_Z` at shader-compile time keeps the generated GLSL
-// (and the Lua build's embedded copies) byte-identical everywhere else; a
-// collision would fail the link loudly, never silently.
+// ANGLE (every browser's WebGL2 front-end) enforces the ES reserved-identifier
+// rule: no `__` anywhere in an identifier. The unified mangle is `__`-free by
+// construction, so no rewrite is needed -- instead assert loudly: a `__` in the
+// adapted source is a real bug (a compiler-minted `__` leaked, or a user wrote
+// `a__b` in shader Rock), and must fail at compile time, not silently.
 function __sw_adapt_es(src) {
-  src = src.replace(/__/g, "_Z");
+  if (src.indexOf("__") >= 0) {
+    throw new Error("[STONE-WEB] adapted GLSL contains `__`, which ANGLE (WebGL2) rejects as a " +
+      "reserved identifier; the unified mangle is `__`-free, so this is a leaked compiler name " +
+      "or a `__` in shader Rock -- offending source:\n" + src);
+  }
   if (src.indexOf("#version 330 core") === 0) {
     return "#version 300 es\nprecision highp float;\nprecision highp int;" + src.slice("#version 330 core".length);
   }

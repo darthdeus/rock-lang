@@ -86,7 +86,7 @@ fn vec3_vec4_constructors() {
     // v(...) maps to native vecN construction, not a helper fn.
     assert!(glsl.contains("vec3(sin(t), cos(t), 0.5)"), "got:\n{glsl}");
     assert!(glsl.contains("return vec4(rgb.x, rgb.y, rgb.z, 1.0);"), "got:\n{glsl}");
-    assert!(!glsl.contains("v__float"), "v() should inline, not emit a helper fn:\n{glsl}");
+    assert!(!glsl.contains("v_float"), "v() should inline, not emit a helper fn:\n{glsl}");
 }
 
 #[test]
@@ -176,7 +176,7 @@ fn vec2_normalize_body() {
     let glsl = emit(src, &["root"]).expect("emit");
     assert!(
         glsl.contains(
-            "vec2 normalize__Vec2_ret_Vec2(vec2 v) {\n  \
+            "vec2 normalize_Vec2_ret_Vec2(vec2 v) {\n  \
              float len;\n  \
              if (((v.x == 0.0) && (v.y == 0.0))) {\n    \
                return vec2(0.0);\n  \

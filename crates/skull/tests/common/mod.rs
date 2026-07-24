@@ -77,7 +77,7 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
 
 /// The body of `function <name>(...) ... end` in emitted module Lua. `name` is
 /// the rock identifier; the emitted definition is mangled
-/// (`hot__int_int_int_ret_float`), so match the `function <name>` prefix. The
+/// (`hot_int_int_int_ret_float`), so match the `function <name>` prefix. The
 /// first top-level `\nend\n` closes the function (nested blocks are indented
 /// `end`s, never column-0). A hoisted def (`<name>__lambda0`) shares the
 /// `function <name>` prefix, but the enclosing `<name>` is emitted first, so
