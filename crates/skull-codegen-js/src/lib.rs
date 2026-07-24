@@ -568,6 +568,9 @@ var __SW = {
   logicalW: 0, logicalH: 0, dpr: 1,
   initialized: false, quitReq: false, resized: false,
   events: [], mouseX: 0, mouseY: 0,
+  // Polled input state (stone_is_key_down / _is_mouse_button_down): keyed by the
+  // SDL key STRING (sdl_keycode_to_string vocabulary) and 1-based button index.
+  keysDown: {}, mouseButtons: {},
   texFilter: 0, // 0 nearest, 1 linear
   // one handle space for images AND canvas textures: handle -> WebGLTexture
   textures: {}, nextTex: 1, whiteImage: 0,
@@ -616,6 +619,25 @@ function __sw_sdl_keycode(e) {
 
 function __sw_push_event(type, key, btn, x, y) {
   __SW.events.push({ type: type, key: key, mouse_button: btn, mouse_x: x, mouse_y: y });
+}
+
+// Mirror of lib.rock sdl_keycode_to_string: the polled key-state map is keyed by
+// this string so stone_is_key_down(name) matches the native vocabulary.
+function __sw_keycode_to_string(kc) {
+  if (kc >= 97 && kc <= 122) return String.fromCharCode(kc); // a-z
+  if (kc >= 48 && kc <= 57) return String.fromCharCode(kc);  // 0-9
+  switch (kc) {
+    case 32: return "space"; case 27: return "escape"; case 13: return "return";
+    case 9: return "tab"; case 8: return "backspace"; case 127: return "delete";
+    case 1073742049: return "lshift"; case 1073742053: return "rshift";
+    case 1073742048: return "lctrl"; case 1073742052: return "rctrl";
+    case 1073742050: return "lalt"; case 1073742054: return "ralt";
+    case 1073741906: return "up"; case 1073741905: return "down";
+    case 1073741904: return "left"; case 1073741903: return "right";
+  }
+  if (kc >= 0x4000003A && kc <= 0x4000003A + 11) return "f" + (kc - 0x4000003A + 1);
+  if (kc >= 33 && kc <= 126) return String.fromCharCode(kc);
+  return "" + kc;
 }
 
 // --- lifecycle ---
@@ -694,22 +716,25 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable) 
 
   window.addEventListener("keydown", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __sw_push_event(2, kc, 0, 0, 0); e.preventDefault(); }
+    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = true; __sw_push_event(2, kc, 0, 0, 0); e.preventDefault(); }
   });
   window.addEventListener("keyup", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __sw_push_event(3, kc, 0, 0, 0); }
+    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = false; __sw_push_event(3, kc, 0, 0, 0); }
   });
   canvas.addEventListener("mousemove", function (e) {
     var r = canvas.getBoundingClientRect();
     __SW.mouseX = e.clientX - r.left; __SW.mouseY = e.clientY - r.top;
   });
   canvas.addEventListener("mousedown", function (e) {
+    __SW.mouseButtons[e.button + 1] = true;
     __sw_push_event(4, 0, e.button + 1, Math.round(__SW.mouseX), Math.round(__SW.mouseY));
   });
   canvas.addEventListener("mouseup", function (e) {
+    __SW.mouseButtons[e.button + 1] = false;
     __sw_push_event(5, 0, e.button + 1, Math.round(__SW.mouseX), Math.round(__SW.mouseY));
   });
+  canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
   canvas.addEventListener("wheel", function (e) {
     // No MOUSEWHEEL member in the C enum: the delta rides in mouse_y (type=6).
     // DOM deltaY<0 = scroll up = SDL +1.
@@ -733,6 +758,11 @@ function stone_poll_event(ev) {
   return true;
 }
 function stone_get_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
+function stone_get_global_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
+function stone_is_key_down(key) { return !!__SW.keysDown[key]; }
+function stone_is_mouse_button_down(button) { return !!__SW.mouseButtons[button]; }
+// No separate scancode state on web; treat a pressed key-string equivalently.
+function stone_is_key_pressed(scancode) { return false; }
 
 // --- window / time ---
 function stone_get_window_size(pw, ph) { pw[0] = __SW.logicalW; ph[0] = __SW.logicalH; }

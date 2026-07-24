@@ -196,6 +196,15 @@ pub fn value_struct_is_gc_free(ws: &Workspace, name: Ustr) -> bool {
     value_shape(ws, name).is_some()
 }
 
+/// Declaration field order of `name` iff it is a GC-free value STRUCT proper --
+/// NOT an enum value-shape (which `value_struct_is_gc_free` also accepts via the
+/// `enum_value_shape` fallback). `value_shape_rec` is struct-only (it requires a
+/// `struct_by_name` entry), so this cleanly separates the two: a genuine value
+/// struct renders `Name { f: v }` colon-format on JS, an enum box still rejects.
+pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
+    value_shape_rec(ws, name, &mut Vec::new()).map(|_| struct_field_names(ws, name))
+}
+
 fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
@@ -289,7 +298,7 @@ fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> O
 /// Declared field names of struct `name`, in declaration order (the positional
 /// `<name>_ct` ctor order). A cdata-eligible enum is `[__tag, _0]` (it rides the
 /// value-struct `<Enum>_ct` path). Empty if `name` is neither.
-fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
+pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
     let Some(sid) = ws.struct_by_name.get(&name) else {
         if let Some(es) = enum_value_shape(ws, name) {
             return es.field_names();

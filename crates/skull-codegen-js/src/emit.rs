@@ -1461,6 +1461,36 @@ impl Emitter<'_> {
         ))
     }
 
+    /// Colon-format render of a GC-free value struct `inspect` arg, matching the
+    /// luajit cdata `__tostring` (`Name { f: v }`, declaration field order). Nested
+    /// value-struct fields recurse; primitive leaves defer to the generic `inspect`.
+    fn render_value_struct_inspect(
+        &self,
+        id: Idx<Inst>,
+        cyc: &str,
+        prec: &str,
+    ) -> Result<String, CompilerError> {
+        if let Inst::MakeValueStruct { name, fields } = &self.mf.insts[id] {
+            if let Some(order) = skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name) {
+                let fmap: HashMap<ustr::Ustr, Idx<Inst>> = fields.iter().copied().collect();
+                let mut expr = js_string_lit(&format!("{name} {{ "))?;
+                for (i, fname) in order.iter().enumerate() {
+                    let vid = *fmap.get(fname).ok_or_else(|| {
+                        err(format!("value struct `{name}` field `{fname}` absent at inspect boundary"))
+                    })?;
+                    if i > 0 {
+                        expr.push_str(&format!(" + {}", js_string_lit(", ")?));
+                    }
+                    expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
+                    expr.push_str(&format!(" + {}", self.render_value_struct_inspect(vid, cyc, prec)?));
+                }
+                expr.push_str(&format!(" + {}", js_string_lit(" }")?));
+                return Ok(format!("({expr})"));
+            }
+        }
+        Ok(format!("inspect({}, {cyc}, {prec})", self.render_val(id)?))
+    }
+
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
         // `inspect`/`inspect_formatted` of a GC-FREE value struct still diverges:
@@ -1471,13 +1501,34 @@ impl Emitter<'_> {
         // equals-format walker as the JS object (NOT the `_vt.__tostring`, which it
         // never calls -- oracle-verified: luajit renders `Bag { n = 5, xs = Vec {..} }`),
         // so it inspects faithfully. A boxed ENUM likewise renders faithfully (T8e).
+        // `inspect` of a GC-FREE value struct: luajit renders it via the cdata
+        // `__tostring` as `Name { f: v }` (COLON, declaration field order), where the
+        // generic `{__ty,..}`-object walker would emit `f = v` (equals, sorted keys).
+        // A GC-free value struct's fields are bounded to primitives + nested value
+        // structs (no strings/GC by the C-layout rule), so an emit-time recursive
+        // colon renderer is exact -- primitive leaves go through the generic
+        // `inspect` (lua_tostring / precision parity), nested value structs recurse.
         if matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
                 if let Inst::MakeValueStruct { name, .. } = &self.mf.insts[arg0] {
+                    if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
+                        let (cyc, prec) = if cf.name.as_str() == "inspect_formatted" {
+                            ("true".to_string(), self.render_val(args[1])?)
+                        } else {
+                            (
+                                args.get(1).map(|a| self.render_val(*a)).transpose()?.unwrap_or_else(|| "true".to_string()),
+                                args.get(2).map(|a| self.render_val(*a)).transpose()?.unwrap_or_else(|| "(-1)".to_string()),
+                            )
+                        };
+                        return self.render_value_struct_inspect(arg0, &cyc, &prec);
+                    }
+                    // A scalarized ENUM box reaches here (name is an enum value-shape,
+                    // not a struct): its numeric tag / named variant cannot be rebuilt
+                    // from the `{__tag, _n}` object -- reject honestly.
                     if skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
                         return Err(err(format!(
-                            "JS subset: `inspect` of GC-free value struct `{name}` \
-                             (colon-format cdata render; deferred to value-struct repr)"
+                            "JS subset: `inspect` of scalarized enum `{name}` \
+                             (numeric-tag box cannot reproduce the named variant)"
                         )));
                     }
                 }
