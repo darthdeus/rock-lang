@@ -2554,6 +2554,15 @@ impl Builder<'_> {
                     .ok_or_else(|| gap("read of an unbound variable"))?;
                 Ok(self.emit_cur(Inst::Load(cell)))
             }
+            // A bare name resolving to a FUNCTION taken by value (`let f = adder`,
+            // passing `adder` as an arg, a `func: adder` field) must reference the
+            // fn's MANGLED emitted symbol -- every non-exempt fn mangles, so a bare
+            // `Inst::Global(name)` would read a nil global. A real global variable
+            // keeps its bare name.
+            Expr::Global(name) if self.ws.functions_by_name.contains_key(&name) => {
+                let sym = self.fn_value_symbol(e, name)?;
+                Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
+            }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
 
             // A reached `?` hole is a not-yet-filled marker: raise a readable
@@ -4273,6 +4282,32 @@ impl Builder<'_> {
     /// Resolve a named call to a [`FuncRef`]. bone records overload-resolved
     /// targets in `resolved_overload_calls`; a non-overloaded name resolves
     /// uniquely through `functions_by_name`.
+    /// The emitted symbol for a FUNCTION taken by value (`let f = adder`). Prefer
+    /// bone's recorded overload resolution (an overload disambiguated by the
+    /// value's expected type); otherwise every candidate is a backend VARIANT of
+    /// one `(name, signature)` and so mangles identically -- dedup and take it.
+    /// A genuine unresolved overload rejects (reject, don't fall back).
+    fn fn_value_symbol(&self, e: Idx<Expr>, name: ustr::Ustr) -> Result<String, CompilerError> {
+        if let Some(fref) = self.overload_target(e) {
+            let f = &self.ws.module(fref.module).functions[fref.func];
+            return Ok(crate::mangle::mangle_fn(self.ws, f));
+        }
+        let cands = self.ws.functions_by_name.get(&name).map(|l| l.as_slice()).unwrap_or(&[]);
+        let mut names: Vec<String> = cands
+            .iter()
+            .map(|&(m, fi)| crate::mangle::mangle_fn(self.ws, &self.ws.module(m).functions[fi]))
+            .collect();
+        names.sort();
+        names.dedup();
+        match names.as_slice() {
+            [only] => Ok(only.clone()),
+            [] => Err(gap(format!("unresolved function value `{name}`"))),
+            _ => Err(gap(format!(
+                "function value `{name}` is an unresolved overload (distinct signatures)"
+            ))),
+        }
+    }
+
     fn resolve_funcref(
         &self,
         e: Idx<Expr>,
