@@ -90,6 +90,29 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// The full emitted (mangled) name of the top-level fn whose SOURCE name is
+/// `src`, read out of emitted `lua`. Every non-exempt fn mangles by signature
+/// (`free_loop` -> `free_loop_ret_unit`), so this recovers the base symbol from
+/// which a test builds the synthetic names it owns (`<mangled>__lambda<k>`,
+/// `<mangled>__step`, ...). The base symbol carries NO `__` (that prefix only
+/// appears on the synthetic derivations, and for a `co fn` a `__step`/`__resume`
+/// header can emit before the constructor), so skip `__`-bearing candidates.
+pub fn mangled_name(lua: &str, src: &str) -> String {
+    let head = format!("function {src}");
+    let mut from = 0;
+    while let Some(p) = lua[from..].find(&head) {
+        let start = from + p + "function ".len();
+        let rest = &lua[start..];
+        let end = rest.find('(').expect("fn header has `(`");
+        let name = &rest[..end];
+        if !name.contains("__") {
+            return name.to_string();
+        }
+        from = start + end;
+    }
+    panic!("no non-synthetic `function {src}` in:\n{lua}");
+}
+
 /// Single-module workspace (no stdlib) for incremental / hot-reload tests.
 pub fn ws_of(src: &str) -> Workspace {
     let module = skull_parser::parse_module(src, Ustr::from("<t>")).expect("parse");

@@ -7,7 +7,7 @@
 //! at the creation site. Record mechanics in depth: `env_record_hoist.rs`.
 
 mod common;
-use common::{emit_module, function_body, run_luajit};
+use common::{emit_module, function_body, mangled_name, run_luajit};
 
 /// True if `body` declares a box cell -- a `local c<N> = {}` line (the box-init
 /// shape). Matched precisely rather than via the bare `= {}` substring, which an
@@ -48,8 +48,9 @@ fn main() { let f = submit(3) f() }
 fn nonloop_capture_hoists_to_by_value_record() {
     let lua = emit_module(NONLOOP_CAPTURE);
     let body = function_body(&lua, "submit");
+    let lam = format!("{}__lambda0", mangled_name(&lua, "submit"));
     assert!(
-        body.contains("setmetatable({ __fn = submit__lambda0"),
+        body.contains(&format!("setmetatable({{ __fn = {lam}")),
         "the capture hoists to an env record, not an inline closure:\n{body}"
     );
     assert!(
@@ -89,8 +90,9 @@ fn main() {
 fn loop_capture_snapshots_per_iteration_via_record() {
     let lua = emit_module(LOOP_CAPTURE);
     let body = function_body(&lua, "submit_loop");
+    let lam = format!("{}__lambda", mangled_name(&lua, "submit_loop"));
     assert!(
-        body.contains("setmetatable({ __fn = submit_loop__lambda"),
+        body.contains(&format!("setmetatable({{ __fn = {lam}")),
         "a loop-created capture hoists to a per-iteration env record:\n{body}"
     );
     assert!(!body.contains("return function"), "no by-value snapshot IIFE (deleted in P2.6):\n{body}");
@@ -119,10 +121,11 @@ fn main() { let h = capture_box() h() }
 fn mutated_capture_lowers_to_box_threaded_into_record() {
     let lua = emit_module(MUTATED_CAPTURE);
     let body = function_body(&lua, "capture_box");
+    let lam = format!("{}__lambda", mangled_name(&lua, "capture_box"));
     assert!(declares_box(&body), "a mutable capture must declare a box `local c<N> = {{}}`:\n{body}");
     assert!(body.contains(".v = "), "a mutable capture stores through `.v`:\n{body}");
     assert!(
-        body.contains("setmetatable({ __fn = capture_box__lambda"),
+        body.contains(&format!("setmetatable({{ __fn = {lam}")),
         "the box is threaded into an env record:\n{body}"
     );
     assert!(!body.contains("return function"), "a boxed capture gets no by-value snapshot IIFE:\n{body}");

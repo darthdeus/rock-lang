@@ -19,7 +19,10 @@ fn node_available() -> bool {
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let scx = ScalarCtx::new(ws);
+    // Target JS explicitly (as the real per-test path does): a fn taken by value
+    // keeps its surface name only on the JS target, where JS resolves it through
+    // its own `discover_globals`; a non-Js target mangles the value ref.
+    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {

@@ -37,7 +37,7 @@ fn user_fn_emit_failure_is_a_hard_error() {
 fn stdlib_parity_gaps_stay_lenient() {
     let emit = emit_mir("fn main() { print(1) }");
     assert!(
-        emit.skipped.iter().all(|(name, _)| name == "flat_vec_new" || name == "grow"),
+        emit.skipped.iter().all(|(name, _)| name.starts_with("flat_vec_new") || name.starts_with("grow")),
         "only the known stdlib gaps may skip: {:?}",
         emit.skipped
     );

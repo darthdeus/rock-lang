@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn int_literal_function() {
         let lua = emit("fn five() -> int { 5 }");
-        assert!(lua.contains("function five()"), "got:\n{lua}");
+        assert!(lua.contains("function five_ret_int()"), "got:\n{lua}");
         // The literal is a single-use pure value -> tree-folded into the return.
         assert!(lua.contains("do return (5)"), "got:\n{lua}");
     }
@@ -1491,11 +1491,14 @@ mod tests {
     /// assertion scope to one fn and ignore the always-emitted value-struct
     /// `copy = function(v) return V2_ct(...) end` metatype helpers.
     fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
-        let after = lua
-            .split(&format!("function {name}("))
-            .nth(1)
-            .unwrap_or_else(|| panic!("no `function {name}(` in:\n{lua}"));
-        after.split("\nfunction ").next().unwrap()
+        // Every non-exempt fn emits under its mangled name (`mk_ret_V2`), so match
+        // the `function <name>` PREFIX and scope from the header's `(` to the next
+        // top-level `function `.
+        let head = format!("function {name}");
+        let hpos = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
+        let rest = &lua[hpos..];
+        let paren = rest.find('(').expect("fn header has `(`");
+        rest[paren + 1..].split("\nfunction ").next().unwrap()
     }
 
     /// A defaulted flat-value param is scalarized like any other value param:
