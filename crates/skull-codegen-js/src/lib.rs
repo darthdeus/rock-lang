@@ -831,7 +831,9 @@ function stone_draw_mesh(data, count, stride, tex) {
     gl.bindTexture(gl.TEXTURE_2D, t);
     var lt = __sw_uloc(sh, "uTexture");
     if (lt) gl.uniform1i(lt, 0);
+    if (__SW.unitInt) __SW.unitInt[0] = false;
   }
+  __sw_fix_stale_int_units(gl, sh);
   var lc = __sw_uloc(sh, "uColor");
   if (lc) gl.uniform4f(lc, 1, 1, 1, 1);
   var ltr = __sw_uloc(sh, "uTransform");
@@ -990,6 +992,7 @@ function stone_create_canvas(w, h, format, depth) {
   else if (format === 2) { internal = gl.RGBA32F; fmt = gl.RGBA; type = gl.FLOAT; }
   else if (format === 3) { internal = gl.R32I; fmt = gl.RED_INTEGER; type = gl.INT; }
   gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, fmt, type, null);
+  if (format === 3) (__SW.intTextures = __SW.intTextures || {})[texHandle] = true;
   var filter = (__SW.texFilter === 1 && format !== 3) ? gl.LINEAR : gl.NEAREST;
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
@@ -1038,10 +1041,46 @@ function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.te
 function stone_clear_canvas(r, g, b, a) {
   var gl = __SW.gl;
   gl.clearColor(r, g, b, a);
+  // WebGL2 (unlike desktop GL) makes clear() INVALID_OPERATION when an
+  // INTEGER draw buffer is enabled -- the engine's MRT color pass calls this
+  // between set_draw_buffers(2) and the explicit clearBufferiv on the id
+  // attachment. Narrow the list to [A0] for the float clear and restore; the
+  // id attachment's per-frame reset is the engine's clearBufferiv, exactly as
+  // on native (where glClear on the int attachment is undefined anyway).
+  var c = __SW.canvases[__SW.boundCanvas];
+  var narrow = c && c.idTex !== undefined && c.drawBufs === 2;
+  if (narrow) gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (narrow) gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
 }
-function stone_clear_canvas_int(drawBuffer, value) {}
-function stone_canvas_attach_id_target(canvasH, idH) { return false; } // single-buffer fallback on web
+// Clear one INTEGER draw buffer of the currently bound FBO (glClear is
+// undefined/forbidden on integer buffers; R32I id targets reset through this).
+function stone_clear_canvas_int(drawBuffer, value) {
+  var gl = __SW.gl;
+  gl.clearBufferiv(gl.COLOR, drawBuffer, new Int32Array([value, 0, 0, 0]));
+}
+// MRT: attach the id-canvas's R32I texture as COLOR_ATTACHMENT1 of the
+// color-canvas's FBO (mirrors stone-rs canvas.rs: size gate, completeness
+// gate with rollback; draw-buffer list stays [A0] -- the color pass toggles).
+function stone_canvas_attach_id_target(canvasH, idH) {
+  var gl = __SW.gl;
+  var c = __SW.canvases[canvasH], idc = __SW.canvases[idH];
+  if (!c || !idc) { __sw_log_once("stone_canvas_attach_id_target: unknown handle(s)"); return false; }
+  if (c.w !== idc.w || c.h !== idc.h) { __sw_log_once("stone_canvas_attach_id_target: size mismatch"); return false; }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, __SW.textures[idc.tex], 0);
+  var ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  if (!ok) {
+    __sw_log_once("stone_canvas_attach_id_target: FBO incomplete after MRT attach");
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, null, 0);
+  } else {
+    c.idTex = idc.tex;
+    c.drawBufs = 1;
+  }
+  var prev = __SW.canvases[__SW.boundCanvas];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
+  return ok;
+}
 function stone_set_present_viewport(active, x, y, w, h) {
   var gl = __SW.gl;
   // Args arrive in logical units (PRESENT_OFFSET/SIZE, computed from
@@ -1131,7 +1170,17 @@ function stone_create_shader_from_combined(src) {
     return 0;
   }
   var h = __SW.nextShader++;
-  __SW.shaders[h] = { prog: prog, ulocs: {} };
+  // Float (non-integer) sampler2D uniforms, for the stale-int-unit fix. The
+  // fake-GL env has no getActiveUniform -- empty list there.
+  var floatSamplers = [];
+  if (gl.getActiveUniform) {
+    var nu = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS) | 0;
+    for (var ui = 0; ui < nu; ui++) {
+      var info = gl.getActiveUniform(prog, ui);
+      if (info && info.type === gl.SAMPLER_2D) floatSamplers.push(info.name);
+    }
+  }
+  __SW.shaders[h] = { prog: prog, ulocs: {}, floatSamplers: floatSamplers, samplerUnits: {} };
   return h;
 }
 function stone_destroy_shader(h) {
@@ -1171,7 +1220,11 @@ function stone_shader_set_vec2(h, name, x, y) { __sw_with_shader_uniform(h, name
 function stone_shader_set_vec3(h, name, x, y, z) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform3f(l, x, y, z); }); }
 function stone_shader_set_vec4(h, name, x, y, z, w) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4f(l, x, y, z, w); }); }
 function stone_shader_set_mat4(h, name, m) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniformMatrix4fv(l, false, m.subarray ? m.subarray(0, 16) : m); }); }
-function stone_shader_set_texture(h, name, unit) { __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1i(l, unit); }); }
+function stone_shader_set_texture(h, name, unit) {
+  var sh = __SW.shaders[h];
+  if (sh && sh.samplerUnits) sh.samplerUnits[name] = unit;
+  __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1i(l, unit); });
+}
 function stone_shader_set_float_array(h, name, values, count) {
   __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform1fv(l, values.subarray ? values.subarray(0, count) : values); });
 }
@@ -1190,6 +1243,29 @@ function stone_bind_texture_to_unit(tex, unit) {
   gl.activeTexture(gl.TEXTURE0 + unit);
   gl.bindTexture(gl.TEXTURE_2D, t);
   gl.activeTexture(gl.TEXTURE0);
+  (__SW.unitInt = __SW.unitInt || {})[unit] = !!(__SW.intTextures && __SW.intTextures[tex]);
+}
+
+// WebGL2 (unlike desktop GL) makes ANY draw INVALID_OPERATION when an active
+// FLOAT sampler's unit holds an INTEGER texture -- even one the shader never
+// actually reads this frame. The engine's outline detect pass leaves its R32I
+// inputs bound on shared units (visible_id on 2, the unit sprite_batch's
+// uShadowmapTex uses), which desktop GL tolerates. Neutralize before draw:
+// rebind the white texture on any float-sampler unit left holding an integer
+// texture. Sampler names/types come from link-time introspection; the
+// name->unit map tracks stone_shader_set_texture.
+function __sw_fix_stale_int_units(gl, sh) {
+  var fs = sh.floatSamplers;
+  if (!fs || fs.length === 0 || !__SW.unitInt) return;
+  for (var i = 0; i < fs.length; i++) {
+    var unit = sh.samplerUnits[fs[i]] || 0;
+    if (__SW.unitInt[unit]) {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, __SW.textures[stone_get_white_image()]);
+      gl.activeTexture(gl.TEXTURE0);
+      __SW.unitInt[unit] = false;
+    }
+  }
 }
 
 // --- fullscreen quad (post-processing passes) ---
@@ -1219,6 +1295,7 @@ function stone_draw_fullscreen_quad() {
     __sw_fsq_present = __sw_fsq_buffer(gl, true);
   }
   gl.useProgram(sh.prog);
+  __sw_fix_stale_int_units(gl, sh);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.boundCanvas === 0 ? __sw_fsq_present : __sw_fsq_identity);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
   gl.enableVertexAttribArray(0);
@@ -1614,18 +1691,136 @@ function stone_draw_polygon(mode, verts, n, r, g, b, a) {
 }
 
 function stone_set_color_mask(r, g, b, a) { var gl = __SW.gl; if (gl) gl.colorMask(r, g, b, a); }
-function stone_set_draw_buffers(count) {}
+// Draw-buffer list of the CURRENTLY BOUND FBO (per-FBO state in WebGL2, same
+// as GL): [A0, A1] during the MRT color pass, [A0] otherwise. Tracked on the
+// bound canvas so stone_clear_canvas knows when to narrow for the float clear.
+function stone_set_draw_buffers(count) {
+  var gl = __SW.gl;
+  var c = __SW.canvases[__SW.boundCanvas];
+  var n = count >= 2 ? 2 : 1;
+  gl.drawBuffers(n === 2 ? [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1] : [gl.COLOR_ATTACHMENT0]);
+  if (c) c.drawBufs = n;
+}
 function stone_get_canvas_fbo(h) { return h; }
 function stone_canvas_save_png(h, path) { return false; }
 function stone_canvas_read_rgba8(h, out, cap) { return 0; }
-function stone_read_canvas_pixel(h, x, y) { return 0; }
-function stone_read_depth_pixel(h, x, y) { return 0; }
 
-function stone_pixel_readback_new(isDepth) { return 0; }
-function stone_pixel_readback_destroy(id) {}
-function stone_pixel_readback_submit(id, ch, x, y) {}
-function stone_pixel_readback_consume(id) { return 0; }
-function stone_pixel_readback_read(id, ch, x, y) { return 0; }
+// The (format, type, view, convert) readPixels shape for one pixel of canvas
+// `c`: R32I ids read as RGBA_INTEGER/INT (exact in f32 -- ids are far below
+// 2^24), float canvases as RGBA/FLOAT, rgba8 as bytes (red normalized).
+function __sw_read_shape(gl, c) {
+  if (c.format === 3) return { fmt: gl.RGBA_INTEGER, type: gl.INT, view: new Int32Array(4), get: function (v) { return v[0]; } };
+  if (c.format === 1 || c.format === 2) return { fmt: gl.RGBA, type: gl.FLOAT, view: new Float32Array(4), get: function (v) { return v[0]; } };
+  return { fmt: gl.RGBA, type: gl.UNSIGNED_BYTE, view: new Uint8Array(4), get: function (v) { return v[0] / 255.0; } };
+}
+// Sync single-pixel read (sim-only cost): finish + readPixels, top-left coords.
+function stone_read_canvas_pixel(h, x, y) {
+  var gl = __SW.gl;
+  var c = __SW.canvases[h];
+  if (!c || x < 0 || y < 0 || x >= c.w || y >= c.h) return 0;
+  var shape = __sw_read_shape(gl, c);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
+  gl.finish();
+  gl.readPixels(x, c.h - 1 - y, 1, 1, shape.fmt, shape.type, shape.view);
+  var prev = __SW.canvases[__SW.boundCanvas];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
+  return shape.get(shape.view);
+}
+// WebGL2 has no DEPTH_COMPONENT readPixels at all (the GLES rule) -- far plane.
+function stone_read_depth_pixel(h, x, y) {
+  __sw_log_once("depth pixel readback unsupported on WebGL2; returning far plane");
+  return 1.0;
+}
+
+// --- async single-pixel readback: double-buffered PIXEL_PACK_BUFFER ping-pong
+// (mirrors stone-rs pixel_readback.rs). submit() promotes prior staging to
+// ready + queues readPixels into staging with a fence; consume() reads the
+// READY pbo (>= 1 frame old BY DESIGN -- mag's async pick). One-shot per
+// promoted submit; OOB / unknown canvas / depth-on-web submits carry the
+// sentinel (0 color, 1 depth far plane). ---
+function stone_pixel_readback_new(isDepth) {
+  var gl = __SW.gl;
+  if (!gl || !gl.createBuffer) return 0;
+  var R = (__SW.readbacks = __SW.readbacks || { slots: {}, next: 1 });
+  var pbos = [gl.createBuffer(), gl.createBuffer()];
+  for (var i = 0; i < 2; i++) {
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbos[i]);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, 16, gl.STREAM_READ);
+  }
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  var id = R.next++;
+  R.slots[id] = {
+    pbos: pbos, readyIdx: 0, stagingIdx: 1,
+    readyPrimed: false, stagingPrimed: false,
+    readyGarbage: false, stagingGarbage: false,
+    readyFmt: 0, stagingFmt: 0, // 0 f32, 1 bytes, 2 ints
+    fences: [null, null],
+    depth: !!isDepth,
+  };
+  return id;
+}
+function stone_pixel_readback_destroy(id) {
+  var R = __SW.readbacks;
+  var s = R && R.slots[id];
+  if (!s) return;
+  var gl = __SW.gl;
+  gl.deleteBuffer(s.pbos[0]); gl.deleteBuffer(s.pbos[1]);
+  delete R.slots[id];
+}
+function stone_pixel_readback_submit(id, canvasH, x, y) {
+  var R = __SW.readbacks;
+  var s = R && R.slots[id];
+  if (!s) return;
+  var gl = __SW.gl;
+  if (s.stagingPrimed) {
+    var t = s.readyIdx; s.readyIdx = s.stagingIdx; s.stagingIdx = t;
+    s.readyPrimed = true;
+    s.readyGarbage = s.stagingGarbage;
+    s.readyFmt = s.stagingFmt;
+    s.stagingPrimed = false;
+  }
+  var c = __SW.canvases[canvasH];
+  var ok = !!c && x >= 0 && y >= 0 && x < c.w && y < c.h;
+  if (ok && s.depth) {
+    __sw_log_once("depth pixel readback unsupported on WebGL2; returning far plane");
+    ok = false;
+  }
+  if (!ok) { s.stagingPrimed = true; s.stagingGarbage = true; return; }
+  var shape = __sw_read_shape(gl, c);
+  s.stagingFmt = (c.format === 3) ? 2 : (c.format === 1 || c.format === 2) ? 0 : 1;
+  gl.bindFramebuffer(gl.READ_FRAMEBUFFER, c.fbo);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbos[s.stagingIdx]);
+  gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+  gl.readPixels(x, c.h - 1 - y, 1, 1, shape.fmt, shape.type, 0);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  if (s.fences[s.stagingIdx]) gl.deleteSync(s.fences[s.stagingIdx]);
+  s.fences[s.stagingIdx] = gl.fenceSync ? gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) : null;
+  var prev = __SW.canvases[__SW.boundCanvas];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
+  s.stagingPrimed = true;
+  s.stagingGarbage = false;
+}
+function stone_pixel_readback_consume(id) {
+  var R = __SW.readbacks;
+  var s = R && R.slots[id];
+  if (!s) return 0;
+  var sentinel = s.depth ? 1.0 : 0.0;
+  if (!s.readyPrimed) return sentinel;
+  s.readyPrimed = false;
+  if (s.readyGarbage) { s.readyGarbage = false; return sentinel; }
+  var gl = __SW.gl;
+  var fence = s.fences[s.readyIdx];
+  if (fence) { gl.clientWaitSync(fence, 0, 0); gl.deleteSync(fence); s.fences[s.readyIdx] = null; }
+  var view = s.readyFmt === 2 ? new Int32Array(4) : s.readyFmt === 1 ? new Uint8Array(4) : new Float32Array(4);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbos[s.readyIdx]);
+  gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, view);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+  return s.readyFmt === 1 ? view[0] / 255.0 : view[0];
+}
+function stone_pixel_readback_read(id, ch, x, y) {
+  stone_pixel_readback_submit(id, ch, x, y);
+  return stone_pixel_readback_consume(id);
+}
 
 // --- window management (fixed canvas on web) ---
 function stone_set_fullscreen(mode) {}
