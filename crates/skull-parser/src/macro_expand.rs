@@ -188,9 +188,13 @@ pub fn expand_macros(modules: &mut [Ast]) {
 fn module_calls_macro(ast: &Ast, reg: &Registry) -> bool {
     ast.exprs.values().any(|ed| {
         if let ExprKind::FunctionCall { func, .. } = &ed.kind {
-            if let ExprKind::Ident(id) = &ast.exprs[*func].kind {
-                return reg.contains_key(&id.name);
-            }
+            return match &ast.exprs[*func].kind {
+                // plain `name(args)`
+                ExprKind::Ident(id) => reg.contains_key(&id.name),
+                // UFCS `recv.name(args)` -- the member names the macro
+                ExprKind::FieldAccess(_, member) => reg.contains_key(&member.name),
+                _ => false,
+            };
         }
         false
     })
@@ -615,22 +619,38 @@ fn expand_expr(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, st
 /// If `e` is a `name(args)` call where `name` is a registered macro, splice the
 /// substituted body in as a `Block`.
 fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, stack: &mut Vec<ShadowScope>) {
-    let ExprKind::FunctionCall { func, args, .. } = &ast.exprs[e].kind else {
-        return;
+    // Two invocation shapes: a plain `name(args)` and a UFCS `recv.name(args)`
+    // (member-position macro -- the receiver becomes the first arg, so the slot
+    // macros read naturally in `player.cast_co.poll_co_slot()` form). A macro
+    // name is globally unique against fn/method names (`check_macro_name_
+    // uniqueness`), so the member form is unambiguously the macro when `name` is
+    // registered. Field/local shadowing only applies to the plain-ident form: a
+    // local can shadow a bare callee name, never a member name.
+    let (name, arg_values, is_ident) = {
+        let ExprKind::FunctionCall { func, args, .. } = &ast.exprs[e].kind else {
+            return;
+        };
+        let func = *func;
+        let arg_idxs: Vec<Idx<ExprData>> = args.iter().map(|a| a.value).collect();
+        match &ast.exprs[func].kind {
+            ExprKind::Ident(id) => (id.name, arg_idxs, true),
+            ExprKind::FieldAccess(recv, member) => {
+                let mut vs = Vec::with_capacity(arg_idxs.len() + 1);
+                vs.push(*recv);
+                vs.extend(arg_idxs);
+                (member.name, vs, false)
+            }
+            _ => return,
+        }
     };
-    let ExprKind::Ident(id) = &ast.exprs[*func].kind else {
-        return;
-    };
-    let name = id.name;
     if !reg.contains_key(&name) {
         return;
     }
     // A locally-bound callee (fn-typed param, local fn value, nested fn, loop
     // binding) shadows any same-named macro — this is a real call.
-    if is_shadowed(stack, name) {
+    if is_ident && is_shadowed(stack, name) {
         return;
     }
-    let arg_values: Vec<Idx<ExprData>> = args.iter().map(|a| a.value).collect();
     if depth >= MAX_MACRO_DEPTH {
         return;
     }
