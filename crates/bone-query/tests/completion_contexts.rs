@@ -448,6 +448,43 @@ fn field_ref_method_prefills_nontrailing_fieldof_arg() {
     assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
 }
 
+// An `Entity<T>`-receiver FieldOf method resolves the owner struct through the
+// Entity's type argument: `e.run_` (e: Entity<Mob>) fills the field of the
+// ELEMENT struct (`Mob`), symmetric with the value-owner overload. The p0 is
+// nominal `Entity<T>`, so `ufcs_methods` DOES surface it -- the prefill must
+// rewrite that item (not double it) with the element's matching field.
+
+#[test]
+fn field_ref_method_entity_receiver_prefills_single_field() {
+    let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r(e: Entity<Mob>) {\n  e.run\n}\n";
+    let it = item(src, 3, 7, "run_into");
+    assert_eq!(it.insert_text.as_deref(), Some("run_into(.attack_co, ${1:co})"), "{it:?}");
+    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
+#[test]
+fn field_ref_method_entity_receiver_prefills_choice_on_multiple_fields() {
+    let src = "struct Mob { health: int, attack_co: int?, cast_co: int?, name: string }\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r(e: Entity<Mob>) {\n  e.run\n}\n";
+    let it = item(src, 3, 7, "run_into");
+    assert_eq!(it.insert_text.as_deref(), Some("run_into(${1|.attack_co,.cast_co|}, ${2:co})"), "{it:?}");
+    assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
+}
+
+#[test]
+fn field_ref_method_entity_receiver_no_duplicate_item() {
+    // The Entity overload is nominal, so it surfaces once via `ufcs_methods`;
+    // the prefill rewrites that single item rather than appending a second.
+    let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
+               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn r(e: Entity<Mob>) {\n  e.run\n}\n";
+    let l = labels(src, 3, 7);
+    assert_eq!(l.iter().filter(|s| s.as_str() == "run_into").count(), 1, "exactly one run_into item: {l:?}");
+}
+
 #[test]
 fn member_completion_resolves_a_cross_file_receiver_type() {
     // a.rock defines IVec2; b.rock has a param of that type. Completing `g.` in

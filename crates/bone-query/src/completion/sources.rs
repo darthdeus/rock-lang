@@ -1067,11 +1067,11 @@ pub(crate) fn member_completions_by_receiver(
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
             let mid = user_module_for_path(ws, path)?;
-            let (fields, recv_struct, vec_elem) =
+            let (fields, recv_struct, vec_elem, recv_elem) =
                 crate::query::struct_members_of_receiver_expr(ws, mid, recv_end)?;
             Some(build_member_items(
-                ws, mid, offset, fields, Some(recv_struct), vec_elem, prefix, arg_slot.clone(),
-                anchor, reach, bool_ctx, paren_follows,
+                ws, mid, offset, fields, Some(recv_struct), vec_elem, recv_elem, prefix,
+                arg_slot.clone(), anchor, reach, bool_ctx, paren_follows,
             ))
         });
         // `Some(Some(items))`: this variant resolved the receiver. Prefer the
@@ -1111,26 +1111,48 @@ pub(crate) fn member_completion_items(
     let fields = crate::query::struct_fields_for_path(ws, mid, offset, segments);
     let recv_struct = crate::query::struct_name_for_path(ws, mid, offset, segments);
     let vec_elem = crate::query::receiver_vec_elem(ws, mid, offset, segments);
+    let recv_elem = crate::query::receiver_sole_arg_struct(ws, mid, offset, segments);
     build_member_items(
-        ws, mid, offset, fields, recv_struct, vec_elem, prefix, arg_slot, anchor, reach, bool_ctx,
-        paren_follows,
+        ws, mid, offset, fields, recv_struct, vec_elem, recv_elem, prefix, arg_slot, anchor, reach,
+        bool_ctx, paren_follows,
     )
 }
 
-/// If UFCS fn `f` (receiver bound to `recv_struct`) has a `FieldOf<recv, V>`
-/// param and `recv_struct` has >=1 field of type `V`, returns `(arg_idx, field
-/// names)` -- `arg_idx` is the FieldOf's position among the *non-receiver* args,
-/// so the pre-fill lands the field in the right slot (`set_co`'s FieldOf is
-/// arg 0 of `(field, next)`, not the trailing param). `None` otherwise (leave
-/// the item untouched). Receiver binding: `T` is `Generic` on `fn kill_co<T>(o:
-/// T, f: FieldOf<T, V>)`, so the FieldOf's `T` must be that same generic var --
-/// or, rarely, a literal `FieldOf<SomeStruct, V>` whose struct is `recv_struct`.
-fn field_ref_slot(ws: &Workspace, recv_struct: Ustr, f: &bone_semantic::hir::Function) -> Option<(usize, Vec<Ustr>)> {
+/// If UFCS fn `f` has a `FieldOf<owner, V>` param and the owner struct has >=1
+/// field of type `V`, returns `(arg_idx, field names)` -- `arg_idx` is the
+/// FieldOf's position among the *non-receiver* args, so the pre-fill lands the
+/// field in the right slot (`set_co`'s FieldOf is arg 0 of `(field, next)`, not
+/// the trailing param). `None` otherwise (leave the item untouched). Two
+/// receiver shapes bind the owner: a bare-generic `o: T` is itself the owner
+/// (`stop<T>(o: T, f: FieldOf<T, V>)`, owner = `recv_struct`); a wrapper
+/// `e: Entity<T>` binds `T` to `recv_elem` (`Entity<Glyph>` -> owner `Glyph`),
+/// resolving the FieldOf through the ctor. The FieldOf's `T` is then that same
+/// generic var, or a literal `FieldOf<owner, V>` whose struct is the owner.
+fn field_ref_slot(
+    ws: &Workspace,
+    recv_struct: Ustr,
+    recv_elem: Option<Ustr>,
+    f: &bone_semantic::hir::Function,
+) -> Option<(usize, Vec<Ustr>)> {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     let p0 = f.param_decls.first()?;
-    let recv_var = match ty_of(ws, None, p0.ty) {
-        TypeExpr::Generic(v, _) => Some(v),
-        _ => None,
+    // The generic var the receiver binds, plus the struct whose fields the
+    // FieldOf owner enumerates. A bare-generic `o: T` receiver IS the owner
+    // (`stop<T>(o: T, ..)`). A wrapper `e: Entity<T>` binds `T` to the
+    // receiver's element (`Entity<Glyph>` -> `Glyph`), so the owner is that
+    // element -- resolving the FieldOf through the ctor.
+    let (recv_var, owner) = match ty_of(ws, None, p0.ty) {
+        TypeExpr::Generic(v, _) => (Some(v), recv_struct),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
+            if n == recv_struct && params.len() == 1 =>
+        {
+            let arg_idx = params.into_iter().next().unwrap();
+            match (ty_of(ws, None, p0.ty.with_idx(arg_idx)), recv_elem) {
+                (TypeExpr::Generic(v, _), Some(e)) => (Some(v), e),
+                _ => (None, recv_struct),
+            }
+        }
+        _ => (None, recv_struct),
     };
     for (i, p) in f.param_decls.iter().enumerate().skip(1) {
         let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
@@ -1143,7 +1165,7 @@ fn field_ref_slot(ws: &Workspace, recv_struct: Ustr, f: &bone_semantic::hir::Fun
             _ => continue,
         };
         let t_ok = match ty_of(ws, None, p.ty.with_idx(t_idx)) {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n == recv_struct,
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n == owner,
             TypeExpr::Generic(tv, _) => recv_var == Some(tv),
             _ => false,
         };
@@ -1151,7 +1173,7 @@ fn field_ref_slot(ws: &Workspace, recv_struct: Ustr, f: &bone_semantic::hir::Fun
             continue;
         }
         let v_str = ws.render(None, p.ty.with_idx(v_idx));
-        let fields = fields_of_type(ws, recv_struct, &v_str);
+        let fields = fields_of_type(ws, owner, &v_str);
         if !fields.is_empty() {
             return Some((i - 1, fields));
         }
@@ -1182,19 +1204,23 @@ fn field_ref_insert(name: &str, f: &bone_semantic::hir::Function, field_arg_idx:
     format!("{name}({})", parts.join(", "))
 }
 
-/// Generic-receiver UFCS field-ref methods applicable to `recv_struct`: a fn
-/// whose first param is a bare generic `T` with a `FieldOf<T, V>` param, where
-/// `recv_struct` has a field of type `V`. `mob.kill_co(.attack_co)` is UFCS-
-/// legal, but the receiver is generic so `ufcs_methods` (nominal-match) never
-/// surfaces it -- this fills that gap. Gated on a matching field existing, so a
-/// struct with no `Task?` field never sees `kill_co` (and generic helpers
-/// like `min`/`max`, which carry no FieldOf param, never leak in). Deduped by
-/// name, first-wins. Returns `(fn, arg_idx, field names)`.
+/// UFCS field-ref methods applicable to this receiver: a fn whose first param
+/// is either a bare generic `T` (owner = `recv_struct`) or a wrapper `Ctor<T>`
+/// whose ctor is `recv_struct` (owner = `recv_elem`, e.g. `Entity<Glyph>`), and
+/// which has a `FieldOf<T, V>` param where the owner has a field of type `V`.
+/// `mob.kill_co(.attack_co)` / `e.run_into(.co, ..)` are UFCS-legal; the generic
+/// receiver is never surfaced by `ufcs_methods` (nominal-match), so this fills
+/// that gap, while the wrapper overload IS surfaced there (caller suppresses the
+/// plain item and keeps this pre-filled one). Gated on a matching field, so a
+/// struct with no `Task?` field never sees the method (and generic helpers like
+/// `min`/`max`, which carry no FieldOf param, never leak in). Deduped by name,
+/// first-wins. Returns `(fn, arg_idx, field names)`.
 fn field_ref_methods<'a>(
     ws: &'a Workspace,
     recv_struct: Ustr,
+    recv_elem: Option<Ustr>,
 ) -> Vec<(&'a bone_semantic::hir::Function, usize, Vec<Ustr>)> {
-    use bone_semantic::hir::TypeExpr;
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
     for m in ws.modules.iter() {
@@ -1203,10 +1229,22 @@ fn field_ref_methods<'a>(
                 continue;
             }
             let Some(p0) = f.param_decls.first() else { continue };
-            if !matches!(ty_of(ws, None, p0.ty), TypeExpr::Generic(..)) {
+            // A bare-generic receiver (`o: T`), or a wrapper `Ctor<T>` whose ctor
+            // is the receiver struct (`e: Entity<T>` on an `Entity<Glyph>`
+            // receiver) -- the two shapes `field_ref_slot` resolves an owner for.
+            let p0_ok = match ty_of(ws, None, p0.ty) {
+                TypeExpr::Generic(..) => true,
+                TypeExpr::App { ctor: TypeCtor::Nominal(n), params } => {
+                    n == recv_struct && params.len() == 1 && recv_elem.is_some()
+                }
+                _ => false,
+            };
+            if !p0_ok {
                 continue;
             }
-            let Some((arg_idx, fields)) = field_ref_slot(ws, recv_struct, f) else { continue };
+            let Some((arg_idx, fields)) = field_ref_slot(ws, recv_struct, recv_elem, f) else {
+                continue;
+            };
             if seen.insert(f.name) {
                 out.push((f, arg_idx, fields));
             }
@@ -1228,6 +1266,9 @@ fn build_member_items(
     // Receiver's rendered element type for a Vec (`[Vec2]` -> "Vec2"); filters
     // UFCS methods to those whose element unifies. None for nominal receivers.
     vec_elem: Option<String>,
+    // Receiver's sole type-arg struct (`Entity<Glyph>` -> "Glyph"); the FieldOf
+    // owner `T` binds through it on wrapper-receiver overloads (`e.run_into(.co)`).
+    recv_elem: Option<Ustr>,
     prefix: &str,
     arg_slot: Option<(String, usize)>,
     anchor: Option<SlotAnchor>,
@@ -1320,7 +1361,20 @@ fn build_member_items(
                 ..Default::default()
             })
         });
+        // FieldOf field-ref methods for this receiver, resolved once. Two shapes:
+        // a bare-generic receiver (`mob.stop`, never surfaced by `ufcs_methods`)
+        // and a wrapper `Entity<T>` overload (`e.run_into`, which the NOMINAL
+        // `ufcs_methods` DOES surface as a plain item). For the latter, suppress
+        // the plain method item below so the pre-filled version isn't doubled.
+        let field_ref_matches = recv_struct
+            .map(|rs| field_ref_methods(ws, rs, recv_elem))
+            .unwrap_or_default();
+        let field_ref_names: std::collections::HashSet<Ustr> =
+            field_ref_matches.iter().map(|(f, _, _)| f.name).collect();
         let method_items = methods.into_iter().zip(method_match).filter_map(|(m, rmatch)| {
+            if field_ref_names.contains(&Ustr::from(m.name.as_str())) {
+                return None;
+            }
             (prefix.is_empty() || admit(m.name.as_bytes(), prefix.as_bytes())).then(|| {
                 // Inline `(params) -> ret`. A method with args left after the
                 // receiver accepts as a snippet `name($0)` (`recv.name()`, cursor
@@ -1359,13 +1413,13 @@ fn build_member_items(
             })
         });
         let mut items: Vec<CompletionItem> = field_items.chain(method_items).collect();
-        // Generic-receiver UFCS field-ref methods (`mob.kill_co(.attack_co)`):
-        // `ufcs_methods` skips them (their receiver is a bare generic, not
-        // nominal), so surface them here, pre-filling the field arg. Gated on a
-        // matching field existing, so `min`/`max`/`expect` (no FieldOf param)
-        // never leak in and a struct without the field never sees the method.
-        if let Some(rs) = recv_struct {
-            for (fdef, arg_idx, fields) in field_ref_methods(ws, rs) {
+        // Field-ref methods (`mob.kill_co(.attack_co)`, `e.run_into(.co, ..)`):
+        // surface each with the field arg pre-filled. A bare-generic receiver is
+        // skipped by `ufcs_methods` (its receiver isn't nominal), so this is the
+        // only source; a wrapper `Entity<T>` overload was suppressed above, so
+        // this is its sole (pre-filled) item. Gated on a matching field existing.
+        {
+            for (fdef, arg_idx, fields) in field_ref_matches {
                 let name = fdef.name;
                 if !(prefix.is_empty() || admit(name.as_bytes(), pfx)) {
                     continue;
