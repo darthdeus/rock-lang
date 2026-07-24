@@ -968,6 +968,39 @@ mod tests {
         compile_source(src).unwrap_or_else(|e| panic!("skull compile failed: {}", e.message))
     }
 
+    /// Bare-name aliases (`_G["pick"] = pick_bool_ret_int`) for the user module's
+    /// fns, so the execution-oracle drivers can keep calling by SOURCE name under
+    /// always-mangle (every non-exempt fn now emits a mangled symbol). A name with
+    /// more than one non-exempt definition is left unaliased -- a bare-name call
+    /// to an overload is ambiguous and no driver relies on one. Exempt fns
+    /// (`main`/`@nomangle`/...) already emit bare, so they need no alias.
+    fn user_fn_aliases(src: &str) -> String {
+        let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>")).expect("parse");
+        let ws = match bone_semantic::semantic_passes::semantic_pass(&mut [module]) {
+            Ok(ws) => ws,
+            Err(_) => return String::new(),
+        };
+        let Ok(mid) = super::user_module_id(&ws) else { return String::new() };
+        use std::collections::HashMap;
+        let mut counts: HashMap<ustr::Ustr, usize> = HashMap::new();
+        for (_, f) in ws.module(mid).functions.iter() {
+            if !skull_mir::mangle::is_exempt(f) {
+                *counts.entry(f.name).or_insert(0) += 1;
+            }
+        }
+        let mut out = String::new();
+        for (_, f) in ws.module(mid).functions.iter() {
+            if skull_mir::mangle::is_exempt(f) || counts[&f.name] > 1 {
+                continue;
+            }
+            let mangled = skull_mir::mangle::mangle_fn(&ws, f);
+            if mangled != f.name.as_str() {
+                out.push_str(&format!("_G[\"{}\"] = {}\n", f.name, mangled));
+            }
+        }
+        out
+    }
+
     /// The schema-drift restart trigger's oracle (docs/hot-reload-schema-drift-plan.md):
     /// the hash moves iff the runtime LAYOUT moves. Body edits are invisible;
     /// each shape-edit class moves exactly its own type's entry; a removed type
@@ -1040,11 +1073,14 @@ mod tests {
     /// multi-line `assert_eq!` expectation would spuriously mismatch.
     fn run(src: &str, driver: &str) -> Option<String> {
         // Stdlib-free harness: codegen emits calls to the checked Vec helpers
-        // the stdlib normally provides -- prepend the canonical shims.
+        // the stdlib normally provides -- prepend the canonical shims. Alias the
+        // user fns back to their bare source names so the driver can call them
+        // (every non-exempt fn mangles under the unified scheme).
         let lua = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             emit(src),
             skull_codegen_lua::VEC_CHECK_SHIMS,
+            user_fn_aliases(src),
             driver
         );
         let out = std::process::Command::new("luajit")
@@ -1236,7 +1272,7 @@ mod tests {
         );
         // Top-level shared step fn — NOT a per-instance `local function` closure.
         assert!(
-            lua.contains("function counter__step("),
+            lua.contains("function counter_ret_Coroutine_int_unit_unit__step("),
             "expected top-level step fn, got:\n{lua}"
         );
         assert!(
@@ -1248,7 +1284,7 @@ mod tests {
             "expected the tagged+stamped frame table, got:\n{lua}"
         );
         assert!(
-            lua.contains("pcall(counter__step,"),
+            lua.contains("pcall(counter_ret_Coroutine_int_unit_unit__step,"),
             "expected name-referenced pcall, got:\n{lua}"
         );
         // State machine: writes to the state field + a completed terminal -3
