@@ -98,3 +98,30 @@ fn main() {
         "unexpected reject message: {err}"
     );
 }
+
+#[test]
+fn coroutine_reraise_does_not_emit_lua_error_extern() {
+    let ws = ws_with(
+        r#"
+co fn inner() -> Coroutine<int> {
+    yield 1
+    error("boom")
+}
+
+co fn outer() -> Coroutine<int> {
+    await inner()
+}
+
+fn main() {
+    let c = outer()
+    c.resume()
+    c.resume()
+}
+"#,
+    );
+    let prog = emit_program_js(&ws).expect("emit js program");
+    assert!(
+        !prog.contains("function error("),
+        "the runtime throwing `error` global must not be shadowed:\n{prog}"
+    );
+}

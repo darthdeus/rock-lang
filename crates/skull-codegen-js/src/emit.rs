@@ -2734,7 +2734,9 @@ fn discover_globals(
     inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
     for name in global_refs(mf) {
-        if enum_defs.contains_key(&name) {
+        if name.as_str() == "error" {
+            continue;
+        } else if enum_defs.contains_key(&name) {
             gctx.enum_globals.insert(name);
         } else if let Some(&site) = state_index.get(&name) {
             if deco_globals.contains(&name) {
