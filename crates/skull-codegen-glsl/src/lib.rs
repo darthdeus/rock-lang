@@ -2662,8 +2662,8 @@ mod value_test_shader {
         assert_eq!(s.ret, ValueTestRet::Int);
         assert!(s.fragment.starts_with("#version 330 core\n"), "{}", s.fragment);
         assert!(s.fragment.contains("layout(location = 0) out int _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
-        assert!(s.fragment.contains("int t()"), "callee def present: {}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t_ret_int();"), "{}", s.fragment);
+        assert!(s.fragment.contains("int t_ret_int()"), "callee def present: {}", s.fragment);
         assert!(s.vertex.contains("gl_VertexID"), "{}", s.vertex);
     }
 
@@ -2673,7 +2673,7 @@ mod value_test_shader {
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
         assert_eq!(s.ret, ValueTestRet::Float);
         assert!(s.fragment.contains("out float _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t_ret_float();"), "{}", s.fragment);
     }
 
     #[test]
@@ -2682,7 +2682,7 @@ mod value_test_shader {
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
         assert_eq!(s.ret, ValueTestRet::Bool);
         assert!(s.fragment.contains("out int _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = (t() ? 1 : 0);"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = (t_ret_bool() ? 1 : 0);"), "{}", s.fragment);
     }
 
     #[test]
