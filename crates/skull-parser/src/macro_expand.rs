@@ -20,8 +20,8 @@ use crate::clone::clone_expr;
 use crate::desugar::{child_blocks, child_exprs, BlockEdges, ExprEdges};
 use smallvec::smallvec;
 use crate::graft::{graft_block, graft_expr, graft_item, graft_type};
-use rock_core::Span;
-use std::collections::HashMap;
+use rock_core::{CompilerError, Span};
+use std::collections::{HashMap, HashSet};
 use ustr::Ustr;
 
 const MAX_MACRO_DEPTH: usize = 64;
@@ -99,6 +99,46 @@ pub fn collect_registry(modules: &[Ast]) -> MacroRegistry {
     MacroRegistry(build_registry(modules))
 }
 
+/// A macro name must be UNIQUE against top-level FUNCTION names across the whole
+/// module set: `foo(...)` in call position is ambiguous when both a `macro foo`
+/// and a `fn foo` exist (expansion would silently claim the call and shadow the
+/// fn), so it is rejected -- a macro always has exactly one meaning. Macro
+/// OVERLOADS (same name, different arity) stay legal; a same-named LOCAL binding
+/// (param, nested fn, `let`) legally shadows a macro and is not a top-level fn,
+/// so it never collides. Cross-module: stdlib + engine + game are one namespace,
+/// so this runs over the full parsed set before expansion erases the macro defs.
+/// Run on the pre-expansion modules (expansion drops the `is_macro` items).
+pub fn check_macro_name_uniqueness(modules: &[Ast]) -> Vec<CompilerError> {
+    let mut fn_names: HashSet<Ustr> = HashSet::new();
+    for m in modules {
+        for item in &m.items {
+            if let ItemKind::Function(f) = &item.kind {
+                if !f.is_macro {
+                    fn_names.insert(f.name.name);
+                }
+            }
+        }
+    }
+    let mut errs = Vec::new();
+    let mut reported: HashSet<Ustr> = HashSet::new();
+    for m in modules {
+        for item in &m.items {
+            if let ItemKind::Function(f) = &item.kind {
+                if f.is_macro && fn_names.contains(&f.name.name) && reported.insert(f.name.name) {
+                    errs.push(CompilerError::new_with_label(
+                        f.name.span,
+                        format!(
+                            "macro `{0}` collides with a function named `{0}` -- a macro name must be unique in call position (`{0}(...)` would be ambiguous between the two). Rename the macro or the function.",
+                            f.name.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    errs
+}
+
 /// Expand every macro call in a SINGLE module against a prebuilt `registry`,
 /// then drop that module's macro defs. This is the per-module unit that
 /// `expand_macros` applies to each module -- exposed so an incremental driver
@@ -148,9 +188,13 @@ pub fn expand_macros(modules: &mut [Ast]) {
 fn module_calls_macro(ast: &Ast, reg: &Registry) -> bool {
     ast.exprs.values().any(|ed| {
         if let ExprKind::FunctionCall { func, .. } = &ed.kind {
-            if let ExprKind::Ident(id) = &ast.exprs[*func].kind {
-                return reg.contains_key(&id.name);
-            }
+            return match &ast.exprs[*func].kind {
+                // plain `name(args)`
+                ExprKind::Ident(id) => reg.contains_key(&id.name),
+                // UFCS `recv.name(args)` -- the member names the macro
+                ExprKind::FieldAccess(_, member) => reg.contains_key(&member.name),
+                _ => false,
+            };
         }
         false
     })
@@ -575,22 +619,38 @@ fn expand_expr(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, st
 /// If `e` is a `name(args)` call where `name` is a registered macro, splice the
 /// substituted body in as a `Block`.
 fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, stack: &mut Vec<ShadowScope>) {
-    let ExprKind::FunctionCall { func, args, .. } = &ast.exprs[e].kind else {
-        return;
+    // Two invocation shapes: a plain `name(args)` and a UFCS `recv.name(args)`
+    // (member-position macro -- the receiver becomes the first arg, so the slot
+    // macros read naturally in `player.cast_co.poll_co_slot()` form). A macro
+    // name is globally unique against fn/method names (`check_macro_name_
+    // uniqueness`), so the member form is unambiguously the macro when `name` is
+    // registered. Field/local shadowing only applies to the plain-ident form: a
+    // local can shadow a bare callee name, never a member name.
+    let (name, arg_values, is_ident) = {
+        let ExprKind::FunctionCall { func, args, .. } = &ast.exprs[e].kind else {
+            return;
+        };
+        let func = *func;
+        let arg_idxs: Vec<Idx<ExprData>> = args.iter().map(|a| a.value).collect();
+        match &ast.exprs[func].kind {
+            ExprKind::Ident(id) => (id.name, arg_idxs, true),
+            ExprKind::FieldAccess(recv, member) => {
+                let mut vs = Vec::with_capacity(arg_idxs.len() + 1);
+                vs.push(*recv);
+                vs.extend(arg_idxs);
+                (member.name, vs, false)
+            }
+            _ => return,
+        }
     };
-    let ExprKind::Ident(id) = &ast.exprs[*func].kind else {
-        return;
-    };
-    let name = id.name;
     if !reg.contains_key(&name) {
         return;
     }
     // A locally-bound callee (fn-typed param, local fn value, nested fn, loop
     // binding) shadows any same-named macro — this is a real call.
-    if is_shadowed(stack, name) {
+    if is_ident && is_shadowed(stack, name) {
         return;
     }
-    let arg_values: Vec<Idx<ExprData>> = args.iter().map(|a| a.value).collect();
     if depth >= MAX_MACRO_DEPTH {
         return;
     }
@@ -1438,8 +1498,6 @@ fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
 // same node shapes but one is `&mut Ast` (rewrite) and one is `&Ast` (read), so
 // the borrow checker keeps them separate, exactly like `clone.rs`/`graft.rs`.
 // Keep them in sync.
-
-use std::collections::HashSet;
 
 /// Per parameter, its declaration span + every use span in the macro template.
 pub fn index_macro_param_refs(
