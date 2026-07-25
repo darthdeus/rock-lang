@@ -1649,9 +1649,23 @@ global PI: float = 3.141592653589793
     else
         -- Collect and sort keys, skipping metadata
         local keys = {}
+        local seen = {}
         for k, _ in pairs(t) do
             if k ~= "__variant" and k ~= "__ty" then
                 keys[#keys + 1] = k
+                seen[k] = true
+            end
+        end
+        -- A null field is an ABSENT key, so `pairs` alone under-reports a
+        -- struct's shape. Declared fields come from the type table instead.
+        local decl = type_name and _G.__ROCK_TYPE_TABLE[type_name]
+        if decl and not t.__variant then
+            for i = 1, #decl.fields do
+                local fname = decl.fields[i].name
+                if not seen[fname] then
+                    keys[#keys + 1] = fname
+                    seen[fname] = true
+                end
             end
         end
         table.sort(keys, __rock_inspect_key_lt)
