@@ -4802,6 +4802,52 @@ impl Builder<'_> {
         if matches!(self.body.expr_arena[expr], Expr::Null) {
             return Ok(self.emit_cur(Inst::ToString(v)));
         }
+        // `expr_ty` PEELS `Nullable`, so every arm below is picked from the
+        // NON-NULL shape while the value can still arrive nil. Guard once here
+        // instead of per arm: the float and payload-free-enum renderings fault on
+        // nil and a newtype renders `Id(nil)`, and the arms that already render
+        // "nil" are unaffected by the branch.
+        if self.expr_is_nullable(expr) {
+            return self.nil_guarded_render(v, |s| s.stringify_non_null(expr, v));
+        }
+        self.stringify_non_null(expr, v)
+    }
+
+    /// `if v == nil then "nil" else <render(v)>` -- the guard every interpolation
+    /// path needs on a nullable hole, since `expr_ty` peels `Nullable` and the
+    /// renderer is chosen from the non-null shape.
+    fn nil_guarded_render(
+        &mut self,
+        v: Idx<Inst>,
+        render: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell(None);
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(v, nil));
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("nil"))));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let rendered = render(self)?;
+        self.store_and_join(result, rendered, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// `stringify` for a value known to be present. Split out so the nullable
+    /// guard above can reuse every arm on its non-null path.
+    fn stringify_non_null(
+        &mut self,
+        expr: Idx<Expr>,
+        v: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         match self.expr_ty(expr) {
             Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool | BuiltinTy::String)) => {
                 Ok(self.emit_cur(Inst::ToString(v)))
@@ -4861,6 +4907,23 @@ impl Builder<'_> {
     /// rock-codegen dispatch. The `%`/`b` conversions (raw prelude globals, not
     /// FuncRef-resolvable) gap for now.
     fn lower_format(
+        &mut self,
+        expr: Idx<Expr>,
+        v: Idx<Inst>,
+        spec: &bone_semantic::hir::InterpSpec,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        // Same `Nullable`-peel guard as `stringify`: a null with a spec would reach
+        // `string.format("%.2f", nil)`. A null has nothing to pad or round, so it
+        // renders bare "nil" whatever the spec asks for.
+        if self.expr_is_nullable(expr) {
+            let spec = spec.clone();
+            return self.nil_guarded_render(v, move |s| s.lower_format_non_null(expr, v, &spec));
+        }
+        self.lower_format_non_null(expr, v, spec)
+    }
+
+    /// `lower_format` for a value known to be present.
+    fn lower_format_non_null(
         &mut self,
         expr: Idx<Expr>,
         v: Idx<Inst>,
