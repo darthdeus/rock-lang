@@ -40,14 +40,6 @@ fn arena_new<T>() -> Arena<T> {
 // Helper functions for arena
 fn arena_pop_free_index(free_indices: [int]) -> int { return pop(free_indices).unwrap() }
 
-fn arena_get_generation_at<T>(entries: [ArenaEntry<T>], index: int) -> int {
-    if index >= 0 && index < vec_len(entries) {
-        let entry = vec_get(entries, index)
-        if !is_null(entry) { return entry.unwrap().generation }
-    }
-    return 0
-}
-
 fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     let index: int = 0
     let generation: int = 0
@@ -56,8 +48,11 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     let has_free_indices: bool = vec_len(arena.free_indices) > 0
     if has_free_indices {
         index = arena_pop_free_index(arena.free_indices)
-        generation = arena_get_generation_at(arena.entries, index) + 1
-        vec_set(arena.entries, index, arena_entry_new(value, index, generation))
+        let entry = vec_get(arena.entries, index).unwrap()
+        generation = entry.generation + 1
+        entry._data = value
+        entry.generation = generation
+        entry.is_occupied = true
     } else {
         generation = 0
         index = vec_len(arena.entries)

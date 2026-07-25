@@ -2635,7 +2635,7 @@ fn ease_in_out_circ(t: float) -> float {
 // ease_out_quad, ...) is applied by consumers at the read site.
 // Engine sugar stepping against the frame clock: Envelope.step (stone).
 
-// TODO: value type? or maybe even make this "flat included"? (like in Jai)
+// The first no-box value customer after mutable-place semantics land.
 struct Envelope {
     value: float = 0,
     attack: float,
