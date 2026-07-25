@@ -3431,7 +3431,7 @@ pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: u
                 TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
                 TyId::Local(_) => continue,
             };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == "FieldOf")
+            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if matches!(n.as_str(), "FieldOf" | "KeyPath"))
             {
                 found = true;
             }

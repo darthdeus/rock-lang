@@ -1497,10 +1497,12 @@ inline(lua) fn table_new() -> any = """return {}"""
     tbl[index] = value
 """
 
-// Field references (key paths). `f: FieldOf<T, V>` is the interned field name
-// at runtime; `o[f]` == `o.field` since skull emits named struct keys. The
-// `.field` literal is compile-checked against T's declaration (invariant in V).
-@inline inline(lua) fn field_get<T, V>(o: T, f: FieldOf<T, V>) -> V = """
+// Field references (key paths). The `.field` literal is the interned field name
+// at runtime; `o[f]` == `o.field` since skull emits named struct keys. `field_get`
+// takes the read-only `KeyPath<T, V>` (allows a `value`-struct T -- reading a
+// value field is fine); `field_set` takes the writable `FieldOf<T, V>`, which
+// refuses a `value`-struct T (immutable). Split per docs/field-refs-plan.md 1.
+@inline inline(lua) fn field_get<T, V>(o: T, f: KeyPath<T, V>) -> V = """
     return o[f]
 """
 

@@ -568,6 +568,23 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         }
     }
 
+    // A writable field ref `FieldOf<T, V>` is usable read-only: it coerces to
+    // `KeyPath<T, V>` (invariant in T, covariant in V). docs/field-refs-plan.md 1.
+    if let (
+        TypeExpr::App { ctor: TypeCtor::Nominal(fname), params: fp },
+        TypeExpr::App { ctor: TypeCtor::Nominal(tname), params: tp },
+    ) = (*gamma.get(from_r), *gamma.get(to_r))
+    {
+        if fname.as_str() == "FieldOf" && tname.as_str() == "KeyPath" {
+            let mut fi = fp.into_iter();
+            let mut ti = tp.into_iter();
+            let (ft, fv) = (from_r.with_idx(fi.next().unwrap()), from_r.with_idx(fi.next().unwrap()));
+            let (tt, tv) = (to_r.with_idx(ti.next().unwrap()), to_r.with_idx(ti.next().unwrap()));
+            unify(gamma, ft, tt, span)?;
+            return coerce(gamma, fv, tv, span);
+        }
+    }
+
     let snap = gamma.out.checkpoint();
     if gamma.trial(|g| unify(g, from_r, to_r, span).is_ok()) {
         return Ok(());

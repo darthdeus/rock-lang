@@ -1551,7 +1551,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                     .copied()
                                     .and_then(|t| struct_app_args(ws, bi, t))
                                     .and_then(|(ctor, args)| {
-                                        (ctor.as_str() == "FieldOf")
+                                        matches!(ctor.as_str(), "FieldOf" | "KeyPath")
                                             .then(|| args.into_iter().next())
                                             .flatten()
                                     })
@@ -2871,7 +2871,7 @@ pub(crate) fn receiver_vec_elem(
 /// a `FieldOf` whose first arg isn't a nominal struct).
 fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
     let (ctor, args) = struct_app_args(ws, bi, ty)?;
-    if ctor.as_str() != "FieldOf" {
+    if !matches!(ctor.as_str(), "FieldOf" | "KeyPath") {
         return None;
     }
     let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;

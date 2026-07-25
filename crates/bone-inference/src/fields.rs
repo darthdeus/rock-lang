@@ -217,6 +217,82 @@ pub(crate) fn reject_swizzle_write(
     Ok(())
 }
 
+/// Whether `ty` resolves to a `value` struct (C-layout / GC-tier both).
+fn ty_is_value_struct(gamma: &Gamma, ty: TyId) -> Option<Ustr> {
+    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = *gamma.get(ty) else {
+        return None;
+    };
+    resolve_struct(gamma, name)
+        .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value)
+        .then_some(name)
+}
+
+/// Whether a value-struct field write whose base is `base` targets real MUTABLE
+/// STORAGE (legal place write) rather than a value LOCAL / rvalue copy (rejected).
+/// A value struct reached through a mutable struct field, a container element
+/// (`Index`), or a global lives in mutable storage and its leaves are writable in
+/// place; one held directly as a value-typed local (`Var`) -- or a chain of value
+/// projections off one -- or produced by a call/literal is an immutable copy.
+/// docs/value-semantics-axes.md Mutability (place vs rvalue).
+fn value_field_write_is_place(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    base: Idx<Expr>,
+    span: Span,
+) -> Result<bool, CompilerError> {
+    let mut cur = base;
+    loop {
+        match c.body.expr_arena[cur] {
+            // Element of a container, or a global: mutable storage.
+            Expr::Index { .. } | Expr::Global(_) => return Ok(true),
+            Expr::FieldAccess { base: parent, .. } => {
+                let pty = infer_expr(c, gamma, parent)?;
+                let pty = resolve(gamma, pty, span);
+                // A value field of a MUTABLE (non-value) struct/table lives in that
+                // struct's storage -> a place. If the parent is ITSELF a value, keep
+                // descending: it is a place only if some ancestor is mutable storage.
+                if ty_is_value_struct(gamma, pty).is_none() {
+                    return Ok(true);
+                }
+                cur = parent;
+            }
+            // A bare value local, a call result, a literal: an immutable copy.
+            _ => return Ok(false),
+        }
+    }
+}
+
+/// Reject a write to a `value` struct's field UNLESS it targets a mutable place.
+/// Value structs are immutable *as values* (docs/value-types-design.md 1): a write
+/// into a value LOCAL / rvalue (`let p = Pt{}; p.x = 5`) is a lost write on a copy
+/// and rejects. But a value that LIVES in mutable storage -- a field of a mutable
+/// struct (`mob.pos.x`), a container element (`buf[i].pos.x`), a global place
+/// (`CAST_ENV.value = x`) -- is writable in place (the mutable-place model,
+/// docs/value-semantics-axes.md; the brief's Phase B place/rvalue classification).
+/// Fires from the assignment / compound-assign / inc-dec target when its BASE is a
+/// value-struct projection.
+pub(crate) fn reject_value_struct_field_write(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    base: Idx<Expr>,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let base_ty = infer_expr(c, gamma, base)?;
+    let base_ty = resolve(gamma, base_ty, span);
+    let Some(name) = ty_is_value_struct(gamma, base_ty) else {
+        return Ok(());
+    };
+    if value_field_write_is_place(c, gamma, base, span)? {
+        return Ok(());
+    }
+    comp_error!(
+        span,
+        "cannot assign to a field of `value` struct `{}`: it is an immutable local/temporary. Replace it wholesale (`p = {} {{ .. }}`), or mutate in place only through a mutable field / element / global.",
+        name,
+        name
+    );
+}
+
 /// The component indices of a VALID swizzle read on `struct_name` -- the
 /// arity/alphabet rules of `vec_swizzle_ty` with the errors collapsed to None.
 /// Callers (assignment rejection, MIR expansion) key off "would this read as a

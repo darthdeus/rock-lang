@@ -121,7 +121,7 @@ fn fieldof_slot_owner(
     let p = f.param_decls.get(pi)?;
     let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
         TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if n.as_str() == "FieldOf" && params.len() == 2 =>
+            if matches!(n.as_str(), "FieldOf" | "KeyPath") && params.len() == 2 =>
         {
             let mut it = params.into_iter();
             (it.next().unwrap(), it.next().unwrap())

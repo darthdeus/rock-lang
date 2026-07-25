@@ -445,6 +445,7 @@ pub fn infer_expr_used(
         Expr::IncDec { target, .. } => {
             if let Expr::FieldAccess { base, field } = c.body.expr_arena[*target] {
                 reject_swizzle_write(c, gamma, base, field, expr_span)?;
+                reject_value_struct_field_write(c, gamma, base, expr_span)?;
             }
             // Same const-rebind rejection as Expr::Assign/CompoundAssign;
             // `CONST++` is a write with extra steps.
@@ -1115,7 +1116,7 @@ pub fn infer_expr_used(
                 .sibling_fields
                 .last()
                 .and_then(|m| m.get(&name))
-                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldOf<T, V>` or in a struct-field default")))?
+                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldOf<T, V>` / `KeyPath<T, V>` or in a struct-field default")))?
         }
 
         Expr::SafeNav { base, field } => {
@@ -1268,6 +1269,7 @@ pub fn infer_expr_used(
             }
             if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
                 reject_swizzle_write(c, gamma, base, field, expr_span)?;
+                reject_value_struct_field_write(c, gamma, base, expr_span)?;
             }
             // Writing any refined path (local field, global, or global field)
             // drops its refinement; re-established below if the stored value is
@@ -1468,6 +1470,7 @@ pub fn infer_expr_used(
 
             if let Expr::FieldAccess { base, field } = c.body.expr_arena[target] {
                 reject_swizzle_write(c, gamma, base, field, expr_span)?;
+                reject_value_struct_field_write(c, gamma, base, expr_span)?;
             }
 
             let target_ty = infer_expr(c, gamma, target)?;
@@ -1634,12 +1637,30 @@ pub(crate) fn check_expr(
             params,
         } = *gamma.get(exp_r)
         {
-            if former.as_str() == "FieldOf" {
+            if former.as_str() == "FieldOf" || former.as_str() == "KeyPath" {
                 let mut it = params.into_iter();
                 let t = exp_r.with_idx(it.next().unwrap());
                 let v = exp_r.with_idx(it.next().unwrap());
 
                 let t_r = resolve(gamma, t, span);
+                // `FieldOf` is the WRITABLE ref (`field_set`, `poll_co_field`): it
+                // cannot resolve against a `value` struct, whose fields are
+                // immutable. `KeyPath` (read-only, `field_get`) allows it -- reading
+                // a value-struct field is fine. Split per docs/field-refs-plan.md 1.
+                if former.as_str() == "FieldOf" {
+                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                        let is_value = resolve_struct(gamma, tn)
+                            .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value);
+                        if is_value {
+                            comp_error!(
+                                span,
+                                "cannot form a writable field reference `.{}` into `value` struct `{}`; value structs are immutable",
+                                field,
+                                tn
+                            );
+                        }
+                    }
+                }
                 let fty = struct_field_ty(gamma, t_r, field, span)?;
 
                 unify(gamma, fty, v, span)?;
