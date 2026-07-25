@@ -92,10 +92,24 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                 _ => false,
             };
 
-            if p_is_iface {
+            // A writable field ref reads read-only: `FieldOf<T, V>` fits a
+            // `KeyPath<T, V>` param (docs/field-refs-plan.md 1). Scoring has to
+            // know it too -- otherwise the coercion only survives the
+            // single-candidate bypass in `check_call`, and a second decl of the
+            // name (a backend sibling, an unrelated overload) makes every
+            // `field_get(o, f: FieldOf<..>)` a no-fit.
+            let p_is_keypath_from_fieldof = match (*gamma.get(a), *gamma.get(p)) {
+                (
+                    TypeExpr::App { ctor: TypeCtor::Nominal(an), .. },
+                    TypeExpr::App { ctor: TypeCtor::Nominal(pn), .. },
+                ) => an.as_str() == "FieldOf" && pn.as_str() == "KeyPath",
+                _ => false,
+            };
+
+            if p_is_iface || p_is_keypath_from_fieldof {
                 let snap = gamma.out.checkpoint();
                 if gamma.trial(|g| coerce(g, a, p, span).is_ok()) {
-                    return Some(3);
+                    return Some(if p_is_iface { 3 } else { 1 });
                 }
 
                 gamma.out.rollback_to(snap);
