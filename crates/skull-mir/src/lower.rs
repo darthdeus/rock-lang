@@ -6738,6 +6738,13 @@ impl Builder<'_> {
     /// through, so a whole-value read out of it must copy. A value local/param is
     /// NOT one (bone rejects leaf writes there), nor is a call result; without
     /// that exclusion every uniform-struct field read would rebuild its value.
+    ///
+    /// Sibling, NOT a duplicate: bone's `value_field_write_is_place`
+    /// (`bone-inference/src/fields.rs`) decides whether a write TARGET is legal
+    /// storage. This decides whether a later write can reach a value being READ,
+    /// so it stops at the first container/global (`vlocal.buf[i]` is shared
+    /// storage even though the chain starts at a value binding) where bone walks
+    /// to the root. They must AGREE that a temporary is neither.
     fn is_mutable_place(&self, e: Idx<Expr>) -> bool {
         match &self.body.expr_arena[e] {
             Expr::Global(_) | Expr::Index { .. } => true,
