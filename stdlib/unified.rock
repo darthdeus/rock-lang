@@ -325,13 +325,13 @@ fn metric_recent(m: Metric, i: int) -> float {
 // The ffi.cdef for every `value` struct is emitted automatically, so
 // `ffi.new("Vec2[?]", n)` is a valid LuaJIT allocation. `native_buffer_alloc<T>`
 // (above) is the generic-body-legal allocator: skull resolves the concrete
-// element cdef name at each call site, so `NativeBuffer { ptr:
-// native_buffer_alloc(n), len: n }` works for any FFI-clean value struct with no
-// per-type boilerplate. At runtime elements are stored contiguously as `T` cdata
-// (AoS); a whole-value `buf[i]` read copies the element out, `buf[i].x` reads the
-// slot live, and `buf[i] = v` copies the struct field-wise. See
-// tests/native_buffer_value.rock, tests/value_element_read_copy.rock and
-// FlatVec<T> below.
+// element cdef name at each call site, so `native_buffer_alloc(n)` works for any
+// FFI-clean value struct with no per-type boilerplate. At runtime elements are
+// stored contiguously as `T` cdata (AoS); a whole-value `buf[i]` read copies the
+// element out, `buf[i].x` reads the slot live, `buf[i].x = v` writes through it,
+// and `buf[i] = v` copies the struct field-wise. See
+// tests/native_buffer_value.rock, tests/value_element_read_copy.rock,
+// tests/value_place_leaf_write.rock and FlatVec<T> below.
 
 // ============================================================================
 // FlatVec<T> — growable flat storage for FFI-clean value structs
