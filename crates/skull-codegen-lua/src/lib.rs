@@ -383,13 +383,73 @@ pub fn emit_named_framed(
     out
 }
 
+/// Whether every use of `cand` is a provably READ-ONLY consumer, so sharing one
+/// module-scope instance across all of them is unobservable.
+///
+/// FAIL-CLOSED by construction: the allow-list is tiny and anything else --
+/// including a new `Inst` variant -- disqualifies. The inverse (list the
+/// escaping consumers) would silently start sharing a mutable value the day the
+/// enum grows.
+fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
+    for (_, inst) in func.insts.iter() {
+        let allowed = match inst {
+            // A field/tuple projection and an equality test observe the value
+            // without retaining or mutating it.
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => *base == cand,
+            Inst::Eq(a, b) | Inst::NotEq(a, b) => *a == cand || *b == cand,
+            // Storing INTO cdata copies by value, so the destination cannot alias
+            // the shared instance: an FFI-clean `<Name>_ct(..)` ctor copies each
+            // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
+            // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
+            // global, cell) stores the REFERENCE and is what aliases.
+            Inst::MakeValueStruct { name, fields } => {
+                !fields.iter().any(|(_, v)| *v == cand)
+                    || !skull_mir::lower::value_struct_is_gc(ws, *name)
+            }
+            Inst::StoreField { base, value, .. } => {
+                *value != cand
+                    || matches!(
+                        func.insts[*base],
+                        Inst::Index { kind: ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_), .. }
+                    )
+            }
+            _ => false,
+        };
+        if allowed {
+            continue;
+        }
+        let mut reads = false;
+        regalloc::inst_uses(inst, &mut |u| reads |= u == cand);
+        if reads {
+            return false;
+        }
+    }
+    // A terminator operand leaves the function (return value, branch
+    // discriminant, yield channel), so it is never a read-only use.
+    !func.blocks.iter().any(|(_, blk)| match &blk.term {
+        Term::Return(vs) | Term::Yield { values: vs, .. } => vs.contains(&cand),
+        Term::Branch { cond, .. } => *cond == cand,
+        Term::Switch { discr, .. } => *discr == cand,
+        _ => false,
+    })
+}
+
 /// Group every all-constant `MakeValueStruct` (every field operand a `Const`) by
 /// (struct name, field literals). Returns `(inst -> group, group -> global name,
 /// def lines)`: each group becomes one function-owned global
-/// `__skull_kc_<fn>_<g> = <Name>_ct(<lits>)`. Hoisting is unconditional -- a
-/// module-scope global is built once at chunk load, so it is never worse than a
-/// per-use ctor (which it equals on a trace via SINK and beats in the
-/// interpreter), unlike a per-CALL function-entry local which defeats SINK.
+/// `__skull_kc_<fn>_<g> = <Name>_ct(<lits>)`. A module-scope global is built once
+/// at chunk load, so it is never worse than a per-use ctor (which it equals on a
+/// trace via SINK and beats in the interpreter), unlike a per-CALL function-entry
+/// local which defeats SINK.
+///
+/// Hoisting is NOT unconditional: it is sound only while the shared instance
+/// cannot be mutated. The place model legalized leaf writes through mutable
+/// storage (docs/value-semantics-axes.md), so a constant that reaches a mutable
+/// place must be materialized FRESH per construction -- otherwise `a.p.x = 5`
+/// through one holder rewrites every other holder of that literal, including an
+/// unrelated global (`tests/value_const_hoist_aliasing.rock`). Candidates whose
+/// uses are not provably read-only emit their ctor inline, exactly as before the
+/// hoist existed.
 fn collect_const_hoists(
     ws: &Workspace,
     func: &MirFunc,
@@ -416,6 +476,9 @@ fn collect_const_hoists(
             })
             .collect();
         let Some(lits) = lits else { continue };
+        if !const_hoist_uses_are_read_only(ws, func, id) {
+            continue;
+        }
         let g = match groups.iter().position(|(n, l)| *n == *name && *l == lits) {
             Some(p) => p as u32,
             None => {
