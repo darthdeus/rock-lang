@@ -2542,68 +2542,141 @@ fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
     }
 }
 
+/// A unit of JS reachability work. The search walks TWO node kinds -- a
+/// plain-Rock fn to lower, and a module global whose initializer must be emitted
+/// -- and either can discover the other, which is why the shared driver is
+/// generic over its node type instead of walking bare `FuncRef`s.
+///
+/// A ginit is keyed by NAME only: `state_index` is the single map from a global's
+/// name to its definition site, so the site is derivable and the name is what
+/// `ginit_seen` already dedupes on.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum JsNode {
+    Fn(FuncRef),
+    Ginit(ustr::Ustr),
+}
+
+/// The JS half of [`skull_mir::reach`]: roots and successors, with cycles
+/// allowed (mutual recursion is ordinary Rock) and no leaf class.
+///
+/// JS has no leaves at the node level because it filters them one step earlier,
+/// at EDGE discovery: `discover_callees` must classify an intrinsic / host-mapped
+/// / `inline(js)` callee anyway in order to REGISTER it (a bare name, a verbatim
+/// co-emission), so a non-expandable callee never becomes a node in the first
+/// place. GLSL, which registers nothing, filters at the node instead. The trait
+/// serves both; `is_leaf` is the hook for the latter shape.
+struct JsReach<'a> {
+    ws: &'a Workspace,
+    scx: &'a skull_mir::lower::ScalarCtx,
+    st: &'a mut WorklistState,
+}
+
+impl JsReach<'_> {
+    /// Everything `discover_*`/the root seeding has queued since the last drain,
+    /// as nodes. Both queues are emptied: the driver owns the traversal from here.
+    fn take_pending(&mut self) -> Vec<JsNode> {
+        let mut out: Vec<JsNode> = std::mem::take(&mut self.st.queue).into_iter().map(JsNode::Fn).collect();
+        out.extend(
+            std::mem::take(&mut self.st.ginit_queue).into_iter().map(|(gname, _)| JsNode::Ginit(gname)),
+        );
+        out
+    }
+
+    /// Lower + transform one fn through the same per-body pipeline the luajit
+    /// path runs (lower -> inline -> cleanup -> closures -> FORL -> residual-
+    /// bound-call validation; coroutines skip inline/FORL), then record it.
+    fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
+        let f = &self.ws.module(fr.module).functions[fr.func];
+        let mut mf = skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func)?;
+        if mf.is_coroutine {
+            skull_transform::cleanup(&mut mf);
+        } else {
+            skull_transform::inline_functions(self.ws, self.scx, fr, &mut mf, &mut self.st.cache)?;
+            skull_transform::cleanup(&mut mf);
+            skull_transform::convert_closures(&mut mf, &self.st.names[&fr]);
+            skull_transform::recover_counted_loops(self.ws, &mut mf);
+            for nf in &mut mf.nested_fns {
+                skull_transform::recover_counted_loops(self.ws, nf);
+            }
+        }
+        skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf)?;
+        self.discover(&mf)?;
+        self.st.lowered.push((fr, mf));
+        Ok(())
+    }
+
+    /// Lower one module global's initializer (never inlined, mirroring the luajit
+    /// global path). A global with no initializer contributes no node body.
+    fn visit_ginit(&mut self, gname: ustr::Ustr) -> Result<(), CompilerError> {
+        let site = self.st.state_index[&gname];
+        let init_name = global_init_js_name(gname);
+        let lowered = skull_mir::lower::lower_global(
+            self.ws, self.scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()),
+        )?;
+        let Some(mut mf) = lowered else { return Ok(()) };
+        skull_transform::cleanup(&mut mf);
+        skull_transform::convert_closures(&mut mf, &init_name);
+        skull_transform::recover_counted_loops(self.ws, &mut mf);
+        for nf in &mut mf.nested_fns {
+            skull_transform::recover_counted_loops(self.ws, nf);
+        }
+        self.discover(&mf)?;
+        let is_const = self.ws.module(site.module).globals[site.gid].is_const;
+        self.st.ginits.push(GlobalInit {
+            name: gname,
+            init_name,
+            mf,
+            is_const,
+            order: (site.module.index(), u32::from(site.gid.into_raw())),
+        });
+        Ok(())
+    }
+
+    fn discover(&mut self, mf: &MirFunc) -> Result<(), CompilerError> {
+        let st = &mut *self.st;
+        register_statics(mf, &mut st.gctx);
+        discover_callees(self.ws, mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
+        discover_globals(
+            self.ws, mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
+            &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+            &mut st.inline_js,
+        )
+    }
+}
+
+impl skull_mir::reach::ReachPolicy for JsReach<'_> {
+    type Node = JsNode;
+
+    fn roots(&mut self) -> Result<Vec<JsNode>, CompilerError> {
+        Ok(self.take_pending())
+    }
+
+    fn is_leaf(&mut self, _node: JsNode) -> Result<bool, CompilerError> {
+        Ok(false)
+    }
+
+    fn on_cycle(&mut self, _node: JsNode) -> Result<(), CompilerError> {
+        Ok(())
+    }
+
+    fn visit(&mut self, node: JsNode) -> Result<Vec<JsNode>, CompilerError> {
+        match node {
+            JsNode::Fn(fr) => self.visit_fn(fr)?,
+            JsNode::Ginit(gname) => self.visit_ginit(gname)?,
+        }
+        Ok(self.take_pending())
+    }
+}
+
+/// Expand the reachable program from whatever the root seeding left on the
+/// worklists. Emission order is canonicalized afterwards, so the driver's
+/// post-order does not reach the output.
 fn drain_worklists(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     st: &mut WorklistState,
 ) -> Result<(), CompilerError> {
-    loop {
-        if let Some(fr) = st.queue.pop() {
-            let f = &ws.module(fr.module).functions[fr.func];
-            let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
-            if mf.is_coroutine {
-                skull_transform::cleanup(&mut mf);
-            } else {
-                skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut st.cache)?;
-                skull_transform::cleanup(&mut mf);
-                skull_transform::convert_closures(&mut mf, &st.names[&fr]);
-                skull_transform::recover_counted_loops(ws, &mut mf);
-                for nf in &mut mf.nested_fns {
-                    skull_transform::recover_counted_loops(ws, nf);
-                }
-            }
-            skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
-            register_statics(&mf, &mut st.gctx);
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
-            discover_globals(
-                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
-                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
-                &mut st.inline_js,
-            )?;
-            st.lowered.push((fr, mf));
-            continue;
-        }
-        if let Some((gname, site)) = st.ginit_queue.pop() {
-            let init_name = global_init_js_name(gname);
-            let mut mf = match skull_mir::lower::lower_global(ws, scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()))? {
-                Some(mf) => mf,
-                None => continue,
-            };
-            skull_transform::cleanup(&mut mf);
-            skull_transform::convert_closures(&mut mf, &init_name);
-            skull_transform::recover_counted_loops(ws, &mut mf);
-            for nf in &mut mf.nested_fns {
-                skull_transform::recover_counted_loops(ws, nf);
-            }
-            register_statics(&mf, &mut st.gctx);
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
-            discover_globals(
-                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
-                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
-                &mut st.inline_js,
-            )?;
-            let is_const = ws.module(site.module).globals[site.gid].is_const;
-            st.ginits.push(GlobalInit {
-                name: gname,
-                init_name,
-                mf,
-                is_const,
-                order: (site.module.index(), u32::from(site.gid.into_raw())),
-            });
-            continue;
-        }
-        break;
-    }
+    skull_mir::reach::walk(&mut JsReach { ws, scx, st })?;
     Ok(())
 }
 
@@ -2748,7 +2821,7 @@ fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> O
 /// inlined. Deco bodies never call a decorated user fn, but computing the actual
 /// call set makes the choice provably safe regardless.
 fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
-    let targets: HashSet<FuncRef> = call_targets(mf).into_iter().collect();
+    let targets: HashSet<FuncRef> = skull_mir::reach::call_targets(mf).into_iter().collect();
     ws.modules
         .iter()
         .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
@@ -2921,7 +2994,7 @@ fn discover_callees(
     seen: &mut HashSet<FuncRef>,
     inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
-    for callee in call_targets(mf) {
+    for callee in skull_mir::reach::call_targets(mf) {
         let cf = &ws.module(callee.module).functions[callee.func];
         // Only the BUILTIN Map renders inline (skip its co-emission); NativeBuffer
         // via the intrinsic table; Vec and user-struct `get` co-emit (fall through).
@@ -3653,29 +3726,6 @@ fn emit_js_constructor(
         paramlist = param_fields.join(", "),
         fields = init.join(", "),
     ))
-}
-
-/// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
-/// the raw arena) so a spliced-away call's stale arena inst is not re-discovered
-/// -- only the calls that survive inlining co-emit. Hoisted closure bodies are
-/// separate `nested_fns` after `convert_closures`, so their calls are walked too.
-fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
-    fn walk(mf: &MirFunc, out: &mut Vec<FuncRef>) {
-        for (_, block) in mf.blocks.iter() {
-            for &iid in &block.insts {
-                match &mf.insts[iid] {
-                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
-                    _ => {}
-                }
-            }
-        }
-        for nf in &mf.nested_fns {
-            walk(nf, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(mf, &mut out);
-    out
 }
 
 /// Every `Inst::Global` read + `Inst::StoreGlobal` write name in `mf` (main body
