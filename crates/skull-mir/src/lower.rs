@@ -2559,6 +2559,13 @@ impl Builder<'_> {
             }
             Expr::Array(elems) => self.lower_array_literal(elems),
             Expr::Index { base, index } => {
+                // A whole-value read of a value-struct element COPIES (via the repr
+                // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
+                // than binding the interior array reference.
+                if self.ffi_clean_value_elem(e).is_some() {
+                    let r = self.lower_expr_repr(e)?;
+                    return Ok(self.pack(r));
+                }
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 Ok(self.emit_cur(Inst::Index {
@@ -4033,6 +4040,23 @@ impl Builder<'_> {
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
             Expr::Call { callee, args } => self.lower_call_repr(e, callee, args),
+            // A value-struct ELEMENT read (`buf[i]`/`fv[i]`) as an unboxed Group of
+            // per-field reads off the checked slot: a leaf projection reads the part
+            // live, while `pack` (a whole-value use -- let-bind, arg, return, store)
+            // rebuilds a fresh cdata instead of aliasing the interior array slot.
+            Expr::Index { base, index } if self.ffi_clean_value_elem(e).is_some() => {
+                let name = self.ffi_clean_value_elem(e).unwrap();
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
+                let parts = self
+                    .struct_field_names(name)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| ValueRepr::Scalar(self.emit_cur(Inst::Field { base: slot, field: f })))
+                    .collect();
+                Ok(ValueRepr::Group { name, parts })
+            }
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
         }
     }
@@ -6323,6 +6347,20 @@ impl Builder<'_> {
             .get(&name)
             .map(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_value)
             .unwrap_or(false)
+    }
+
+    /// `Some(name)` iff `e`'s inferred type is an FFI-clean (cdata) `value` struct.
+    /// A whole-value read of such an ELEMENT (`buf[i]`/`fv[i]`) lives inline in the
+    /// NativeBuffer/FlatVec cdata array; binding the raw checked read aliases that
+    /// interior storage, so the read must COPY (docs/value-semantics-axes.md
+    /// finding #3, Sequencing #1). GC-carrying value structs (table repr) are
+    /// excluded -- they can't live in a NativeBuffer and copy semantics for their
+    /// shared inner refs are a later arc.
+    fn ffi_clean_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
+            return None;
+        };
+        (self.is_value_struct(name) && !value_struct_is_gc(self.ws, name)).then_some(name)
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
