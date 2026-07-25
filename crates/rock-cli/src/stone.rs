@@ -97,49 +97,6 @@ kill -KILL -{} 2>/dev/null  # Kill process group
 /// - Game process management with hot reload
 /// - Automatic restart when libstone or compiler changes
 
-/// Is `name` a compiler crate dir? The bare `rock`/`skull`/`bone` crates plus
-/// every `rock-*`/`skull-*`/`bone-*`. NOT `stone*` (those are the engine, rebuilt
-/// separately as libstone).
-fn is_compiler_crate_dir(name: &str) -> bool {
-    matches!(name, "rock" | "skull" | "bone")
-        || name.starts_with("rock-")
-        || name.starts_with("skull-")
-        || name.starts_with("bone-")
-}
-
-/// Every compiler crate's `src/` under `crates/` (CWD is the workspace root --
-/// stone runs after `ensure_workspace_root`). Enumerated rather than hardcoded
-/// so a newly added crate is watched automatically.
-fn compiler_crate_srcs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("crates") {
-        for e in entries.flatten() {
-            if is_compiler_crate_dir(&e.file_name().to_string_lossy()) {
-                let src = e.path().join("src");
-                if src.is_dir() {
-                    dirs.push(src);
-                }
-            }
-        }
-    }
-    dirs
-}
-
-/// Classify a changed path as a compiler source (-> rebuild the rock binary):
-/// a file under a compiler crate's `src/`, or any `Cargo.toml`/`Cargo.lock`.
-/// Matches on the crate dir immediately before `/src/`, so it works for relative
-/// and absolute paths and excludes the engine (`stone-rs/src`, handled earlier).
-fn is_compiler_source(path_str: &str) -> bool {
-    if path_str.contains("Cargo.") {
-        return true;
-    }
-    if let Some(idx) = path_str.find("/src/") {
-        let crate_name = path_str[..idx].rsplit('/').next().unwrap_or("");
-        return is_compiler_crate_dir(crate_name);
-    }
-    false
-}
-
 /// Replace this process with the freshly rebuilt `rock` binary, preserving the
 /// original `stone` arguments. The new process re-runs `do_stone_watch` from
 /// scratch -- `SkullStone::init` re-emits main.lua with the NEW codegen -- so a
@@ -152,29 +109,9 @@ fn reexec_with_new_binary(game_process: &mut Option<Child>) {
     if let Some(mut p) = game_process.take() {
         let _ = kill_game_process(&mut p);
     }
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            error!("stone: cannot find own exe to re-exec ({e}); staying on the old compiler binary");
-            return;
-        }
-    };
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     info!("Compiler changed -- re-exec'ing rock with the new binary");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // exec replaces the image; returns only on failure.
-        let err = Command::new(&exe).args(&args).exec();
-        error!("stone: re-exec failed ({err}); staying on the old compiler binary (Ctrl-C + rerun to pick up the change)");
-    }
-    #[cfg(not(unix))]
-    {
-        match Command::new(&exe).args(&args).spawn() {
-            Ok(_) => std::process::exit(0),
-            Err(e) => error!("stone: re-exec spawn failed ({e}); staying on the old compiler binary"),
-        }
+    if let Err(e) = crate::watch::reexec_current_binary() {
+        error!("stone: {e}; staying on the old compiler binary (Ctrl-C + rerun to pick up the change)");
     }
 }
 
@@ -248,32 +185,17 @@ pub fn do_stone_watch(
     // tmp/ for the restart-trigger file. FileWatcher silently skips
     // nonexistent paths, so listing the optional crates is safe on machines
     // where they aren't checked out.
-    let mut watch_paths = vec![
-        PathBuf::from(path),
-        // The stdlib is read from disk at runtime, so watch the resolved
-        // directory (honors ROCK_STDLIB_DIR; falls back to the repo `stdlib/`)
-        // rather than a cwd-relative `stdlib`. A stdlib edit is not a compiler
-        // source, so it re-cooks the game (which reads the fresh stdlib), no
-        // binary rebuild.
-        rock_host::stdlib_loader::stdlib_dir(),
-        PathBuf::from("stone"),
+    let mut watch_paths = crate::watch::project_engine_watch_paths(path);
+    watch_paths.extend([
         PathBuf::from("stone-rs/src"),
         PathBuf::from("stone-rs/Cargo.toml"),
         PathBuf::from("stone-rs/build.rs"),
         PathBuf::from("stone-video/src"),
         PathBuf::from("stone-video/Cargo.toml"),
         PathBuf::from("stone-video/build.rs"),
-        PathBuf::from("Cargo.toml"),
-        PathBuf::from("Cargo.lock"),
         PathBuf::from("tmp"),  // Watch tmp/ for restart.txt trigger
-    ];
-    // Every compiler crate's src/ -- the bare `rock`/`skull`/`bone` crates plus
-    // every `rock-*`/`skull-*`/`bone-*`. Enumerated from the workspace root so a
-    // new crate is watched without editing this list. A codegen edit there must
-    // trigger a compiler rebuild+restart; without it a live stone session keeps
-    // emitting against the old in-memory codegen (stale behavior, and during a
-    // scaffold migration a stale main.lua the overlay can't load against).
-    watch_paths.extend(compiler_crate_srcs());
+    ]);
+    watch_paths.extend(crate::watch::compiler_watch_paths());
 
     // Create channel for file change events
     let (change_tx, change_rx) = channel::<FileChangeEvent>();
@@ -325,7 +247,7 @@ pub fn do_stone_watch(
             if path_str.contains("stone-rs/") || path_str.contains("stone-video/") {
                 needs_libstone_rebuild = true;
                 changed_libstone.push(filename);
-            } else if is_compiler_source(&path_str) {
+            } else if crate::watch::is_compiler_source(path) {
                 needs_compiler_rebuild = true;
                 changed_compiler.push(filename);
             } else if path_str.ends_with(".rock") {
@@ -380,7 +302,7 @@ pub fn do_stone_watch(
 
         if needs_compiler_rebuild {
             info!("Rebuilding compiler...");
-            match build_compiler() {
+            match crate::watch::build_compiler() {
                 Ok(_) => {
                     info!("Compiler rebuilt successfully");
                     should_restart = true;
@@ -542,11 +464,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Build the Rock compiler
-fn build_compiler() -> Result<()> {
-    rock_host::engine_build::run_cargo(&["build", "--bin", "rock"], "Failed to build compiler")
 }
 
 /// Flight recorder config: always-on record-from-boot for `rock stone`
@@ -1205,9 +1122,10 @@ pub fn do_replay_window(
 mod tests {
     use super::{
         apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        flight_recorder_for, frame_exit_result, frame_timeout, is_compiler_source,
+        flight_recorder_for, frame_exit_result, frame_timeout,
         FlightRecorder,
     };
+    use crate::watch::is_compiler_source;
 
     /// `--no-record` disables the flight recorder outright: no config, and no
     /// side effects either -- the replays dir must not be created (the check
@@ -1368,6 +1286,7 @@ mod tests {
         // Cargo manifests/lockfile -> rebuild.
         assert!(is_compiler_source("Cargo.toml"));
         assert!(is_compiler_source("skull/Cargo.toml"));
+        assert!(is_compiler_source("rock-cli/build.rs"));
 
         // The engine is NOT a compiler source (rebuilt separately as libstone).
         assert!(!is_compiler_source("stone-rs/src/audio.rs"));

@@ -77,7 +77,7 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
 
 /// The body of `function <name>(...) ... end` in emitted module Lua. `name` is
 /// the rock identifier; the emitted definition is mangled
-/// (`hot__int_int_int_ret_float`), so match the `function <name>` prefix. The
+/// (`hot_int_int_int_ret_float`), so match the `function <name>` prefix. The
 /// first top-level `\nend\n` closes the function (nested blocks are indented
 /// `end`s, never column-0). A hoisted def (`<name>__lambda0`) shares the
 /// `function <name>` prefix, but the enclosing `<name>` is emitted first, so
@@ -88,6 +88,29 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     let rest = &lua[start..];
     let end = rest.find("\nend\n").map(|e| e + 5).unwrap_or(rest.len());
     &rest[..end]
+}
+
+/// The full emitted (mangled) name of the top-level fn whose SOURCE name is
+/// `src`, read out of emitted `lua`. Every non-exempt fn mangles by signature
+/// (`free_loop` -> `free_loop_ret_unit`), so this recovers the base symbol from
+/// which a test builds the synthetic names it owns (`<mangled>__lambda<k>`,
+/// `<mangled>__step`, ...). The base symbol carries NO `__` (that prefix only
+/// appears on the synthetic derivations, and for a `co fn` a `__step`/`__resume`
+/// header can emit before the constructor), so skip `__`-bearing candidates.
+pub fn mangled_name(lua: &str, src: &str) -> String {
+    let head = format!("function {src}");
+    let mut from = 0;
+    while let Some(p) = lua[from..].find(&head) {
+        let start = from + p + "function ".len();
+        let rest = &lua[start..];
+        let end = rest.find('(').expect("fn header has `(`");
+        let name = &rest[..end];
+        if !name.contains("__") {
+            return name.to_string();
+        }
+        from = start + end;
+    }
+    panic!("no non-synthetic `function {src}` in:\n{lua}");
 }
 
 /// Single-module workspace (no stdlib) for incremental / hot-reload tests.

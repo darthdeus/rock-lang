@@ -1062,7 +1062,7 @@ pub fn skull_run(path: &str) -> Result<()> {
 /// Render a bone `CompilerError` against a whole project's source set, so spans
 /// resolve to the right file. Every discovered source is registered under its
 /// id-path (the same id used when parsing into a module).
-fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
+pub(crate) fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
     render_project_errs(sources, std::slice::from_ref(e))
 }
 
@@ -2745,6 +2745,7 @@ mod overlay_runtime_tests {
              global TICK_OUT: int = 0\n\
              @update\n\
              fn tick() {{ TICK_OUT = {tick_val} }}\n\
+             @nomangle\n\
              fn run_frame() {{ for s in UPDATE_SYSTEMS {{ s.func() }} }}\n"
         )
     }
@@ -2788,7 +2789,7 @@ mod overlay_runtime_tests {
         // The overlay carries the redefined body AND a targeted rebind of just the
         // changed decorated fn (in-place, not clear-all + re-register-all).
         assert!(
-            overlay.lua.contains("function tick()")
+            overlay.lua.contains("function tick_ret_unit()")
                 && overlay.lua.contains("__rock_rebind_system(\"tick\""),
             "overlay must redefine the body AND rebind the changed system:\n{}",
             overlay.lua
@@ -2821,8 +2822,10 @@ mod overlay_runtime_tests {
         let mid = skull::user_module_id(session.workspace()).unwrap();
         let full = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full").0;
 
-        // Redefine `tick` globally but do NOT clear+re-register (no rebind).
-        let naive_redef = "function tick() TICK_OUT = 2 end";
+        // Redefine the emitted `tick` symbol globally but do NOT clear+re-register
+        // (no rebind): the registry captured the OLD func VALUE, so the redefinition
+        // does not reach it.
+        let naive_redef = "function tick_ret_unit() TICK_OUT = 2 end";
         match run_parts(&[&full.lua, naive_redef, SIM_DRIVER]) {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
@@ -2861,7 +2864,7 @@ mod overlay_runtime_tests {
         let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must carry the re-emitted coroutine (its top-level step fn).
         assert!(
-            overlay.lua.contains("counter__step("),
+            overlay.lua.contains("counter_ret_Coroutine_int_unit_unit__step("),
             "overlay must re-emit the coroutine's step fn:\n{}",
             overlay.lua
         );
@@ -2916,12 +2919,12 @@ mod overlay_runtime_tests {
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must re-emit the whole frame-slot channel.
-        assert!(overlay.lua.contains("gen__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
+        assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
         assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
         assert!(
-            overlay.lua.contains("function gen__advance(")
-                && overlay.lua.contains("__advance = gen__advance")
-                && overlay.lua.contains("__resume = gen__resume"),
+            overlay.lua.contains("function gen_ret_Coroutine_Ev_unit_unit__advance(")
+                && overlay.lua.contains("__advance = gen_ret_Coroutine_Ev_unit_unit__advance")
+                && overlay.lua.contains("__resume = gen_ret_Coroutine_Ev_unit_unit__resume"),
             "overlay must re-emit the per-co-fn __advance/__resume fns + the ctor storing them as fields:\n{}",
             overlay.lua
         );
@@ -2945,7 +2948,7 @@ mod overlay_runtime_tests {
     /// The load-bearing hot-reload case: a flat-enum coroutine created + first-resumed
     /// under v0, then resumed again ACROSS a body-edit overlay on the SAME live object
     /// (the engine's per-frame poll pattern). The live object keeps its v0
-    /// `__advance`/`__resume` closures, but `__advance` calls `gen__step` by GLOBAL
+    /// `__advance`/`__resume` closures, but `__advance` calls `gen_ret_Coroutine_Ev_unit_unit__step` by GLOBAL
     /// name, so a mid-flight resume runs the NEW step -- writing the new yield leaves
     /// into the SAME reused `__y*` slots on the object/frame (the enum shape is
     /// unchanged), which the (baseline, unchanged) `pump` reads directly. If
@@ -2961,7 +2964,9 @@ mod overlay_runtime_tests {
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Pair({a}, {b})\n  yield Ev::Done\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = gen() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
             )
         };
@@ -3017,14 +3022,18 @@ mod overlay_runtime_tests {
                   fn mk(n: int) -> int { return n }\n\
                   co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
                   fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  @nomangle\n\
                   fn start() { GEN = gen() }\n\
+                  @nomangle\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
         let v1 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
                   global GEN: Coroutine<Ev>? = null\n\
                   fn mk(n: int) -> int { return n }\n\
                   co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let z = mk(999)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  a = a + z\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
                   fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  @nomangle\n\
                   fn start() { GEN = gen() }\n\
+                  @nomangle\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
         let mut session = bone_session(files(v0)).expect("session v0");
@@ -3072,7 +3081,9 @@ mod overlay_runtime_tests {
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n{extra}  yield Ev::Tick(1)\n  print(\"fire\")\n  yield Ev::Tick(2)\n  print(\"cleanup\")\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = gen() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
             )
         };
@@ -3122,7 +3133,9 @@ mod overlay_runtime_tests {
                  co fn inner() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Tick({b})\n}}\n\
                  co fn outer() -> Coroutine<Ev> {{\n  await inner()\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = outer() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
             )
         };
@@ -3172,8 +3185,11 @@ mod overlay_runtime_tests {
                  co fn inner() -> Coroutine<Ev> {{\n  on_killed(() => note_inner_killed())\n  yield Ev::Tick(1)\n  yield Ev::Tick(2)\n}}\n\
                  co fn outer() -> Coroutine<Ev> {{\n{extra}  await inner()\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = outer() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
+                 @nomangle\n\
                  fn report() {{ print(\"{{INNER_KILLED}}\") }}\n"
             )
         };
@@ -3222,8 +3238,11 @@ mod overlay_runtime_tests {
                  fn mk(n: int) -> int {{ return n }}\n\
                  co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n{cross}  yield Ev::Tick(b)\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = gen() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
+                 @nomangle\n\
                  fn report() {{ print(\"busy:{{BUSY}}\") }}\n"
             )
         };
@@ -3271,7 +3290,7 @@ mod overlay_runtime_tests {
                 // Per-fn skips are also an acceptable surface -- but the co fn
                 // must NOT emit with a silently-dropped hook.
                 assert!(
-                    !full.lua.contains("function gen__step("),
+                    !full.lua.contains("function gen_ret_Coroutine_Ev_unit_unit__step("),
                     "a co fn with a non-lambda hook arg must not emit:\n{}",
                     full.lua
                 );
@@ -3298,7 +3317,7 @@ mod overlay_runtime_tests {
                 // Emission collects per-fn skips rather than failing the whole
                 // unit -- accept either surface, but the co fn must NOT emit.
                 assert!(
-                    !full.lua.contains("function gen__step("),
+                    !full.lua.contains("function gen_ret_Coroutine_Ev_unit_unit__step("),
                     "a co fn with `yield` inside a defer body must not emit:\n{}",
                     full.lua
                 );
@@ -3322,7 +3341,9 @@ mod overlay_runtime_tests {
                   fn mk(n: int) -> int { return n }\n\
                   co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
                   fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  @nomangle\n\
                   fn start() { GEN = gen() }\n\
+                  @nomangle\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
         // Widen Tick BEYOND the current max payload width (Pair's 2 -> Tick's 3),
         // so the frame-slot yield channel genuinely grows -- the shape edit shifts
@@ -3334,7 +3355,9 @@ mod overlay_runtime_tests {
                   fn mk(n: int) -> int { return n }\n\
                   co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a, b, a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
                   fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x, y, z) => x + y + z\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
+                  @nomangle\n\
                   fn start() { GEN = gen() }\n\
+                  @nomangle\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
         let mut session = bone_session(files(v0)).expect("session v0");
@@ -3413,12 +3436,16 @@ mod overlay_runtime_tests {
     fn struct_field_add_full_reload_nil_poisons_live_instances() {
         let v0 = "struct Mob { hp: int }\n\
                   global M: Mob? = null\n\
+                  @nomangle\n\
                   fn spawn() { M = Mob { hp: 10 } }\n\
+                  @nomangle\n\
                   fn describe() {\n  let m = M\n  if m != null { print(\"{m.hp}\") }\n}\n\
                   fn main() { }\n";
         let v1 = "struct Mob { hp: int, armor: int }\n\
                   global M: Mob? = null\n\
+                  @nomangle\n\
                   fn spawn() { M = Mob { hp: 10, armor: 5 } }\n\
+                  @nomangle\n\
                   fn describe() {\n  let m = M\n  if m != null { print(\"{m.hp + m.armor}\") }\n}\n\
                   fn main() { }\n";
 
@@ -3492,12 +3519,16 @@ mod overlay_runtime_tests {
     fn value_struct_reorder_full_reload_misassigns_positional_ctor() {
         let v0 = "value P { x: int, y: int }\n\
                   global CUR: P = P { x: 0, y: 0 }\n\
+                  @nomangle\n\
                   fn store_p() { CUR = P { x: 1, y: 2 } }\n\
+                  @nomangle\n\
                   fn show() { print(\"{CUR.x},{CUR.y}\") }\n\
                   fn main() { }\n";
         let v1 = "value P { y: int, x: int }\n\
                   global CUR: P = P { x: 0, y: 0 }\n\
+                  @nomangle\n\
                   fn store_p() { CUR = P { x: 1, y: 2 } }\n\
+                  @nomangle\n\
                   fn show() { print(\"{CUR.x},{CUR.y}\") }\n\
                   fn main() { }\n";
 
@@ -3606,6 +3637,7 @@ mod overlay_runtime_tests {
                  @on_reload\n\
                  fn bump_fire_count() {{ FIRE_COUNT = FIRE_COUNT + 1 }}\n\
                  fn unrelated() -> int {{ return {n} }}\n\
+                 @nomangle\n\
                  fn report() {{ print(\"{{FIRE_COUNT}}\") }}\n"
             )
         };
@@ -3657,6 +3689,7 @@ mod overlay_runtime_tests {
                  @nomangle\n\
                  @on_reload\n\
                  fn refresh() {{ OUT = {v} }}\n\
+                 @nomangle\n\
                  fn report() {{ print(\"{{OUT}}\") }}\n"
             )
         };
@@ -3750,7 +3783,7 @@ mod overlay_runtime_tests {
     // top-level body emitted IN THE SAME CHUNK as the step (const-hoist
     // precedent), so a BodyOnly overlay carries it. A test that would also pass
     // against pre-P1 emission (inline `function(...)` closures, no
-    // `gen__step__lambda<k>` global) is not evidence -- each asserts the
+    // `gen_ret_Coroutine_Ev_unit_unit__step__lambda<k>` global) is not evidence -- each asserts the
     // hoisted body is present in the overlay.
 
     /// The frame layout stamp for a coroutine ctor `function <ctor>()`: the
@@ -3758,8 +3791,23 @@ mod overlay_runtime_tests {
     /// lambda-local must produce the SAME stamp (P1: lambda locals left the
     /// layout canon); a co-fn-level local shifts it.
     fn layout_stamp(lua: &str, ctor: &str) -> i64 {
-        let marker = format!("function {ctor}()");
-        let start = lua.find(&marker).unwrap_or_else(|| panic!("no ctor `{ctor}` in emitted lua"));
+        // The emitted ctor is `function <ctor>_ret_<coroutine-type>()`; recover the
+        // one WITHOUT a `__` synthetic suffix (the ctor itself, not its
+        // `__step`/`__advance`/`__resume`).
+        let prefix = format!("function {ctor}_ret_");
+        let mut scan = 0usize;
+        let start = loop {
+            let at = lua[scan..]
+                .find(&prefix)
+                .map(|i| scan + i)
+                .unwrap_or_else(|| panic!("no ctor `{ctor}` in emitted lua"));
+            let rest = &lua[at + "function ".len()..];
+            let paren = rest.find('(').expect("ctor header has `(`");
+            if !rest[..paren].contains("__") {
+                break at;
+            }
+            scan = at + prefix.len();
+        };
         let tail = &lua[start..];
         let key = "__layout = ";
         let lpos = tail.find(key).expect("ctor has no __layout stamp");
@@ -3769,9 +3817,9 @@ mod overlay_runtime_tests {
     }
 
     /// A capturing co-fn lambda whose BODY is edited (operator `+` -> `*`): the
-    /// overlay must carry the hoisted `gen__step__lambda0` body, and a
+    /// overlay must carry the hoisted `gen_ret_Coroutine_Ev_unit_unit__step__lambda0` body, and a
     /// coroutine created AFTER the reload runs the new lambda behavior. Equals a
-    /// fresh full build of v1. The `overlay.lua.contains("gen__step__lambda0")`
+    /// fresh full build of v1. The `overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda0")`
     /// assertion is what discriminates P1 from pre-P1 (which had no hoisted
     /// global -- the lambda was an inline closure inside the step).
     #[test]
@@ -3782,7 +3830,9 @@ mod overlay_runtime_tests {
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = 3\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(4))\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = gen() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
             )
         };
@@ -3800,7 +3850,7 @@ mod overlay_runtime_tests {
         );
         let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
         assert!(
-            overlay.lua.contains("gen__step__lambda0"),
+            overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda0"),
             "the overlay must carry the hoisted lambda body (const-hoist precedent); \
              absence means pre-P1 inline-closure emission"
         );
@@ -3834,7 +3884,9 @@ mod overlay_runtime_tests {
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = 5\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n  let g = (x: int) => x {op} base\n  yield Ev::Tick(g(3))\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = gen() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
             )
         };
@@ -3858,7 +3910,7 @@ mod overlay_runtime_tests {
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
-        assert!(overlay.lua.contains("gen__step__lambda1"), "overlay must carry the hoisted g body");
+        assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda1"), "overlay must carry the hoisted g body");
 
         // start() + pump() under v0: f = record snapshotting the OLD lambda0
         // (x+5), f(3)=8. Overlay (op *). pump #2 on the SAME live coroutine:
@@ -3900,7 +3952,9 @@ mod overlay_runtime_tests {
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = 4\n  let f = (x: int) => {body}\n  yield Ev::Tick(f(3))\n  let g = (x: int) => {body}\n  yield Ev::Tick(g(3))\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = gen() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
             )
         };
@@ -3956,7 +4010,9 @@ mod overlay_runtime_tests {
                  fn mk(n: int) -> int {{ return n }}\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = mk(4)\n{extra}  let f = (x: int) => x + base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n}}\n\
                  fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 @nomangle\n\
                  fn start() {{ GEN = gen() }}\n\
+                 @nomangle\n\
                  fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
             )
         };
@@ -4852,10 +4908,12 @@ mod shape_drift_tests {
     fn struct_shape_edit_requests_restart_and_defers_the_write() {
         let v0 = "struct Mob { hp: int }\n\
                   global M: Mob? = null\n\
+                  @nomangle\n\
                   fn spawn() { M = Mob { hp: 10 } }\n\
                   fn main() { }\n";
         let v1 = "struct Mob { hp: int, armor: int }\n\
                   global M: Mob? = null\n\
+                  @nomangle\n\
                   fn spawn() { M = Mob { hp: 10, armor: 5 } }\n\
                   fn main() { }\n";
         let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);

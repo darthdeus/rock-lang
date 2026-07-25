@@ -1675,8 +1675,8 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
         let ret = f.return_ty.as_ref().map(|t| render_ty(ws, t)).unwrap_or_default();
         let _ = write!(
             out,
-            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} lua={:?} extern={} anns={:?} ffi={:?}\n",
-            f.name, f.is_coroutine, f.is_variadic, f.num_required, f.lua_body, f.is_extern, f.annotations, f.ffi_lib,
+            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} inline={:?} backend={:?} extern={} anns={:?} ffi={:?}\n",
+            f.name, f.is_coroutine, f.is_variadic, f.num_required, f.inline_body, f.backend, f.is_extern, f.annotations, f.ffi_lib,
         );
     }
 

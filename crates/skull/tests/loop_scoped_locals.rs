@@ -12,7 +12,7 @@
 //! `benchmarks/nyicoal/`, `docs/gc-pressure-reduction-plan.md` item 1.
 
 mod common;
-use common::emit_module;
+use common::{emit_module, mangled_name};
 
 /// Extract the body of `function <name>...` up to its closing `end` at col 0.
 fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {
@@ -45,7 +45,7 @@ fn hot(x: float, y: float, n: int) -> float {
 fn main() { print("{hot(1.0, 2.0, 8)}") }
 "#;
     let lua = emit_module(src);
-    let body = fn_body(&lua, "hot(");
+    let body = fn_body(&lua, &format!("{}(", mangled_name(&lua, "hot")));
     let for_pos = body.find(" for ").unwrap_or_else(|| panic!("no for loop in:\n{body}"));
     let after_for = &body[for_pos..];
     let decl = after_for
@@ -82,7 +82,7 @@ fn hot(x: float, y: float, n: int) -> float {
 fn main() { print("{hot(1.0, 2.0, 8)}") }
 "#;
     let lua = emit_module(src);
-    let body = fn_body(&lua, "hot(");
+    let body = fn_body(&lua, &format!("{}(", mangled_name(&lua, "hot")));
     // `pre` is multi-use (pre * pre after the loop): a real register whose value
     // crosses the loop. Every rN referenced after the loop's `end` must be
     // declared at fn top (the first `local` line), else it reads nil.

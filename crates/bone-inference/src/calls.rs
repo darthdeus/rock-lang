@@ -139,6 +139,100 @@ fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> Str
     format!("{}({}){}", f.name, params, ret)
 }
 
+/// Backend-selection rank: a lower rank is the preferred representative when a
+/// group of same-signature backend-variant decls is collapsed. `Any` (portable
+/// Rock) wins, then `Lua` (native default), then `Js` -- so the luajit-servable
+/// variant is what a backend-agnostic pass records, and codegen only has to look
+/// for a sibling on the JS side (never the Lua side, which is the common path).
+fn backend_rank(b: skull_parser::FnBackend) -> u8 {
+    match b {
+        skull_parser::FnBackend::Any => 0,
+        skull_parser::FnBackend::Lua => 1,
+        skull_parser::FnBackend::Js => 2,
+    }
+}
+
+/// The signature key two decls must share to be backend variants of one another:
+/// param types (rendered, inference-free) -- the same key `static_owner_tag`-class
+/// grouping uses. Return type is deliberately excluded (overload resolution keys
+/// on params).
+fn signature_key(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
+    let f = &gamma.workspace.module(mid).functions[fid];
+    f.param_decls
+        .iter()
+        .map(|p| gamma.workspace.render(None, p.ty))
+        .join("\u{1}")
+}
+
+/// See the call site in [`select_overload`]. Groups candidates by signature; a
+/// group whose backends are all distinct collapses to its lowest-rank member; a
+/// group with a repeated backend (a genuine duplicate) is kept whole so the tie
+/// still surfaces as an "Ambiguous overload" error.
+pub(crate) fn collapse_backend_variants(
+    gamma: &Gamma,
+    candidates: &[(ModuleId, Idx<Function>)],
+) -> Vec<(ModuleId, Idx<Function>)> {
+    if candidates.len() <= 1 {
+        return candidates.to_vec();
+    }
+    // Fast path: a cross-backend collapse is only possible when candidates span
+    // >= 2 distinct backends. If they all share one backend (the overwhelmingly
+    // common case -- an all-`Any` portable overload set, or an all-`Lua`
+    // inline(lua)/operator set), no group is ever "all distinct", so the result
+    // equals the input. Skip the signature rendering entirely -- this keeps the
+    // collapse off the hot overload path unless a backend variant is in play.
+    let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
+    if candidates
+        .iter()
+        .all(|&(mid, fid)| gamma.workspace.module(mid).functions[fid].backend == first_backend)
+    {
+        return candidates.to_vec();
+    }
+    // Preserve input order for determinism; group indices by signature key.
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, &(mid, fid)) in candidates.iter().enumerate() {
+        let key = signature_key(gamma, mid, fid);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, v)) => v.push(i),
+            None => groups.push((key, vec![i])),
+        }
+    }
+    let mut out = Vec::with_capacity(candidates.len());
+    for (_, idxs) in groups {
+        if idxs.len() == 1 {
+            out.push(candidates[idxs[0]]);
+            continue;
+        }
+        let backend_of = |i: usize| gamma.workspace.module(candidates[i].0).functions[candidates[i].1].backend;
+        let all_distinct = {
+            let mut seen: Vec<skull_parser::FnBackend> = Vec::new();
+            idxs.iter().all(|&i| {
+                let b = backend_of(i);
+                if seen.contains(&b) {
+                    false
+                } else {
+                    seen.push(b);
+                    true
+                }
+            })
+        };
+        if all_distinct {
+            // Collapse to the lowest-rank representative (stable: first among ties,
+            // but ranks are distinct here so there is no tie).
+            let rep = *idxs
+                .iter()
+                .min_by_key(|&&i| backend_rank(backend_of(i)))
+                .unwrap();
+            out.push(candidates[rep]);
+        } else {
+            for &i in &idxs {
+                out.push(candidates[i]);
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn select_overload(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -150,6 +244,16 @@ pub(crate) fn select_overload(
     name: Ustr,
     span: Span,
 ) -> Result<(ModuleId, Idx<Function>), SelectError> {
+    // Collapse backend-variant decls (same name, same signature, different
+    // `backend`) to ONE representative BEFORE scoring, so a same-name pair like
+    // `extern(ffi,..) fn f` + `extern(js) fn f` never scores as a tie. Each
+    // codegen backend later selects its own variant. Genuine same-signature
+    // same-backend duplicates are NOT collapsed -- they still tie -> "Ambiguous
+    // overload", the error the plan requires them to keep. Different signatures
+    // stay distinct overloads (normal overload resolution).
+    let collapsed = collapse_backend_variants(gamma, candidates);
+    let candidates: &[(ModuleId, Idx<Function>)] = &collapsed;
+
     let mut best_cost: Option<usize> = None;
     // Every candidate at `best_cost`, so a tie can NAME the tied signatures.
     let mut best_set: SmallVec<[(ModuleId, Idx<Function>); 4]> = SmallVec::new();

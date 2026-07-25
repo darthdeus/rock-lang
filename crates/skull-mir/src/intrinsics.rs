@@ -91,7 +91,7 @@ pub fn is_gpu_context(f: &Function) -> bool {
 
 /// The luajit mapping is the `inline(lua)` body; a Rock body is the fallback.
 fn has_luajit_mapping(f: &Function) -> bool {
-    f.lua_body.is_some()
+    f.inline_body.is_some()
 }
 
 fn has_anno(f: &Function, name: &str) -> bool {

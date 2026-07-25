@@ -141,7 +141,7 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
     let mut found = None;
     for (_, &mid) in ws.module_ids.iter() {
         for (fid, f) in ws.module(mid).functions.iter() {
-            if f.name.as_str() == name && f.lua_body.is_none() {
+            if f.name.as_str() == name && f.inline_body.is_none() {
                 assert!(found.is_none(), "ambiguous fn `{name}`");
                 found = Some(FuncRef { module: mid, func: fid });
             }

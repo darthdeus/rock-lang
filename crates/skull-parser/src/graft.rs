@@ -66,9 +66,10 @@ fn graft_fn(src: &Ast, dst: &mut Ast, f: &FunctionDef) -> FunctionDef {
         return_ty: f.return_ty.map(|t| graft_type(src, dst, t)),
         body: match &f.body {
             FunctionBody::Rock(b) => FunctionBody::Rock(graft_block(src, dst, *b)),
-            FunctionBody::Lua(s) => FunctionBody::Lua(*s),
+            FunctionBody::Inline(be, s) => FunctionBody::Inline(*be, *s),
             FunctionBody::ExternC => FunctionBody::ExternC,
             FunctionBody::ExternLua => FunctionBody::ExternLua,
+            FunctionBody::ExternJs => FunctionBody::ExternJs,
             FunctionBody::Ffi(l) => FunctionBody::Ffi(*l),
         },
         is_macro: f.is_macro,

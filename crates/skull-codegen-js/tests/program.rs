@@ -50,8 +50,8 @@ fn main() {
 fn assembly_order() {
     let ws = ws_with(PROG);
     let js = emit_program(&ws);
-    ordered(&js, "function __deco_system(", "function main__");
-    ordered(&js, "function main__", "function __ginit_DERIVED(");
+    ordered(&js, "function __deco_system(", "function main(");
+    ordered(&js, "function main(", "function __ginit_DERIVED(");
     ordered(&js, "function __ginit_DERIVED(", "__G.DERIVED = __ginit_DERIVED();");
     // `__deco_system({` is the APPLICATION (descriptor obj); the bare
     // `__deco_system(c0` definition sorts earlier and is matched above.
@@ -72,13 +72,12 @@ fn init_dependency_order() {
 fn application_line_content() {
     let ws = ws_with(PROG);
     let js = emit_program(&ws);
-    // The decorated-fn JS names are FuncRef-deterministic; match the stable
-    // `<name>__m<mid>_f<fid>` prefix instead of pinning the numeric suffix.
+    // The decorated-fn JS names are the shared (name + signature) mangle.
     let alpha_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"alpha\""))
         .unwrap_or_else(|| panic!("no alpha application line:\n{js}"));
     assert!(alpha_app.contains("name: \"alpha\""), "descriptor name: {alpha_app}");
     assert!(alpha_app.contains("params: []"), "descriptor params: {alpha_app}");
-    assert!(alpha_app.contains("func: alpha__m"), "descriptor func js-name: {alpha_app}");
+    assert!(alpha_app.contains("func: alpha_ret_unit"), "descriptor func js-name: {alpha_app}");
     assert!(alpha_app.trim_end().ends_with(", 5);"), "literal stage arg: {alpha_app}");
 
     let beta_app = js.lines().find(|l| l.contains("__deco_system(") && l.contains("\"beta\""))

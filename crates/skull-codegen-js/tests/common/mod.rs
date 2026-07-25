@@ -69,7 +69,7 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() != name
                 || f.param_decls.len() != arity
-                || f.lua_body.is_some()
+                || f.inline_body.is_some()
                 || !f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
             {
                 continue;

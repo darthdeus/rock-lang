@@ -121,7 +121,7 @@ fn shutdown_systems_clear_contract_via_real_engine() {
              os.exit(1)\n\
          end\n\n\
          -- Phase 2: engine's pre-dofile clear\n\
-         clear_all_systems()\n\
+         clear_all_systems_ret_unit()\n\
          if _G.SHUTDOWN_SYSTEMS.len ~= 0 then\n\
              print(\"FAIL: post-clear SHUTDOWN_SYSTEMS.len = \" .. tostring(_G.SHUTDOWN_SYSTEMS.len) .. \", expected 0 (clear must wipe SHUTDOWN_SYSTEMS, not just the *_SYSTEMS arrays)\")\n\
              os.exit(1)\n\
@@ -200,7 +200,7 @@ fn sims_clear_contract_via_real_engine() {
              os.exit(1)\n\
          end\n\n\
          -- Phase 2: engine's pre-dofile clear\n\
-         clear_all_systems()\n\
+         clear_all_systems_ret_unit()\n\
          local n2 = map_count(_G.SIMS)\n\
          if n2 ~= 0 then\n\
              print(\"FAIL: post-clear SIMS count = \" .. tostring(n2) .. \", expected 0 (clear must wipe SIMS — without SIMS.clear() this entry survives)\")\n\

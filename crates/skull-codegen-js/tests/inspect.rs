@@ -1,10 +1,12 @@
 //! inspect emission (T8d): `inspect`/`inspect_formatted` map to the
 //! `__rock_inspect_value` runtime port (`JS_INSPECT_RUNTIME`) -- structs (sorted
 //! keys, ` = ` sep, compact/multiline threshold), Vec, Map, arrays, scalars,
-//! fn-records. A VALUE STRUCT or ENUM argument REJECTS (its luajit render is
-//! colon-format cdata / a named enum variant the scalarized JS shape cannot
-//! reproduce). Node execution is the correctness oracle; `tests/js_inspect.rock`
-//! cross-checks against luajit.
+//! fn-records. A GC-FREE VALUE STRUCT argument renders colon-format cdata-faithful
+//! (`Name { f: v }`, declaration field order) via an emit-time recursive renderer
+//! (its fields are bounded to primitives + nested value structs). An ENUM argument
+//! still REJECTS (the scalarized box cannot reproduce the named variant). Node
+//! execution is the correctness oracle; `tests/js_inspect.rock` cross-checks
+//! against luajit.
 
 use std::process::Command;
 
@@ -86,13 +88,23 @@ fn scalar_string() {
     assert_eq!(eval_str(src, "root"), "\"hi\"");
 }
 
-// A VALUE STRUCT argument rejects (colon-format cdata render, deferred).
+// A GC-free VALUE STRUCT renders colon-format, declaration field order (NOT
+// sorted): matches the luajit cdata `__tostring` byte for byte.
 #[test]
-fn value_struct_arg_rejects() {
-    let src = "value V2 { x: int, y: int }\n\
-               fn root() -> string { inspect(V2 { x: 1, y: 2 }) }";
-    let err = emit_closure(&ws_with(src), "root").unwrap_err();
-    assert!(err.contains("value struct"), "reject reason: {err}");
+fn value_struct_colon_render() {
+    let src = "value V2 { y: int, x: int }\n\
+               fn root() -> string { inspect(V2 { y: 5, x: 3 }) }";
+    // Declaration order is y then x (deliberately non-alphabetical).
+    assert_eq!(eval_str(src, "root"), "V2 { y: 5, x: 3 }");
+}
+
+// A nested value struct recurses with the same colon rule.
+#[test]
+fn value_struct_nested_colon_render() {
+    let src = "value IV { x: int, y: int }\n\
+               value Nested { a: IV, b: int }\n\
+               fn root() -> string { inspect(Nested { a: IV { x: 1, y: 2 }, b: 9 }) }";
+    assert_eq!(eval_str(src, "root"), "Nested { a: IV { x: 1, y: 2 }, b: 9 }");
 }
 
 // An ENUM argument rejects. A payload-bearing enum scalarizes to the

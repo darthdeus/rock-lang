@@ -160,8 +160,8 @@ fn collect_stats(
         let mut body_bytes = 0usize;
         let mut fn_count = 0usize;
         for (fid, func) in module.functions.iter() {
-            // Editable rock bodies only: skip externs and inline(lua) bodies.
-            if func.is_extern || func.lua_body.is_some() {
+            // Editable rock bodies only: skip externs and inline bodies.
+            if func.is_extern || func.inline_body.is_some() {
                 continue;
             }
             let (s, e) = func.span.offset_range;

@@ -67,7 +67,7 @@ fn fallback_plus_mapping_intrinsics_satisfy_the_differential_precondition() {
             "`{name}` must NOT be @native_required -- it has a portable fallback to diff against"
         );
         assert!(
-            f.lua_body.is_none(),
+            f.inline_body.is_none(),
             "`{name}` must have a Rock fallback body (the portable reference), not an inline(lua) mapping"
         );
         assert!(

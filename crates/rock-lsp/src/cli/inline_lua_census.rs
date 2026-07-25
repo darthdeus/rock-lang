@@ -79,7 +79,7 @@ fn file_stat(disp: &str, src: &str, ignores: &[String]) -> Option<FileStat> {
     let mut fns: Vec<FnStat> = Vec::new();
     for item in &ast.items {
         let ItemKind::Function(func) = &item.kind else { continue };
-        let FunctionBody::Lua(body) = &func.body else { continue };
+        let FunctionBody::Inline(skull_parser::FnBackend::Lua, body) = &func.body else { continue };
         let name = func.name.name.as_str();
         if ignores.iter().any(|ig| name.contains(ig.as_str())) {
             continue;

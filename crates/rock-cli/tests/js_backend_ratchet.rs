@@ -60,9 +60,22 @@ fn corpus() -> Vec<String> {
         "tests/js_trampoline_fallback.rock",
         "tests/engine_systems_test.rock",
         "tests/deco_v2_init_with_args.rock",
-        // Keeps the SKIP path alive: `from_codepoint` (UTF-8 bytes vs UTF-16) is a
-        // documented out-of-scope divergence, so this file always leaves >=1 skip.
+        // Now fully runs: `from_codepoint` gained a byte-faithful UTF-8 JS mapping
+        // (chess's SRS-JSON decode reaches it via json.rock), so the multibyte
+        // `chars()` round-trip test passes instead of skipping.
         "tests/strings_chars.rock",
+        // Skip sentinel: a `@nomangle inline(lua)` metatable probe with no JS body
+        // (inherently luajit-only) keeps the SKIP(reason) path exercised.
+        "tests/vec_direct_ty_tag.rock",
+        // A backend-sibling fn taken as a VALUE (`float_to_int` -> inline(js)
+        // sibling): before the fn-value collapse + JS per-target selection these
+        // skipped ("lowering gap: inline(lua) body"); now they run.
+        "tests/function_ref_cross_module.rock",
+        // FlatVec<value> flat-slot lowering (mag web tier): element access over
+        // the flat Float32Array backing (push/get/set/sort/iterate). Failed at
+        // runtime (NaN reads) before `ContainerKind::NativeBufferValue`.
+        "tests/flat_vec_value.rock",
+        "tests/flat_vec_sugar.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -210,7 +223,16 @@ fn js_runnable_coverage_ratchet() {
     // (2 pass + 1 always-skip `from_codepoint`) to keep the SKIP path alive,
     // lifting the corpus to 312 (full-suite pass 3740 -> 3835, MapNext 79 /
     // random* 9 / env_var 2 skip buckets -> 0).
-    const FLOOR: usize = 312;
+    // fn-value backend-sibling collapse (bone) + JS per-target fn-value selection
+    // (skull `discover_globals`) let tests/function_ref_cross_module.rock's 2
+    // `float_to_int`-as-value tests run (were 2 skips) -> 314.
+    // Chess web tier (Arc 3): a byte-faithful `from_codepoint` JS mapping lets
+    // tests/strings_chars.rock's multibyte test run (was the skip sentinel) -> 315;
+    // tests/vec_direct_ty_tag.rock joins as the replacement skip sentinel (0 pass).
+    // mag web tier (Arc 4): value-element NativeBuffer flat-slot lowering
+    // (`ContainerKind::NativeBufferValue`) makes tests/flat_vec_value.rock +
+    // tests/flat_vec_sugar.rock run green (were runtime-FAIL, kept out) -> 319.
+    const FLOOR: usize = 319;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",

@@ -9,10 +9,11 @@
 //! tests pin BOTH: the `__layout` literal AND the emitted `s.c<slot>` shape.
 
 mod common;
-use common::emit_module;
+use common::{emit_module, mangled_name};
 
 /// The `__layout = <int>` literal the ctor `function <ctor>(` writes.
 fn layout_stamp(lua: &str, ctor: &str) -> i64 {
+    let ctor = mangled_name(lua, ctor);
     let marker = format!("function {ctor}(");
     let start = lua.find(&marker).unwrap_or_else(|| panic!("no ctor `{ctor}` in:\n{lua}"));
     let tail = &lua[start..];
@@ -27,6 +28,7 @@ fn layout_stamp(lua: &str, ctor: &str) -> i64 {
 /// param is the state table `s`, and a frame cell renders `<s>.c<slot>`. Returns
 /// the sorted unique slots so a test can pin density (a dense 0..n).
 fn frame_slots_in_step(lua: &str, ctor: &str) -> Vec<u32> {
+    let ctor = mangled_name(lua, ctor);
     let head = format!("function {ctor}__step(");
     let start = lua.find(&head).unwrap_or_else(|| panic!("no `{head}` in:\n{lua}"));
     let after = &lua[start + head.len()..];
@@ -166,8 +168,8 @@ fn main() { let c = gen(); let _ = c.resume() }
         "the ghost must not add a frame field"
     );
     // And the dead local's value literal (7) must not appear as a frame store.
-    let step_head = "function gen__step(";
-    let s = &b[b.find(step_head).unwrap()..];
+    let step_head = format!("function {}__step(", mangled_name(&b, "gen"));
+    let s = &b[b.find(&step_head).unwrap()..];
     let step = &s[..s.find("\nend\n").map(|e| e + 5).unwrap_or(s.len())];
     assert!(!step.contains("= (7)"), "the ghost's dead store must be DCE'd:\n{step}");
 }

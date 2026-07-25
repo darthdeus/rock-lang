@@ -12,7 +12,7 @@
 //! tests/closure_capture_semantics_cofn.rock; here we pin the emit SHAPE.
 
 mod common;
-use common::{emit_module, function_body};
+use common::{emit_module, function_body, mangled_name};
 
 /// Scan for `needle` followed by one-or-more ASCII digits followed by `tail`
 /// (e.g. `= c` + digits + `.c` pins a frame-field read `= c<S>.c<slot>` without
@@ -64,15 +64,17 @@ fn main() {
 #[test]
 fn param_lambda_hoists_as_record_under_frame() {
     let lua = emit_module(PARAM_CAPTURE);
-    let step = function_body(&lua, "worker__step");
+    let w = mangled_name(&lua, "worker");
+    let step_name = format!("{w}__step");
+    let step = function_body(&lua, &step_name);
     // `s` is the step's first param cell; the frame capture collapses to it, so
     // the record field is named `c<raw(s)>` == the step's first param name.
-    let s = fn_params(&lua, "worker__step").swap_remove(0);
+    let s = fn_params(&lua, &step_name).swap_remove(0);
     // the co-fn lambda hoists to a sibling top-level fn taking (env, <param>).
-    let lp = fn_params(&lua, "worker__step__lambda0");
+    let lp = fn_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
     assert!(
-        step.contains(&format!("setmetatable({{ __fn = worker__step__lambda0, {s} =")),
+        step.contains(&format!("setmetatable({{ __fn = {w}__step__lambda0, {s} =")),
         "the step must build an env record collapsing the frame capture to `s` (field `{s}`):\n{step}"
     );
     assert!(
@@ -88,8 +90,9 @@ fn param_lambda_hoists_as_record_under_frame() {
 #[test]
 fn frame_capture_composes_env_then_frame() {
     let lua = emit_module(PARAM_CAPTURE);
-    let s = fn_params(&lua, "worker__step").swap_remove(0);
-    let body = function_body(&lua, "worker__step__lambda0");
+    let w = mangled_name(&lua, "worker");
+    let s = fn_params(&lua, &format!("{w}__step")).swap_remove(0);
+    let body = function_body(&lua, &format!("{w}__step__lambda0"));
     assert!(
         body.contains(&format!(".{s}")),
         "the hoisted body must reach the frame capture through the s-field `.{s}` (via-`s` collapse):\n{body}"
@@ -117,10 +120,11 @@ fn main() {
 #[test]
 fn capture_free_lambda_hoists_bare_under_frame() {
     let lua = emit_module(CAPTURE_FREE);
-    let step = function_body(&lua, "worker__step");
+    let w = mangled_name(&lua, "worker");
+    let step = function_body(&lua, &format!("{w}__step"));
     assert!(
-        lua.contains("function worker__step__lambda0()"),
-        "the capture-free co-fn lambda must hoist to a bare `worker__step__lambda0()`:\n{lua}"
+        lua.contains(&format!("function {w}__step__lambda0()")),
+        "the capture-free co-fn lambda must hoist to a bare `{w}__step__lambda0()`:\n{lua}"
     );
     assert!(
         !step.contains("setmetatable") && !step.contains("function("),
@@ -151,9 +155,10 @@ fn main() {
 #[test]
 fn loop_binding_snapshots_by_value_into_record() {
     let lua = emit_module(LOOP_BINDING);
-    let step = function_body(&lua, "looper__step");
+    let lp_name = mangled_name(&lua, "looper");
+    let step = function_body(&lua, &format!("{lp_name}__step"));
     assert!(
-        step.contains("setmetatable({ __fn = looper__step__lambda"),
+        step.contains(&format!("setmetatable({{ __fn = {lp_name}__step__lambda")),
         "the loop lambda must build an env record:\n{step}"
     );
     // The record field value is a frame-field READ (`= c<S>.c<i>`): snapshot,
@@ -165,8 +170,8 @@ fn loop_binding_snapshots_by_value_into_record() {
     // The hoisted body reads its by-value snapshot as a single `.c<slot>` field
     // hop off its env, and NEVER through `s` at call time (the final-value bug
     // D4(b) avoids -- a via-`s` capture would read the s-field `.c<S>`).
-    let s = fn_params(&lua, "looper__step").swap_remove(0);
-    let body = function_body(&lua, "looper__step__lambda");
+    let s = fn_params(&lua, &format!("{lp_name}__step")).swap_remove(0);
+    let body = function_body(&lua, &format!("{lp_name}__step__lambda"));
     assert!(
         contains_digit_bridge(body, ".c", ""),
         "the hoisted body must read a snapshot field `.c<slot>` from its env:\n{body}"

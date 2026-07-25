@@ -10,7 +10,7 @@
 //! lambda gets no scope. These compile-and-run without panicking.
 
 mod common;
-use common::{emit_module, run_luajit};
+use common::{emit_module, mangled_name, run_luajit};
 
 /// The confirmed repro: an outer lambda inside `if false`, itself holding an
 /// inner lambda. Both are dead; the live `return 42` path must compile.
@@ -100,7 +100,7 @@ fn main() { print("{thing(4)}") }
 "#;
     let lua = emit_module(src);
     assert!(
-        lua.contains("function thing__lambda"),
+        lua.contains(&format!("function {}__lambda", mangled_name(&lua, "thing"))),
         "reachable nested lambdas must still hoist:\n{lua}"
     );
     let out = run_luajit(&format!("{lua}\nmain()\n"), "reachable_nested");

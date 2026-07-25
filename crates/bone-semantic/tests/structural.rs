@@ -823,8 +823,9 @@ fn structurally_equal_compounds_reassign_is_ok() {
         param_decls: vec![],
         num_required: 0,
         return_ty: None,
-        lua_body: None,
+        inline_body: None,
         is_extern: false,
+        backend: bone_semantic::hir::FnBackend::Any,
         annotations: vec![],
         ffi_lib: None,
     });
@@ -1753,5 +1754,30 @@ fn main() {
         rendered,
         vec!["V2".to_string(), "int".to_string()],
         "T must resolve to the concrete instantiation per call site"
+    );
+}
+
+// A genuine overload (same name, DIFFERENT signatures) taken as a fn-value must
+// STILL reject -- the backend-variant collapse only merges same-signature
+// cross-backend siblings, never real overloads (which have no single value type).
+#[test]
+fn fn_value_genuine_overload_rejects() {
+    let src = r#"
+fn pick(x: int) -> int { return x }
+fn pick(x: float) -> float { return x }
+fn use_it() -> int {
+    let g = pick
+    return g(1)
+}
+"#;
+    let msgs = check(src)
+        .expect("semantic_pass")
+        .inferences_iter()
+        .flat_map(|(_, inf)| inf.errors.values().flatten().cloned().collect::<Vec<_>>())
+        .map(|e| e.message)
+        .collect::<Vec<_>>();
+    assert!(
+        msgs.iter().any(|m| m.contains("ambiguous fn-value reference `pick`")),
+        "a real overload as a value must stay ambiguous, got: {msgs:?}"
     );
 }

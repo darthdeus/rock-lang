@@ -18,7 +18,6 @@
 //! references are a direct index format. (Regalloc to fit luajit's 200-local cap
 //! is a later refinement; see `docs/skull-bone-mir-faithful-plan.md` Phase 5.)
 
-mod mangle;
 mod regalloc;
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -29,10 +28,9 @@ use bone_semantic::hir::Function;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{CompilerError, Span};
 use comfy_la_arena::Idx;
-use ustr::Ustr;
 use skull_mir::mir::*;
 
-pub use mangle::{compute_overloaded_names, mangle_fn};
+pub use skull_mir::mangle::mangle_fn;
 
 /// The shared metatable of capturing-lambda env records
 /// (`docs/closure-env-records-plan.md`): a record `{ __fn = <top-level fn>,
@@ -121,13 +119,11 @@ fn push_uint(out: &mut String, mut n: u32) {
     out.push_str(std::str::from_utf8(&buf[i..]).unwrap());
 }
 
-/// Whole-workspace codegen inputs not derivable from a single [`MirFunc`]: the
-/// set of overloaded names (drives mangling) and the map of every real top-level
-/// Lua name (function names + globals) to its source span (guards every synthetic
-/// `<name>__lambda<k>` / `<co>__step` / `__on_*` / ... name against clobber).
-/// Computed once per emit.
+/// Whole-workspace codegen input not derivable from a single [`MirFunc`]: the
+/// map of every real top-level Lua name (function names + globals) to its source
+/// span (guards every synthetic `<name>__lambda<k>` / `<co>__step` / `__on_*` /
+/// ... name against clobber). Computed once per emit.
 pub struct CodegenCtx {
-    overloaded: HashSet<Ustr>,
     /// Every REAL top-level Lua name (a function's mangled name or a global's
     /// name) -> the span of its source definition. A synthetic name minted
     /// through [`mint_synthetic`] that lands here would clobber the user's def
@@ -182,12 +178,11 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
 
 impl CodegenCtx {
     pub fn new(ws: &Workspace) -> Self {
-        let overloaded = compute_overloaded_names(ws);
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
         for m in ws.modules.iter() {
             for (_, f) in m.functions.iter() {
-                let name = mangle_fn(ws, f, &overloaded);
+                let name = mangle_fn(ws, f);
                 reserved_namespace_collision(&name, f.name_span, &mut collisions);
                 reserved.insert(name, f.name_span);
             }
@@ -196,7 +191,11 @@ impl CodegenCtx {
                 reserved.insert(g.name.as_str().to_string(), g.name_span);
             }
         }
-        CodegenCtx { overloaded, reserved, collisions: Mutex::new(collisions) }
+        // Permanent mangle-collision check (reject, don't fall back): two distinct
+        // signatures mangling alike, or a mangled name equal to an exempt bare
+        // name. Drained through the same sink as the synthetic-name collisions.
+        collisions.extend(skull_mir::mangle::collision_errors(ws));
+        CodegenCtx { reserved, collisions: Mutex::new(collisions) }
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -232,13 +231,6 @@ impl CodegenCtx {
         let mut sink = self.collisions.lock().expect("collision sink");
         sink.sort_by(|a, b| a.0.cmp(&b.0));
         sink.drain(..).next().map(|(_, e)| e)
-    }
-
-    /// The workspace overload set (drives mangling). Computed once in [`new`];
-    /// callers that also need it (e.g. `mir_emit`'s `direct_refs`) borrow this
-    /// rather than recomputing the workspace-wide scan.
-    pub fn overloaded(&self) -> &HashSet<Ustr> {
-        &self.overloaded
     }
 }
 
@@ -360,7 +352,7 @@ pub fn emit_function(
     self_ref: FuncRef,
     func: &MirFunc,
 ) -> String {
-    let name = mangle::mangle_fn(ws, func_of(ws, self_ref), &ctx.overloaded);
+    let name = mangle_fn(ws, func_of(ws, self_ref));
     emit_named(ws, ctx, &name, func)
 }
 
@@ -1248,8 +1240,8 @@ fn func_of(ws: &Workspace, r: FuncRef) -> &Function {
 }
 
 /// The mangled Lua name for a `FuncRef` (the same name a call site emits).
-pub fn mangled(ws: &Workspace, ctx: &CodegenCtx, r: FuncRef) -> String {
-    mangle::mangle_fn(ws, func_of(ws, r), &ctx.overloaded)
+pub fn mangled(ws: &Workspace, r: FuncRef) -> String {
+    mangle_fn(ws, func_of(ws, r))
 }
 
 /// The Lua local name for a value: its register `r<color>` (colored values) or
@@ -1363,7 +1355,7 @@ impl Emitter<'_> {
         if self.inlinable[raw(slot) as usize]
             || !matches!(
                 &self.func.insts[slot],
-                Inst::Index { kind: ContainerKind::NativeBuffer, .. }
+                Inst::Index { kind, .. } if kind.is_native_buffer()
             )
         {
             return None;
@@ -1525,7 +1517,9 @@ impl Emitter<'_> {
         args: &[Idx<Inst>],
         result: Idx<Inst>,
     ) -> bool {
-        let Some(body) = callee.lua_body else {
+        // Only a lua-targeted inline body can splice into lua output (a js body
+        // would be nonsense here).
+        let Some((bone_semantic::hir::FnBackend::Lua, body)) = callee.inline_body else {
             return false;
         };
         let ann = |n: &str| callee.annotations.iter().any(|a| a.name.name.as_str() == n);
@@ -1706,7 +1700,7 @@ impl Emitter<'_> {
             Inst::Shr(a, b) => self.write_bitfn(out, "bit.rshift", a, b),
 
             Inst::Call { func, args } => {
-                let callee = mangle::mangle_fn(self.ws, func_of(self.ws, *func), &self.ctx.overloaded);
+                let callee = mangle_fn(self.ws, func_of(self.ws, *func));
                 out.push_str(&callee);
                 out.push('(');
                 self.write_csv(out, args);
@@ -1834,7 +1828,9 @@ impl Emitter<'_> {
 
             Inst::Index { base, index, kind } => self.write_index(out, *base, *index, *kind),
             Inst::Len { base, kind } => match kind {
-                ContainerKind::Vec | ContainerKind::NativeBuffer => {
+                ContainerKind::Vec
+                | ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferValue(_) => {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
                 }
@@ -1934,7 +1930,7 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
-            ContainerKind::NativeBuffer => {
+            ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 out.push_str("__nb_checked_get(");
                 self.write_opnd(out, base);
                 out.push_str(", ");
@@ -1974,7 +1970,7 @@ impl Emitter<'_> {
             } => {
                 match kind {
                     // NativeBuffer write -> debug-mode bounds-checked helper.
-                    ContainerKind::NativeBuffer => {
+                    ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                         out.push_str("  __nb_checked_set(");
                         self.write_opnd(out, *base);
                         out.push_str(", ");
@@ -2019,7 +2015,9 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
-                    ContainerKind::NativeBuffer | ContainerKind::Map => {
+                    ContainerKind::NativeBuffer
+                    | ContainerKind::NativeBufferValue(_)
+                    | ContainerKind::Map => {
                         unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }
                 }
@@ -2047,7 +2045,7 @@ impl Emitter<'_> {
                     }
                     write_cellname(out, self.frame, self.cell_colors, *c);
                 }
-                let callee = mangle::mangle_fn(self.ws, func_of(self.ws, *func), &self.ctx.overloaded);
+                let callee = mangle_fn(self.ws, func_of(self.ws, *func));
                 let _ = write!(out, " = {callee}(");
                 self.write_csv(out, args);
                 out.push_str(")\n");
