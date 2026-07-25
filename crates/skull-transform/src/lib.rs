@@ -202,13 +202,22 @@ pub fn cleanup(func: &mut MirFunc) {
     // cursors: MapIter{__inner: VecIter{..}}). Sweeping between rounds lets
     // each level peel; depth = chain nesting, so this converges fast. The ctor
     // store prefilter avoids allocating the per-cell analysis for no-op rounds.
+    let dbg = std::env::var("SROA_DEBUG").is_ok();
+    let mut round = 0;
     loop {
+        if dbg {
+            eprintln!("--- SROA round {round} input ({}) ---\n{func}", func.name);
+            round += 1;
+        }
         let changed = has_scalarizable_store(func) && scalarize_struct_cells_once(func);
         let subst = copy_propagate_subst(func);
         dce_core(func, subst.as_deref());
         if !changed {
             break;
         }
+    }
+    if dbg {
+        eprintln!("--- SROA final ({}) ---\n{func}", func.name);
     }
     if fold_const_branches(func) {
         dce(func);
@@ -1024,6 +1033,49 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
         for &i in &b.insts {
             if let Inst::Store { cell, .. } = &func.insts[i] {
                 escaping[raw(*cell) as usize] = true;
+            }
+        }
+    }
+    // A leaf write THROUGH a value field (`h.p.x = 5`, base `Field(Load(c), p)`)
+    // mutates the cell's contents in place, so its stored value is not stable for
+    // the rest of the block. Forwarding the load would move the write onto the
+    // ctor -- a temporary -- while the `Field`-of-ctor fold below sends later
+    // reads to the ORIGINAL construction operands, disconnecting the two. Keeping
+    // the cell also lets SROA peel it on the next round, where the write becomes a
+    // leaf-cell store. Same exclusion as `escaping`, different reason.
+    //
+    // Only cells holding a VALUE qualify. A direct `obj.f = v` on a cell holding
+    // a `MakeStruct` table targets one runtime object shared by every use, so
+    // forwarding stays sound (and the fold below never forwards through a table
+    // anyway) -- excluding those keeps the hot `obj.field = v` shape
+    // copy-propagated. SROA peels one level per round, so the base is a `Field`
+    // chain on the first round and a bare `Load` of the peeled value cell after.
+    let mut holds_value = vec![false; func.cells.len()];
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            if let Inst::Store { cell, value } = &func.insts[i] {
+                if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) {
+                    holds_value[raw(*cell) as usize] = true;
+                }
+            }
+        }
+    }
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            let Inst::StoreField { base, .. } = &func.insts[i] else { continue };
+            // `d.o.i.a = 9` nests the reads; the write lands in the root cell.
+            let mut cur = *base;
+            loop {
+                match &func.insts[cur] {
+                    Inst::Load(c) => {
+                        if holds_value[raw(*c) as usize] {
+                            escaping[raw(*c) as usize] = true;
+                        }
+                        break;
+                    }
+                    Inst::Field { base, .. } => cur = *base,
+                    _ => break,
+                }
             }
         }
     }
