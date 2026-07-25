@@ -167,6 +167,7 @@ fn dce_core(func: &mut MirFunc, subst: Option<&[Option<Idx<Inst>>]>) {
     }
 }
 
+
 /// Value operands a terminator reads (the live-use contribution of a `Term`).
 fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
     match term {
@@ -199,10 +200,10 @@ pub fn cleanup(func: &mut MirFunc) {
     // leaves its (now-dead) ctor behind, and that ctor's operand uses pin the
     // NEXT nesting level's cell as escaping (iterator combinator chains nest
     // cursors: MapIter{__inner: VecIter{..}}). Sweeping between rounds lets
-    // each level peel; depth = chain nesting, so this converges fast, and the
-    // no-change round costs one extra scan.
+    // each level peel; depth = chain nesting, so this converges fast. The ctor
+    // store prefilter avoids allocating the per-cell analysis for no-op rounds.
     loop {
-        let changed = scalarize_struct_cells_once(func);
+        let changed = has_scalarizable_store(func) && scalarize_struct_cells_once(func);
         let subst = copy_propagate_subst(func);
         dce_core(func, subst.as_deref());
         if !changed {
@@ -212,6 +213,24 @@ pub fn cleanup(func: &mut MirFunc) {
     if fold_const_branches(func) {
         dce(func);
     }
+}
+
+fn has_scalarizable_store(func: &MirFunc) -> bool {
+    func.blocks.iter().any(|(_, b)| {
+        b.insts.iter().any(|&i| {
+            matches!(
+                &func.insts[i],
+                Inst::Store { value, .. }
+                    if matches!(
+                        &func.insts[*value],
+                        Inst::MakeValueStruct { .. }
+                            | Inst::MakeStruct { .. }
+                            | Inst::MakeEnum { .. }
+                            | Inst::MakeTuple(_)
+                    )
+            )
+        })
+    })
 }
 
 /// Fold `Branch` on a constant bool condition into a `Goto`, then clear blocks
@@ -475,7 +494,7 @@ pub fn scalarize_struct_cells(func: &mut MirFunc) {
             eprintln!("--- SROA round {round} input ---\n{func}");
             round += 1;
         }
-        scalarize_struct_cells_once(func)
+        has_scalarizable_store(func) && scalarize_struct_cells_once(func)
     } {}
     if dbg {
         eprintln!("--- SROA final ---\n{func}");
@@ -1109,6 +1128,42 @@ pub struct CoroLowered {
     /// rebuilding on the post-rewrite CFG (they are stable across the rewrite).
     pub step_tree: crate::scope::ScopeTree,
     pub step_own: crate::scope::Ownership,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lower(src: &str, fn_name: &str) -> MirFunc {
+        let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
+        let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+        let (fid, _) = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == fn_name)
+            .expect("function");
+        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        skull_mir::lower::lower_function(&ws, &scx, mid, fid).expect("lower")
+    }
+
+    #[test]
+    fn cleanup_prefilter_finds_only_aggregate_stores() {
+        let scalar = lower("fn f(x: int) -> int { return x }", "f");
+        assert!(!has_scalarizable_store(&scalar));
+
+        let aggregate = lower(
+            "struct Pair { a: int, b: int }\n\
+             fn f(flag: bool) -> int {\n\
+                 let p = Pair { a: 1, b: 2 }\n\
+                 if flag { return p.a }\n\
+                 return p.b\n\
+             }",
+            "f",
+        );
+        assert!(has_scalarizable_store(&aggregate), "{aggregate}");
+    }
 }
 
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
@@ -1903,4 +1958,3 @@ pub fn materialize_frame(
         }
     }
 }
-

@@ -502,7 +502,9 @@ pub fn emit_named_framed(
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
-    let mut out = String::new();
+    let estimated_body_bytes = func.insts.len() * 24;
+    let mut out =
+        String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
     render_scope(ws, ctx, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
