@@ -494,15 +494,22 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
 pub(crate) fn emit_js_program_project(
     dir: &str,
 ) -> (skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace) {
-    use std::path::PathBuf;
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-    let sources = match crate::unified_compile::discover_sources(&spec) {
-        Ok(s) => s,
+    match try_emit_js_program_project(dir) {
+        Ok(emitted) => emitted,
         Err(e) => {
-            log::error!(target: "JS", "cannot load project {}: {}", dir, e);
+            eprintln!("{e}");
             std::process::exit(1);
         }
-    };
+    }
+}
+
+pub(crate) fn try_emit_js_program_project(
+    dir: &str,
+) -> Result<(skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace)> {
+    use std::path::PathBuf;
+    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
+    let sources = crate::unified_compile::discover_sources(&spec)
+        .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
     let sources = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
         sources.production_only()
     } else {
@@ -510,30 +517,28 @@ pub(crate) fn emit_js_program_project(
     };
     let (mut modules, entry_file) = match crate::skull_backend::skull_assemble_project(&sources) {
         Ok(v) => v,
-        Err(errs) => {
-            eprintln!("{}", crate::skull_backend::render_project_errs(&sources, &errs));
-            std::process::exit(1);
-        }
+        Err(errs) => return Err(anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errs)
+        )),
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
-        Err(errs) => {
-            eprintln!("{}", crate::skull_backend::render_project_errs(&sources, &errs));
-            log::error!(target: "JS", "bone type-check failed for project {}", dir);
-            std::process::exit(1);
-        }
+        Err(errs) => return Err(anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errs)
+        )),
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!("{}", crate::skull_backend::render_project_err(&sources, &e));
-            log::error!(target: "JS", "js emit failed for project {}", dir);
-            std::process::exit(1);
-        }
+        Err(e) => return Err(anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_err(&sources, &e)
+        )),
     };
-    (prog, ws)
+    Ok((prog, ws))
 }
 
 /// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and

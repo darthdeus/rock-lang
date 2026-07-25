@@ -523,6 +523,7 @@ pub struct Args {
     /// (defaults to `tests/`). Compilation/test failures don't abort
     /// the loop; Ctrl-C to exit.
     pub watch: bool,
+    pub port: u16,
 
     /// Resolved compiler backend for this invocation (default `skull`; see
     /// `from_matches`). `skull` is bone type-check + skull codegen; `bone` is
@@ -634,7 +635,10 @@ impl Args {
             .arg(Arg::new("list").long("list").action(ArgAction::SetTrue)
                 .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."))
             .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
-                .help("For `rock test`: re-run tests on every `.rock` file change in the watched paths."))
+                .help("For `rock test`: re-run tests on source changes. For `rock web`: serve the build and reload connected browsers after successful changes."))
+            .arg(Arg::new("port").long("port").default_value("8000")
+                .value_parser(clap::value_parser!(u16))
+                .help("For `rock web --watch`: loopback HTTP port. Use 0 to choose an available port."))
             .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
                 .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
             .arg(Arg::new("backend").long("backend")
@@ -690,6 +694,7 @@ impl Args {
             app_args: many_str("app_args"),
             jv: m.get_flag("jv"),
             watch: m.get_flag("watch"),
+            port: *m.get_one::<u16>("port").unwrap(),
             package: m.get_flag("package"),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is

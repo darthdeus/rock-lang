@@ -510,7 +510,12 @@ impl CommandContext {
         // --backend, so it dispatches before the backend switch like shader/fmt.
         if self.args.command == CliCommand::Web {
             let project = self.get_project_dir_or_current()?;
-            return crate::web::build_web(&project, self.args.output.as_deref());
+            return crate::web::run_web(
+                &project,
+                self.args.output.as_deref(),
+                self.args.watch,
+                self.args.port,
+            );
         }
         // shader is GLSL fn-library emission (route B); it type-checks a single
         // file against the stdlib and emits GLSL, so it's backend-agnostic and
@@ -688,4 +693,3 @@ impl CommandContext {
         self.run_command_skull()
     }
 }
-
