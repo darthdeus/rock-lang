@@ -2974,6 +2974,34 @@ impl Builder<'_> {
 
     /// `target = value` -> a `Store`/`StoreField`/`StoreIndex`/`StoreGlobal`
     /// (the effect; no value). The expression form wraps this with a unit value.
+    /// The BASE of an assignment target, lowered as a PLACE: the slot itself,
+    /// never a packed copy of it. `lower_expr` on a value-struct element/field is
+    /// an RVALUE read and rebuilds a fresh box (the whole-value copy rule), so
+    /// using it here would land the store on a temporary. The syntactic position
+    /// ("I am an assignment target's base") is known here, so nothing needs to be
+    /// plumbed down from bone. Recurses the whole chain: `a.b[i].c.x = 5` must not
+    /// pack at any level.
+    fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        match self.body.expr_arena[e].clone() {
+            Expr::Index { base, index } => {
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                Ok(self.emit_cur(Inst::Index { base: b, index: i, kind }))
+            }
+            // A swizzle and a flattened-enum field are not places (both
+            // materialize a fresh value); leave them to the rvalue path, which
+            // rejects or copies as it does today.
+            Expr::FieldAccess { base, field }
+                if self.swizzle_of(base, field).is_none()
+                    && self.flat_field_of(base, field).is_none() =>
+            {
+                let b = self.lower_place_base(base)?;
+                Ok(self.emit_cur(Inst::Field { base: b, field }))
+            }
+            _ => self.lower_expr(e),
+        }
+    }
+
     fn lower_assign_effect(
         &mut self,
         target: Idx<Expr>,
@@ -3005,7 +3033,7 @@ impl Builder<'_> {
                 self.emit_cur(Inst::Store { cell, value: v });
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_expr(base)?;
+                let b = self.lower_place_base(base)?;
                 // A flattened enum field: write the discriminant + payload slots
                 // directly on the parent table (no nested box).
                 if let Some(shape) = self.flat_field_of(base, field) {
@@ -3040,7 +3068,7 @@ impl Builder<'_> {
             // non-null path. Deep `a?.b?.c = v` works: `base` (`a?.b`) is itself
             // a SafeNav that lowers to nil if any inner link is null.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_expr(base)?;
+                let recv = self.lower_place_base(base)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
@@ -3106,7 +3134,7 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_expr(base)?;
+                let b = self.lower_place_base(base)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field });
                 let rv = self.lower_expr(value)?;
                 let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
@@ -3123,7 +3151,7 @@ impl Builder<'_> {
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
             // The read-modify-write and `value` run only on the non-null path.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_expr(base)?;
+                let recv = self.lower_place_base(base)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
@@ -3218,7 +3246,7 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_expr(base)?;
+                let b = self.lower_place_base(base)?;
                 let old = self.emit_cur(Inst::Field { base: b, field });
                 let new = bump(self, old);
                 self.emit_cur(Inst::StoreField { base: b, field, value: new });
