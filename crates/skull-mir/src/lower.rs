@@ -4936,19 +4936,28 @@ impl Builder<'_> {
             Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
             _ => None,
         };
-        // A composite with `.N` precision and no explicit type is a recursive
-        // precision-aware stringify -> `inspect_formatted`.
+        // A composite has no printf conversion: render it structurally (at
+        // `.N` precision when asked, via `inspect_formatted`) and then run the
+        // same pad path a conversion would. The numeric-presentation flags
+        // below have no meaning on a structural rendering, so a spec carrying
+        // one is left to gap rather than silently ignored.
         let has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
-        let plain_spec = spec.format_type.is_none()
+        if spec.format_type.is_none()
+            && inferred.is_none()
             && spec.grouping.is_none()
-            && spec.fill.is_none()
-            && spec.width.is_none()
-            && spec.width_expr.is_none()
-            && spec.alignment.is_none();
-        if has_precision && plain_spec && inferred.is_none() && self.is_composite_expr(expr) {
-            let prec = self.lower_precision(spec)?;
-            let func = self.resolve_global_fn("inspect_formatted")?;
-            return Ok(self.emit_cur(Inst::Call { func, args: vec![v, prec] }));
+            && spec.sign.is_none()
+            && !spec.alternate
+            && !spec.zero_pad
+            && self.is_composite_expr(expr)
+        {
+            let rendered = if has_precision {
+                let prec = self.lower_precision(spec)?;
+                let func = self.resolve_global_fn("inspect_formatted")?;
+                self.emit_cur(Inst::Call { func, args: vec![v, prec] })
+            } else {
+                self.stringify_non_null(expr, v)?
+            };
+            return self.pad_to_width(rendered, spec);
         }
 
         let grouping = spec.grouping;
@@ -4995,20 +5004,31 @@ impl Builder<'_> {
             out = self.emit_cur(Inst::Call { func, args: vec![out, sep_v, grp_v] });
         }
         if needs_pad {
-            // Pad to the field width AFTER grouping (separators count toward it).
-            let w = match (spec.width, spec.width_expr) {
-                (Some(w), _) => self.emit_cur(Inst::Const(Lit::Int(w as i64))),
-                (None, Some(we)) => self.lower_expr(we)?,
-                (None, None) => self.emit_cur(Inst::Const(Lit::Int(0))),
-            };
-            let align = spec.alignment.map(|c| c.to_string()).unwrap_or_else(|| ">".to_string());
-            let align_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(align.as_str()))));
-            let fill = spec.fill.unwrap_or(' ').to_string();
-            let fill_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(fill.as_str()))));
-            let func = self.resolve_global_fn("__rock_fmt_pad")?;
-            out = self.emit_cur(Inst::Call { func, args: vec![out, w, align_v, fill_v] });
+            // Pad AFTER grouping (separators count toward the field width).
+            out = self.pad_to_width(out, spec)?;
         }
         Ok(out)
+    }
+
+    /// Pad an already-rendered string to the spec's field width. A width of 0
+    /// (no width in the spec) leaves the string untouched, so this is safe to
+    /// call unconditionally.
+    fn pad_to_width(
+        &mut self,
+        out: Idx<Inst>,
+        spec: &bone_semantic::hir::InterpSpec,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let w = match (spec.width, spec.width_expr) {
+            (Some(w), _) => self.emit_cur(Inst::Const(Lit::Int(w as i64))),
+            (None, Some(we)) => self.lower_expr(we)?,
+            (None, None) => self.emit_cur(Inst::Const(Lit::Int(0))),
+        };
+        let align = spec.alignment.map(|c| c.to_string()).unwrap_or_else(|| ">".to_string());
+        let align_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(align.as_str()))));
+        let fill = spec.fill.unwrap_or(' ').to_string();
+        let fill_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(fill.as_str()))));
+        let func = self.resolve_global_fn("__rock_fmt_pad")?;
+        Ok(self.emit_cur(Inst::Call { func, args: vec![out, w, align_v, fill_v] }))
     }
 
     /// A spec's precision as a value: static `Int`, dynamic `{.{p}}` expression,
