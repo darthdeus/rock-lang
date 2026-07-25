@@ -1508,16 +1508,21 @@ inline(lua) fn table_new() -> any = """return {}"""
     tbl[index] = value
 """
 
-// Field references (key paths). The `.field` literal is the interned field name
-// at runtime; `o[f]` == `o.field` since skull emits named struct keys. `field_get`
-// takes the read-only `KeyPath<T, V>` (allows a `value`-struct T -- reading a
-// value field is fine); `field_set` takes the writable `FieldOf<T, V>`, which
-// refuses a `value`-struct T (immutable). Split per docs/field-refs-plan.md 1.
-@inline inline(lua) fn field_get<T, V>(o: T, f: KeyPath<T, V>) -> V = """
+// Field references. The `.field` literal is the interned field name at runtime;
+// `o[f]` == `o.field` since skull emits named struct keys. `FieldRef<T, V>` is
+// the TOP of the lattice -- it carries both capabilities and coerces down to the
+// single-capability selectors. `ReadFieldRef<T, V>` is read-only (`field_get`)
+// and allows a `value`-struct T, since reading a value field is fine; the
+// writable side refuses a `value`-struct T (immutable). Split per
+// docs/field-refs-plan.md 1.
+// `field_set` will relax to the write-only `WriteFieldRef<T, V>` once that
+// lands -- it is the selector an EMBEDDED field can satisfy, being the one that
+// grants no whole-value read (docs/scalarization-and-boxing-design.md S 6).
+@inline inline(lua) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = """
     return o[f]
 """
 
-@inline inline(lua) fn field_set<T, V>(o: T, f: FieldOf<T, V>, v: V) = """
+@inline inline(lua) fn field_set<T, V>(o: T, f: FieldRef<T, V>, v: V) = """
     o[f] = v
 """
 

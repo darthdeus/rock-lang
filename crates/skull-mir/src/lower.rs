@@ -2583,7 +2583,7 @@ impl Builder<'_> {
             Expr::Bool(x) => Ok(self.emit_cur(Inst::Const(Lit::Bool(x)))),
             Expr::String(s) => Ok(self.emit_cur(Inst::Const(Lit::Str(s)))),
 
-            // A field-ref key path (`.field` resolved against `FieldOf<T, V>`)
+            // A field-ref key path (`.field` resolved against `FieldRef<T, V>`)
             // lowers to its interned field name. skull emits named struct keys,
             // so `obj[name]` is identical to `obj.field`.
             Expr::SiblingRef(name) => Ok(self.emit_cur(Inst::Const(Lit::Str(name)))),

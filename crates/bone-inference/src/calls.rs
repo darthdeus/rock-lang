@@ -92,21 +92,21 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                 _ => false,
             };
 
-            // A writable field ref reads read-only: `FieldOf<T, V>` fits a
-            // `KeyPath<T, V>` param (docs/field-refs-plan.md 1). Scoring has to
+            // A full field ref reads read-only: `FieldRef<T, V>` fits a
+            // `ReadFieldRef<T, V>` param (docs/field-refs-plan.md 1). Scoring has to
             // know it too -- otherwise the coercion only survives the
             // single-candidate bypass in `check_call`, and a second decl of the
             // name (a backend sibling, an unrelated overload) makes every
-            // `field_get(o, f: FieldOf<..>)` a no-fit.
-            let p_is_keypath_from_fieldof = match (*gamma.get(a), *gamma.get(p)) {
+            // `field_get(o, f: FieldRef<..>)` a no-fit.
+            let p_is_readfieldref_from_fieldref = match (*gamma.get(a), *gamma.get(p)) {
                 (
                     TypeExpr::App { ctor: TypeCtor::Nominal(an), .. },
                     TypeExpr::App { ctor: TypeCtor::Nominal(pn), .. },
-                ) => an.as_str() == "FieldOf" && pn.as_str() == "KeyPath",
+                ) => an.as_str() == "FieldRef" && pn.as_str() == "ReadFieldRef",
                 _ => false,
             };
 
-            if p_is_iface || p_is_keypath_from_fieldof {
+            if p_is_iface || p_is_readfieldref_from_fieldref {
                 let snap = gamma.out.checkpoint();
                 if gamma.trial(|g| coerce(g, a, p, span).is_ok()) {
                     return Some(if p_is_iface { 3 } else { 1 });
@@ -1108,7 +1108,7 @@ pub(crate) fn resolve_named_call_inner(
         }
 
         for a in args {
-            // A `.field` arg needs a FieldOf expected type to infer, so like a
+            // A `.field` arg needs a FieldRef expected type to infer, so like a
             // lambda it gets a fresh var (fits any candidate, stops
             // discriminating) and stays out of `preinferred` -- so post-selection
             // it falls through to `check_expr` against the winner's param.

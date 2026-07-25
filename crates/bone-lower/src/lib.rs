@@ -419,10 +419,10 @@ pub fn lower_type_expr_in(
             )
         }
 
-        // `FieldOf<T, V>` (writable field ref) and `KeyPath<T, V>` (read-only field
-        // ref -- `field_get`, allows value structs) are name-recognized magic
+        // `FieldRef<T, V>` (full field ref: read + write) and `ReadFieldRef<T, V>`
+        // (read-only -- `field_get`, allows value structs) are name-recognized magic
         // formers, not declared types; both lower to a 2-param Nominal.
-        TypeExprKind::App { ctor, args } if ctor.name == "FieldOf" || ctor.name == "KeyPath" => {
+        TypeExprKind::App { ctor, args } if ctor.name == "FieldRef" || ctor.name == "ReadFieldRef" => {
             if args.len() != 2 {
                 comp_error!(
                     te.span,

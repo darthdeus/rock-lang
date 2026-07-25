@@ -309,14 +309,14 @@ fn contextual_co_colors_as_keyword_before_fn_but_variable_otherwise() {
     );
 }
 
-/// A `.field` key-path literal (`FieldOf<T,V>` arg) colors its field name as
+/// A `.field` key-path literal (`FieldRef<T,V>` arg) colors its field name as
 /// PROPERTY, same as a receiver field access -- the leading `.` marks it a
 /// member in the token stream, and the HIR SiblingRef must not override that
 /// to `variable`.
 #[test]
 fn field_ref_key_path_colors_field_as_property() {
     let src = "struct Mob { health: int, attack_co: int? }\n\
-               fn poll_slot(f: FieldOf<Mob, int?>) {}\n\
+               fn poll_slot(f: FieldRef<Mob, int?>) {}\n\
                fn main() {\n  poll_slot(.attack_co)\n}\n";
     let toks = decode(src);
     // `attack_co` starts after `  poll_slot(.`

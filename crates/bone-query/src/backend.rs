@@ -1420,19 +1420,19 @@ impl BoneWorkspace {
             }
         }
         // Field-reference key path: a call-arg slot whose expected param is
-        // `FieldOf<Struct, V>` completes to Struct's fields of type V (the
+        // `FieldRef<Struct, V>` completes to Struct's fields of type V (the
         // typechecker's invariance) -- offered whether or not the leading `.`
         // is typed yet, with a generic `T` resolved from a sibling arg. Analyze
         // a munged variant so the callee + args resolve through an incomplete
         // `.`. Gated so the variant only fires when the slot is plausibly a
-        // field ref (live signature says FieldOf, or a `.` is already typed);
+        // field ref (live signature says FieldRef, or a `.` is already typed);
         // `field_ref_arg_completions` returns None -> falls through to normal
         // completion (e.g. enum-shorthand `.Variant` in an arg).
         if let Some((callee, arg_idx, recv_end)) = cx.arg_call.clone() {
             let lead_dot = leading_dot(src, offset);
             // Skip the variant only when the live signature is KNOWN and clearly
             // not a field ref. If the callee is unknown live (the incomplete arg
-            // broke the current file) or the slot is FieldOf, analyze the munge
+            // broke the current file) or the slot is FieldRef, analyze the munge
             // to resolve it -- so normal `foo(arg` stays variant-free but a
             // field-ref slot is caught even through a parse error. The gate reads
             // the param's nominal HEAD (`TypeCtor`), not a rendered substring.
@@ -3434,7 +3434,7 @@ fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
 }
 
 /// Whether any overload of `callee` declares arg `arg_index` as a
-/// `FieldOf<..>` slot, decided on the param's nominal head. None when no
+/// `FieldRef<..>` slot, decided on the param's nominal head. None when no
 /// overload is known live (unknown callee / arity) -- the caller treats that
 /// as "can't rule it out".
 pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Option<bool> {
@@ -3452,7 +3452,7 @@ pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: u
                 TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
                 TyId::Local(_) => continue,
             };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if matches!(n.as_str(), "FieldOf" | "KeyPath"))
+            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if matches!(n.as_str(), "FieldRef" | "ReadFieldRef"))
             {
                 found = true;
             }
