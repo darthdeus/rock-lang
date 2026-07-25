@@ -1764,6 +1764,20 @@ pub fn emit_shader_entry(
     root: &str,
     profile: GlslProfile,
 ) -> Result<String, CompilerError> {
+    Ok(emit_shader_entry_with_dependencies(ws, mid, root, profile)?.source)
+}
+
+pub struct ShaderEmission {
+    pub source: String,
+    pub dependencies: Vec<FuncRef>,
+}
+
+pub fn emit_shader_entry_with_dependencies(
+    ws: &Workspace,
+    mid: ModuleId,
+    root: &str,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
     let overloaded = compute_overloaded_names(ws);
     let fref = resolve_root(ws, mid, root)?;
@@ -1841,9 +1855,12 @@ pub fn emit_shader_entry(
     // explicit fragment float precision, and the vertex declarations are
     // harmless no-ops (highp is already the vertex default).
     let (version, precision) = profile_header(profile);
-    Ok(format!(
+    let source = format!(
         "{version}\n\n#ifdef PIXEL\n\n{precision}{px}\n#endif\n\n#ifdef VERTEX\n\n{precision}{FULLSCREEN_VERTEX}\n#endif\n"
-    ))
+    );
+    let mut dependencies = reach.order;
+    dependencies.push(fref);
+    Ok(ShaderEmission { source, dependencies })
 }
 
 /// Emission profile (docs/shaders.md): the `#version` line and
@@ -2187,7 +2204,7 @@ fn lower_reach_helpers(
     overloaded: &HashSet<Ustr>,
     fref: FuncRef,
     stage: Stage,
-) -> Result<(MirFunc, String), CompilerError> {
+) -> Result<(MirFunc, String, Vec<FuncRef>), CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     let mf = lower_function(ws, scx, fref.module, fref.func)
         .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
@@ -2230,7 +2247,9 @@ fn lower_reach_helpers(
         helpers.push_str(&emit_fn_def(ws, overloaded, href, &reach.bodies[&href])?);
         helpers.push('\n');
     }
-    Ok((mf, helpers))
+    let mut dependencies = reach.order;
+    dependencies.push(fref);
+    Ok((mf, helpers, dependencies))
 }
 
 /// Reject a fragment-stage read of the varyings `position` field: it is
@@ -2254,7 +2273,7 @@ fn emit_vertex_stage(
     fref: FuncRef,
     v: &VertexShape,
     varyings: &VaryingsShape,
-) -> Result<String, CompilerError> {
+) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let shape = EntryShape {
         global_params: v.attr_params.iter().copied().chain(v.uniform_params.iter().copied()).collect(),
         uniform_fields: v.attrs.iter().copied().chain(v.uniforms.iter().copied()).collect(),
@@ -2265,7 +2284,8 @@ fn emit_vertex_stage(
             position_is_gl: true,
         }),
     };
-    let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Vertex)?;
+    let (mf, helpers, dependencies) =
+        lower_reach_helpers(ws, scx, overloaded, fref, Stage::Vertex)?;
 
     let mut out = String::new();
     for (loc, (n, t)) in v.attrs.iter().enumerate() {
@@ -2288,7 +2308,7 @@ fn emit_vertex_stage(
     out.push('\n');
     out.push_str(&helpers);
     out.push_str(&emit_fn_def_with(ws, overloaded, fref, &mf, Some(&shape))?);
-    Ok(out)
+    Ok((out, dependencies))
 }
 
 fn emit_fragment_stage(
@@ -2298,7 +2318,7 @@ fn emit_fragment_stage(
     fref: FuncRef,
     fs: &FragShape,
     varyings: &VaryingsShape,
-) -> Result<String, CompilerError> {
+) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
@@ -2314,7 +2334,8 @@ fn emit_fragment_stage(
         arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
         main_out,
     };
-    let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Fragment)?;
+    let (mf, helpers, dependencies) =
+        lower_reach_helpers(ws, scx, overloaded, fref, Stage::Fragment)?;
     reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
 
     let mut out = String::new();
@@ -2349,7 +2370,7 @@ fn emit_fragment_stage(
         out.push('\n');
         out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
     }
-    Ok(out)
+    Ok((out, dependencies))
 }
 
 /// Reject duplicate global names across BOTH stages (decision 7): attributes,
@@ -2398,6 +2419,19 @@ pub fn emit_shader_pipeline(
     frag_root: &str,
     profile: GlslProfile,
 ) -> Result<String, CompilerError> {
+    Ok(emit_shader_pipeline_with_dependencies(
+        ws, mid, vert_root, frag_root, profile,
+    )?
+    .source)
+}
+
+pub fn emit_shader_pipeline_with_dependencies(
+    ws: &Workspace,
+    mid: ModuleId,
+    vert_root: &str,
+    frag_root: &str,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
     let overloaded = compute_overloaded_names(ws);
     let vfref = resolve_root(ws, mid, vert_root)?;
@@ -2416,13 +2450,22 @@ pub fn emit_shader_pipeline(
     let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
     check_pipeline_collisions(&vshape, &varyings, &fshape, vf.name_span)?;
 
-    let vertex_block = emit_vertex_stage(ws, &scx, &overloaded, vfref, &vshape, &varyings)?;
-    let pixel_block = emit_fragment_stage(ws, &scx, &overloaded, ffref, &fshape, &varyings)?;
+    let (vertex_block, vertex_dependencies) =
+        emit_vertex_stage(ws, &scx, &overloaded, vfref, &vshape, &varyings)?;
+    let (pixel_block, pixel_dependencies) =
+        emit_fragment_stage(ws, &scx, &overloaded, ffref, &fshape, &varyings)?;
 
     let (version, precision) = profile_header(profile);
-    Ok(format!(
+    let source = format!(
         "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
-    ))
+    );
+    let dependencies = vertex_dependencies
+        .into_iter()
+        .chain(pixel_dependencies)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(ShaderEmission { source, dependencies })
 }
 
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated

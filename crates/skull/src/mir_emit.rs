@@ -606,6 +606,14 @@ pub struct SkullEmitCache {
     /// preserves the live value). Rebuilt by `emit_full`.
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
+    shader_registrations: ShaderRegistrations,
+}
+
+#[derive(Default)]
+struct ShaderRegistrations {
+    lua: String,
+    dependencies: FxHashSet<FuncRef>,
+    callsites: FxHashSet<(ModuleId, BodyOwner)>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -969,25 +977,23 @@ fn lua_long_bracket(s: &str) -> String {
 /// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
 /// violation, stage/collision) is a spanned `CompilerError` failing the compile,
 /// never skip-and-continue.
-fn shader_registration_lines(ws: &Workspace) -> Result<String, CompilerError> {
+fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, CompilerError> {
     // Always Core330. The profile is a property of the GL context, which a build
     // cannot know: the engine rewrites #version + precision for GLES at
     // shader-compile time (stone-gl `adapt_source_for_gles`), and that header is
     // the ONLY difference between the two profiles.
     let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let pairs = skull_mir::lower::collect_shader_pairs(ws)?;
-    if pairs.is_empty() {
-        return Ok(String::new());
-    }
+    let collection = skull_mir::lower::collect_shader_collection(ws)?;
     let mut out = String::new();
-    for pair in pairs {
+    let mut dependencies = FxHashSet::default();
+    for pair in collection.pairs {
         let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
-        let glsl = match pair.vert {
+        let emission = match pair.vert {
             Some(vert) => {
                 let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline(
+                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
                     ws,
                     vert.module,
                     vname.as_str(),
@@ -995,16 +1001,26 @@ fn shader_registration_lines(ws: &Workspace) -> Result<String, CompilerError> {
                     profile,
                 )?
             }
-            None => skull_codegen_glsl::emit_shader_entry(
+            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
                 ws,
                 pair.frag.module,
                 fname.as_str(),
                 profile,
             )?,
         };
-        let _ = writeln!(out, "__rock_shader_register({:?}, {})", pair.key, lua_long_bracket(&glsl));
+        dependencies.extend(emission.dependencies);
+        let _ = writeln!(
+            out,
+            "__rock_shader_register({:?}, {})",
+            pair.key,
+            lua_long_bracket(&emission.source)
+        );
     }
-    Ok(out)
+    Ok(ShaderRegistrations {
+        lua: out,
+        dependencies,
+        callsites: collection.callsites.into_iter().collect(),
+    })
 }
 
 fn assemble(
@@ -1228,7 +1244,7 @@ fn assemble(
     // `rock_shader` pipeline registrations (docs/shaders.md):
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
-    out.push_str(&shader_registration_lines(ws)?);
+    out.push_str(&cache.shader_registrations.lua);
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -1379,6 +1395,7 @@ pub fn emit_full(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
+    let shader_registrations = shader_registration_lines(ws)?;
     let cache = SkullEmitCache {
         chunks,
         changed_since_full: FxHashSet::default(),
@@ -1388,6 +1405,7 @@ pub fn emit_full(
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
+        shader_registrations,
     };
     let emit = assemble(ws, &cache.cg, &cache.scx, cache.cg.overloaded(), &cache)?;
     Ok((emit, cache))
@@ -1411,6 +1429,30 @@ pub fn emit_full(
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
 impl SkullEmitCache {
+fn update_shader_registrations(
+    &mut self,
+    ws: &Workspace,
+    reinferred: &[(ModuleId, BodyOwner)],
+) -> Result<bool, CompilerError> {
+    let affected = reinferred.iter().any(|&(mid, owner)| {
+        self.shader_registrations.callsites.contains(&(mid, owner))
+            || matches!(
+                owner,
+                BodyOwner::Function(fid)
+                    if self
+                        .shader_registrations
+                        .dependencies
+                        .contains(&FuncRef { module: mid, func: fid })
+            )
+            || skull_mir::lower::body_has_shader_pipeline_call(ws, mid, owner)
+    });
+    if !affected {
+        return Ok(false);
+    }
+    self.shader_registrations = shader_registration_lines(ws)?;
+    Ok(true)
+}
+
 fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
@@ -1520,6 +1562,7 @@ pub fn emit_incremental(
 ) -> Result<MirEmit, CompilerError> {
     let t_reemit = Instant::now();
     let _affected = cache.update_chunk_cache(ws, reinferred);
+    cache.update_shader_registrations(ws, reinferred)?;
     let reemit = t_reemit.elapsed();
 
     // Reassembly: the SAME work `emit_full` does (concat every cached chunk +
@@ -1544,6 +1587,7 @@ fn assemble_overlay(
     ws: &Workspace,
     overloaded: &FxHashSet<Ustr>,
     cache: &SkullEmitCache,
+    shader_changed: bool,
 ) -> MirEmit {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -1701,17 +1745,8 @@ fn assemble_overlay(
     let (deco_map, _) = build_deco_map(ws);
     out.push_str(&decorator_rebind_lines(ws, overloaded, &deco_map, &order));
 
-    // Re-run ALL `rock_shader` registrations on a body-edit reload too (decision 2:
-    // top-level registrations re-run on reload; the plan sanctions conservative
-    // re-emit-all at this corpus size). The engine's hash-idempotent register
-    // no-ops unchanged pairs and recompiles an edited shader body in place. A GLSL
-    // emit error can't return Err here (the overlay's `MirEmit` is baked into the
-    // watch fast path), so warn loudly (never-swallow) -- the next full rebuild
-    // rejects it authoritatively via `assemble` (same pattern as the collision
-    // warning above).
-    match shader_registration_lines(ws) {
-        Ok(lines) => out.push_str(&lines),
-        Err(err) => eprintln!("skull overlay emit: rock_shader registration -- {}", err.message),
+    if shader_changed {
+        out.push_str(&cache.shader_registrations.lua);
     }
 
     MirEmit { lua: out, skipped, phases: Vec::new() }
@@ -1762,6 +1797,13 @@ pub fn emit_overlay(
     let t2 = Instant::now();
     let affected = cache.update_chunk_cache(ws, reinferred);
     cache.changed_since_full.extend(affected);
+    let shader_changed = match cache.update_shader_registrations(ws, reinferred) {
+        Ok(changed) => changed,
+        Err(err) => {
+            eprintln!("skull overlay emit: rock_shader registration -- {}", err.message);
+            false
+        }
+    };
     // Accumulate changed `const` globals so the overlay re-emits their inits
     // (unguarded). A mutable `global` value edit is interface-tier (full rebuild),
     // so it never reaches here; even so, gate on `is_const` defensively.
@@ -1774,7 +1816,7 @@ pub fn emit_overlay(
     }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache.cg.overloaded(), cache);
+    let mut emit = assemble_overlay(ws, cache.cg.overloaded(), cache, shader_changed);
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else

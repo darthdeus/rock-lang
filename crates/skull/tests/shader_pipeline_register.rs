@@ -113,6 +113,16 @@ fn frag_body_id(ws: &Workspace) -> (ModuleId, BodyOwner) {
     panic!("no ui_sim_solid_frag fn");
 }
 
+fn body_id_named(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
+    let mid = test_mid(ws);
+    for (fid, f) in ws.module(mid).functions.iter() {
+        if f.name.as_str() == name {
+            return (mid, BodyOwner::Function(fid));
+        }
+    }
+    panic!("no {name} fn");
+}
+
 #[test]
 fn changed_fragment_body_changes_registration() {
     let a = emit_module(&src_with_frag("1.0"));
@@ -157,6 +167,85 @@ fn overlay_carries_edited_shader_registration() {
     );
 }
 
+#[test]
+fn unrelated_body_overlay_omits_shader_registrations() {
+    let src = format!(
+        "{}\nfn unrelated_shader_user() -> int {{ return 1 }}\n",
+        src_with_frag("1.0")
+    );
+    let ws = ws_with_stdlib(&src);
+    let mid = test_mid(&ws);
+    let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
+    let overlay = emit_overlay(&ws, &mut cache, &[body_id_named(&ws, "unrelated_shader_user")]);
+    assert!(
+        !overlay.lua.contains("__rock_shader_register("),
+        "an unrelated body edit must not rebuild shader registrations:\n{}",
+        overlay.lua
+    );
+}
+
+fn src_with_shader_helper(x: &str) -> String {
+    src_with_frag(&format!("shader_color_component({x})")).replace(
+        "@shader(fragment)",
+        "fn shader_color_component(x: float) -> float { return x }\n\n@shader(fragment)",
+    )
+}
+
+#[test]
+fn shader_helper_overlay_carries_affected_registration() {
+    let ws1 = ws_with_stdlib(&src_with_shader_helper("1.0"));
+    let mid1 = test_mid(&ws1);
+    let (_full, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
+
+    let ws2 = ws_with_stdlib(
+        &src_with_shader_helper("1.0")
+            .replace("return x }", "return x * 0.5 }"),
+    );
+    let overlay = emit_overlay(
+        &ws2,
+        &mut cache,
+        &[body_id_named(&ws2, "shader_color_component")],
+    );
+    assert!(
+        overlay.lua.contains("__rock_shader_register(\"ui_vert+ui_sim_solid_frag\""),
+        "a shader helper edit must rebuild its registration:\n{}",
+        overlay.lua
+    );
+    assert!(
+        overlay.lua.contains("0.5"),
+        "the registration must carry the edited helper source:\n{}",
+        overlay.lua
+    );
+}
+
+fn src_with_optional_call(include_call: bool) -> String {
+    let body = if include_call {
+        "return rock_shader(ui_vert, ui_sim_solid_frag)"
+    } else {
+        "return \"none\""
+    };
+    let base = src_with_frag("1.0").replace(
+        "fn use_it() -> string { return rock_shader(ui_vert, ui_sim_solid_frag) }\n",
+        "",
+    );
+    format!("{base}\nfn shader_choice() -> string {{ {body} }}\n")
+}
+
+#[test]
+fn new_shader_callsite_overlay_carries_registration() {
+    let ws1 = ws_with_stdlib(&src_with_optional_call(false));
+    let mid1 = test_mid(&ws1);
+    let (_full, mut cache) = emit_full(&ws1, mid1).expect("emit_full without callsite");
+
+    let ws2 = ws_with_stdlib(&src_with_optional_call(true));
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id_named(&ws2, "shader_choice")]);
+    assert!(
+        overlay.lua.contains("__rock_shader_register(\"ui_vert+ui_sim_solid_frag\""),
+        "adding a shader callsite must register its pipeline:\n{}",
+        overlay.lua
+    );
+}
+
 // -- A3c: single-arg fullscreen form `rock_shader(frag)`. Key = the bare frag
 // name (never contains '+', so it cannot collide with a pair key); the driver
 // routes vert=None to `emit_shader_entry`, which emits the same complete file
@@ -195,16 +284,6 @@ fn fs_frag(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 } }
 fn make_pair() -> string { return rock_shader(ui_vert, ui_sim_solid_frag) }
 fn make_fs() -> string { return rock_shader(fs_frag) }
 "#;
-
-fn frag_body_id_named(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
-    let mid = test_mid(ws);
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == name {
-            return (mid, BodyOwner::Function(fid));
-        }
-    }
-    panic!("no {name} fn");
-}
 
 #[test]
 fn single_arg_call_collapses_to_bare_frag_key() {
@@ -251,7 +330,7 @@ fn single_arg_overlay_carries_registration() {
     let ws = ws_with_stdlib(MIXED_SRC);
     let mid = test_mid(&ws);
     let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
-    let reinferred = vec![frag_body_id_named(&ws, "fs_frag")];
+    let reinferred = vec![body_id_named(&ws, "fs_frag")];
     let overlay = emit_overlay(&ws, &mut cache, &reinferred);
     assert!(
         overlay.lua.contains("__rock_shader_register(\"fs_frag\""),
