@@ -749,6 +749,26 @@ impl BoneWorkspace {
             }
         }
 
+        // `backend_sibling_mismatch`. Like `unused_fn` this is whole-project --
+        // a finding is a property of a decl PAIR, so an edit to either half
+        // flips it -- but it reads only signatures, no bodies and no inference,
+        // so the workspace pass is cheap enough to redo per edit with no cache.
+        // Not gated on `is_bin`: a lib's siblings have to agree just as much.
+        {
+            let by_sib = bone_lints::backend_sibling_mismatches_by_file(proj.session.workspace());
+            for (p, diags) in by_file.iter_mut() {
+                if p == path && this_file_parse_err.is_some() {
+                    continue;
+                }
+                let Some(findings) = by_sib.get(&Ustr::from(p.as_str())) else {
+                    continue;
+                };
+                let src = proj.texts.get(p).map(String::as_str).unwrap_or("");
+                let kept = bone_lints::filter_suppressed(findings.clone(), src);
+                diags.extend(kept.iter().map(lint_finding_diagnostic));
+            }
+        }
+
         if prof {
             eprintln!(
                 "[bone update] update_file {uf_ms:.2}ms  diag-scan {diag_ms:.2}ms  holes {holes_ms:.2}ms ({reparsed}/{} files reparsed)",
@@ -892,6 +912,7 @@ impl BoneWorkspace {
         };
         let mut diags = lint_diagnostics_for(proj, path);
         diags.extend(transmute_diagnostics_for(proj, path));
+        diags.extend(sibling_lint_diagnostics_for(proj, path));
         if proj.is_bin {
             diags.extend(fn_lint_diagnostics_for(proj, path));
         }
@@ -4249,6 +4270,32 @@ fn fn_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     let by_fn =
         bone_lints::unused_fns_by_file(proj.session.workspace(), &proj.session.warm_mids);
     let Some(findings) = by_fn.get(&Ustr::from(path)) else {
+        return Vec::new();
+    };
+    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
+    bone_lints::filter_suppressed(findings.clone(), src)
+        .iter()
+        .map(lint_finding_diagnostic)
+        .collect()
+}
+
+/// `backend_sibling_mismatch` lint diagnostics for one file. Sibling sets are
+/// whole-workspace and cross-file (an engine decl in `stdlib/` against its
+/// `inline(js)` half in `js_ffi.rock`), so this runs the workspace pass and
+/// keeps only `path`'s findings. Warm (stdlib) modules are SCANNED -- half of
+/// every stone sibling set lives there -- but not reported on, matching the
+/// other lints' read-only treatment of stdlib files; a drifted pair still
+/// surfaces on its user-module half.
+fn sibling_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
+    let ws = proj.session.workspace();
+    let Some(mid) = user_module_for_path(ws, path) else {
+        return Vec::new();
+    };
+    if proj.session.warm_mids.contains(&mid) {
+        return Vec::new();
+    }
+    let by_file = bone_lints::backend_sibling_mismatches_by_file(ws);
+    let Some(findings) = by_file.get(&Ustr::from(path)) else {
         return Vec::new();
     };
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");

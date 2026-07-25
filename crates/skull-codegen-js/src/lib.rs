@@ -705,7 +705,8 @@ function stone_quit_requested() { return __SW.quitReq; }
 function stone_is_initialized() { return __SW.initialized; }
 function stone_get_backend_name_js() { return "stone-web"; }
 
-function stone_create_window_ex(title, x, y, width, height, display, resizable) {
+function stone_create_window_ex(title, x, y, width, height, display, resizable, fullscreen) {
+  if (fullscreen) { __sw_log_once("stone_create_window_ex: fullscreen=" + fullscreen + " ignored; the browser only enters fullscreen from a user gesture, so the canvas boots windowed"); }
   var fake = globalThis.__STONE_WEB_FAKE_ENV;
   if (fake) {
     __SW.gl = fake.gl;
@@ -1873,7 +1874,11 @@ function stone_pixel_readback_read(id, ch, x, y) {
 }
 
 // --- window management (fixed canvas on web) ---
-function stone_set_fullscreen(mode) {}
+// Element.requestFullscreen() needs a transient user activation, which a
+// rAF-driven frame never has -- so this can only ever report, not act.
+function stone_set_fullscreen(mode) {
+  if (mode) { __sw_log_once("stone_set_fullscreen(" + mode + "): not supported on web; needs a user gesture to call requestFullscreen"); }
+}
 function stone_set_window_title(w, title) { if (typeof document !== "undefined") document.title = title; }
 function stone_set_window_position(x, y) {}
 function stone_get_window_position(px, py) { px[0] = 0; py[0] = 0; }

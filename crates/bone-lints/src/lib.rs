@@ -5,8 +5,8 @@
 //! Plan + catalog: `docs/lint-future-plan.md`, spec `docs/linter.md`.
 
 use bone_core::hir::{
-    BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module, Statement, TyId,
-    TypeExpr,
+    BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, FnBackend, Function, Module,
+    Statement, TyId, TypeExpr,
 };
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
@@ -119,7 +119,13 @@ pub const UNUSED_VAR: &str = "unused_var";
 /// Every lint name the suppression/completion/code-action machinery knows. The
 /// single source: the LSP code action and the magic-comment completion both
 /// read this so they never drift a hardcoded name apart.
-pub const KNOWN_LINTS: &[&str] = &[UNUSED_VAR, UNUSED_FN, UNUSED_PURE_EXPR, TRANSMUTE_OF_NULLABLE];
+pub const KNOWN_LINTS: &[&str] = &[
+    UNUSED_VAR,
+    UNUSED_FN,
+    UNUSED_PURE_EXPR,
+    TRANSMUTE_OF_NULLABLE,
+    BACKEND_SIBLING_MISMATCH,
+];
 
 /// A finding that carries its lint name and source line, so one suppression
 /// pass serves every lint. `LINT` is the name matched inside
@@ -152,6 +158,31 @@ impl LintFinding for UnusedFn {
     fn to_diagnostic(&self) -> CompilerError {
         CompilerError::new_with_label(self.span, format!("unused function `{}`", self.name))
             .with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+impl LintFinding for BackendSiblingMismatch {
+    const LINT: &'static str = BACKEND_SIBLING_MISMATCH;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let detail = match &self.issue {
+            BackendSiblingIssue::MissingOn { backend } => format!(
+                "declared for `{}` but no `{backend}` declaration has this signature -- \
+                 a `{backend}` build cannot emit a call to it",
+                self.backend
+            ),
+            BackendSiblingIssue::ReturnDiffers { other_backend, other_ret } => format!(
+                "returns a different type than its `{other_backend}` sibling (`{other_ret}`) -- \
+                 overloads key on params, so these are one overload with two answers"
+            ),
+        };
+        CompilerError::new_with_label(
+            self.span,
+            format!("backend sibling mismatch: `{}{}` {detail}", self.name, self.signature),
+        )
+        .with_level(CompilerErrorLevel::Warning)
     }
 }
 
@@ -200,6 +231,175 @@ fn allow_body_matches(s: &str, lint_name: &str) -> bool {
     let Some(s) = s.trim_start().strip_prefix('(') else { return false };
     let Some(rest) = s.trim_start().strip_prefix(lint_name) else { return false };
     matches!(rest.chars().next(), None | Some(' ') | Some('\t') | Some(',') | Some(')'))
+}
+
+/// What is wrong with one decl of a backend-sibling set.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BackendSiblingIssue {
+    /// No decl of this signature targets `backend` -- neither a native decl
+    /// there nor a portable (`Any`) body that every backend emits.
+    MissingOn { backend: &'static str },
+    /// Same signature, disagreeing return types. Overload resolution keys on
+    /// params only, so these two decls are ONE overload with two answers: the
+    /// typechecker records the collapsed representative's return type and the
+    /// other backend emits a body returning something else.
+    ReturnDiffers { other_backend: &'static str, other_ret: String },
+}
+
+/// A `backend-sibling-mismatch` finding: one decl of a name that is declared on
+/// more than one concrete backend, where the set of declarations does not line
+/// up across those backends.
+#[derive(Clone, Debug)]
+pub struct BackendSiblingMismatch {
+    pub name: Ustr,
+    /// Rendered param list, `(int, bool)` -- the overload key.
+    pub signature: String,
+    pub backend: &'static str,
+    pub issue: BackendSiblingIssue,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(backend_sibling_mismatch)`.
+pub const BACKEND_SIBLING_MISMATCH: &str = "backend_sibling_mismatch";
+
+/// One decl, reduced to what the sibling comparison needs.
+struct SiblingDecl {
+    name: Ustr,
+    signature: String,
+    ret: String,
+    backend: FnBackend,
+    span: Span,
+    file: Ustr,
+}
+
+/// The lint's name for a backend, and `None` for the portable `Any` rung (which
+/// is not a backend you can be missing from -- it serves all of them).
+fn backend_name(b: FnBackend) -> Option<&'static str> {
+    match b {
+        FnBackend::Lua => Some("lua"),
+        FnBackend::Js => Some("js"),
+        FnBackend::Any => None,
+    }
+}
+
+/// Declarations of one name that don't line up across the backends they target.
+///
+/// A name declared on two concrete backends is a *sibling set*: shared code
+/// calls it and each backend emits its own body, so the decls have to agree.
+/// They drift silently -- the split of `field_get` onto `KeyPath<T, V>` left the
+/// `inline(js)` sibling on `FieldOf`, which nothing caught until a luajit build
+/// resolved to the js-only decl and emit rejected it. skull's emit check sees
+/// only the backend being built and only reached calls, so the OTHER backend's
+/// half stays broken until someone builds for it.
+///
+/// The set is keyed on the rendered param list (the overload key -- param
+/// names and return type are not part of it) and a portable `Any` body counts
+/// as serving every backend, so a wrapper-over-raw-extern pair is clean. A name
+/// on ONE backend is never reported: that is a platform-exclusive fn, not a
+/// drifted sibling, which is why this needs no opt-out annotation.
+///
+/// Whole-workspace and decl-level: no inference, no bodies, no call graph.
+/// Stdlib decls participate (half of every stone sibling set lives there);
+/// findings are attributed to the file of the offending decl.
+pub fn backend_sibling_mismatches(ws: &Workspace) -> Vec<BackendSiblingMismatch> {
+    backend_sibling_mismatches_by_file(ws).into_values().flatten().collect()
+}
+
+/// Same as [`backend_sibling_mismatches`], grouped by the source file of the
+/// decl each finding sits on. The LSP publishes per file; a file with no
+/// findings is absent.
+pub fn backend_sibling_mismatches_by_file(
+    ws: &Workspace,
+) -> FxHashMap<Ustr, Vec<BackendSiblingMismatch>> {
+    let mut out: FxHashMap<Ustr, Vec<BackendSiblingMismatch>> = FxHashMap::default();
+    for decls in ws.functions_by_name.values() {
+        for finding in sibling_set_mismatches(ws, decls) {
+            let file = finding.1;
+            out.entry(file).or_default().push(finding.0);
+        }
+    }
+    out
+}
+
+/// The findings for ONE name's decl set, each paired with the file it belongs
+/// to. Empty for the overwhelmingly common case: fewer than two decls, or every
+/// decl on a single backend.
+fn sibling_set_mismatches(
+    ws: &Workspace,
+    decls: &[(ModuleId, Idx<Function>)],
+) -> Vec<(BackendSiblingMismatch, Ustr)> {
+    if decls.len() < 2 {
+        return Vec::new();
+    }
+    let infos: Vec<SiblingDecl> = decls
+        .iter()
+        .filter(|(mid, _)| *mid != ModuleId::builtin())
+        .map(|&(mid, fid)| {
+            let module = ws.module(mid);
+            let f = &module.functions[fid];
+            SiblingDecl {
+                name: f.name,
+                signature: format!(
+                    "({})",
+                    f.param_decls.iter().map(|p| ws.render(None, p.ty)).join(", ")
+                ),
+                ret: f.return_ty.map(|t| ws.render(None, t)).unwrap_or_else(|| "()".to_string()),
+                backend: f.backend,
+                span: f.name_span,
+                file: module.file,
+            }
+        })
+        .collect();
+
+    let concrete: Vec<&'static str> =
+        infos.iter().filter_map(|d| backend_name(d.backend)).unique().collect();
+    if concrete.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for d in &infos {
+        let Some(here) = backend_name(d.backend) else { continue };
+        for &other in &concrete {
+            if other == here {
+                continue;
+            }
+            let served = infos.iter().any(|o| {
+                o.signature == d.signature && backend_name(o.backend).is_none_or(|b| b == other)
+            });
+            if !served {
+                out.push((
+                    BackendSiblingMismatch {
+                        name: d.name,
+                        signature: d.signature.clone(),
+                        backend: here,
+                        issue: BackendSiblingIssue::MissingOn { backend: other },
+                        span: d.span,
+                    },
+                    d.file,
+                ));
+            }
+        }
+        if let Some(o) = infos
+            .iter()
+            .find(|o| o.signature == d.signature && o.ret != d.ret && o.backend != d.backend)
+        {
+            out.push((
+                BackendSiblingMismatch {
+                    name: d.name,
+                    signature: d.signature.clone(),
+                    backend: here,
+                    issue: BackendSiblingIssue::ReturnDiffers {
+                        other_backend: backend_name(o.backend).unwrap_or("portable"),
+                        other_ret: o.ret.clone(),
+                    },
+                    span: d.span,
+                },
+                d.file,
+            ));
+        }
+    }
+    out
 }
 
 /// An `unused-fn` finding: a top-level user function unreachable from any root.

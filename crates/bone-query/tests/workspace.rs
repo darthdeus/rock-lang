@@ -1187,3 +1187,54 @@ fn definition_of_stdlib_type_resolves_to_a_real_file() {
         "line {line} of the resolved stdlib should declare Entity, got {target:?}"
     );
 }
+
+// `backend_sibling_mismatch` is whole-project and decl-level. The live path
+// must publish it, and -- unlike `unused_fn` -- for a `lib` too: a library's
+// backend siblings have to agree just as much as a game's.
+#[test]
+fn update_publishes_backend_sibling_mismatch_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("m.rock"),
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
+         inline(js) fn probe(x: float) -> int = \"return x;\"\n",
+    )
+    .unwrap();
+    let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
+    let diags: Vec<_> =
+        per_file.into_iter().filter(|(p, _)| p == &m).flat_map(|(_, d)| d).collect();
+    assert!(
+        diags.iter().any(|d| d.message.contains("backend sibling mismatch")
+            && d.code == Some(lsp_types::NumberOrString::String(
+                "backend_sibling_mismatch".to_string()
+            ))
+            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
+        "live path must publish the backend_sibling_mismatch warning: {diags:?}"
+    );
+}
+
+// A matching sibling pair is the common case -- it must stay silent, or every
+// stone/js_ffi pair would warn.
+#[test]
+fn matching_backend_siblings_publish_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"l\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("m.rock"),
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
+         inline(js) fn probe(x: int) -> int = \"return x;\"\n",
+    )
+    .unwrap();
+    let m = bone_query::canonicalize_lenient(&dir.path().join("m.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
+    let diags: Vec<_> =
+        per_file.into_iter().filter(|(p, _)| p == &m).flat_map(|(_, d)| d).collect();
+    assert!(
+        !diags.iter().any(|d| d.message.contains("backend sibling mismatch")),
+        "identical siblings must not warn: {diags:?}"
+    );
+}
