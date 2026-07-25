@@ -46,6 +46,7 @@ mod iter_lsp;
 mod iter_parse;
 pub mod glsl_test;
 pub mod js_test;
+pub mod live_project;
 pub mod web;
 mod test_protocol;
 mod lsp_survey;

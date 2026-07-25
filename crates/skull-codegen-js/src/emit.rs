@@ -1892,6 +1892,7 @@ pub fn emit_with_closure(
 ) -> Result<String, CompilerError> {
     let mut st = WorklistState::new(ws, roots, false);
     drain_worklists(ws, scx, &mut st)?;
+    st.canonicalize_emission_order();
     let bodies = st.top_bodies();
     check_scalar_abi(ws, scx, &st.lowered, &bodies)?;
     let hoisted = collect_hoisted(&bodies);
@@ -1908,8 +1909,8 @@ pub fn emit_with_closure(
             out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
         }
     }
-    for line in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
-        out.push_str(&line);
+    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+        out.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
         out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
@@ -1947,8 +1948,38 @@ pub fn emit_program(
         extra.push((fr, nm.clone()));
         nm
     });
-    let program = emit_program_core(ws, scx, &extra)?;
-    Ok(JsProgram { program, main_js_name })
+    let build = build_program_core(ws, scx, &extra)?;
+    Ok(JsProgram { program: build.program, main_js_name })
+}
+
+pub fn emit_program_cached(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    user_mid: bone_semantic::prelude::ModuleId,
+) -> Result<(JsProgram, JsEmitCache), CompilerError> {
+    let mut extra = Vec::new();
+    let main_js_name = nullary_main(ws, user_mid).map(|fr| {
+        let name = callee_js_name(ws, fr);
+        extra.push((fr, name.clone()));
+        name
+    });
+    let build = build_program_core(ws, scx, &extra)?;
+    let static_keys = build
+        .chunks
+        .values()
+        .flat_map(|chunk| chunk.statics.iter())
+        .map(|cell| (cell.cell, static_cell_key(cell)))
+        .collect();
+    let program = JsProgram {
+        program: build.program.clone(),
+        main_js_name,
+    };
+    let cache = JsEmitCache {
+        build,
+        changed_since_full: HashSet::new(),
+        static_keys,
+    };
+    Ok((program, cache))
 }
 
 /// [`emit_program`] with EXPLICIT extra roots and no `main` handling -- the
@@ -1974,6 +2005,14 @@ fn emit_program_core(
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
+    Ok(build_program_core(ws, scx, extra_roots)?.program)
+}
+
+fn build_program_core(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    extra_roots: &[(FuncRef, String)],
+) -> Result<ProgramBuild, CompilerError> {
     let deco_names = decorator_names(ws);
     let mut roots: Vec<(FuncRef, String)> = extra_roots.to_vec();
     let mut root_set: HashSet<FuncRef> = extra_roots.iter().map(|(fr, _)| *fr).collect();
@@ -2033,6 +2072,7 @@ fn emit_program_core(
     }
 
     drain_worklists(ws, scx, &mut st)?;
+    st.canonicalize_emission_order();
 
     let mut bodies = st.top_bodies();
     bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
@@ -2040,39 +2080,84 @@ fn emit_program_core(
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
-    out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
-    out.push_str(&emit_vt_eq(ws, &bodies)?);
+    let mut stable = String::new();
+    let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
+    out.push_str(&enum_singletons);
+    stable.push_str(&enum_singletons);
+    let vt_eq = emit_vt_eq(ws, &bodies)?;
+    out.push_str(&vt_eq);
+    stable.push_str(&vt_eq);
     // 1. deco def fns.
     for (name, mf) in &deco_bodies {
-        out.push_str(&emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?);
+        let definition = emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?;
+        out.push_str(&definition);
+        stable.push_str(&definition);
         for nf in &mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+            let definition =
+                emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?;
+            out.push_str(&definition);
+            stable.push_str(&definition);
         }
     }
     // 2. fn defs (main, decorated fns, transitive callees).
+    let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
-        out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
+        let js = emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?;
+        out.push_str(&js);
+        chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
     }
     // 2b. inline(js) fns, emitted verbatim.
     for fr in &st.inline_js {
-        out.push_str(&emit_inline_js_fn(ws, scx, *fr, &st.names[fr]));
+        let definition = emit_inline_js_fn(ws, scx, *fr, &st.names[fr]);
+        out.push_str(&definition);
+        stable.push_str(&definition);
     }
     // 3. ginit def fns.
+    let mut const_chunks = HashMap::new();
     for g in &st.ginits {
-        out.push_str(&emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?);
+        let definition =
+            emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?;
+        out.push_str(&definition);
+        if g.is_const {
+            const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
+        } else {
+            stable.push_str(&definition);
+        }
         for nf in &g.mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+            let definition =
+                emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?;
+            out.push_str(&definition);
+            if g.is_const {
+                const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
+            } else {
+                stable.push_str(&definition);
+            }
         }
     }
     // 4. load-time init lines (dependency-ordered).
-    for line in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
-        out.push_str(&line);
+    let mut const_order = Vec::new();
+    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+        out.push_str(&init.js);
+        if let Some(chunk) = const_chunks.get_mut(&init.name) {
+            chunk.push_str(&init.js);
+            const_order.push(init.name);
+        } else {
+            stable.push_str(&init.js);
+        }
     }
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
-    out.push_str(&decorator_application_lines_js(ws, &deco_names, &st.names)?);
+    let applications = decorator_application_lines_js(ws, &deco_names, &st.names)?;
+    out.push_str(&applications);
+    stable.push_str(&applications);
 
-    Ok(out)
+    Ok(ProgramBuild {
+        program: out,
+        stable,
+        chunks,
+        const_chunks,
+        const_order,
+    })
 }
 
 /// `rock_shader(vert, frag)` collapses to a pipeline key const; the driver emits
@@ -2140,6 +2225,212 @@ pub struct JsProgram {
     pub main_js_name: Option<String>,
 }
 
+struct JsChunk {
+    js: String,
+    statics: Vec<skull_mir::mir::StaticCell>,
+}
+
+struct ProgramBuild {
+    program: String,
+    stable: String,
+    chunks: HashMap<FuncRef, JsChunk>,
+    const_chunks: HashMap<ustr::Ustr, String>,
+    const_order: Vec<ustr::Ustr>,
+}
+
+pub struct JsEmitCache {
+    build: ProgramBuild,
+    changed_since_full: HashSet<FuncRef>,
+    static_keys: HashMap<ustr::Ustr, String>,
+}
+
+impl JsEmitCache {
+    pub fn current_program(&self) -> &str {
+        &self.build.program
+    }
+}
+
+pub enum JsReload {
+    Overlay(String),
+    FullRequired,
+    NoChange,
+}
+
+impl JsReload {
+    pub fn expect_overlay(self) -> String {
+        match self {
+            Self::Overlay(js) => js,
+            Self::FullRequired => panic!("JS overlay required a full reload"),
+            Self::NoChange => panic!("JS overlay reported no emitted change"),
+        }
+    }
+}
+
+pub fn emit_overlay(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    user_mid: bone_semantic::prelude::ModuleId,
+    cache: &mut JsEmitCache,
+    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+) -> Result<JsReload, CompilerError> {
+    if reinferred
+        .iter()
+        .any(|(_, owner)| {
+            !matches!(
+                owner,
+                bone_semantic::hir::BodyOwner::Function(_)
+                    | bone_semantic::hir::BodyOwner::Global(_)
+            )
+        })
+    {
+        return Ok(JsReload::FullRequired);
+    }
+
+    let mut roots = Vec::new();
+    if let Some(main) = nullary_main(ws, user_mid) {
+        roots.push((main, callee_js_name(ws, main)));
+    }
+    let current = build_program_core(ws, scx, &roots)?;
+    if current.stable != cache.build.stable {
+        return Ok(JsReload::FullRequired);
+    }
+    if current.const_chunks.keys().collect::<HashSet<_>>()
+        != cache.build.const_chunks.keys().collect::<HashSet<_>>()
+    {
+        return Ok(JsReload::FullRequired);
+    }
+
+    let mut changed_now = HashSet::new();
+    for (fref, chunk) in &current.chunks {
+        if cache
+            .build
+            .chunks
+            .get(fref)
+            .is_none_or(|previous| previous.js != chunk.js)
+        {
+            changed_now.insert(*fref);
+        }
+    }
+    let changed_consts: HashSet<ustr::Ustr> = current
+        .const_chunks
+        .iter()
+        .filter_map(|(name, chunk)| {
+            (cache.build.const_chunks.get(name) != Some(chunk)).then_some(*name)
+        })
+        .collect();
+    if changed_now.is_empty() && changed_consts.is_empty() {
+        cache.build = current;
+        return Ok(JsReload::NoChange);
+    }
+    cache.changed_since_full.extend(changed_now.iter().copied());
+
+    let mut out = String::from("// skull JS incremental overlay\n");
+    for name in &current.const_order {
+        if changed_consts.contains(name) {
+            out.push_str(&current.const_chunks[name]);
+        }
+    }
+    let mut reset_cells = HashSet::new();
+    for fref in &changed_now {
+        let Some(chunk) = current.chunks.get(fref) else { continue };
+        for cell in &chunk.statics {
+            let key = static_cell_key(cell);
+            if cache
+                .static_keys
+                .get(&cell.cell)
+                .is_none_or(|previous| *previous != key)
+                && reset_cells.insert(cell.cell)
+            {
+                out.push_str(&format!(
+                    "__G.{} = undefined; __G.{} = false;\n",
+                    cell.cell, cell.done_flag
+                ));
+            }
+            cache.static_keys.insert(cell.cell, key);
+        }
+    }
+
+    let mut order: Vec<FuncRef> = cache.changed_since_full.iter().copied().collect();
+    order.sort_by_key(|fref| (fref.module.index(), u32::from(fref.func.into_raw())));
+    for fref in &order {
+        if let Some(chunk) = current.chunks.get(fref) {
+            out.push_str(&chunk.js);
+        }
+    }
+
+    let decorator_names = decorator_names(ws);
+    let decorated: Vec<FuncRef> = order
+        .iter()
+        .copied()
+        .filter(|fref| {
+            ws.module(fref.module).functions[fref.func]
+                .annotations
+                .iter()
+                .any(|annotation| decorator_names.contains(&annotation.name.name))
+        })
+        .collect();
+    if !decorated.is_empty() {
+        let Some(rebind) = exact_inline_js(ws, "__rock_rebind_system") else {
+            return Ok(JsReload::FullRequired);
+        };
+        out.push_str(&emit_inline_js_fn(ws, scx, rebind, "__rock_rebind_system"));
+        for fref in decorated {
+            let function = &ws.module(fref.module).functions[fref.func];
+            out.push_str(&format!(
+                "__rock_rebind_system({}, {});\n",
+                js_string_lit(function.name.as_str())?,
+                callee_js_name(ws, fref)
+            ));
+        }
+    }
+
+    if let Some(wire) = find_plain_function(ws, "run_wire_systems") {
+        let wire_name = callee_js_name(ws, wire);
+        if current.chunks.contains_key(&wire) {
+            out.push_str(&format!("{wire_name}();\n"));
+        }
+    }
+
+    cache.build = current;
+    Ok(JsReload::Overlay(out))
+}
+
+fn static_cell_key(cell: &skull_mir::mir::StaticCell) -> String {
+    format!("{}@{:x}", cell.type_str, cell.init_hash)
+}
+
+fn collect_statics(function: &MirFunc) -> Vec<skull_mir::mir::StaticCell> {
+    let mut cells = function.statics.clone();
+    for nested in &function.nested_fns {
+        cells.extend(collect_statics(nested));
+    }
+    cells
+}
+
+fn exact_inline_js(ws: &Workspace, name: &str) -> Option<FuncRef> {
+    ws.functions_by_name
+        .get(&ustr::Ustr::from(name))?
+        .iter()
+        .find_map(|(module, function)| {
+            matches!(
+                ws.module(*module).functions[*function].inline_body,
+                Some((bone_semantic::hir::FnBackend::Js, _))
+            )
+            .then_some(FuncRef { module: *module, func: *function })
+        })
+}
+
+fn find_plain_function(ws: &Workspace, name: &str) -> Option<FuncRef> {
+    ws.functions_by_name
+        .get(&ustr::Ustr::from(name))?
+        .iter()
+        .find_map(|(module, function)| {
+            let function_ref = &ws.module(*module).functions[*function];
+            (function_ref.inline_body.is_none() && !function_ref.is_extern)
+                .then_some(FuncRef { module: *module, func: *function })
+        })
+}
+
 /// The shared worklists driving [`emit_with_closure`] and [`emit_program`]:
 /// a fn queue (roots + transitively discovered plain-Rock callees) and a global-
 /// init queue (module globals the emitted bodies read), plus the accumulated
@@ -2191,6 +2482,14 @@ impl WorklistState {
             .map(|(_, mf)| mf)
             .chain(self.ginits.iter().map(|g| &g.mf))
             .collect()
+    }
+
+    fn canonicalize_emission_order(&mut self) {
+        self.lowered
+            .sort_by_key(|(fr, _)| (fr.module.index(), u32::from(fr.func.into_raw())));
+        self.inline_js
+            .sort_by_key(|fr| (fr.module.index(), u32::from(fr.func.into_raw())));
+        self.ginits.sort_by_key(|g| g.order);
     }
 }
 
@@ -2293,7 +2592,14 @@ fn drain_worklists(
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
                 &mut st.inline_js,
             )?;
-            st.ginits.push(GlobalInit { name: gname, init_name, mf });
+            let is_const = ws.module(site.module).globals[site.gid].is_const;
+            st.ginits.push(GlobalInit {
+                name: gname,
+                init_name,
+                mf,
+                is_const,
+                order: (site.module.index(), u32::from(site.gid.into_raw())),
+            });
             continue;
         }
         break;
@@ -2552,6 +2858,13 @@ struct GlobalInit {
     name: ustr::Ustr,
     init_name: String,
     mf: MirFunc,
+    is_const: bool,
+    order: (usize, u32),
+}
+
+struct GlobalInitLine {
+    name: ustr::Ustr,
+    js: String,
 }
 
 /// Deterministic init-fn name for a module global. Global names are unique
@@ -2872,7 +3185,7 @@ fn order_global_inits(
     ginits: &[GlobalInit],
     lowered: &[(FuncRef, MirFunc)],
     names: &HashMap<FuncRef, String>,
-) -> Result<Vec<String>, CompilerError> {
+) -> Result<Vec<GlobalInitLine>, CompilerError> {
     // Per-fn direct facts, keyed by emit name (ginit = init_name, lowered = js name).
     let mut direct_globals: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
     let mut direct_calls: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
@@ -2977,7 +3290,10 @@ fn order_global_inits(
         let before = remaining.len();
         remaining.retain(|g| {
             if init_deps[&g.name].iter().all(|d| emitted.contains(d)) {
-                lines.push(format!("__G.{} = {}();\n", g.name, g.init_name));
+                lines.push(GlobalInitLine {
+                    name: g.name,
+                    js: format!("__G.{} = {}();\n", g.name, g.init_name),
+                });
                 emitted.insert(g.name);
                 false
             } else {
@@ -3980,4 +4296,3 @@ fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
     }
     reachable
 }
-

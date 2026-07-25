@@ -49,6 +49,17 @@ fn build_web_bundle(
     watch: bool,
 ) -> Result<Vec<WebAsset>> {
     let (emitted, ws) = crate::js_test::try_emit_js_program_project(project)?;
+    write_web_bundle(project, out_dir, copy_assets, watch, &emitted, &ws)
+}
+
+fn write_web_bundle(
+    project: &str,
+    out_dir: &Path,
+    copy_assets: bool,
+    watch: bool,
+    emitted: &skull_codegen_js::emit::JsProgram,
+    ws: &bone_semantic::inference::Workspace,
+) -> Result<Vec<WebAsset>> {
     let register_lines = shader_register_lines_js(&ws)?;
     let game_dir = web_game_dir(project);
     let assets = collect_web_assets(Path::new(project), &game_dir)?;
@@ -73,8 +84,132 @@ fn build_web_bundle(
     let index_path = out_dir.join("index.html");
     rock_host::project::write_atomic(&game_js_path, &game_js)?;
     rock_host::project::write_atomic(&index_path, &index_html)?;
+    if watch {
+        rock_host::project::write_atomic(&out_dir.join("incremental.js"), "")?;
+    }
     log::info!(target: "WEB", "{} -> {} ({} + game.js)", project, out_dir.display(), index_path.display());
     Ok(assets)
+}
+
+enum WebCompile {
+    NoChange,
+    Overlay,
+    Reload,
+}
+
+struct WebCompiler {
+    project: crate::live_project::LiveProject,
+    cache: skull_codegen_js::emit::JsEmitCache,
+    main_js_name: Option<String>,
+}
+
+impl WebCompiler {
+    fn init(project: &str, out_dir: &Path) -> Result<(Self, Vec<WebAsset>)> {
+        let include_tests =
+            !rock_host::project::is_game_project(&PathBuf::from(project)).unwrap_or(false);
+        let live = crate::live_project::LiveProject::init(project, include_tests)?;
+        let scx = skull_mir::lower::ScalarCtx::new(live.workspace())
+            .with_target(bone_semantic::hir::FnBackend::Js);
+        let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
+            live.workspace(),
+            &scx,
+            live.entry_module(),
+        )
+        .map_err(|error| anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_err(live.sources(), &error)
+        ))?;
+        let assets =
+            write_web_bundle(project, out_dir, false, true, &emitted, live.workspace())?;
+        let main_js_name = emitted.main_js_name.clone();
+        Ok((Self { project: live, cache, main_js_name }, assets))
+    }
+
+    fn recompile(
+        &mut self,
+        project: &str,
+        out_dir: &Path,
+        changed: &[PathBuf],
+    ) -> Result<WebCompile> {
+        match self.project.recompile(changed)? {
+            crate::live_project::LiveUpdate::NoChange => Ok(WebCompile::NoChange),
+            crate::live_project::LiveUpdate::Full { .. } => {
+                log::info!(target: "WEB", "Interface change requires a page reload");
+                self.emit_full(project, out_dir)?;
+                Ok(WebCompile::Reload)
+            }
+            crate::live_project::LiveUpdate::BodyOnly { reinferred, .. } => {
+                let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
+                    .with_target(bone_semantic::hir::FnBackend::Js);
+                match skull_codegen_js::emit::emit_overlay(
+                    self.project.workspace(),
+                    &scx,
+                    self.project.entry_module(),
+                    &mut self.cache,
+                    &reinferred,
+                )
+                .map_err(|error| anyhow::anyhow!(
+                    "{}",
+                    crate::skull_backend::render_project_err(self.project.sources(), &error)
+                ))? {
+                    skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
+                        overlay.push_str(&shader_register_lines_js(self.project.workspace())?);
+                        rock_host::project::write_atomic(
+                            &out_dir.join("incremental.js"),
+                            &overlay,
+                        )?;
+                        self.write_current_game(project, out_dir)?;
+                        Ok(WebCompile::Overlay)
+                    }
+                    skull_codegen_js::emit::JsReload::FullRequired => {
+                        log::info!(target: "WEB", "Module-load JS changed; page reload required");
+                        self.emit_full(project, out_dir)?;
+                        Ok(WebCompile::Reload)
+                    }
+                    skull_codegen_js::emit::JsReload::NoChange => Ok(WebCompile::NoChange),
+                }
+            }
+        }
+    }
+
+    fn emit_full(&mut self, project: &str, out_dir: &Path) -> Result<Vec<WebAsset>> {
+        let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
+            .with_target(bone_semantic::hir::FnBackend::Js);
+        let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
+            self.project.workspace(),
+            &scx,
+            self.project.entry_module(),
+        )
+        .map_err(|error| anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_err(self.project.sources(), &error)
+        ))?;
+        let assets = write_web_bundle(
+            project,
+            out_dir,
+            false,
+            true,
+            &emitted,
+            self.project.workspace(),
+        )?;
+        self.main_js_name = emitted.main_js_name;
+        self.cache = cache;
+        Ok(assets)
+    }
+
+    fn write_current_game(&self, project: &str, out_dir: &Path) -> Result<()> {
+        let game_dir = web_game_dir(project);
+        let assets = collect_web_assets(Path::new(project), &game_dir)?;
+        let preload: Vec<String> = assets.iter().map(|asset| asset.key.clone()).collect();
+        let emitted = skull_codegen_js::emit::JsProgram {
+            program: self.cache.current_program().to_string(),
+            main_js_name: self.main_js_name.clone(),
+        };
+        let register_lines = shader_register_lines_js(self.project.workspace())?;
+        let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);
+        rock_host::project::write_atomic(&out_dir.join("game.js"), &game_js)?;
+        Ok(())
+    }
 }
 
 fn web_game_dir(project: &str) -> String {
@@ -188,7 +323,19 @@ fn repo_relative(rel: &str) -> PathBuf {
 
 struct ReloadHub {
     generation: AtomicU64,
-    subscribers: Mutex<Vec<std::sync::mpsc::Sender<u64>>>,
+    subscribers: Mutex<Vec<std::sync::mpsc::Sender<BrowserEvent>>>,
+}
+
+#[derive(Clone, Copy)]
+enum BrowserEventKind {
+    Overlay,
+    Reload,
+}
+
+#[derive(Clone, Copy)]
+struct BrowserEvent {
+    generation: u64,
+    kind: BrowserEventKind,
 }
 
 impl ReloadHub {
@@ -199,18 +346,19 @@ impl ReloadHub {
         }
     }
 
-    fn subscribe(&self) -> std::sync::mpsc::Receiver<u64> {
+    fn subscribe(&self) -> std::sync::mpsc::Receiver<BrowserEvent> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.subscribers.lock().unwrap().push(tx);
         rx
     }
 
-    fn reload(&self) {
+    fn publish(&self, kind: BrowserEventKind) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let event = BrowserEvent { generation, kind };
         self.subscribers
             .lock()
             .unwrap()
-            .retain(|subscriber| subscriber.send(generation).is_ok());
+            .retain(|subscriber| subscriber.send(event).is_ok());
     }
 }
 
@@ -244,12 +392,12 @@ fn asset_map(assets: Vec<WebAsset>) -> HashMap<String, PathBuf> {
 fn watch_web(project: &str, out: Option<&str>, port: u16) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
     let out_dir = web_out_dir(project, out);
-    let initial_assets = match build_web_bundle(project, &out_dir, false, true) {
-        Ok(assets) => assets,
+    let (mut compiler, initial_assets) = match WebCompiler::init(project, &out_dir) {
+        Ok((compiler, assets)) => (Some(compiler), assets),
         Err(e) => {
             log::error!(target: "WEB", "{e}");
             log::info!(target: "WEB", "watching for changes; the server will publish the first successful build");
-            Vec::new()
+            (None, Vec::new())
         }
     };
     std::fs::create_dir_all(&out_dir)?;
@@ -284,11 +432,57 @@ fn watch_web(project: &str, out: Option<&str>, port: u16) -> Result<()> {
             continue;
         }
 
-        match build_web_bundle(project, &state.out_dir, false, true) {
-            Ok(assets) => {
+        let rock_paths: Vec<PathBuf> = event
+            .paths
+            .iter()
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rock"))
+            .cloned()
+            .collect();
+        let has_asset_changes = rock_paths.len() != event.paths.len();
+        let outcome = if compiler.is_none() {
+            WebCompiler::init(project, &state.out_dir).map(|(new_compiler, assets)| {
+                compiler = Some(new_compiler);
                 state.publish_assets(assets);
-                state.reload.reload();
-                log::info!(target: "WEB", "Browser build updated");
+                WebCompile::Reload
+            })
+        } else if rock_paths.is_empty() {
+            Ok(WebCompile::NoChange)
+        } else {
+            compiler
+                .as_mut()
+                .expect("checked above")
+                .recompile(project, &state.out_dir, &rock_paths)
+        };
+
+        match outcome {
+            Ok(outcome) => {
+                let game_dir = web_game_dir(project);
+                match collect_web_assets(Path::new(project), &game_dir) {
+                    Ok(assets) => state.publish_assets(assets),
+                    Err(e) => {
+                        log::error!(target: "WEB", "{e}; keeping the last published asset map");
+                    }
+                }
+                let kind = if has_asset_changes {
+                    Some(BrowserEventKind::Reload)
+                } else {
+                    match outcome {
+                        WebCompile::NoChange => None,
+                        WebCompile::Overlay => Some(BrowserEventKind::Overlay),
+                        WebCompile::Reload => Some(BrowserEventKind::Reload),
+                    }
+                };
+                if let Some(kind) = kind {
+                    state.reload.publish(kind);
+                    match kind {
+                        BrowserEventKind::Overlay => {
+                            log::info!(target: "WEB", "Browser overlay updated")
+                        }
+                        BrowserEventKind::Reload => {
+                            log::info!(target: "WEB", "Browser build updated")
+                        }
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("{e}");
@@ -335,8 +529,16 @@ fn serve_connection(mut stream: TcpStream, state: &WebServerState) -> Result<()>
             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n",
         )?;
         stream.flush()?;
-        for generation in reloads {
-            write!(stream, "data: {generation}\n\n")?;
+        for event in reloads {
+            let kind = match event.kind {
+                BrowserEventKind::Overlay => "overlay",
+                BrowserEventKind::Reload => "reload",
+            };
+            write!(
+                stream,
+                "data: {{\"generation\":{},\"kind\":\"{}\"}}\n\n",
+                event.generation, kind
+            )?;
             stream.flush()?;
         }
         return Ok(());
@@ -509,8 +711,10 @@ fn assemble_web_program(
         manifest.join(", ")
     ));
     match &emitted.main_js_name {
-        Some(main) => p.push_str(&format!("__rock_web_boot({main});\n")),
-        None => p.push_str("__rock_web_boot(null);\n"),
+        Some(main) => p.push_str(&format!(
+            "var __ROCK_WEB_READY = __rock_web_boot({main});\n"
+        )),
+        None => p.push_str("var __ROCK_WEB_READY = __rock_web_boot(null);\n"),
     }
     p
 }
@@ -520,7 +724,28 @@ fn assemble_web_program(
 /// `<script src="game.js">`.
 fn index_html(title: &str, watch: bool) -> String {
     let reload = if watch {
-        "<script>new EventSource('/__rock_reload').onmessage = function () { location.reload(); };</script>\n"
+        r#"<script>
+(function () {
+  var apply = Promise.resolve(__ROCK_WEB_READY);
+  new EventSource('/__rock_reload').onmessage = function (message) {
+    var update = JSON.parse(message.data);
+    if (update.kind === 'reload') {
+      location.reload();
+      return;
+    }
+    apply = apply.then(function () {
+      return new Promise(function (resolve, reject) {
+        var script = document.createElement('script');
+        script.src = '/incremental.js?v=' + update.generation;
+        script.onload = resolve;
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }).catch(function () { location.reload(); });
+  };
+})();
+</script>
+"#
     } else {
         ""
     };
@@ -538,8 +763,8 @@ fn index_html(title: &str, watch: bool) -> String {
 </head>
 <body>
 <canvas id="stone-canvas"></canvas>
-{reload}\
 <script src="game.js"></script>
+{reload}\
 </body>
 </html>
 "#

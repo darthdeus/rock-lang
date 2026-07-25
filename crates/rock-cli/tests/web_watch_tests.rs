@@ -126,7 +126,9 @@ fn watch_serves_sources_reloads_on_green_and_keeps_last_green_on_error() {
     .unwrap();
     std::fs::write(
         project.join("main.rock"),
-        "fn main() { print(\"version-one\") }\n",
+        "const VALUE: int = 1\n\
+         @nomangle fn hot() { print(\"version-one\"); print(VALUE) }\n\
+         fn main() { hot() }\n",
     )
     .unwrap();
     std::fs::write(project.join("assets/data.txt"), "asset-one").unwrap();
@@ -162,11 +164,26 @@ fn watch_serves_sources_reloads_on_green_and_keeps_last_green_on_error() {
     let mut reload = subscribe(port);
     std::fs::write(
         project.join("main.rock"),
-        "fn main() { print(\"version-two\") }\n",
+        "const VALUE: int = 1\n\
+         @nomangle fn hot() { print(\"version-two\"); print(VALUE) }\n\
+         fn main() { hot() }\n",
     )
     .unwrap();
-    next_reload(&mut reload).unwrap();
+    let event = next_reload(&mut reload).unwrap();
+    assert!(event.contains("\"kind\":\"overlay\""), "{event}");
+    wait_http(port, "/incremental.js", "version-two");
     wait_http(port, "/game.js", "version-two");
+
+    let mut reload = subscribe(port);
+    std::fs::write(
+        project.join("main.rock"),
+        "const VALUE: int = 2\n\
+         @nomangle fn hot() { print(\"version-two\"); print(VALUE) }\n\
+         fn main() { hot() }\n",
+    )
+    .unwrap();
+    let event = next_reload(&mut reload).unwrap();
+    assert!(event.contains("\"kind\":\"overlay\""), "{event}");
 
     let mut failed_reload = subscribe(port);
     std::fs::write(
@@ -188,19 +205,28 @@ fn watch_serves_sources_reloads_on_green_and_keeps_last_green_on_error() {
         game.contains("version-two"),
         "compile error replaced the last green bundle"
     );
+    assert!(
+        http_get(port, "/incremental.js")
+            .unwrap()
+            .contains("version-two"),
+        "compile error replaced the last green overlay"
+    );
 
     let mut reload = subscribe(port);
     std::fs::write(
         project.join("main.rock"),
-        "fn main() { print(\"version-three\") }\n",
+        "@nomangle fn hot(message: string) { print(message) }\n\
+         fn main() { hot(\"version-three\") }\n",
     )
     .unwrap();
-    next_reload(&mut reload).unwrap();
+    let event = next_reload(&mut reload).unwrap();
+    assert!(event.contains("\"kind\":\"reload\""), "{event}");
     wait_http(port, "/game.js", "version-three");
 
     let mut reload = subscribe(port);
     std::fs::write(project.join("assets/data.txt"), "asset-two").unwrap();
-    next_reload(&mut reload).unwrap();
+    let event = next_reload(&mut reload).unwrap();
+    assert!(event.contains("\"kind\":\"reload\""), "{event}");
     assert_eq!(
         http_get(port, "/proj/assets/data.txt").unwrap(),
         "asset-two"

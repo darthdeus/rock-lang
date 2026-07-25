@@ -244,3 +244,98 @@ fn web_chrome_screenshot_and_click_pick_mag() {
         colors.len()
     );
 }
+
+#[test]
+fn web_chrome_hot_reload_preserves_state() {
+    if Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+    {
+        eprintln!("SKIP web_chrome_hot_reload_preserves_state: node not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("project");
+    let out = dir.path().join("out");
+    let ready = dir.path().join("ready");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        "[package]\nname = \"hot_reload_smoke\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("main.rock"),
+        "global STATE: int = 1\n@nomangle fn hot() -> int { 1 }\nfn main() { hot() }\n",
+    )
+    .unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut server = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args([
+            "web",
+            project.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--watch",
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn web watch");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !out.join("index.html").is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(out.join("index.html").is_file(), "web watch did not build");
+
+    let driver = repo_root().join("tools/web/chrome_hot_reload_smoke.js");
+    let mut smoke = Command::new("node")
+        .arg(driver)
+        .arg(format!("http://127.0.0.1:{port}/index.html"))
+        .arg(&ready)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn hot-reload smoke");
+    while !ready.is_file() && std::time::Instant::now() < deadline {
+        if smoke.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !ready.is_file() {
+        let output = smoke.wait_with_output().unwrap();
+        let _ = server.kill();
+        let _ = server.wait();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("SKIP: no chrome") {
+            eprintln!("SKIP web_chrome_hot_reload_preserves_state: no chrome on PATH");
+            return;
+        }
+        panic!("hot-reload smoke did not become ready:\n{stderr}");
+    }
+
+    std::fs::write(
+        project.join("main.rock"),
+        "global STATE: int = 1\n@nomangle fn hot() -> int { 2 }\nfn main() { hot() }\n",
+    )
+    .unwrap();
+    let output = smoke.wait_with_output().unwrap();
+    let _ = server.kill();
+    let _ = server.wait();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("PASS"),
+        "browser hot reload failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
