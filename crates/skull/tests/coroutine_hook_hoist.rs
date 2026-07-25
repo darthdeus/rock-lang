@@ -11,7 +11,7 @@
 //! dropped capture would go red.
 
 mod common;
-use common::{emit_module, run_luajit};
+use common::{emit_module, mangled_name, run_luajit};
 
 /// A co fn whose `on_killed` hook reads a frame local (`base`), derived from the
 /// ctor param `seed`. `main` exercises worker/resume/kill so all four fns
@@ -45,13 +45,14 @@ fn main() {
 #[test]
 fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
     let lua = emit_module(ON_KILLED);
+    let hook = format!("{}__on_killed", mangled_name(&lua, "worker"));
     assert!(
-        lua.contains("function worker__on_killed("),
-        "on_killed must hoist to a top-level `worker__on_killed`:\n{lua}"
+        lua.contains(&format!("function {hook}(")),
+        "on_killed must hoist to a top-level `{hook}`:\n{lua}"
     );
     assert!(
-        lua.contains("__on_killed = worker__on_killed"),
-        "the ctor must store the hoisted fn by value (`__on_killed = worker__on_killed`):\n{lua}"
+        lua.contains(&format!("__on_killed = {hook}")),
+        "the ctor must store the hoisted fn by value (`__on_killed = {hook}`):\n{lua}"
     );
     assert!(
         !lua.contains("__on_killed = function"),
@@ -69,18 +70,19 @@ fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
 #[test]
 fn hook_fn_shared_across_constructions_and_still_fires() {
     let lua = emit_module(ON_KILLED);
-    let driver = "\n\
-        local h1 = worker(5)\n\
-        local h2 = worker(6)\n\
-        worker__resume(h1, nil)\n\
-        local fresh = {}\n\
+    let w = mangled_name(&lua, "worker");
+    let driver = format!("\n\
+        local h1 = {w}(5)\n\
+        local h2 = {w}(6)\n\
+        {w}__resume(h1, nil)\n\
+        local fresh = {{}}\n\
         for k, v in pairs(h1) do\n\
         \x20 if type(v) == \"function\" and not rawequal(v, h2[k]) then fresh[#fresh + 1] = k end\n\
         end\n\
         table.sort(fresh)\n\
         print(#fresh == 0 and \"shared\" or table.concat(fresh, \",\"))\n\
         __rock_coroutine_kill(h1)\n\
-        print(LOG)\n";
+        print(LOG)\n");
     let out = run_luajit(&format!("{lua}{driver}"), "shared");
     assert_eq!(
         out, "shared\n105",

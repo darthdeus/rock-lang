@@ -52,6 +52,9 @@ fn ffi_out_float() -> Ptr<float> { return __ffi_new_float_1() }
 
 inline(lua) fn read(p: Ptr<int>) -> int = "return p[0]"
 inline(lua) fn read(p: Ptr<float>) -> float = "return p[0]"
+// JS: a Ptr<T> is the TypedArray itself (NativeBuffer .ptr).
+inline(js) fn read(p: Ptr<int>) -> int = "return p[0];"
+inline(js) fn read(p: Ptr<float>) -> float = "return p[0];"
 
 // ============================================================================
 // Typed pointer phantoms — close the Rock-side FFI hole
@@ -619,6 +622,11 @@ value Entity<T> {
     end
     _G.__rock_on_hot_reload[#_G.__rock_on_hot_reload + 1] = name
 """
+
+// JS: no hot reload (a browser/node program loads once); registration is a
+// no-op so @on_reload-decorated fns compile unchanged.
+@nomangle inline(js) fn on_hot_reload(f: fn() -> ()) = ""
+@nomangle inline(js) fn on_hot_reload_by_name(name: string) = ""
 
 // Fire every registered on_hot_reload callback. Iterates a COPY and does NOT
 // clear the list (see on_hot_reload's doc). A STRING entry is a global name,
@@ -1274,12 +1282,17 @@ fn expect<T>(value: T?, message: string) -> T {
 @intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
 @intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
 
+// `float_to_int` is taken as a fn VALUE (tests/function_ref_cross_module), so
+// it needs a real bound JS fn, not a call-site template: an inline(js) sibling
+// of the inline(lua) body. bone collapses the same-name backend pair to one
+// logical fn in the value path, so the reference / call binds the right variant.
 inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
     end
     return math.floor(value)
 """
+inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 
 @inline fn to_int(value: float) -> int { return float_to_int(value) }
 
@@ -2713,6 +2726,7 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 """
 
 @inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
+@inline inline(js) fn string.repeat(s, count: int) -> string = "return s.repeat(count);"
 
 // StringBuilder: append-and-join accumulator. Naive `+` concat in a loop is
 // O(n^2) even on luajit (immutable interned strings), so join/split/format
@@ -2753,6 +2767,12 @@ inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
 
 // Pattern-based string matching (Lua patterns, not regex)
 @inline inline(lua) fn string_match(s: string, pattern: string) -> string? = "string.match(s, pattern)"
+// JS: first capture (or whole match) via the shared Lua-pattern translator.
+inline(js) fn string_match(s: string, pattern: string) -> string? = """
+    var m = s.match(new RegExp(__lua_pattern_to_regex(pattern)));
+    if (!m) return null;
+    return m.length > 1 ? m[1] : m[0];
+"""
 
 // Lazy iterator over all matches of pattern in s — works directly in for-loops
 @inline inline(lua) fn string.gmatch(s, pattern: string) -> fn() -> string? = "string.gmatch(s, pattern)"
@@ -2760,6 +2780,73 @@ inline(lua) fn format_float(v: float, width: int, decimals: int) -> string = """
 // Pattern-based replacement (use replace for literal replacement)
 inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     return (string.gsub(s, pattern, replacement))
+"""
+
+// JS: a minimal Lua-pattern subset translated to a JS regex (classes %w %d
+// %s %a, their uppercase negations, [...] sets, captures, anchors, + * - ?).
+// Anything outside the subset THROWS naming the pattern -- loud gap, never a
+// silent wrong result. `-` (lazy) maps to `*?`; %-escaped magic chars unescape.
+@nomangle inline(js) fn __lua_pattern_to_regex(pattern: string) -> string = """
+    var out = "";
+    var i = 0;
+    while (i < pattern.length) {
+        var c = pattern[i];
+        if (c === "%") {
+            var n = pattern[i + 1];
+            if (n === "w") out += "[A-Za-z0-9]";
+            else if (n === "W") out += "[^A-Za-z0-9]";
+            else if (n === "d") out += "[0-9]";
+            else if (n === "D") out += "[^0-9]";
+            else if (n === "s") out += "[ \\t\\n\\r]";
+            else if (n === "S") out += "[^ \\t\\n\\r]";
+            else if (n === "a") out += "[A-Za-z]";
+            else if (n === "A") out += "[^A-Za-z]";
+            else if ("^$()%.[]*+-?".indexOf(n) >= 0) out += "\\" + n;
+            else throw new Error("lua pattern (js): unsupported escape %" + n + " in: " + pattern);
+            i += 2;
+        } else if (c === "[") {
+            var j = i + 1;
+            var cls = "[";
+            if (pattern[j] === "^") { cls += "^"; j++; }
+            while (j < pattern.length && pattern[j] !== "]") {
+                if (pattern[j] === "%") {
+                    var m = pattern[j + 1];
+                    if (m === "w") cls += "A-Za-z0-9";
+                    else if (m === "d") cls += "0-9";
+                    else if (m === "s") cls += " \\t\\n\\r";
+                    else if (m === "a") cls += "A-Za-z";
+                    else cls += "\\" + m;
+                    j += 2;
+                } else {
+                    var ch = pattern[j];
+                    cls += ("\\^$.|?*+()[]{}".indexOf(ch) >= 0 ? "\\" + ch : ch);
+                    j++;
+                }
+            }
+            if (pattern[j] !== "]") throw new Error("lua pattern (js): unterminated [] set in: " + pattern);
+            out += cls + "]";
+            i = j + 1;
+        } else if (c === "-") {
+            out += "*?";
+            i++;
+        } else if ("\\|{}".indexOf(c) >= 0) {
+            out += "\\" + c;
+            i++;
+        } else if (c === "." ) {
+            out += "[^]";
+            i++;
+        } else {
+            out += c;
+            i++;
+        }
+    }
+    return out;
+"""
+
+inline(js) fn string.gsub(s, pattern: string, replacement: string) -> string = """
+    var rx = new RegExp(__lua_pattern_to_regex(pattern), "g");
+    var rep = replacement.replace(/%([0-9%%])/g, function (_, d) { return d === "%" ? "%" : "$" + d; });
+    return s.replace(rx, rep);
 """
 
 // `join` (portable, over StringBuilder) lives in stdlib/strings.rock.

@@ -43,6 +43,99 @@ fn gap(msg: impl std::fmt::Display) -> CompilerError {
 // threads the unboxed form through lowering; `pack` is the single place a Group
 // becomes a real `<name>_ct(...)` cdata (an escape). See the plan doc.
 
+/// Whether a fn with backend `b` can serve codegen `target`: an `Any` (portable
+/// Rock) body serves every target, else the backend must match exactly.
+fn serves_target(b: bone_semantic::hir::FnBackend, target: bone_semantic::hir::FnBackend) -> bool {
+    use bone_semantic::hir::FnBackend;
+    b == FnBackend::Any || b == target
+}
+
+/// `Some(k)` iff `name` is a GC-free `value` struct whose every flattened
+/// primitive leaf is `float` (recursively), where `k` is the leaf count; `None`
+/// otherwise (not such a struct, or any int/bool/enum leaf). The JS backend uses
+/// it to lower a `NativeBuffer<Vertex>` (all-float value struct, e.g. the vertex
+/// pool) to one flat `Float32Array(n * k)` -- JS has no per-struct ctype.
+pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<usize> {
+    all_float_leaf_count_rec(ws, name, &mut Vec::new())
+}
+
+fn all_float_leaf_count_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !sd.is_value || visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
+    let mut total = 0usize;
+    for f in &sd.fields {
+        let n = match static_ty(ws, f.ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float) => 1,
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                match all_float_leaf_count_rec(ws, n, visiting) {
+                    Some(k) => k,
+                    None => {
+                        visiting.pop();
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                visiting.pop();
+                return None;
+            }
+        };
+        total += n;
+    }
+    visiting.pop();
+    Some(total)
+}
+
+/// One immediate field of an all-float value struct in its flattened float-slot
+/// layout: `offset` in float units from the struct's start, and whether it is a
+/// float leaf or a nested value struct (named, for recursive descent).
+pub struct ValueSlotField {
+    pub name: Ustr,
+    pub offset: usize,
+    /// `None` = float leaf (width 1); `Some(n)` = nested value struct `n`.
+    pub nested: Option<Ustr>,
+}
+
+/// Immediate fields of all-float value STRUCT `name` with their flattened
+/// float-slot offsets, declaration order (the C layout / Float32Array order).
+/// `None` unless `name` is a value struct proper whose every leaf is float --
+/// the exact set `FfiNewArray` lowers to a flat `Float32Array` on JS.
+pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueSlotField>> {
+    value_struct_all_float_leaf_count(ws, name)?;
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    let mut out = Vec::with_capacity(sd.fields.len());
+    let mut offset = 0usize;
+    for f in &sd.fields {
+        match static_ty(ws, f.ty)? {
+            TypeExpr::Builtin(BuiltinTy::Float) => {
+                out.push(ValueSlotField { name: f.name, offset, nested: None });
+                offset += 1;
+            }
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                let w = value_struct_all_float_leaf_count(ws, n)?;
+                out.push(ValueSlotField { name: f.name, offset, nested: Some(n) });
+                offset += w;
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Whether `name` is an FFI-clean value STRUCT proper (C-layout cdata array
+/// element on luajit) -- the element predicate for
+/// [`ContainerKind::NativeBufferValue`](crate::mir::ContainerKind). Struct-only:
+/// a cdata-eligible enum's value shape does not qualify (its element access
+/// goes through match lowering, not `Field`).
+pub fn is_ffi_clean_value_struct(ws: &Workspace, name: Ustr) -> bool {
+    value_shape_rec(ws, name, &mut Vec::new()).is_some()
+}
+
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
 #[derive(Clone, Debug)]
@@ -149,6 +242,15 @@ pub fn value_struct_is_gc_free(ws: &Workspace, name: Ustr) -> bool {
     value_shape(ws, name).is_some()
 }
 
+/// Declaration field order of `name` iff it is a GC-free value STRUCT proper --
+/// NOT an enum value-shape (which `value_struct_is_gc_free` also accepts via the
+/// `enum_value_shape` fallback). `value_shape_rec` is struct-only (it requires a
+/// `struct_by_name` entry), so this cleanly separates the two: a genuine value
+/// struct renders `Name { f: v }` colon-format on JS, an enum box still rejects.
+pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
+    value_shape_rec(ws, name, &mut Vec::new()).map(|_| struct_field_names(ws, name))
+}
+
 fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
     let sid = *ws.struct_by_name.get(&name)?;
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
@@ -242,7 +344,7 @@ fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> O
 /// Declared field names of struct `name`, in declaration order (the positional
 /// `<name>_ct` ctor order). A cdata-eligible enum is `[__tag, _0]` (it rides the
 /// value-struct `<Enum>_ct` path). Empty if `name` is neither.
-fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
+pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
     let Some(sid) = ws.struct_by_name.get(&name) else {
         if let Some(es) = enum_value_shape(ws, name) {
             return es.field_names();
@@ -441,7 +543,7 @@ fn compute_call_spec(
     enclosing: &SpecSubst,
 ) -> Option<(SpecKey, SpecSubst)> {
     let f = &ws.module(func.module).functions[func.func];
-    if f.generics.is_empty() || f.is_extern || f.lua_body.is_some() || f.is_coroutine {
+    if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
     if !f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure")) {
@@ -907,6 +1009,12 @@ pub struct ScalarCtx {
     /// [`fn_uses_scalar_abi`] is the single gate the definition and every call site
     /// both consult, so flipping it here can never drift the two ABIs apart.
     values_first_class: bool,
+    /// The codegen backend this lowering feeds. Drives backend-variant selection
+    /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
+    /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
+    /// when the collapsed representative is a luajit-native variant. `Any`
+    /// disables the filtering entirely (the GLSL backend + generic/test callers).
+    target: bone_semantic::hir::FnBackend,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -941,15 +1049,33 @@ impl ScalarCtx {
                 }
             }
         }
-        Self { taken_by_ref, per_body, ref_counts, values_first_class: false }
+        // Default target is Lua: skull-codegen-lua is the primary consumer and its
+        // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
+        // GLSL backend override via `with_target`.
+        Self {
+            taken_by_ref,
+            per_body,
+            ref_counts,
+            values_first_class: false,
+            target: bone_semantic::hir::FnBackend::Lua,
+        }
+    }
+
+    /// Set the codegen backend this lowering feeds (see [`target`]).
+    pub fn with_target(mut self, target: bone_semantic::hir::FnBackend) -> Self {
+        self.target = target;
+        self
     }
 
     /// Like [`new`](Self::new) but with the scalarized value ABI disabled: value
     /// structs stay first-class single values everywhere (the GLSL backend's
     /// requirement -- a `vecN` is not scalar leaves). See [`values_first_class`].
+    /// The GLSL backend does not participate in Lua/JS backend-variant selection,
+    /// so its target is `Any` (filtering disabled).
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         let mut scx = Self::new(ws);
         scx.values_first_class = true;
+        scx.target = bone_semantic::hir::FnBackend::Any;
         scx
     }
 
@@ -1022,7 +1148,7 @@ fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst
     if !has_scalar_abi {
         // Implicit scalarization is limited to ordinary rock-bodied fns reachable
         // only by direct call. `@scalar_abi` overrides all of these gates.
-        if f.lua_body.is_some()
+        if f.inline_body.is_some()
             || f.name.as_str() == "main"
             || scx.taken_by_ref.contains(&f.name)
             || f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "nomangle" | "test"))
@@ -1057,6 +1183,28 @@ pub fn scalar_abi_lua_param_names(
         }
     }
     Some(names)
+}
+
+/// Per-declared-param LEAF width under the scalar ABI (a value-struct param's
+/// flattened leaf count, 1 for everything else); `None` when `fref` does not
+/// use the scalar ABI. Pairs with `scalar_abi_lua_param_names` -- the JS arity
+/// guard needs widths per DECLARED param so a defaulted value-struct param
+/// counts as its whole leaf group, not one slot.
+pub fn scalar_abi_param_leaf_widths(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+) -> Option<Vec<usize>> {
+    if !fn_uses_scalar_abi(ws, scx, fref) {
+        return None;
+    }
+    let f = &ws.module(fref.module).functions[fref.func];
+    Some(
+        f.param_decls
+            .iter()
+            .map(|pd| sig_value_shape(ws, pd.ty).map(|s| s.leaf_count()).unwrap_or(1))
+            .collect(),
+    )
 }
 
 /// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first
@@ -1543,7 +1691,7 @@ pub fn lower_function_spec(
 ) -> Result<MirFunc, CompilerError> {
     let module = ws.module(mid);
     let func = &module.functions[fid];
-    if func.lua_body.is_some() {
+    if func.inline_body.is_some() {
         return Err(gap("inline(lua) body"));
     }
     let body = module
@@ -2460,6 +2608,21 @@ impl Builder<'_> {
                     .get(&raw(b))
                     .ok_or_else(|| gap("read of an unbound variable"))?;
                 Ok(self.emit_cur(Inst::Load(cell)))
+            }
+            // A bare name resolving to a FUNCTION taken by value (`let f = adder`,
+            // passing `adder` as an arg, a `func: adder` field) must reference the
+            // fn's MANGLED emitted symbol -- every non-exempt fn mangles, so a bare
+            // `Inst::Global(name)` would read a nil global. The JS backend is the
+            // exception: it resolves fn-values through its own discovery keyed on
+            // the SURFACE name (`discover_globals` -> `callee_js_name`), so it keeps
+            // the bare name and mangles at its own emit boundary. A real global
+            // variable keeps its bare name on every target.
+            Expr::Global(name)
+                if self.scx.target != bone_semantic::hir::FnBackend::Js
+                    && self.ws.functions_by_name.contains_key(&name) =>
+            {
+                let sym = self.fn_value_symbol(e, name)?;
+                Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
             }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
 
@@ -4204,27 +4367,182 @@ impl Builder<'_> {
     /// Resolve a named call to a [`FuncRef`]. bone records overload-resolved
     /// targets in `resolved_overload_calls`; a non-overloaded name resolves
     /// uniquely through `functions_by_name`.
+    /// The emitted symbol for a FUNCTION taken by value (`let f = adder`). Prefer
+    /// bone's recorded overload resolution (an overload disambiguated by the
+    /// value's expected type); otherwise every candidate is a backend VARIANT of
+    /// one `(name, signature)` and so mangles identically -- dedup and take it.
+    /// A genuine unresolved overload rejects (reject, don't fall back).
+    fn fn_value_symbol(&self, e: Idx<Expr>, name: ustr::Ustr) -> Result<String, CompilerError> {
+        if let Some(fref) = self.overload_target(e) {
+            let f = &self.ws.module(fref.module).functions[fref.func];
+            return Ok(crate::mangle::mangle_fn(self.ws, f));
+        }
+        let cands = self.ws.functions_by_name.get(&name).map(|l| l.as_slice()).unwrap_or(&[]);
+        let mut names: Vec<String> = cands
+            .iter()
+            .map(|&(m, fi)| crate::mangle::mangle_fn(self.ws, &self.ws.module(m).functions[fi]))
+            .collect();
+        names.sort();
+        names.dedup();
+        match names.as_slice() {
+            [only] => Ok(only.clone()),
+            [] => Err(gap(format!("unresolved function value `{name}`"))),
+            _ => Err(gap(format!(
+                "function value `{name}` is an unresolved overload (distinct signatures)"
+            ))),
+        }
+    }
+
     fn resolve_funcref(
         &self,
         e: Idx<Expr>,
         name: ustr::Ustr,
     ) -> Result<FuncRef, CompilerError> {
-        if let Some(&(module, func)) = self
+        let rep = if let Some(&(module, func)) = self
             .inf
             .and_then(|i| i.resolved_overload_calls.get(&e))
         {
-            return Ok(FuncRef { module, func });
+            FuncRef { module, func }
+        } else {
+            match self.ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
+                Some([(module, func)]) => FuncRef {
+                    module: *module,
+                    func: *func,
+                },
+                Some([]) | None => return Err(gap(format!("unresolved call `{name}`"))),
+                Some(_) => {
+                    return Err(gap(format!(
+                        "overloaded call `{name}` with no recorded resolution"
+                    )))
+                }
+            }
+        };
+        self.select_backend_variant(e, name, rep)
+    }
+
+    /// Pick the backend-variant of a collapsed call `rep` that serves the current
+    /// codegen [`target`](ScalarCtx::target). bone typechecks one backend-agnostic
+    /// HIR and records ONE representative per overload; codegen selects here:
+    ///
+    /// - `Any` target (GLSL / generic): no filtering, `rep` as-is.
+    /// - `rep` already serves the target: `rep` as-is (the common Lua path).
+    /// - a same-signature sibling serves the target: use it (the JS side of a
+    ///   same-name pair -- the representative is the luajit variant, the sibling
+    ///   the `inline(js)`/`extern(js)` one).
+    /// - `Lua` target, no lua/any binding: REJECT (a JS-only decl called from
+    ///   lua-reachable code).
+    /// - `Js` target, no js/any binding and no sibling: leave `rep` for the JS
+    ///   emitter's own host-mapping / reject (a `inline(lua)` stdlib primitive with
+    ///   a hand-written JS template must still resolve there).
+    fn select_backend_variant(
+        &self,
+        e: Idx<Expr>,
+        name: ustr::Ustr,
+        rep: FuncRef,
+    ) -> Result<FuncRef, CompilerError> {
+        use bone_semantic::hir::FnBackend;
+        let target = self.scx.target;
+        if target == FnBackend::Any {
+            return Ok(rep);
         }
-        match self.ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
-            Some([(module, func)]) => Ok(FuncRef {
-                module: *module,
-                func: *func,
-            }),
-            Some([]) | None => Err(gap(format!("unresolved call `{name}`"))),
-            Some(_) => Err(gap(format!(
-                "overloaded call `{name}` with no recorded resolution"
-            ))),
+        let rep_backend = self.ws.module(rep.module).functions[rep.func].backend;
+        if rep_backend == target {
+            return Ok(rep);
         }
+        // A backend sibling can exist ONLY when the name has >=2 candidates
+        // (bone collapsed a backend-variant group to `rep`). The overwhelmingly
+        // common single-candidate call skips the sibling scan entirely, keeping
+        // the `Any`-serves-everything fast path off the hot overload-select path.
+        let has_variants = self
+            .ws
+            .functions_by_name
+            .get(&name)
+            .is_some_and(|l| l.len() >= 2);
+        if !has_variants {
+            return if serves_target(rep_backend, target) {
+                Ok(rep)
+            } else {
+                self.reject_or_defer(e, name, rep, target)
+            };
+        }
+        // An exact-target sibling outranks an `Any` representative: backend
+        // mapping beats the portable fallback (the intrinsics precedence
+        // doctrine). Without this an `inline(js)` variant of a portable-bodied
+        // fn is unreachable, since `Any` serves every target.
+        if let Some(sib) = self.find_sibling_variant(rep, target, true) {
+            return Ok(sib);
+        }
+        if rep_backend == FnBackend::Any {
+            return Ok(rep);
+        }
+        // rep is the other concrete backend (e.g. lua while target is js): an
+        // `Any` sibling can still serve as the portable fallback.
+        if let Some(sib) = self.find_sibling_variant(rep, target, false) {
+            return Ok(sib);
+        }
+        self.reject_or_defer(e, name, rep, target)
+    }
+
+    /// No servable binding for `target` was found: a `Lua` target REJECTS (a
+    /// js-only decl reached from lua-reachable code); a `Js` target defers `rep`
+    /// to the JS emitter (which may host-map a lua-bodied stdlib primitive, or
+    /// reject with its own message).
+    fn reject_or_defer(
+        &self,
+        e: Idx<Expr>,
+        name: ustr::Ustr,
+        rep: FuncRef,
+        target: bone_semantic::hir::FnBackend,
+    ) -> Result<FuncRef, CompilerError> {
+        use bone_semantic::hir::FnBackend;
+        match target {
+            FnBackend::Lua => Err(CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "call to `{name}` has no luajit binding: its only declaration targets the `js` backend"
+                ),
+            )),
+            _ => Ok(rep),
+        }
+    }
+
+    /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
+    /// Signature match is param-type equality (rendered, inference-free) -- the
+    /// same key bone's `collapse_backend_variants` groups on. The caller has
+    /// already established the name has >=2 candidates, so `rep_sig` (a per-param
+    /// render) is only built when a sibling could exist.
+    fn find_sibling_variant(
+        &self,
+        rep: FuncRef,
+        target: bone_semantic::hir::FnBackend,
+        exact: bool,
+    ) -> Option<FuncRef> {
+        use bone_semantic::hir::FnBackend;
+        let rf = &self.ws.module(rep.module).functions[rep.func];
+        let name = rf.name;
+        let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| self.ws.render(None, p.ty)).collect();
+        let cands = self.ws.functions_by_name.get(&name)?;
+        for &(mid, fid) in cands.iter() {
+            if mid == rep.module && fid == rep.func {
+                continue;
+            }
+            let f = &self.ws.module(mid).functions[fid];
+            let ok = if exact {
+                f.backend == target
+            } else {
+                f.backend == FnBackend::Any || f.backend == target
+            };
+            if !ok {
+                continue;
+            }
+            if f.param_decls.len() != rep_sig.len() {
+                continue;
+            }
+            if f.param_decls.iter().zip(&rep_sig).all(|(p, r)| self.ws.render(None, p.ty) == *r) {
+                return Some(FuncRef { module: mid, func: fid });
+            }
+        }
+        None
     }
 
     /// `await sub` — drive the inner coroutine `sub` through its `.resume()`,
@@ -5036,7 +5354,9 @@ impl Builder<'_> {
             ContainerKind::Vec => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
             )),
-            ContainerKind::NativeBuffer => self.lower_for_array(vars, iter, body),
+            ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
+                self.lower_for_array(vars, iter, body)
+            }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
         }
     }
@@ -5567,10 +5887,11 @@ impl Builder<'_> {
         // `for v in fv` over FlatVec: numeric loop bounded by the `len` FIELD
         // (not the buffer capacity), elements via the `buf` NativeBuffer.
         let (kind, arr_v, len_v) = if self.expr_is_flat_vec(iter) {
+            let kind = self.nb_kind(iter);
             let fv = self.lower_expr(iter)?;
             let buf = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("buf") });
             let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
-            (ContainerKind::NativeBuffer, buf, len)
+            (kind, buf, len)
         } else {
             let kind = self.coll_kind(iter);
             let arr_v = self.lower_expr(iter)?;
@@ -6978,6 +7299,36 @@ impl Builder<'_> {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "FlatVec")
     }
 
+    /// The value-STRUCT element of `e`'s `NativeBuffer<E>` / `FlatVec<E>` type,
+    /// or `None` when `E` is a primitive / unresolved generic / not value-shaped.
+    /// Drives [`ContainerKind::NativeBufferValue`]; an opaque generic `E` stays
+    /// plain `NativeBuffer` (matching the alloc intrinsic, which also requires a
+    /// concrete element).
+    fn nb_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = self.ty_node(ty)? else {
+            return None;
+        };
+        if !matches!(n.as_str(), "NativeBuffer" | "FlatVec") {
+            return None;
+        }
+        let p = params.into_iter().next()?;
+        let elem = self.resolve_tyid(ty.with_idx(p))?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(en), .. } = self.ty_node(elem)? else {
+            return None;
+        };
+        is_ffi_clean_value_struct(self.ws, en).then_some(en)
+    }
+
+    /// The NativeBuffer container kind for base expr `e`: value-struct elements
+    /// carry their name so the JS emitter can lower flat slots (Lua identical).
+    fn nb_kind(&self, e: Idx<Expr>) -> ContainerKind {
+        match self.nb_value_elem(e) {
+            Some(elem) => ContainerKind::NativeBufferValue(elem),
+            None => ContainerKind::NativeBuffer,
+        }
+    }
+
     /// Lower an index-expr base to `(base inst, container kind)`. A
     /// `FlatVec<T>` base indexes its `buf` NativeBuffer storage -- project the
     /// field and index with NativeBuffer semantics, so the value-element slot
@@ -6989,9 +7340,10 @@ impl Builder<'_> {
         base: Idx<Expr>,
     ) -> Result<(Idx<Inst>, ContainerKind), CompilerError> {
         if self.expr_is_flat_vec(base) {
+            let kind = self.nb_kind(base);
             let b = self.lower_expr(base)?;
             let buf = self.emit_cur(Inst::Field { base: b, field: Ustr::from("buf") });
-            return Ok((buf, ContainerKind::NativeBuffer));
+            return Ok((buf, kind));
         }
         let kind = self.coll_kind(base);
         let b = self.lower_expr(base)?;
@@ -7015,7 +7367,7 @@ impl Builder<'_> {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
-            }) if is_native_buffer(name.as_str()) => ContainerKind::NativeBuffer,
+            }) if is_native_buffer(name.as_str()) => self.nb_kind(base),
             _ => {
                 let rendered = self
                     .inf
@@ -7628,7 +7980,7 @@ fn native_buffer_elem_is_generic(ws: &Workspace, inf: &BodyInference, ret: TyId)
 /// check its specialization resolves the element ctype. `None` otherwise.
 fn fn_opaque_intrinsic_ret(ws: &Workspace, fref: FuncRef) -> Option<TyId> {
     let f = &ws.module(fref.module).functions[fref.func];
-    if f.generics.is_empty() || f.lua_body.is_some() {
+    if f.generics.is_empty() || f.inline_body.is_some() {
         return None;
     }
     let body = ws.module(fref.module).bodies.get(&BodyOwner::Function(fref.func))?;
@@ -7669,7 +8021,7 @@ fn fn_opaque_intrinsic_transitive(
         return true;
     }
     let f = &ws.module(fref.module).functions[fref.func];
-    if f.generics.is_empty() || f.lua_body.is_some() {
+    if f.generics.is_empty() || f.inline_body.is_some() {
         return false;
     }
     let Some(inf) = ws
@@ -8024,6 +8376,11 @@ pub struct ShaderPair {
     pub frag: FuncRef,
 }
 
+pub struct ShaderCollection {
+    pub pairs: Vec<ShaderPair>,
+    pub callsites: Vec<(ModuleId, BodyOwner)>,
+}
+
 /// The `@shader(<stage>)` stage of `f` (`"vertex"`/`"fragment"`), else `None`.
 /// A local read of the annotation (skull-codegen-glsl has the same helper, but
 /// skull-mir must not depend on it -- the layering constraint).
@@ -8147,8 +8504,41 @@ pub fn shader_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
 /// `__rock_shader_register`. Any resolution failure surfaces as `Err` (the fatal
 /// [`shader_expand_rejection`] gate runs first, so this is normally infallible).
 pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerError> {
+    Ok(collect_shader_collection(ws)?.pairs)
+}
+
+pub fn body_has_shader_pipeline_call(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> bool {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return false };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    body.expr_arena.iter().any(|(e, expr)| {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            return false;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        resolved.is_some_and(|(fmod, fid)| {
+            matches!(
+                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                Some(ExpandKind::ShaderPipeline)
+            )
+        })
+    })
+}
+
+pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
     let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
         std::collections::BTreeMap::new();
+    let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
         let ir = ws.inference(mid);
@@ -8172,13 +8562,17 @@ pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerE
                 ) {
                     continue;
                 }
+                callsites.insert((mid, *owner));
                 let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
                 let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
                 by_key.entry(pair.key.clone()).or_insert(pair);
             }
         }
     }
-    Ok(by_key.into_values().collect())
+    Ok(ShaderCollection {
+        pairs: by_key.into_values().collect(),
+        callsites: callsites.into_iter().collect(),
+    })
 }
 
 /// Reject a CPU-side (Lua-emission) DIRECT call to a `@gpu_only` intrinsic

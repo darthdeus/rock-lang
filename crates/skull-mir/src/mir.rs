@@ -57,8 +57,22 @@ pub enum ContainerKind {
     Vec,
     /// `NativeBuffer<T>` — `{ ptr, len }`; `.ptr` is a 0-based C array.
     NativeBuffer,
+    /// `NativeBuffer<E>` where `E` is an FFI-clean value STRUCT (`elem` = its
+    /// name). Same `{ ptr, len }` shape; the Lua emitter renders it EXACTLY like
+    /// [`ContainerKind::NativeBuffer`] (element access is a cdata ref). Carried
+    /// so the JS emitter can lower element access into flat-slot arithmetic over
+    /// the single `Float32Array(n * k)` backing (Arc-2 P3 representation), which
+    /// has no per-element cdata view.
+    NativeBufferValue(Ustr),
     /// `Map<K,V>` — keyed directly by K, no `+1`.
     Map,
+}
+
+impl ContainerKind {
+    /// Either NativeBuffer flavor — the `{ ptr, len }` C-array shape.
+    pub fn is_native_buffer(self) -> bool {
+        matches!(self, ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_))
+    }
 }
 
 /// Which `co fn` lifecycle hook a [`Inst::CoroHook`] registers. All three

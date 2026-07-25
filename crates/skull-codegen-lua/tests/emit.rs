@@ -117,6 +117,26 @@ fn run(src: &str, driver: &str) -> String {
             lua.push_str(&emit_function(&ws, &ctx, fref, &func));
         }
     }
+    // Alias the user module's uniquely-named fns back to their bare source names
+    // so the `driver` can call them by source name (every non-exempt fn mangles).
+    {
+        use std::collections::HashMap;
+        let mut counts: HashMap<ustr::Ustr, usize> = HashMap::new();
+        for (_, f) in ws.module(mid).functions.iter() {
+            if !skull_mir::mangle::is_exempt(f) {
+                *counts.entry(f.name).or_insert(0) += 1;
+            }
+        }
+        for (_, f) in ws.module(mid).functions.iter() {
+            if skull_mir::mangle::is_exempt(f) || counts[&f.name] > 1 {
+                continue;
+            }
+            let m = skull_codegen_lua::mangle_fn(&ws, f);
+            if m != f.name.as_str() {
+                lua.push_str(&format!("_G[\"{}\"] = {}\n", f.name, m));
+            }
+        }
+    }
     lua.push_str(&format!("print({})\n", driver));
     // Unique per call: parallel tests must not clobber a shared temp file.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -160,7 +180,7 @@ fn int_literal_and_return() {
     assert_eq!(
         emit("fn five() -> int { 5 }", "five"),
         "\
-function five()
+function five_ret_int()
   ::bb0::
   do return (5) end
 end
@@ -173,7 +193,7 @@ fn param_cell_read() {
     assert_eq!(
         emit("fn id(x: int) -> int { x }", "id"),
         "\
-function id(c0)
+function id_int_ret_int(c0)
   local r0
   ::bb0::
   r0 = c0
@@ -188,7 +208,7 @@ fn int_arithmetic() {
     assert_eq!(
         emit_std("fn add(a: int, b: int) -> int { a + b }", "add"),
         "\
-function add(c0, c1)
+function add_int_int_ret_int(c0, c1)
   local r0, r1
   ::bb0::
   r0 = c0
@@ -305,7 +325,7 @@ fn inline_lua_with_inline_annotation_is_spliced() {
         "use_it",
     );
     assert!(
-        !body.contains("dbl("),
+        !body.contains("dbl_int_ret_int("),
         "@inline inline(lua) should be spliced, not called:\n{body}"
     );
     assert!(
@@ -324,7 +344,7 @@ fn inline_lua_without_inline_annotation_is_called() {
         "use_it",
     );
     assert!(
-        body.contains("dbl("),
+        body.contains("dbl_int_ret_int("),
         "plain inline(lua) should be called, not spliced:\n{body}"
     );
 }
@@ -501,7 +521,7 @@ fn use_it() -> int { let (ok, n) = pair(); if ok { n } else { 0 } }";
         "destructure must be zero-alloc multi-assign, not a table build:\n{body}"
     );
     assert!(
-        body.lines().any(|l| l.contains(", ") && l.contains("= pair(")),
+        body.lines().any(|l| l.contains(", ") && l.contains("= pair_ret_tuple2_bool_int(")),
         "expected a multi-assign call line `a, b = pair(...)`:\n{body}"
     );
 }
@@ -520,7 +540,7 @@ fn use_it() -> int { let t = pair(); t.1 }";
         !body.contains("[1]") && !body.contains("[2]"),
         "non-escaping whole-stored tuple should scalarize, not pack:\n{body}"
     );
-    assert!(body.contains("= pair()"), "multi-assign call expected:\n{body}");
+    assert!(body.contains("= pair_ret_tuple2_bool_int()"), "multi-assign call expected:\n{body}");
 }
 
 #[test]
@@ -533,7 +553,7 @@ fn if_as_value_branch_and_cell_join() {
     assert_eq!(
         emit("fn sign(x: int) -> int { if x < 0 { 0 } else { 1 } }", "sign"),
         "\
-function sign(c0)
+function sign_int_ret_int(c0)
   local r0
   ::bb0::
   r0 = c0

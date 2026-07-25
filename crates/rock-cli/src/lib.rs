@@ -46,6 +46,8 @@ mod iter_lsp;
 mod iter_parse;
 pub mod glsl_test;
 pub mod js_test;
+pub mod live_project;
+pub mod web;
 mod test_protocol;
 mod lsp_survey;
 mod lsp_test;
@@ -237,6 +239,13 @@ pub enum CliCommand {
     /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
     /// See `glsl_test::shader_validate`.
     ShaderValidate,
+    /// `rock web <project> [--out <dir>]` -- emit a static browser build
+    /// (`index.html` + `game.js`) for a Rock project via the JS backend. A
+    /// `CliCommand` dispatched pre-backend-switch (like `fmt`/`shader`): it runs
+    /// project-mode JS emission and assembles the browser bundle (runtime
+    /// preludes + `JS_WEB_RUNTIME` + emitted program + a boot line). Serve the
+    /// out dir with any static file server. See `docs/stone-web-plan.md` Arc 2.
+    Web,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -267,6 +276,7 @@ impl clap::ValueEnum for CliCommand {
             Self::BackendStats,
             Self::Shader,
             Self::ShaderValidate,
+            Self::Web,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -313,6 +323,7 @@ impl CliCommand {
             Self::BackendStats => "backend-stats",
             Self::Shader => "shader",
             Self::ShaderValidate => "shader-validate",
+            Self::Web => "web",
         }
     }
 }
@@ -513,6 +524,7 @@ pub struct Args {
     /// (defaults to `tests/`). Compilation/test failures don't abort
     /// the loop; Ctrl-C to exit.
     pub watch: bool,
+    pub port: u16,
 
     /// Resolved compiler backend for this invocation (default `skull`; see
     /// `from_matches`). `skull` is bone type-check + skull codegen; `bone` is
@@ -547,7 +559,7 @@ impl Args {
                     .value_parser(clap::value_parser!(CliCommand)),
             )
             .arg(Arg::new("files").num_args(0..))
-            .arg(Arg::new("output").long("output"))
+            .arg(Arg::new("output").long("output").alias("out"))
             .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
                 .help("Compile without the standard library"))
@@ -624,7 +636,10 @@ impl Args {
             .arg(Arg::new("list").long("list").action(ArgAction::SetTrue)
                 .help("For `rock sim`: list every `@sim` wire name in the project, one per line, then exit."))
             .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
-                .help("For `rock test`: re-run tests on every `.rock` file change in the watched paths."))
+                .help("For `rock test`: re-run tests on source changes. For `rock web`: serve the build and reload connected browsers after successful changes."))
+            .arg(Arg::new("port").long("port").default_value("8000")
+                .value_parser(clap::value_parser!(u16))
+                .help("For `rock web --watch`: loopback HTTP port. Use 0 to choose an available port."))
             .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
                 .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
             .arg(Arg::new("backend").long("backend")
@@ -680,6 +695,7 @@ impl Args {
             app_args: many_str("app_args"),
             jv: m.get_flag("jv"),
             watch: m.get_flag("watch"),
+            port: *m.get_one::<u16>("port").unwrap(),
             package: m.get_flag("package"),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is

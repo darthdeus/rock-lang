@@ -12,4 +12,5 @@ pub mod decorator;
 pub mod display;
 pub mod intrinsics;
 pub mod lower;
+pub mod mangle;
 pub mod mir;

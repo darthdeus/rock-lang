@@ -24,7 +24,7 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use skull_codegen_lua::{compute_overloaded_names, mangle_fn};
+use skull_codegen_lua::mangle_fn;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
@@ -154,7 +154,7 @@ impl Reach<'_> {
             self.black.insert(fref);
             return Ok(());
         }
-        if f.is_extern || f.lua_body.is_some() {
+        if f.is_extern || f.inline_body.is_some() {
             return Err(err(
                 f.name_span,
                 format!(
@@ -431,7 +431,6 @@ enum FoldKind {
 
 struct FnEmit<'a> {
     ws: &'a Workspace,
-    overloaded: &'a HashSet<Ustr>,
     f: &'a MirFunc,
     /// GLSL return type (None = void); floats coerce int-literal returns.
     ret_ty: Option<GlslTy>,
@@ -510,11 +509,10 @@ struct LoopCtx {
 /// Emit `<ret> <name>(<params>) { <body> }` for one lowered fn.
 fn emit_fn_def(
     ws: &Workspace,
-    overloaded: &HashSet<Ustr>,
     fref: FuncRef,
     mf: &MirFunc,
 ) -> Result<String, CompilerError> {
-    emit_fn_def_with(ws, overloaded, fref, mf, None)
+    emit_fn_def_with(ws, fref, mf, None)
 }
 
 /// [`emit_fn_def`], optionally in ENTRY mode: the uniform-struct and sampler
@@ -522,7 +520,6 @@ fn emit_fn_def(
 /// uniform globals) and the fn keeps its bare Rock name.
 fn emit_fn_def_with(
     ws: &Workspace,
-    overloaded: &HashSet<Ustr>,
     fref: FuncRef,
     mf: &MirFunc,
     entry: Option<&EntryShape>,
@@ -534,7 +531,7 @@ fn emit_fn_def_with(
     } else if entry.is_some() {
         f.name.as_str().to_string()
     } else {
-        mangle_fn(ws, f, overloaded)
+        mangle_fn(ws, f)
     };
     // A `void main()` entry destructures its returned struct into globals
     // (gl_Position + varyings, or MRT outs) -- no signature return type.
@@ -568,7 +565,6 @@ fn emit_fn_def_with(
 
     let mut e = FnEmit {
         ws,
-        overloaded,
         f: mf,
         ret_ty,
         cell_name: HashMap::default(),
@@ -1128,7 +1124,7 @@ impl FnEmit<'_> {
             return Ok(s);
         }
         // An emittable user fn -> a plain call to its (mangled) GLSL name.
-        let gname = mangle_fn(self.ws, cf, self.overloaded);
+        let gname = mangle_fn(self.ws, cf);
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
         Ok(format!("{gname}({})", rargs?.join(", ")))
@@ -1594,7 +1590,6 @@ pub fn emit_shader_library(
     roots: &[String],
 ) -> Result<String, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
-    let overloaded = compute_overloaded_names(ws);
 
     let mut reach = Reach {
         ws,
@@ -1631,7 +1626,7 @@ pub fn emit_shader_library(
             out.push('\n');
         }
         let mf = &reach.bodies[&fref];
-        out.push_str(&emit_fn_def(ws, &overloaded, fref, mf)?);
+        out.push_str(&emit_fn_def(ws, fref, mf)?);
     }
     Ok(out)
 }
@@ -1764,8 +1759,21 @@ pub fn emit_shader_entry(
     root: &str,
     profile: GlslProfile,
 ) -> Result<String, CompilerError> {
+    Ok(emit_shader_entry_with_dependencies(ws, mid, root, profile)?.source)
+}
+
+pub struct ShaderEmission {
+    pub source: String,
+    pub dependencies: Vec<FuncRef>,
+}
+
+pub fn emit_shader_entry_with_dependencies(
+    ws: &Workspace,
+    mid: ModuleId,
+    root: &str,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
-    let overloaded = compute_overloaded_names(ws);
     let fref = resolve_root(ws, mid, root)?;
     let f = &ws.module(fref.module).functions[fref.func];
 
@@ -1830,10 +1838,10 @@ pub fn emit_shader_entry(
         px.push('\n');
     }
     for &href in &reach.order {
-        px.push_str(&emit_fn_def(ws, &overloaded, href, &reach.bodies[&href])?);
+        px.push_str(&emit_fn_def(ws, href, &reach.bodies[&href])?);
         px.push('\n');
     }
-    px.push_str(&emit_fn_def_with(ws, &overloaded, fref, &mf, Some(&shape))?);
+    px.push_str(&emit_fn_def_with(ws, fref, &mf, Some(&shape))?);
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
@@ -1841,9 +1849,12 @@ pub fn emit_shader_entry(
     // explicit fragment float precision, and the vertex declarations are
     // harmless no-ops (highp is already the vertex default).
     let (version, precision) = profile_header(profile);
-    Ok(format!(
+    let source = format!(
         "{version}\n\n#ifdef PIXEL\n\n{precision}{px}\n#endif\n\n#ifdef VERTEX\n\n{precision}{FULLSCREEN_VERTEX}\n#endif\n"
-    ))
+    );
+    let mut dependencies = reach.order;
+    dependencies.push(fref);
+    Ok(ShaderEmission { source, dependencies })
 }
 
 /// Emission profile (docs/shaders.md): the `#version` line and
@@ -2184,10 +2195,9 @@ fn reject_stage_violations<'a>(
 fn lower_reach_helpers(
     ws: &Workspace,
     scx: &ScalarCtx,
-    overloaded: &HashSet<Ustr>,
     fref: FuncRef,
     stage: Stage,
-) -> Result<(MirFunc, String), CompilerError> {
+) -> Result<(MirFunc, String, Vec<FuncRef>), CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     let mf = lower_function(ws, scx, fref.module, fref.func)
         .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
@@ -2227,10 +2237,12 @@ fn lower_reach_helpers(
         helpers.push('\n');
     }
     for &href in &reach.order {
-        helpers.push_str(&emit_fn_def(ws, overloaded, href, &reach.bodies[&href])?);
+        helpers.push_str(&emit_fn_def(ws, href, &reach.bodies[&href])?);
         helpers.push('\n');
     }
-    Ok((mf, helpers))
+    let mut dependencies = reach.order;
+    dependencies.push(fref);
+    Ok((mf, helpers, dependencies))
 }
 
 /// Reject a fragment-stage read of the varyings `position` field: it is
@@ -2250,11 +2262,10 @@ fn reject_position_read(ws: &Workspace, mf: &MirFunc, varyings_cell: Idx<Cell>, 
 fn emit_vertex_stage(
     ws: &Workspace,
     scx: &ScalarCtx,
-    overloaded: &HashSet<Ustr>,
     fref: FuncRef,
     v: &VertexShape,
     varyings: &VaryingsShape,
-) -> Result<String, CompilerError> {
+) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let shape = EntryShape {
         global_params: v.attr_params.iter().copied().chain(v.uniform_params.iter().copied()).collect(),
         uniform_fields: v.attrs.iter().copied().chain(v.uniforms.iter().copied()).collect(),
@@ -2265,7 +2276,7 @@ fn emit_vertex_stage(
             position_is_gl: true,
         }),
     };
-    let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Vertex)?;
+    let (mf, helpers, dependencies) = lower_reach_helpers(ws, scx, fref, Stage::Vertex)?;
 
     let mut out = String::new();
     for (loc, (n, t)) in v.attrs.iter().enumerate() {
@@ -2287,18 +2298,17 @@ fn emit_vertex_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, overloaded, fref, &mf, Some(&shape))?);
-    Ok(out)
+    out.push_str(&emit_fn_def_with(ws, fref, &mf, Some(&shape))?);
+    Ok((out, dependencies))
 }
 
 fn emit_fragment_stage(
     ws: &Workspace,
     scx: &ScalarCtx,
-    overloaded: &HashSet<Ustr>,
     fref: FuncRef,
     fs: &FragShape,
     varyings: &VaryingsShape,
-) -> Result<String, CompilerError> {
+) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
@@ -2314,7 +2324,7 @@ fn emit_fragment_stage(
         arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
         main_out,
     };
-    let (mf, helpers) = lower_reach_helpers(ws, scx, overloaded, fref, Stage::Fragment)?;
+    let (mf, helpers, dependencies) = lower_reach_helpers(ws, scx, fref, Stage::Fragment)?;
     reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
 
     let mut out = String::new();
@@ -2342,14 +2352,14 @@ fn emit_fragment_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, overloaded, fref, &mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, fref, &mf, Some(&shape))?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
     if fs.outputs.is_none() {
         out.push('\n');
         out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
     }
-    Ok(out)
+    Ok((out, dependencies))
 }
 
 /// Reject duplicate global names across BOTH stages (decision 7): attributes,
@@ -2398,8 +2408,20 @@ pub fn emit_shader_pipeline(
     frag_root: &str,
     profile: GlslProfile,
 ) -> Result<String, CompilerError> {
+    Ok(emit_shader_pipeline_with_dependencies(
+        ws, mid, vert_root, frag_root, profile,
+    )?
+    .source)
+}
+
+pub fn emit_shader_pipeline_with_dependencies(
+    ws: &Workspace,
+    mid: ModuleId,
+    vert_root: &str,
+    frag_root: &str,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
-    let overloaded = compute_overloaded_names(ws);
     let vfref = resolve_root(ws, mid, vert_root)?;
     let ffref = resolve_root(ws, mid, frag_root)?;
     let vf = &ws.module(vfref.module).functions[vfref.func];
@@ -2416,13 +2438,22 @@ pub fn emit_shader_pipeline(
     let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
     check_pipeline_collisions(&vshape, &varyings, &fshape, vf.name_span)?;
 
-    let vertex_block = emit_vertex_stage(ws, &scx, &overloaded, vfref, &vshape, &varyings)?;
-    let pixel_block = emit_fragment_stage(ws, &scx, &overloaded, ffref, &fshape, &varyings)?;
+    let (vertex_block, vertex_dependencies) =
+        emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings)?;
+    let (pixel_block, pixel_dependencies) =
+        emit_fragment_stage(ws, &scx, ffref, &fshape, &varyings)?;
 
     let (version, precision) = profile_header(profile);
-    Ok(format!(
+    let source = format!(
         "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
-    ))
+    );
+    let dependencies = vertex_dependencies
+        .into_iter()
+        .chain(pixel_dependencies)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(ShaderEmission { source, dependencies })
 }
 
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
@@ -2539,8 +2570,7 @@ pub fn emit_value_test(
     // The fn library runs the strict tier-0 profile pass; a body outside the
     // subset rejects here (the SKIP reason -- the A1 fn-emission work list).
     let defs = emit_shader_library(ws, mid, std::slice::from_ref(&root.to_string()))?;
-    let overloaded = compute_overloaded_names(ws);
-    let call = mangle_fn(ws, f, &overloaded);
+    let call = mangle_fn(ws, f);
 
     let (version, precision) = profile_header(profile);
     let (out_ty, out_expr) = match ret {
@@ -2617,7 +2647,6 @@ mod assertion_flip_tests {
     fn missed_sink_is_a_hard_emit_error() {
         let (ws, mid) = build_ws("@pure fn f(i: int) -> float { return i }");
         let scx = ScalarCtx::new_values_first_class(&ws);
-        let overloaded = compute_overloaded_names(&ws);
         let fref = resolve_root(&ws, mid, "f").expect("root");
         let mut mf = lower_function(&ws, &scx, fref.module, fref.func).expect("lower");
 
@@ -2642,7 +2671,7 @@ mod assertion_flip_tests {
             }
         }
 
-        let r = emit_fn_def(&ws, &overloaded, fref, &mf);
+        let r = emit_fn_def(&ws, fref, &mf);
         let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
         assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
     }
@@ -2674,8 +2703,8 @@ mod value_test_shader {
         assert_eq!(s.ret, ValueTestRet::Int);
         assert!(s.fragment.starts_with("#version 330 core\n"), "{}", s.fragment);
         assert!(s.fragment.contains("layout(location = 0) out int _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
-        assert!(s.fragment.contains("int t()"), "callee def present: {}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t_ret_int();"), "{}", s.fragment);
+        assert!(s.fragment.contains("int t_ret_int()"), "callee def present: {}", s.fragment);
         assert!(s.vertex.contains("gl_VertexID"), "{}", s.vertex);
     }
 
@@ -2685,7 +2714,7 @@ mod value_test_shader {
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
         assert_eq!(s.ret, ValueTestRet::Float);
         assert!(s.fragment.contains("out float _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = t();"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = t_ret_float();"), "{}", s.fragment);
     }
 
     #[test]
@@ -2694,7 +2723,7 @@ mod value_test_shader {
         let s = emit_value_test(&ws, mid, "t", GlslProfile::Core330).expect("emit");
         assert_eq!(s.ret, ValueTestRet::Bool);
         assert!(s.fragment.contains("out int _rock_value_out;"), "{}", s.fragment);
-        assert!(s.fragment.contains("_rock_value_out = (t() ? 1 : 0);"), "{}", s.fragment);
+        assert!(s.fragment.contains("_rock_value_out = (t_ret_bool() ? 1 : 0);"), "{}", s.fragment);
     }
 
     #[test]

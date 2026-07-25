@@ -119,6 +119,12 @@ pub(crate) fn check_modules(
     if !syntax.is_empty() {
         return Err(syntax);
     }
+    // Macro names must be unique against function names (call-position ambiguity)
+    // -- checked before `semantic_pass` expands the macro defs away.
+    let macro_dupes = skull_parser::check_macro_name_uniqueness(modules);
+    if !macro_dupes.is_empty() {
+        return Err(macro_dupes);
+    }
     let ws = bone_semantic::semantic_passes::semantic_pass(modules).map_err(|e| vec![e])?;
     let errs = body_errors(&ws);
     if !errs.is_empty() {

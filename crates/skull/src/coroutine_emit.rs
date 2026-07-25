@@ -18,7 +18,7 @@ fn raw<T>(i: Idx<T>) -> u32 {
 /// Emit a `co fn` as its stackless `__step` (via the dumb printer, with a frame
 /// context) + the stdlib Coroutine constructor.
 pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func: &MirFunc) -> String {
-    let name = mangled(ws, ctx, self_ref);
+    let name = mangled(ws, self_ref);
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).

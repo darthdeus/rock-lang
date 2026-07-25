@@ -34,8 +34,8 @@ use ustr::Ustr;
 /// SEQUENTIALLY under `--features sequential` (clean single-thread sampling
 /// profiles — mirrors bone's `sequential` shim). Order-preserving in both modes,
 /// so the assembled Lua chunk is byte-identical regardless of the feature. Each
-/// `emit_*_unit` is independent (read-only `ws`/`scx`/`cg`/`overloaded`, owns its
-/// own `MirFunc`), so the lower+cleanup+emit work fans out cleanly per definition.
+/// `emit_*_unit` is independent (read-only `ws`/`scx`/`cg`, owns its own
+/// `MirFunc`), so the lower+cleanup+emit work fans out cleanly per definition.
 #[cfg(not(feature = "sequential"))]
 fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync + Send) -> Vec<R> {
     use rayon::prelude::*;
@@ -75,7 +75,6 @@ fn par_map_with<T, R, S>(items: Vec<T>, init: impl Fn() -> S, f: impl Fn(&mut S,
 /// descended into — keeping init ordering from over-constraining on closures.
 fn direct_refs(
     ws: &Workspace,
-    overloaded: &FxHashSet<Ustr>,
     mf: &MirFunc,
 ) -> (Vec<Ustr>, Vec<Ustr>) {
     let mut globals = Vec::new();
@@ -92,7 +91,7 @@ fn direct_refs(
                 Inst::Global(n) => globals.push(*n),
                 Inst::Call { func, .. } => {
                     let f = &ws.module(func.module).functions[func.func];
-                    calls.push(Ustr::from(&mangle_fn(ws, f, overloaded)));
+                    calls.push(Ustr::from(&mangle_fn(ws, f)));
                 }
                 _ => {}
             }
@@ -369,7 +368,6 @@ struct UnitOut {
 /// Reads the per-thread regalloc accumulator that the caller reset before emit.
 fn emit_lowered(
     ws: &Workspace,
-    overloaded: &FxHashSet<Ustr>,
     out: &mut UnitOut,
     mf: &MirFunc,
     lua: String,
@@ -377,7 +375,7 @@ fn emit_lowered(
     t_emit: Duration,
 ) {
     if let Some(key) = collect_refs {
-        let (gs, cs) = direct_refs(ws, overloaded, mf);
+        let (gs, cs) = direct_refs(ws, mf);
         out.refs = Some((key, gs, cs));
     }
     out.lua = lua;
@@ -390,7 +388,6 @@ fn emit_decorator_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
-    overloaded: &FxHashSet<Ustr>,
     mid: ModuleId,
     did: Idx<bone_semantic::hir::DecoratorDef>,
 ) -> UnitOut {
@@ -416,7 +413,7 @@ fn emit_decorator_unit(
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, &deco_name, &mf);
             emit_pass_nested_fns(ws, cg, &mut mf.nested_fns, &mut lua);
-            emit_lowered(ws, overloaded, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
+            emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
     }
@@ -428,7 +425,6 @@ fn emit_global_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
-    overloaded: &FxHashSet<Ustr>,
     mid: ModuleId,
     gid: Idx<bone_semantic::hir::GlobalDef>,
 ) -> UnitOut {
@@ -460,7 +456,7 @@ fn emit_global_unit(
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, &init_name, &mf);
             emit_pass_nested_fns(ws, cg, &mut mf.nested_fns, &mut lua);
-            emit_lowered(ws, overloaded, &mut out, &mf, lua, Some(key), te.elapsed());
+            emit_lowered(ws, &mut out, &mf, lua, Some(key), te.elapsed());
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
             // runs UNCONDITIONALLY (no preserve guard), mirroring rock-codegen's
@@ -606,6 +602,14 @@ pub struct SkullEmitCache {
     /// preserves the live value). Rebuilt by `emit_full`.
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
+    shader_registrations: ShaderRegistrations,
+}
+
+#[derive(Default)]
+struct ShaderRegistrations {
+    lua: String,
+    dependencies: FxHashSet<FuncRef>,
+    callsites: FxHashSet<(ModuleId, BodyOwner)>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -639,7 +643,6 @@ fn emit_body_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
-    overloaded: &FxHashSet<Ustr>,
     self_ref: FuncRef,
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
@@ -687,7 +690,7 @@ fn emit_body_chunk(
     // BEFORE FORL recovery (matching the JS pipeline) so a loop lifted into a
     // lambda body is FORL-recovered in the split fn. Coroutines skip this (their
     // `Inst::Lambda`s convert at codegen via `FrameCtx`/`HoistPlan` -- S3).
-    let name = mangle_fn(ws, f, overloaded);
+    let name = mangle_fn(ws, f);
     let pre_nested = mf.nested_fns.len();
     skull_transform::convert_closures(&mut mf, &name);
     // Route each pass-hoisted `<name>__lambda<k>` through the synthetic-name
@@ -702,7 +705,7 @@ fn emit_body_chunk(
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
     validate_no_residual_spec_bindings(f, &mf)?;
     collect_callee_frefs(&mf, &mut deps);
-    let (direct_globals, direct_calls) = direct_refs(ws, overloaded, &mf);
+    let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let mut lua = emit_function(ws, cg, self_ref, &mf);
@@ -759,7 +762,7 @@ fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc],
 /// NEITHER: it exists only monomorphized-by-inlining at its call sites (its
 /// body holds placeholder bound-calls that have no standalone emission).
 fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
-    !f.is_extern && f.lua_body.is_none() && !fn_has_bounds(f)
+    !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f)
 }
 
 /// Whether the fn declares any `Iterator` bound on its generics.
@@ -841,7 +844,6 @@ fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bone_semantic:
 /// re-points system registries at the current globals after a body edit).
 fn decorator_application_lines(
     ws: &Workspace,
-    overloaded: &FxHashSet<Ustr>,
     deco_map: &DecoMap,
     skipped: &mut Vec<(String, String)>,
 ) -> String {
@@ -856,7 +858,7 @@ fn decorator_application_lines(
                     continue;
                 };
                 let d = &ws.module(dmid).decorators[did];
-                let mangled = mangle_fn(ws, f, overloaded);
+                let mangled = mangle_fn(ws, f);
                 let target = format!("{{ name = {:?}, params = {{}}, func = {} }}", f.name.as_str(), mangled);
                 match crate::decorator_call_args(d, ann) {
                     Ok(args) => {
@@ -905,9 +907,9 @@ pub fn collect_sim_fns(ws: &Workspace) -> Vec<(&bone_semantic::hir::Function, St
 /// registers its sims and the runtime's `ROCK_RUN_SIM=<wire>` dispatch resolves.
 ///
 /// `register_sim` is itself a regular Rock fn (`stone/engine/sim.rock`), so it
-/// is mangled the same way as its definition (skull mangles only overloaded
-/// names, so the single-overload `register_sim` stays bare -- definition and
-/// call agree). Every `@sim` implies stone/engine is linked, so a missing
+/// is mangled the same way as its definition (every fn mangles by name +
+/// signature, so definition and call agree). Every `@sim` implies stone/engine
+/// is linked, so a missing
 /// `register_sim` is an internal error rather than a silent nil-call (mirrors
 /// rock's discipline).
 ///
@@ -915,7 +917,6 @@ pub fn collect_sim_fns(ws: &Workspace) -> Vec<(&bone_semantic::hir::Function, St
 /// never from the live dev game's overlay, so `assemble_overlay` needs none.
 fn sim_registration_lines(
     ws: &Workspace,
-    overloaded: &FxHashSet<Ustr>,
 ) -> Result<String, CompilerError> {
     let sims = collect_sim_fns(ws);
     if sims.is_empty() {
@@ -934,11 +935,11 @@ fn sim_registration_lines(
                     .to_string(),
             )
         })?;
-    let register_name = mangle_fn(ws, register_fn, overloaded);
+    let register_name = mangle_fn(ws, register_fn);
 
     let mut out = String::new();
     for (f, wire) in sims {
-        let mangled = mangle_fn(ws, f, overloaded);
+        let mangled = mangle_fn(ws, f);
         let _ = writeln!(out, "{}({:?}, {})", register_name, wire, mangled);
     }
     Ok(out)
@@ -969,25 +970,23 @@ fn lua_long_bracket(s: &str) -> String {
 /// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
 /// violation, stage/collision) is a spanned `CompilerError` failing the compile,
 /// never skip-and-continue.
-fn shader_registration_lines(ws: &Workspace) -> Result<String, CompilerError> {
+fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, CompilerError> {
     // Always Core330. The profile is a property of the GL context, which a build
     // cannot know: the engine rewrites #version + precision for GLES at
     // shader-compile time (stone-gl `adapt_source_for_gles`), and that header is
     // the ONLY difference between the two profiles.
     let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let pairs = skull_mir::lower::collect_shader_pairs(ws)?;
-    if pairs.is_empty() {
-        return Ok(String::new());
-    }
+    let collection = skull_mir::lower::collect_shader_collection(ws)?;
     let mut out = String::new();
-    for pair in pairs {
+    let mut dependencies = FxHashSet::default();
+    for pair in collection.pairs {
         let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
-        let glsl = match pair.vert {
+        let emission = match pair.vert {
             Some(vert) => {
                 let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline(
+                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
                     ws,
                     vert.module,
                     vname.as_str(),
@@ -995,23 +994,32 @@ fn shader_registration_lines(ws: &Workspace) -> Result<String, CompilerError> {
                     profile,
                 )?
             }
-            None => skull_codegen_glsl::emit_shader_entry(
+            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
                 ws,
                 pair.frag.module,
                 fname.as_str(),
                 profile,
             )?,
         };
-        let _ = writeln!(out, "__rock_shader_register({:?}, {})", pair.key, lua_long_bracket(&glsl));
+        dependencies.extend(emission.dependencies);
+        let _ = writeln!(
+            out,
+            "__rock_shader_register({:?}, {})",
+            pair.key,
+            lua_long_bracket(&emission.source)
+        );
     }
-    Ok(out)
+    Ok(ShaderRegistrations {
+        lua: out,
+        dependencies,
+        callsites: collection.callsites.into_iter().collect(),
+    })
 }
 
 fn assemble(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
-    overloaded: &FxHashSet<Ustr>,
     cache: &SkullEmitCache,
 ) -> Result<MirEmit, CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
@@ -1048,7 +1056,7 @@ fn assemble(
     // module; the definition bodies themselves lower+emit in parallel.
     let (deco_map, deco_items) = build_deco_map(ws);
     let deco_results = par_map(deco_items, |(mid, did)| {
-        emit_decorator_unit(ws, scx, cg, overloaded, mid, did)
+        emit_decorator_unit(ws, scx, cg, mid, did)
     });
     merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut times);
 
@@ -1063,6 +1071,12 @@ fn assemble(
         let mid = module.id;
         for (fid, f) in module.functions.iter() {
             let self_ref = FuncRef { module: mid, func: fid };
+            // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
+            // its lua sibling (if any) carries the binding, and a js-only call from
+            // lua-reachable code is rejected at call lowering (resolve_funcref).
+            if f.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
@@ -1085,10 +1099,11 @@ fn assemble(
                 }
                 continue;
             }
-            if let Some(body) = f.lua_body {
+            if let Some((_, body)) = f.inline_body {
                 // inline(lua): emit the hand-written body verbatim, wrapping a
                 // value-returning bodyless-`return` and prepending default fills.
-                let name = mangle_fn(ws, f, overloaded);
+                // (Js inline bodies were skipped above via the backend guard.)
+                let name = mangle_fn(ws, f);
                 let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, self_ref) {
                     Some(names) => names.join(", "),
                     None => f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
@@ -1121,7 +1136,7 @@ fn assemble(
             // Ordinary / coroutine: pull the cached chunk.
             match cache.chunks.get(&self_ref) {
                 Some(Ok(chunk)) => {
-                    let key = Ustr::from(&mangle_fn(ws, f, overloaded));
+                    let key = Ustr::from(&mangle_fn(ws, f));
                     direct_globals.insert(key, chunk.direct_globals.clone());
                     direct_calls.insert(key, chunk.direct_calls.clone());
                     times.add(&chunk.times);
@@ -1130,7 +1145,7 @@ fn assemble(
                 }
                 Some(Err(msg)) => {
                     if is_stdlib_module_file(module.file.as_str()) {
-                        skipped.push((mangle_fn(ws, f, overloaded), msg.clone()));
+                        skipped.push((mangle_fn(ws, f), msg.clone()));
                     } else {
                         return Err(CompilerError::new_with_label(
                             f.name_span,
@@ -1140,7 +1155,7 @@ fn assemble(
                 }
                 None => {
                     if is_stdlib_module_file(module.file.as_str()) {
-                        skipped.push((mangle_fn(ws, f, overloaded), "not emitted (no cached chunk)".to_string()));
+                        skipped.push((mangle_fn(ws, f), "not emitted (no cached chunk)".to_string()));
                     } else {
                         return Err(CompilerError::new_with_label(
                             f.name_span,
@@ -1172,7 +1187,7 @@ fn assemble(
         .collect();
 
     let global_results = par_map(global_items, |(mid, gid)| {
-        emit_global_unit(ws, scx, cg, overloaded, mid, gid)
+        emit_global_unit(ws, scx, cg, mid, gid)
     });
     merge_units(global_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut times);
 
@@ -1222,13 +1237,13 @@ fn assemble(
     out.push_str("}\n");
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
-    out.push_str(&decorator_application_lines(ws, overloaded, &deco_map, &mut skipped));
+    out.push_str(&decorator_application_lines(ws, &deco_map, &mut skipped));
     // `@sim` registrations (after fn + global defs; same init slot as rock).
-    out.push_str(&sim_registration_lines(ws, overloaded)?);
+    out.push_str(&sim_registration_lines(ws)?);
     // `rock_shader` pipeline registrations (docs/shaders.md):
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
-    out.push_str(&shader_registration_lines(ws)?);
+    out.push_str(&cache.shader_registrations.lua);
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -1340,7 +1355,6 @@ pub fn emit_full(
     let cg = CodegenCtx::new(ws);
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
-    let overloaded = cg.overloaded();
     let scx = skull_mir::lower::ScalarCtx::new(ws);
 
     let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
@@ -1358,7 +1372,7 @@ pub fn emit_full(
         fn_items,
         skull_transform::InlineCache::default,
         |inline_cache, (self_ref, f)| {
-            (self_ref, emit_body_chunk(ws, &cg, &scx, overloaded, self_ref, f, inline_cache))
+            (self_ref, emit_body_chunk(ws, &cg, &scx, self_ref, f, inline_cache))
         },
     );
     let chunks: FxHashMap<FuncRef, Result<Chunk, String>> = chunks.into_iter().collect();
@@ -1379,6 +1393,7 @@ pub fn emit_full(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
+    let shader_registrations = shader_registration_lines(ws)?;
     let cache = SkullEmitCache {
         chunks,
         changed_since_full: FxHashSet::default(),
@@ -1388,8 +1403,9 @@ pub fn emit_full(
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
+        shader_registrations,
     };
-    let emit = assemble(ws, &cache.cg, &cache.scx, cache.cg.overloaded(), &cache)?;
+    let emit = assemble(ws, &cache.cg, &cache.scx, &cache)?;
     Ok((emit, cache))
 }
 
@@ -1411,6 +1427,30 @@ pub fn emit_full(
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
 impl SkullEmitCache {
+fn update_shader_registrations(
+    &mut self,
+    ws: &Workspace,
+    reinferred: &[(ModuleId, BodyOwner)],
+) -> Result<bool, CompilerError> {
+    let affected = reinferred.iter().any(|&(mid, owner)| {
+        self.shader_registrations.callsites.contains(&(mid, owner))
+            || matches!(
+                owner,
+                BodyOwner::Function(fid)
+                    if self
+                        .shader_registrations
+                        .dependencies
+                        .contains(&FuncRef { module: mid, func: fid })
+            )
+            || skull_mir::lower::body_has_shader_pipeline_call(ws, mid, owner)
+    });
+    if !affected {
+        return Ok(false);
+    }
+    self.shader_registrations = shader_registration_lines(ws)?;
+    Ok(true)
+}
+
 fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
@@ -1433,7 +1473,6 @@ fn update_chunk_cache(
     }
     let scx = &cache.scx;
     let cg = &cache.cg;
-    let overloaded = cg.overloaded();
     // No valid-scan/retain: this path only ever sees BODY edits (an add/remove fn
     // is interface-tier -> the caller routes to `emit_full`, a fresh cache), so the
     // chunk key set -- and the `dependents` index built over it -- is invariant
@@ -1488,7 +1527,7 @@ fn update_chunk_cache(
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
         if is_cached_body(f) {
-            let chunk = emit_body_chunk(ws, cg, scx, overloaded, *fref, f, &mut cache.inline_cache);
+            let chunk = emit_body_chunk(ws, cg, scx, *fref, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                 for d in new_deps {
@@ -1520,13 +1559,14 @@ pub fn emit_incremental(
 ) -> Result<MirEmit, CompilerError> {
     let t_reemit = Instant::now();
     let _affected = cache.update_chunk_cache(ws, reinferred);
+    cache.update_shader_registrations(ws, reinferred)?;
     let reemit = t_reemit.elapsed();
 
     // Reassembly: the SAME work `emit_full` does (concat every cached chunk +
     // re-emit globals/decorators/prelude/entry), scaling with total output size.
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
-    let mut emit = assemble(ws, &cache.cg, &cache.scx, cache.cg.overloaded(), cache)?;
+    let mut emit = assemble(ws, &cache.cg, &cache.scx, cache)?;
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
     emit.phases.push(("incr: reassemble full output", reassemble));
@@ -1542,8 +1582,8 @@ pub fn emit_incremental(
 /// `docs/skull-incremental-emit-split.md`.
 fn assemble_overlay(
     ws: &Workspace,
-    overloaded: &FxHashSet<Ustr>,
     cache: &SkullEmitCache,
+    shader_changed: bool,
 ) -> MirEmit {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -1556,7 +1596,7 @@ fn assemble_overlay(
             Some(Ok(chunk)) => out.push_str(&chunk.lua),
             Some(Err(msg)) => {
                 let f = &ws.module(fref.module).functions[fref.func];
-                skipped.push((mangle_fn(ws, f, overloaded), msg.clone()));
+                skipped.push((mangle_fn(ws, f), msg.clone()));
             }
             // extern / inline(lua) edits are interface-tier -> full rebuild path.
             None => {}
@@ -1665,7 +1705,7 @@ fn assemble_overlay(
         let mut inits: Vec<GlobalInit> = Vec::new();
         for a in &affected {
             let line = if a.changed {
-                let unit = emit_global_unit(ws, &cache.scx, &cache.cg, overloaded, a.mid, a.gid);
+                let unit = emit_global_unit(ws, &cache.scx, &cache.cg, a.mid, a.gid);
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);
@@ -1699,19 +1739,10 @@ fn assemble_overlay(
     // edit, not the whole system count, and a body edit touching no decorated fn
     // emits no rebind at all. (`docs/skull-incremental-emit-split.md`.)
     let (deco_map, _) = build_deco_map(ws);
-    out.push_str(&decorator_rebind_lines(ws, overloaded, &deco_map, &order));
+    out.push_str(&decorator_rebind_lines(ws, &deco_map, &order));
 
-    // Re-run ALL `rock_shader` registrations on a body-edit reload too (decision 2:
-    // top-level registrations re-run on reload; the plan sanctions conservative
-    // re-emit-all at this corpus size). The engine's hash-idempotent register
-    // no-ops unchanged pairs and recompiles an edited shader body in place. A GLSL
-    // emit error can't return Err here (the overlay's `MirEmit` is baked into the
-    // watch fast path), so warn loudly (never-swallow) -- the next full rebuild
-    // rejects it authoritatively via `assemble` (same pattern as the collision
-    // warning above).
-    match shader_registration_lines(ws) {
-        Ok(lines) => out.push_str(&lines),
-        Err(err) => eprintln!("skull overlay emit: rock_shader registration -- {}", err.message),
+    if shader_changed {
+        out.push_str(&cache.shader_registrations.lua);
     }
 
     MirEmit { lua: out, skipped, phases: Vec::new() }
@@ -1724,7 +1755,6 @@ fn assemble_overlay(
 /// them; a changed non-decorated function (or none) emits nothing here.
 fn decorator_rebind_lines(
     ws: &Workspace,
-    overloaded: &FxHashSet<Ustr>,
     deco_map: &DecoMap,
     changed: &[FuncRef],
 ) -> String {
@@ -1734,7 +1764,7 @@ fn decorator_rebind_lines(
         if !f.annotations.iter().any(|ann| deco_map.contains_key(&ann.name.name)) {
             continue;
         }
-        let mangled = mangle_fn(ws, f, overloaded);
+        let mangled = mangle_fn(ws, f);
         let _ = writeln!(out, "__rock_rebind_system({:?}, {})", f.name.as_str(), mangled);
     }
     out
@@ -1762,6 +1792,13 @@ pub fn emit_overlay(
     let t2 = Instant::now();
     let affected = cache.update_chunk_cache(ws, reinferred);
     cache.changed_since_full.extend(affected);
+    let shader_changed = match cache.update_shader_registrations(ws, reinferred) {
+        Ok(changed) => changed,
+        Err(err) => {
+            eprintln!("skull overlay emit: rock_shader registration -- {}", err.message);
+            false
+        }
+    };
     // Accumulate changed `const` globals so the overlay re-emits their inits
     // (unguarded). A mutable `global` value edit is interface-tier (full rebuild),
     // so it never reaches here; even so, gate on `is_const` defensively.
@@ -1774,7 +1811,7 @@ pub fn emit_overlay(
     }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache.cg.overloaded(), cache);
+    let mut emit = assemble_overlay(ws, cache, shader_changed);
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else

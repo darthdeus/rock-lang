@@ -6,7 +6,7 @@
 mod common;
 use common::{ws_of, ws_with_stdlib};
 
-use skull_codegen_lua::{compute_overloaded_names, mangle_fn};
+use skull_codegen_lua::mangle_fn;
 use skull_mir::intrinsics::{
     declared_intrinsics, expand_kind, is_intrinsic, is_native_required, unbacked_entries, Emission,
     ExpandKind, IntrinsicEntry, IntrinsicTable,
@@ -79,7 +79,6 @@ fn use_both() -> int {
 #[test]
 fn generic_intrinsic_key_is_declared_signature_mangle() {
     let ws = ws_of(GENERIC);
-    let overloaded = compute_overloaded_names(&ws);
 
     let gid_generic = ws
         .modules
@@ -88,10 +87,10 @@ fn generic_intrinsic_key_is_declared_signature_mangle() {
         .find(|f| f.name.as_str() == "gid" && !f.generics.is_empty())
         .expect("generic gid");
 
-    let key = mangle_fn(&ws, gid_generic, &overloaded);
+    let key = mangle_fn(&ws, gid_generic);
     // The declared-signature mangle: generic param encoded as its NAME (`T`),
     // no `int`/`bool` from either call site.
-    assert_eq!(key, "gid__T_ret_T", "generic intrinsic key must be the declared-signature mangle");
+    assert_eq!(key, "gid_T_ret_T", "generic intrinsic key must be the declared-signature mangle");
     assert!(is_intrinsic(gid_generic));
     assert!(!is_native_required(gid_generic));
     assert!(expand_kind(gid_generic).is_none());
@@ -99,7 +98,7 @@ fn generic_intrinsic_key_is_declared_signature_mangle() {
 
 // `@struct_expand` is recognized as the `StructPairs` expansion intrinsic
 // through the ONE registry recognizer, and a generic `@struct_expand` fn's key
-// is likewise its declared mangle (unique name here -> surface name).
+// is likewise its declared mangle (always-mangle: even a unique name mangles).
 const EXPAND: &str = r#"
 value V2 { x: float, y: float }
 enum U { F(float), Vv(V2) }
@@ -116,8 +115,11 @@ fn struct_expand_is_an_expansion_intrinsic() {
     assert_eq!(expand_kind(upairs), Some(ExpandKind::StructPairs));
     assert!(is_intrinsic(upairs), "an expansion intrinsic is an intrinsic");
 
-    let overloaded = compute_overloaded_names(&ws);
-    assert_eq!(mangle_fn(&ws, upairs, &overloaded), "upairs", "unique generic -> surface name key");
+    assert_eq!(
+        mangle_fn(&ws, upairs),
+        "upairs_T_ret_arr_tuple2_string_U",
+        "always-mangle: the declared-signature mangle (generic param as `T`)"
+    );
 
     // It is registered as an intrinsic declaration (name, arity=1).
     let declared = declared_intrinsics(&ws);
@@ -176,6 +178,6 @@ fn stdlib_native_required_set_has_luajit_mapping() {
         let f = stdlib_fn(&ws, n);
         assert!(is_native_required(f), "`{n}` must be @native_required");
         assert!(is_intrinsic(f), "`{n}` must be @intrinsic");
-        assert!(f.lua_body.is_some(), "`{n}` (native-required) must have an inline(lua) luajit mapping");
+        assert!(f.inline_body.is_some(), "`{n}` (native-required) must have an inline(lua) luajit mapping");
     }
 }

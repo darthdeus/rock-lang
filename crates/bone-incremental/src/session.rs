@@ -1,4 +1,7 @@
-use skull_parser::{Ast, FunctionBody, ItemKind, MacroRegistry, collect_registry, cook_one};
+use skull_parser::{
+    Ast, FunctionBody, ItemKind, MacroRegistry, check_macro_name_uniqueness, collect_registry,
+    cook_one,
+};
 
 use bone_semantic::{
     hir::{Function, Module, TypeCtor, TypeExpr},
@@ -146,6 +149,17 @@ pub enum FileDiff {
     LayoutOnly,
     BodiesOnly(Vec<usize>),
     Interface,
+}
+
+/// Reject a macro name colliding with a function name (call-position ambiguity),
+/// cross-module, on the pre-expansion module set (macros still present). The
+/// same gate `check_modules` applies on the CLI compile path, so sim / stone /
+/// LSP rebuilds refuse the same programs. Returns the first collision.
+fn reject_macro_name_collisions(modules: &[Ast]) -> Result<(), CompilerError> {
+    match check_macro_name_uniqueness(modules).into_iter().next() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
@@ -392,6 +406,7 @@ impl Session {
         let mut expanded = session.warm.clone();
         expanded.extend(user_modules);
         session.registry = collect_registry(&expanded);
+        reject_macro_name_collisions(&expanded)?;
         expand_and_desugar(&mut session.ws, &mut expanded)?;
 
         lower_and_infer(&mut session.ws, &expanded)?;
@@ -919,6 +934,7 @@ impl Session {
 
         let mut expanded = self.combined_unexpanded()?;
         let registry = collect_registry(&expanded);
+        reject_macro_name_collisions(&expanded)?;
         expand_and_desugar(&mut ws, &mut expanded)?;
 
         let all_mids = lower_and_infer(&mut ws, &expanded)?;
@@ -1659,8 +1675,8 @@ fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
         let ret = f.return_ty.as_ref().map(|t| render_ty(ws, t)).unwrap_or_default();
         let _ = write!(
             out,
-            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} lua={:?} extern={} anns={:?} ffi={:?}\n",
-            f.name, f.is_coroutine, f.is_variadic, f.num_required, f.lua_body, f.is_extern, f.annotations, f.ffi_lib,
+            "fn {} co={} var={} gen=[{generics}] params=[{params}] req={} ret={ret} inline={:?} backend={:?} extern={} anns={:?} ffi={:?}\n",
+            f.name, f.is_coroutine, f.is_variadic, f.num_required, f.inline_body, f.backend, f.is_extern, f.annotations, f.ffi_lib,
         );
     }
 

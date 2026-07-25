@@ -300,7 +300,7 @@ fn js_run_tests(
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, String)> = Vec::new();
 
-    let scx = ScalarCtx::new(ws);
+    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
     let mut supported: Vec<(usize, String)> = Vec::new();
     // Test indices that reject ONLY because they read a decorator-populated
@@ -431,12 +431,26 @@ fn js_run_tests(
 /// propagating node's exit code. A bone rejection or emit reject prints the
 /// diagnostic and exits non-zero -- never a silent fallback.
 pub fn js_run(path: &str) -> Result<()> {
-    if std::path::Path::new(path).is_dir() {
-        anyhow::bail!(
-            "js backend: `rock run <dir>` (project mode) is not supported yet -- pass a single \
-             .rock file (M1 is headless single-file program emission)"
-        );
+    let emitted = if std::path::Path::new(path).is_dir() {
+        emit_js_program_project(path).0
+    } else {
+        emit_js_program_single(path)
+    };
+
+    let program = build_run_program(&emitted);
+    match rock_host::js_runner::run_node_code_streaming(&program) {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            log::error!(target: "JS", "node run failed: {}", e.message);
+            std::process::exit(1);
+        }
     }
+}
+
+/// Emit the whole program for a single `.rock` file (M1 headless path). Diagnoses
+/// and exits on any parse/check/emit rejection -- never a silent fallback.
+fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     let src = match fs_err::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -460,24 +474,71 @@ pub fn js_run(path: &str) -> Result<()> {
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let scx = ScalarCtx::new(&ws);
-    let emitted = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
+    match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
             std::process::exit(1);
         }
-    };
+    }
+}
 
-    let program = build_run_program(&emitted);
-    match rock_host::js_runner::run_node_code_streaming(&program) {
-        Ok(0) => Ok(()),
-        Ok(code) => std::process::exit(code),
+/// Emit the whole program for a project directory (`rock run <dir> --backend
+/// js`). Mirrors `skull_emit_project`'s front half: discover the deterministic
+/// module set, bone-check, resolve the entry module, then the SAME
+/// `emit_program` the single-file path runs (module-loop-driven, order fixed by
+/// `project.rs` file-name sort). Game projects drop test-only files. Any
+/// rejection prints the project diagnostic and exits. Also returns the checked
+/// workspace -- the web assembler collects `rock_shader` pairs from it.
+pub(crate) fn emit_js_program_project(
+    dir: &str,
+) -> (skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace) {
+    match try_emit_js_program_project(dir) {
+        Ok(emitted) => emitted,
         Err(e) => {
-            log::error!(target: "JS", "node run failed: {}", e.message);
+            eprintln!("{e}");
             std::process::exit(1);
         }
     }
+}
+
+pub(crate) fn try_emit_js_program_project(
+    dir: &str,
+) -> Result<(skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace)> {
+    use std::path::PathBuf;
+    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
+    let sources = crate::unified_compile::discover_sources(&spec)
+        .map_err(|e| anyhow::anyhow!("cannot load project {dir}: {e}"))?;
+    let sources = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
+        sources.production_only()
+    } else {
+        sources
+    };
+    let (mut modules, entry_file) = match crate::skull_backend::skull_assemble_project(&sources) {
+        Ok(v) => v,
+        Err(errs) => return Err(anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errs)
+        )),
+    };
+    let ws = match crate::bone_backend::check_modules(&mut modules) {
+        Ok(ws) => ws,
+        Err(errs) => return Err(anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errs)
+        )),
+    };
+    let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
+    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
+    let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+        Ok(p) => p,
+        Err(e) => return Err(anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_err(&sources, &e)
+        )),
+    };
+    Ok((prog, ws))
 }
 
 /// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and
@@ -534,7 +595,7 @@ function put(s) { process.stdout.write(s); }
 /// A JS double-quoted string literal for a Rust string, escaping the control
 /// and non-ASCII chars a JS lexer needs (test output can carry arbitrary
 /// bytes). `{:?}` would emit Rust's `\u{XXXX}`, which JS rejects.
-fn js_str(s: &str) -> String {
+pub(crate) fn js_str(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {
         match c {

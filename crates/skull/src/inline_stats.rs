@@ -53,7 +53,7 @@ pub fn report(ws: &Workspace) -> InlineStatsReport {
         for (fid, f) in module.functions.iter() {
             // Mirror emit: only ordinary bodies inline (extern / inline(lua) /
             // coroutine bodies are never inlined into).
-            if f.is_extern || f.lua_body.is_some() || f.is_coroutine {
+            if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
                 continue;
             }
             funcs_scanned += 1;

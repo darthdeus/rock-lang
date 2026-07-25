@@ -11,7 +11,7 @@
 //! hoisted global name (no record, no `__call`).
 
 mod common;
-use common::{emit_module, function_body, run_luajit};
+use common::{emit_module, function_body, mangled_name, run_luajit};
 
 /// A lambda capturing a single-assignment fn param: the record + `(__rock_env, ..)` body
 /// shape, and no inline closure at the creation site.
@@ -25,13 +25,14 @@ fn main() { let f = mk_cap(5) print("{f()}") }
     // The capturing lambda hoists to an env-carrying body. Post-cutover the env
     // param is a normal (colored `c<N>`) cell materialized by the pass, not the
     // magic `__rock_env` local the old codegen path named it.
+    let lam = format!("{}__lambda0", mangled_name(&lua, "mk_cap"));
     assert!(
-        lua.contains("function mk_cap__lambda0(c"),
+        lua.contains(&format!("function {lam}(c")),
         "the capturing lambda hoists to an env-carrying body:\n{lua}"
     );
     let body = function_body(&lua, "mk_cap");
     assert!(
-        body.contains("setmetatable({ __fn = mk_cap__lambda0"),
+        body.contains(&format!("setmetatable({{ __fn = {lam}")),
         "the creation site builds an env record, not a closure:\n{body}"
     );
     assert!(body.contains("__rock_fn_mt"), "the record uses the shared metatable:\n{body}");
@@ -64,9 +65,10 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "pair_box");
+    let lam = format!("{}__lambda", mangled_name(&lua, "pair_box"));
     assert!(body.contains("= {}"), "the mutable capture declares a box `local c<N> = {{}}`:\n{body}");
     assert!(
-        body.contains("setmetatable({ __fn = pair_box__lambda"),
+        body.contains(&format!("setmetatable({{ __fn = {lam}")),
         "both captures hoist to env records:\n{body}"
     );
     // A boxed capture field passes the box TABLE (no `.v`); each hoisted body
@@ -96,14 +98,15 @@ fn main() {
     // Both lambdas hoist (the outer captures `x` transitively, threading it in);
     // inst-arena order fixes which k is inner vs outer, so assert order-agnostically.
     // Post-cutover the env param is a colored `c<N>` cell, not the magic `__rock_env`.
-    assert!(lua.contains("function outer_cap__lambda0(c"), "one nested lambda hoists to an env body:\n{lua}");
-    assert!(lua.contains("function outer_cap__lambda1(c"), "the other nested lambda hoists to an env body:\n{lua}");
+    let m = mangled_name(&lua, "outer_cap");
+    assert!(lua.contains(&format!("function {m}__lambda0(c")), "one nested lambda hoists to an env body:\n{lua}");
+    assert!(lua.contains(&format!("function {m}__lambda1(c")), "the other nested lambda hoists to an env body:\n{lua}");
     // The OUTER hoisted body constructs the INNER record, seeding the capture from
     // its OWN env (the transitive thread). The exact env-field render is a colored
     // `c<N>.c<M>`; the behavior below proves the thread, so pin only the record.
     let outer_builds_inner = (0..2).any(|k| {
-        let body = function_body(&lua, &format!("outer_cap__lambda{k}"));
-        body.contains("setmetatable({ __fn = outer_cap__lambda")
+        let body = function_body(&lua, &format!("{m}__lambda{k}"));
+        body.contains(&format!("setmetatable({{ __fn = {m}__lambda"))
     });
     assert!(outer_builds_inner, "the outer hoisted body must build the inner record:\n{lua}");
     let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_nested");
@@ -150,11 +153,12 @@ fn mk_snap(x: int) -> fn() -> int { return () => x }
 fn main() { let _ = mk_snap(1) }
 "#;
     let lua = emit_module(src);
-    let driver = "\nlocal a = mk_snap(1)\nlocal b = mk_snap(2)\n\
+    let mk = mangled_name(&lua, "mk_snap");
+    let driver = format!("\nlocal a = {mk}(1)\nlocal b = {mk}(2)\n\
         print(rawequal(a.__fn, b.__fn))\n\
         local extra = false\n\
         for k, v in pairs(a) do if k ~= \"__fn\" and type(v) == \"function\" then extra = true end end\n\
-        print(extra)\n";
+        print(extra)\n");
     let out = run_luajit(&format!("{lua}{driver}"), "envrec_snapshape");
     assert_eq!(
         out, "true\nfalse",

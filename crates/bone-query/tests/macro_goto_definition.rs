@@ -50,30 +50,43 @@ fn def_macro_invocation_jumps_to_the_macro_decl_cross_file() {
 }
 
 #[test]
-fn def_shared_macro_and_fn_name_resolves_by_arity() {
-    // A 2-arg macro and a 3-arg fn share the name (mirrors `run_into`). The
-    // 3-arg call is a FN call -- goto-def must fall through to the fn decl, not
-    // claim the macro (the registry arity check returns None for argc=3).
-    let path = "/probe/arity.rock";
-    let src = "macro pick(a: expr, b: expr) {\n\
+fn def_macro_overload_resolves_to_the_arity_matching_decl() {
+    // A macro name can't collide with a fn (rule: macro names are unique), but
+    // it CAN have overloads by arity. Goto-def picks the decl of the overload
+    // the call's arity selects -- the same `select_overload` expansion uses.
+    let path = "/probe/overload.rock";
+    let src = "macro pick(a: expr) {\n\
+               \x20   let _ = a\n\
+               }\n\
+               macro pick(a: expr, b: expr) {\n\
                \x20   let _ = a\n\
                \x20   let _ = b\n\
                }\n\
-               fn pick(a: int, b: int, c: int) -> int { return a + b + c }\n\
                fn main() {\n\
-               \x20   let _ = pick(1, 2, 3)\n\
+               \x20   pick(1)\n\
+               \x20   pick(1, 2)\n\
                }\n";
 
     let mut bone = BoneWorkspace::new();
     bone.update(path, src.to_string());
 
-    // The 3-arg call -> the fn decl (`fn pick` name at char 3 on line 4).
-    let fn_call = bone
-        .definition(path, pos(src, "pick(1, 2, 3)", 2))
-        .expect("goto-def on the 3-arg fn call");
+    // 1-arg call -> the 1-arg macro decl (`macro pick` name at char 6, line 0).
+    let one = bone
+        .definition(path, pos(src, "pick(1)", 2))
+        .expect("goto-def on the 1-arg macro call");
     assert_eq!(
-        (fn_call.range.start.line, fn_call.range.start.character),
-        (4, 3),
-        "the 3-arg call is a fn call -- must resolve to `fn pick`, not the macro"
+        (one.range.start.line, one.range.start.character),
+        (0, 6),
+        "1-arg call must resolve to the 1-arg overload decl"
+    );
+
+    // 2-arg call -> the 2-arg macro decl (`macro pick` name at char 6, line 3).
+    let two = bone
+        .definition(path, pos(src, "pick(1, 2)", 2))
+        .expect("goto-def on the 2-arg macro call");
+    assert_eq!(
+        (two.range.start.line, two.range.start.character),
+        (3, 6),
+        "2-arg call must resolve to the 2-arg overload decl"
     );
 }

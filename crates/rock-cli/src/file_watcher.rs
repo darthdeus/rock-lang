@@ -1,7 +1,7 @@
 use anyhow::Result;
-use notify::event::ModifyKind;
 use notify::RecursiveMode;
-use notify_debouncer_full::{new_debouncer, DebouncedEvent};
+use notify::event::ModifyKind;
+use notify_debouncer_full::{DebouncedEvent, new_debouncer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
@@ -45,6 +45,8 @@ pub struct FileWatcherConfig {
     pub restart_trigger_enabled: bool,
     /// File extensions to watch (e.g., ["rock"])
     pub watch_extensions: Vec<String>,
+    pub watch_all_files: bool,
+    pub ignored_roots: Vec<PathBuf>,
 }
 
 impl Default for FileWatcherConfig {
@@ -54,6 +56,8 @@ impl Default for FileWatcherConfig {
             filter_metadata: false,
             restart_trigger_enabled: false,
             watch_extensions: vec!["rock".to_string()],
+            watch_all_files: false,
+            ignored_roots: Vec::new(),
         }
     }
 }
@@ -124,23 +128,34 @@ impl FileWatcher {
         self
     }
 
+    pub fn with_all_files(mut self) -> Self {
+        self.config.watch_all_files = true;
+        self
+    }
+
+    pub fn with_ignored_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.config.ignored_roots = roots;
+        self
+    }
+
     /// Start watching the specified paths
     pub fn watch(
         self,
         paths: Vec<PathBuf>,
         change_tx: Sender<FileChangeEvent>,
-    ) -> Result<
-        notify_debouncer_full::Debouncer<
-            notify::RecommendedWatcher,
-            DebouncerCacheType,
-        >,
-    > {
+    ) -> Result<notify_debouncer_full::Debouncer<notify::RecommendedWatcher, DebouncerCacheType>>
+    {
         let config = self.config;
 
         // Canonicalized watched roots, captured for `is_tmp_scratch_file`'s
         // root-relative `tmp/` check. notify reports event paths under the
         // canonical root, so the roots must be canonical to strip_prefix.
         let scratch_roots: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect();
+        let ignored_roots: Vec<PathBuf> = config
+            .ignored_roots
             .iter()
             .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
             .collect();
@@ -161,6 +176,16 @@ impl FileWatcher {
                         let mut is_restart_trigger = false;
 
                         for event in events {
+                            let event_paths: Vec<&PathBuf> = event
+                                .paths
+                                .iter()
+                                .filter(|path| {
+                                    !ignored_roots.iter().any(|root| path.starts_with(root))
+                                })
+                                .collect();
+                            if event_paths.is_empty() {
+                                continue;
+                            }
                             // Check if this is a restart trigger file.
                             // Match strictly `<...>/tmp/restart.txt` via the
                             // OS-native Path API: works on both `/` and `\`,
@@ -169,10 +194,8 @@ impl FileWatcher {
                             // `ends_with("/restart.txt")` substring check
                             // would have triggered on).
                             if config.restart_trigger_enabled {
-                                for path in &event.paths {
-                                    let is_restart_file = path
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
+                                for &path in &event_paths {
+                                    let is_restart_file = path.file_name().and_then(|n| n.to_str())
                                         == Some("restart.txt");
                                     let parent_is_tmp = path
                                         .parent()
@@ -188,7 +211,10 @@ impl FileWatcher {
                             }
 
                             // Check if this event affects watched file types
-                            let affects_watched_files = event.paths.iter().any(|path| {
+                            let affects_watched_files = event_paths.iter().any(|path| {
+                                if config.watch_all_files {
+                                    return !path.to_string_lossy().ends_with('~');
+                                }
                                 if let Some(ext) = path.extension() {
                                     if let Some(ext_str) = ext.to_str() {
                                         // Ignore backup files ending with ~
@@ -212,7 +238,7 @@ impl FileWatcher {
                                             // and update the timestamp for each affected file
                                             // BUT: don't track timestamps for tmp/ files (except restart.txt)
                                             let now = Instant::now();
-                                            for path in &event.paths {
+                                            for &path in &event_paths {
                                                 if !is_tmp_scratch_file(path, &scratch_roots) {
                                                     data_write_timestamps.insert(path.clone(), now);
                                                 }
@@ -223,7 +249,7 @@ impl FileWatcher {
                                             // Check if we should debounce this metadata event
                                             // against a recent data event on the same file
                                             let mut should_debounce = false;
-                                            for path in &event.paths {
+                                            for &path in &event_paths {
                                                 if let Some(last_data_write) =
                                                     data_write_timestamps.get(path)
                                                 {
@@ -234,7 +260,7 @@ impl FileWatcher {
                                                             METADATA_DEBOUNCE_MS,
                                                         )
                                                     {
-                                                            should_debounce = true;
+                                                        should_debounce = true;
                                                         break;
                                                     }
                                                 }
@@ -265,14 +291,12 @@ impl FileWatcher {
 
                             if is_relevant && (affects_watched_files || is_restart_trigger) {
                                 has_relevant_changes = true;
-                                for path in &event.paths {
+                                for &path in &event_paths {
                                     if is_tmp_scratch_file(path, &scratch_roots) {
                                         continue;
                                     }
-                                    let is_backup = path
-                                        .to_string_lossy()
-                                        .ends_with('~');
-                                    if path.is_file() && !is_backup {
+                                    let is_backup = path.to_string_lossy().ends_with('~');
+                                    if !path.is_dir() && !is_backup {
                                         affected_paths.insert(path.clone());
                                     }
                                 }

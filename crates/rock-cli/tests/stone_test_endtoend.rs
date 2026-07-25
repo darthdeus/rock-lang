@@ -73,7 +73,7 @@ fn global_type_change_vec_to_arena_emits_restart_decision() {
 fn incremental_recompile_lua_runs_correctly_under_hot_reload() {
     let h = StoneHarness::spawn(&[(
         "a.rock",
-        "global SCORE: int = 0\nfn bump() { SCORE = SCORE + 1 }\n",
+        "global SCORE: int = 0\n@nomangle fn bump() { SCORE = SCORE + 1 }\n",
     )]);
     // Settle before reading `before_lua` so a phantom seed-file event
     // (the OS can deliver one for the seed write right after the watcher
@@ -84,7 +84,7 @@ fn incremental_recompile_lua_runs_correctly_under_hot_reload() {
 
     h.write_file(
         "a.rock",
-        "global SCORE: int = 0\nfn bump() { SCORE = SCORE + 10 }\n",
+        "global SCORE: int = 0\n@nomangle fn bump() { SCORE = SCORE + 10 }\n",
     );
     let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
     assert!(
@@ -138,13 +138,13 @@ fn incremental_recompile_lua_runs_correctly_under_hot_reload() {
 fn function_body_change_keeps_hot_reload_decision() {
     let h = StoneHarness::spawn(&[(
         "a.rock",
-        "global SCORE: int = 0\nfn bump() { SCORE = SCORE + 1 }\n",
+        "global SCORE: int = 0\n@nomangle fn bump() { SCORE = SCORE + 1 }\n",
     )]);
     h.await_reload_count(1, SETTLE_TIMEOUT);
 
     h.write_file(
         "a.rock",
-        "global SCORE: int = 0\nfn bump() { SCORE = SCORE + 99 }\n",
+        "global SCORE: int = 0\n@nomangle fn bump() { SCORE = SCORE + 99 }\n",
     );
     let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
     assert!(log.len() >= 2);

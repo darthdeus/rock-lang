@@ -64,9 +64,11 @@ fn js_number(f: f64) -> Result<String, CompilerError> {
 }
 
 /// A JS double-quoted string literal escaping the control chars a JS lexer
-/// needs. Non-ASCII-printable bytes reject rather than guessing an encoding
-/// (the Lua backend passes UTF-8 through verbatim; JS source is UTF-16, so a
-/// raw copy would diverge -- out of the T2 subset).
+/// needs. Non-ASCII chars encode as `\u` escapes (UTF-16 code units, the same
+/// scheme the driver's `js_str` uses) -- JS string LENGTH then counts UTF-16
+/// units where Lua counts bytes, a known cross-backend divergence for
+/// non-ASCII content; rejecting outright bricked whole game builds over an
+/// em-dash in a log message.
 fn js_string_lit(s: &str) -> Result<String, CompilerError> {
     let mut o = String::from("\"");
     for c in s.chars() {
@@ -77,11 +79,10 @@ fn js_string_lit(s: &str) -> Result<String, CompilerError> {
             '\r' => o.push_str("\\r"),
             '\t' => o.push_str("\\t"),
             c if c.is_ascii() && !c.is_ascii_control() => o.push(c),
-            _ => {
-                return Err(err(format!(
-                    "JS subset: non-ASCII-printable char in string literal (U+{:04X})",
-                    c as u32
-                )))
+            c => {
+                for u in c.encode_utf16(&mut [0u16; 2]) {
+                    o.push_str(&format!("\\u{:04x}", u));
+                }
             }
         }
     }
@@ -150,6 +151,7 @@ pub fn emit_fn_with_callees(
         shared_tail_reject: false,
         pack_multi_return: false,
         hoisted_temps: HashSet::new(),
+        nbv_bypass: compute_nbv_bypass(mf, &reachable_blocks(mf)),
         out: String::new(),
         indent: 1,
     };
@@ -240,6 +242,7 @@ pub fn emit_fn_trampoline(
         shared_tail_reject: false,
         pack_multi_return,
         hoisted_temps,
+        nbv_bypass: compute_nbv_bypass(mf, &region),
         out: String::new(),
         indent: 1,
     };
@@ -368,6 +371,12 @@ struct Emitter<'a> {
     /// their per-case `let`. Empty for the structured path (block nesting keeps a
     /// temp in scope) and the spilled coroutine step (no cross-block temps).
     hoisted_temps: HashSet<u32>,
+    /// Value-element NativeBuffer slot refs (raw inst ids) whose EVERY use is a
+    /// `Field`/`StoreField` base: those consumers render flat-slot access from
+    /// the ref's own operands, so the ref itself emits no statement (its Lua
+    /// analogue is a cdata slot local; on JS there is no per-element view to
+    /// bind). A ref with any OTHER use materializes as a whole-element COPY.
+    nbv_bypass: HashSet<u32>,
     out: String,
     indent: usize,
 }
@@ -428,6 +437,9 @@ impl Emitter<'_> {
     /// Inlinable and dead-pure insts emit nothing.
     fn inst_emits(&self, iid: Idx<Inst>) -> bool {
         let inst = &self.mf.insts[iid];
+        if self.nbv_bypass.contains(&raw(iid)) {
+            return false;
+        }
         if matches!(inst, Inst::Store { .. } | Inst::StoreIndex { .. }) {
             return true;
         }
@@ -987,6 +999,12 @@ impl Emitter<'_> {
                     );
                     let line = match kind {
                         ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
+                        // Whole value-struct element write: per-leaf stores into
+                        // the flat backing from the value object (a MakeValueStruct
+                        // renders as an object literal; a copy read is an object).
+                        ContainerKind::NativeBufferValue(elem) => {
+                            self.nbv_write_stmt(&b, &i, &v, *elem, 0, *elem)?
+                        }
                         ContainerKind::Vec => format!("__vec_checked_set({b}, {i}, {v});"),
                         ContainerKind::Map => format!("{b}.set({i}, {v});"),
                     };
@@ -1006,8 +1024,32 @@ impl Emitter<'_> {
                     self.push(&format!("{k} = __map_next({t}, {k});"));
                     self.push(&format!("{v} = ({k} === null ? null : {t}.get({k}));"));
                 }
-                // `base.field = value` (struct field / cursor mutation).
+                // `base.field = value` (struct field / cursor mutation). A base
+                // that projects a value-element NativeBuffer slot (the scalarized
+                // element-store shape) writes the flat backing instead: a float
+                // leaf via `__nbv_set`, a nested value-struct field via the
+                // per-leaf write IIFE (matching Lua's whole-cdata field assign).
                 Inst::StoreField { base, field, value } => {
+                    if let Some((b_iid, i_iid, root, off, cur)) = self.nbv_proj(*base)? {
+                        let (k, fields) = self.nbv_layout(cur)?;
+                        let _ = k;
+                        let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
+                            err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
+                        })?;
+                        let (root_k, _) = self.nbv_layout(root)?;
+                        let b = self.render_val(b_iid)?;
+                        let i = self.render_val(i_iid)?;
+                        let v = self.render_val(*value)?;
+                        let line = match f.nested {
+                            None => format!(
+                                "__nbv_set({b}, {i}, {root_k}, {}, {v});",
+                                off + f.offset
+                            ),
+                            Some(n) => self.nbv_write_stmt(&b, &i, &v, root, off + f.offset, n)?,
+                        };
+                        self.push(&line);
+                        continue;
+                    }
                     let line = format!(
                         "{}.{field} = {};",
                         self.render_val(*base)?,
@@ -1059,12 +1101,19 @@ impl Emitter<'_> {
                 // it would silently lose the OOB error, diverging under
                 // `try_call(|| xs[oob])`). Map index is a raw miss-returns-nil VM
                 // op with no side effect, so it stays droppable below.
-                Inst::Index { kind: ContainerKind::Vec | ContainerKind::NativeBuffer, .. }
-                    if self.use_count[raw(iid) as usize] == 0 =>
+                Inst::Index { kind, .. }
+                    if (matches!(kind, ContainerKind::Vec) || kind.is_native_buffer())
+                        && self.use_count[raw(iid) as usize] == 0 =>
                 {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
+                // A value-element slot ref consumed entirely by Field/StoreField
+                // renders through its consumers -- no statement here (the copy
+                // materialize would be dead work per scalarized element store).
+                Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. }
+                    if self.nbv_bypass.contains(&raw(iid)) => {}
+                Inst::Field { .. } if self.nbv_bypass.contains(&raw(iid)) => {}
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
@@ -1364,6 +1413,13 @@ impl Emitter<'_> {
                 let (b, i) = (self.render_val(*base)?, self.render_val(*index)?);
                 match kind {
                     ContainerKind::NativeBuffer => format!("__nb_checked_get({b}, {i})"),
+                    // A whole value-struct element read materializes a COPY object
+                    // from the flat slots (immutable in Rock, so indistinguishable
+                    // from Lua's cdata ref). Field/StoreField consumers never see
+                    // this render -- they lower flat access from the operands.
+                    ContainerKind::NativeBufferValue(elem) => {
+                        self.nbv_copy_expr(&b, &i, *elem, 0, *elem)?
+                    }
                     ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
                     // Map miss returns nil (raw VM op in Lua); JS Map.get returns
                     // undefined on miss, which `== null` treats as nil.
@@ -1371,7 +1427,9 @@ impl Emitter<'_> {
                 }
             }
             Inst::Len { base, kind } => match kind {
-                ContainerKind::NativeBuffer | ContainerKind::Vec => {
+                ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferValue(_)
+                | ContainerKind::Vec => {
                     format!("{}.len", self.render_val(*base)?)
                 }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
@@ -1383,15 +1441,41 @@ impl Emitter<'_> {
             Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
-                other => {
-                    return Err(err(format!(
-                        "JS subset: native_buffer_alloc element ctype `{other}` has no TypedArray"
-                    )))
-                }
+                // An all-float value struct (e.g. the vertex pool) has no per-struct
+                // ctype on JS: back it onto one flat Float32Array of `n * k` floats
+                // (k = flattened float leaf count). The `.ptr` is that array; the
+                // hot path reads it through a cached `Ptr<float>` view (a js sibling
+                // of `__vbo_as_float_ptr` returns `.ptr` itself). A value struct with
+                // any non-float leaf still rejects.
+                other => match skull_mir::lower::value_struct_all_float_leaf_count(self.ws, *ctype) {
+                    Some(k) => format!("new Float32Array(({}) * {k})", self.render_val(*count)?),
+                    None => {
+                        return Err(err(format!(
+                            "JS subset: native_buffer_alloc element ctype `{other}` has no \
+                             TypedArray (only int, float, and all-float value structs map)"
+                        )))
+                    }
+                },
             },
             // A general field read is JS property access. NativeBuffer `.ptr`/
-            // `.len` and Vec `._data`/`.len` are the same shape.
+            // `.len` and Vec `._data`/`.len` are the same shape. A base that
+            // projects a value-element NativeBuffer slot lowers to flat-slot
+            // access instead: a float leaf reads `__nbv_get`, a nested value
+            // struct materializes its sub-object copy.
             Inst::Field { base, field } => {
+                if let Some((b_iid, i_iid, root, off, cur)) = self.nbv_proj(*base)? {
+                    let (_, fields) = self.nbv_layout(cur)?;
+                    let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
+                        err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
+                    })?;
+                    let (root_k, _) = self.nbv_layout(root)?;
+                    let b = self.render_val(b_iid)?;
+                    let i = self.render_val(i_iid)?;
+                    return Ok(match f.nested {
+                        None => format!("__nbv_get({b}, {i}, {root_k}, {})", off + f.offset),
+                        Some(n) => self.nbv_copy_expr(&b, &i, root, off + f.offset, n)?,
+                    });
+                }
                 format!("{}.{field}", self.render_val(*base)?)
             }
             // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
@@ -1450,6 +1534,161 @@ impl Emitter<'_> {
         ))
     }
 
+    /// Flat-slot layout of value-element `elem`: `(stride k, immediate fields)`.
+    /// Errs (fail-closed) when `elem` has a non-float leaf -- such a buffer cannot
+    /// be allocated on JS (`FfiNewArray` rejects), so access to one is a backend
+    /// gap, never a silent scalar read.
+    fn nbv_layout(
+        &self,
+        elem: ustr::Ustr,
+    ) -> Result<(usize, Vec<skull_mir::lower::ValueSlotField>), CompilerError> {
+        let k = skull_mir::lower::value_struct_all_float_leaf_count(self.ws, elem);
+        let fields = skull_mir::lower::value_struct_slot_fields(self.ws, elem);
+        match (k, fields) {
+            (Some(k), Some(fields)) => Ok((k, fields)),
+            _ => Err(err(format!(
+                "JS subset: NativeBuffer element `{elem}` is not an all-float value \
+                 struct -- no flat Float32Array layout to index"
+            ))),
+        }
+    }
+
+    /// Resolve `iid` as a value-element NativeBuffer projection: the root
+    /// `Index{NativeBufferValue}` or a nested-struct `Field` chain off one.
+    /// `Ok(None)` = not NBV-related; `Err` = NBV but unlowerable (fail-closed).
+    /// Returns `(buf inst, index inst, root elem, cumulative offset, cur struct)`.
+    fn nbv_proj(
+        &self,
+        iid: Idx<Inst>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ustr::Ustr, usize, ustr::Ustr)>, CompilerError> {
+        match &self.mf.insts[iid] {
+            Inst::Index { base, index, kind: ContainerKind::NativeBufferValue(e) } => {
+                self.nbv_layout(*e)?;
+                Ok(Some((*base, *index, *e, 0, *e)))
+            }
+            Inst::Field { base, field } => {
+                let Some((b, i, root, off, cur)) = self.nbv_proj(*base)? else {
+                    return Ok(None);
+                };
+                let (_, fields) = self.nbv_layout(cur)?;
+                let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
+                    err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
+                })?;
+                match f.nested {
+                    Some(n) => Ok(Some((b, i, root, off + f.offset, n))),
+                    // A float leaf terminates the projection chain -- the Field
+                    // render handles it directly; it is never itself a base.
+                    None => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// `{__ty: "S", f: __b.ptr[__o + N], nested: {...}}` -- the object literal
+    /// reading struct `cur`'s leaves from the flat backing, relative to the free
+    /// vars `__b` (buffer) and `__o` (element base slot). `base` is the cumulative
+    /// float offset of `cur` within the root element.
+    fn nbv_obj_literal(&self, cur: ustr::Ustr, base: usize) -> Result<String, CompilerError> {
+        let (_, fields) = self.nbv_layout(cur)?;
+        let mut parts = vec![format!("__ty: {}", js_string_lit(cur.as_str())?)];
+        for f in &fields {
+            let part = match f.nested {
+                Some(n) => self.nbv_obj_literal(n, base + f.offset)?,
+                None => format!("__b.ptr[__o + {}]", base + f.offset),
+            };
+            parts.push(format!("{}: {part}", f.name));
+        }
+        Ok(format!("{{{}}}", parts.join(", ")))
+    }
+
+    /// Whole-element (or nested sub-struct) COPY read: a bounds-checked IIFE
+    /// materializing the value-struct object from the flat slots. Value structs
+    /// are immutable in Rock, so a copy is indistinguishable from Lua's cdata ref.
+    fn nbv_copy_expr(
+        &self,
+        b: &str,
+        i: &str,
+        root: ustr::Ustr,
+        off: usize,
+        cur: ustr::Ustr,
+    ) -> Result<String, CompilerError> {
+        let (k, _) = self.nbv_layout(root)?;
+        let obj = self.nbv_obj_literal(cur, off)?;
+        Ok(format!(
+            "(function(__b, __i) {{ __nbv_check(__b, __i); var __o = __i * {k}; return {obj}; }})({b}, {i})"
+        ))
+    }
+
+    /// Leaf-store lines writing struct `cur` (at cumulative offset `base`) from
+    /// the object expression `__v{path}` -- used by the whole-element write IIFE.
+    fn nbv_store_lines(
+        &self,
+        cur: ustr::Ustr,
+        base: usize,
+        path: &str,
+        out: &mut Vec<String>,
+    ) -> Result<(), CompilerError> {
+        let (_, fields) = self.nbv_layout(cur)?;
+        for f in &fields {
+            match f.nested {
+                Some(n) => self.nbv_store_lines(n, base + f.offset, &format!("{path}.{}", f.name), out)?,
+                None => out.push(format!("__b.ptr[__o + {}] = __v{path}.{};", base + f.offset, f.name)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whole-element (or nested sub-struct) write: bounds-checked IIFE storing
+    /// every leaf of `cur` (at offset `off` within root) from the value object.
+    fn nbv_write_stmt(
+        &self,
+        b: &str,
+        i: &str,
+        v: &str,
+        root: ustr::Ustr,
+        off: usize,
+        cur: ustr::Ustr,
+    ) -> Result<String, CompilerError> {
+        let (k, _) = self.nbv_layout(root)?;
+        let mut lines = Vec::new();
+        self.nbv_store_lines(cur, off, "", &mut lines)?;
+        Ok(format!(
+            "(function(__b, __i, __v) {{ __nbv_check(__b, __i); var __o = __i * {k}; {} }})({b}, {i}, {v});",
+            lines.join(" ")
+        ))
+    }
+
+    /// Colon-format render of a GC-free value struct `inspect` arg, matching the
+    /// luajit cdata `__tostring` (`Name { f: v }`, declaration field order). Nested
+    /// value-struct fields recurse; primitive leaves defer to the generic `inspect`.
+    fn render_value_struct_inspect(
+        &self,
+        id: Idx<Inst>,
+        cyc: &str,
+        prec: &str,
+    ) -> Result<String, CompilerError> {
+        if let Inst::MakeValueStruct { name, fields } = &self.mf.insts[id] {
+            if let Some(order) = skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name) {
+                let fmap: HashMap<ustr::Ustr, Idx<Inst>> = fields.iter().copied().collect();
+                let mut expr = js_string_lit(&format!("{name} {{ "))?;
+                for (i, fname) in order.iter().enumerate() {
+                    let vid = *fmap.get(fname).ok_or_else(|| {
+                        err(format!("value struct `{name}` field `{fname}` absent at inspect boundary"))
+                    })?;
+                    if i > 0 {
+                        expr.push_str(&format!(" + {}", js_string_lit(", ")?));
+                    }
+                    expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
+                    expr.push_str(&format!(" + {}", self.render_value_struct_inspect(vid, cyc, prec)?));
+                }
+                expr.push_str(&format!(" + {}", js_string_lit(" }")?));
+                return Ok(format!("({expr})"));
+            }
+        }
+        Ok(format!("inspect({}, {cyc}, {prec})", self.render_val(id)?))
+    }
+
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
         // `inspect`/`inspect_formatted` of a GC-FREE value struct still diverges:
@@ -1460,13 +1699,34 @@ impl Emitter<'_> {
         // equals-format walker as the JS object (NOT the `_vt.__tostring`, which it
         // never calls -- oracle-verified: luajit renders `Bag { n = 5, xs = Vec {..} }`),
         // so it inspects faithfully. A boxed ENUM likewise renders faithfully (T8e).
+        // `inspect` of a GC-FREE value struct: luajit renders it via the cdata
+        // `__tostring` as `Name { f: v }` (COLON, declaration field order), where the
+        // generic `{__ty,..}`-object walker would emit `f = v` (equals, sorted keys).
+        // A GC-free value struct's fields are bounded to primitives + nested value
+        // structs (no strings/GC by the C-layout rule), so an emit-time recursive
+        // colon renderer is exact -- primitive leaves go through the generic
+        // `inspect` (lua_tostring / precision parity), nested value structs recurse.
         if matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
                 if let Inst::MakeValueStruct { name, .. } = &self.mf.insts[arg0] {
+                    if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
+                        let (cyc, prec) = if cf.name.as_str() == "inspect_formatted" {
+                            ("true".to_string(), self.render_val(args[1])?)
+                        } else {
+                            (
+                                args.get(1).map(|a| self.render_val(*a)).transpose()?.unwrap_or_else(|| "true".to_string()),
+                                args.get(2).map(|a| self.render_val(*a)).transpose()?.unwrap_or_else(|| "(-1)".to_string()),
+                            )
+                        };
+                        return self.render_value_struct_inspect(arg0, &cyc, &prec);
+                    }
+                    // A scalarized ENUM box reaches here (name is an enum value-shape,
+                    // not a struct): its numeric tag / named variant cannot be rebuilt
+                    // from the `{__tag, _n}` object -- reject honestly.
                     if skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
                         return Err(err(format!(
-                            "JS subset: `inspect` of GC-free value struct `{name}` \
-                             (colon-format cdata render; deferred to value-struct repr)"
+                            "JS subset: `inspect` of scalarized enum `{name}` \
+                             (numeric-tag box cannot reproduce the named variant)"
                         )));
                     }
                 }
@@ -1601,12 +1861,22 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
     false
 }
 
-/// Deterministic JS name for a co-emitted callee, unique per `FuncRef`
-/// (`<name>__m<module>_f<fn>`): concatenating independently emitted closure
-/// programs can only ever collide on byte-identical definitions.
+/// Deterministic JS name for a co-emitted callee -- the SHARED mangle keyed on
+/// `(name, declared signature)`, identical to the Lua and GLSL backends. Exempt
+/// (`extern`/`@nomangle`/`@test`/`main`/`test_*`) fns keep their bare name: the
+/// discipline is "called by original name from inline bodies / compiler
+/// codegen", and on JS an inline(js) body or a driver-injected line is verbatim
+/// text that can only use the bare name (same rule as the lua backend).
 pub fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
     let f = &ws.module(fr.module).functions[fr.func];
-    format!("{}__m{}_f{}", f.name, fr.module.index(), raw(fr.func))
+    skull_mir::mangle::mangle_fn(ws, f)
+}
+
+/// A `@nomangle` fn keeps its bare name, so an inline(js) body referencing it by
+/// its literal source name resolves to that bare global (the verbatim-name
+/// discipline).
+fn is_nomangle(f: &bone_semantic::hir::Function) -> bool {
+    f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
 }
 
 /// Emit `roots` (each under its given JS name) plus the transitive plain-Rock
@@ -1622,8 +1892,9 @@ pub fn emit_with_closure(
 ) -> Result<String, CompilerError> {
     let mut st = WorklistState::new(ws, roots, false);
     drain_worklists(ws, scx, &mut st)?;
+    st.canonicalize_emission_order();
     let bodies = st.top_bodies();
-    check_scalar_abi(ws, &st.lowered, &bodies)?;
+    check_scalar_abi(ws, scx, &st.lowered, &bodies)?;
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -1638,11 +1909,14 @@ pub fn emit_with_closure(
             out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
         }
     }
-    for line in order_global_inits(&st.ginits)? {
-        out.push_str(&line);
+    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+        out.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
         out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
+    }
+    for fr in &st.inline_js {
+        out.push_str(&emit_inline_js_fn(ws, scx, *fr, &st.names[fr]));
     }
     Ok(out)
 }
@@ -1674,8 +1948,38 @@ pub fn emit_program(
         extra.push((fr, nm.clone()));
         nm
     });
-    let program = emit_program_core(ws, scx, &extra)?;
-    Ok(JsProgram { program, main_js_name })
+    let build = build_program_core(ws, scx, &extra)?;
+    Ok(JsProgram { program: build.program, main_js_name })
+}
+
+pub fn emit_program_cached(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    user_mid: bone_semantic::prelude::ModuleId,
+) -> Result<(JsProgram, JsEmitCache), CompilerError> {
+    let mut extra = Vec::new();
+    let main_js_name = nullary_main(ws, user_mid).map(|fr| {
+        let name = callee_js_name(ws, fr);
+        extra.push((fr, name.clone()));
+        name
+    });
+    let build = build_program_core(ws, scx, &extra)?;
+    let static_keys = build
+        .chunks
+        .values()
+        .flat_map(|chunk| chunk.statics.iter())
+        .map(|cell| (cell.cell, static_cell_key(cell)))
+        .collect();
+    let program = JsProgram {
+        program: build.program.clone(),
+        main_js_name,
+    };
+    let cache = JsEmitCache {
+        build,
+        changed_since_full: HashSet::new(),
+        static_keys,
+    };
+    Ok((program, cache))
 }
 
 /// [`emit_program`] with EXPLICIT extra roots and no `main` handling -- the
@@ -1701,6 +2005,14 @@ fn emit_program_core(
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
+    Ok(build_program_core(ws, scx, extra_roots)?.program)
+}
+
+fn build_program_core(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    extra_roots: &[(FuncRef, String)],
+) -> Result<ProgramBuild, CompilerError> {
     let deco_names = decorator_names(ws);
     let mut roots: Vec<(FuncRef, String)> = extra_roots.to_vec();
     let mut root_set: HashSet<FuncRef> = extra_roots.iter().map(|(fr, _)| *fr).collect();
@@ -1719,6 +2031,8 @@ fn emit_program_core(
     }
 
     let mut st = WorklistState::new(ws, &roots, true);
+
+    force_shader_register_sibling(ws, &mut st)?;
 
     // Decorator DEFINITION bodies (`deco <kind> <name> { .. }` -> `__deco_<name>`),
     // for the APPLIED decorators only (D1 reachability: an unapplied `deco` -- e.g.
@@ -1746,52 +2060,161 @@ fn emit_program_core(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
+            register_statics(&mf, &mut st.gctx);
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+                &mut st.inline_js,
             )?;
             deco_bodies.push((deco_name, mf));
         }
     }
 
     drain_worklists(ws, scx, &mut st)?;
+    st.canonicalize_emission_order();
 
     let mut bodies = st.top_bodies();
     bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
-    check_scalar_abi(ws, &st.lowered, &bodies)?;
+    check_scalar_abi(ws, scx, &st.lowered, &bodies)?;
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
-    out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
-    out.push_str(&emit_vt_eq(ws, &bodies)?);
+    let mut stable = String::new();
+    let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
+    out.push_str(&enum_singletons);
+    stable.push_str(&enum_singletons);
+    let vt_eq = emit_vt_eq(ws, &bodies)?;
+    out.push_str(&vt_eq);
+    stable.push_str(&vt_eq);
     // 1. deco def fns.
     for (name, mf) in &deco_bodies {
-        out.push_str(&emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?);
+        let definition = emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?;
+        out.push_str(&definition);
+        stable.push_str(&definition);
         for nf in &mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+            let definition =
+                emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?;
+            out.push_str(&definition);
+            stable.push_str(&definition);
         }
     }
     // 2. fn defs (main, decorated fns, transitive callees).
+    let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
-        out.push_str(&emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?);
+        let js = emit_lowered_fn(ws, *fr, mf, &st.names[fr], &st.names, &hoisted, &st.gctx)?;
+        out.push_str(&js);
+        chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
+    }
+    // 2b. inline(js) fns, emitted verbatim.
+    for fr in &st.inline_js {
+        let definition = emit_inline_js_fn(ws, scx, *fr, &st.names[fr]);
+        out.push_str(&definition);
+        stable.push_str(&definition);
     }
     // 3. ginit def fns.
+    let mut const_chunks = HashMap::new();
     for g in &st.ginits {
-        out.push_str(&emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?);
+        let definition =
+            emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?;
+        out.push_str(&definition);
+        if g.is_const {
+            const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
+        } else {
+            stable.push_str(&definition);
+        }
         for nf in &g.mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+            let definition =
+                emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?;
+            out.push_str(&definition);
+            if g.is_const {
+                const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
+            } else {
+                stable.push_str(&definition);
+            }
         }
     }
     // 4. load-time init lines (dependency-ordered).
-    for line in order_global_inits(&st.ginits)? {
-        out.push_str(&line);
+    let mut const_order = Vec::new();
+    for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
+        out.push_str(&init.js);
+        if let Some(chunk) = const_chunks.get_mut(&init.name) {
+            chunk.push_str(&init.js);
+            const_order.push(init.name);
+        } else {
+            stable.push_str(&init.js);
+        }
     }
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
-    out.push_str(&decorator_application_lines_js(ws, &deco_names, &st.names)?);
+    let applications = decorator_application_lines_js(ws, &deco_names, &st.names)?;
+    out.push_str(&applications);
+    stable.push_str(&applications);
 
-    Ok(out)
+    Ok(ProgramBuild {
+        program: out,
+        stable,
+        chunks,
+        const_chunks,
+        const_order,
+    })
+}
+
+/// `rock_shader(vert, frag)` collapses to a pipeline key const; the driver emits
+/// one top-level `__rock_shader_register(key, glsl)` per distinct pair (the JS
+/// assembler mirrors skull's Lua `shader_registration_lines`). Those calls are
+/// raw driver text, not MIR, so the register fn is never discovered
+/// transitively -- force its js sibling into the program under its bare
+/// `@nomangle` name whenever a pair exists, so the register lines resolve. The
+/// native Rock body (WATCHER lookup + GL compile) is not JS-emittable, so a
+/// program with a shader pair but no reachable js sibling REJECTS rather than
+/// silently dropping the registration (P2, docs/stone-web-plan.md).
+fn force_shader_register_sibling(
+    ws: &Workspace,
+    st: &mut WorklistState,
+) -> Result<(), CompilerError> {
+    if skull_mir::lower::collect_shader_pairs(ws)?.is_empty() {
+        return Ok(());
+    }
+    let name = ustr::Ustr::from("__rock_shader_register");
+    let cands = ws.functions_by_name.get(&name).map(|l| l.as_slice()).unwrap_or(&[]);
+    // Exact-JS sibling first (the intrinsics precedence doctrine), else the
+    // portable plain-Rock body (the engine's real watcher.rock registration
+    // path, JS-emittable once its inline(lua) helpers have js siblings).
+    let target = cands
+        .iter()
+        .find(|(m, f)| {
+            let cf = &ws.module(*m).functions[*f];
+            cf.backend == bone_semantic::hir::FnBackend::Js
+                && (matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) || cf.is_extern)
+        })
+        .or_else(|| {
+            cands.iter().find(|(m, f)| {
+                let cf = &ws.module(*m).functions[*f];
+                cf.inline_body.is_none() && !cf.is_extern
+            })
+        });
+    let &(m, f) = target.ok_or_else(|| {
+        err(
+            "JS: `rock_shader` pipelines emit `__rock_shader_register` calls, but no \
+             JS-servable `__rock_shader_register` is reachable (inline(js)/extern(js) \
+             sibling or a plain-Rock body); refusing to drop the shader registration",
+        )
+    })?;
+    let fr = FuncRef { module: m, func: f };
+    if st.seen.insert(fr) {
+        // Bare @nomangle name: the driver register lines call it verbatim.
+        st.names.insert(fr, name.to_string());
+        let cf = &ws.module(m).functions[f];
+        if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+            st.inline_js.push(fr);
+            scan_inline_js_body(ws, fr, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js);
+        } else if cf.inline_body.is_none() && !cf.is_extern {
+            st.queue.push(fr);
+        }
+        // extern(js): runtime provides the global -- no def emitted.
+    }
+    Ok(())
 }
 
 /// A whole-program JS emission plus the entry fn's JS name (`None` when the entry
@@ -1800,6 +2223,212 @@ fn emit_program_core(
 pub struct JsProgram {
     pub program: String,
     pub main_js_name: Option<String>,
+}
+
+struct JsChunk {
+    js: String,
+    statics: Vec<skull_mir::mir::StaticCell>,
+}
+
+struct ProgramBuild {
+    program: String,
+    stable: String,
+    chunks: HashMap<FuncRef, JsChunk>,
+    const_chunks: HashMap<ustr::Ustr, String>,
+    const_order: Vec<ustr::Ustr>,
+}
+
+pub struct JsEmitCache {
+    build: ProgramBuild,
+    changed_since_full: HashSet<FuncRef>,
+    static_keys: HashMap<ustr::Ustr, String>,
+}
+
+impl JsEmitCache {
+    pub fn current_program(&self) -> &str {
+        &self.build.program
+    }
+}
+
+pub enum JsReload {
+    Overlay(String),
+    FullRequired,
+    NoChange,
+}
+
+impl JsReload {
+    pub fn expect_overlay(self) -> String {
+        match self {
+            Self::Overlay(js) => js,
+            Self::FullRequired => panic!("JS overlay required a full reload"),
+            Self::NoChange => panic!("JS overlay reported no emitted change"),
+        }
+    }
+}
+
+pub fn emit_overlay(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    user_mid: bone_semantic::prelude::ModuleId,
+    cache: &mut JsEmitCache,
+    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+) -> Result<JsReload, CompilerError> {
+    if reinferred
+        .iter()
+        .any(|(_, owner)| {
+            !matches!(
+                owner,
+                bone_semantic::hir::BodyOwner::Function(_)
+                    | bone_semantic::hir::BodyOwner::Global(_)
+            )
+        })
+    {
+        return Ok(JsReload::FullRequired);
+    }
+
+    let mut roots = Vec::new();
+    if let Some(main) = nullary_main(ws, user_mid) {
+        roots.push((main, callee_js_name(ws, main)));
+    }
+    let current = build_program_core(ws, scx, &roots)?;
+    if current.stable != cache.build.stable {
+        return Ok(JsReload::FullRequired);
+    }
+    if current.const_chunks.keys().collect::<HashSet<_>>()
+        != cache.build.const_chunks.keys().collect::<HashSet<_>>()
+    {
+        return Ok(JsReload::FullRequired);
+    }
+
+    let mut changed_now = HashSet::new();
+    for (fref, chunk) in &current.chunks {
+        if cache
+            .build
+            .chunks
+            .get(fref)
+            .is_none_or(|previous| previous.js != chunk.js)
+        {
+            changed_now.insert(*fref);
+        }
+    }
+    let changed_consts: HashSet<ustr::Ustr> = current
+        .const_chunks
+        .iter()
+        .filter_map(|(name, chunk)| {
+            (cache.build.const_chunks.get(name) != Some(chunk)).then_some(*name)
+        })
+        .collect();
+    if changed_now.is_empty() && changed_consts.is_empty() {
+        cache.build = current;
+        return Ok(JsReload::NoChange);
+    }
+    cache.changed_since_full.extend(changed_now.iter().copied());
+
+    let mut out = String::from("// skull JS incremental overlay\n");
+    for name in &current.const_order {
+        if changed_consts.contains(name) {
+            out.push_str(&current.const_chunks[name]);
+        }
+    }
+    let mut reset_cells = HashSet::new();
+    for fref in &changed_now {
+        let Some(chunk) = current.chunks.get(fref) else { continue };
+        for cell in &chunk.statics {
+            let key = static_cell_key(cell);
+            if cache
+                .static_keys
+                .get(&cell.cell)
+                .is_none_or(|previous| *previous != key)
+                && reset_cells.insert(cell.cell)
+            {
+                out.push_str(&format!(
+                    "__G.{} = undefined; __G.{} = false;\n",
+                    cell.cell, cell.done_flag
+                ));
+            }
+            cache.static_keys.insert(cell.cell, key);
+        }
+    }
+
+    let mut order: Vec<FuncRef> = cache.changed_since_full.iter().copied().collect();
+    order.sort_by_key(|fref| (fref.module.index(), u32::from(fref.func.into_raw())));
+    for fref in &order {
+        if let Some(chunk) = current.chunks.get(fref) {
+            out.push_str(&chunk.js);
+        }
+    }
+
+    let decorator_names = decorator_names(ws);
+    let decorated: Vec<FuncRef> = order
+        .iter()
+        .copied()
+        .filter(|fref| {
+            ws.module(fref.module).functions[fref.func]
+                .annotations
+                .iter()
+                .any(|annotation| decorator_names.contains(&annotation.name.name))
+        })
+        .collect();
+    if !decorated.is_empty() {
+        let Some(rebind) = exact_inline_js(ws, "__rock_rebind_system") else {
+            return Ok(JsReload::FullRequired);
+        };
+        out.push_str(&emit_inline_js_fn(ws, scx, rebind, "__rock_rebind_system"));
+        for fref in decorated {
+            let function = &ws.module(fref.module).functions[fref.func];
+            out.push_str(&format!(
+                "__rock_rebind_system({}, {});\n",
+                js_string_lit(function.name.as_str())?,
+                callee_js_name(ws, fref)
+            ));
+        }
+    }
+
+    if let Some(wire) = find_plain_function(ws, "run_wire_systems") {
+        let wire_name = callee_js_name(ws, wire);
+        if current.chunks.contains_key(&wire) {
+            out.push_str(&format!("{wire_name}();\n"));
+        }
+    }
+
+    cache.build = current;
+    Ok(JsReload::Overlay(out))
+}
+
+fn static_cell_key(cell: &skull_mir::mir::StaticCell) -> String {
+    format!("{}@{:x}", cell.type_str, cell.init_hash)
+}
+
+fn collect_statics(function: &MirFunc) -> Vec<skull_mir::mir::StaticCell> {
+    let mut cells = function.statics.clone();
+    for nested in &function.nested_fns {
+        cells.extend(collect_statics(nested));
+    }
+    cells
+}
+
+fn exact_inline_js(ws: &Workspace, name: &str) -> Option<FuncRef> {
+    ws.functions_by_name
+        .get(&ustr::Ustr::from(name))?
+        .iter()
+        .find_map(|(module, function)| {
+            matches!(
+                ws.module(*module).functions[*function].inline_body,
+                Some((bone_semantic::hir::FnBackend::Js, _))
+            )
+            .then_some(FuncRef { module: *module, func: *function })
+        })
+}
+
+fn find_plain_function(ws: &Workspace, name: &str) -> Option<FuncRef> {
+    ws.functions_by_name
+        .get(&ustr::Ustr::from(name))?
+        .iter()
+        .find_map(|(module, function)| {
+            let function_ref = &ws.module(*module).functions[*function];
+            (function_ref.inline_body.is_none() && !function_ref.is_extern)
+                .then_some(FuncRef { module: *module, func: *function })
+        })
 }
 
 /// The shared worklists driving [`emit_with_closure`] and [`emit_program`]:
@@ -1812,6 +2441,8 @@ struct WorklistState {
     queue: Vec<FuncRef>,
     seen: HashSet<FuncRef>,
     lowered: Vec<(FuncRef, MirFunc)>,
+    /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
+    inline_js: Vec<FuncRef>,
     state_index: HashMap<ustr::Ustr, GlobalSite>,
     /// Empty in program mode (applications ARE emitted, so a registry read is
     /// legitimate); the per-test reject set otherwise.
@@ -1831,6 +2462,7 @@ impl WorklistState {
             queue: roots.iter().map(|(fr, _)| *fr).collect(),
             seen: roots.iter().map(|(fr, _)| *fr).collect(),
             lowered: Vec::new(),
+            inline_js: Vec::new(),
             state_index: build_state_index(ws),
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
@@ -1851,6 +2483,43 @@ impl WorklistState {
             .chain(self.ginits.iter().map(|g| &g.mf))
             .collect()
     }
+
+    fn canonicalize_emission_order(&mut self) {
+        self.lowered
+            .sort_by_key(|(fr, _)| (fr.module.index(), u32::from(fr.func.into_raw())));
+        self.inline_js
+            .sort_by_key(|fr| (fr.module.index(), u32::from(fr.func.into_raw())));
+        self.ginits.sort_by_key(|g| g.order);
+    }
+}
+
+/// Emit an `inline(js)` fn verbatim: `function <js_name>(p1, p2) { <raw js> }`.
+/// The body is the author's raw JS, spliced unchanged (mirrors the luajit path's
+/// verbatim `inline(lua)` emission in `skull::mir_emit`).
+fn emit_inline_js_fn(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fr: FuncRef,
+    js_name: &str,
+) -> String {
+    let f = &ws.module(fr.module).functions[fr.func];
+    // A @scalar_abi fn's value-struct params explode into their
+    // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
+    // sites and the raw body's leaf names agree.
+    let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, fr) {
+        Some(names) => names.join(", "),
+        None => f
+            .param_decls
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    let src = match f.inline_body {
+        Some((bone_semantic::hir::FnBackend::Js, s)) => s.to_string(),
+        _ => String::new(),
+    };
+    format!("function {js_name}({params}) {{\n{src}\n}}\n")
 }
 
 /// Drain the fn + ginit worklists: lower each queued fn (same per-body pipeline
@@ -1859,6 +2528,20 @@ impl WorklistState {
 /// callees + module-global reads (feeding both queues), and record the lowered
 /// body. A ginit is a lowered `lower_global` returning the init value (never
 /// inlined, mirroring the luajit global path).
+/// Register a body's `static` locals as `__G` state: each lowers to a private
+/// `__static_*` cell + done-flag global (`lower_static`). No initializer line
+/// is needed -- an undefined done-flag is falsy, so the first-reach guard runs
+/// the init exactly as Lua's nil does.
+fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
+    for sc in &mf.statics {
+        gctx.state.insert(sc.cell);
+        gctx.state.insert(sc.done_flag);
+    }
+    for nf in &mf.nested_fns {
+        register_statics(nf, gctx);
+    }
+}
+
 fn drain_worklists(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -1880,10 +2563,12 @@ fn drain_worklists(
                 }
             }
             skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
+            register_statics(&mf, &mut st.gctx);
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+                &mut st.inline_js,
             )?;
             st.lowered.push((fr, mf));
             continue;
@@ -1900,12 +2585,21 @@ fn drain_worklists(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen)?;
+            register_statics(&mf, &mut st.gctx);
+            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+                &mut st.inline_js,
             )?;
-            st.ginits.push(GlobalInit { name: gname, init_name, mf });
+            let is_const = ws.module(site.module).globals[site.gid].is_const;
+            st.ginits.push(GlobalInit {
+                name: gname,
+                init_name,
+                mf,
+                is_const,
+                order: (site.module.index(), u32::from(site.gid.into_raw())),
+            });
             continue;
         }
         break;
@@ -1942,6 +2636,7 @@ fn emit_lowered_fn(
 /// WITHOUT a default is the legitimate omitted-defaulted-arg shape.
 fn check_scalar_abi(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     lowered: &[(FuncRef, MirFunc)],
     bodies: &[&MirFunc],
 ) -> Result<(), CompilerError> {
@@ -1955,7 +2650,7 @@ fn check_scalar_abi(
                     _ => continue,
                 };
                 if let Some(&arity) = arities.get(callee) {
-                    let required = required_arg_count(ws, *callee, arity);
+                    let required = required_arg_count(ws, scx, *callee, arity);
                     if argc < required || argc > arity {
                         let cf = &ws.module(callee.module).functions[callee.func];
                         return Err(err(format!(
@@ -2163,6 +2858,13 @@ struct GlobalInit {
     name: ustr::Ustr,
     init_name: String,
     mf: MirFunc,
+    is_const: bool,
+    order: (usize, u32),
+}
+
+struct GlobalInitLine {
+    name: ustr::Ustr,
+    js: String,
 }
 
 /// Deterministic init-fn name for a module global. Global names are unique
@@ -2217,6 +2919,7 @@ fn discover_callees(
     names: &mut HashMap<FuncRef, String>,
     queue: &mut Vec<FuncRef>,
     seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
     for callee in call_targets(mf) {
         let cf = &ws.module(callee.module).functions[callee.func];
@@ -2231,7 +2934,24 @@ fn discover_callees(
         if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
             continue;
         }
-        if cf.lua_body.is_some() || cf.is_extern {
+        // `inline(js)`: co-emit its raw JS body verbatim (never MIR-lowered). The
+        // FuncRef is already the JS variant of a same-name pair (`resolve_funcref`
+        // swapped it at lowering).
+        if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+            if seen.insert(callee) {
+                names.insert(callee, callee_js_name(ws, callee));
+                inline_js.push(callee);
+                scan_inline_js_body(ws, callee, names, queue, seen, inline_js);
+            }
+            continue;
+        }
+        // `extern(js)`: a JS runtime-/driver-provided global, called by its bare
+        // name (the `__rock_env_var` glue pattern). No def is emitted here.
+        if cf.is_extern && cf.backend == bone_semantic::hir::FnBackend::Js {
+            names.entry(callee).or_insert_with(|| cf.name.to_string());
+            continue;
+        }
+        if cf.inline_body.is_some() || cf.is_extern {
             return Err(err(format!(
                 "JS subset: call to `{}` is not a mapped JS intrinsic",
                 cf.name
@@ -2243,6 +2963,67 @@ fn discover_callees(
         }
     }
     Ok(())
+}
+
+/// Scan an emitted `inline(js)` fn's verbatim body for identifiers naming a
+/// workspace `@nomangle` fn, and root each match under its BARE name -- the JS
+/// half of the `@nomangle` discipline. A verbatim body is invisible to the MIR
+/// callee walk, so without this the web boot seam (`stone_run_game` inline(js)
+/// variant -> `@nomangle` Rock `web_run_game`/`web_run_frame`) never emits its
+/// targets. Plain-Rock matches queue for normal lowering; inline(js) matches
+/// co-emit verbatim (and are scanned recursively); extern(js) matches need no
+/// def (prelude-provided); host-lua-only matches are skipped (a textual match
+/// in a comment must not force an unemittable body -- the reject loop or the
+/// missing-global runtime error catches a real call).
+fn scan_inline_js_body(
+    ws: &Workspace,
+    fr: FuncRef,
+    names: &mut HashMap<FuncRef, String>,
+    queue: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
+) {
+    let f = &ws.module(fr.module).functions[fr.func];
+    let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else { return };
+    let mut idents: HashSet<&str> = HashSet::new();
+    let s = body.as_str();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < bytes.len() && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            idents.insert(&s[start..i]);
+        } else {
+            i += 1;
+        }
+    }
+    for ident in idents {
+        let name = ustr::Ustr::from(ident);
+        let Some(cands) = ws.functions_by_name.get(&name) else { continue };
+        for &(m, fid) in cands.iter() {
+            let cf = &ws.module(m).functions[fid];
+            if !is_nomangle(cf) {
+                continue;
+            }
+            let target = FuncRef { module: m, func: fid };
+            if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+                if seen.insert(target) {
+                    names.insert(target, cf.name.to_string());
+                    inline_js.push(target);
+                    scan_inline_js_body(ws, target, names, queue, seen, inline_js);
+                }
+            } else if cf.inline_body.is_none() && !cf.is_extern {
+                if seen.insert(target) {
+                    names.insert(target, cf.name.to_string());
+                    queue.push(target);
+                }
+            }
+        }
+    }
 }
 
 /// Classify every `Inst::Global`/`StoreGlobal` name `mf` references: module-level
@@ -2263,9 +3044,12 @@ fn discover_globals(
     names: &mut HashMap<FuncRef, String>,
     queue: &mut Vec<FuncRef>,
     seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
     for name in global_refs(mf) {
-        if enum_defs.contains_key(&name) {
+        if name.as_str() == "error" {
+            continue;
+        } else if enum_defs.contains_key(&name) {
             gctx.enum_globals.insert(name);
         } else if let Some(&site) = state_index.get(&name) {
             if deco_globals.contains(&name) {
@@ -2281,9 +3065,7 @@ fn discover_globals(
         } else if let Some(&[(module, func)]) =
             ws.functions_by_name.get(&name).map(|l| l.as_slice())
         {
-            // A NON-overloaded top-level fn used as a value; an overloaded name has
-            // no unique MIR resolution (as on luajit, which emits the bare name),
-            // so it is left rejecting.
+            // A NON-overloaded top-level fn used as a value.
             let fr = FuncRef { module, func };
             let jsname = callee_js_name(ws, fr);
             gctx.fns.entry(name).or_insert_with(|| jsname.clone());
@@ -2291,35 +3073,227 @@ fn discover_globals(
                 names.insert(fr, jsname);
                 queue.push(fr);
             }
+        } else if let Some(cands) = ws.functions_by_name.get(&name) {
+            // A backend-variant sibling pair (same name, same signature,
+            // different backend) used as a VALUE. bone accepts it (collapses to
+            // one logical fn) exactly as the call path does; JS resolves to the
+            // variant serving this target, mirroring `select_backend_variant`. A
+            // real overload (distinct signatures) is rejected by bone before
+            // emit, so `select_js_value_variant` only ever sees a sibling group
+            // here; it returns `None` (leave rejecting) for a lua-only group.
+            if let Some(fr) = select_js_value_variant(ws, &cands) {
+                register_fn_value_variant(ws, name, fr, gctx, names, queue, seen, inline_js);
+            }
         }
     }
     Ok(())
 }
 
+/// The variant of a same-name backend-sibling group that serves the JS target:
+/// an exact `Js` decl (inline(js)/extern(js)) wins, else the portable `Any`
+/// fallback. `None` means the group has neither -- a lua-only fn taken as a
+/// value from JS-reachable code, which stays rejecting (no JS binding).
+fn select_js_value_variant(
+    ws: &Workspace,
+    cands: &[(bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::Function>)],
+) -> Option<FuncRef> {
+    use bone_semantic::hir::FnBackend;
+    let backend_of =
+        |&(m, f): &(bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::Function>)| {
+            ws.module(m).functions[f].backend
+        };
+    cands
+        .iter()
+        .find(|c| backend_of(c) == FnBackend::Js)
+        .or_else(|| cands.iter().find(|c| backend_of(c) == FnBackend::Any))
+        .map(|&(module, func)| FuncRef { module, func })
+}
+
+/// Register a fn-value variant `fr` (already selected for this target) the same
+/// way `discover_callees` registers a callee by kind: an inline(js) body co-emits
+/// verbatim, an extern(js) decl binds its bare driver name (no def), a plain-Rock
+/// fn lowers normally. In every case `gctx.fns[name]` maps the surface name (what
+/// the `Inst::Global` read carries) to the emitted JS identifier.
+#[allow(clippy::too_many_arguments)]
+fn register_fn_value_variant(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    fr: FuncRef,
+    gctx: &mut GlobalCtx,
+    names: &mut HashMap<FuncRef, String>,
+    queue: &mut Vec<FuncRef>,
+    seen: &mut HashSet<FuncRef>,
+    inline_js: &mut Vec<FuncRef>,
+) {
+    use bone_semantic::hir::FnBackend;
+    let cf = &ws.module(fr.module).functions[fr.func];
+    if matches!(cf.inline_body, Some((FnBackend::Js, _))) {
+        let jsname = callee_js_name(ws, fr);
+        gctx.fns.entry(name).or_insert_with(|| jsname.clone());
+        if seen.insert(fr) {
+            names.insert(fr, jsname);
+            inline_js.push(fr);
+            scan_inline_js_body(ws, fr, names, queue, seen, inline_js);
+        }
+    } else if cf.is_extern && cf.backend == FnBackend::Js {
+        gctx.fns.entry(name).or_insert_with(|| cf.name.to_string());
+        names.entry(fr).or_insert_with(|| cf.name.to_string());
+    } else {
+        // A portable (`Any`) Rock body -- lower it to JS like any other callee.
+        let jsname = callee_js_name(ws, fr);
+        gctx.fns.entry(name).or_insert_with(|| jsname.clone());
+        if seen.insert(fr) {
+            names.insert(fr, jsname);
+            queue.push(fr);
+        }
+    }
+}
+
+/// Static callee emit-names of `mf` (`Call`/`CallMulti`), resolved through
+/// `names` (+ nested fns). Indirect (fn-value) and bound calls are not statically
+/// resolvable and contribute no ordering edge -- parity with the luajit backend's
+/// direct-call facts (`skull::mir_emit::direct_calls`).
+fn direct_callees(mf: &MirFunc, names: &HashMap<FuncRef, String>) -> Vec<ustr::Ustr> {
+    fn walk(mf: &MirFunc, names: &HashMap<FuncRef, String>, out: &mut Vec<ustr::Ustr>) {
+        for (_, block) in mf.blocks.iter() {
+            for &iid in &block.insts {
+                let fr = match &mf.insts[iid] {
+                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
+                    _ => continue,
+                };
+                if let Some(n) = names.get(&fr) {
+                    out.push(ustr::Ustr::from(n.as_str()));
+                }
+            }
+        }
+        for nf in &mf.nested_fns {
+            walk(nf, names, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(mf, names, &mut out);
+    out
+}
+
 /// Order the global-init assignment lines so each global inits AFTER every global
-/// it (transitively) reads: `__G.<name> = <init_name>();`. A round-based topo sort
-/// over the init bodies' state-global reads; a self-read is ignored (`X = X or ..`
-/// style is not expressible here); a genuine cycle rejects.
-fn order_global_inits(ginits: &[GlobalInit]) -> Result<Vec<String>, CompilerError> {
+/// it TRANSITIVELY reads through its call graph: `__G.<name> = <init_name>();`.
+/// A shallow "reads in the init body" edge misses `ACT_UI_CONFIRM = action_new(..)`
+/// where the `ACTIONS` read is inside `action_new`, not the init body -- so build
+/// the transitive global-read closure over every emitted fn (ginits + lowered),
+/// exactly the luajit backend's `transitive_global_reads`. A genuine cycle rejects.
+fn order_global_inits(
+    ginits: &[GlobalInit],
+    lowered: &[(FuncRef, MirFunc)],
+    names: &HashMap<FuncRef, String>,
+) -> Result<Vec<GlobalInitLine>, CompilerError> {
+    // Per-fn direct facts, keyed by emit name (ginit = init_name, lowered = js name).
+    let mut direct_globals: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
+    let mut direct_calls: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
+    let mut record = |key: ustr::Ustr, mf: &MirFunc| {
+        direct_globals.insert(key, global_refs(mf));
+        direct_calls.insert(key, direct_callees(mf, names));
+    };
+    for g in ginits {
+        record(ustr::Ustr::from(g.init_name.as_str()), &g.mf);
+    }
+    // Key by the EMIT name (`names[fr]`, mangled) -- that is what `direct_callees`
+    // resolves a call to, NOT the unmangled `mf.name`.
+    for (fr, mf) in lowered {
+        if let Some(emit_name) = names.get(fr) {
+            record(ustr::Ustr::from(emit_name.as_str()), mf);
+        }
+    }
+
+    // Transitive closure: closure[f] |= closure[callee], to a fixpoint.
+    let mut id_of: HashMap<ustr::Ustr, usize> = HashMap::new();
+    let intern = |s: ustr::Ustr, id_of: &mut HashMap<ustr::Ustr, usize>| -> usize {
+        let next = id_of.len();
+        *id_of.entry(s).or_insert(next)
+    };
+    for (f, gs) in direct_globals.iter() {
+        intern(*f, &mut id_of);
+        for g in gs {
+            intern(*g, &mut id_of);
+        }
+    }
+    for (f, cs) in direct_calls.iter() {
+        intern(*f, &mut id_of);
+        for c in cs {
+            intern(*c, &mut id_of);
+        }
+    }
+    let n = id_of.len();
+    let mut closure: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (f, gs) in direct_globals.iter() {
+        let fi = id_of[f];
+        for g in gs {
+            closure[fi].insert(id_of[g]);
+        }
+    }
+    for (f, cs) in direct_calls.iter() {
+        let fi = id_of[f];
+        callees[fi].extend(cs.iter().map(|c| id_of[c]));
+    }
+    let mut add: Vec<usize> = Vec::new();
+    loop {
+        let mut changed = false;
+        for fi in 0..n {
+            if callees[fi].is_empty() {
+                continue;
+            }
+            add.clear();
+            for &c in &callees[fi] {
+                for &g in &closure[c] {
+                    if !closure[fi].contains(&g) {
+                        add.push(g);
+                    }
+                }
+            }
+            for &g in &add {
+                if closure[fi].insert(g) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Round-based topo sort over each init's transitive global reads (restricted to
+    // globals that themselves have an init line); source order kept within a round.
+    let mut names_by_id: Vec<ustr::Ustr> = vec![ustr::Ustr::from(""); n];
+    for (&k, &v) in id_of.iter() {
+        names_by_id[v] = k;
+    }
     let known: HashSet<ustr::Ustr> = ginits.iter().map(|g| g.name).collect();
-    let deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = ginits
+    let init_deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = ginits
         .iter()
         .map(|g| {
-            let ds = global_refs(&g.mf)
-                .into_iter()
-                .filter(|n| *n != g.name && known.contains(n))
-                .collect();
+            let ds: HashSet<ustr::Ustr> = match id_of.get(&ustr::Ustr::from(g.init_name.as_str())) {
+                Some(&fi) => closure[fi]
+                    .iter()
+                    .map(|&gid| names_by_id[gid])
+                    .filter(|d| *d != g.name && known.contains(d))
+                    .collect(),
+                None => HashSet::new(),
+            };
             (g.name, ds)
         })
         .collect();
+
     let mut emitted: HashSet<ustr::Ustr> = HashSet::new();
     let mut lines = Vec::with_capacity(ginits.len());
     let mut remaining: Vec<&GlobalInit> = ginits.iter().collect();
     while !remaining.is_empty() {
         let before = remaining.len();
         remaining.retain(|g| {
-            if deps[&g.name].iter().all(|d| emitted.contains(d)) {
-                lines.push(format!("__G.{} = {}();\n", g.name, g.init_name));
+            if init_deps[&g.name].iter().all(|d| emitted.contains(d)) {
+                lines.push(GlobalInitLine {
+                    name: g.name,
+                    js: format!("__G.{} = {}();\n", g.name, g.init_name),
+                });
                 emitted.insert(g.name);
                 false
             } else {
@@ -2738,14 +3712,31 @@ fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
 /// MIR param slot. A GC value-struct default would break the 1:1 assumption, but
 /// value-struct construction rejects at emit independently, so no such call is
 /// admitted here.
-fn required_arg_count(ws: &Workspace, fr: FuncRef, arity: usize) -> usize {
+fn required_arg_count(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fr: FuncRef,
+    arity: usize,
+) -> usize {
     use bone_semantic::hir::BodyOwner;
-    let n_defaults = ws
+    let defaults: Vec<bool> = ws
         .module(fr.module)
         .bodies
         .get(&BodyOwner::Function(fr.func))
-        .map(|b| b.param_defaults.iter().filter(|d| d.is_some()).count())
-        .unwrap_or(0);
+        .map(|b| b.param_defaults.iter().map(|d| d.is_some()).collect())
+        .unwrap_or_default();
+    // Scalar ABI: a defaulted value-struct param explodes to N leaf slots and
+    // all N are omittable together -- subtract per-param LEAF widths, not 1.
+    if let Some(widths) = skull_mir::lower::scalar_abi_param_leaf_widths(ws, scx, fr) {
+        let omittable: usize = widths
+            .iter()
+            .zip(defaults.iter().chain(std::iter::repeat(&false)))
+            .filter(|(_, d)| **d)
+            .map(|(w, _)| w)
+            .sum();
+        return arity.saturating_sub(omittable);
+    }
+    let n_defaults = defaults.iter().filter(|d| **d).count();
     arity.saturating_sub(n_defaults)
 }
 
@@ -2771,7 +3762,7 @@ fn is_host_print(cf: &bone_semantic::hir::Function) -> bool {
 fn is_host_put(cf: &bone_semantic::hir::Function) -> bool {
     cf.name.as_str() == "put"
         && cf.param_decls.len() == 1
-        && cf.lua_body.is_some_and(|b| b.as_str().contains("io.write"))
+        && cf.inline_body.is_some_and(|(_, b)| b.as_str().contains("io.write"))
 }
 
 /// The logging dedup/throttle impls (`@nomangle inline(lua)` in
@@ -2795,7 +3786,7 @@ fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
         ("log_reset_dedup", 0),
         ("log_dedup_count", 0),
     ];
-    (cf.is_extern || cf.lua_body.is_some())
+    (cf.is_extern || cf.inline_body.is_some())
         && LOG_FNS.iter().any(|(n, a)| *n == cf.name.as_str() && *a == cf.param_decls.len())
 }
 
@@ -2804,12 +3795,20 @@ fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
 /// is the host-body flag PLUS the (name, arity) match, so a plain-Rock user fn
 /// of the same name co-emits normally and is never captured here.
 fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
-    if !(cf.is_extern || cf.lua_body.is_some()) {
+    if !(cf.is_extern || cf.inline_body.is_some()) {
         return None;
     }
     match (cf.name.as_str(), cf.param_decls.len()) {
         ("tostring", 1) => Some("lua_tostring($1)"),
         ("__rock_format_float", 1) => Some("__rock_format_float($1)"),
+        // `int_to_float`/`to_float` are pure `$1` identities (JS numbers are all
+        // doubles): a call-site host template inlines with zero cost and neither
+        // is ever taken as a value, so a co-emitted identity fn would be strictly
+        // worse. `float_to_int` (taken as a value in tests/function_ref_cross_module)
+        // is an inline(js) sibling in the stdlib instead -- the fn-value path now
+        // collapses backend siblings, so it needs a real bound fn, not a template.
+        ("int_to_float", 1) => Some("$1"),
+        ("to_float", 1) => Some("$1"),
         // `phantom<T>()` is a nil placeholder (iterator `done`, post-`error`
         // unreachable). `__debug_traceback` is error-message-only (never on
         // stdout, so an empty string suffices). `is_null` mirrors `== nil`.
@@ -2866,6 +3865,11 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("upper", 1) => Some("$1.toUpperCase()"),
         ("lower", 1) => Some("$1.toLowerCase()"),
         ("string_char", 1) => Some("String.fromCharCode($1)"),
+        // `from_codepoint(cp)` -> the byte-faithful UTF-8 encoder in
+        // JS_STRING_RUNTIME: each output JS char code is one UTF-8 byte, matching
+        // luajit's byte-string, so `chars()` (which UTF-8-decodes over `unit_at`)
+        // round-trips a code point identically on both backends.
+        ("from_codepoint", 1) => Some("__from_codepoint($1)"),
         // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
         ("parse_float", 1) => Some("__parse_float($1)"),
         // RNG -> the `JS_RNG_RUNTIME` mulberry32 port (stream differs from Lua's
@@ -3081,6 +4085,66 @@ fn for_each_term_operand(term: &Term, f: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
+/// Value-element NativeBuffer refs to suppress: an `Index{NativeBufferValue}`
+/// (or a nested-struct `Field` chained off one) whose every use is a `Field`/
+/// `StoreField` BASE. Those consumers render flat-slot access from the chain's
+/// own operands, so the ref emits nothing; any other use (a `Store` into a cell,
+/// a call arg, a `StoreIndex` value) forces the whole-element COPY materialize.
+fn compute_nbv_bypass(mf: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<u32> {
+    let mut cand: HashSet<u32> = HashSet::new();
+    for &b in blocks {
+        for &id in &mf.blocks[b].insts {
+            match &mf.insts[id] {
+                Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. } => {
+                    cand.insert(raw(id));
+                }
+                // A Field chained off a candidate (nested value-struct descent).
+                // Blocks are in traversal order and a Field always follows its
+                // base textually, so a single pass suffices for chains.
+                Inst::Field { base, .. } if cand.contains(&raw(*base)) => {
+                    cand.insert(raw(id));
+                }
+                _ => {}
+            }
+        }
+    }
+    if cand.is_empty() {
+        return cand;
+    }
+    let mut other_use: HashSet<u32> = HashSet::new();
+    let mut used: HashSet<u32> = HashSet::new();
+    for &b in blocks {
+        for &id in &mf.blocks[b].insts {
+            match &mf.insts[id] {
+                Inst::Field { base, .. } => {
+                    used.insert(raw(*base));
+                }
+                Inst::StoreField { base, value, .. } => {
+                    used.insert(raw(*base));
+                    used.insert(raw(*value));
+                    if cand.contains(&raw(*value)) {
+                        other_use.insert(raw(*value));
+                    }
+                }
+                other => for_each_operand(other, &mut |u| {
+                    used.insert(raw(u));
+                    if cand.contains(&raw(u)) {
+                        other_use.insert(raw(u));
+                    }
+                }),
+            }
+        }
+        for_each_term_operand(&mf.blocks[b].term, &mut |u| {
+            used.insert(raw(u));
+            if cand.contains(&raw(u)) {
+                other_use.insert(raw(u));
+            }
+        });
+    }
+    cand.retain(|id| used.contains(id) && !other_use.contains(id));
+    cand
+}
+
 /// A pure, position-independent value inst that folds into its single use site.
 /// EXCLUDES `Load`/`Call`/`Index`/`Field`/`Len` (impure or cell-order-sensitive)
 /// -- those materialize at their program position. Mirrors codegen-lua's
@@ -3232,4 +4296,3 @@ fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
     }
     reachable
 }
-

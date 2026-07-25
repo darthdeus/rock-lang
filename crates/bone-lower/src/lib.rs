@@ -1800,7 +1800,7 @@ pub fn build_function(
         }
     }
 
-    let (body_failed, lua_body, is_extern, ffi_lib, mut errors) =
+    let (body_failed, inline_body, is_extern, ffi_lib, backend, mut errors) =
         lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
     errors.extend(anno_errors);
 
@@ -1824,8 +1824,9 @@ pub fn build_function(
 
         num_required,
         return_ty,
-        lua_body,
+        inline_body,
         is_extern,
+        backend,
         annotations,
         ffi_lib,
     };
@@ -1842,15 +1843,26 @@ pub fn build_function(
 /// entries to `module.ty_arena` and orphans the old ones, leaking one slot per
 /// edit (pinned by the `bone-incremental` `sentinel_body_edit_leaks_ty_arena_entries`).
 ///
-/// Returns the body-kind flags (`body_failed`, `lua_body`, `is_extern`,
-/// `ffi_lib`); the caller owns assembling / keeping the `Function` signature.
+/// Returns the body-kind flags (`body_failed`, `inline_body`, `is_extern`,
+/// `ffi_lib`, `backend`); the caller owns assembling / keeping the `Function`
+/// signature.
 fn lower_fn_body_into(
     ctx: &mut LowerCtx,
     a: &Ast,
     f: &FunctionDef,
     body: &mut Body,
     param_tys: &[TyId],
-) -> Result<(bool, Option<Ustr>, bool, Option<Ustr>, Vec<CompilerError>), CompilerError> {
+) -> Result<
+    (
+        bool,
+        Option<(hir::FnBackend, Ustr)>,
+        bool,
+        Option<Ustr>,
+        hir::FnBackend,
+        Vec<CompilerError>,
+    ),
+    CompilerError,
+> {
     debug_assert_eq!(
         f.params.len(),
         param_tys.len(),
@@ -1896,29 +1908,49 @@ fn lower_fn_body_into(
     let root_scope = body.alloc_root_scope_with_bindings(bindings);
     let mut body_failed = false;
 
-    let (body_e, lua_body, is_extern, ffi_lib) = match &f.body {
+    // `(inline_body, is_extern, ffi_lib, backend)`. `backend` is the codegen
+    // discriminator: a Rock body is `Any` (portable); `extern`/`extern(lua)`/ffi
+    // are luajit-native (`Lua`); `extern(js)` is `Js`; an inline body carries its
+    // own backend.
+    let (body_e, inline_body, is_extern, ffi_lib, backend) = match &f.body {
         skull_parser::FunctionBody::Rock(block) => {
             let b = a.b(block);
 
             match lower_block(ctx, a, body, root_scope, block) {
-                Ok(lowered) => (Some(ctx.alloc_block_expr(body, lowered, b)), None, false, None),
+                Ok(lowered) => (
+                    Some(ctx.alloc_block_expr(body, lowered, b)),
+                    None,
+                    false,
+                    None,
+                    hir::FnBackend::Any,
+                ),
 
                 Err(e) => {
                     errors.push(e);
                     body_failed = true;
 
-                    (None, None, false, None)
+                    (None, None, false, None, hir::FnBackend::Any)
                 }
             }
         }
 
-        skull_parser::FunctionBody::Lua(src) => (None, Some(Ustr::from(src.as_str())), false, None),
-
-        skull_parser::FunctionBody::ExternC | skull_parser::FunctionBody::ExternLua => {
-            (None, None, true, None)
+        skull_parser::FunctionBody::Inline(be, src) => {
+            (None, Some((*be, Ustr::from(src.as_str()))), false, None, *be)
         }
 
-        skull_parser::FunctionBody::Ffi(lib) => (None, None, true, Some(Ustr::from(lib.as_str()))),
+        skull_parser::FunctionBody::ExternC | skull_parser::FunctionBody::ExternLua => {
+            (None, None, true, None, hir::FnBackend::Lua)
+        }
+
+        skull_parser::FunctionBody::ExternJs => (None, None, true, None, hir::FnBackend::Js),
+
+        skull_parser::FunctionBody::Ffi(lib) => (
+            None,
+            None,
+            true,
+            Some(Ustr::from(lib.as_str())),
+            hir::FnBackend::Lua,
+        ),
     };
 
     body.root = body_e;
@@ -1926,7 +1958,7 @@ fn lower_fn_body_into(
     body.param_bindings = range;
     body.param_defaults = param_defaults;
 
-    Ok((body_failed, lua_body, is_extern, ffi_lib, errors))
+    Ok((body_failed, inline_body, is_extern, ffi_lib, backend, errors))
 }
 
 pub fn lower_function_def(
@@ -2056,7 +2088,7 @@ pub fn relower_function_in_place(
         lower_type_expr_local(&mut ctx, a, &mut body, a.te(&p.ty))?;
     }
 
-    let (body_failed, _lua_body, _is_extern, _ffi_lib, mut errors) =
+    let (body_failed, _inline_body, _is_extern, _ffi_lib, _backend, mut errors) =
         lower_fn_body_into(&mut ctx, a, f, &mut body, &param_tys)?;
     ctx.module.lower_var_high_water = ctx._next_var_id;
 
