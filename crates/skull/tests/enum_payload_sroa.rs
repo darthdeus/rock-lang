@@ -104,6 +104,18 @@ fn mixed_payload_and_unit_enum_does_not_allocate_table() {
     );
 }
 
+#[test]
+fn runtime_program_paths_are_unique_within_process() {
+    assert_ne!(run_t_path(), run_t_path());
+}
+
+fn run_t_path() -> std::path::PathBuf {
+    static NEXT_PATH: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT_PATH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("skull_enum_sroa_{}_{}.lua", std::process::id(), n))
+}
+
 /// Emit `src`, append a print-capturing harness that calls `t()`, run under
 /// luajit, and return the captured stdout (`None` if luajit is unavailable).
 fn run_t(src: &str) -> Option<String> {
@@ -118,7 +130,7 @@ fn run_t(src: &str) -> Option<String> {
          __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
          t()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
     );
-    let path = std::env::temp_dir().join(format!("skull_enum_sroa_{}.lua", std::process::id()));
+    let path = run_t_path();
     std::fs::write(&path, &prog).expect("write lua");
     let out = std::process::Command::new("luajit").arg(&path).output().expect("run luajit");
     let _ = std::fs::remove_file(&path);

@@ -8338,6 +8338,11 @@ pub struct ShaderPair {
     pub frag: FuncRef,
 }
 
+pub struct ShaderCollection {
+    pub pairs: Vec<ShaderPair>,
+    pub callsites: Vec<(ModuleId, BodyOwner)>,
+}
+
 /// The `@shader(<stage>)` stage of `f` (`"vertex"`/`"fragment"`), else `None`.
 /// A local read of the annotation (skull-codegen-glsl has the same helper, but
 /// skull-mir must not depend on it -- the layering constraint).
@@ -8461,8 +8466,41 @@ pub fn shader_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
 /// `__rock_shader_register`. Any resolution failure surfaces as `Err` (the fatal
 /// [`shader_expand_rejection`] gate runs first, so this is normally infallible).
 pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerError> {
+    Ok(collect_shader_collection(ws)?.pairs)
+}
+
+pub fn body_has_shader_pipeline_call(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> bool {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return false };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    body.expr_arena.iter().any(|(e, expr)| {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            return false;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        resolved.is_some_and(|(fmod, fid)| {
+            matches!(
+                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                Some(ExpandKind::ShaderPipeline)
+            )
+        })
+    })
+}
+
+pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
     let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
         std::collections::BTreeMap::new();
+    let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
     for (_, &mid) in ws.module_ids.iter() {
         let module = ws.module(mid);
         let ir = ws.inference(mid);
@@ -8486,13 +8524,17 @@ pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerE
                 ) {
                     continue;
                 }
+                callsites.insert((mid, *owner));
                 let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
                 let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
                 by_key.entry(pair.key.clone()).or_insert(pair);
             }
         }
     }
-    Ok(by_key.into_values().collect())
+    Ok(ShaderCollection {
+        pairs: by_key.into_values().collect(),
+        callsites: callsites.into_iter().collect(),
+    })
 }
 
 /// Reject a CPU-side (Lua-emission) DIRECT call to a `@gpu_only` intrinsic
