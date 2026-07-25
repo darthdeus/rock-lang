@@ -2563,6 +2563,15 @@ impl Parser {
                             break;
                         }
                         if nc == ':' && expr_depth == 0 {
+                            // `::` is a path separator, not a spec split.
+                            if chars.peek() == Some(&':') {
+                                chars.next();
+                                inner_char_count += 1;
+                                inner_byte_count += 1;
+                                expr_str.push(':');
+                                expr_str.push(':');
+                                continue;
+                            }
                             in_format = true;
                             continue;
                         }
