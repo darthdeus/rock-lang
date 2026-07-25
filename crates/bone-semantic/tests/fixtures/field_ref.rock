@@ -162,16 +162,25 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// H. value struct: at the TYPE level a field ref resolves like any struct.
-//    The RUNTIME question (string-keyed cdata access) is a separate skull
-//    concern (docs/field-refs-plan.md Open edges); this pins type-level accept.
+// H. value struct: the WRITABLE former refuses (a writable ref into a value
+//    struct is meaningless -- the object is passed by copy, so the write would
+//    land on a temporary; docs/value-semantics-axes.md). The read-only KeyPath
+//    former accepts, which is what field_get takes.
 // ---------------------------------------------------------------------------
 
-//- value_struct_field_ok
+//- value_struct_writable_field_fail @fail
 value FixVec2 { x: float, y: float }
 fn take(f: FieldOf<FixVec2, float>) {}
 fn main() {
     let f: FieldOf<FixVec2, float> = .x
-      //^ FieldOf<FixVec2, float>
+    take(f)
+}
+
+//- value_struct_keypath_ok
+value FixVec2 { x: float, y: float }
+fn take(f: KeyPath<FixVec2, float>) {}
+fn main() {
+    let f: KeyPath<FixVec2, float> = .x
+      //^ KeyPath<FixVec2, float>
     take(f)
 }
