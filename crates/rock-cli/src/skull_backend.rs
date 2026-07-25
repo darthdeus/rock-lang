@@ -1135,7 +1135,9 @@ fn skull_emit_project(dir: &str) -> String {
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
-    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir(&ws, user_mid) {
+    // Project build: modules outside `dir` (the `stone` dependency, stdlib) are
+    // libraries and prune to what the project reaches.
+    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir_in(&ws, user_mid, Some(dir)) {
         Ok(e) => (e.lua, e.skipped),
         Err(e) => {
             eprintln!("{}", render_project_err(&sources, &e));
@@ -4165,7 +4167,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
         let mid = skull::user_module_id(ws)
             .map_err(no_user_module)?;
         let t_full = Instant::now();
-        let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+        let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(path))
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         (emit.lua, c, ms(t_full))
     };
@@ -4334,7 +4336,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let ws = session.workspace();
         let mid = skull::user_module_id(ws)
             .map_err(no_user_module)?;
-        let (_emit, c) = skull::mir_emit::emit_full(ws, mid)
+        let (_emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(path))
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         c
     };
@@ -4614,7 +4616,7 @@ impl SkullStone {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+            let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(dir))
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
             let spec = crate::unified_compile::SourceSpec::Directory(
@@ -4696,7 +4698,7 @@ impl SkullStone {
                 let ws = self.project.workspace();
                 let mid = skull::user_module_id(ws)
                     .map_err(no_user_module)?;
-                let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+                let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(self.project.dir()))
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?;
                 self.cache = c; // resets changed_since_full
                 // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`):
@@ -4747,7 +4749,7 @@ impl SkullStone {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+            let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(self.project.dir()))
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             self.cache = c; // resets changed_since_full -- the overlay is now folded in
             // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
@@ -4926,8 +4928,11 @@ mod force_full_tests {
         let inc_lua = src("incremental.lua");
         let rock = src("main.rock");
 
-        let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\n";
-        let v2 = "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }\n";
+        // Needs a `main`: emission is reachability-driven, so a fixture with no
+        // entry point at all emits no user code and the two builds would compare
+        // equal for a reason that has nothing to do with the fold.
+        let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\nfn main() { print(\"{use_it()}\") }\n";
+        let v2 = "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }\nfn main() { print(\"{use_it()}\") }\n";
 
         // init at v1: writes main.lua(v1), wipes any overlay.
         std::fs::write(&rock, v1).unwrap();
@@ -4971,6 +4976,61 @@ mod force_full_tests {
             main_forced, main_fresh,
             "force_full main.lua must be byte-identical to a fresh full build of the edited source"
         );
+    }
+
+    /// Global DCE prunes a fn no root reaches, so main.lua does NOT define it.
+    /// A later BODY edit that adds the first call to that fn must still leave it
+    /// defined somewhere: the overlay redefines only CHANGED fns, so without the
+    /// newly-reachable backfill (`newly_reachable`) the composed program calls a
+    /// global that exists in neither file and dies on load.
+    #[test]
+    fn overlay_backfills_a_fn_the_edit_makes_reachable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        let src = |p: &str| dir.path().join(p);
+
+        let main_lua = src("main.lua");
+        let inc_lua = src("incremental.lua");
+        let rock = src("main.rock");
+
+        // A LIBRARY fn, since the project's own modules are always roots. `split`
+        // is not inlined and pulls `find`/`substring`/`len` with it, so this also
+        // covers the multi-hop case rather than just the first edge.
+        let v1 = "fn main() { print(\"start\") }\n";
+        let v2 = "fn main() { print(\"{split(\\\"a,b\\\", \\\",\\\").len}\") }\n";
+        // Only `split` itself: its own callees are inlined into it, so they are
+        // legitimately absent from the composed program. The transitive case is
+        // covered by the driver's own tests (crates/skull-mir/tests/reach_driver.rs).
+        let needed = ["function split_string_string_ret_arr_string("];
+
+        std::fs::write(&rock, v1).unwrap();
+        let mut skull = SkullStone::init(&dir_str, &main_lua, &inc_lua).expect("init v1");
+        let main_v1 = std::fs::read_to_string(&main_lua).expect("main.lua after init");
+        for n in needed {
+            assert!(
+                !main_v1.contains(n),
+                "`{n}` must be pruned at v1 -- otherwise this test proves nothing"
+            );
+        }
+
+        // Body edit: main now calls `split`, which routes to the overlay.
+        std::fs::write(&rock, v2).unwrap();
+        let reload = skull.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("recompile v2");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "a body edit should route to the overlay (Incremental tier)"
+        );
+        let main_after = std::fs::read_to_string(&main_lua).expect("main.lua after edit");
+        let overlay = std::fs::read_to_string(&inc_lua).expect("overlay after edit");
+        for n in needed {
+            assert!(
+                main_after.contains(n) || overlay.contains(n),
+                "the edit made `{n}` reachable, so the composed program must define it \
+                 somewhere (main.lua: {}, overlay: {})",
+                main_after.contains(n),
+                overlay.contains(n),
+            );
+        }
     }
 
     /// A project with a type error (a call to a non-existent function) must make

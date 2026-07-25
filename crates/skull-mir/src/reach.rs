@@ -19,6 +19,7 @@
 //! native stack.
 
 use crate::mir::{FuncRef, Inst, MirFunc};
+use ustr::Ustr;
 use bone_semantic::prelude::CompilerError;
 use rustc_hash::FxHashSet as HashSet;
 use std::hash::Hash;
@@ -109,6 +110,37 @@ pub fn walk<P: ReachPolicy>(policy: &mut P) -> Result<Vec<P::Node>, CompilerErro
         }
     }
     Ok(order)
+}
+
+/// Every module-global name `mf` reads or writes, main body and hoisted nested
+/// fns, deduped in source order.
+///
+/// A backend needs this for reachability as well as for globals: a top-level fn
+/// used as a VALUE (`let f = helper`, a fn passed as an argument) lowers to an
+/// `Inst::Global`, NOT an `Inst::Call`, so [`call_targets`] alone does not see it
+/// and the referenced fn would be pruned out from under a live reference.
+pub fn global_ref_names(mf: &MirFunc) -> Vec<Ustr> {
+    fn walk(mf: &MirFunc, out: &mut Vec<Ustr>, seen: &mut HashSet<Ustr>) {
+        for (_, block) in mf.blocks.iter() {
+            for &iid in &block.insts {
+                let name = match &mf.insts[iid] {
+                    Inst::Global(n) => *n,
+                    Inst::StoreGlobal { name, .. } => *name,
+                    _ => continue,
+                };
+                if seen.insert(name) {
+                    out.push(name);
+                }
+            }
+        }
+        for nf in &mf.nested_fns {
+            walk(nf, out, seen);
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::default();
+    walk(mf, &mut out, &mut seen);
+    out
 }
 
 /// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
