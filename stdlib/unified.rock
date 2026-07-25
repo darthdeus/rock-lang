@@ -1650,13 +1650,13 @@ global PI: float = 3.141592653589793
         -- Collect and sort keys, skipping metadata
         local keys = {}
         for k, _ in pairs(t) do
-            if k ~= "__variant" and k ~= "__ty" and k ~= "variant" and k ~= "__tag" then
+            if k ~= "__variant" and k ~= "__ty" then
                 keys[#keys + 1] = k
             end
         end
         table.sort(keys, __rock_inspect_key_lt)
 
-        local variant = t.__variant or t.variant
+        local variant = t.__variant
 
         -- Unit enum variant
         if type_name and variant and #keys == 0 then

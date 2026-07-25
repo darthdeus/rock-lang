@@ -301,8 +301,8 @@ function __rock_make_enum(variant, ty, kv) {
 
 /// `inspect` / `inspect_formatted`: a faithful port of `__rock_inspect_value`
 /// (stdlib/unified.rock). Adapts to the JS shapes: a struct/enum `{__ty, ...}`
-/// object (keys sorted by `lua_tostring`, `__ty`/`__variant`/`variant`/`__tag`
-/// skipped), a Vec `{_data (0-based), len, __ty:"Vec"}`, a JS `Map` (raw-table
+/// object (keys sorted by `lua_tostring`, `__ty`/`__variant` skipped), a Vec
+/// `{_data (0-based), len, __ty:"Vec"}`, a JS `Map` (raw-table
 /// analog), a JS array (Lua array-table analog), and scalars. A capturing-lambda
 /// env record (`__fn`) is an opaque callable LEAF (`String(fn)`), matching the
 /// luajit `__rock_fn_mt` rule; a `visited` Map detects cycles. NOTE: most inspect
@@ -363,13 +363,13 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   } else {
     for (var k in t) {
       if (Object.prototype.hasOwnProperty.call(t, k) &&
-          k !== "__variant" && k !== "__ty" && k !== "variant" && k !== "__tag") {
+          k !== "__variant" && k !== "__ty") {
         pairs.push([k, t[k]]);
       }
     }
   }
   pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
-  var variant = t.__variant !== undefined ? t.__variant : t.variant;
+  var variant = t.__variant;
   if (type_name !== undefined && variant !== undefined && pairs.length === 0) {
     if (visited) visited.delete(t);
     return type_name + "::" + variant;
