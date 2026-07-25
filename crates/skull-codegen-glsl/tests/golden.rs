@@ -18,6 +18,13 @@ fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
+    // the CLI reports those and refuses to emit. Without this check the goldens
+    // pin emission for sources the real pipeline rejects (backlog #67).
+    let errs = skull_mir::verdict::body_errors(&ws);
+    if !errs.is_empty() {
+        return Err(errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "));
+    }
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
     skull_codegen_glsl::emit_shader_library(&ws, mid, &roots).map_err(|e| e.message)
@@ -92,10 +99,10 @@ fn vec3_vec4_constructors() {
 #[test]
 fn nested_counted_loops() {
     let src = r#"
-        @pure fn random2(p: Vec2) -> Vec2 {
+        fn random2(p: Vec2) -> Vec2 {
             return v(fract(p.x), fract(p.y))
         }
-        @pure fn worley2(p: Vec2) -> float {
+        fn worley2(p: Vec2) -> float {
             let dist = 1.0
             let i_p = v(floor(p.x), floor(p.y))
             let f_p = v(fract(p.x), fract(p.y))
@@ -172,7 +179,7 @@ fn if_branch_pick() {
 /// emits.
 #[test]
 fn vec2_normalize_body() {
-    let src = r#"@pure fn root(v: Vec2) -> Vec2 { return v.normalize() }"#;
+    let src = r#"fn root(v: Vec2) -> Vec2 { return v.normalize() }"#;
     let glsl = emit(src, &["root"]).expect("emit");
     assert!(
         glsl.contains(
@@ -194,7 +201,7 @@ fn vec2_normalize_body() {
 /// Statement `if` with no else: the empty else block is suppressed.
 #[test]
 fn statement_if_no_else() {
-    let src = r#"@pure fn f(x: float) -> float { let r = x if x > 0.0 { r = x * 2.0 } return r }"#;
+    let src = r#"fn f(x: float) -> float { let r = x if x > 0.0 { r = x * 2.0 } return r }"#;
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
@@ -235,7 +242,7 @@ fn if_else_if_ladder() {
 /// result cell -> `(cond ? a : b)` at the use.
 #[test]
 fn expression_if_into_cell() {
-    let src = r#"@pure fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#;
+    let src = r#"fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#;
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
@@ -251,7 +258,7 @@ fn expression_if_into_cell() {
 /// ternary, exactly as the diamond's `r = float(t1)` store did).
 #[test]
 fn ternary_int_result_outer_coercion() {
-    let src = r#"@pure fn f(x: float) -> float { let r: float = if x > 0.0 { 1 } else { 2 } return r }"#;
+    let src = r#"fn f(x: float) -> float { let r: float = if x > 0.0 { 1 } else { 2 } return r }"#;
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
@@ -297,7 +304,7 @@ fn or_in_nested_if() {
 /// keeps the return unnested; the counted-for shape survives the early exit.
 #[test]
 fn early_return_in_counted_for() {
-    let src = r#"@pure fn f(n: int) -> int {
+    let src = r#"fn f(n: int) -> int {
         let acc = 0
         for i in 0..n {
             if i > 5 { return acc }
@@ -329,7 +336,7 @@ fn early_return_in_counted_for() {
 /// (a diamond computing the bool), emitted via `while (true) { <cond>; if (!c) break; <body> }`.
 #[test]
 fn while_compound_condition() {
-    let src = r#"@pure fn f(x: float) -> float {
+    let src = r#"fn f(x: float) -> float {
         let acc = 0.0
         let i = 0
         while i < 10 && acc < 100.0 {
@@ -358,7 +365,7 @@ fn while_compound_condition() {
 /// break + continue in a counted `for` (continue -> the for-header increment).
 #[test]
 fn break_continue_in_counted_for() {
-    let src = r#"@pure fn f(n: int) -> int {
+    let src = r#"fn f(n: int) -> int {
         let acc = 0
         for i in 0..n {
             if i > 5 { break }
@@ -393,7 +400,7 @@ fn break_continue_in_counted_for() {
 /// break + continue in a general `while`.
 #[test]
 fn break_continue_in_while() {
-    let src = r#"@pure fn f(n: int) -> int {
+    let src = r#"fn f(n: int) -> int {
         let acc = 0
         let i = 0
         while i < n {
@@ -430,7 +437,7 @@ fn break_continue_in_while() {
 /// Nested loop + if (the grass wind-loop shape).
 #[test]
 fn nested_loop_with_if() {
-    let src = r#"@pure fn f(n: int) -> int {
+    let src = r#"fn f(n: int) -> int {
         let acc = 0
         for y in 0..n {
             for x in 0..n {
@@ -470,7 +477,7 @@ fn nested_loop_with_if() {
 /// is loop-invariant, so re-reading it each iteration is identical.
 #[test]
 fn const_loop_bound_fold() {
-    let src = r#"@pure fn f() -> int {
+    let src = r#"fn f() -> int {
         let acc = 0
         for i in 0..4 { acc = acc + i }
         return acc
@@ -495,7 +502,7 @@ fn const_loop_bound_fold() {
 /// const bounds are provably loop-invariant).
 #[test]
 fn param_loop_bound_not_folded() {
-    let src = r#"@pure fn f(n: int) -> int {
+    let src = r#"fn f(n: int) -> int {
         let acc = 0
         for i in 0..n { acc = acc + i }
         return acc
@@ -565,7 +572,7 @@ fn two_store_diamond_still_folds() {
 /// that keeps a manual `while i < n { .. i = i + 1 }` off the range-for path).
 #[test]
 fn nested_while_loops() {
-    let src = r#"@pure fn f(n: int) -> int {
+    let src = r#"fn f(n: int) -> int {
         let acc = 0
         let i = 0
         while i < n {
@@ -611,7 +618,7 @@ fn nested_while_loops() {
 #[test]
 fn int_literal_float_contexts() {
     let src = r#"
-        @pure fn root(x: float) -> float {
+        fn root(x: float) -> float {
             let y = 0.5
             if x > 0 {
                 y = x + 1
@@ -676,7 +683,7 @@ fn int_in_mixed_arithmetic() {
 /// (the first-store inference corner this replaces).
 #[test]
 fn let_float_annotation_cell_typing() {
-    let src = r#"@pure fn f() -> float { let y: float = 0  return y }"#;
+    let src = r#"fn f() -> float { let y: float = 0  return y }"#;
     let glsl = emit(src, &["f"]).expect("emit");
     assert_eq!(
         glsl.trim(),
@@ -701,6 +708,13 @@ fn emit_entry_profile(
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
+    // the CLI reports those and refuses to emit. Without this check the goldens
+    // pin emission for sources the real pipeline rejects (backlog #67).
+    let errs = skull_mir::verdict::body_errors(&ws);
+    if !errs.is_empty() {
+        return Err(errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "));
+    }
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull_codegen_glsl::emit_shader_entry(&ws, mid, root, profile).map_err(|e| e.message)
 }

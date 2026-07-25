@@ -64,26 +64,7 @@ impl BonePhaseTimes {
 /// "lowered and checked", NOT "no type errors"; every verdict-shaped consumer
 /// must go through here or it will count broken bodies as passing.
 pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<CompilerError> {
-    // Per-body type errors PLUS lowering errors (which live on the module, not
-    // the inference — e.g. `_` placeholder inside an explicit lambda/block) PLUS
-    // interface-position type errors (an unknown / wrong-arity type in a
-    // signature / global / field). Lowering is TOTAL: such a reference lowers to
-    // `Error` + a recorded `interface_errors` entry rather than aborting the
-    // pass, so a verdict ignoring `interface_errors` would accept
-    // `fn f(x: Nonexistent)` and let skull emit Lua over the error type. A body
-    // OR interface that fails to lower is a failure, not a silent pass.
-    let mut errs: Vec<CompilerError> = ws
-        .inferences
-        .iter().flatten()
-        .flat_map(|inf| inf.errors.values().flatten().cloned())
-        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten().cloned()))
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter().cloned()))
-        .collect();
-    errs.sort_by(|a, b| {
-        (a.location.file.as_str(), a.location.offset)
-            .cmp(&(b.location.file.as_str(), b.location.offset))
-    });
-    errs
+    skull_mir::verdict::body_errors(ws)
 }
 
 /// Render every error in `errs` against `sources` and join into one report.
