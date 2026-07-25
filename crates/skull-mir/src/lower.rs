@@ -3007,6 +3007,25 @@ impl Builder<'_> {
                 let b = self.lower_place_base(base)?;
                 Ok(self.emit_cur(Inst::Field { base: b, field }))
             }
+            // A call returning a VALUE is not storage: the rvalue lowering packs a
+            // fresh box, so the store lands on a temporary and emits
+            // `(Pt_ct(a, b)).x = v` -- not valid Lua, so the whole chunk fails to
+            // parse at load. bone rejects the reachable form (`1dd209b65`), so
+            // this is unreachable by construction; it rejects rather than falls
+            // back so a future admission change surfaces here instead of as an
+            // unparseable chunk.
+            //
+            // A call returning a REFERENCE struct IS storage -- it hands back the
+            // shared table, so the write is real. `o.next.unwrap().value = v` is
+            // the live shape (`tests/lambda_stress_tests.rock`).
+            Expr::Call { .. } | Expr::SafeNavCall { .. } if self.expr_is_value_struct(e) => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "assignment target's base is a `value` call result, which is not storage: \
+                     the write would land on a temporary and be discarded"
+                        .to_string(),
+                ))
+            }
             _ => self.lower_expr(e),
         }
     }
@@ -6809,6 +6828,15 @@ impl Builder<'_> {
     }
 
     /// Whether nominal `name` is a `value` struct (C-layout cdata).
+    /// Whether `e`'s type is a `value` struct -- the shape whose rvalue lowering
+    /// packs a fresh cdata rather than handing back shared storage.
+    fn expr_is_value_struct(&self, e: Idx<Expr>) -> bool {
+        match self.expr_ty(e) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self.is_value_struct(name),
+            _ => false,
+        }
+    }
+
     fn is_value_struct(&self, name: Ustr) -> bool {
         self.ws
             .struct_by_name
