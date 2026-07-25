@@ -325,8 +325,10 @@ fn metric_recent(m: Metric, i: int) -> float {
 // element cdef name at each call site, so `NativeBuffer { ptr:
 // native_buffer_alloc(n), len: n }` works for any FFI-clean value struct with no
 // per-type boilerplate. At runtime elements are stored contiguously as `T` cdata
-// (AoS); `buf[i]` returns a cdata ref (no copy) and `buf[i] = v` copies the struct
-// field-wise. See tests/native_buffer_value.rock and FlatVec<T> below.
+// (AoS); a whole-value `buf[i]` read copies the element out, `buf[i].x` reads the
+// slot live, and `buf[i] = v` copies the struct field-wise. See
+// tests/native_buffer_value.rock, tests/value_element_read_copy.rock and
+// FlatVec<T> below.
 
 // ============================================================================
 // FlatVec<T> — growable flat storage for FFI-clean value structs
@@ -415,12 +417,8 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 // key is a single precomputed field read.
 @inline fn FlatVec<T>.sort(fv, key_fn: (T) -> float) {
     for i in 1..fv.len {
-        // `fv.get(i)` returns a VALUE copy (the scalar return ABI reads the fields
-        // into leaves) -- a direct `fv.buf[i]` binds a cdata ref that the shift
-        // below would alias and corrupt. The key reads the buffer ref directly
-        // (already a cdata -> no pack) BEFORE any shift, so no per-pivot box.
-        let x = fv.get(i)
-        let kx = key_fn(fv.buf[i])
+        let x = fv.buf[i]
+        let kx = key_fn(x)
         let j = i - 1
         while j >= 0 && key_fn(fv.buf[j]) > kx {
             fv.buf[j + 1] = fv.buf[j]
