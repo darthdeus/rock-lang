@@ -22,7 +22,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use comfy_la_arena::Idx;
 use crate::scope::{non_dominating_by_value_captures, Ownership, ScopeId, ScopeTree};
-use skull_codegen_lua::reachable_blocks_from;
+use skull_mir::cfg::reachable_blocks_from;
 use skull_mir::mir::*;
 use ustr::Ustr;
 

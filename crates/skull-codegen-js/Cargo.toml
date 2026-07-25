@@ -11,6 +11,7 @@ edition = "2024"
 
 [dependencies]
 skull-mir = { path = "../skull-mir" }
+rustc-hash = { workspace = true }
 skull-transform = { path = "../skull-transform" }
 bone-semantic = { path = "../bone-semantic" }
 skull-parser = { path = "../skull-parser" }

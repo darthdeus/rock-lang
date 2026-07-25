@@ -25,6 +25,7 @@ use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
+use skull_mir::cfg::reverse_postorder;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
@@ -1500,45 +1501,6 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
         }
     }
     false
-}
-
-fn reverse_postorder(f: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
-    let mut post = Vec::new();
-    let mut visited: HashSet<Idx<Block>> = HashSet::default();
-    let mut stack = vec![(entry, false)];
-    visited.insert(entry);
-    while let Some((b, processed)) = stack.pop() {
-        if processed {
-            post.push(b);
-            continue;
-        }
-        stack.push((b, true));
-        successors(&f.blocks[b].term, |s| {
-            if visited.insert(s) {
-                stack.push((s, false));
-            }
-        });
-    }
-    post.reverse();
-    post
-}
-
-pub(crate) fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
-    match term {
-        Term::Goto(t) => f(*t),
-        Term::Branch { then_bb, else_bb, .. } => {
-            f(*then_bb);
-            f(*else_bb);
-        }
-        Term::Switch { cases, default, .. } => {
-            for (_, b) in cases {
-                f(*b);
-            }
-            f(*default);
-        }
-        Term::Yield { resume, .. } => f(*resume),
-        Term::Return(_) | Term::Unreachable => {}
-    }
 }
 
 // --- public API --------------------------------------------------------------

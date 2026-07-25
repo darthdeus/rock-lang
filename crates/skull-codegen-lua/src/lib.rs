@@ -28,6 +28,9 @@ use bone_semantic::hir::Function;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{CompilerError, Span};
 use comfy_la_arena::Idx;
+use skull_mir::cfg::{
+    PredMap, predecessors, reachable_blocks_from, reverse_postorder, successors,
+};
 use skull_mir::mir::*;
 
 pub use skull_mir::mangle::mangle_fn;
@@ -234,59 +237,6 @@ impl CodegenCtx {
     }
 }
 
-/// Successor blocks of a terminator, in branch order (for reverse-postorder).
-/// Visit each successor block of `term` (callback form — avoids the per-call
-/// `Vec` alloc; this runs per block, per iteration inside the regalloc liveness
-/// fixpoints, where it was a malloc/memmove hot spot). No caller needs the set
-/// materialized.
-fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
-    match term {
-        Term::Return(_) | Term::Unreachable => {}
-        Term::Goto(b) => f(*b),
-        Term::Branch { then_bb, else_bb, .. } => {
-            f(*then_bb);
-            f(*else_bb);
-        }
-        Term::Switch { cases, default, .. } => {
-            for (_, b) in cases {
-                f(*b);
-            }
-            f(*default);
-        }
-        Term::Yield { resume, .. } => f(*resume),
-    }
-}
-
-/// Blocks reachable from `entry`, in arena-id order. Pure `goto`+labels means
-/// label order is irrelevant to correctness, so emit in source-faithful id order
-/// rather than RPO; unreachable blocks (dead lowering artifacts) are dropped so
-/// no dangling `goto` reaches the printer. (RPO returns once counted-loop
-/// recovery lands — a real `for` needs its preheader emitted just before the
-/// header, which id order doesn't guarantee.)
-pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
-    let mut visited: HashSet<Idx<Block>> = HashSet::default();
-    let mut stack = vec![entry];
-    visited.insert(entry);
-    while let Some(b) = stack.pop() {
-        successors(&func.blocks[b].term, |s| {
-            if visited.insert(s) {
-                stack.push(s);
-            }
-        });
-    }
-    // The entry MUST be emitted first — Lua executes top-down, so it falls into
-    // the first label regardless of the `entry` field (matters when the entry is
-    // not the lowest-id block, e.g. a coroutine's dispatch entry).
-    let mut order = vec![entry];
-    order.extend(
-        func.blocks
-            .iter()
-            .map(|(id, _)| id)
-            .filter(|id| *id != entry && visited.contains(id)),
-    );
-    order
-}
-
 /// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the top
 /// scope rooted at `entry` emits: its terminator-reachable blocks PLUS every
 /// inline-lambda sub-region nested within them (reached via `Inst::Lambda`
@@ -361,77 +311,6 @@ pub fn emit_function(
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
 pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) -> String {
     emit_named_framed(ws, ctx, name, func, None, None)
-}
-
-/// Immediate-dominator map over the blocks reachable from `entry` (classic
-/// Cooper-Harvey-Kennedy iterative fixpoint over reverse-postorder). The entry
-/// maps to itself.
-pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> HashMap<Idx<Block>, Idx<Block>> {
-    let rpo = reverse_postorder(func, entry);
-    let mut order: HashMap<Idx<Block>, usize> = HashMap::default();
-    for (i, &b) in rpo.iter().enumerate() {
-        order.insert(b, i);
-    }
-    let (all_preds, _) = predecessors(func, &rpo);
-    let mut idom: HashMap<Idx<Block>, Idx<Block>> = HashMap::default();
-    idom.insert(entry, entry);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in rpo.iter().skip(1) {
-            let mut new_idom: Option<Idx<Block>> = None;
-            for &p in all_preds.get(&b).map(|v| v.as_slice()).unwrap_or(&[]) {
-                if !idom.contains_key(&p) {
-                    continue; // not yet processed
-                }
-                new_idom = Some(match new_idom {
-                    None => p,
-                    Some(cur) => intersect(&idom, &order, p, cur),
-                });
-            }
-            if let Some(ni) = new_idom {
-                if idom.get(&b) != Some(&ni) {
-                    idom.insert(b, ni);
-                    changed = true;
-                }
-            }
-        }
-    }
-    idom
-}
-
-/// The CHK "intersect" walk: climb the two dominator chains (by RPO number) until
-/// they meet.
-fn intersect(
-    idom: &HashMap<Idx<Block>, Idx<Block>>,
-    order: &HashMap<Idx<Block>, usize>,
-    mut a: Idx<Block>,
-    mut b: Idx<Block>,
-) -> Idx<Block> {
-    while a != b {
-        while order[&a] > order[&b] {
-            a = idom[&a];
-        }
-        while order[&b] > order[&a] {
-            b = idom[&b];
-        }
-    }
-    a
-}
-
-/// Does block `a` dominate block `b` (walk `b`'s idom chain to the entry)?
-pub fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<Block>) -> bool {
-    let mut x = b;
-    loop {
-        if x == a {
-            return true;
-        }
-        let Some(&p) = idom.get(&x) else { return false };
-        if p == x {
-            return false; // reached the entry without hitting `a`
-        }
-        x = p;
-    }
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -637,57 +516,6 @@ struct CountedLoop {
     exit: Idx<Block>,
     /// The natural-loop body blocks (excludes header + latch).
     region: HashSet<Idx<Block>>,
-}
-
-/// Reverse-postorder of the blocks reachable from `entry`. A loop preheader
-/// dominates its header, so RPO emits it first — the `for` then falls through
-/// into the header position (a `for` can't be a goto target, unlike a label).
-/// Unreachable lowering-artifact blocks are dropped.
-fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
-    let mut post = Vec::new();
-    let mut visited: HashSet<Idx<Block>> = HashSet::default();
-    let mut stack = vec![(entry, false)];
-    visited.insert(entry);
-    while let Some((b, processed)) = stack.pop() {
-        if processed {
-            post.push(b);
-            continue;
-        }
-        stack.push((b, true));
-        successors(&func.blocks[b].term, |s| {
-            if visited.insert(s) {
-                stack.push((s, false));
-            }
-        });
-    }
-    post.reverse();
-    post
-}
-
-/// (all predecessors, goto-only predecessors) of each reachable block. Loop
-/// edges are unconditional gotos (preheader->header, latch->header), so the
-/// goto-pred set isolates the two loop entries.
-type PredMap = HashMap<Idx<Block>, Vec<Idx<Block>>>;
-fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
-    let reach: HashSet<Idx<Block>> = rpo.iter().copied().collect();
-    let mut all: PredMap = HashMap::default();
-    let mut goto: PredMap = HashMap::default();
-    for &b in rpo {
-        match &func.blocks[b].term {
-            Term::Goto(t) => {
-                all.entry(*t).or_default().push(b);
-                goto.entry(*t).or_default().push(b);
-            }
-            t => {
-                successors(t, |s| {
-                    if reach.contains(&s) {
-                        all.entry(s).or_default().push(b);
-                    }
-                });
-            }
-        }
-    }
-    (all, goto)
 }
 
 /// Every counted loop in `func`, keyed by header block. `frame` excludes a

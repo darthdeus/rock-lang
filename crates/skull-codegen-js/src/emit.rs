@@ -588,7 +588,7 @@ impl Emitter<'_> {
             if insts > MAX_INSTS {
                 return None;
             }
-            structure::successors(&self.mf.blocks[b].term, |t| {
+            skull_mir::cfg::successors(&self.mf.blocks[b].term, |t| {
                 if !boundary(t) {
                     stack.push(t);
                 }

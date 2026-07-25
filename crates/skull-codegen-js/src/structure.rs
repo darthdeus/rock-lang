@@ -5,35 +5,11 @@
 //! skull-mir lowers for a tier-0 fn. Simple iterative algorithms at
 //! test-fn scale.
 
-use comfy_la_arena::{Idx, RawIdx};
+use comfy_la_arena::Idx;
+use skull_mir::cfg::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
 use skull_mir::mir::{Block, MirFunc, Term};
+use rustc_hash::FxHashSet;
 use std::collections::{HashMap, HashSet};
-
-fn bx(b: Idx<Block>) -> usize {
-    b.into_raw().into_u32() as usize
-}
-
-fn bi(n: usize) -> Idx<Block> {
-    Idx::from_raw(RawIdx::from_u32(n as u32))
-}
-
-pub(crate) fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
-    match term {
-        Term::Goto(t) => f(*t),
-        Term::Branch { then_bb, else_bb, .. } => {
-            f(*then_bb);
-            f(*else_bb);
-        }
-        Term::Switch { cases, default, .. } => {
-            for (_, b) in cases {
-                f(*b);
-            }
-            f(*default);
-        }
-        Term::Yield { resume, .. } => f(*resume),
-        Term::Return(_) | Term::Unreachable => {}
-    }
-}
 
 /// One natural loop: its header (back-edge target), the set of body blocks, and
 /// its single exit (the out-of-loop block a body block branches to). Tier-0
@@ -93,95 +69,6 @@ pub(crate) fn analyze(f: &MirFunc) -> Structure {
     Structure { ipdom, loops }
 }
 
-fn succ_list(f: &MirFunc) -> Vec<Vec<usize>> {
-    let mut s = vec![Vec::new(); f.blocks.len()];
-    for (b, blk) in f.blocks.iter() {
-        let i = bx(b);
-        successors(&blk.term, |t| s[i].push(bx(t)));
-    }
-    s
-}
-
-fn pred_list(n: usize, succ: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    let mut p = vec![Vec::new(); n];
-    for (b, ss) in succ.iter().enumerate() {
-        for &s in ss {
-            p[s].push(b);
-        }
-    }
-    p
-}
-
-/// Reverse post-order of the nodes reachable from `entry` over `adj`.
-fn rpo(n: usize, entry: usize, adj: &[Vec<usize>]) -> Vec<usize> {
-    let mut visited = vec![false; n];
-    let mut post = Vec::new();
-    let mut stack = vec![(entry, 0usize)];
-    visited[entry] = true;
-    while let Some(&(node, i)) = stack.last() {
-        if i < adj[node].len() {
-            stack.last_mut().unwrap().1 += 1;
-            let s = adj[node][i];
-            if !visited[s] {
-                visited[s] = true;
-                stack.push((s, 0));
-            }
-        } else {
-            post.push(node);
-            stack.pop();
-        }
-    }
-    post.reverse();
-    post
-}
-
-/// Cooper-Harvey-Kennedy iterative dominators.
-fn idoms(n: usize, entry: usize, preds: &[Vec<usize>], rpo_order: &[usize]) -> Vec<Option<usize>> {
-    let mut rpo_index = vec![usize::MAX; n];
-    for (i, &b) in rpo_order.iter().enumerate() {
-        rpo_index[b] = i;
-    }
-    let mut idom = vec![None; n];
-    idom[entry] = Some(entry);
-
-    let intersect = |mut a: usize, mut b: usize, idom: &[Option<usize>], ri: &[usize]| -> usize {
-        while a != b {
-            while ri[a] > ri[b] {
-                a = idom[a].unwrap();
-            }
-            while ri[b] > ri[a] {
-                b = idom[b].unwrap();
-            }
-        }
-        a
-    };
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &b in rpo_order {
-            if b == entry {
-                continue;
-            }
-            let mut new_idom: Option<usize> = None;
-            for &p in &preds[b] {
-                if idom[p].is_some() {
-                    new_idom = Some(match new_idom {
-                        None => p,
-                        Some(ni) => intersect(p, ni, &idom, &rpo_index),
-                    });
-                }
-            }
-            if idom[b] != new_idom {
-                idom[b] = new_idom;
-                changed = true;
-            }
-        }
-    }
-    idom[entry] = None;
-    idom
-}
-
 /// Immediate post-dominators: dominators on the reversed CFG rooted at a virtual
 /// exit (node `n`) that every `Return` block flows into. `Unreachable` blocks do
 /// NOT connect to the exit: they mark control the compiler proved never runs (an
@@ -218,19 +105,6 @@ fn post_idoms(f: &MirFunc, n: usize, succ: &[Vec<usize>]) -> Vec<Option<Idx<Bloc
     out
 }
 
-fn dominates(idom: &[Option<usize>], a: usize, b: usize) -> bool {
-    let mut cur = b;
-    loop {
-        if cur == a {
-            return true;
-        }
-        match idom[cur] {
-            Some(p) => cur = p,
-            None => return false,
-        }
-    }
-}
-
 fn natural_loops(
     f: &MirFunc,
     n: usize,
@@ -253,7 +127,7 @@ fn natural_loops(
 
     let mut out = HashMap::new();
     for (h, hlatches) in latches {
-        let mut body: HashSet<usize> = HashSet::new();
+        let mut body: FxHashSet<usize> = FxHashSet::default();
         for &l in &hlatches {
             collect_loop_body(h, l, preds, &mut body);
         }
@@ -315,23 +189,10 @@ fn natural_loops(
 
 /// The natural loop body of back edge `latch -> header`: `header` plus every node
 /// that reaches `latch` without passing through `header`.
-fn collect_loop_body(header: usize, latch: usize, preds: &[Vec<usize>], body: &mut HashSet<usize>) {
-    body.insert(header);
-    if body.insert(latch) {
-        let mut stack = vec![latch];
-        while let Some(x) = stack.pop() {
-            for &p in &preds[x] {
-                if p != header && body.insert(p) {
-                    stack.push(p);
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use comfy_la_arena::RawIdx;
     use skull_mir::mir::{Inst, Lit};
     use ustr::Ustr;
 

@@ -18,7 +18,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_mir::mir::*;
 
-use skull_codegen_lua::reachable_blocks_from;
+use skull_mir::cfg::reachable_blocks_from;
 
 /// Index into [`ScopeTree::scopes`]. The enclosing fn is always [`ROOT`].
 pub type ScopeId = usize;
@@ -454,8 +454,8 @@ pub fn non_dominating_by_value_captures(
             } else {
                 let idom = idoms
                     .entry(parent_entry)
-                    .or_insert_with(|| skull_codegen_lua::dominators(func, parent_entry));
-                skull_codegen_lua::dominates(idom, wblock, cblock)
+                    .or_insert_with(|| skull_mir::cfg::dominators(func, parent_entry));
+                skull_mir::cfg::dominates(idom, wblock, cblock)
             };
             if !write_dominates {
                 // Box fallback FIRST so correctness never depends on the assert
