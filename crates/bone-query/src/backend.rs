@@ -30,7 +30,6 @@ use lsp_types::{
     Uri, WorkspaceEdit,
 };
 
-use bone_lints::LintFinding;
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{BodyInference, InferenceResult, ModuleId, Span, TyId, Workspace};
 use bone_incremental::session::{Session, UpdateTier};
@@ -184,10 +183,7 @@ pub struct ModuleRecency {
 /// (the default when `type` is absent). False for a `lib`, or when no
 /// `stick.toml` exists (a standalone scratch file is not a closed world).
 fn stick_is_bin(root: &Path) -> bool {
-    matches!(
-        rock_host::stick::StickConfig::find_from_dir(root),
-        Ok(Some((_, cfg))) if cfg.package.package_type() == rock_host::stick::PackageType::Bin
-    )
+    rock_host::stick::StickConfig::is_bin_at(root)
 }
 
 /// All bone-backed LSP state for the running server. Holds one [`Session`] per
@@ -725,47 +721,29 @@ impl BoneWorkspace {
             diags.extend(lints);
         }
 
-        // `unused_fn` lint (bin projects only). Unlike `unused_var`, reachability
-        // is whole-project: a finding in ANY file can flip from an edit ANYWHERE
-        // (adding or removing a call keeps or kills a function), so there is no
-        // per-file cache -- recompute the whole workspace each edit and
-        // distribute by file. A `lib`'s public API has external callers we can't
-        // see, so the lint would false-flag it; hence the `is_bin` gate.
-        if proj.is_bin {
-            let by_fn = bone_lints::unused_fns_by_file(
+        // The whole-workspace lints (`unused_fn`, `backend_sibling_mismatch`).
+        // Unlike `unused_var` these are cross-file: a finding in ANY file can
+        // flip from an edit ANYWHERE (adding or removing a call keeps or kills a
+        // function; a signature edit on either half of a sibling pair), so there
+        // is no per-file cache -- recompute the workspace each edit and
+        // distribute by file. Cheap: no bodies walked for siblings, no inference
+        // for either.
+        {
+            let by_ws = bone_lints::workspace_findings_by_file(
                 proj.session.workspace(),
                 &proj.session.warm_mids,
+                proj.is_bin,
             );
             for (p, diags) in by_file.iter_mut() {
                 if p == path && this_file_parse_err.is_some() {
                     continue;
                 }
-                let Some(findings) = by_fn.get(&Ustr::from(p.as_str())) else {
+                let Some(findings) = by_ws.get(&Ustr::from(p.as_str())) else {
                     continue;
                 };
                 let src = proj.texts.get(p).map(String::as_str).unwrap_or("");
-                let kept = bone_lints::filter_suppressed(findings.clone(), src);
-                diags.extend(kept.iter().map(lint_finding_diagnostic));
-            }
-        }
-
-        // `backend_sibling_mismatch`. Like `unused_fn` this is whole-project --
-        // a finding is a property of a decl PAIR, so an edit to either half
-        // flips it -- but it reads only signatures, no bodies and no inference,
-        // so the workspace pass is cheap enough to redo per edit with no cache.
-        // Not gated on `is_bin`: a lib's siblings have to agree just as much.
-        {
-            let by_sib = bone_lints::backend_sibling_mismatches_by_file(proj.session.workspace());
-            for (p, diags) in by_file.iter_mut() {
-                if p == path && this_file_parse_err.is_some() {
-                    continue;
-                }
-                let Some(findings) = by_sib.get(&Ustr::from(p.as_str())) else {
-                    continue;
-                };
-                let src = proj.texts.get(p).map(String::as_str).unwrap_or("");
-                let kept = bone_lints::filter_suppressed(findings.clone(), src);
-                diags.extend(kept.iter().map(lint_finding_diagnostic));
+                let kept = bone_lints::filter_suppressed_findings(findings.clone(), src);
+                diags.extend(kept.iter().map(finding_diagnostic));
             }
         }
 
@@ -912,10 +890,7 @@ impl BoneWorkspace {
         };
         let mut diags = lint_diagnostics_for(proj, path);
         diags.extend(transmute_diagnostics_for(proj, path));
-        diags.extend(sibling_lint_diagnostics_for(proj, path));
-        if proj.is_bin {
-            diags.extend(fn_lint_diagnostics_for(proj, path));
-        }
+        diags.extend(workspace_lint_diagnostics_for(proj, path));
         diags
     }
 
@@ -4121,9 +4096,9 @@ pub fn compiler_error_to_diagnostics(e: &CompilerError) -> Vec<(Ustr, Diagnostic
 /// Render a lint finding as an LSP warning tagged with its lint name in the
 /// `code` field, so the "Suppress with `// rock: allow(<lint>)`" code action
 /// identifies lint squiggles robustly (by `code`, not by message-sniffing).
-fn lint_finding_diagnostic<F: LintFinding>(f: &F) -> Diagnostic {
-    let mut d = compiler_error_to_diagnostic(&f.to_diagnostic());
-    d.code = Some(NumberOrString::String(F::LINT.to_string()));
+fn finding_diagnostic(f: &bone_lints::Finding) -> Diagnostic {
+    let mut d = compiler_error_to_diagnostic(&f.error);
+    d.code = Some(NumberOrString::String(f.lint.to_string()));
     d
 }
 
@@ -4209,28 +4184,11 @@ fn lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
     let Some(mid) = user_module_for_path(ws, path) else {
         return Vec::new();
     };
-    // A warm (stdlib) file the user opened is a read-only reference: don't lint
-    // it (every stdlib helper would false-flag as an unused var).
-    if proj.session.warm_mids.contains(&mid) {
-        return Vec::new();
-    }
-    let module = &ws.modules[mid.index()];
-    let variants = bone_lints::enum_variant_names(ws, &proj.session.warm_mids);
-    let unused_vars: Vec<_> = module
-        .bodies
-        .values()
-        .flat_map(|b| bone_lints::unused_vars_in_body(b, &variants))
-        .collect();
-    let unused_pure: Vec<_> = module
-        .bodies
-        .values()
-        .flat_map(bone_lints::unused_pure_exprs_in_body)
-        .collect();
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    let mut out: Vec<Diagnostic> =
-        bone_lints::filter_suppressed(unused_vars, src).iter().map(lint_finding_diagnostic).collect();
-    out.extend(bone_lints::filter_suppressed(unused_pure, src).iter().map(lint_finding_diagnostic));
-    out
+    bone_lints::flat_findings(ws, &proj.session.warm_mids, mid, src)
+        .iter()
+        .map(finding_diagnostic)
+        .collect()
 }
 
 /// `transmute_of_nullable` lint diagnostics (warnings) for one file: run the
@@ -4242,66 +4200,32 @@ fn transmute_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> 
     let Some(mid) = user_module_for_path(ws, path) else {
         return Vec::new();
     };
-    if proj.session.warm_mids.contains(&mid) {
-        return Vec::new();
-    }
-    let module = &ws.modules[mid.index()];
-    let inf = ws.inference(mid);
-    let findings: Vec<_> = module
-        .bodies
-        .iter()
-        .flat_map(|(owner, body)| {
-            let bi = inf.and_then(|i| i.per_fn.get(owner));
-            bone_lints::transmute_of_nullable_in_body(ws, bi, body)
-        })
-        .collect();
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    bone_lints::filter_suppressed(findings, src)
+    bone_lints::inference_findings(ws, &proj.session.warm_mids, mid, src)
         .iter()
-        .map(lint_finding_diagnostic)
+        .map(finding_diagnostic)
         .collect()
 }
 
-/// `unused_fn` lint diagnostics for one file. Reachability is whole-project, so
-/// this runs the workspace walk and keeps only `path`'s dead functions; the
-/// caller gates it to `bin` projects. The one-shot CLI path -- the `update`
-/// path distributes the same by-file result across every tracked file.
-fn fn_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
-    let by_fn =
-        bone_lints::unused_fns_by_file(proj.session.workspace(), &proj.session.warm_mids);
-    let Some(findings) = by_fn.get(&Ustr::from(path)) else {
-        return Vec::new();
-    };
-    let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    bone_lints::filter_suppressed(findings.clone(), src)
-        .iter()
-        .map(lint_finding_diagnostic)
-        .collect()
-}
-
-/// `backend_sibling_mismatch` lint diagnostics for one file. Sibling sets are
-/// whole-workspace and cross-file (an engine decl in `stdlib/` against its
-/// `inline(js)` half in `js_ffi.rock`), so this runs the workspace pass and
-/// keeps only `path`'s findings. Warm (stdlib) modules are SCANNED -- half of
-/// every stone sibling set lives there -- but not reported on, matching the
-/// other lints' read-only treatment of stdlib files; a drifted pair still
-/// surfaces on its user-module half.
-fn sibling_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
-    let ws = proj.session.workspace();
-    let Some(mid) = user_module_for_path(ws, path) else {
-        return Vec::new();
-    };
-    if proj.session.warm_mids.contains(&mid) {
-        return Vec::new();
-    }
-    let by_file = bone_lints::backend_sibling_mismatches_by_file(ws);
+/// The whole-workspace lints (`unused_fn`, `backend_sibling_mismatch`) for one
+/// file: run the workspace pass and keep only `path`'s findings. Both are
+/// cross-file properties -- reachability spans the project, a sibling set spans
+/// a decl PAIR -- so there is nothing per-file to compute. `unused_fn` is gated
+/// to `bin` projects inside the runner. The one-shot path; `update` distributes
+/// the same by-file result across every tracked file.
+fn workspace_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
+    let by_file = bone_lints::workspace_findings_by_file(
+        proj.session.workspace(),
+        &proj.session.warm_mids,
+        proj.is_bin,
+    );
     let Some(findings) = by_file.get(&Ustr::from(path)) else {
         return Vec::new();
     };
     let src = proj.texts.get(path).map(String::as_str).unwrap_or("");
-    bone_lints::filter_suppressed(findings.clone(), src)
+    bone_lints::filter_suppressed_findings(findings.clone(), src)
         .iter()
-        .map(lint_finding_diagnostic)
+        .map(finding_diagnostic)
         .collect()
 }
 

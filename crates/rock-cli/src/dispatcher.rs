@@ -19,6 +19,15 @@ impl CommandContext {
         // engine adapts the header per context at shader-compile time. Every
         // other command would accept-and-ignore it, which reads as "ES was
         // selected" while emitting desktop headers.
+        // The build lint pass runs deep inside the backends, far from `Args`, so
+        // the reporting policy is installed once here.
+        crate::lint_pass::set_policy(if self.args.no_lints {
+            crate::lint_pass::LintReport::Off
+        } else if self.args.lint_summary {
+            crate::lint_pass::LintReport::Summary
+        } else {
+            crate::lint_pass::LintReport::Full
+        });
         if self.args.profile.is_some() && self.args.command != CliCommand::Shader {
             anyhow::bail!(
                 "rock {}: --profile applies only to `rock shader` (offline GLSL emission). \
@@ -650,6 +659,12 @@ impl CommandContext {
                     std::process::exit(1);
                 }
             };
+        }
+        // `rock lint` is a pure consumer of bone's typechecked output -- no
+        // codegen, so it dispatches before the backend switch like `fmt`.
+        if self.args.command == CliCommand::Lint {
+            let path = self.get_path_or_current()?;
+            return crate::lint_cmd::do_lint(&path);
         }
         if self.args.command == CliCommand::StoneTest {
             let path = self.get_path_or_current()?;

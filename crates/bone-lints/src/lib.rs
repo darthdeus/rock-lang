@@ -127,6 +127,177 @@ pub const KNOWN_LINTS: &[&str] = &[
     BACKEND_SIBLING_MISMATCH,
 ];
 
+/// A name-tagged, rendered finding of any lint -- the type every SURFACE
+/// consumes (LSP diagnostics, `rock lint`, the build pass), so a surface never
+/// needs to know which lints exist or which cost class each belongs to.
+#[derive(Clone, Debug)]
+pub struct Finding {
+    pub lint: &'static str,
+    pub error: CompilerError,
+    pub line: usize,
+}
+
+impl Finding {
+    fn of<F: LintFinding>(f: &F) -> Self {
+        Finding { lint: F::LINT, error: f.to_diagnostic(), line: f.line() }
+    }
+
+    pub fn level(&self) -> CompilerErrorLevel {
+        self.error.level
+    }
+
+    pub fn file(&self) -> Ustr {
+        self.error.location.file
+    }
+}
+
+/// The lints that read only a body's HIR -- no inference, no other file. A
+/// file's findings change only when that file's own text changes, which is what
+/// lets the LSP cache them per file across unrelated edits.
+///
+/// `src` is the file's text, for `// rock: allow(...)` suppression. A warm
+/// (stdlib) module lints to nothing: it is a read-only reference to the author,
+/// and every stdlib helper would false-flag.
+pub fn flat_findings(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    mid: ModuleId,
+    src: &str,
+) -> Vec<Finding> {
+    flat_findings_with(ws, &enum_variant_names(ws, warm), warm, mid, src)
+}
+
+/// [`flat_findings`] with the workspace's enum-variant names supplied. The
+/// variant scan is whole-workspace, so a caller linting EVERY module computes it
+/// once here instead of once per file.
+fn flat_findings_with(
+    ws: &Workspace,
+    variants: &FxHashSet<Ustr>,
+    warm: &FxHashSet<ModuleId>,
+    mid: ModuleId,
+    src: &str,
+) -> Vec<Finding> {
+    if warm.contains(&mid) {
+        return Vec::new();
+    }
+    let module = ws.module(mid);
+    let unused_vars: Vec<_> =
+        module.bodies.values().flat_map(|b| unused_vars_in_body(b, variants)).collect();
+    let unused_pure: Vec<_> =
+        module.bodies.values().flat_map(unused_pure_exprs_in_body).collect();
+    let mut out: Vec<Finding> =
+        filter_suppressed(unused_vars, src).iter().map(Finding::of).collect();
+    out.extend(filter_suppressed(unused_pure, src).iter().map(Finding::of));
+    out
+}
+
+/// The lints that read the module's INFERENCE. A dependency edit can re-infer
+/// this module and change its findings without its own text changing, so a
+/// caching surface must invalidate these on re-inference, not on text.
+pub fn inference_findings(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    mid: ModuleId,
+    src: &str,
+) -> Vec<Finding> {
+    if warm.contains(&mid) {
+        return Vec::new();
+    }
+    let module = ws.module(mid);
+    let inf = ws.inference(mid);
+    let findings: Vec<_> = module
+        .bodies
+        .iter()
+        .flat_map(|(owner, body)| {
+            transmute_of_nullable_in_body(ws, inf.and_then(|i| i.per_fn.get(owner)), body)
+        })
+        .collect();
+    filter_suppressed(findings, src).iter().map(Finding::of).collect()
+}
+
+/// The whole-workspace lints, grouped by the file each finding sits in. A
+/// finding anywhere can flip from an edit anywhere, so these are recomputed as
+/// a unit; a file with none is absent from the map. Unsuppressed -- the caller
+/// holds the per-file text and applies [`filter_suppressed_findings`].
+///
+/// `unused_fn` is closed-world and runs only for a `bin` package;
+/// `backend_sibling_mismatch` is not gated (a lib's siblings must agree too).
+pub fn workspace_findings_by_file(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    is_bin: bool,
+) -> FxHashMap<Ustr, Vec<Finding>> {
+    let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
+    if is_bin {
+        for (file, findings) in unused_fns_by_file(ws, warm) {
+            out.entry(file).or_default().extend(findings.iter().map(Finding::of));
+        }
+    }
+    // Warm modules are SCANNED (half of every stone sibling set is stdlib) but
+    // not reported on, like every other lint's treatment of stdlib files.
+    let warm_files: FxHashSet<Ustr> = warm.iter().map(|&mid| ws.module(mid).file).collect();
+    for (file, findings) in backend_sibling_mismatches_by_file(ws) {
+        if warm_files.contains(&file) {
+            continue;
+        }
+        out.entry(file).or_default().extend(findings.iter().map(Finding::of));
+    }
+    out
+}
+
+/// Every lint in the catalog, reported for the files in `sources`. The
+/// whole-workspace entry point behind `rock lint` and the build pass.
+///
+/// `sources` is the REPORT set: it names the files to report on and supplies
+/// each one's text for suppression. Every other non-warm module is still
+/// SCANNED -- the workspace lints need the whole call graph and every sibling
+/// decl -- but produces no findings, which is how a project's `stick.toml`
+/// dependencies stay silent without being invisible. Restricting the report set
+/// is also what keeps the pass off the compile hot path: a dependency's bodies
+/// are never walked for the per-body lints.
+pub fn lint_workspace(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    is_bin: bool,
+    sources: &FxHashMap<Ustr, &str>,
+) -> Vec<Finding> {
+    let mut by_file = workspace_findings_by_file(ws, warm, is_bin);
+    let variants = enum_variant_names(ws, warm);
+    let mut out = Vec::new();
+    for module in user_modules(ws, warm) {
+        let Some(&src) = sources.get(&module.file) else { continue };
+        out.extend(flat_findings_with(ws, &variants, warm, module.id, src));
+        out.extend(inference_findings(ws, warm, module.id, src));
+        if let Some(findings) = by_file.remove(&module.file) {
+            out.extend(filter_suppressed_findings(findings, src));
+        }
+    }
+    out
+}
+
+/// [`filter_suppressed`] for already-rendered [`Finding`]s, matching each one's
+/// own lint name. Same rule: the finding's line or the line above it.
+pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<Finding> {
+    let mut allow: FxHashSet<(usize, &'static str)> = FxHashSet::default();
+    for (n, line) in source.lines().enumerate() {
+        for &lint in KNOWN_LINTS {
+            if parse_allow_comment(line, lint) {
+                allow.insert((n, lint));
+            }
+        }
+    }
+    if allow.is_empty() {
+        return findings;
+    }
+    findings
+        .into_iter()
+        .filter(|f| {
+            !allow.contains(&(f.line, f.lint))
+                && !(f.line > 0 && allow.contains(&(f.line - 1, f.lint)))
+        })
+        .collect()
+}
+
 /// A finding that carries its lint name and source line, so one suppression
 /// pass serves every lint. `LINT` is the name matched inside
 /// `// rock: allow(<LINT>)`.
@@ -321,6 +492,24 @@ pub fn backend_sibling_mismatches_by_file(
     out
 }
 
+/// Whether `decls` carries declarations on two DIFFERENT concrete backends --
+/// the precondition for a sibling set. Reads only `Function.backend`, no types.
+fn spans_two_backends(ws: &Workspace, decls: &[(ModuleId, Idx<Function>)]) -> bool {
+    let mut seen: Option<&'static str> = None;
+    for &(mid, fid) in decls {
+        if mid == ModuleId::builtin() {
+            continue;
+        }
+        let Some(b) = backend_name(ws.module(mid).functions[fid].backend) else { continue };
+        match seen {
+            None => seen = Some(b),
+            Some(prev) if prev != b => return true,
+            Some(_) => {}
+        }
+    }
+    false
+}
+
 /// The findings for ONE name's decl set, each paired with the file it belongs
 /// to. Empty for the overwhelmingly common case: fewer than two decls, or every
 /// decl on a single backend.
@@ -329,6 +518,13 @@ fn sibling_set_mismatches(
     decls: &[(ModuleId, Idx<Function>)],
 ) -> Vec<(BackendSiblingMismatch, Ustr)> {
     if decls.len() < 2 {
+        return Vec::new();
+    }
+    // Cheap gate before the expensive part: a set is only interesting if its
+    // decls span two concrete backends. Rendering every param list first would
+    // pay a full type-render for every overload set in the workspace (stdlib
+    // included) to discard almost all of them -- ~1ms per build on a game.
+    if !spans_two_backends(ws, decls) {
         return Vec::new();
     }
     let infos: Vec<SiblingDecl> = decls
