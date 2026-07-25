@@ -36,6 +36,15 @@ pub trait ReachPolicy {
     /// Where the search starts. Called once, before any expansion.
     fn roots(&mut self) -> Result<Vec<Self::Node>, CompilerError>;
 
+    /// Nodes already on the expansion path when the search starts, so reaching
+    /// one is a cycle. GLSL's shader entry is lowered and profile-checked by its
+    /// caller and then hands the driver its callees; a callee calling back into
+    /// that entry is recursion exactly as any other cycle is, and without this
+    /// the driver could not see it.
+    fn initially_in_progress(&mut self) -> Vec<Self::Node> {
+        Vec::new()
+    }
+
     /// A node that is never expanded and never enters the post-order: an
     /// intrinsic, a host-mapped fn, an operator rendered inline at its call
     /// site. Consulted BEFORE the cycle check, so a policy that rejects an
@@ -69,6 +78,7 @@ pub fn walk<P: ReachPolicy>(policy: &mut P) -> Result<Vec<P::Node>, CompilerErro
     let mut done: HashSet<P::Node> = HashSet::default();
     let mut order: Vec<P::Node> = Vec::new();
 
+    in_progress.extend(policy.initially_in_progress());
     let roots = policy.roots()?;
     let mut stack: Vec<Frame<P::Node>> = roots.into_iter().rev().map(Frame::Enter).collect();
 
