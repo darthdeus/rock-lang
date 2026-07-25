@@ -2624,7 +2624,15 @@ impl Builder<'_> {
                 let sym = self.fn_value_symbol(e, name)?;
                 Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
             }
-            Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            // A global holding a value struct routes through the repr layer so a
+            // whole-value read copies the box (a global is a mutable place).
+            Expr::Global(name) => {
+                if self.value_struct_of(e).is_some() {
+                    let r = self.lower_expr_repr(e)?;
+                    return Ok(self.pack(r));
+                }
+                Ok(self.emit_cur(Inst::Global(name)))
+            }
 
             // A reached `?` hole is a not-yet-filled marker: raise a readable
             // runtime error (naming the hole) rather than silently evaluating to
@@ -2725,7 +2733,7 @@ impl Builder<'_> {
                 // A whole-value read of a value-struct element COPIES (via the repr
                 // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
                 // than binding the interior array reference.
-                if self.ffi_clean_value_elem(e).is_some() {
+                if self.value_struct_of(e).is_some() {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
                 }
@@ -2988,6 +2996,7 @@ impl Builder<'_> {
                 let i = self.lower_expr(index)?;
                 Ok(self.emit_cur(Inst::Index { base: b, index: i, kind }))
             }
+            Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
             // A swizzle and a flattened-enum field are not places (both
             // materialize a fresh value); leave them to the rvalue path, which
             // rejects or copies as it does today.
@@ -4131,6 +4140,27 @@ impl Builder<'_> {
         out
     }
 
+    /// A whole-value read of value struct `name` out of a BOXED place (struct
+    /// field, global, container element): split the box into leaves and rebuild a
+    /// fresh `Group`, so `pack` materializes a COPY instead of aliasing the stored
+    /// box. This is the same split-and-repack that already makes fn round-trips
+    /// copy (params/returns ride the scalar ABI).
+    ///
+    /// Nested value fields recurse, so the snapshot survives a later place write
+    /// through the owner -- a shallow expansion would snapshot the nested box's
+    /// POINTER. A GC leaf is one slot, so its pointee stays shared by design. A
+    /// leaf projection off the `Group` still reads its own slot at its own read
+    /// point, and the unread leaves die in DCE.
+    fn boxed_value_copy_repr(&mut self, boxed: Idx<Inst>, name: Ustr) -> ValueRepr {
+        let Some(shape) = value_shape(self.ws, name).or_else(|| value_shape_gc(self.ws, name))
+        else {
+            return ValueRepr::Scalar(boxed);
+        };
+        let leaves = self.cdata_leaves(boxed, &shape);
+        let mut idx = 0;
+        self.rebuild_from_leaves(&shape, &leaves, &mut idx)
+    }
+
     /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse
     /// of `repr_to_leaves`), consuming leaves depth-first from `*idx`.
     fn rebuild_from_leaves(
@@ -4204,11 +4234,23 @@ impl Builder<'_> {
                         return Ok(parts[i].clone());
                     }
                 }
-                // A boxed value struct: read the field directly. A payload-free
-                // enum field is a plain `int` (the enum value IS the int), so no
-                // conversion -- same as any primitive field.
+                // A boxed base: read the field directly. A payload-free enum field
+                // is a plain `int` (the enum value IS the int), so no conversion --
+                // same as any primitive field. A VALUE-struct field is a whole-value
+                // read out of a mutable place, so it copies.
                 let basev = self.pack(br);
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field { base: basev, field })))
+                let fv = self.emit_cur(Inst::Field { base: basev, field });
+                match self.value_struct_of(e).filter(|_| self.is_mutable_place(base)) {
+                    Some(name) => Ok(self.boxed_value_copy_repr(fv, name)),
+                    None => Ok(ValueRepr::Scalar(fv)),
+                }
+            }
+            // A global holding a value struct is a mutable place: a whole-value read
+            // copies (the leaves are snapshotted at the read point).
+            Expr::Global(g) if self.value_struct_of(e).is_some() => {
+                let name = self.value_struct_of(e).unwrap();
+                let gv = self.emit_cur(Inst::Global(g));
+                Ok(self.boxed_value_copy_repr(gv, name))
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
@@ -4231,22 +4273,16 @@ impl Builder<'_> {
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
             Expr::Call { callee, args } => self.lower_call_repr(e, callee, args),
-            // A value-struct ELEMENT read (`buf[i]`/`fv[i]`) as an unboxed Group of
-            // per-field reads off the checked slot: a leaf projection reads the part
-            // live, while `pack` (a whole-value use -- let-bind, arg, return, store)
-            // rebuilds a fresh cdata instead of aliasing the interior array slot.
-            Expr::Index { base, index } if self.ffi_clean_value_elem(e).is_some() => {
-                let name = self.ffi_clean_value_elem(e).unwrap();
+            // A value-struct ELEMENT read (`buf[i]`/`fv[i]`/`v[i]`) as an unboxed
+            // Group of leaf reads off the checked slot: a leaf projection reads the
+            // part live, while `pack` (a whole-value use -- let-bind, arg, return,
+            // store) rebuilds a fresh value instead of aliasing the array slot.
+            Expr::Index { base, index } if self.value_struct_of(e).is_some() => {
+                let name = self.value_struct_of(e).unwrap();
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
-                let parts = self
-                    .struct_field_names(name)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|f| ValueRepr::Scalar(self.emit_cur(Inst::Field { base: slot, field: f })))
-                    .collect();
-                Ok(ValueRepr::Group { name, parts })
+                Ok(self.boxed_value_copy_repr(slot, name))
             }
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
         }
@@ -6698,18 +6734,34 @@ impl Builder<'_> {
             .unwrap_or(false)
     }
 
-    /// `Some(name)` iff `e`'s inferred type is an FFI-clean (cdata) `value` struct.
-    /// A whole-value read of such an ELEMENT (`buf[i]`/`fv[i]`) lives inline in the
-    /// NativeBuffer/FlatVec cdata array; binding the raw checked read aliases that
-    /// interior storage, so the read must COPY (docs/value-semantics-axes.md
-    /// finding #3, Sequencing #1). GC-carrying value structs (table repr) are
-    /// excluded -- they can't live in a NativeBuffer and copy semantics for their
-    /// shared inner refs are a later arc.
-    fn ffi_clean_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
+    /// Whether `e` denotes a mutable PLACE -- storage a later write can reach
+    /// through, so a whole-value read out of it must copy. A value local/param is
+    /// NOT one (bone rejects leaf writes there), nor is a call result; without
+    /// that exclusion every uniform-struct field read would rebuild its value.
+    fn is_mutable_place(&self, e: Idx<Expr>) -> bool {
+        match &self.body.expr_arena[e] {
+            Expr::Global(_) | Expr::Index { .. } => true,
+            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
+                self.is_mutable_place(*base)
+            }
+            // A reference-struct binding aliases shared storage; a value binding
+            // is a copy of its own.
+            Expr::Var(b) => !self.binding_is_nonnull_value_struct(*b),
+            _ => false,
+        }
+    }
+
+    /// The value-struct type of `e`, EITHER tier. `None` for a non-value type or
+    /// unsolved inference, and for a `V?` -- `expr_ty` PEELS `Nullable`, and
+    /// splitting a possibly-null value into leaves would index nil.
+    fn value_struct_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if self.expr_is_nullable(e) {
+            return None;
+        }
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
             return None;
         };
-        (self.is_value_struct(name) && !value_struct_is_gc(self.ws, name)).then_some(name)
+        self.is_value_struct(name).then_some(name)
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
