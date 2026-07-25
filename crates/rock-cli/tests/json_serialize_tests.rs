@@ -85,6 +85,16 @@ fn serializer_branch_coverage() {
         "IVec2 and Vec2 must have distinct __ty values"
     );
 
+    // ── string escaping: backslash ───────────────────────────────────────
+    // stone's time-reset keybinding is a literal backslash. An unescaped one
+    // truncates the enclosing JSON string and invalidates the WHOLE dump, so
+    // this asserts the round trip rather than just the shape.
+    assert_eq!(
+        state["stone"]["KEY_DEBUG_TIME_RESET"], "\\",
+        "backslash string global must round-trip: got {}",
+        state["stone"]["KEY_DEBUG_TIME_RESET"]
+    );
+
     // ── empty Vec envelope ───────────────────────────────────────────────
     // Without the metatable check, an empty Vec serializes as `{}` and
     // downstream .data.len accesses hit "len on object".
