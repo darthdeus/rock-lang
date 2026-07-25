@@ -528,6 +528,38 @@ fn match_int_ladder() {
     );
 }
 
+/// A `match` EXPRESSION ladder: the inner diamond stores the same single-use
+/// result cell as the outer arm, so folding it to a ternary would suppress the
+/// outer arm's store and silently drop the `n == 1` case (emitting an empty
+/// `if/else` followed by an unconditional `x = (n==2) ? 20 : 30`, so `f(1)`
+/// returned 31 instead of 11). The fold requires the diamond's two arms to be
+/// the cell's ONLY writers -- a load-count of 1 does not imply that.
+#[test]
+fn match_expression_ladder_is_not_folded() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let x = match n { 1 => 10, 2 => 20, _ => 30 }
+        return x + 1
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert!(glsl.contains("t1 = 10;"), "n == 1 arm must survive; got:\n{glsl}");
+    assert!(
+        !glsl.contains("(n == 2) ? 20 : 30"),
+        "inner diamond must not fold past the outer arm's store; got:\n{glsl}"
+    );
+}
+
+/// The same diamond shape WITH a single writer pair still folds -- the store
+/// guard must not disable the legitimate cosmetic fold.
+#[test]
+fn two_store_diamond_still_folds() {
+    let src = r#"@pure fn f(n: int) -> int {
+        let y = match n { 10 => 100, _ => 200 }
+        return y
+    }"#;
+    let glsl = emit(src, &["f"]).expect("emit");
+    assert!(glsl.contains('?'), "single diamond should still fold to a ternary; got:\n{glsl}");
+}
+
 /// Nested general `while` loops with an inner `break` (the inner loop's exit
 /// aliases the outer loop's back-edge region -- pins the `loop_binding` gate
 /// that keeps a manual `while i < n { .. i = i + 1 }` off the range-for path).

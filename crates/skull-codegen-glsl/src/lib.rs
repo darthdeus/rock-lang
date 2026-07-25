@@ -724,10 +724,18 @@ impl FnEmit<'_> {
         // Cell load-counts over reachable code -- a fold is only sound when the
         // diamond's result cell has exactly one use.
         let mut load_count: HashMap<Idx<Cell>, usize> = HashMap::default();
+        // Stores too: the fold renders the diamond at the cell's use, so the
+        // diamond's two arms must be the cell's ONLY writers. A nested ladder
+        // (`match n { 1 => .., 2 => .., _ => .. }`) folds its inner diamond while
+        // an OUTER arm also stores the same single-use cell -- suppressing that
+        // arm's store and silently dropping the case.
+        let mut store_count: HashMap<Idx<Cell>, usize> = HashMap::default();
         for &b in &reach {
             for &iid in &self.f.blocks[b].insts {
-                if let Inst::Load(c) = self.f.insts[iid] {
-                    *load_count.entry(c).or_default() += 1;
+                match self.f.insts[iid] {
+                    Inst::Load(c) => *load_count.entry(c).or_default() += 1,
+                    Inst::Store { cell, .. } => *store_count.entry(cell).or_default() += 1,
+                    _ => {}
                 }
             }
         }
@@ -748,6 +756,9 @@ impl FnEmit<'_> {
             }
             let rcell = tcell;
             if load_count.get(&rcell).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            if store_count.get(&rcell).copied().unwrap_or(0) != 2 {
                 continue;
             }
             let Some(&result_ty) = self.cell_ty.get(&rcell) else { continue };
