@@ -49,6 +49,9 @@ pub mod js_test;
 pub mod live_project;
 pub mod web;
 mod test_protocol;
+mod lint_cmd;
+mod lint_union;
+pub mod lint_pass;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
@@ -102,6 +105,13 @@ pub enum CliCommand {
     /// `<name>` may be comma-separated for chained multi-start
     /// (`a,b` -> two luajit children sharing one `$OUT` tempdir).
     Sim,
+    /// `rock lint <path>` -- run the lint catalog (`crates/bone-lints`) over a
+    /// file or project and report the findings. The author-facing surface of the
+    /// same engine the LSP and the build pass drive; exits non-zero only on an
+    /// `Error`-severity finding, matching the build gate. Dispatched
+    /// pre-backend-switch (like `fmt`/`shader`): lints read bone's typechecked
+    /// output, no codegen involved.
+    Lint,
     /// `rock completions <shell>` — print a shell completion script
     /// to stdout. Shells: bash, zsh, fish, powershell, elvish.
     /// Install (zsh): `rock completions zsh > ~/.zsh/_rock` then add
@@ -256,6 +266,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Stone, Self::Replay, Self::Perf,
             Self::Sim,
             Self::Completions,
+            Self::Lint,
             Self::StoneTest,
             Self::IterCompile,
             Self::IterParse,
@@ -304,6 +315,7 @@ impl CliCommand {
             Self::Perf => "perf",
             Self::Sim => "sim",
             Self::Completions => "completions",
+            Self::Lint => "lint",
             Self::IterCompile => "iter-compile",
             Self::IterParse => "iter-parse",
             Self::IterTokenize => "iter-tokenize",
@@ -531,6 +543,20 @@ pub struct Args {
     /// type-check only. Override with `--backend` or `ROCK_BACKEND=bone|skull`.
     pub backend: Backend,
 
+    /// Build lint pass: `--no-lints` drops the `Warning`/`Advice` tiers from a
+    /// build's output; `--lint-summary` compacts them to one count line.
+    /// `Error`-severity findings render and fail the build under both.
+    pub no_lints: bool,
+    pub lint_summary: bool,
+
+    /// `rock lint --union <lib>`: judge a library's reachability against every
+    /// consumer in the repo at once, reporting only what none of them reach.
+    pub union: bool,
+    /// Where `--union` looks for consumers. Defaults to the lib's parent, which
+    /// is right when the lib sits beside its consumers (`stone/`); a nested lib
+    /// (`libs/json`) needs the repo root passed explicitly.
+    pub consumers: Option<String>,
+
     /// For `rock test`: force package-aware compilation (the surrounding
     /// stick.toml is compiled as one unit, so @test files see sibling
     /// definitions). Without the flag, `rock test` still auto-detects a
@@ -642,6 +668,14 @@ impl Args {
                 .help("For `rock web --watch`: loopback HTTP port. Use 0 to choose an available port."))
             .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
                 .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
+            .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
+                .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
+            .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
+                .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
+            .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
+                .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
+            .arg(Arg::new("consumers").long("consumers")
+                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/json`."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
@@ -697,6 +731,10 @@ impl Args {
             watch: m.get_flag("watch"),
             port: *m.get_one::<u16>("port").unwrap(),
             package: m.get_flag("package"),
+            no_lints: m.get_flag("no-lints"),
+            lint_summary: m.get_flag("lint-summary"),
+            union: m.get_flag("union"),
+            consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
             // `skull`. An explicit `--backend skull`/`bone` on a command that

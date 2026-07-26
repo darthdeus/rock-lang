@@ -3,8 +3,9 @@
 //! harness runs a full `semantic_pass` and reads `ws.inference`. cast/transmute
 //! are defined locally (no stdlib needed) -- the lint matches the callee name.
 
-use bone_lints::{filter_suppressed, transmute_of_nullable, TransmuteOfNullable};
+use bone_lints::{filter_suppressed, transmute_of_nullable, LintFinding, TransmuteOfNullable};
 use bone_semantic::prelude::*;
+use rock_core::errors::CompilerErrorLevel;
 
 fn parse(src: &str) -> skull_parser::Ast {
     skull_parser::parse_module(src, Ustr::from("<transmute_of_nullable>")).expect("parse")
@@ -82,6 +83,22 @@ fn nullable_struct_transmute_is_flagged() {
     let fs = transmute_of_nullable(&ws);
     assert_eq!(fs.len(), 1, "expected one transmute(Mob?) finding: {fs:?}");
     assert_eq!(fs[0].inner_type, "Mob?", "diagnostic names the inner type: {fs:?}");
+}
+
+// Unlike every other lint in the catalog this one reports at `Error`: a
+// laundered null-on-failure is a correctness hole, not a smell, so it fails the
+// build rather than printing. `stone/engine/systems/coroutines.rock`
+// (`take_result`) is the standing proof that irreducible instances exist, which
+// is why -- unlike `entity_across_yield` -- the allow comment stays legal.
+#[test]
+fn finding_reports_at_error_level() {
+    let fs = findings("fn main() -> int {\n    let _x: int = cast(maybe_int())\n    3\n}");
+    assert_eq!(fs.len(), 1, "expected the one cast finding: {fs:?}");
+    assert_eq!(
+        fs[0].to_diagnostic().level,
+        CompilerErrorLevel::Error,
+        "transmute_of_nullable gates the build"
+    );
 }
 
 #[test]

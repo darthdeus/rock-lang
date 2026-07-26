@@ -376,6 +376,18 @@ impl StickConfig {
         Ok(())
     }
 
+    /// True iff the deepest `stick.toml` at or above `dir` is a `bin` package
+    /// (the default when `type` is absent). False for a `lib`, and false when
+    /// no `stick.toml` exists -- a standalone scratch file is not a closed
+    /// world. The gate for closed-world analyses (`unused_fn`), read by both
+    /// the LSP and the build lint pass.
+    pub fn is_bin_at(dir: &Path) -> bool {
+        matches!(
+            Self::find_from_dir(dir),
+            Ok(Some((_, cfg))) if cfg.package.package_type() == PackageType::Bin
+        )
+    }
+
     pub fn find_from_current_dir() -> Result<Option<(PathBuf, Self)>> {
         let current_dir = std::env::current_dir()?;
         Self::find_from_dir(&current_dir)

@@ -28,6 +28,8 @@ rock-tokenizer = { path = "../rock-tokenizer" }
 skull-fmt = { path = "../skull-fmt" }
 skull-parser = { path = "../skull-parser" }
 bone-semantic = { path = "../bone-semantic" }
+bone-core = { path = "../bone-core" }
+bone-lints = { path = "../bone-lints" }
 bone-incremental = { path = "../bone-incremental" }
 bone-query = { path = "../bone-query" }
 rock-lsp = { path = "../rock-lsp" }
