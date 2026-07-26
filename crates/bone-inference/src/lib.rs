@@ -21,6 +21,7 @@ mod narrowing;
 use narrowing::{detect_null_narrow, infer_branch, path_key, stmt_guard_narrows, Narrow, Root};
 
 mod defer;
+mod embed;
 mod purity;
 mod expr;
 mod lambda;
@@ -477,6 +478,8 @@ pub fn check_function(
         gamma.body_errors.append(&mut purity_errors);
     }
 
+    embed::verify_embed_projection(c, &mut gamma);
+
     report_unpinned_lambda_params(&mut gamma);
 
     let errors = std::mem::take(&mut gamma.body_errors);
@@ -522,6 +525,8 @@ pub fn check_decorator(
         gamma.body_errors.push(e);
     }
 
+    embed::verify_embed_projection(c, &mut gamma);
+
     report_unpinned_lambda_params(&mut gamma);
 
     let errors = std::mem::take(&mut gamma.body_errors);
@@ -553,6 +558,8 @@ pub fn check_global(
     })() {
         gamma.body_errors.push(e);
     }
+
+    embed::verify_embed_projection(c, &mut gamma);
 
     report_unpinned_lambda_params(&mut gamma);
 
@@ -603,6 +610,8 @@ pub fn check_struct_defaults(
     }
 
     gamma.sibling_fields.pop();
+
+    embed::verify_embed_projection(c, &mut gamma);
 
     report_unpinned_lambda_params(&mut gamma);
 

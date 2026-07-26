@@ -1131,6 +1131,13 @@ impl Parser {
                 break;
             }
             let annotations = self.parse_item_annotations()?;
+            // `embed` is contextual: it is the modifier only when a field name
+            // follows it, so `embed: int` stays a field named `embed`.
+            let is_embed = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "embed")
+                && matches!(self.peek_kind(), TokenKind::Ident(_));
+            if is_embed {
+                self.advance();
+            }
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_type()?;
@@ -1140,7 +1147,7 @@ impl Parser {
                 None
             };
             let span = self.span_from(name.span);
-            fields.push(Field { span, name, ty, default, annotations });
+            fields.push(Field { span, name, ty, default, annotations, is_embed });
             self.skip_comments();
             // Item separator: comma or newline (both allowed).
             self.eat(TokenKind::Comma);

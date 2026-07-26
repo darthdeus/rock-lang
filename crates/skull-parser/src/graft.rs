@@ -108,6 +108,7 @@ fn graft_field(src: &Ast, dst: &mut Ast, fl: &Field) -> Field {
         ty: graft_type(src, dst, fl.ty),
         default: fl.default.map(|e| graft_expr(src, dst, e)),
         annotations: fl.annotations.clone(),
+        is_embed: fl.is_embed,
     }
 }
 

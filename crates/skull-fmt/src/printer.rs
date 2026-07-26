@@ -446,11 +446,15 @@ impl<'a> Printer<'a> {
     }
 
     fn field(&self, field: &Field) -> Doc {
-        let mut parts = vec![
+        let mut parts = vec![];
+        if field.is_embed {
+            parts.push(Doc::text("embed "));
+        }
+        parts.extend([
             Doc::text(kw(field.name.name)),
             Doc::text(": "),
             self.type_expr(field.ty),
-        ];
+        ]);
         if let Some(d) = field.default {
             parts.push(Doc::text(" = "));
             parts.push(self.expr(d));

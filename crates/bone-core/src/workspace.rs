@@ -14,6 +14,12 @@ pub struct Workspace {
     pub inferences: Vec<Option<InferenceResult>>,
 
     pub struct_by_name: FxHashMap<Ustr, StructId>,
+    /// Any struct anywhere declares an `embed` field. Set (never cleared) while
+    /// registering struct fields, so the per-body projection-only check can bail
+    /// in O(1) on the overwhelmingly common workspace that uses no `embed` at
+    /// all. Monotonic on purpose: staying true after the last embed field is
+    /// deleted costs a check, whereas a stale false would skip enforcement.
+    pub has_embed_fields: bool,
     pub enums_by_name: FxHashMap<Ustr, EnumId>,
     pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
     /// Declared generic-parameter count for every nominal type (struct / enum /
@@ -92,6 +98,7 @@ impl Workspace {
             inferences: Default::default(),
 
             struct_by_name: Default::default(),
+            has_embed_fields: false,
             enums_by_name: Default::default(),
             newtypes_by_name: Default::default(),
             type_generic_arity: Default::default(),

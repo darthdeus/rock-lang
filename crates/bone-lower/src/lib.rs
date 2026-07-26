@@ -2189,6 +2189,7 @@ pub fn lower_struct_def(
             span: field.name.span,
             has_default: field.default.is_some(),
             annotations: field_annotations,
+            is_embed: field.is_embed,
         });
 
         if let Some(default) = default {
@@ -2240,12 +2241,20 @@ pub fn lower_enum_def(
                     .map(|f| {
                         let annos = lower_annotations(a, &f.annotations);
                         validate_annotations(AnnoPos::EnumVariantField, &annos, &ctx.workspace.decorator_names)?;
+                        if f.is_embed {
+                            comp_error!(
+                                f.name.span,
+                                "`embed` is not allowed on an enum variant field `{}`; embed inlines leaves into a struct owner",
+                                f.name.name
+                            );
+                        }
                         Ok(hir::StructFieldDef {
                             name: f.name.name,
                             ty: lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?,
                             span: f.name.span,
                             has_default: false,
                             annotations: annos,
+                            is_embed: false,
                         })
                     })
                     .try_vec()?;

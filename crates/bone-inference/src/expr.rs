@@ -1668,6 +1668,31 @@ pub(crate) fn check_expr(
                         }
                     }
                 }
+                // ADMISSION: every field ref satisfies `WriteFieldRef`; only a
+                // NON-embed field also satisfies the readable formers. An
+                // embedded field has no whole value to hand out, and `FieldRef`
+                // coerces onward to `ReadFieldRef`, so it re-opens the same
+                // extraction (docs/scalarization-and-boxing-design.md S 6).
+                if matches!(former.as_str(), "FieldRef" | "ReadFieldRef") {
+                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                        let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
+                            gamma.workspace.module(sid.module).structs[sid.def]
+                                .fields
+                                .iter()
+                                .any(|f| f.name == field && f.is_embed)
+                        });
+                        if is_embed {
+                            comp_error!(
+                                span,
+                                "`{}` is an `embed` field of `{}`, so it admits only the write-only `WriteFieldRef<{}, _>`; a readable selector would hand out the whole value",
+                                field,
+                                tn,
+                                tn
+                            );
+                        }
+                    }
+                }
+
                 let fty = struct_field_ty(gamma, t_r, field, span)?;
 
                 // The write capability is INVARIANT in V, and `unify` alone does
