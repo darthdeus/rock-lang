@@ -56,10 +56,12 @@ pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 /// (field name, field type) pairs for structs (+ the value/cdata flag),
 /// ordered (variant name, payload shape) for enums, the wrapped type for
 /// newtypes. Bodies, spans, defaults, and comments do not participate, so a
-/// hot body edit or a doc tweak never restarts. Transitive drift needs no
-/// transitive hash: a nested type's OWN entry changes. Known over-trigger
-/// (accepted, uniform-predictable): reordering a boxed enum's variants
-/// restarts even though its live tags are name strings.
+/// hot body edit or a doc tweak never restarts. A BOXED field needs no
+/// transitive hash: the parent holds a pointer either way, so a nested type's
+/// OWN entry changing is the whole signal. An `embed` field is the exception --
+/// see [`struct_shape_hash`]. Known over-trigger (accepted,
+/// uniform-predictable): reordering a boxed enum's variants restarts even
+/// though its live tags are name strings.
 pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
     use bone_semantic::hir::VariantPayload;
     use std::hash::{Hash, Hasher};
@@ -67,14 +69,7 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
     let mut out = ShapeHashes::default();
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            let mut h = rustc_hash::FxHasher::default();
-            "struct".hash(&mut h);
-            s.is_value.hash(&mut h);
-            for f in s.fields.iter() {
-                f.name.as_str().hash(&mut h);
-                ws.render(None, f.ty).hash(&mut h);
-            }
-            out.insert(s.name, h.finish());
+            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new()));
         }
         for (_, e) in module.enums.iter() {
             let mut h = rustc_hash::FxHasher::default();
@@ -108,6 +103,55 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
         }
     }
     out
+}
+
+/// One struct's layout hash. An `embed` field contributes the embedded type's
+/// SHAPE HASH, not just its rendered name: the child has no box of its own, so
+/// its leaves ARE this struct's physical keys and widening the child relayouts
+/// the PARENT.
+///
+/// That extra contribution also covers the flag flip, since an embed field
+/// hashes strictly more than a boxed one: flipping `f: Task?` to
+/// `embed f: Task?` leaves every rendered field type identical and touches no
+/// other type, so before this the whole workspace hashed clean and NO restart
+/// fired. `is_embed` is hashed explicitly anyway -- the flag is part of the
+/// layout in its own right, and that should not depend on how the child
+/// happens to contribute.
+///
+/// `visiting` breaks a cycle with a stable sentinel. bone rejects a cyclic
+/// embed graph (`check_embed_site_legality`), so this is unreachable by
+/// construction; it exists so a malformed workspace reaching codegen produces a
+/// wrong-but-finite hash instead of hanging the compiler.
+fn struct_shape_hash(
+    ws: &Workspace,
+    s: &bone_semantic::hir::StructDef,
+    visiting: &mut Vec<ustr::Ustr>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = rustc_hash::FxHasher::default();
+    "struct".hash(&mut h);
+    s.is_value.hash(&mut h);
+    for f in s.fields.iter() {
+        f.name.as_str().hash(&mut h);
+        f.is_embed.hash(&mut h);
+        ws.render(None, f.ty).hash(&mut h);
+        if !f.is_embed {
+            continue;
+        }
+        match nominal_field_type(ws, f.ty)
+            .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied())
+        {
+            Some(sid) if !visiting.contains(&s.name) => {
+                let child = &ws.modules[sid.module.index()].structs[sid.def];
+                visiting.push(s.name);
+                struct_shape_hash(ws, child, visiting).hash(&mut h);
+                visiting.pop();
+            }
+            _ => "<embed-unresolved>".hash(&mut h),
+        }
+    }
+    h.finish()
 }
 
 /// The type names whose shape hash differs between two compiles: changed,
@@ -1082,6 +1126,80 @@ mod tests {
 
         let removed = base.replace("newtype Gold(int)\n", "");
         assert_eq!(super::shape_diff(&h0, &hashes(&removed)), vec!["Gold"], "a removed type counts as drifted");
+    }
+
+    /// `embed` moves the PARENT's layout: the child's leaves become the parent's
+    /// physical keys, so the parent's hash must react both to the flag itself and
+    /// to the child's shape. The non-transitivity that is correct for a boxed
+    /// field (a pointer either way) is wrong here, and only here.
+    #[test]
+    fn embed_drifts_the_parent_shape() {
+        let hashes = |src: &str| {
+            let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>"))
+                .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
+            let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
+                .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
+            super::type_shape_hashes(&ws)
+        };
+
+        // (a) The flag alone relayouts the parent, while every rendered field
+        // type stays identical -- so nothing else in the workspace drifts and
+        // the parent's own entry is the only possible signal.
+        let boxed = "struct Pt { x: int }\nstruct Holder { p: Pt, tag: int }\n";
+        let embedded = "struct Pt { x: int }\nstruct Holder { embed p: Pt, tag: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(boxed), &hashes(embedded)),
+            vec!["Holder"],
+            "flipping a field to `embed` relayouts the parent"
+        );
+
+        // (b) The child's fields ARE the parent's keys, so widening the child
+        // widens the parent.
+        let embedded_wide = "struct Pt { x: int, y: int }\nstruct Holder { embed p: Pt, tag: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(embedded), &hashes(embedded_wide)),
+            vec!["Holder", "Pt"],
+            "a field added to an EMBEDDED child also relayouts the parent"
+        );
+
+        // (c) CONTROL, the property that must not regress: a BOXED child is a
+        // pointer either way, so widening it leaves the parent's layout alone.
+        // If this ever reports `Holder` too, the hash went transitive in general
+        // and every nested edit now over-triggers a restart.
+        let boxed_wide = "struct Pt { x: int, y: int }\nstruct Holder { p: Pt, tag: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(boxed), &hashes(boxed_wide)),
+            vec!["Pt"],
+            "a field added to a BOXED child must NOT drift the parent"
+        );
+
+        // (d) Transitive through a chain: the deepest leaf is a key on the
+        // outermost parent, so every level drifts.
+        let chain = "struct Inner { c: int }\n\
+                     struct Mid { embed b: Inner, m: int }\n\
+                     struct Outer { embed a: Mid, o: int }\n";
+        let chain_wide = "struct Inner { c: int, d: int }\n\
+                          struct Mid { embed b: Inner, m: int }\n\
+                          struct Outer { embed a: Mid, o: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(chain), &hashes(chain_wide)),
+            vec!["Inner", "Mid", "Outer"],
+            "an embed chain propagates the child's shape to every enclosing parent"
+        );
+
+        // A boxed link BREAKS the chain: `Mid` holds `Inner` by pointer, so
+        // widening `Inner` stops there even though `Outer` embeds `Mid`.
+        let broken = "struct Inner { c: int }\n\
+                      struct Mid { b: Inner, m: int }\n\
+                      struct Outer { embed a: Mid, o: int }\n";
+        let broken_wide = "struct Inner { c: int, d: int }\n\
+                           struct Mid { b: Inner, m: int }\n\
+                           struct Outer { embed a: Mid, o: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(broken), &hashes(broken_wide)),
+            vec!["Inner"],
+            "a boxed link stops transitive propagation"
+        );
     }
 
     #[test]
