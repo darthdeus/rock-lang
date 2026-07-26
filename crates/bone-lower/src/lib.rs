@@ -419,10 +419,14 @@ pub fn lower_type_expr_in(
             )
         }
 
-        // `FieldRef<T, V>` (full field ref: read + write) and `ReadFieldRef<T, V>`
-        // (read-only -- `field_get`, allows value structs) are name-recognized magic
-        // formers, not declared types; both lower to a 2-param Nominal.
-        TypeExprKind::App { ctor, args } if ctor.name == "FieldRef" || ctor.name == "ReadFieldRef" => {
+        // `FieldRef<T, V>` (full field ref: read + write), `ReadFieldRef<T, V>`
+        // (read-only -- `field_get`, allows value structs) and `WriteFieldRef<T, V>`
+        // (write-only -- `field_set`, the selector an embedded field can satisfy)
+        // are name-recognized magic formers, not declared types; all lower to a
+        // 2-param Nominal.
+        TypeExprKind::App { ctor, args }
+            if matches!(ctor.name.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") =>
+        {
             if args.len() != 2 {
                 comp_error!(
                     te.span,

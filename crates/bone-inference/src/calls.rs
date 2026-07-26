@@ -92,21 +92,25 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                 _ => false,
             };
 
-            // A full field ref reads read-only: `FieldRef<T, V>` fits a
-            // `ReadFieldRef<T, V>` param (docs/field-refs-plan.md 1). Scoring has to
-            // know it too -- otherwise the coercion only survives the
-            // single-candidate bypass in `check_call`, and a second decl of the
-            // name (a backend sibling, an unrelated overload) makes every
+            // A full field ref carries both capabilities: `FieldRef<T, V>` fits a
+            // `ReadFieldRef<T, V>` param (`field_get`) and a `WriteFieldRef<T, V>`
+            // one (`field_set`) -- docs/field-refs-plan.md. Scoring has to know it
+            // too -- otherwise the coercion only survives the single-candidate
+            // bypass in `check_call`, and a second decl of the name (a backend
+            // sibling, an unrelated overload) makes every
             // `field_get(o, f: FieldRef<..>)` a no-fit.
-            let p_is_readfieldref_from_fieldref = match (*gamma.get(a), *gamma.get(p)) {
+            let p_is_single_cap_from_fieldref = match (*gamma.get(a), *gamma.get(p)) {
                 (
                     TypeExpr::App { ctor: TypeCtor::Nominal(an), .. },
                     TypeExpr::App { ctor: TypeCtor::Nominal(pn), .. },
-                ) => an.as_str() == "FieldRef" && pn.as_str() == "ReadFieldRef",
+                ) => {
+                    an.as_str() == "FieldRef"
+                        && matches!(pn.as_str(), "ReadFieldRef" | "WriteFieldRef")
+                }
                 _ => false,
             };
 
-            if p_is_iface || p_is_readfieldref_from_fieldref {
+            if p_is_iface || p_is_single_cap_from_fieldref {
                 let snap = gamma.out.checkpoint();
                 if gamma.trial(|g| coerce(g, a, p, span).is_ok()) {
                     return Some(if p_is_iface { 3 } else { 1 });

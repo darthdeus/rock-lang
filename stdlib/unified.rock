@@ -1515,14 +1515,15 @@ inline(lua) fn table_new() -> any = """return {}"""
 // and allows a `value`-struct T, since reading a value field is fine; the
 // writable side refuses a `value`-struct T (immutable). Split per
 // docs/field-refs-plan.md 1.
-// `field_set` will relax to the write-only `WriteFieldRef<T, V>` once that
-// lands -- it is the selector an EMBEDDED field can satisfy, being the one that
-// grants no whole-value read (docs/scalarization-and-boxing-design.md S 6).
+// `field_set` takes the write-only `WriteFieldRef<T, V>` -- the selector an
+// EMBEDDED field can satisfy, being the one that grants no whole-value read
+// (docs/scalarization-and-boxing-design.md S 6). A `FieldRef` coerces down to
+// it, so call sites are unchanged.
 @inline inline(lua) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = """
     return o[f]
 """
 
-@inline inline(lua) fn field_set<T, V>(o: T, f: FieldRef<T, V>, v: V) = """
+@inline inline(lua) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = """
     o[f] = v
 """
 

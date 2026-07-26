@@ -1,8 +1,5 @@
-//! TARGET SPEC (NOT YET IMPLEMENTED) for field references / key paths --
-//! step 5 of docs/coroutine-ownership-plan.md. RED until the typechecker
-//! learns `FieldRef<T, V>` + the `.field` literal. Sections are the intended
-//! typing rules; run `cargo test -p bone-semantic -- field_ref` to see the
-//! current RED and the real error messages driving the design.
+//! The typing rules for field references / key paths. Run
+//! `cargo test -p bone-semantic -- field_ref`.
 //!
 //! Design being pinned:
 //!   - `FieldRef<T, V>` is a compiler-known type former (like Entity<T> /
@@ -182,5 +179,118 @@ fn take(f: ReadFieldRef<FixVec2, float>) {}
 fn main() {
     let f: ReadFieldRef<FixVec2, float> = .x
       //^ ReadFieldRef<FixVec2, float>
+    take(f)
+}
+
+// ---------------------------------------------------------------------------
+// I. `WriteFieldRef<T, V>` -- the write-only former, terminal in the lattice.
+//    It grants no whole-value read, which is exactly the capability an
+//    EMBEDDED field cannot offer (docs/scalarization-and-boxing-design.md S 6).
+//    Lattice: `FieldRef` is the TOP and coerces DOWN to both single-capability
+//    formers; `ReadFieldRef` and `WriteFieldRef` are INCOMPARABLE, so no
+//    coercion runs between them, and neither coerces back up.
+// ---------------------------------------------------------------------------
+
+//- write_field_ref_concrete_ok
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+      //^ WriteFieldRef<Mob, int?>
+    take(f)
+}
+
+//- write_field_ref_free_v_inferred
+struct Mob { health: int, attack_co: int? }
+inline(lua) fn set_field<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = "o[f] = v"
+fn main() {
+    let m = Mob { health: 3, attack_co: null }
+    set_field(m, .health, 7)
+    let ok = 1
+      //^ int
+    ok
+}
+
+// T solved from a sibling arg, then `.field` resolves against it -- the slot-verb
+// shape, spelled identically to the `FieldRef` one.
+//- write_field_ref_t_from_sibling_ok
+struct Mob { health: int, attack_co: int? }
+struct Entity<T> { _index: int }
+fn stop<T>(e: Entity<T>, f: WriteFieldRef<T, int?>) {}
+fn main() {
+    let e: Entity<Mob> = Entity { _index: 0 }
+      //^ Entity<Mob>
+    stop(e, .attack_co)
+}
+
+//- write_field_ref_missing_field_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    take(.nope)
+}
+
+// INVARIANT in V, like `FieldRef`. Write-only contravariance would be sound but
+// has no consumer; invariance is the conservative choice and relaxing it later
+// is source-compatible.
+//- write_field_ref_widen_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    take(.health)
+}
+
+// The write capability refuses a `value` struct T, same rule as `FieldRef`:
+// the object travels by copy, so the write would land on a temporary.
+//- write_field_ref_value_struct_fail @fail
+value FixVec2 { x: float, y: float }
+fn take(f: WriteFieldRef<FixVec2, float>) {}
+fn main() {
+    take(.x)
+}
+
+// Arity guard: the former takes exactly <Struct, FieldType>.
+//- write_field_ref_arity_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob>) {}
+fn main() {
+    take(.attack_co)
+}
+
+// TOP coerces down: a `FieldRef` satisfies a `WriteFieldRef` slot.
+//- field_ref_coerces_to_write_ok
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    let f: FieldRef<Mob, int?> = .attack_co
+      //^ FieldRef<Mob, int?>
+    take(f)
+}
+
+// ... and NOT back up: a write-only selector is not a full field ref.
+//- write_field_ref_no_coerce_to_field_ref_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn take(f: FieldRef<Mob, int?>) {}
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take(f)
+}
+
+// THE EXTRACTION HOLE this former exists to close: a write-only selector must
+// not reach a readable one, or an embedded field's whole value could be read out.
+//- write_field_ref_no_coerce_to_read_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn take(f: ReadFieldRef<Mob, int?>) {}
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take(f)
+}
+
+// The other diagonal of the diamond: read-only does not grant write.
+//- read_field_ref_no_coerce_to_write_fail @fail
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    let f: ReadFieldRef<Mob, int?> = .attack_co
     take(f)
 }
