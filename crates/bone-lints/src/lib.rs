@@ -948,7 +948,12 @@ impl LintFinding for TransmuteOfNullable {
                 self.fn_name, self.inner_type
             ),
         )
-        .with_level(CompilerErrorLevel::Warning)
+        // The catalog's only `Error`: a laundered null-on-failure is a
+        // correctness hole, not a smell. Irreducible instances do exist (a
+        // generic `R` has no `?? default` to fall back to -- see
+        // `take_result` in stone), so unlike `entity_across_yield` the allow
+        // comment stays legal.
+        .with_level(CompilerErrorLevel::Error)
     }
 }
 

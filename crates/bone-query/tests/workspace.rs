@@ -545,9 +545,11 @@ fn unused_fn_is_silent_for_lib() {
 }
 
 // The `transmute_of_nullable` lint reads inference and resolves the REAL stdlib
-// `cast`; the live `update` path must publish its warning for the edited file.
+// `cast`; the live `update` path must publish it for the edited file, at the
+// `Error` severity that also gates the build (the editor and the compiler agree
+// on how bad it is, so a red squiggle predicts a failed build).
 #[test]
-fn update_publishes_transmute_of_nullable_warning() {
+fn update_publishes_transmute_of_nullable_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"g\"\n").unwrap();
     let src = "fn maybe() -> int? {\n  return 1\n}\nfn main() -> int {\n  let _x: int = cast(maybe())\n  3\n}\n";
@@ -563,8 +565,8 @@ fn update_publishes_transmute_of_nullable_warning() {
     assert!(
         diags.iter().any(|d| d.message.contains("strips nullability")
             && d.message.contains("int?")
-            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
-        "update() must publish the transmute_of_nullable warning: {diags:?}"
+            && d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "update() must publish the transmute_of_nullable error: {diags:?}"
     );
 }
 
