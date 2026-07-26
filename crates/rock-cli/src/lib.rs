@@ -50,6 +50,7 @@ pub mod live_project;
 pub mod web;
 mod test_protocol;
 mod lint_cmd;
+mod lint_union;
 pub mod lint_pass;
 mod lsp_survey;
 mod lsp_test;
@@ -548,6 +549,14 @@ pub struct Args {
     pub no_lints: bool,
     pub lint_summary: bool,
 
+    /// `rock lint --union <lib>`: judge a library's reachability against every
+    /// consumer in the repo at once, reporting only what none of them reach.
+    pub union: bool,
+    /// Where `--union` looks for consumers. Defaults to the lib's parent, which
+    /// is right when the lib sits beside its consumers (`stone/`); a nested lib
+    /// (`libs/json`) needs the repo root passed explicitly.
+    pub consumers: Option<String>,
+
     /// For `rock test`: force package-aware compilation (the surrounding
     /// stick.toml is compiled as one unit, so @test files see sibling
     /// definitions). Without the flag, `rock test` still auto-detects a
@@ -663,6 +672,10 @@ impl Args {
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
                 .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
+            .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
+                .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
+            .arg(Arg::new("consumers").long("consumers")
+                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/json`."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
@@ -720,6 +733,8 @@ impl Args {
             package: m.get_flag("package"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
+            union: m.get_flag("union"),
+            consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
             // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
             // `skull`. An explicit `--backend skull`/`bone` on a command that

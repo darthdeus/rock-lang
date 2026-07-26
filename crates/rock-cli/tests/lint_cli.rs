@@ -2,8 +2,9 @@
 //!
 //! Covers the surface contract: findings reach the author from `rock lint` AND
 //! from an ordinary build, `--no-lints`/`--lint-summary` change only what is
-//! printed, and a `Warning`-tier finding never fails a build. The Error-gate
-//! logic is unit-tested in `lint_pass` (no catalog lint is `Error` yet).
+//! printed, a `Warning`-tier finding never fails a build, and `--union` judges a
+//! lib against every consumer at once. The Error-gate logic is unit-tested in
+//! `lint_pass`.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -112,4 +113,73 @@ fn lint_rejects_a_program_that_does_not_typecheck() {
     let out = run(&["lint", dir.path().to_str().unwrap()]);
     assert!(!out.status.success(), "a type error fails `rock lint`");
     assert!(stderr(&out).contains("does not type-check"), "{}", stderr(&out));
+}
+
+/// A library plus two consumers that each call a different half of it, and one
+/// function nobody calls anywhere.
+fn union_repo(dir: &Path) {
+    let engine = dir.join("engine");
+    std::fs::create_dir_all(&engine).unwrap();
+    std::fs::write(engine.join("stick.toml"), "[package]\nname = \"engine\"\ntype = \"lib\"\n")
+        .unwrap();
+    std::fs::write(
+        engine.join("e.rock"),
+        "fn used_by_a() -> int {\n    1\n}\n\nfn used_by_b() -> int {\n    2\n}\n\nfn dead_everywhere() -> int {\n    3\n}\n",
+    )
+    .unwrap();
+
+    for (name, call) in [("game_a", "used_by_a"), ("game_b", "used_by_b")] {
+        let g = dir.join(name);
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(
+            g.join("stick.toml"),
+            format!("[package]\nname = \"{name}\"\ntype = \"bin\"\n\n[dependencies]\nengine = {{ path = \"../engine\" }}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            g.join("main.rock"),
+            format!("fn main() {{\n    print(\"{{{call}()}}\")\n}}\n"),
+        )
+        .unwrap();
+    }
+}
+
+// A lib's reachability is only meaningful against ALL of its consumers at once.
+// Per-consumer it is meaningless: `used_by_a` is uncalled in game_b and vice
+// versa, yet neither is dead. Only the intersection is a real finding.
+#[test]
+fn union_reports_only_what_is_dead_in_every_consumer() {
+    let dir = tempfile::tempdir().unwrap();
+    union_repo(dir.path());
+    let out = run(&["lint", "--union", dir.path().join("engine").to_str().unwrap()]);
+    let err = stderr(&out);
+    assert!(
+        err.contains("unused function `dead_everywhere`"),
+        "a fn no consumer calls is dead: {err}"
+    );
+    assert!(
+        !err.contains("`used_by_a`") && !err.contains("`used_by_b`"),
+        "a fn ANY consumer calls is live -- per-consumer absence is not death: {err}"
+    );
+}
+
+// The intersection is only sound if every consumer was actually analyzed: a
+// consumer that failed to typecheck might have been the sole caller. Silently
+// dropping it would turn live code into a "finding".
+#[test]
+fn union_names_the_consumers_it_could_not_analyze() {
+    let dir = tempfile::tempdir().unwrap();
+    union_repo(dir.path());
+    let broken = dir.path().join("game_c");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(
+        broken.join("stick.toml"),
+        "[package]\nname = \"game_c\"\ntype = \"bin\"\n\n[dependencies]\nengine = { path = \"../engine\" }\n",
+    )
+    .unwrap();
+    std::fs::write(broken.join("main.rock"), "fn main() { this_does_not_typecheck() }\n").unwrap();
+
+    let out = run(&["lint", "--union", dir.path().join("engine").to_str().unwrap()]);
+    let err = stderr(&out);
+    assert!(err.contains("game_c"), "an unanalyzable consumer must be named: {err}");
 }

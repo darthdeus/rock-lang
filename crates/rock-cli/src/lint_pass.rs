@@ -90,9 +90,9 @@ pub fn run_build_lints(
 
 /// Split findings by severity, emit the soft tiers per `mode`, and hand back the
 /// `Error`s. Pure apart from the printing, so the build gate is unit-testable
-/// without a workspace: today no catalog lint is `Error`-severity, and the
-/// entire point of build integration is that the first one (`entity_across_yield`)
-/// refuses the program.
+/// without a workspace. `transmute_of_nullable` is the catalog's `Error` today;
+/// the point of build integration is that such a finding refuses the program
+/// rather than printing at an author who can ignore it.
 fn report(
     found: Vec<bone_lints::Finding>,
     sources: &SourceFiles,
@@ -197,6 +197,36 @@ fn summary_line(soft: &[bone_lints::Finding], root: &Path) -> String {
 /// The modules of `ws` that are NOT part of this build's user sources: the
 /// stdlib, plus anything else warmed in. Read-only references to the author, so
 /// no lint reports on them.
+/// The `unused_fn` findings for files under `report_root`, judged against
+/// `consumer`'s closed world. The union pass's per-consumer probe: it inverts
+/// the usual report set (report on the DEPENDENCY, not the project) because the
+/// question is what this consumer fails to reach in a library it depends on.
+/// One consumer's answer is never a finding on its own -- see `lint_union`.
+pub fn unused_fns_under(
+    ws: &Workspace,
+    sources: &SourceFiles,
+    consumer: &Path,
+    report_root: &Path,
+) -> Vec<bone_lints::Finding> {
+    let texts = source_texts(sources);
+    let warm = warm_module_ids(ws, &texts);
+    let is_bin = rock_host::stick::StickConfig::is_bin_at(consumer);
+    let by_file = bone_lints::workspace_findings_by_file(ws, &warm, is_bin);
+    let mut out = Vec::new();
+    for (file, findings) in by_file {
+        if !Path::new(file.as_str()).starts_with(report_root) {
+            continue;
+        }
+        let src = texts.get(&file).map(String::as_str).unwrap_or("");
+        out.extend(
+            bone_lints::filter_suppressed_findings(findings, src)
+                .into_iter()
+                .filter(|f| f.lint == bone_lints::UNUSED_FN),
+        );
+    }
+    out
+}
+
 fn warm_module_ids(ws: &Workspace, texts: &FxHashMap<Ustr, String>) -> FxHashSet<ModuleId> {
     ws.modules
         .iter()

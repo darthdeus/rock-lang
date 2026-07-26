@@ -664,6 +664,12 @@ impl CommandContext {
         // codegen, so it dispatches before the backend switch like `fmt`.
         if self.args.command == CliCommand::Lint {
             let path = self.get_path_or_current()?;
+            if self.args.union {
+                return crate::lint_union::do_lint_union(
+                    &path,
+                    self.args.consumers.as_deref(),
+                );
+            }
             return crate::lint_cmd::do_lint(&path);
         }
         if self.args.command == CliCommand::StoneTest {
