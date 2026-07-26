@@ -935,22 +935,36 @@ pub fn yield_slot(i: usize) -> Ustr {
     Ustr::from(format!("__y{i}").as_str())
 }
 
+// A flattened child field's physical slots are DOTTED parent keys, the same
+// encoding `embed` uses (`docs/scalarization-and-boxing-design.md` S 6). `.` is
+// not an identifier character, so a slot key can never equal a legal user field
+// name -- which the `__`-based encoding this replaced could: an enum field `sig`
+// and a user field `sig__tag` both wrote `sig__tag`, so the table ctor emitted
+// the key twice and Lua's last-write-wins clobbered the discriminant, silently
+// breaking every match on that enum.
+//
+// The three forms are disjoint by their suffix: `#` for the discriminant (not an
+// identifier character and not a digit), all-digits for a positional payload (an
+// identifier cannot start with a digit), an identifier for a named payload. They
+// cannot collide with an `embed` leaf key either, because both are prefixed by
+// the owning parent FIELD name and a field name denotes exactly one field.
+
 /// The parent-table slot holding a flattened enum field's discriminant (variant
-/// name string), e.g. field `sig` -> `sig__tag`.
+/// name string), e.g. field `sig` -> `sig.#`.
 fn flat_tag_slot(field: Ustr) -> Ustr {
-    Ustr::from(format!("{field}__tag").as_str())
+    Ustr::from(format!("{field}.#").as_str())
 }
 
 /// The parent-table slot holding a flattened enum field's `i`th positional payload,
-/// e.g. field `sig` payload 0 -> `sig__0`.
+/// e.g. field `sig` payload 0 -> `sig.0`.
 fn flat_payload_slot(field: Ustr, i: usize) -> Ustr {
-    Ustr::from(format!("{field}__{i}").as_str())
+    Ustr::from(format!("{field}.{i}").as_str())
 }
 
 /// The parent-table slot holding a flattened enum field's named (record) payload,
-/// e.g. field `shape` record field `r` -> `shape__r`.
+/// e.g. field `shape` record field `r` -> `shape.r`.
 fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
-    Ustr::from(format!("{field}__{rec_field}").as_str())
+    Ustr::from(format!("{field}.{rec_field}").as_str())
 }
 
 /// A flattened enum value's runtime cells: the discriminant + every union slot

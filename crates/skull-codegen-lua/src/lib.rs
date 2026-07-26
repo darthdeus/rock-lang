@@ -1281,7 +1281,9 @@ impl Emitter<'_> {
         out.push('\n');
         for &fi in &following[..n] {
             if let Inst::StoreField { field, value, .. } = &self.func.insts[fi] {
-                let _ = write!(out, "    {lname}.{field} = ");
+                let _ = write!(out, "    {lname}");
+                write_field_key(out, field.as_str());
+                out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
             }
@@ -1643,7 +1645,7 @@ impl Emitter<'_> {
                         out.push_str(", ");
                     }
                     first = false;
-                    let _ = write!(out, "{n} = ");
+                    write_table_key(out, n.as_str());
                     self.write_opnd(out, *id);
                 }
                 out.push('}');
@@ -1710,7 +1712,7 @@ impl Emitter<'_> {
             }
             Inst::Field { base, field } => {
                 self.write_opnd(out, *base);
-                let _ = write!(out, ".{field}");
+                write_field_key(out, field.as_str());
             }
             Inst::TupleIndex { base, index } => {
                 self.write_opnd(out, *base);
@@ -1851,7 +1853,8 @@ impl Emitter<'_> {
             Inst::StoreField { base, field, value } => {
                 out.push_str("  ");
                 self.write_opnd(out, *base);
-                let _ = write!(out, ".{field} = ");
+                write_field_key(out, field.as_str());
+                out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
             }
@@ -2067,6 +2070,39 @@ pub fn lua_string(s: &str) -> String {
 }
 
 /// Append the double-quoted, escaped Lua string literal for `s` into `out`.
+/// A field key is a Lua identifier unless it is an `embed` leaf's physical key,
+/// which is a dotted path (`"p.x"`). Lua keywords never reach here -- the
+/// tokenizer already escapes them to `__rock_<kw>` -- so anything non-identifier
+/// is a compiler-minted physical key. Constant-string bracket indexing compiles
+/// to the same `TGETS` as dot sugar, so the bracket form costs nothing.
+fn is_lua_ident(s: &str) -> bool {
+    let mut cs = s.chars();
+    cs.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Suffix position: `base.f` or `base["a.b"]`.
+fn write_field_key(out: &mut String, field: &str) {
+    if is_lua_ident(field) {
+        let _ = write!(out, ".{field}");
+    } else {
+        out.push('[');
+        write_lua_string(out, field);
+        out.push(']');
+    }
+}
+
+/// Table-constructor key position: `f = ` or `["a.b"] = `.
+fn write_table_key(out: &mut String, field: &str) {
+    if is_lua_ident(field) {
+        let _ = write!(out, "{field} = ");
+    } else {
+        out.push('[');
+        write_lua_string(out, field);
+        out.push_str("] = ");
+    }
+}
+
 fn write_lua_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
