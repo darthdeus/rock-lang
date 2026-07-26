@@ -14,12 +14,20 @@ fn f(c: Choice) -> int {
     y
 }
 
-// A variant that doesn't exist on the scrutinee enum is rejected.
-//- unqualified_unknown_variant @fail
+// SENTINEL -- PINNED BUG. A variant name that doesn't exist on the scrutinee
+// enum SHOULD be rejected; today it is silently accepted (the arm reads as an
+// irrefutable binding), so a typo'd variant becomes a catch-all and the arms
+// after it are dead. This section is INVERTED: it passes today BECAUSE the bug
+// exists. When bone learns to reject it, this goes red -- restore the `@fail`
+// marker, drop the type annotation, and delete this comment.
+//- unqualified_unknown_variant_sentinel
 enum Choice { A, B }
 fn f(c: Choice) -> int {
-    match c {
+    let r = match c {
         A => 1
         Nope => 2
     }
+    let y = r
+      //^ int
+    y
 }

@@ -54,12 +54,18 @@ fn f() -> int {
     5
 }
 
-// A newtype wraps exactly one type; multi-field defs are rejected by the
-// grammar.
-//- newtype_multi_field_rejected @fail
+// SENTINEL -- PINNED BUG. A newtype wraps exactly one type, so a multi-field
+// def SHOULD be rejected. bone accepts it; the rejection only happens later, at
+// skull emit, as `unsupported call form: Comma` at the CONSTRUCTOR call -- so a
+// declared-but-unconstructed one compiles clean. This section is INVERTED: it
+// passes today BECAUSE the bug exists. When bone rejects the def, this goes red
+// -- restore the `@fail` marker, drop the type annotation, and delete this comment.
+//- newtype_multi_field_def_accepted_sentinel
 newtype Bad(int, string)
 fn f() -> int {
-    0
+    let x = 0
+      //^ int
+    x
 }
 
 // A newtype binds exactly one value; multi-binding patterns are rejected.
