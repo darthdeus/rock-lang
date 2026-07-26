@@ -129,31 +129,56 @@ fn fmt_float(f: f64) -> String {
 
 // --- reachability + profile pass --------------------------------------------
 
+/// GLSL's reachability policy for [`skull_mir::reach`]: walk the shader entry's
+/// call graph, lowering and profile-checking each fn, and reject recursion (GLSL
+/// has no call stack for it). Unlike the JS policy this walks bare `FuncRef`s --
+/// there is no second node kind and nothing to register per edge, so the leaf
+/// test lives on the node.
 struct Reach<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
     /// Lowered MIR of every emittable (non-intrinsic) reachable fn, keyed by ref.
     bodies: HashMap<FuncRef, MirFunc>,
-    /// DFS colouring: gray = on the current path (cycle -> recursion reject).
-    gray: HashSet<FuncRef>,
-    black: HashSet<FuncRef>,
-    /// Post-order (callees before callers) of emittable fns.
-    order: Vec<FuncRef>,
+    /// Where the search starts, and the entry already on the path (see
+    /// `initially_in_progress`).
+    seeds: Vec<FuncRef>,
+    entry: Option<FuncRef>,
 }
 
-impl Reach<'_> {
-    /// DFS from one root/callee. Intrinsics are leaves (not emitted, not walked).
-    fn visit(&mut self, fref: FuncRef) -> Result<(), CompilerError> {
-        if self.black.contains(&fref) {
-            return Ok(());
-        }
+impl<'a> Reach<'a> {
+    fn new(ws: &'a Workspace, scx: &'a ScalarCtx) -> Self {
+        Reach { ws, scx, bodies: HashMap::default(), seeds: Vec::new(), entry: None }
+    }
+
+    /// Expand `seeds` and return the emittable fns in post-order (callees before
+    /// callers -- GLSL emits straight from this and has no forward declarations).
+    fn walk(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+        skull_mir::reach::walk(self)
+    }
+}
+
+impl skull_mir::reach::ReachPolicy for Reach<'_> {
+    type Node = FuncRef;
+
+    fn roots(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+        Ok(std::mem::take(&mut self.seeds))
+    }
+
+    /// The shader entry is lowered and profile-checked by the caller, which then
+    /// seeds the driver with its callees -- so a callee calling back into the
+    /// entry is recursion, and the driver can only see that if the entry counts
+    /// as already on the path.
+    fn initially_in_progress(&mut self) -> Vec<FuncRef> {
+        self.entry.into_iter().collect()
+    }
+
+    fn is_leaf(&mut self, fref: FuncRef) -> Result<bool, CompilerError> {
         let f = &self.ws.module(fref.module).functions[fref.func];
         // An intrinsic mapping OR a Vec operator is rendered inline at call sites
         // (a native builtin / infix op), never emitted as a GLSL definition, never
         // walked -- so it's a reachability leaf.
         if renders_inline(f) {
-            self.black.insert(fref);
-            return Ok(());
+            return Ok(true);
         }
         if f.is_extern || f.inline_body.is_some() {
             return Err(err(
@@ -164,14 +189,19 @@ impl Reach<'_> {
                 ),
             ));
         }
-        if self.gray.contains(&fref) {
-            return Err(err(
-                f.name_span,
-                format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
-            ));
-        }
-        self.gray.insert(fref);
+        Ok(false)
+    }
 
+    fn on_cycle(&mut self, fref: FuncRef) -> Result<(), CompilerError> {
+        let f = &self.ws.module(fref.module).functions[fref.func];
+        Err(err(
+            f.name_span,
+            format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
+        ))
+    }
+
+    fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
+        let f = &self.ws.module(fref.module).functions[fref.func];
         // Signature must be tier 0.
         check_signature(self.ws, f)?;
         // Lower to MIR (values-first-class) and profile-check the body.
@@ -180,15 +210,8 @@ impl Reach<'_> {
         })?;
         let mut callees: Vec<FuncRef> = Vec::new();
         profile_body(f, &mf, &mut callees)?;
-
-        for c in callees {
-            self.visit(c)?;
-        }
-        self.gray.remove(&fref);
-        self.black.insert(fref);
-        self.order.push(fref);
         self.bodies.insert(fref, mf);
-        Ok(())
+        Ok(callees)
     }
 }
 
@@ -1347,7 +1370,20 @@ impl FnEmit<'_> {
                 let (target, want) = if mo.position_is_gl && name.as_str() == "position" {
                     ("gl_Position".to_string(), GlslTy::Vec4)
                 } else {
-                    (name.to_string(), mo.fields.get(&name).copied().unwrap_or(GlslTy::Float))
+                    // bone typechecks the returned struct against the varyings/MRT
+                    // struct, so every field is in the map. Reject rather than
+                    // defaulting: a classify/emit drift would otherwise silently
+                    // emit a Float-typed assignment for a vec/int output.
+                    let ty = mo.fields.get(&name).copied().ok_or_else(|| {
+                        err(
+                            self.span(),
+                            format!(
+                                "shader entry: returned field `{name}` is not an output of this entry's \
+                                 varyings/MRT struct"
+                            ),
+                        )
+                    })?;
+                    (name.to_string(), ty)
                 };
                 let s = self.render_val_t(val, want)?;
                 self.push(&format!("{target} = {s};"));
@@ -1564,18 +1600,11 @@ pub fn emit_shader_library(
 ) -> Result<String, CompilerError> {
     let scx = ScalarCtx::new_values_first_class(ws);
 
-    let mut reach = Reach {
-        ws,
-        scx: &scx,
-        bodies: HashMap::default(),
-        gray: HashSet::default(),
-        black: HashSet::default(),
-        order: Vec::new(),
-    };
+    let mut reach = Reach::new(ws, &scx);
     for r in roots {
-        let fref = resolve_root(ws, mid, r)?;
-        reach.visit(fref)?;
+        reach.seeds.push(resolve_root(ws, mid, r)?);
     }
+    let order = reach.walk()?;
 
     // Detect which floored-int helpers are needed.
     let (mut uses_idiv, mut uses_imod) = (false, false);
@@ -1594,7 +1623,7 @@ pub fn emit_shader_library(
     if !out.is_empty() {
         out.push('\n');
     }
-    for (i, &fref) in reach.order.iter().enumerate() {
+    for (i, &fref) in order.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
@@ -1769,19 +1798,11 @@ pub fn emit_shader_entry_with_dependencies(
     let mut callees: Vec<FuncRef> = Vec::new();
     profile_body(f, &mf, &mut callees)?;
 
-    let mut reach = Reach {
-        ws,
-        scx: &scx,
-        bodies: HashMap::default(),
-        gray: HashSet::default(),
-        black: HashSet::default(),
-        order: Vec::new(),
-    };
-    reach.gray.insert(fref); // a callee calling back into the entry = recursion
-    for c in callees {
-        reach.visit(c)?;
-    }
-    reach.gray.remove(&fref);
+    let mut reach = Reach::new(ws, &scx);
+    // The entry is lowered above; a callee calling back into it is recursion.
+    reach.entry = Some(fref);
+    reach.seeds = callees;
+    let order = reach.walk()?;
 
     reject_stage_violations(ws, Stage::Fragment, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
 
@@ -1810,7 +1831,7 @@ pub fn emit_shader_entry_with_dependencies(
         px.push_str(&prelude);
         px.push('\n');
     }
-    for &href in &reach.order {
+    for &href in &order {
         px.push_str(&emit_fn_def(ws, href, &reach.bodies[&href])?);
         px.push('\n');
     }
@@ -1825,7 +1846,7 @@ pub fn emit_shader_entry_with_dependencies(
     let source = format!(
         "{version}\n\n#ifdef PIXEL\n\n{precision}{px}\n#endif\n\n#ifdef VERTEX\n\n{precision}{FULLSCREEN_VERTEX}\n#endif\n"
     );
-    let mut dependencies = reach.order;
+    let mut dependencies = order;
     dependencies.push(fref);
     Ok(ShaderEmission { source, dependencies })
 }
@@ -2177,19 +2198,11 @@ fn lower_reach_helpers(
     let mut callees: Vec<FuncRef> = Vec::new();
     profile_body(f, &mf, &mut callees)?;
 
-    let mut reach = Reach {
-        ws,
-        scx,
-        bodies: HashMap::default(),
-        gray: HashSet::default(),
-        black: HashSet::default(),
-        order: Vec::new(),
-    };
-    reach.gray.insert(fref);
-    for c in callees {
-        reach.visit(c)?;
-    }
-    reach.gray.remove(&fref);
+    let mut reach = Reach::new(ws, scx);
+    // The entry is lowered above; a callee calling back into it is recursion.
+    reach.entry = Some(fref);
+    reach.seeds = callees;
+    let order = reach.walk()?;
 
     reject_stage_violations(ws, stage, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
 
@@ -2209,11 +2222,11 @@ fn lower_reach_helpers(
         helpers.push_str(&prelude);
         helpers.push('\n');
     }
-    for &href in &reach.order {
+    for &href in &order {
         helpers.push_str(&emit_fn_def(ws, href, &reach.bodies[&href])?);
         helpers.push('\n');
     }
-    let mut dependencies = reach.order;
+    let mut dependencies = order;
     dependencies.push(fref);
     Ok((mf, helpers, dependencies))
 }

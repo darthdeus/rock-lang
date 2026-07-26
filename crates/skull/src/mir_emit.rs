@@ -359,6 +359,11 @@ struct UnitOut {
     refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     /// `(global_name, init_key, load_line)` for a global initializer.
     pending_init: Option<(Ustr, Ustr, String)>,
+    /// Callees this definition still calls -- reachability roots, since decorator
+    /// bodies and global initializers are always emitted.
+    calls: Vec<FuncRef>,
+    /// Module-global names read/written (fn-as-value edges; see `Chunk`).
+    global_names: Vec<Ustr>,
     times: PhaseTimes,
 }
 
@@ -378,6 +383,8 @@ fn emit_lowered(
         let (gs, cs) = direct_refs(ws, mf);
         out.refs = Some((key, gs, cs));
     }
+    out.calls = skull_mir::reach::call_targets(mf);
+    out.global_names = skull_mir::reach::global_ref_names(mf);
     out.lua = lua;
     out.times.emit = t_emit;
     out.times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
@@ -496,6 +503,8 @@ fn merge_units(
     direct_globals: &mut FxHashMap<Ustr, Vec<Ustr>>,
     direct_calls: &mut FxHashMap<Ustr, Vec<Ustr>>,
     pending_inits: &mut Vec<(Ustr, Ustr, String)>,
+    calls: &mut Vec<FuncRef>,
+    global_names: &mut Vec<Ustr>,
     times: &mut PhaseTimes,
 ) {
     for u in results {
@@ -510,8 +519,205 @@ fn merge_units(
         if let Some(pi) = u.pending_init {
             pending_inits.push(pi);
         }
+        calls.extend(u.calls);
+        global_names.extend(u.global_names);
         times.add(&u.times);
     }
+}
+
+/// The Lua half of [`skull_mir::reach`]. Unlike JS and GLSL this does NOT
+/// interleave lowering with discovery: `emit_full` has already lowered every body
+/// in parallel, so the call graph is final before the walk starts and `visit` is a
+/// cache lookup. (The "reachability cannot be a pre-pass" rule is about LOWERING
+/// order; once the chunks exist it no longer applies.) Keeping the parallel
+/// fan-out matters -- it is the edit loop's throughput -- and it leaves the chunk
+/// key set complete, which the incremental cache depends on.
+struct LuaReach<'a> {
+    by_name: &'a FxHashMap<Ustr, Vec<FuncRef>>,
+    chunks: &'a FxHashMap<FuncRef, Result<Chunk, String>>,
+    roots: Vec<FuncRef>,
+}
+
+/// Global-name -> fns, keyed by BOTH the emitted (mangled) name and the source
+/// name. A fn taken as a VALUE lowers to `Inst::Global` carrying the name the Lua
+/// printer emits verbatim -- which is the MANGLED name for an ordinary fn
+/// (`double` -> `double_int_ret_int`) and the source name for a `@nomangle` one.
+/// Looking up only the source name silently misses every mangled fn value, which
+/// is how `let f: fn(int) -> int = double` first emitted a reference to a
+/// definition DCE had dropped.
+///
+/// A source name maps to its whole overload set: the read carries no signature, so
+/// this is conservative (it can keep a sibling the body never takes) but never
+/// drops a live one.
+fn build_name_index(ws: &Workspace) -> FxHashMap<Ustr, Vec<FuncRef>> {
+    let mut idx: FxHashMap<Ustr, Vec<FuncRef>> = FxHashMap::default();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            let fref = FuncRef { module: module.id, func: fid };
+            idx.entry(f.name).or_default().push(fref);
+            let mangled = Ustr::from(&mangle_fn(ws, f));
+            if mangled != f.name {
+                idx.entry(mangled).or_default().push(fref);
+            }
+        }
+    }
+    idx
+}
+
+fn fns_named<'a>(
+    by_name: &'a FxHashMap<Ustr, Vec<FuncRef>>,
+    name: Ustr,
+) -> impl Iterator<Item = FuncRef> + 'a {
+    by_name.get(&name).map(|v| v.as_slice()).unwrap_or(&[]).iter().copied()
+}
+
+impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
+    type Node = FuncRef;
+
+    fn roots(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+        Ok(std::mem::take(&mut self.roots))
+    }
+
+    /// A fn with no cached chunk (extern, `inline(lua)`, `Iterator`-bounded) has
+    /// no MIR to walk. It is still EMITTED if reached -- `is_leaf` only means
+    /// "expand no further", and those bodies reach onward only by bare name,
+    /// which the `@nomangle` root rule covers.
+    fn is_leaf(&mut self, fref: FuncRef) -> Result<bool, CompilerError> {
+        Ok(!matches!(self.chunks.get(&fref), Some(Ok(_))))
+    }
+
+    /// Recursion is ordinary Rock.
+    fn on_cycle(&mut self, _fref: FuncRef) -> Result<(), CompilerError> {
+        Ok(())
+    }
+
+    fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
+        let Some(Ok(chunk)) = self.chunks.get(&fref) else { return Ok(Vec::new()) };
+        let mut succs = chunk.calls.clone();
+        for &name in &chunk.global_names {
+            succs.extend(fns_named(self.by_name, name));
+        }
+        Ok(succs)
+    }
+}
+
+/// Whether `f` must be emitted no matter what the call graph says.
+///
+/// `@nomangle` is the load-bearing one. It is precisely the annotation for "this
+/// fn is called by its ORIGINAL name from outside the MIR call graph" (CLAUDE.md:
+/// from another `inline(lua)` body, from compiler codegen, or from itself), so
+/// rooting all of them covers every invisible edge class at once -- including the
+/// two string-keyed dispatch sites, `@on_reload` (via `on_hot_reload_by_name`) and
+/// `on_loop_jump`, whose targets appear only as string literals. Measured cost on
+/// match3: 24 fns / 7.2 KB, 0.3% of the chunk. Sound beats clever at that price.
+///
+/// The rest name a fn from generated top-level text rather than from a body:
+/// `main` (the CLI appends `__rock_main_wrapper(main)`), a decorated fn (its
+/// mangled name goes in a `decorator_application_lines` call), `@sim`
+/// (`sim_registration_lines`), and `@test` (the harness calls it bare).
+/// Whether a module is a LIBRARY -- something the compilation target consumes --
+/// rather than part of the target itself.
+///
+/// The distinction is what makes whole-program DCE both safe and worthwhile. A
+/// library is prunable: nothing outside it depends on a definition no root
+/// reaches, and libraries are where the dead weight is (a game chunk is mostly
+/// stdlib + engine). The target's OWN sources are roots, because compiling a unit
+/// and getting its functions is a real contract here -- codegen tests compile a
+/// fragment with no entry point and expect its fns, and `rock compile foo.rock`
+/// on a file of helpers should not emit an empty program.
+///
+/// The stdlib is always a library. Beyond that the caller supplies the target's
+/// root directory: a module whose file lives outside it came from a declared
+/// dependency (`stone` via stick.toml). `None` means a single-file compile, whose
+/// only library is the stdlib.
+fn is_library_module(file: &str, project_root: Option<&str>) -> bool {
+    if is_stdlib_module_file(file) {
+        return true;
+    }
+    match project_root {
+        Some(root) => !file.starts_with(root),
+        None => false,
+    }
+}
+
+fn is_emission_root(
+    file: &str,
+    project_root: Option<&str>,
+    f: &bone_semantic::hir::Function,
+    deco_map: &DecoMap,
+) -> bool {
+    if !is_library_module(file, project_root) {
+        return true;
+    }
+    if f.name.as_str() == "main" {
+        return true;
+    }
+    let has = |n: &str| f.annotations.iter().any(|a| a.name.name.as_str() == n);
+    if has("nomangle") || has("sim") || has("test") {
+        return true;
+    }
+    // `extern` decls bind a bare name an inline(lua) body may call directly.
+    if f.is_extern {
+        return true;
+    }
+    f.annotations.iter().any(|a| deco_map.contains_key(&a.name.name))
+}
+
+/// The fns whose definitions must appear in the emitted chunk: the roots plus
+/// everything they transitively call. `extra_roots` carries the call edges of the
+/// definitions that are always emitted regardless (decorator bodies, global
+/// initializers) and of the shader registrations.
+fn reachable_fns(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    deco_map: &DecoMap,
+    project_root: Option<&str>,
+    extra_roots: &[FuncRef],
+    extra_root_names: &[Ustr],
+) -> Result<FxHashSet<FuncRef>, CompilerError> {
+    let by_name = build_name_index(ws);
+    let mut roots: Vec<FuncRef> = Vec::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if is_emission_root(module.file.as_str(), project_root, f, deco_map) {
+                roots.push(FuncRef { module: module.id, func: fid });
+            }
+        }
+    }
+    roots.extend(extra_roots.iter().copied());
+    roots.extend(cache.shader_registrations.dependencies.iter().copied());
+    // `sim_registration_lines` calls `register_sim` from generated text.
+    if !collect_sim_fns(ws).is_empty() {
+        roots.extend(register_sim_fn(ws));
+    }
+    for &name in extra_root_names {
+        roots.extend(fns_named(&by_name, name));
+    }
+
+    let mut policy =
+        LuaReach { by_name: &by_name, chunks: &cache.chunks, roots: roots.clone() };
+    let order = skull_mir::reach::walk(&mut policy)?;
+
+    // `walk` returns only EXPANDED nodes. A root and a LEAF (extern, inline(lua),
+    // `Iterator`-bounded -- anything with no cached chunk) are reached and
+    // emittable too, so fold the roots and every expanded body's edges back in.
+    let mut set: FxHashSet<FuncRef> = order.iter().copied().collect();
+    set.extend(roots);
+    for fref in order {
+        if let Some(Ok(chunk)) = cache.chunks.get(&fref) {
+            set.extend(chunk.calls.iter().copied());
+            for &name in &chunk.global_names {
+                set.extend(fns_named(&by_name, name));
+            }
+        }
+    }
+    Ok(set)
 }
 
 /// Emit the whole workspace via the new (cell-model) path. `user_mid` is the
@@ -522,7 +728,18 @@ fn merge_units(
 /// GLES at shader-compile time (stone-gl `adapt_source_for_gles`) -- which is
 /// the only thing the two profiles differ by.
 pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit, CompilerError> {
-    emit_full(ws, user_mid).map(|(emit, _cache)| emit)
+    emit_workspace_mir_in(ws, user_mid, None)
+}
+
+/// [`emit_workspace_mir`] for a PROJECT build: `project_root` is the target's
+/// directory, so modules outside it (a stick.toml dependency such as `stone`) are
+/// libraries and prune down to what the project reaches. See [`is_library_module`].
+pub fn emit_workspace_mir_in(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+) -> Result<MirEmit, CompilerError> {
+    emit_full_in(ws, user_mid, project_root).map(|(emit, _cache)| emit)
 }
 
 /// One emitted ordinary/coroutine function definition plus the facts incremental
@@ -545,6 +762,15 @@ struct Chunk {
     /// `static` cells this body declares -- aggregated at chunk-pull for the
     /// hot-reload preservation preamble + `__rock_known_globals` registration.
     statics: Vec<skull_mir::mir::StaticCell>,
+    /// The callees this body still CALLS after inlining -- the reachability edge
+    /// set. Distinct from `deps`, which is an invalidation superset (it also holds
+    /// everything inlined AWAY, and would keep spliced-out callees alive).
+    calls: Vec<FuncRef>,
+    /// Module-global names this body reads/writes. A top-level fn used as a VALUE
+    /// lowers to an `Inst::Global`, not a call, so these are reachability edges
+    /// too -- without them a fn passed as an argument gets pruned out from under
+    /// a live reference.
+    global_names: Vec<Ustr>,
 }
 
 /// Per-body emit cache for incremental codegen: the expensive function chunks
@@ -603,6 +829,13 @@ pub struct SkullEmitCache {
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
     shader_registrations: ShaderRegistrations,
+    /// The fn definitions the last full assembly actually EMITTED (global DCE
+    /// prunes the rest). `assemble_overlay` needs it: the overlay redefines only
+    /// CHANGED fns, so a body edit that newly calls a previously-pruned fn would
+    /// otherwise leave that fn defined nowhere -- a runtime nil call on reload.
+    emitted: FxHashSet<FuncRef>,
+    /// The compilation target's root directory; see [`is_library_module`].
+    project_root: Option<String>,
 }
 
 #[derive(Default)]
@@ -674,6 +907,8 @@ fn emit_body_chunk(
             direct_calls: Vec::new(),
             times,
             statics: mf.statics.clone(),
+            calls: skull_mir::reach::call_targets(&mf),
+            global_names: skull_mir::reach::global_ref_names(&mf),
         });
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
@@ -717,7 +952,9 @@ fn emit_body_chunk(
     emit_nested_fns(ws, cg, &mut mf.nested_fns, &mut deps, &mut statics, &mut lua);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics })
+    let calls = skull_mir::reach::call_targets(&mf);
+    let global_names = skull_mir::reach::global_ref_names(&mf);
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, global_names })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -915,6 +1152,19 @@ pub fn collect_sim_fns(ws: &Workspace) -> Vec<(&bone_semantic::hir::Function, St
 ///
 /// Full-emit only: sims run from a fresh `main.lua` process via `ROCK_RUN_SIM`,
 /// never from the live dev game's overlay, so `assemble_overlay` needs none.
+/// The engine's `register_sim`, which [`sim_registration_lines`] calls by MANGLED
+/// name from generated top-level text. Shared with the reachability roots so the
+/// registration and the root cannot drift: emitting the call while DCE prunes the
+/// definition is a nil-call at load, which is exactly what happened.
+fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
+    ws.modules.iter().find_map(|m| {
+        m.functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == "register_sim")
+            .map(|(fid, _)| FuncRef { module: m.id, func: fid })
+    })
+}
+
 fn sim_registration_lines(
     ws: &Workspace,
 ) -> Result<String, CompilerError> {
@@ -923,19 +1173,14 @@ fn sim_registration_lines(
         return Ok(String::new());
     }
 
-    let register_fn = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.functions.iter().map(|(_, f)| f))
-        .find(|f| f.name.as_str() == "register_sim")
-        .ok_or_else(|| {
-            CompilerError::new_no_location(
-                "internal: `register_sim` is not in scope yet `@sim` annotations exist \
-                 (skull) -- stone/engine must be linked. Please report."
-                    .to_string(),
-            )
-        })?;
-    let register_name = mangle_fn(ws, register_fn);
+    let register_fn = register_sim_fn(ws).ok_or_else(|| {
+        CompilerError::new_no_location(
+            "internal: `register_sim` is not in scope yet `@sim` annotations exist \
+             (skull) -- stone/engine must be linked. Please report."
+                .to_string(),
+        )
+    })?;
+    let register_name = mangle_fn(ws, &ws.module(register_fn.module).functions[register_fn.func]);
 
     let mut out = String::new();
     for (f, wire) in sims {
@@ -1021,7 +1266,7 @@ fn assemble(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
-) -> Result<MirEmit, CompilerError> {
+) -> Result<(MirEmit, FxHashSet<FuncRef>), CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -1058,7 +1303,44 @@ fn assemble(
     let deco_results = par_map(deco_items, |(mid, did)| {
         emit_decorator_unit(ws, scx, cg, mid, did)
     });
-    merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut times);
+    let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
+    let mut always_emitted_names: Vec<Ustr> = Vec::new();
+    merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut times);
+
+    // Global initializers are emitted below, in their original slot, but they are
+    // LOWERED here: their call edges are reachability roots (a global init is
+    // always emitted), so the walk needs them before the fn-def loop runs.
+    let mut pending_inits: Vec<(Ustr, Ustr, String)> = Vec::new();
+    let global_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
+        .modules
+        .iter()
+        .filter(|m| m.id != ModuleId::builtin())
+        .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
+        .collect();
+    // name->type snapshot table for the NEXT reload's preservation guards
+    // (mirrors rock's `__rock_known_globals`). Built from the same `ws.render`
+    // the per-init guards use, so an unchanged global's type compares equal.
+    let known_globals: String = global_items
+        .iter()
+        .map(|(mid, gid)| {
+            let g = &ws.module(*mid).globals[*gid];
+            format!("[{:?}] = {:?},", g.name.as_str(), ws.render(None, g.ty))
+        })
+        .collect();
+    let global_results = par_map(global_items, |(mid, gid)| {
+        emit_global_unit(ws, scx, cg, mid, gid)
+    });
+    let mut globals_lua = String::new();
+    // Held back and appended after the fn-def skips so the reported order is
+    // unchanged by the hoist.
+    let mut global_skipped: Vec<(String, String)> = Vec::new();
+    merge_units(global_results, &mut globals_lua, &mut global_skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut always_emitted_calls, &mut always_emitted_names, &mut times);
+
+    // Whole-program DCE: emit a fn definition only if a root reaches it.
+    let reachable = reachable_fns(
+        ws, cache, &deco_map, cache.project_root.as_deref(), &always_emitted_calls,
+        &always_emitted_names,
+    )?;
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
     // regenerated for extern / inline(lua)). The cached chunks were built in
@@ -1077,6 +1359,12 @@ fn assemble(
             if f.backend == bone_semantic::hir::FnBackend::Js {
                 continue;
             }
+            // Whole-program DCE. Only the DEFINITION is gated: the bookkeeping
+            // below (global-init ordering facts, skip reporting, the hard error on
+            // an unlowerable user fn) runs for every fn exactly as before, so
+            // pruning can change which definitions are emitted and nothing else --
+            // in particular it never hides a diagnostic.
+            let emit_def = reachable.contains(&self_ref);
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
@@ -1100,6 +1388,9 @@ fn assemble(
                 continue;
             }
             if let Some((_, body)) = f.inline_body {
+                if !emit_def {
+                    continue;
+                }
                 // inline(lua): emit the hand-written body verbatim, wrapping a
                 // value-returning bodyless-`return` and prepending default fills.
                 // (Js inline bodies were skipped above via the backend guard.)
@@ -1140,8 +1431,12 @@ fn assemble(
                     direct_globals.insert(key, chunk.direct_globals.clone());
                     direct_calls.insert(key, chunk.direct_calls.clone());
                     times.add(&chunk.times);
-                    out.push_str(&chunk.lua);
-                    all_statics.extend(chunk.statics.iter().cloned());
+                    if emit_def {
+                        out.push_str(&chunk.lua);
+                        // A dropped definition's `static` cells do not exist, so
+                        // they must not be registered for hot-reload preservation.
+                        all_statics.extend(chunk.statics.iter().cloned());
+                    }
                 }
                 Some(Err(msg)) => {
                     if is_stdlib_module_file(module.file.as_str()) {
@@ -1168,28 +1463,10 @@ fn assemble(
     }
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
-    let mut pending_inits: Vec<(Ustr, Ustr, String)> = Vec::new();
-    let global_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
-        .modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin())
-        .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
-        .collect();
-    // name->type snapshot table for the NEXT reload's preservation guards
-    // (mirrors rock's `__rock_known_globals`). Built from the same `ws.render`
-    // the per-init guards use, so an unchanged global's type compares equal.
-    let known_globals: String = global_items
-        .iter()
-        .map(|(mid, gid)| {
-            let g = &ws.module(*mid).globals[*gid];
-            format!("[{:?}] = {:?},", g.name.as_str(), ws.render(None, g.ty))
-        })
-        .collect();
-
-    let global_results = par_map(global_items, |(mid, gid)| {
-        emit_global_unit(ws, scx, cg, mid, gid)
-    });
-    merge_units(global_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut times);
+    // (Lowered above, so the walk could see their call edges; appended here, in
+    // the original slot, so the emitted text is unchanged.)
+    out.push_str(&globals_lua);
+    skipped.extend(global_skipped);
 
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
@@ -1267,7 +1544,7 @@ fn assemble(
     if let Some(err) = cg.take_collision() {
         return Err(err);
     }
-    Ok(MirEmit { lua: out, skipped, phases })
+    Ok((MirEmit { lua: out, skipped, phases }, reachable))
 }
 
 /// Full emit: populate the chunk cache for every ordinary/coroutine body, then
@@ -1315,6 +1592,46 @@ pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in(ws, user_mid, None)
+}
+
+/// Absolutize `project_root` so it can be prefix-matched against module file
+/// paths, which are absolute for a project build.
+///
+/// Rejects a root that matches NO module. The caller passing a relative or stale
+/// directory would otherwise silently classify the project's own sources as
+/// library modules -- pruning MORE than intended, with no signal. That is the
+/// failure this whole guard exists for: a path predicate that quietly matches
+/// nothing looks exactly like one that works.
+fn canonical_project_root(
+    ws: &Workspace,
+    project_root: Option<&str>,
+) -> Result<Option<String>, CompilerError> {
+    let Some(root) = project_root else { return Ok(None) };
+    let abs = std::fs::canonicalize(root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| root.to_string());
+    let matches = ws
+        .modules
+        .iter()
+        .any(|m| !is_stdlib_module_file(m.file.as_str()) && m.file.as_str().starts_with(&abs));
+    if !matches {
+        return Err(CompilerError::new_no_location(format!(
+            "skull: project root `{abs}` matches no module file -- every project source would \
+             be classified as a library and pruned. This is a caller bug, not a user error."
+        )));
+    }
+    Ok(Some(abs))
+}
+
+/// [`emit_full`] scoped to a project directory; see [`is_library_module`].
+pub fn emit_full_in(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let project_root = canonical_project_root(ws, project_root)?;
+    let project_root = project_root.as_deref();
     validate_on_reload_nomangle(ws)?;
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
         return Err(CompilerError::new_with_label(
@@ -1404,8 +1721,12 @@ pub fn emit_full(
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
         shader_registrations,
+        emitted: FxHashSet::default(),
+        project_root: project_root.map(str::to_string),
     };
-    let emit = assemble(ws, &cache.cg, &cache.scx, &cache)?;
+    let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache)?;
+    let mut cache = cache;
+    cache.emitted = emitted;
     Ok((emit, cache))
 }
 
@@ -1566,7 +1887,8 @@ pub fn emit_incremental(
     // re-emit globals/decorators/prelude/entry), scaling with total output size.
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
-    let mut emit = assemble(ws, &cache.cg, &cache.scx, cache)?;
+    let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache)?;
+    cache.emitted = emitted;
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
     emit.phases.push(("incr: reassemble full output", reassemble));
@@ -1580,6 +1902,50 @@ pub fn emit_incremental(
 /// Loaded AFTER `main.lua`; redefined globals override their stale defs. Emits NO
 /// scaffold/globals -- those are unchanged on a body edit and live in main.lua.
 /// `docs/skull-incremental-emit-split.md`.
+/// Fns the changed chunks now reach that the last full build did not emit.
+/// Bounded by `cache.emitted`, which is the leaf set -- so the common case (an
+/// edit that calls nothing new) expands nothing.
+fn newly_reachable(cache: &SkullEmitCache) -> Vec<FuncRef> {
+    struct Backfill<'a> {
+        cache: &'a SkullEmitCache,
+        roots: Vec<FuncRef>,
+    }
+    impl skull_mir::reach::ReachPolicy for Backfill<'_> {
+        type Node = FuncRef;
+        fn roots(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+            Ok(std::mem::take(&mut self.roots))
+        }
+        fn is_leaf(&mut self, fref: FuncRef) -> Result<bool, CompilerError> {
+            Ok(self.cache.emitted.contains(&fref)
+                || !matches!(self.cache.chunks.get(&fref), Some(Ok(_))))
+        }
+        fn on_cycle(&mut self, _fref: FuncRef) -> Result<(), CompilerError> {
+            Ok(())
+        }
+        fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
+            match self.cache.chunks.get(&fref) {
+                Some(Ok(chunk)) => Ok(chunk.calls.clone()),
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+    let mut roots: Vec<FuncRef> = Vec::new();
+    for fref in &cache.changed_since_full {
+        if let Some(Ok(chunk)) = cache.chunks.get(fref) {
+            roots.extend(chunk.calls.iter().copied().filter(|c| !cache.emitted.contains(c)));
+        }
+    }
+    if roots.is_empty() {
+        return Vec::new();
+    }
+    let mut policy = Backfill { cache, roots: roots.clone() };
+    // Infallible: every policy method returns Ok.
+    let mut out = skull_mir::reach::walk(&mut policy).unwrap_or_default();
+    out.extend(roots.iter().copied());
+    out.retain(|fr| !cache.emitted.contains(fr));
+    out
+}
+
 fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -1590,7 +1956,14 @@ fn assemble_overlay(
 
     // Redefine the changed functions, deterministic order for a stable diff.
     let mut order: Vec<FuncRef> = cache.changed_since_full.iter().copied().collect();
+    // ... plus anything they now reach that the last full build had PRUNED. The
+    // overlay redefines only changed fns, so without this a body edit that adds
+    // the first call to a dead fn leaves that fn defined nowhere and the reload
+    // dies on a nil call. The walk stops at every already-emitted fn (`is_leaf`),
+    // so on a normal edit it visits nothing.
+    order.extend(newly_reachable(cache));
     order.sort_by_key(|fr| (fr.module.index(), u32::from(fr.func.into_raw())));
+    order.dedup();
     for fref in &order {
         match cache.chunks.get(fref) {
             Some(Ok(chunk)) => out.push_str(&chunk.lua),
