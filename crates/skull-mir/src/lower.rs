@@ -949,6 +949,16 @@ pub fn yield_slot(i: usize) -> Ustr {
 // cannot collide with an `embed` leaf key either, because both are prefixed by
 // the owning parent FIELD name and a field name denotes exactly one field.
 
+/// Re-key relative embed leaf paths under an owning field: `[("x", v)]` under
+/// `p` becomes `[("p.x", v)]`. Relative paths let a leaf list be computed once
+/// and attached wherever the child is spliced.
+fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>)> {
+    leaves
+        .into_iter()
+        .map(|(k, v)| (Ustr::from(&format!("{field}.{k}")), v))
+        .collect()
+}
+
 /// The parent-table slot holding a flattened enum field's discriminant (variant
 /// name string), e.g. field `sig` -> `sig.#`.
 fn flat_tag_slot(field: Ustr) -> Ustr {
@@ -3018,8 +3028,9 @@ impl Builder<'_> {
                 if self.swizzle_of(base, field).is_none()
                     && self.flat_field_of(base, field).is_none() =>
             {
-                let b = self.lower_place_base(base)?;
-                Ok(self.emit_cur(Inst::Field { base: b, field }))
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                Ok(self.emit_cur(Inst::Field { base: b, field: key }))
             }
             // A call returning a VALUE is not storage: the rvalue lowering packs a
             // fresh box, so the store lands on a temporary and emits
@@ -3075,18 +3086,29 @@ impl Builder<'_> {
                 self.emit_cur(Inst::Store { cell, value: v });
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_place_base(base)?;
+                // A whole embedded field (`p.f = Foo { .. }`): the child has no
+                // slot of its own, so write its leaves. Composition happens
+                // BEFORE this, so `p.f` here is the child, not a physical key.
+                if let Some(cname) = self.embed_field_of(base, field) {
+                    let b = self.lower_place_base(base)?;
+                    self.store_embed(b, base, field, cname, value)?;
+                    return Ok(());
+                }
+                // An embed LEAF write composes to one dotted key on the parent
+                // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
                 // A flattened enum field: write the discriminant + payload slots
                 // directly on the parent table (no nested box).
                 if let Some(shape) = self.flat_field_of(base, field) {
                     let cells = self.lower_flat_value(&shape, value)?;
-                    self.store_flat_cells(b, field, cells);
+                    self.store_flat_cells(b, key, cells);
                     return Ok(());
                 }
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
-                    field,
+                    field: key,
                     value: v,
                 });
             }
@@ -3176,11 +3198,12 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_place_base(base)?;
-                let cur = self.emit_cur(Inst::Field { base: b, field });
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                let cur = self.emit_cur(Inst::Field { base: b, field: key });
                 let rv = self.lower_expr(value)?;
                 let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
-                self.emit_cur(Inst::StoreField { base: b, field, value: new_v });
+                self.emit_cur(Inst::StoreField { base: b, field: key, value: new_v });
             }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
@@ -3288,10 +3311,11 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_place_base(base)?;
-                let old = self.emit_cur(Inst::Field { base: b, field });
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                let old = self.emit_cur(Inst::Field { base: b, field: key });
                 let new = bump(self, old);
-                self.emit_cur(Inst::StoreField { base: b, field, value: new });
+                self.emit_cur(Inst::StoreField { base: b, field: key, value: new });
                 Ok(if postfix { old } else { new })
             }
             Expr::Index { base, index } => {
@@ -4260,6 +4284,28 @@ impl Builder<'_> {
                 if let Some(shape) = self.flat_field_of(base, field) {
                     let parent = self.lower_expr(base)?;
                     return Ok(ValueRepr::Scalar(self.materialize_flat(parent, field, &shape)));
+                }
+                // An embedded field read as a WHOLE value re-materializes from
+                // its leaves. Projection-only keeps every such read transient
+                // (never bound, returned, captured or stored), so this is the
+                // consuming boundary, not a reintroduced box.
+                if let Some(cname) = self.embed_field_of(base, field) {
+                    let parent = self.lower_expr(base)?;
+                    let v = if self.embed_read_is_nullable(base, field) {
+                        self.materialize_embed_nullable(parent, field, cname)
+                    } else {
+                        self.materialize_embed(parent, field, cname)
+                    };
+                    return Ok(ValueRepr::Scalar(v));
+                }
+                // An embed LEAF read composes to one dotted key on the parent
+                // that holds it; no intermediate projection exists.
+                let (pbase, key) = self.physical_field(base, field);
+                if key != field {
+                    let parent = self.lower_expr(pbase)?;
+                    return Ok(ValueRepr::Scalar(
+                        self.emit_cur(Inst::Field { base: parent, field: key }),
+                    ));
                 }
                 let br = self.lower_expr_repr(base)?;
                 if let ValueRepr::Group { name, parts } = &br {
@@ -6770,8 +6816,11 @@ impl Builder<'_> {
         // instead of one boxed value (`docs/enum-allocation-report.md`).
         let mut lit_box: Vec<(Ustr, Idx<Inst>)> = Vec::new();
         let mut lit_flat: Vec<(Ustr, FlatCells)> = Vec::new();
+        let mut lit_embed: Vec<(Ustr, Vec<(Ustr, Idx<Inst>)>)> = Vec::new();
         let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
         let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::new();
+        let mut embed_by_value: HashMap<u32, (Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>)> =
+            HashMap::new();
         for fidx in fields {
             let lf = self.body.struct_lit_field_arena[fidx];
             let key: u32 = lf.value.into_raw().into();
@@ -6785,6 +6834,20 @@ impl Builder<'_> {
                     }
                 };
                 lit_flat.push((lf.name, cells));
+            } else if let Some(cname) = self.embed_field_of_struct(name, lf.name) {
+                // An embedded field's leaves ARE this parent's keys, so its
+                // value is spliced rather than lowered to a child box. Keyed by
+                // the value expr so a field GROUP still evaluates once.
+                let nullable = self.embed_field_is_nullable(name, lf.name);
+                let leaves = match embed_by_value.get(&key) {
+                    Some(l) => l.clone(),
+                    None => {
+                        let l = self.embed_value_leaves(nullable, cname, lf.value)?;
+                        embed_by_value.insert(key, l.clone());
+                        l
+                    }
+                };
+                lit_embed.push((lf.name, Self::embed_field_slots(lf.name, leaves)));
             } else {
                 let v = match by_value.get(&key) {
                     Some(&v) => v,
@@ -6803,8 +6866,32 @@ impl Builder<'_> {
                 for fname in decl {
                     if let Some((_, cells)) = lit_flat.iter().find(|(n, _)| *n == fname) {
                         fs.extend(self.flat_literal_slots(fname, cells.clone()));
+                    } else if let Some((_, slots)) = lit_embed.iter().find(|(n, _)| *n == fname) {
+                        fs.extend(slots.clone());
                     } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
                         fs.push((fname, v));
+                    } else if let Some(cname) = self.embed_field_of_struct(name, fname) {
+                        // Unwritten embed field: copy the base's leaves through
+                        // (including its presence slot), else the struct default.
+                        let nullable = self.embed_field_is_nullable(name, fname);
+                        match base_inst {
+                            Some(bi) => {
+                                for k in self.embed_leaf_paths(cname) {
+                                    let key = Ustr::from(&format!("{fname}.{k}"));
+                                    let v = self.emit_cur(Inst::Field { base: bi, field: key });
+                                    fs.push((key, v));
+                                }
+                                if nullable {
+                                    let p = self.emit_cur(Inst::Field { base: bi, field: fname });
+                                    fs.push((fname, p));
+                                }
+                            }
+                            None => {
+                                let dv = self.lower_struct_default(name, fname)?;
+                                let leaves = self.embed_leaf_reads(cname, dv);
+                                fs.extend(Self::embed_field_slots(fname, (None, leaves)));
+                            }
+                        }
                     } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
                         // Unwritten flat field: from the base if present, else the
                         // struct default; spread the box into slots either way.
@@ -7272,6 +7359,349 @@ impl Builder<'_> {
             return None;
         };
         flat_enum_shape(self.ws, ename)
+    }
+
+    // --- `embed` storage: a child's leaves ARE the parent's physical keys ---
+    //
+    // Key encoding is the dotted path shared with flattened enum fields (see
+    // `flat_tag_slot`): `embed a: X` with leaf `b` lives at `parent["a.b"]`,
+    // recursively. `.` is not an identifier character, so the encoding cannot
+    // collide with a user field or a control key, and it is injective over
+    // paths. Enforcement of the source-level rules (projection-only, site
+    // legality) is bone's half; this is storage only.
+
+    /// The embedded child's struct name for `sname.field`, when `field` is
+    /// declared `embed` on a REFERENCE parent. A `value` parent is already
+    /// contiguous cdata, so `embed` there is a no-op GUARANTEE (it asserts the
+    /// layout) and must not re-encode anything.
+    fn embed_field_of_struct(&self, sname: Ustr, field: Ustr) -> Option<Ustr> {
+        // This runs on EVERY field access, so bail in O(1) when the workspace
+        // declares no embed field at all. The flag is set while registering
+        // fields and never cleared: a stale `true` costs one bool check, a
+        // stale `false` would silently skip the flattening.
+        if !self.ws.has_embed_fields || self.is_value_struct(sname) {
+            return None;
+        }
+        let sid = *self.ws.struct_by_name.get(&sname)?;
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let fdef = sd.fields.iter().find(|f| f.name == field)?;
+        if !fdef.is_embed {
+            return None;
+        }
+        // `resolve_ty` peels `Nullable`, which is what a nullable embed needs:
+        // presence is a separate leaf, the child's own leaves are unchanged.
+        let TypeExpr::App { ctor: TypeCtor::Nominal(cname), .. } = self.resolve_ty(fdef.ty)? else {
+            return None;
+        };
+        Some(cname)
+    }
+
+    /// Whether an embed field is declared nullable. Presence is its own LEAF --
+    /// it lives at the field's own declared name, which flattening leaves free
+    /// (every physical key is dotted), so no extra encoding is needed.
+    fn embed_field_is_nullable(&self, sname: Ustr, field: Ustr) -> bool {
+        let Some(sid) = self.ws.struct_by_name.get(&sname) else { return false };
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        sd.fields
+            .iter()
+            .find(|f| f.name == field)
+            .is_some_and(|f| matches!(self.ty_node(f.ty), Some(TypeExpr::Nullable(_))))
+    }
+
+    fn embed_field_of(&self, base: Idx<Expr>, field: Ustr) -> Option<Ustr> {
+        let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
+            return None;
+        };
+        self.embed_field_of_struct(sname, field)
+    }
+
+    /// Physical key for `base.field`, composing an `embed` chain into one dotted
+    /// path and returning the expression that actually HOLDS it. `t.a.b.c` with
+    /// `a` and `b` embedded is the single key `"a.b.c"` on `t` -- no intermediate
+    /// projection exists at any level, because no intermediate box does.
+    fn physical_field(&self, base: Idx<Expr>, field: Ustr) -> (Idx<Expr>, Ustr) {
+        let mut parts = vec![field];
+        let mut cur = base;
+        while let Expr::FieldAccess { base: b2, field: f2 } = self.body.expr_arena[cur] {
+            if self.embed_field_of(b2, f2).is_none() {
+                break;
+            }
+            parts.push(f2);
+            cur = b2;
+        }
+        if parts.len() == 1 {
+            return (cur, field);
+        }
+        parts.reverse();
+        let key: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
+        (cur, Ustr::from(&key.join(".")))
+    }
+
+    /// Re-materialize an embedded field `parent.{prefix}` from its physical
+    /// leaves, at a whole-value-read boundary (a scalar-ABI call argument, `==`,
+    /// interpolation). Projection-only guarantees the result is a TRANSIENT --
+    /// it can never be bound, returned, captured or stored -- so it stays
+    /// sinkable rather than becoming the storage the feature removed.
+    fn materialize_embed(&mut self, parent: Idx<Inst>, prefix: Ustr, cname: Ustr) -> Idx<Inst> {
+        let mut fields = Vec::new();
+        for f in self.struct_field_names(cname).unwrap_or_default() {
+            let key = Ustr::from(&format!("{prefix}.{f}"));
+            let v = match self.embed_field_of_struct(cname, f) {
+                Some(inner) => self.materialize_embed(parent, key, inner),
+                None => self.emit_cur(Inst::Field { base: parent, field: key }),
+            };
+            fields.push((f, v));
+        }
+        if self.is_value_struct(cname) {
+            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
+        } else {
+            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
+        }
+    }
+
+    /// The `(physical key, value)` pairs for an embedded field's leaves, the one
+    /// source for both a parent literal's splice and a whole-field write.
+    ///
+    /// A DIRECT child literal FUSES: its field expressions lower straight into
+    /// the parent's leaf slots, so the child box is never built at all. Any
+    /// other expression is lowered once and read leaf-wise -- correct, and a
+    /// transient the later passes can still sink. Mirrors `lower_flat_value`,
+    /// which fuses a direct `E::V(..)` ctor the same way.
+    ///
+    /// All leaves are evaluated BEFORE any caller stores them, so a whole-field
+    /// write is not observable half-applied.
+    fn embed_leaf_values(
+        &mut self,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[value].clone() {
+            // A functional-update base reads unwritten fields off another
+            // instance; leave that to the general path rather than duplicating
+            // the base-copy rule here.
+            if name == cname && bases.into_iter().next().is_none() {
+                // A field GROUP (`Ty { a + b: expr }`) shares ONE value expr
+                // across several fields: lower each distinct one once, so the
+                // evaluation count is right and grouped leaves share it.
+                let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
+                let mut written: Vec<(Ustr, Idx<Expr>)> = Vec::new();
+                for fidx in fields {
+                    let lf = self.body.struct_lit_field_arena[fidx];
+                    written.push((lf.name, lf.value));
+                }
+                let mut out = Vec::new();
+                for f in self.struct_field_names(cname).unwrap_or_default() {
+                    let inner = self.embed_field_of_struct(cname, f);
+                    match written.iter().find(|(n, _)| *n == f).map(|(_, v)| *v) {
+                        Some(ve) => match inner {
+                            Some(ic) => out.extend(prefixed(f, self.embed_leaf_values(ic, ve)?)),
+                            None => {
+                                let k: u32 = ve.into_raw().into();
+                                let v = match by_value.get(&k) {
+                                    Some(&v) => v,
+                                    None => {
+                                        let v = self.lower_expr(ve)?;
+                                        by_value.insert(k, v);
+                                        v
+                                    }
+                                };
+                                out.push((f, v));
+                            }
+                        },
+                        // Unwritten: the child's own field default.
+                        None => {
+                            let d = self.lower_struct_default(cname, f)?;
+                            match inner {
+                                Some(ic) => out.extend(prefixed(f, self.embed_leaf_reads(ic, d))),
+                                None => out.push((f, d)),
+                            }
+                        }
+                    }
+                }
+                return Ok(out);
+            }
+        }
+        let v = self.lower_expr(value)?;
+        Ok(self.embed_leaf_reads(cname, v))
+    }
+
+    /// Every relative leaf path of embedded child `cname`, declaration order.
+    fn embed_leaf_paths(&self, cname: Ustr) -> Vec<Ustr> {
+        let mut out = Vec::new();
+        for f in self.struct_field_names(cname).unwrap_or_default() {
+            match self.embed_field_of_struct(cname, f) {
+                Some(inner) => out.extend(
+                    self.embed_leaf_paths(inner)
+                        .into_iter()
+                        .map(|k| Ustr::from(&format!("{f}.{k}"))),
+                ),
+                None => out.push(f),
+            }
+        }
+        out
+    }
+
+    /// `(presence, leaves)` for a NULLABLE embed field. Callers publish presence
+    /// LAST, so an error or yield mid-assignment leaves the field ABSENT rather
+    /// than present-and-half-built.
+    ///
+    /// A statically-known null or a direct child literal needs no branch; any
+    /// other expression is tested once at runtime, because reading leaves off an
+    /// absent child would index nil.
+    fn embed_nullable_leaf_values(
+        &mut self,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(Idx<Inst>, Vec<(Ustr, Idx<Inst>)>), CompilerError> {
+        let paths = self.embed_leaf_paths(cname);
+        // `= null`: clear presence AND every leaf. Scalar staleness is
+        // unobservable under presence gating, but a stale REFERENCE leaf keeps
+        // its pointee alive -- a leak, not a cosmetic -- so clear uniformly.
+        if matches!(self.body.expr_arena[value], Expr::Null) {
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            return Ok((nil, paths.into_iter().map(|k| (k, nil)).collect()));
+        }
+        if matches!(self.body.expr_arena[value], Expr::StructLiteral { name, .. } if name == cname) {
+            let leaves = self.embed_leaf_values(cname, value)?;
+            let present = self.emit_cur(Inst::Const(Lit::Bool(true)));
+            return Ok((present, leaves));
+        }
+        // Dynamic `Child?`: one presence test, leaves read only on the present
+        // arm and joined through cells.
+        let v = self.lower_expr(value)?;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(v, nil));
+        let cells: Vec<Idx<Cell>> = paths.iter().map(|_| self.f.new_cell(None)).collect();
+        let absent_bb = self.f.new_block();
+        let present_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: absent_bb, else_bb: present_bb });
+
+        self.cur = absent_bb;
+        for &c in &cells {
+            let n = self.emit_cur(Inst::Const(Lit::Nil));
+            self.emit_cur(Inst::Store { cell: c, value: n });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = present_bb;
+        for (&c, (_, lv)) in cells.iter().zip(self.embed_leaf_reads(cname, v)) {
+            self.emit_cur(Inst::Store { cell: c, value: lv });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = join;
+        let leaves = paths
+            .into_iter()
+            .zip(cells)
+            .map(|(k, c)| (k, self.emit_cur(Inst::Load(c))))
+            .collect();
+        let present = self.emit_cur(Inst::Not(is_nil));
+        Ok((present, leaves))
+    }
+
+    /// The same relative-path pairs read off an already-boxed child.
+    fn embed_leaf_reads(&mut self, cname: Ustr, value: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
+        let mut out = Vec::new();
+        for f in self.struct_field_names(cname).unwrap_or_default() {
+            let part = self.emit_cur(Inst::Field { base: value, field: f });
+            match self.embed_field_of_struct(cname, f) {
+                Some(inner) => out.extend(prefixed(f, self.embed_leaf_reads(inner, part))),
+                None => out.push((f, part)),
+            }
+        }
+        out
+    }
+
+    /// Whether the embed field `base.field` is declared nullable.
+    fn embed_read_is_nullable(&self, base: Idx<Expr>, field: Ustr) -> bool {
+        match self.expr_ty(base) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) => {
+                self.embed_field_is_nullable(sname, field)
+            }
+            _ => false,
+        }
+    }
+
+    /// `(presence, relative leaves)` for setting an embed field to `value`.
+    /// Relative so one lowering can be attached under several field names (a
+    /// field group shares one value expr); [`embed_field_slots`] re-keys it.
+    fn embed_value_leaves(
+        &mut self,
+        nullable: bool,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>), CompilerError> {
+        if nullable {
+            let (present, leaves) = self.embed_nullable_leaf_values(cname, value)?;
+            return Ok((Some(present), leaves));
+        }
+        Ok((None, self.embed_leaf_values(cname, value)?))
+    }
+
+    /// Absolute `(physical key, value)` pairs for embed field `field`: the
+    /// child's leaves under the dotted path, plus the presence slot LAST when
+    /// the field is nullable. The one source for a parent literal's splice and
+    /// for a whole-field write, so the two cannot drift.
+    fn embed_field_slots(
+        field: Ustr,
+        (present, leaves): (Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>),
+    ) -> Vec<(Ustr, Idx<Inst>)> {
+        let mut out = prefixed(field, leaves);
+        if let Some(p) = present {
+            out.push((field, p));
+        }
+        out
+    }
+
+    /// Write a whole embedded field `parent.{field} = value` leaf-wise.
+    fn store_embed(
+        &mut self,
+        parent: Idx<Inst>,
+        base: Idx<Expr>,
+        field: Ustr,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let nullable = self.embed_read_is_nullable(base, field);
+        let leaves = self.embed_value_leaves(nullable, cname, value)?;
+        for (key, v) in Self::embed_field_slots(field, leaves) {
+            self.emit_cur(Inst::StoreField { base: parent, field: key, value: v });
+        }
+        Ok(())
+    }
+
+    /// A whole read of a NULLABLE embed field: presence-gated, so an absent
+    /// field reads as null and never materializes a box from stale leaves.
+    fn materialize_embed_nullable(
+        &mut self,
+        parent: Idx<Inst>,
+        field: Ustr,
+        cname: Ustr,
+    ) -> Idx<Inst> {
+        let present = self.emit_cur(Inst::Field { base: parent, field });
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(present, nil));
+        let result = self.f.new_cell(None);
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let boxed = self.materialize_embed(parent, field, cname);
+        self.store_and_join(result, boxed, join);
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
     }
 
     /// Lower an enum-typed value into its flattened cells: the discriminant

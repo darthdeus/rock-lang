@@ -1657,7 +1657,12 @@ global PI: float = 3.141592653589793
         local keys = {}
         local seen = {}
         for k, _ in pairs(t) do
-            if k ~= "__variant" and k ~= "__ty" then
+            -- A dotted key is a compiler-minted PHYSICAL slot (an `embed` leaf,
+            -- a flattened enum's discriminant/payload). It has no source-level
+            -- name, so it is never shown; the declared field it belongs to is
+            -- rendered from the leaves instead.
+            if k ~= "__variant" and k ~= "__ty"
+               and not (type(k) == "string" and string.find(k, ".", 1, true)) then
                 keys[#keys + 1] = k
                 seen[k] = true
             end
@@ -1665,12 +1670,21 @@ global PI: float = 3.141592653589793
         -- A null field is an ABSENT key, so `pairs` alone under-reports a
         -- struct's shape. Declared fields come from the type table instead.
         local decl = type_name and _G.__ROCK_TYPE_TABLE[type_name]
+        local embed_vals = nil
         if decl and not t.__variant then
             for i = 1, #decl.fields do
-                local fname = decl.fields[i].name
-                if not seen[fname] then
-                    keys[#keys + 1] = fname
-                    seen[fname] = true
+                local f = decl.fields[i]
+                if not seen[f.name] then
+                    keys[#keys + 1] = f.name
+                    seen[f.name] = true
+                end
+                -- An embedded field's declared name holds either nothing or a
+                -- presence flag, so rebuild its logical value from the leaves.
+                -- A TABLE there means this is already a rebuilt logical view
+                -- (nested embed), whose child sits under the name directly.
+                if f.embed and type(t[f.name]) ~= "table" then
+                    embed_vals = embed_vals or {}
+                    embed_vals[f.name] = __rock_embed_view(t, f.name, f.type, f.nullable)
                 end
             end
         end
@@ -1699,7 +1713,9 @@ global PI: float = 3.141592653589793
             local parts = {}
             for i, k in ipairs(keys) do
                 local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
-                parts[i] = key_str .. " = " .. __rock_inspect_value(t[k], indent, path .. "." .. tostring(k), visited, precision)
+                local v = t[k]
+                if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
+                parts[i] = key_str .. " = " .. __rock_inspect_value(v, indent, path .. "." .. tostring(k), visited, precision)
             end
             if header ~= "" then
                 result = header .. " { " .. table.concat(parts, ", ") .. " }"
@@ -1711,7 +1727,9 @@ global PI: float = 3.141592653589793
             local lines = {}
             for _, k in ipairs(keys) do
                 local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
-                lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(t[k], indent .. "  ", path .. "." .. tostring(k), visited, precision)
+                local v = t[k]
+                if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
+                lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(v, indent .. "  ", path .. "." .. tostring(k), visited, precision)
             end
             local body = table.concat(lines, ",\n")
             if header ~= "" then
@@ -1724,6 +1742,28 @@ global PI: float = 3.141592653589793
 
     if visited then visited[t] = nil end
     return result
+"""
+
+// Rebuild an `embed` field's LOGICAL value from the parent's physical leaves.
+// The child has no box of its own: its leaves live at `<prefix>.<subfield>` on
+// the parent, recursively, and a nullable embed keeps presence at `<prefix>`.
+// Returns nil when absent, so an absent field reads as null rather than as a
+// struct assembled from stale leaves.
+@nomangle inline(lua) fn __rock_embed_view(t: any, prefix: string, ty: string, nullable: bool) -> any = """
+    if nullable and t[prefix] == nil then return nil end
+    local decl = _G.__ROCK_TYPE_TABLE[ty]
+    if not decl then return nil end
+    local o = { __ty = ty }
+    for i = 1, #decl.fields do
+        local f = decl.fields[i]
+        local key = prefix .. "." .. f.name
+        if f.embed then
+            o[f.name] = __rock_embed_view(t, key, f.type, f.nullable)
+        else
+            o[f.name] = t[key]
+        end
+    end
+    return o
 """
 
 // Hoisted sort comparator — module-level so `table.sort` doesn't allocate

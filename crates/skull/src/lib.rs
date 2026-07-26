@@ -908,6 +908,33 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     }
 }
 
+/// The nominal name a field's type denotes, peeling `Nullable`. An `embed`
+/// field needs this even when nullable: reflection rebuilds its logical value
+/// from that type's field list, and [`reflect_field_type`] renders any nullable
+/// as `any`, which would lose the name.
+fn nominal_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    let resolve = |t: bone_semantic::prelude::TyId| -> Option<(TypeExpr, bone_semantic::prelude::TyId)> {
+        match t {
+            bone_semantic::prelude::TyId::Static(mid, idx) => {
+                ws.modules.get(mid.index()).map(|m| (m.ty_arena[idx], t))
+            }
+            bone_semantic::prelude::TyId::Local(_) => None,
+        }
+    };
+    let (mut te, mut cur) = resolve(ty)?;
+    if let TypeExpr::Nullable(inner) = te {
+        let (t2, c2) = resolve(cur.with_idx(inner))?;
+        te = t2;
+        cur = c2;
+    }
+    let _ = cur;
+    match te {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name.as_str().to_string()),
+        _ => None,
+    }
+}
+
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
 /// value's metadata from its `__ty` tag. Mirrors
@@ -933,9 +960,19 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
                 .iter()
                 .map(|f| {
                     let (tystr, nullable) = reflect_field_type(ws, f.ty);
+                    // `embed` marks a field whose leaves are THIS struct's
+                    // physical keys (`f.x`), so reflection has to rebuild the
+                    // logical child from them -- the declared name indexes
+                    // nothing (a presence slot when nullable). The child's name
+                    // must survive nullability for that rebuild to be possible.
+                    let tystr = match f.is_embed.then(|| nominal_field_type(ws, f.ty)).flatten() {
+                        Some(n) => n,
+                        None => tystr,
+                    };
+                    let embed = if f.is_embed { ", embed = true" } else { "" };
                     format!(
-                        "{{ name = \"{}\", type = \"{}\", nullable = {} }}",
-                        f.name, tystr, nullable
+                        "{{ name = \"{}\", type = \"{}\", nullable = {}{} }}",
+                        f.name, tystr, nullable, embed
                     )
                 })
                 .collect();
