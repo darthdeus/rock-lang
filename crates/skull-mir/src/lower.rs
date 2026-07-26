@@ -977,6 +977,22 @@ fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
     Ustr::from(format!("{field}.{rec_field}").as_str())
 }
 
+/// Every relative slot a flattened enum field occupies: discriminant, positional
+/// payloads, named payloads. A flat-enum field is MULTI-SLOT, so any site walking
+/// a struct's physical leaves must expand it -- treating the field name as one
+/// leaf silently splits the field across two encodings (the store writes
+/// `f.#`/`f.0`, the walker touches `f`).
+fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
+    let mut out = vec![flat_tag_slot(field)];
+    for i in 0..shape.tuple_width {
+        out.push(flat_payload_slot(field, i));
+    }
+    for rf in &shape.record_fields {
+        out.push(flat_named_slot(field, *rf));
+    }
+    out
+}
+
 /// A flattened enum value's runtime cells: the discriminant + every union slot
 /// (positional tuple slots and named record slots), nil where unused.
 #[derive(Clone)]
@@ -7446,11 +7462,28 @@ impl Builder<'_> {
         let mut fields = Vec::new();
         for f in self.struct_field_names(cname).unwrap_or_default() {
             let key = Ustr::from(&format!("{prefix}.{f}"));
-            let v = match self.embed_field_of_struct(cname, f) {
-                Some(inner) => self.materialize_embed(parent, key, inner),
-                None => self.emit_cur(Inst::Field { base: parent, field: key }),
-            };
-            fields.push((f, v));
+            match self.embed_field_of_struct(cname, f) {
+                Some(inner) => {
+                    let v = self.materialize_embed(parent, key, inner);
+                    fields.push((f, v));
+                }
+                // A flat-enum field stays FLAT in the rebuilt child: consumers
+                // read it as `child["f.#"]`, so re-boxing it under `f` would
+                // hand them a shape they never look at.
+                None => match self.flat_field_of_struct(cname, f) {
+                    Some(shape) => {
+                        for slot in flat_slot_names(f, &shape) {
+                            let src = Ustr::from(&format!("{prefix}.{slot}"));
+                            let v = self.emit_cur(Inst::Field { base: parent, field: src });
+                            fields.push((slot, v));
+                        }
+                    }
+                    None => {
+                        let v = self.emit_cur(Inst::Field { base: parent, field: key });
+                        fields.push((f, v));
+                    }
+                },
+            }
         }
         if self.is_value_struct(cname) {
             self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
@@ -7484,6 +7517,7 @@ impl Builder<'_> {
                 // across several fields: lower each distinct one once, so the
                 // evaluation count is right and grouped leaves share it.
                 let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
+                let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::new();
                 let mut written: Vec<(Ustr, Idx<Expr>)> = Vec::new();
                 for fidx in fields {
                     let lf = self.body.struct_lit_field_arena[fidx];
@@ -7492,10 +7526,33 @@ impl Builder<'_> {
                 let mut out = Vec::new();
                 for f in self.struct_field_names(cname).unwrap_or_default() {
                     let inner = self.embed_field_of_struct(cname, f);
+                    // A flat-enum field contributes its sub-slots, never one
+                    // boxed leaf -- same expansion the non-embed struct literal
+                    // does via `flat_literal_slots`.
+                    let flat = if inner.is_none() { self.flat_field_of_struct(cname, f) } else { None };
                     match written.iter().find(|(n, _)| *n == f).map(|(_, v)| *v) {
-                        Some(ve) => match inner {
-                            Some(ic) => out.extend(prefixed(f, self.embed_leaf_values(ic, ve)?)),
-                            None => {
+                        Some(ve) => match (inner, flat) {
+                            // Through the nullable-aware pair, not `embed_leaf_values`
+                            // directly: a nullable inner embed owns a presence slot,
+                            // and `= null` must not be read leaf-wise off nil.
+                            (Some(ic), _) => {
+                                let n = self.embed_field_is_nullable(cname, f);
+                                let leaves = self.embed_value_leaves(n, ic, ve)?;
+                                out.extend(Self::embed_field_slots(f, leaves));
+                            }
+                            (None, Some(shape)) => {
+                                let k: u32 = ve.into_raw().into();
+                                let cells = match flat_by_value.get(&k) {
+                                    Some(c) => c.clone(),
+                                    None => {
+                                        let c = self.lower_flat_value(&shape, ve)?;
+                                        flat_by_value.insert(k, c.clone());
+                                        c
+                                    }
+                                };
+                                out.extend(self.flat_literal_slots(f, cells));
+                            }
+                            (None, None) => {
                                 let k: u32 = ve.into_raw().into();
                                 let v = match by_value.get(&k) {
                                     Some(&v) => v,
@@ -7511,9 +7568,13 @@ impl Builder<'_> {
                         // Unwritten: the child's own field default.
                         None => {
                             let d = self.lower_struct_default(cname, f)?;
-                            match inner {
-                                Some(ic) => out.extend(prefixed(f, self.embed_leaf_reads(ic, d))),
-                                None => out.push((f, d)),
+                            match (inner, flat) {
+                                (Some(ic), _) => out.extend(prefixed(f, self.embed_leaf_reads(ic, d))),
+                                (None, Some(shape)) => {
+                                    let cells = self.spread_box_to_cells(d, &shape);
+                                    out.extend(self.flat_literal_slots(f, cells));
+                                }
+                                (None, None) => out.push((f, d)),
                             }
                         }
                     }
@@ -7535,7 +7596,10 @@ impl Builder<'_> {
                         .into_iter()
                         .map(|k| Ustr::from(&format!("{f}.{k}"))),
                 ),
-                None => out.push(f),
+                None => match self.flat_field_of_struct(cname, f) {
+                    Some(shape) => out.extend(flat_slot_names(f, &shape)),
+                    None => out.push(f),
+                },
             }
         }
         out
@@ -7608,6 +7672,17 @@ impl Builder<'_> {
     fn embed_leaf_reads(&mut self, cname: Ustr, value: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
         let mut out = Vec::new();
         for f in self.struct_field_names(cname).unwrap_or_default() {
+            // A flat-enum field is read out sub-slot-wise; emitting the whole
+            // field read first would be a dead load of a key nothing writes.
+            if self.embed_field_of_struct(cname, f).is_none() {
+                if let Some(shape) = self.flat_field_of_struct(cname, f) {
+                    for slot in flat_slot_names(f, &shape) {
+                        let v = self.emit_cur(Inst::Field { base: value, field: slot });
+                        out.push((slot, v));
+                    }
+                    continue;
+                }
+            }
             let part = self.emit_cur(Inst::Field { base: value, field: f });
             match self.embed_field_of_struct(cname, f) {
                 Some(inner) => out.extend(prefixed(f, self.embed_leaf_reads(inner, part))),
