@@ -72,7 +72,7 @@ pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<Compi
 /// the first — a project with 5 type errors must not force a
 /// fix-one-recompile-repeat loop.
 pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
-    errs.iter().map(|e| e.render(sources)).collect::<Vec<_>>().join("\n")
+    rock_core::errors::render_all(errs, sources)
 }
 
 /// The bone stdlib with `user` modules appended — the checkable module set every

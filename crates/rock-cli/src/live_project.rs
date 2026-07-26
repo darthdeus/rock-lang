@@ -139,16 +139,36 @@ impl LiveProject {
 
     pub fn verdict(&self, context: &str) -> Result<()> {
         let diagnostics = self.session.diagnostics();
-        if diagnostics.is_empty() {
-            return Ok(());
+        if !diagnostics.is_empty() {
+            for diagnostic in &diagnostics {
+                eprintln!(
+                    "{}",
+                    crate::skull_backend::render_project_err(&self.sources, diagnostic)
+                );
+            }
+            anyhow::bail!("skull: {} type error(s) {context}", diagnostics.len())
         }
-        for diagnostic in &diagnostics {
-            eprintln!(
-                "{}",
-                crate::skull_backend::render_project_err(&self.sources, diagnostic)
-            );
+        // The build lint pass on the hot-reload path: a reload is a build, so a
+        // finding surfaces the same way it does for `rock compile`. Only a
+        // type-clean workspace is linted -- broken bodies would report garbage.
+        let scope = if self.include_tests {
+            crate::lint_pass::Scope::WholeProject
+        } else {
+            crate::lint_pass::Scope::ProductionOnly
+        };
+        let lint_errs = crate::lint_pass::run_build_lints(
+            self.session.workspace(),
+            &self.sources,
+            Path::new(&self.dir),
+            scope,
+        );
+        if !lint_errs.is_empty() {
+            for e in &lint_errs {
+                eprintln!("{}", crate::skull_backend::render_project_err(&self.sources, e));
+            }
+            anyhow::bail!("skull: {} lint error(s) {context}", lint_errs.len())
         }
-        anyhow::bail!("skull: {} type error(s) {context}", diagnostics.len())
+        Ok(())
     }
 
     fn rediscover(&mut self) -> Result<()> {

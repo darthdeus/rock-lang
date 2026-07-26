@@ -544,10 +544,51 @@ fn unused_fn_is_silent_for_lib() {
     );
 }
 
-// The `transmute_of_nullable` lint reads inference and resolves the REAL stdlib
-// `cast`; the live `update` path must publish its warning for the edited file.
+// A DEPENDENCY's files are scanned but never reported on -- the same report-set
+// rule the build pass applies (`rock-cli/src/lint_pass.rs`). `update` publishes
+// diagnostics for every tracked file in the session, and a bin's session
+// contains its whole compilation unit, so without this filter opening a game
+// file lints the shared engine as if that one game were the whole world:
+// `unused_fn` flags every engine fn the OTHER 23 consumers call. Reachability is
+// the only lint that can differ this way (the per-file lints give the same
+// answer in any session), so it is the one this pins.
 #[test]
-fn update_publishes_transmute_of_nullable_warning() {
+fn unused_fn_is_silent_for_a_dependency_of_a_bin() {
+    let dir = tempfile::tempdir().unwrap();
+    let dep = dir.path().join("engine");
+    std::fs::create_dir_all(&dep).unwrap();
+    std::fs::write(dep.join("stick.toml"), "[package]\nname = \"engine\"\ntype = \"lib\"\n")
+        .unwrap();
+    std::fs::write(dep.join("e.rock"), "fn engine_helper() {}\n").unwrap();
+
+    let game = dir.path().join("game");
+    std::fs::create_dir_all(&game).unwrap();
+    std::fs::write(
+        game.join("stick.toml"),
+        "[package]\nname = \"g\"\ntype = \"bin\"\n\n[dependencies]\nengine = { path = \"../engine\" }\n",
+    )
+    .unwrap();
+    std::fs::write(game.join("m.rock"), "fn main() {}\n").unwrap();
+
+    let m = bone_query::canonicalize_lenient(&game.join("m.rock").to_string_lossy());
+    let e = bone_query::canonicalize_lenient(&dep.join("e.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    let per_file = bone.update(&m, std::fs::read_to_string(&m).unwrap());
+
+    let dep_diags: Vec<_> =
+        per_file.into_iter().filter(|(p, _)| p == &e).flat_map(|(_, d)| d).collect();
+    assert!(
+        !dep_diags.iter().any(|d| d.message.contains("unused function")),
+        "a dependency's reachability is not the consumer's to judge: {dep_diags:?}"
+    );
+}
+
+// The `transmute_of_nullable` lint reads inference and resolves the REAL stdlib
+// `cast`; the live `update` path must publish it for the edited file, at the
+// `Error` severity that also gates the build (the editor and the compiler agree
+// on how bad it is, so a red squiggle predicts a failed build).
+#[test]
+fn update_publishes_transmute_of_nullable_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"g\"\n").unwrap();
     let src = "fn maybe() -> int? {\n  return 1\n}\nfn main() -> int {\n  let _x: int = cast(maybe())\n  3\n}\n";
@@ -563,8 +604,8 @@ fn update_publishes_transmute_of_nullable_warning() {
     assert!(
         diags.iter().any(|d| d.message.contains("strips nullability")
             && d.message.contains("int?")
-            && d.severity == Some(lsp_types::DiagnosticSeverity::WARNING)),
-        "update() must publish the transmute_of_nullable warning: {diags:?}"
+            && d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "update() must publish the transmute_of_nullable error: {diags:?}"
     );
 }
 

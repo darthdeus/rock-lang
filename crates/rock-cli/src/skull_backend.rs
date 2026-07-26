@@ -58,6 +58,13 @@ fn skull_emit_full(
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
     let ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
+    // The build lint pass (`docs/lint-future-plan.md`): soft findings report,
+    // `Error` findings refuse the program through the same path a type error
+    // takes.
+    let lint_errs = crate::lint_pass::run_build_lints_single(&ws, file, src);
+    if !lint_errs.is_empty() {
+        return Err(EmitFullErr::Compile(lint_errs));
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     let emit = skull::mir_emit::emit_workspace_mir(&ws, user_mid)
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
@@ -975,6 +982,23 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
             return;
         }
 
+        // A recompile is a build, so the lint pass runs here too; an `Error`
+        // finding refuses the reload the same way a type error does.
+        let lint_errs = crate::lint_pass::run_build_lints(
+            s.workspace(),
+            &sources,
+            std::path::Path::new(path),
+            crate::lint_pass::Scope::WholeProject,
+        );
+        if !lint_errs.is_empty() {
+            *cache = None;
+            for e in &lint_errs {
+                eprintln!("{}", render_project_err(&sources, e));
+            }
+            log::error!(target: "WATCH", "skull {label}: {} lint error(s) - serving last good output", lint_errs.len());
+            return;
+        }
+
         let ws = s.workspace();
         let Ok(mid) = skull::user_module_id(ws) else {
             log::error!(target: "WATCH", "skull {label}: no user module");
@@ -1134,6 +1158,22 @@ fn skull_emit_project(dir: &str) -> String {
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
+
+    // Lints are a compiler pass, not an editor accessory: they run on the same
+    // typechecked output every build produces, and an `Error` finding refuses
+    // the program (`docs/lint-future-plan.md`). The game build dropped `tests/`
+    // above, hence ProductionOnly.
+    let lint_errs = crate::lint_pass::run_build_lints(
+        &ws,
+        &sources,
+        std::path::Path::new(dir),
+        crate::lint_pass::Scope::ProductionOnly,
+    );
+    if !lint_errs.is_empty() {
+        eprintln!("{}", render_project_errs(&sources, &lint_errs));
+        log::error!(target: "SKULL", "{} lint error(s) in project {}", lint_errs.len(), dir);
+        std::process::exit(1);
+    }
 
     let (lua, skipped) = match skull::mir_emit::emit_workspace_mir(&ws, user_mid) {
         Ok(e) => (e.lua, e.skipped),
@@ -1412,6 +1452,7 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
 }
 
 pub fn skull_test(paths: &[String]) -> Result<()> {
+    crate::lint_pass::set_corpus_mode();
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
 
     let (files, package_dirs) = collect_test_units(paths)?;

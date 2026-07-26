@@ -206,12 +206,12 @@ impl CompilerError {
 
     #[must_use]
     pub fn render(&self, sources: &SourceFiles) -> String {
-        // If we're in the stdlib, use a simple format to avoid circular dependencies
-        // This prevents issues where error display tries to use Rock's to_string
-        if self.location.file.to_string().contains("<stdlib>") {
-            return self.render_simple();
-        }
+        render_all(std::slice::from_ref(self), sources)
+    }
 
+    /// The ariadne report for this error, without a source cache attached.
+    /// Split out so a batch render builds the cache once -- see [`render_all`].
+    fn report_builder(&self) -> ariadne::ReportBuilder<'static, (String, std::ops::Range<usize>)> {
         let mut builder = make_report_builder(
             self.level.report_kind(),
             self.location.file.to_string(),
@@ -240,22 +240,46 @@ impl CompilerError {
                 }
             },
         }
+        builder
+    }
+}
 
-        let contents = sources
+/// Render every error in `errs` against ONE ariadne source cache, joined by
+/// blank lines.
+///
+/// Building the cache copies the contents of every file in `sources` (a game
+/// project is ~1.5 MB), so a per-error cache costs ~1.6 ms EACH on a big
+/// project. That was invisible while rendering only ended a build; the lint
+/// pass renders warnings on every successful build, which is what surfaced it.
+/// Every multi-diagnostic report should come through here.
+#[must_use]
+pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
+    if errs.is_empty() {
+        return String::new();
+    }
+    // Errors in the stdlib render without source context (the stdlib is not in
+    // `sources`, and rendering it risks a circular to_string dependency).
+    let (stdlib, spanned): (Vec<&CompilerError>, Vec<&CompilerError>) =
+        errs.iter().partition(|e| e.location.file.to_string().contains("<stdlib>"));
+
+    let mut out: Vec<String> = stdlib.iter().map(|e| e.render_simple()).collect();
+    if !spanned.is_empty() {
+        let sources_vec = sources
             .files
             .iter()
-            .map(|source| {
-                let source = source.borrow();
-                (source.file.to_id_path(), source.contents.clone())
+            .map(|src| {
+                let src = src.borrow();
+                (src.file.to_id_path(), src.contents.clone())
             })
             .collect_vec();
-        let mut written = Vec::new();
-        builder
-            .finish()
-            .write(ariadne::sources(contents), &mut written)
-            .unwrap();
-        String::from_utf8(written).unwrap()
+        let mut cache = ariadne::sources(sources_vec);
+        for e in spanned {
+            let mut buf = Vec::new();
+            e.report_builder().finish().write(&mut cache, &mut buf).unwrap();
+            out.push(String::from_utf8(buf).unwrap());
+        }
     }
+    out.join("\n")
 }
 
 impl From<CompilerError> for Vec<CompilerError> {
