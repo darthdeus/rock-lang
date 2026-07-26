@@ -164,6 +164,13 @@ struct BoneProject {
     /// public API has no in-project caller yet isn't dead -- so it runs only
     /// when this is true. Computed once at load, not per keystroke.
     is_bin: bool,
+    /// This project's root (the `stick.toml` directory keying the session). The
+    /// REPORT SET: a tracked file outside it is a DEPENDENCY -- scanned, so the
+    /// call graph is whole, but never reported on. Same rule as the build pass
+    /// (`rock-cli/src/lint_pass.rs`), and it matters most for `unused_fn`: a
+    /// session holds its whole compilation unit, so without this a game would
+    /// judge the shared engine's reachability against one consumer's world.
+    root: PathBuf,
     /// Last time each module was (re)inferred, keyed by module file. Stamped for
     /// every file at load and for the `update.reinferred` set on each edit, so
     /// `rock/modules` can render "how long ago did this recompile" -- the
@@ -382,6 +389,7 @@ impl BoneWorkspace {
                 fn_sigs: None,
                 call_through: None,
                 is_bin,
+                root: root.to_path_buf(),
                 module_touched: HashMap::new(),
             })
     }
@@ -456,8 +464,8 @@ impl BoneWorkspace {
                 let now = std::time::Instant::now();
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 self.projects.insert(
-                    root,
-                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), transmute_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, module_touched },
+                    root.clone(),
+                    BoneProject { session, texts, freq: None, hole_cache: HashMap::new(), lint_cache: HashMap::new(), transmute_cache: HashMap::new(), reach: None, fn_sigs: None, call_through: None, is_bin, root, module_touched },
                 );
             }
             Err(e) => {
@@ -736,6 +744,9 @@ impl BoneWorkspace {
             );
             for (p, diags) in by_file.iter_mut() {
                 if p == path && this_file_parse_err.is_some() {
+                    continue;
+                }
+                if !in_report_set(proj, p) {
                     continue;
                 }
                 let Some(findings) = by_ws.get(&Ustr::from(p.as_str())) else {
@@ -4207,6 +4218,15 @@ fn transmute_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> 
         .collect()
 }
 
+/// Whether `path` is the project's OWN code, and so may be reported on. A
+/// tracked file outside the root is a `stick.toml` dependency: it is scanned
+/// (the call graph must be whole) but its findings belong to its own project,
+/// not to whichever consumer happens to be open. Mirrors the build pass's
+/// report set.
+fn in_report_set(proj: &BoneProject, path: &str) -> bool {
+    Path::new(path).starts_with(&proj.root)
+}
+
 /// The whole-workspace lints (`unused_fn`, `backend_sibling_mismatch`) for one
 /// file: run the workspace pass and keep only `path`'s findings. Both are
 /// cross-file properties -- reachability spans the project, a sibling set spans
@@ -4214,6 +4234,9 @@ fn transmute_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> 
 /// to `bin` projects inside the runner. The one-shot path; `update` distributes
 /// the same by-file result across every tracked file.
 fn workspace_lint_diagnostics_for(proj: &BoneProject, path: &str) -> Vec<Diagnostic> {
+    if !in_report_set(proj, path) {
+        return Vec::new();
+    }
     let by_file = bone_lints::workspace_findings_by_file(
         proj.session.workspace(),
         &proj.session.warm_mids,
