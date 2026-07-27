@@ -372,6 +372,33 @@ fn struct_field_value_offers_expected_enum_variant() {
     );
 }
 
+#[test]
+fn struct_field_value_type_directs_even_when_the_literal_is_a_call_arg() {
+    // Same shape as `struct_field_value_offers_expected_enum_variant`, but the
+    // struct literal is itself an argument to a call (`run(Pass { .. })`) --
+    // the common `run_pass(Pass { blend: .. })` shape. `enclosing_arg_call`
+    // walks past the struct literal to the outer call and reports the CALL's
+    // param type (`PassX`) as expected, so `classify()`'s `arg_call.is_none()`
+    // guard drops the struct's own field_value context and the enum variant
+    // never gets type-directed above an unrelated same-named fn.
+    let labels = labels_at(
+        "enum BlendModeX { Alpha, Replace }\n\
+         struct PassX { blend: BlendModeX }\n\
+         fn run(p: PassX) {}\n\
+         fn replace(s: string, old: string, new: string) -> string { s }\n\
+         fn probe() {\n  run(PassX { blend: repl$0 })\n}\n",
+    );
+    let variant = rank_of(&labels, "BlendModeX::Replace");
+    let decoy = rank_of(&labels, "replace");
+    assert!(variant.is_some(), "BlendModeX::Replace must be offered: {labels:?}");
+    assert!(decoy.is_some(), "decoy `replace` fn must be offered: {labels:?}");
+    assert!(
+        variant < decoy,
+        "expected enum variant must type-direct above the unrelated same-named fn \
+         even when the struct literal sits inside a call's arg list: {labels:?}"
+    );
+}
+
 // -- after_yield: coroutine-fn boost fires only on a REAL yield operand -------
 
 #[test]

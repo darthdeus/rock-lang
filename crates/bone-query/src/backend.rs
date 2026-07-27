@@ -2522,7 +2522,17 @@ impl BoneWorkspace {
         let inf = ws.inference(mid);
         let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
         // Active argument = top-level commas between the call's `(` and the cursor.
-        let active = active_param(src, call_span.offset_range.0, offset);
+        let mut active = active_param(src, call_span.offset_range.0, offset);
+        // UFCS: `recv.callee(..)` folds the receiver into HIR arg 0 (the
+        // signature's params include it, e.g. `dl: DrawList` ahead of
+        // `pos: Vec2`), but the WRITTEN paren list the cursor sits in only
+        // has the trailing args -- `active_param`'s comma count is 0-based
+        // over that written list alone. Shift by one so a dot-call cursor in
+        // the first written arg highlights the SECOND declared param, not
+        // the receiver's.
+        if call_is_ufcs_dot_syntax(src, call_span.offset_range.0) {
+            active += 1;
+        }
         Some(SignatureHelp {
             signatures: sigs
                 .into_iter()
@@ -3422,6 +3432,28 @@ fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
         }
     }
     arg
+}
+
+/// Whether the call starting at `call_start` is written as `recv.name(..)`
+/// (a UFCS/method dot-call) rather than a bare `name(..)`. Scans forward for
+/// the call's own opening `(` (same first-`(` assumption `active_param`
+/// makes -- a receiver that is itself a call, `get_screen().rect_outline()`,
+/// is out of scope), then checks whether the callee name it immediately
+/// follows is itself preceded by a `.`.
+fn call_is_ufcs_dot_syntax(src: &str, call_start: usize) -> bool {
+    let b = src.as_bytes();
+    let start = call_start.min(b.len());
+    let Some(rel_paren) = b[start..].iter().position(|&c| c == b'(') else {
+        return false;
+    };
+    let mut j = start + rel_paren;
+    while j > start && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
+        j -= 1;
+    }
+    while j > start && (b[j - 1] == b' ' || b[j - 1] == b'\t') {
+        j -= 1;
+    }
+    j > start && b[j - 1] == b'.'
 }
 
 /// Whether any overload of `callee` declares arg `arg_index` as a

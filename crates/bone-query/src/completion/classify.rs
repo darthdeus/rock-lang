@@ -506,12 +506,21 @@ pub(crate) struct CompletionCx {
 
 /// Classify the cursor for completion: parse the munge ladder once, consult
 /// every classifier once, and encode the cross-classifier guards (field
-/// value yields to call arg; yield/Entity hints are universe-gated) in one
+/// value wins over call arg; yield/Entity hints are universe-gated) in one
 /// place instead of scattered call sites.
 pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     let ast = crate::cursor_context::CursorAst::at(src, offset);
     let cx = ast.as_ref();
-    let arg_call = cx.and_then(|c| c.call_arg());
+    let field_value = cx.and_then(|c| c.struct_field_value());
+    // `struct_field_value` only fires inside a REAL record literal's `field:
+    // <cursor>` value slot (or a decl field default) -- structurally the
+    // innermost enclosing context, and strictly more specific than any
+    // call the record literal happens to sit inside as an argument
+    // (`run(Pass { blend: <cursor> })`: `call_arg` walks past the `Pass {
+    // .. }` literal to report `run`'s own param type, which is the WRONG,
+    // less specific slot). So field_value must win whenever it fires;
+    // arg_call is the fallback for a direct (non-record) call arg.
+    let arg_call = if field_value.is_none() { cx.and_then(|c| c.call_arg()) } else { None };
     let expr_position = !cx.is_some_and(|c| c.is_type_position());
     CompletionCx {
         member: cx.and_then(|c| c.member_path()),
@@ -520,11 +529,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
         qualified: cx.and_then(|c| c.qualified_base()),
         struct_literal: cx.and_then(|c| c.struct_literal()),
         decorator: decorator_context(src, offset),
-        field_value: if arg_call.is_none() {
-            cx.and_then(|c| c.struct_field_value())
-        } else {
-            None
-        },
+        field_value,
         anchor: cx.and_then(slot_anchor),
         bool_chain: cx.is_some_and(|c| c.bool_condition_chain()),
         after_yield: expr_position && cx.is_some_and(|c| c.after_yield()),
