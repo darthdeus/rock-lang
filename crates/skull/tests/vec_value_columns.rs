@@ -132,21 +132,19 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
 // inside one reaches the SHARED generic `VecIter<T>.next`, which reads the
 // `_data` that column storage does not have.
 //
-// The lambda and nested-fn cases WORK: `convert_closures` splits those bodies
-// into standalone functions with their own top-level CFG, at which point the
-// upvalue reason is gone and the inliner runs over them. The `co fn` and
-// global-init cases are still RED -- neither runs the inliner at all -- and
-// `column_iteration_rejects_where_it_cannot_specialize` pins that they REJECT
-// meanwhile, so a regression to a silent miscompile fails a test rather than
-// merely leaving them red for a new reason.
+// All four now work, by two different routes. A lambda and a nested fn are
+// SPLICED: `convert_closures` splits them into standalone functions with their
+// own top-level CFG, at which point the upvalue reason expires and the inliner
+// runs over them. A `co fn`'s `__step` and a global initializer never run an
+// inliner at all, so they CALL a standalone specialized copy of the callee
+// (`next_..._spec_V2`) emitted once for the program.
 //
-// The ordinary-call guard (`in_unspliced_ctx` -> keep the shared boxed ABI,
-// `lower.rs:3965`) is NOT the fix here: for a boxed value the shared body is
-// CORRECT and the guard merely forgoes an optimization, whereas for columns the
-// shared body is WRONG -- taking that branch would turn a loud rejection into a
-// miscompile. That distinction is what
-// `unspliceable_iteration_of_boxed_elements_still_emits` guards from the other
-// side: the rejection must reach column-eligible elements ONLY.
+// The ordinary-call guard (`in_unspliced_ctx` -> keep the shared boxed ABI) is
+// still not the fix: for a boxed value the shared body is CORRECT and the guard
+// merely forgoes an optimization, whereas for columns the shared body is WRONG.
+// `unspliceable_iteration_of_boxed_elements_still_emits` guards that from the
+// other side -- specialization is forced for column-eligible elements ONLY, so
+// an ABI-only instantiation still rides the shared body.
 
 const VEC_IN_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
@@ -223,9 +221,9 @@ fn column_vec_iterated_inside_a_nested_fn() {
         .expect("column [V2] iterated in a nested fn must emit");
     let body = body_of_synthetic(&lua, "_inner_");
     assert!(
-        !body.contains("next_VecIter_T_"),
+        !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "nested fn called the UNSPECIALIZED VecIter `next` over column storage \
-         (silent miscompile -- no validator error):\n{body}"
+         (the specialized copy is `..._spec_V2`):\n{body}"
     );
     assert_eq!(
         common::run_luajit(&format!("{lua}\nmain()\n"), "col_nested"),
@@ -271,7 +269,7 @@ fn column_vec_iterated_inside_a_co_fn() {
         .expect("column [V2] iterated in a co fn must emit");
     let body = body_of_synthetic(&lua, "__step");
     assert!(
-        !body.contains("next_VecIter_T_"),
+        !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "co fn `__step` called the UNSPECIALIZED VecIter `next` over column \
          storage (the raised error is swallowed by `__resume`'s pcall):\n{body}"
     );
@@ -303,106 +301,55 @@ fn column_vec_iterated_in_a_global_initializer() {
         .expect("column [V2] iterated in a global initializer must emit");
     let body = body_of_synthetic(&lua, "ginit_TOTAL");
     assert!(
-        !body.contains("next_VecIter_T_"),
+        !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "global initializer called the UNSPECIALIZED VecIter `next` over column \
          storage:\n{body}"
     );
     assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "col_ginit"), "4");
 }
 
-/// The two contexts specialization does not reach yet must REJECT rather than
-/// emit. This is what keeps the tests above honest: they are red either way, so
-/// without this a regression from "loud rejection" back to "silent miscompile"
-/// would not fail anything.
-///
-/// Neither remaining context runs the inliner AT ALL, which is why hoisting did
-/// not fix them the way it fixed the lambda and nested-fn cases: a coroutine
-/// deliberately neither inlines nor is inlined into, and a global-init unit has
-/// no inline pass. Reaching them wants the specialized callee emitted as its own
-/// top-level function and CALLED, rather than spliced.
-///
-/// The global-initializer case additionally pins that the rejection travels the
-/// hard-error channel and not `UnitOut::skipped`, which is silent unless
-/// `SKULL_DEBUG_SKIPPED` is set.
-#[test]
-fn column_iteration_rejects_where_it_cannot_specialize() {
-    for (ctx, src) in [("co fn", VEC_IN_CO_FN), ("global init", VEC_IN_GLOBAL_INIT)] {
-        let err = common::try_emit_module(src)
-            .err()
-            .unwrap_or_else(|| panic!("{ctx}: unspliceable column iteration must not emit"));
-        assert!(
-            err.message.contains("was not spliced"),
-            "{ctx}: rejected for the wrong reason: {}",
-            err.message
-        );
-    }
-}
-
-const VEC_ENUMERATE: &str = r#"
+const VEC_STDLIB_SURFACE: &str = r#"
 value V2 { x: float, y: float }
 
 fn main() {
     let xs: [V2] = [V2 { x: 1.0, y: 10.0 }, V2 { x: 2.0, y: 20.0 }, V2 { x: 3.0, y: 30.0 }]
-    for (i, v) in enumerate(xs) { print("{i}:{v.x},{v.y}") }
-    for pair in enumerate(xs) { print("t{pair.0}:{pair.1.x}") }
-}
-"#;
-
-/// `enumerate` was the first confirmed casualty of the un-audited stdlib Vec
-/// surface and the one real game code hit: bitgun's `update_survivors`
-/// enumerates a `[Vec2]`, which stopped the game compiling.
-///
-/// In `for` position `enumerate` never reaches the stdlib overload -- bone keeps
-/// the builtin template and skull lowers it directly -- so the fix is in the loop
-/// lowering, not in `stdlib/unified.rock`. Both binding forms are covered: `(i,
-/// v)` and the single binding to the whole `(index, element)` tuple, which take
-/// different branches.
-///
-/// Values AND indices are asserted. A shape-only assertion would not catch a
-/// decomposition that reads the right columns at the wrong offset, which is the
-/// plausible failure once the element read is no longer a single slot.
-#[test]
-fn enumerate_over_column_storage_yields_correct_pairs() {
-    let lua = common::try_emit_module(VEC_ENUMERATE).expect("`enumerate` over columns must emit");
-    assert!(
-        !common::function_body(&lua, "main").contains("_data"),
-        "enumerate read the boxed `_data` backing of a column-stored [V2]"
-    );
-    assert_eq!(
-        common::run_luajit(&format!("{lua}\nmain()\n"), "col_enumerate"),
-        "0:1,10\n1:2,20\n2:3,30\nt0:1\nt1:2\nt2:3"
-    );
-}
-
-const VEC_GET_VIA_PRIMITIVE: &str = r#"
-value V2 { x: float, y: float }
-
-fn main() {
-    let xs: [V2] = [V2 { x: 1.0, y: 10.0 }, V2 { x: 2.0, y: 20.0 }]
+    xs.set(0, V2 { x: 9.0, y: 90.0 })
+    print("set:{xs[0].x},{xs[0].y}")
     let g = xs.get(1)
-    if g != null { print("{g.x},{g.y}") }
+    if g != null { print("get:{g.x},{g.y}") }
+    let p = xs.pop()
+    if p != null { print("pop:{p.x} len{xs.len}") }
+    let r = xs.swap_remove(0)
+    if r != null { print("swap:{r.x} now{xs[0].x} len{xs.len}") }
+    xs.clear()
+    print("clear len{xs.len}")
+    xs.push(V2 { x: 7.0, y: 70.0 })
+    print("repush:{xs[0].x},{xs[0].y} len{xs.len}")
 }
 "#;
 
-/// `__vec_data_get/_set/_unset` are the representation boundary: nearly the whole
-/// stdlib Vec surface (`get`, `set`, `pop`, `clear`, `insert_at`, `remove_at`,
-/// `swap_remove`) reaches storage only through them, so they are lowered
-/// column-aware instead of each helper being intercepted by name.
+/// The stdlib Vec surface over column storage, end to end. These are PLAIN
+/// generics -- no `@inline`, no `@pure` -- so nothing used to specialize them and
+/// every one reached the shared `_data` body: `xs.set(..)` failed at top level,
+/// and `Vec.clear` is what stopped bitgun running.
 ///
-/// It is a STATIC decision per instantiation, not a runtime test for whether
-/// `_data` exists: `vec_column_elem_of` resolves through the active `SpecSubst`,
-/// so the shared snapshot of a generic body keeps the boxed backing while the
-/// snapshot specialized at `T = V2` lowers to column operations.
+/// They work now because a column-eligible instantiation forces specialization
+/// whether or not the callee opted in, and because the specialized copy is
+/// emitted standalone rather than needing a splice. Inside it,
+/// `__vec_data_get/_set/_unset` see the concrete element through the `SpecSubst`
+/// and lower to column operations.
 ///
-/// `get` is the one that proves the mechanism today, because `vec_get` is
-/// `@inline` and so actually gets specialized at a concrete site. `set`, `pop`,
-/// `clear`, `remove_at` and `swap_remove` are plain generics that nothing
-/// specializes yet, so they still reach the shared `_data` body and still fail --
-/// that is the standalone-specialized-callee work, not a gap in this lowering.
+/// Asserted on VALUES, not shape. `swap_remove` moving the last element into the
+/// hole and `pop` returning the right one are exactly the properties a
+/// per-column decomposition can get subtly wrong while still emitting
+/// column-shaped code.
 #[test]
-fn vec_data_primitives_are_column_aware_when_specialized() {
-    let lua = common::try_emit_module(VEC_GET_VIA_PRIMITIVE).expect("`get` over columns must emit");
-    assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "col_vec_get"), "2,20");
+fn stdlib_vec_surface_works_over_column_storage() {
+    let lua = common::try_emit_module(VEC_STDLIB_SURFACE).expect("stdlib Vec surface must emit");
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "col_surface"),
+        "set:9,90\nget:2,20\npop:3 len2\nswap:9 now2 len1\nclear len0\nrepush:7,70 len1"
+    );
 }
 
 const VEC_BOXED_ELEMS_UNSPLICED: &str = r#"

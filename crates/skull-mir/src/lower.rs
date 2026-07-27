@@ -603,11 +603,23 @@ fn compute_call_spec(
     if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
-    if !f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure")) {
+    let bindings = inf.call_generic_bindings.get(&e)?;
+    let (key, subst) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?;
+    // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
+    // whether it happens is the author's call.
+    //
+    // A column-eligible element is not an optimization. The shared body reads a
+    // `_data` that this instantiation's storage does not have, so it is WRONG, not
+    // slow -- the same asymmetry that decides whether an unspliceable call may
+    // fall back to the shared body. Specializing is the only correct lowering, so
+    // it does not wait for an annotation. This is what makes the plain-generic
+    // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
+    let opted_in =
+        f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
+    if !opted_in && !spec_key_has_column_elem(ws, &key) {
         return None;
     }
-    let bindings = inf.call_generic_bindings.get(&e)?;
-    compute_spec_from_bindings(ws, inf, func, bindings, enclosing)
+    Some((key, subst))
 }
 
 /// [`compute_call_spec`] against an explicit binding list instead of a call
@@ -3995,7 +4007,18 @@ impl Builder<'_> {
         // `subst` = the shared (unspecialized) path, byte-identical. In an unspliced
         // context the splice never fires, so the splatted call would reach the
         // SHARED generic body and drop leaves -- keep the shared boxed ABI there.
-        let spec = if self.in_unspliced_ctx { None } else { self.call_spec(e, func) };
+        // In an unspliced context an ABI-only specialization is dropped: no splice
+        // will fire, and the splatted call would reach the SHARED generic body and
+        // drop every leaf but the first, so the boxed ABI is kept to match it.
+        //
+        // A column-eligible instantiation is NOT dropped, because the shared body
+        // is wrong rather than merely unspecialized, and because a splice is no
+        // longer the only thing that can serve it: the call targets a standalone
+        // specialized copy, lowered under this same substitution, so the two agree
+        // on the ABI without an inliner ever running.
+        let spec = self
+            .call_spec(e, func)
+            .filter(|(k, _)| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k));
         let empty = SpecSubst::new();
         let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
         // The instantiation key is recorded on the emitted call inst whenever this

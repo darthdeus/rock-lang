@@ -24,6 +24,35 @@ use skull_parser::CompilerError;
 /// The mangle separator. A single `_`; see the module docs for why.
 const SEP: &str = "_";
 
+/// The emitted name for the copy of `f` specialized at `key` -- the instantiation
+/// the call site already lowered its arguments for.
+///
+/// Derived from [`mangle_fn`] plus the reified leaves in declaration order, so the
+/// definition and every call site agree without a side table, exactly as the base
+/// mangle does. `None` for an all-`None` key: that is the shared snapshot, which
+/// keeps the base name.
+///
+/// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
+/// Its bare name belongs to the ONE body the author owns; a specialized copy is a
+/// different function and must not claim it.
+pub fn spec_fn_name(ws: &Workspace, f: &Function, key: &[Option<crate::lower::ReifiedLeaf>]) -> Option<String> {
+    if key.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut out = mangle_fn(ws, f);
+    out.push_str(SEP);
+    out.push_str("spec");
+    for leaf in key {
+        out.push_str(SEP);
+        match leaf {
+            Some(crate::lower::ReifiedLeaf::Nominal(n)) => out.push_str(n.as_str()),
+            Some(crate::lower::ReifiedLeaf::Prim(p)) => out.push_str(p),
+            None => out.push_str("any"),
+        }
+    }
+    Some(out)
+}
+
 /// True if `f` keeps its bare surface name (never mangled).
 pub fn is_exempt(f: &Function) -> bool {
     let name = f.name.as_str();

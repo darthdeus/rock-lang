@@ -368,6 +368,8 @@ struct UnitOut {
     /// Callees this definition still calls -- reachability roots, since decorator
     /// bodies and global initializers are always emitted.
     calls: Vec<FuncRef>,
+    /// Specialized callees this definition needs emitted (see `Chunk::specs`).
+    specs: Vec<(FuncRef, skull_mir::lower::SpecKey)>,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
     times: PhaseTimes,
@@ -422,7 +424,7 @@ fn emit_decorator_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            if let Err(e) = check_unit_spec_bindings(ws, mid, &deco_name, &mf, d.span) {
+            if let Err(e) = check_unit_spec_bindings(ws, mid, &deco_name, &mf, d.span, &mut out.specs) {
                 out.hard_error = Some(e);
                 return out;
             }
@@ -468,7 +470,7 @@ fn emit_global_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            if let Err(e) = check_unit_spec_bindings(ws, mid, g.name.as_str(), &mf, g.name_span) {
+            if let Err(e) = check_unit_spec_bindings(ws, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs) {
                 out.hard_error = Some(e);
                 return out;
             }
@@ -785,6 +787,11 @@ struct Chunk {
     /// too -- without them a fn passed as an argument gets pruned out from under
     /// a live reference.
     global_names: Vec<Ustr>,
+    /// Callees this body invokes through a SPECIALIZED instantiation that no
+    /// splice served, so each needs a standalone specialized copy emitted.
+    /// Deduplicated program-wide by [`assemble`] -- many bodies ask for the same
+    /// one, and it must be defined exactly once.
+    specs: Vec<(FuncRef, skull_mir::lower::SpecKey)>,
 }
 
 /// Per-body emit cache for incremental codegen: the expensive function chunks
@@ -909,7 +916,8 @@ fn emit_body_chunk(
         // Coroutines never inline, so a combinator chain here would leave a
         // call to a bounded fn that has no standalone emission -- reject.
         skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
-        validate_emitted_body(&mf)?;
+        let mut specs = Vec::new();
+        validate_emitted_body(&mf, &mut specs)?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let lua = crate::coroutine_emit::emit_coroutine(ws, cg, self_ref, &mf);
@@ -924,6 +932,7 @@ fn emit_body_chunk(
             statics: mf.statics.clone(),
             calls: skull_mir::reach::call_targets(&mf),
             global_names: skull_mir::reach::global_ref_names(&mf),
+            specs,
         });
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
@@ -964,7 +973,8 @@ fn emit_body_chunk(
     inline_hoisted_bodies(ws, scx, self_ref, &mut mf.nested_fns, inline_cache, &mut deps)?;
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
-    validate_emitted_body(&mf)?;
+    let mut specs = Vec::new();
+    validate_emitted_body(&mf, &mut specs)?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -980,7 +990,7 @@ fn emit_body_chunk(
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
     let global_names = skull_mir::reach::global_ref_names(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, global_names })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, global_names, specs })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -1042,45 +1052,89 @@ fn is_stdlib_module_file(file: &str) -> bool {
     file.starts_with("<bone-stdlib:") || file.starts_with("<stdlib")
 }
 
-/// Post-inline gate: a call the caller lowered with the SPECIALIZED scalar ABI
-/// (its value args splatted to leaves, tagged in `spec_bindings`) MUST have been
-/// spliced with the matching specialized body -- the shared generic body takes
-/// `T` as one boxed slot and would drop every leaf but the first. A surviving
-/// (still block-reachable) entry means the splice was skipped; that is the
-/// documented hard rejection (`MirFunc::spec_bindings` docs) rather than emitting
-/// broken Lua.
+/// Every call in `mf` that the lowerer gave a SPECIALIZED instantiation and the
+/// inliner did not splice. Each needs a standalone specialized copy of the
+/// callee emitted, which the call already targets by name (`spec_fn_name`) -- its
+/// value args are splatted to leaves, so the shared generic body, which takes `T`
+/// as one boxed slot, could not serve it.
 ///
-/// Must run on EVERY separately-emitted body, not just the top-level one: a
+/// This is what replaced rejecting those calls. A rejection was the honest
+/// response while nothing could serve them, and it caught real miscompiles, but a
+/// standalone copy serves them in EVERY context: it needs no inliner, so the
+/// coroutine and global-init bodies -- neither of which runs one -- are reached
+/// the same way as any other.
+///
+/// Must run on every separately-emitted body, not just the top-level one: a
 /// nested `fn` and a `co fn`'s state machine are their own emitted callables, and
 /// leaving them unchecked made a missing splice silent (the nested fn died at
 /// runtime on a nil `_data`; the `co fn` did not even do that -- `__resume`'s
 /// pcall parked the error in `s.__error` and returned nil, so the caller read an
 /// exhausted coroutine and computed a wrong answer).
-///
-/// Ordinary calls in those contexts never reach here: the lowerer boxes their
-/// value args (`in_unspliced_ctx`), forgoing the scalar ABI to keep the shared
-/// generic body serviceable. The `for`-protocol `next` is the exception, and only
-/// for a column-eligible element -- there the shared body is not merely
-/// unoptimized but WRONG (it reads a `_data` that column storage does not have),
-/// so a rejection is the only correct outcome.
-fn validate_no_residual_spec_bindings(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
+fn collect_residual_spec_bindings(
+    mf: &skull_mir::mir::MirFunc,
+    out: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+) {
     // REACHABLE blocks only, as the rule has always been stated: a hoisted lambda
     // body is a full arena clone of its parent that differs only in `entry`, so it
     // carries the parent's unreachable blocks and their bindings with it. Judging
-    // those would reject a body for a call it does not contain.
+    // those would specialize for a call the body does not contain.
     for bid in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
         for &iid in &mf.blocks[bid].insts {
-            if mf.spec_bindings.contains_key(&iid)
-                && matches!(
-                    &mf.insts[iid],
-                    skull_mir::mir::Inst::Call { .. } | skull_mir::mir::Inst::CallMulti { .. }
-                )
-            {
-                return Err("a value-specialized generic call was not spliced (its args are \
-                     splatted to leaves, so the shared generic body cannot serve it)"
-                    .to_string());
-            }
+            let Some(key) = mf.spec_bindings.get(&iid) else { continue };
+            let fref = match &mf.insts[iid] {
+                skull_mir::mir::Inst::Call { func, .. }
+                | skull_mir::mir::Inst::CallMulti { func, .. } => *func,
+                _ => continue,
+            };
+            out.push((fref, key.clone()));
         }
+    }
+}
+
+/// Emit one top-level Lua function per distinct `(callee, instantiation)` a body
+/// asked for, under the name its call sites already target (`spec_fn_name`).
+///
+/// This is what lets specialization reach contexts the inliner cannot enter. A
+/// splice needs a caller whose CFG the inliner will walk; a standalone definition
+/// needs nothing, so a coroutine's `__step` and a global initializer -- neither of
+/// which runs an inline pass -- call the specialized copy exactly as any other
+/// body does.
+///
+/// A worklist, not a loop over the initial set: a specialized body is lowered
+/// under its own substitution and can therefore require further specializations
+/// that no shared body ever mentions (`Vec<Vec2>.remove_at` calling
+/// `__vec_data_set` at `T = Vec2`). `done` keys on the full `(FuncRef, SpecKey)`
+/// so each is defined exactly once no matter how many bodies requested it.
+fn emit_specialized_callees(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    cg: &CodegenCtx,
+    pending: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    out: &mut String,
+) -> Result<(), CompilerError> {
+    let mut done: FxHashSet<(FuncRef, skull_mir::lower::SpecKey)> = FxHashSet::default();
+    let mut cache = skull_transform::InlineCache::default();
+    while let Some((fref, key)) = pending.pop() {
+        if !done.insert((fref, key.clone())) {
+            continue;
+        }
+        let f = &ws.module(fref.module).functions[fref.func];
+        let Some(name) = skull_mir::mangle::spec_fn_name(ws, f, &key) else {
+            continue; // all-`None` key: the shared body already serves it
+        };
+        let subst = skull_mir::lower::spec_subst_from_key(ws, fref, &key);
+        let mut mf = skull_mir::lower::lower_function_spec(ws, scx, fref.module, fref.func, &subst)
+            .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+        let (_, _) = skull_transform::inline_functions(ws, scx, fref, &mut mf, &mut cache)
+            .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+        skull_transform::cleanup(&mut mf);
+        skull_transform::convert_closures(&mut mf, &name);
+        skull_transform::recover_counted_loops(ws, &mut mf);
+        validate_emitted_body(&mf, pending)
+            .map_err(|msg| CompilerError::new_with_label(f.name_span, format!("cannot emit specialized `{name}`: {msg}")))?;
+        out.push_str(&emit_named(ws, cg, &name, &mf));
+        let mut nested = std::mem::take(&mut mf.nested_fns);
+        emit_pass_nested_fns(ws, cg, &mut nested, out);
     }
     Ok(())
 }
@@ -1141,25 +1195,32 @@ fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Resu
     Ok(())
 }
 
-/// [`validate_no_residual_spec_bindings`] over a hoisted-body tree (named nested
-/// `fn`s and the lambda bodies `convert_closures` appends), each of which emits as
-/// its own top-level Lua function and so needs the check in its own right.
-fn validate_nested_spec_bindings(nested: &[MirFunc]) -> Result<(), String> {
+/// [`validate_emitted_body`] over a hoisted-body tree (named nested `fn`s and the
+/// lambda bodies `convert_closures` appends), each of which emits as its own
+/// top-level Lua function and so needs the checks in its own right.
+fn validate_nested_bodies(
+    nested: &[MirFunc],
+    specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+) -> Result<(), String> {
     for nf in nested {
-        validate_emitted_body(nf)
+        validate_emitted_body(nf, specs)
             .map_err(|msg| format!("in nested body `{}`: {msg}", nf.name))?;
     }
     Ok(())
 }
 
 /// Every post-transform invariant one about-to-be-emitted body must hold, and its
-/// hoisted children with it. The single entry point on purpose: each check below
-/// was added because some emitted-body kind was missing it, so a new check joins
-/// here rather than at one call site.
-fn validate_emitted_body(mf: &MirFunc) -> Result<(), String> {
-    validate_no_residual_spec_bindings(mf)?;
+/// hoisted children with it, plus the specialized callees it needs emitted. The
+/// single entry point on purpose: each check below was added because some
+/// emitted-body kind was missing it, so a new one joins here rather than at one
+/// call site.
+fn validate_emitted_body(
+    mf: &MirFunc,
+    specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+) -> Result<(), String> {
+    collect_residual_spec_bindings(mf, specs);
     validate_no_whole_element_column_access(mf)?;
-    validate_nested_spec_bindings(&mf.nested_fns)
+    validate_nested_bodies(&mf.nested_fns, specs)
 }
 
 /// The spec-binding check for a decorator / global-init unit, whose body and
@@ -1172,8 +1233,11 @@ fn check_unit_spec_bindings(
     name: &str,
     mf: &MirFunc,
     span: bone_semantic::prelude::Span,
+    out_specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
 ) -> Result<(), CompilerError> {
-    let r = validate_emitted_body(mf);
+    let mut specs = Vec::new();
+    let r = validate_emitted_body(mf, &mut specs);
+    out_specs.extend(specs);
     match r {
         Ok(()) => Ok(()),
         Err(_) if is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
@@ -1417,6 +1481,7 @@ fn assemble(
     // ordering + deco application).
     let mut times = PhaseTimes::default();
     let mut t_scaffold = Duration::ZERO;
+    let mut needed_specs: Vec<(FuncRef, skull_mir::lower::SpecKey)> = Vec::new();
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut direct_globals: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
@@ -1445,6 +1510,7 @@ fn assemble(
         emit_decorator_unit(ws, scx, cg, mid, did)
     });
     first_unit_error(&deco_results)?;
+    needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
     merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut times);
@@ -1473,6 +1539,7 @@ fn assemble(
         emit_global_unit(ws, scx, cg, mid, gid)
     });
     first_unit_error(&global_results)?;
+    needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut globals_lua = String::new();
     // Held back and appended after the fn-def skips so the reported order is
     // unchanged by the hoist.
@@ -1579,6 +1646,8 @@ fn assemble(
                         // A dropped definition's `static` cells do not exist, so
                         // they must not be registered for hot-reload preservation.
                         all_statics.extend(chunk.statics.iter().cloned());
+                        // Only a body that is actually emitted can call one.
+                        needed_specs.extend(chunk.specs.iter().cloned());
                     }
                 }
                 Some(Err(msg)) => {
@@ -1604,6 +1673,8 @@ fn assemble(
             }
         }
     }
+
+    emit_specialized_callees(ws, scx, cg, &mut needed_specs, &mut out)?;
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in

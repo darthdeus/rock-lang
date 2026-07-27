@@ -1277,7 +1277,7 @@ impl Emitter<'_> {
         let lname = format!("__nbslot{}", raw(slot));
         out.push_str("  do\n");
         let _ = write!(out, "    local {lname} = ");
-        self.write_value(out, &self.func.insts[slot]);
+        self.write_value(out, slot, &self.func.insts[slot]);
         out.push('\n');
         for &fi in &following[..n] {
             if let Inst::StoreField { field, value, .. } = &self.func.insts[fi] {
@@ -1378,15 +1378,29 @@ impl Emitter<'_> {
             out.push_str("  ");
             write_vname(out, &self.colors, id);
             out.push_str(" = ");
-            self.write_value(out, inst);
+            self.write_value(out, id, inst);
             out.push('\n');
         } else {
-            self.write_effect(out, inst);
+            self.write_effect(out, id, inst);
         }
     }
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
     /// true iff it spliced; else the caller emits the normal `callee(args)`.
+    /// The emitted symbol this call targets. A call the lowerer gave a
+    /// specialized instantiation (its value args splatted to leaves) targets the
+    /// SPECIALIZED copy -- the shared generic body takes `T` as one boxed slot and
+    /// could not serve those arguments. Same derivation the specialized definition
+    /// is emitted under, so the two cannot drift.
+    fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
+        let callee = func_of(self.ws, func);
+        self.func
+            .spec_bindings
+            .get(&id)
+            .and_then(|key| skull_mir::mangle::spec_fn_name(self.ws, callee, key))
+            .unwrap_or_else(|| mangle_fn(self.ws, callee))
+    }
+
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {
         let Inst::Call { func, args } = &self.func.insts[id] else {
             return false;
@@ -1470,7 +1484,7 @@ impl Emitter<'_> {
             // bare negative literal under unary `-` would form `--` — a Lua
             // comment — without the wrap.)
             out.push('(');
-            self.write_value(out, &self.func.insts[id]);
+            self.write_value(out, id, &self.func.insts[id]);
             out.push(')');
         } else {
             write_vname(out, &self.colors, id);
@@ -1501,7 +1515,7 @@ impl Emitter<'_> {
     }
 
     /// The RHS expression for a value-producing instruction.
-    fn write_value(&self, out: &mut String, inst: &Inst) {
+    fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => out.push_str(g.as_str()),
@@ -1565,7 +1579,7 @@ impl Emitter<'_> {
             // the inner value's expression verbatim (identity). Reached only if a
             // pass ever materializes one; the operand path (`write_opnd`) folds it
             // away. `write_value` (not `write_opnd`) to avoid a double wrap.
-            Inst::IntToFloat(x) => self.write_value(out, &self.func.insts[*x]),
+            Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
 
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),
@@ -1595,7 +1609,7 @@ impl Emitter<'_> {
             Inst::Shr(a, b) => self.write_bitfn(out, "bit.rshift", a, b),
 
             Inst::Call { func, args } => {
-                let callee = mangle_fn(self.ws, func_of(self.ws, *func));
+                let callee = self.callee_name(id, *func);
                 out.push_str(&callee);
                 out.push('(');
                 self.write_csv(out, args);
@@ -1888,7 +1902,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn write_effect(&self, out: &mut String, inst: &Inst) {
+    fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
@@ -1999,7 +2013,7 @@ impl Emitter<'_> {
                     }
                     write_cellname(out, self.frame, self.cell_colors, *c);
                 }
-                let callee = mangle_fn(self.ws, func_of(self.ws, *func));
+                let callee = self.callee_name(id, *func);
                 let _ = write!(out, " = {callee}(");
                 self.write_csv(out, args);
                 out.push_str(")\n");
