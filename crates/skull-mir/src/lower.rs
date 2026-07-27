@@ -3768,6 +3768,22 @@ impl Builder<'_> {
             if let Some(r) = self.column_data_primitive(name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
+            // `vec_new()` is the fourth boundary primitive, and the odd one out:
+            // its element type comes from the CALL's own type, not a receiver, so
+            // it cannot be read off an argument. It is also `inline(lua)`, so it
+            // never specializes (`compute_call_spec` bails on an inline body) --
+            // the opaque body would hand back a `_data` table that every later
+            // column access then indexes as nil.
+            if name.as_str() == "vec_new" && arg_idxs.is_empty() {
+                if let Some(shape) = self.vec_column_elem_of(e).and_then(|el| value_shape(self.ws, el))
+                {
+                    let columns =
+                        value_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
+                    return Ok(ValueRepr::Scalar(
+                        self.emit_cur(Inst::MakeVecColumns { columns, len: 0 }),
+                    ));
+                }
+            }
         }
         // `on_killed(f)` / `on_resume(f)` inside a `co fn` register a lifecycle
         // hook. bone desugars `on_killed { body }` to a call of an `on_killed`
@@ -9910,14 +9926,30 @@ mod tests {
         );
         assert!(!dump.contains("V2_ct"), "value return must scalarize (no cdata ctor), got:\n{dump}");
         assert!(!dump.contains("make_struct") && !dump.contains("__ty"), "value struct must not be a table:\n{dump}");
-        // But an ESCAPING value literal (into a `[V2]` element) materializes the
-        // `<name>_ct(...)` cdata via `pack` — value semantics for the collection.
-        let esc = mir_std(
+        // A literal escaping into a COLUMN-ELIGIBLE `[V2]` builds no element at
+        // all: the leaves land straight in the per-leaf columns. Value semantics
+        // still hold -- storing the scalar leaves IS the copy.
+        let col = mir_std(
             "value V2 { x: int, y: int }\n fn g() -> [V2] { [V2 { y: 7, x: 3 }] }",
             "g",
         );
-        // Display carries declared field names (for SROA): `V2_ct(x: v.., y: v..)`.
-        assert!(esc.contains("V2_ct(x:"), "an escaping value literal must build a cdata ctor, got:\n{esc}");
+        assert!(
+            col.contains("vec.columns") && !col.contains("V2_ct"),
+            "a column-eligible element must store leaves, not a cdata ctor, got:\n{col}"
+        );
+        // An INELIGIBLE element keeps the boxed representation, so the escaping
+        // literal still materializes `<name>_ct(...)` via `pack`. `Wide` exceeds
+        // MAX_COLUMN_LEAVES; this is the other side of the eligibility boundary.
+        // Display carries declared field names (for SROA): `Wide_ct(a: v.., ..)`.
+        let esc = mir_std(
+            "value Wide { a: int, b: int, c: int, d: int, e: int }\n \
+             fn g() -> [Wide] { [Wide { a: 1, b: 2, c: 3, d: 4, e: 5 }] }",
+            "g",
+        );
+        assert!(
+            esc.contains("Wide_ct(a:"),
+            "an escaping ineligible value literal must build a cdata ctor, got:\n{esc}"
+        );
     }
 
     #[test]

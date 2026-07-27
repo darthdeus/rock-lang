@@ -450,3 +450,38 @@ fn ineligible_element_types_keep_todays_representation() {
         );
     }
 }
+
+const VEC_NEW_COLUMN: &str = r#"
+value V2 { x: float, y: float }
+
+fn main() {
+    let a: [V2] = vec_new()
+    a.push(V2 { x: 1.0, y: 2.0 })
+    print("{a.len},{a[0].x},{a[0].y}")
+}
+"#;
+
+/// `vec_new()` is the fourth representation-boundary primitive and the odd one
+/// out: its element type comes from the CALL's own type, not from a receiver, so
+/// `vec_column_elem_of` cannot read it off an argument. It is also `inline(lua)`,
+/// which `compute_call_spec` refuses to specialize -- so before the intercept the
+/// opaque body handed back a `_data` table and the very next column write indexed
+/// a nil.
+#[test]
+fn vec_new_at_a_column_element_builds_empty_columns() {
+    let lua = common::try_emit_module(VEC_NEW_COLUMN).expect("vec_new at [V2] must emit");
+    let body = common::function_body(&lua, "main");
+    assert!(
+        !body.contains("vec_new()"),
+        "vec_new at a column element must not call the boxed stdlib body:\n{body}"
+    );
+    assert!(
+        body.contains("[\"x\"] = {}") && body.contains("[\"y\"] = {}"),
+        "vec_new at [V2] must build one empty array per leaf:\n{body}"
+    );
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "col_vecnew"),
+        "1,1,2",
+        "push onto a vec_new-ed column Vec must land in the columns"
+    );
+}
