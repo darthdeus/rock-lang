@@ -113,6 +113,23 @@ pub fn mangled_name(lua: &str, src: &str) -> String {
     panic!("no non-synthetic `function {src}` in:\n{lua}");
 }
 
+/// Like [`try_emit_module`] but ALSO loads `lib` as an extra stdlib module. The
+/// emit path is deliberately lenient for stdlib bodies (a codegen parity gap
+/// there becomes a silent `skipped`), so a case probing that leniency needs a
+/// body the module-file check actually classifies as stdlib.
+pub fn try_emit_with_stdlib_module(
+    lib: &str,
+    src: &str,
+) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"));
+    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// Single-module workspace (no stdlib) for incremental / hot-reload tests.
 pub fn ws_of(src: &str) -> Workspace {
     let module = skull_parser::parse_module(src, Ustr::from("<t>")).expect("parse");

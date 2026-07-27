@@ -94,6 +94,12 @@ pub enum CompilerErrorKind {
         message: String,
     },
 
+    /// A `nobox` value materialized implicitly. Distinct from a plain codegen
+    /// rejection because it is a LANGUAGE GUARANTEE: the stdlib emit path may
+    /// downgrade a codegen parity gap to a silent `skipped`, and must never
+    /// downgrade this (a dropped body is a nil global at runtime).
+    NoboxGuaranteeViolated,
+
     // Control flow error kinds
     ControlFlowInSubexpression,
     MissingElseBranch,

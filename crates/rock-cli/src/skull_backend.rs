@@ -1251,7 +1251,13 @@ fn build_rock_globals_registry(
         let Some(pkg) = matched else { continue };
         let entry = by_package.entry(pkg.to_string()).or_default();
         for (_gid, g) in m.globals.iter() {
-            entry.push(g.name.as_str().to_string());
+            // A `nobox` global has no slot under its own name -- it IS its leaf
+            // globals, so that is what reflection reads and restores. Listing the
+            // base name would dump nil and restore nothing.
+            match skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+                Some(leaves) => entry.extend(leaves.iter().map(|l| l.to_string())),
+                None => entry.push(g.name.as_str().to_string()),
+            }
         }
     }
     by_package.retain(|_, names| !names.is_empty());

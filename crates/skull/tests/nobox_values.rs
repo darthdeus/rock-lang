@@ -1,5 +1,7 @@
 mod common;
-use common::{emit_module, function_body, run_luajit, try_emit_module};
+use common::{
+    emit_module, function_body, run_luajit, try_emit_module, try_emit_with_stdlib_module,
+};
 
 const NOBOX_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -444,5 +446,173 @@ fn collection_storage_keeps_nobox_elements_in_columns() {
     assert!(
         !body.contains("NV2_ct("),
         "nobox collection materialized an element:\n{body}"
+    );
+}
+
+const NOBOX_GLOBAL: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }
+
+fn read() -> float {
+    return SPOT.x + SPOT.y
+}
+
+fn main() {
+    print("{read()}")
+    SPOT.x = 10.0
+    print("{read()}")
+    SPOT = NV2 { x: 100.0, y: 200.0 }
+    print("{read()}")
+}
+"#;
+
+#[test]
+fn global_of_a_nobox_value_stores_leaves() {
+    let lua = emit_module(NOBOX_GLOBAL);
+    let init = function_body(&lua, "__skull_ginit_SPOT");
+    assert!(
+        init.contains("do return (1.0), (2.0) end"),
+        "the initializer did not return leaves:\n{init}"
+    );
+    assert!(
+        lua.contains("__nbg_SPOT_0, __nbg_SPOT_1 = __skull_ginit_SPOT()"),
+        "the global was not bound leaf-wise:\n{lua}"
+    );
+    for f in ["read", "main"] {
+        let body = function_body(&lua, f);
+        assert!(
+            !body.contains("NV2_ct("),
+            "`{f}` materialized the nobox global:\n{body}"
+        );
+    }
+}
+
+#[test]
+fn nobox_global_reads_and_writes_leaves_at_runtime() {
+    let lua = emit_module(NOBOX_GLOBAL);
+    let out = run_luajit(&format!("{lua}\nmain()\n"), "nobox_global");
+    assert_eq!(out, "3\n12\n300");
+}
+
+const NOBOX_STDLIB_SINK_LIB: &str = r#"
+nobox value SV2 { x: float, y: float }
+
+fn consume(v: SV2) {}
+
+fn stdlib_bad(v: SV2, sink: fn(SV2)) {
+    sink(v)
+}
+
+fn stdlib_entry() {
+    stdlib_bad(SV2 { x: 1.0, y: 2.0 }, consume)
+}
+"#;
+
+const NOBOX_STDLIB_SINK_USER: &str = r#"
+fn main() {
+    stdlib_entry()
+}
+"#;
+
+#[test]
+fn a_stdlib_body_does_not_get_leniency_for_a_nobox_violation() {
+    let err = try_emit_with_stdlib_module(NOBOX_STDLIB_SINK_LIB, NOBOX_STDLIB_SINK_USER)
+        .expect_err("a nobox violation in a stdlib body must reject, not silently skip");
+    assert!(err.message.contains("nobox") && err.message.contains("SV2"), "{err:?}");
+}
+
+const NOBOX_GLOBAL_INIT_ORDER: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+global DERIVED: NV2 = NV2 { x: BASE.x + 10.0, y: BASE.y + 10.0 }
+global BASE: NV2 = NV2 { x: 1.0, y: 2.0 }
+
+fn main() {
+    print("{DERIVED.x} {DERIVED.y}")
+}
+"#;
+
+#[test]
+fn a_nobox_global_read_orders_its_dependent_initializer() {
+    let lua = emit_module(NOBOX_GLOBAL_INIT_ORDER);
+    let base = lua.find("__nbg_BASE_0, __nbg_BASE_1 =").expect("BASE init line");
+    let derived = lua.find("__nbg_DERIVED_0, __nbg_DERIVED_1 =").expect("DERIVED init line");
+    assert!(base < derived, "DERIVED initialized before the BASE it reads:\n{lua}");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_order"),
+        "11 12"
+    );
+}
+
+const NOBOX_NULLABLE_GLOBAL: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+global MAYBE: NV2? = NV2 { x: 3.0, y: 4.0 }
+
+fn probe() -> float {
+    if MAYBE != null {
+        return MAYBE.x + MAYBE.y
+    }
+    return -1.0
+}
+
+fn main() {
+    print("{probe()}")
+    MAYBE = null
+    print("{probe()}")
+    MAYBE = NV2 { x: 1.0, y: 1.0 }
+    print("{probe()}")
+}
+"#;
+
+#[test]
+fn a_refined_nullable_nobox_global_addresses_the_right_leaves() {
+    // A refined read's expr type is `NV2`, whose 2-leaf shape would put `x` on
+    // the presence leaf. Layout follows the DECLARED type, so it must not.
+    let lua = emit_module(NOBOX_NULLABLE_GLOBAL);
+    assert!(
+        lua.contains("__nbg_MAYBE_0, __nbg_MAYBE_1, __nbg_MAYBE_2 ="),
+        "a nullable nobox global did not reserve a presence leaf:\n{lua}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_nullable"),
+        "7\n-1\n2"
+    );
+}
+
+const NOBOX_GLOBAL_PLACES: &str = r#"
+nobox value NV2 { x: float, y: float }
+nobox value Outer { a: NV2, n: float }
+
+global O: Outer = Outer { a: NV2 { x: 1.0, y: 2.0 }, n: 3.0 }
+global P: NV2 = NV2 { x: 0.0, y: 0.0 }
+
+fn len2(v: NV2) -> float { return v.x * v.x + v.y * v.y }
+
+fn main() {
+    O.a = NV2 { x: 10.0, y: 20.0 }
+    O.a.y = 99.0
+    P.x += 5.0
+    P.x++
+    print("{O.a.x} {O.a.y} {O.n} {P.x} {P.y} {len2(O.a)}")
+    let copy = O.a
+    O.a.x = 0.0
+    print("{copy.x} {O.a.x}")
+}
+"#;
+
+#[test]
+fn nobox_global_places_reach_the_right_leaves() {
+    let lua = emit_module(NOBOX_GLOBAL_PLACES);
+    let body = function_body(&lua, "main");
+    for ct in ["NV2_ct(", "Outer_ct("] {
+        assert!(!body.contains(ct), "a nobox global place materialized via {ct}:\n{body}");
+    }
+    // Nested whole-value write, nested leaf write, leaf compound assign, leaf
+    // inc/dec, whole-value read into a call, and the copy-on-read rule.
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_places"),
+        "10 99 3 6 0 9901\n10 0"
     );
 }

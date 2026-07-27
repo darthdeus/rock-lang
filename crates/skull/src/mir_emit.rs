@@ -439,6 +439,25 @@ fn emit_decorator_unit(
     out
 }
 
+/// The assignment target of a global's init line: its own name, or -- for a
+/// `nobox` global, whose storage IS its leaves -- the comma-separated leaf list
+/// bound from the initializer's multiple return. Leaf names are compiler-minted
+/// top-level names, so they go through the collision sink.
+fn global_init_target(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    g: &bone_semantic::hir::GlobalDef,
+) -> String {
+    match skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+        Some(leaves) => leaves
+            .iter()
+            .map(|l| cg.mint_synthetic(l.to_string()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => g.name.to_string(),
+    }
+}
+
 /// Lower + emit one global's initializer fn, recording its `pending_init` line.
 fn emit_global_unit(
     ws: &Workspace,
@@ -493,13 +512,14 @@ fn emit_global_unit(
             // written into `__rock_known_globals` below (which lists const + mutable
             // alike); both come from the same render so "type unchanged" compares
             // equal.
+            let target = global_init_target(ws, cg, g);
             let line = if g.is_const {
-                format!("{} = {}()\n", g.name, init_name)
+                format!("{target} = {init_name}()\n")
             } else {
                 let ty_str = ws.render(None, g.ty);
                 format!(
-                    "if not _G.HOT_RELOAD or not _G.__rock_old_globals or _G.__rock_old_globals[{:?}] ~= {:?} then {} = {}() end\n",
-                    g.name.as_str(), ty_str, g.name, init_name
+                    "if not _G.HOT_RELOAD or not _G.__rock_old_globals or _G.__rock_old_globals[{:?}] ~= {:?} then {target} = {init_name}() end\n",
+                    g.name.as_str(), ty_str
                 )
             };
             out.pending_init = Some((g.name, key, line));
@@ -916,8 +936,7 @@ fn emit_body_chunk(
         // call to a bounded fn that has no standalone emission -- reject.
         skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
         let mut specs = Vec::new();
-        validate_emitted_body(ws, &mf, &mut specs)
-            .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
+        validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let lua = crate::coroutine_emit::emit_coroutine(ws, cg, self_ref, &mf);
@@ -974,8 +993,7 @@ fn emit_body_chunk(
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
-    validate_emitted_body(ws, &mf, &mut specs)
-        .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
+    validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -1139,7 +1157,7 @@ fn emit_specialized_callees(
         skull_transform::convert_closures(&mut mf, &name);
         skull_transform::recover_counted_loops(ws, &mut mf);
         validate_emitted_body(ws, &mf, pending)
-            .map_err(|msg| CompilerError::new_with_label(f.name_span, format!("cannot emit specialized `{name}`: {msg}")))?;
+            .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
         out.push_str(&emit_named(ws, cg, &name, &mf));
         let mut nested = std::mem::take(&mut mf.nested_fns);
         emit_pass_nested_fns(ws, cg, &mut nested, out);
@@ -1210,12 +1228,42 @@ fn validate_nested_bodies(
     ws: &Workspace,
     nested: &[MirFunc],
     specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
-) -> Result<(), String> {
+) -> Result<(), BodyRejection> {
     for nf in nested {
         validate_emitted_body(ws, nf, specs)
-            .map_err(|msg| format!("in nested body `{}`: {msg}", nf.name))?;
+            .map_err(|r| r.prefixed(&format!("in nested body `{}`", nf.name)))?;
     }
     Ok(())
+}
+
+/// Why an about-to-be-emitted body was rejected. `guarantee` separates a
+/// LANGUAGE GUARANTEE (today: `nobox`) from a codegen parity gap: the stdlib
+/// emit path downgrades a gap to a silent `skipped` -- its known-gap list -- and
+/// must never downgrade a guarantee, since dropping the body turns the promise
+/// into a nil global at runtime.
+struct BodyRejection {
+    message: String,
+    guarantee: bool,
+}
+
+impl BodyRejection {
+    fn gap(message: String) -> Self {
+        Self { message, guarantee: false }
+    }
+
+    fn prefixed(self, what: &str) -> Self {
+        Self { message: format!("{what}: {}", self.message), ..self }
+    }
+
+    /// Spanned rejection at `span`, tagged so the stdlib leniency check can tell
+    /// a guarantee from a gap without matching on the message text.
+    fn into_error(self, span: bone_semantic::prelude::Span, what: &str) -> CompilerError {
+        let mut e = CompilerError::new_with_label(span, format!("{what}{}", self.message));
+        if self.guarantee {
+            e.kind = skull_parser::CompilerErrorKind::NoboxGuaranteeViolated;
+        }
+        e
+    }
 }
 
 /// Every post-transform invariant one about-to-be-emitted body must hold, and its
@@ -1227,10 +1275,11 @@ fn validate_emitted_body(
     ws: &Workspace,
     mf: &MirFunc,
     specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
-) -> Result<(), String> {
+) -> Result<(), BodyRejection> {
     collect_residual_spec_bindings(mf, specs);
-    validate_no_whole_element_column_access(mf)?;
-    skull_transform::validate_no_implicit_nobox_materialization(ws, mf)?;
+    validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap)?;
+    skull_transform::validate_no_implicit_nobox_materialization(ws, mf)
+        .map_err(|message| BodyRejection { message, guarantee: true })?;
     validate_nested_bodies(ws, &mf.nested_fns, specs)
 }
 
@@ -1251,8 +1300,8 @@ fn check_unit_spec_bindings(
     out_specs.extend(specs);
     match r {
         Ok(()) => Ok(()),
-        Err(_) if is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
-        Err(msg) => Err(CompilerError::new_with_label(span, format!("cannot emit `{name}`: {msg}"))),
+        Err(r) if !r.guarantee && is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
+        Err(r) => Err(r.into_error(span, &format!("cannot emit `{name}`: "))),
     }
 }
 
@@ -1662,7 +1711,11 @@ fn assemble(
                     }
                 }
                 Some(Err(err)) => {
-                    if is_stdlib_module_file(module.file.as_str()) {
+                    // A GUARANTEE violation is never a known stdlib gap: silently
+                    // dropping the body would leave callers calling a nil global.
+                    if is_stdlib_module_file(module.file.as_str())
+                        && err.kind != skull_parser::CompilerErrorKind::NoboxGuaranteeViolated
+                    {
                         skipped.push((mangle_fn(ws, f), err.message.clone()));
                     } else {
                         return Err(err.clone());
@@ -1694,9 +1747,32 @@ fn assemble(
     // call graph (now that every fn's direct facts are recorded).
     let ts = Instant::now();
     let reach = transitive_global_reads(&direct_globals, &direct_calls);
+    // Init ordering is stated over SOURCE globals, but a `nobox` global is READ
+    // through its leaves, so a leaf dep has to resolve back to the group that
+    // owns it or the dependent initializer sorts before it. Built from the
+    // globals that actually mint leaves -- never a name-shape guess.
+    let leaf_owner: FxHashMap<Ustr, Ustr> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.globals.iter())
+        .flat_map(|(_, g)| {
+            skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
+                .into_iter()
+                .flatten()
+                .map(move |l| (l, g.name))
+        })
+        .collect();
     let inits: Vec<GlobalInit> = pending_inits
         .into_iter()
-        .map(|(name, init_name, line)| GlobalInit { name, deps: reach.deps_of(init_name), line })
+        .map(|(name, init_name, line)| GlobalInit {
+            name,
+            deps: reach
+                .deps_of(init_name)
+                .into_iter()
+                .map(|d| leaf_owner.get(&d).copied().unwrap_or(d))
+                .collect(),
+            line,
+        })
         .collect();
     // `static` cells: on reload, RESET (nil the cell + clear the done-flag) when
     // the init/type key changed since last run, so the next reach re-inits with
@@ -2309,7 +2385,12 @@ fn assemble_overlay(
             } else {
                 // Unchanged dependent: its ginit is already in main.lua; re-run only
                 // the line so it recomputes from the upstream's new value.
-                format!("{} = {}()\n", a.name, crate::global_init_fn_name(a.name.as_str()))
+                let g = &ws.module(a.mid).globals[a.gid];
+                format!(
+                    "{} = {}()\n",
+                    global_init_target(ws, &cache.cg, g),
+                    crate::global_init_fn_name(a.name.as_str())
+                )
             };
             let edges: Vec<Ustr> = a
                 .reach

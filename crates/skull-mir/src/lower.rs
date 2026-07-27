@@ -552,6 +552,53 @@ fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
         .or_else(|| flat_enum_shape(ws, name).map(|s| s.value_shape()))
 }
 
+/// The Lua global holding leaf `leaf` of the `nobox` global `base`. A global is
+/// category-2 storage -- its layout is derived from the stored type -- so a
+/// `nobox` global is K scalar globals, never one boxed cdata.
+pub fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
+    Ustr::from(&format!("__nbg_{base}_{leaf}"))
+}
+
+/// Whether `name` is a `nobox` value struct.
+fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
+    ws.struct_by_name
+        .get(&name)
+        .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+}
+
+/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
+/// is leaf 0), `None` for every other type. bone requires an explicit annotation
+/// on every global, so this is exact for a `GlobalDef`'s `ty`.
+fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    match static_ty(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_nobox_nominal(ws, name) => {
+            value_shape_of_nominal(ws, name)
+        }
+        TypeExpr::Nullable(inner) => {
+            let inner = static_ty(ws, ty.with_idx(inner))?;
+            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = inner else {
+                return None;
+            };
+            if !is_nobox_nominal(ws, name) {
+                return None;
+            }
+            let mut shape = value_shape_of_nominal(ws, name)?;
+            shape.nullable = true;
+            Some(shape)
+        }
+        _ => None,
+    }
+}
+
+/// The leaf globals a `nobox`-typed global is stored in, `None` for every other
+/// global. THE single source for the emitted binding, the reads and writes, and
+/// the reflection registry -- so `--dump-state` and snapshot restore address the
+/// storage the program actually uses instead of a base name holding nil.
+pub fn nobox_global_leaves(ws: &Workspace, name: Ustr, ty: TyId) -> Option<Vec<Ustr>> {
+    let shape = nobox_declared_shape(ws, ty)?;
+    Some((0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ReifiedCtor {
     Array,
@@ -2041,6 +2088,11 @@ pub fn lower_global(
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
     };
+    // A `nobox` global is category-2 storage: its layout comes from the declared
+    // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
+    // per leaf. Without this the body packs a box the verifier then rejects.
+    let g = &module.globals[gid];
+    b.ret_shape = nobox_declared_shape(ws, g.ty);
     b.lower_root()?;
     Ok(Some(b.f))
 }
@@ -3217,6 +3269,19 @@ impl Builder<'_> {
                 let i = self.lower_expr(index)?;
                 Ok(self.emit_cur(Inst::Index { base: b, index: i, kind }))
             }
+            // A `nobox` global has no single slot -- `Inst::Global(name)` would
+            // read a nil global and the write would land on nothing. Every
+            // reachable place form (whole group, leaf field) is handled before
+            // this; reject rather than emit that silent nil.
+            Expr::Global(name) if self.nobox_global_place(e).is_some() => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    format!(
+                        "`{name}` is a `nobox` global, which is stored as leaves and has no \
+                         slot this assignment target can write through"
+                    ),
+                ))
+            }
             Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
             // A swizzle and a flattened-enum field are not places (both
             // materialize a fresh value); leave them to the rvalue path, which
@@ -3282,6 +3347,14 @@ impl Builder<'_> {
                 let v = self.coerced_to_binding(v, value, b);
                 self.emit_cur(Inst::Store { cell, value: v });
             }
+            // A leaf of a `nobox` global (`SPOT.x = v`, `SPOT.a.b = v`): the
+            // group has no slot to take a place base of, so the write lands in
+            // the leaf global itself.
+            Expr::FieldAccess { .. } if self.nobox_global_place(target).is_some() => {
+                let (leaves, shape) =
+                    self.nobox_global_place(target).expect("guard matched");
+                self.nobox_global_store(&leaves, shape, value)?;
+            }
             Expr::FieldAccess { base, field } => {
                 // `xs[i].x = v` on a column-stored Vec: there is no element slot
                 // to take a place base of, so the write lands directly in the
@@ -3331,6 +3404,11 @@ impl Builder<'_> {
                     value: v,
                     kind,
                 });
+            }
+            Expr::Global(_) if self.nobox_global_place(target).is_some() => {
+                let (leaves, shape) =
+                    self.nobox_global_place(target).expect("guard matched");
+                self.nobox_global_store(&leaves, shape, value)?;
             }
             Expr::Global(name) => {
                 let v = self.lower_expr(value)?;
@@ -3399,6 +3477,16 @@ impl Builder<'_> {
                 let rv = self.lower_expr(value)?;
                 let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::Store { cell, value: new_v });
+            }
+            // A `nobox` global is stored as leaves, so neither the whole-group
+            // nor the leaf form has a slot the arms below can read-modify-write
+            // through. bone desugars `t <op>= v` to `t = t <op> v` before skull
+            // sees it, so this is unreachable by construction (proved by
+            // `error`-ing the arm over the full surface: zero fires). It rejects
+            // rather than falling through so a future routing change surfaces
+            // here instead of as a silent read of a nil global.
+            _ if self.nobox_global_place(target).is_some() => {
+                return Err(gap("compound assignment reached a `nobox` global place"))
             }
             Expr::Global(name) => {
                 let cur = self.emit_cur(Inst::Global(name));
@@ -3511,6 +3599,17 @@ impl Builder<'_> {
                 let old = self.emit_cur(Inst::Load(cell));
                 let new = bump(self, old);
                 self.emit_cur(Inst::Store { cell, value: new });
+                Ok(if postfix { old } else { new })
+            }
+            // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
+            // `arith_ty` already restricted the target to int/float, so a whole
+            // group can never reach here.
+            _ if matches!(self.nobox_global_place(target), Some((_, None))) => {
+                let (leaves, _) = self.nobox_global_place(target).expect("guard matched");
+                let name = leaves[0];
+                let old = self.emit_cur(Inst::Global(name));
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreGlobal { name, value: new });
                 Ok(if postfix { old } else { new })
             }
             Expr::Global(name) => {
@@ -5265,6 +5364,12 @@ impl Builder<'_> {
                     Some(name) => Ok(self.boxed_value_copy_repr(fv, name)),
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
+            }
+            // A `nobox` global lives in K scalar globals, so the read IS the leaf
+            // snapshot -- no box to copy out of.
+            Expr::Global(_) if self.nobox_global_place(e).is_some() => {
+                let (leaves, shape) = self.nobox_global_place(e).expect("guard matched");
+                Ok(self.nobox_global_load(&leaves, shape))
             }
             // A global holding a value struct is a mutable place: a whole-value read
             // copies (the leaves are snapshotted at the read point).
@@ -9537,7 +9642,13 @@ impl Builder<'_> {
     }
 
     fn nobox_binding_shape(&self, binding: Idx<BindingInfo>) -> Option<ValueShape> {
-        let ty = self.resolve_tyid(self.binding_ty(binding)?)?;
+        self.nobox_shape_of_ty(self.binding_ty(binding)?)
+    }
+
+    /// The leaf shape of a `nobox`-typed `ty` (nullable included: presence is
+    /// leaf 0), `None` for every other type.
+    fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
+        let ty = self.resolve_tyid(ty)?;
         match self.ty_node(ty)? {
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
@@ -9561,6 +9672,81 @@ impl Builder<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The leaf globals a place rooted at a `nobox` global denotes, plus the
+    /// shape of the projected part (`None` = one primitive leaf). `SPOT` is the
+    /// whole group, `SPOT.x` / `SPOT.a.b` a contiguous sub-range of it -- the
+    /// leaf order is `repr_to_leaves`', so a projection is a slice, never a
+    /// scatter. `None` when the place is not rooted at a `nobox` global.
+    fn nobox_global_place(&self, e: Idx<Expr>) -> Option<(Vec<Ustr>, Option<ValueShape>)> {
+        match self.body.expr_arena[e].clone() {
+            // The DECLARED type, never `e`'s: a refined read of a `global X: NV2?`
+            // has expr type `NV2`, whose 2-leaf shape would address the presence
+            // leaf as `x`. Storage layout is a property of the global, not of the
+            // read site.
+            Expr::Global(name) => {
+                let shape = nobox_declared_shape(self.ws, *self.ws.globals_by_name.get(&name)?)?;
+                let leaves =
+                    (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect();
+                Some((leaves, Some(shape)))
+            }
+            Expr::FieldAccess { base, field } => {
+                let (leaves, Some(shape)) = self.nobox_global_place(base)? else {
+                    return None;
+                };
+                let mut off = usize::from(shape.nullable);
+                for (fname, fs) in &shape.fields {
+                    let (n, sub) = match fs {
+                        FieldShape::Prim => (1, None),
+                        FieldShape::Nested(s) => (s.leaf_count(), Some(s.clone())),
+                    };
+                    if *fname == field {
+                        return Some((leaves[off..off + n].to_vec(), sub));
+                    }
+                    off += n;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Read a `nobox` global place back as an unboxed repr.
+    fn nobox_global_load(
+        &mut self,
+        leaves: &[Ustr],
+        shape: Option<ValueShape>,
+    ) -> ValueRepr {
+        let vals: Vec<Idx<Inst>> =
+            leaves.iter().map(|g| self.emit_cur(Inst::Global(*g))).collect();
+        match shape {
+            Some(shape) => {
+                let mut idx = 0;
+                self.rebuild_from_leaves(&shape, &vals, &mut idx)
+            }
+            None => ValueRepr::Scalar(vals[0]),
+        }
+    }
+
+    /// Write `value` into a `nobox` global place, leaf by leaf.
+    fn nobox_global_store(
+        &mut self,
+        leaves: &[Ustr],
+        shape: Option<ValueShape>,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let vals = match shape {
+            Some(shape) => {
+                let r = self.lower_expr_repr(value)?;
+                self.repr_to_leaves(&r, &shape)
+            }
+            None => vec![self.lower_expr(value)?],
+        };
+        for (g, v) in leaves.iter().zip(vals) {
+            self.emit_cur(Inst::StoreGlobal { name: *g, value: v });
+        }
+        Ok(())
     }
 
     fn emit_all_equal(&mut self, lhs: &[Idx<Inst>], rhs: &[Idx<Inst>]) -> Idx<Inst> {
