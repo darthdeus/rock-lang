@@ -196,24 +196,6 @@ fn go() -> float {
 fn main() { print("{go()}") }
 "#;
 
-/// The body of the single emitted function whose name contains `needle`.
-/// Synthetic callables carry a generated suffix (`<mangled>__lambda0`) or a
-/// hash (`__local_go_<hash>_inner_0`), so they are found by pattern rather
-/// than spelled out. Panics if it is not unique -- an ambiguous match would
-/// silently assert against the wrong body.
-fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
-    let names: Vec<&str> = lua
-        .match_indices("\nfunction ")
-        .map(|(i, m)| {
-            let rest = &lua[i + m.len()..];
-            &rest[..rest.find('(').expect("fn header has `(`")]
-        })
-        .filter(|n| n.contains(needle))
-        .collect();
-    assert_eq!(names.len(), 1, "expected exactly one fn containing `{needle}`, got {names:?}");
-    common::function_body(lua, names[0])
-}
-
 /// Iterating a column-stored Vec inside a LAMBDA. Real engine code hits it
 /// (`draw_glow_lights`, a `for` over `GLOW_LIGHTS` inside a
 /// `with_blend_mode(..., () => ..)` callback).
@@ -224,7 +206,7 @@ fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
 fn column_vec_iterated_inside_a_lambda() {
     let lua = common::try_emit_module(VEC_IN_LAMBDA)
         .expect("column [V2] iterated in a lambda must emit");
-    let body = body_of_synthetic(&lua, "__lambda");
+    let body = common::body_of_synthetic(&lua, "__lambda");
     assert!(
         !body.contains("_data"),
         "lambda body read the single `_data` backing of a column-stored [V2]:\n{body}"
@@ -254,7 +236,7 @@ fn column_vec_iterated_inside_a_lambda() {
 fn column_vec_iterated_inside_a_nested_fn() {
     let lua = common::try_emit_module(VEC_IN_NESTED_FN)
         .expect("column [V2] iterated in a nested fn must emit");
-    let body = body_of_synthetic(&lua, "_inner_");
+    let body = common::body_of_synthetic(&lua, "_inner_");
     assert!(
         !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "nested fn called the UNSPECIALIZED VecIter `next` over column storage \
@@ -309,7 +291,7 @@ fn main() { print("{go()}") }
 fn column_vec_iterated_inside_a_co_fn() {
     let lua = common::try_emit_module(VEC_IN_CO_FN)
         .expect("column [V2] iterated in a co fn must emit");
-    let body = body_of_synthetic(&lua, "__step");
+    let body = common::body_of_synthetic(&lua, "__step");
     assert!(
         !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "co fn `__step` called the UNSPECIALIZED VecIter `next` over column \
@@ -341,7 +323,7 @@ fn main() { print("{TOTAL}") }
 fn column_vec_iterated_in_a_global_initializer() {
     let lua = common::try_emit_module(VEC_IN_GLOBAL_INIT)
         .expect("column [V2] iterated in a global initializer must emit");
-    let body = body_of_synthetic(&lua, "ginit_TOTAL");
+    let body = common::body_of_synthetic(&lua, "ginit_TOTAL");
     assert!(
         !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "global initializer called the UNSPECIALIZED VecIter `next` over column \

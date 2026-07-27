@@ -1,6 +1,7 @@
 mod common;
 use common::{
-    emit_module, function_body, run_luajit, try_emit_module, try_emit_with_stdlib_module,
+    body_of_synthetic, emit_module, function_body, run_luajit, try_emit_module,
+    try_emit_with_stdlib_module,
 };
 
 const NOBOX_FIELD: &str = r#"
@@ -579,6 +580,86 @@ fn a_refined_nullable_nobox_global_addresses_the_right_leaves() {
         run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_nullable"),
         "7\n-1\n2"
     );
+}
+
+const NOBOX_NESTED_FN: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn outer(p: NV2, k: float) -> float {
+    fn scale(v: NV2, by: float) -> NV2 {
+        return NV2 { x: v.x * by, y: v.y * by }
+    }
+    fn sum(v: NV2) -> float { return v.x + v.y }
+    let s = scale(p, k)
+    return sum(s) + sum(scale(s, 2.0))
+}
+
+fn main() {
+    print("{outer(NV2 { x: 1.0, y: 2.0 }, 3.0)}")
+}
+"#;
+
+#[test]
+fn a_nested_fn_threads_nobox_leaves_through_params_and_return() {
+    let lua = emit_module(NOBOX_NESTED_FN);
+    let bodies = [
+        function_body(&lua, "outer"),
+        body_of_synthetic(&lua, "_scale_"),
+        body_of_synthetic(&lua, "_sum_"),
+    ];
+    for body in bodies {
+        assert!(
+            !body.contains("NV2_ct("),
+            "a nobox value materialized at a nested-fn boundary:\n{body}"
+        );
+    }
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_fn"), "27");
+}
+
+const VALUE_NESTED_FN_BY_VALUE: &str = r#"
+value V2 { x: float, y: float }
+
+fn apply(f: fn(V2) -> float, v: V2) -> float { return f(v) }
+
+fn outer(p: V2) -> float {
+    fn sum(v: V2) -> float { return v.x + v.y }
+    return sum(p) + apply(sum, p)
+}
+
+fn main() {
+    print("{outer(V2 { x: 1.0, y: 2.0 })}")
+}
+"#;
+
+#[test]
+fn a_nested_fn_taken_by_value_keeps_one_boxed_abi_at_every_call() {
+    // The scalar ABI is all-or-nothing per callee: a nested fn reachable as a
+    // fn VALUE cannot splat, so its direct calls must not splat either.
+    let lua = emit_module(VALUE_NESTED_FN_BY_VALUE);
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "value_nested_fn_by_value"),
+        "6"
+    );
+}
+
+const NOBOX_NESTED_FN_BY_VALUE: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn apply(f: fn(NV2) -> float, v: NV2) -> float { return f(v) }
+
+fn outer(p: NV2) -> float {
+    fn sum(v: NV2) -> float { return v.x + v.y }
+    return apply(sum, p)
+}
+
+fn main() {}
+"#;
+
+#[test]
+fn a_nested_fn_taken_by_value_rejects_a_nobox_param() {
+    let err = try_emit_module(NOBOX_NESTED_FN_BY_VALUE)
+        .expect_err("an indirectly-reachable nested fn must not implicitly box a nobox param");
+    assert!(err.message.contains("nobox"), "{err:?}");
 }
 
 const NOBOX_GLOBAL_PLACES: &str = r#"

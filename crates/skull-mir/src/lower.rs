@@ -522,27 +522,38 @@ fn struct_expand_variants(
 /// the single-cdata ABI (cdata has no spare field for a nil discriminator).
 fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => value_shape(ws, n)
-            .or_else(|| value_shape_gc(ws, n))
-            .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape())),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(ws, n),
         TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                if ws
-                    .struct_by_name
-                    .get(&n)
-                    .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
-                {
-                    let mut shape = value_shape(ws, n).or_else(|| value_shape_gc(ws, n))?;
-                    shape.nullable = true;
-                    Some(shape)
-                } else {
-                    flat_enum_shape(ws, n).map(|s| s.value_shape())
-                }
+                sig_shape_of_nullable_nominal(ws, n)
             }
             _ => None,
         },
         _ => None,
     }
+}
+
+/// The shape policy behind [`sig_value_shape`]'s non-nullable arm, shared with the
+/// body-local walker ([`Builder::body_sig_value_shape`]) so the two arenas can
+/// never disagree about what threads as leaves.
+fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
+    value_shape(ws, n)
+        .or_else(|| value_shape_gc(ws, n))
+        .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape()))
+}
+
+/// [`sig_shape_of_nominal`] for a NULLABLE nominal.
+fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
+    if ws
+        .struct_by_name
+        .get(&n)
+        .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+    {
+        let mut shape = value_shape(ws, n).or_else(|| value_shape_gc(ws, n))?;
+        shape.nullable = true;
+        return Some(shape);
+    }
+    flat_enum_shape(ws, n).map(|s| s.value_shape())
 }
 
 /// The value shape of a `name` nominal (value struct or flat enum), or `None`.
@@ -1425,6 +1436,23 @@ fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst
         || f.return_ty.is_some_and(|t| sig_value_shape_spec(ws, subst, t).is_some())
 }
 
+/// A hoisted nested `fn`: the private top-level name it resolves to, and the
+/// value ABI its definition and every call site both read (so the two can never
+/// drift, the same single-gate discipline as [`fn_uses_scalar_abi`]).
+#[derive(Clone)]
+struct NestedFn {
+    hoisted: Ustr,
+    /// Per-param value shape; all-`None` when the fn keeps the boxed ABI.
+    param_shapes: Vec<Option<ValueShape>>,
+    ret_shape: Option<ValueShape>,
+}
+
+impl NestedFn {
+    fn uses_scalar_abi(&self) -> bool {
+        self.ret_shape.is_some() || self.param_shapes.iter().any(|s| s.is_some())
+    }
+}
+
 /// The Lua parameter-name list for a scalar-ABI `inline(lua)` fn (`@scalar_abi`):
 /// each value param expands to its depth-first leaf names `<base>__<leaf>` (the
 /// names the hand-written body references), non-value params keep their name.
@@ -2236,9 +2264,10 @@ struct Builder<'a> {
     /// distinct cells and adding an unrelated static never renames siblings.
     static_counters: HashMap<Ustr, u32>,
     /// Nested `fn` names: raw binding idx -> the hoisted `__local_*` global a
-    /// call / value-ref of the binding resolves to. Inherited (cloned) by a
-    /// nested fn's own builder so it can reference itself + prior siblings.
-    nested_fn_globals: HashMap<u32, Ustr>,
+    /// call / value-ref of the binding resolves to, plus its value ABI.
+    /// Inherited (cloned) by a nested fn's own builder so it can reference
+    /// itself + prior siblings.
+    nested_fn_globals: HashMap<u32, NestedFn>,
     /// Per nested-fn source-name counter (source order), the `static_counters`
     /// analogue for shadowing duplicates.
     nested_fn_counters: HashMap<Ustr, u32>,
@@ -2500,6 +2529,63 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// The value ABI of a nested `fn`, read by both its definition and its call
+    /// sites. Same rule as [`fn_uses_scalar_abi`] for a top-level fn, minus the
+    /// annotation gates a nested fn cannot carry: it splats iff it has a
+    /// scalarizable value param/return AND is never referenced as a fn VALUE (an
+    /// indirect callee can't splat). The enclosing function is ONE body arena, so
+    /// scanning it for `Expr::Var(name)` also covers sibling nested fns and
+    /// lambdas -- a `Callee::Local` callee is not an `Expr::Var`, so a plain call
+    /// never counts as taking the fn by value.
+    fn nested_fn_abi(
+        &self,
+        name: Idx<BindingInfo>,
+        params: IdxRange<BindingInfo>,
+        ret_ty: Option<TyId>,
+        hoisted: Ustr,
+    ) -> NestedFn {
+        let boxed = NestedFn { hoisted, param_shapes: Vec::new(), ret_shape: None };
+        let taken_by_value = self
+            .body
+            .expr_arena
+            .iter()
+            .any(|(_, e)| matches!(e, Expr::Var(b) if *b == name));
+        if taken_by_value || self.scx.values_first_class {
+            return boxed;
+        }
+        let abi = NestedFn {
+            hoisted,
+            param_shapes: params
+                .into_iter()
+                .map(|pb| self.binding_ty(pb).and_then(|t| self.body_sig_value_shape(t)))
+                .collect(),
+            ret_shape: ret_ty.and_then(|t| self.body_sig_value_shape(t)),
+        };
+        if abi.uses_scalar_abi() { abi } else { boxed }
+    }
+
+    /// [`sig_value_shape`] for a type that may live in the BODY's inference arena
+    /// rather than the workspace one -- a nested `fn`'s params are declared inside
+    /// the enclosing body, so `static_ty` cannot see them. Same shape policy
+    /// (`sig_shape_of_nominal`), reached through `ty_node`, which also applies the
+    /// enclosing specialization substitution.
+    fn body_sig_value_shape(&self, ty: TyId) -> Option<ValueShape> {
+        let ty = self.resolve_tyid(ty)?;
+        match self.ty_node(ty)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(self.ws, n),
+            TypeExpr::Nullable(inner) => {
+                let inner = self.resolve_tyid(ty.with_idx(inner))?;
+                match self.ty_node(inner)? {
+                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                        sig_shape_of_nullable_nominal(self.ws, n)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
     /// <name>_<ctr>`. The name is registered in `nested_fn_globals` BEFORE the
     /// body is lowered so self-recursion resolves; the child inherits the
@@ -2508,6 +2594,7 @@ impl Builder<'_> {
         &mut self,
         name: Idx<BindingInfo>,
         params: IdxRange<BindingInfo>,
+        ret_ty: Option<TyId>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let sname = self.body.binding_arena[name].name;
@@ -2518,7 +2605,8 @@ impl Builder<'_> {
             v
         };
         let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
-        self.nested_fn_globals.insert(raw(name), hoisted);
+        let abi = self.nested_fn_abi(name, params, ret_ty, hoisted);
+        self.nested_fn_globals.insert(raw(name), abi.clone());
 
         let mf = MirFunc::new(hoisted);
         let entry = mf.entry();
@@ -2539,8 +2627,8 @@ impl Builder<'_> {
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
             in_unspliced_ctx: true,
-            param_shapes: Vec::new(),
-            ret_shape: None,
+            param_shapes: abi.param_shapes.clone(),
+            ret_shape: abi.ret_shape.clone(),
             ret_tuple: None,
             // A nested fn is emitted as a sibling top-level Lua fn and is never a
             // GLSL callee (referenced indirectly), so a return coercion here is
@@ -2558,10 +2646,22 @@ impl Builder<'_> {
             nested_fn_counters: HashMap::new(),
         };
 
-        for pb in params {
-            let cell = child.f.new_cell(Some(child.body.binding_arena[pb].name));
-            child.f.params.push(cell);
-            child.binds.insert(raw(pb), cell);
+        for (i, pb) in params.into_iter().enumerate() {
+            let pname = child.body.binding_arena[pb].name;
+            match child.param_shapes.get(i).and_then(|s| s.clone()) {
+                Some(shape) => {
+                    let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
+                        .map(|li| child.f.new_cell(Some(Ustr::from(format!("{pname}__{li}").as_str()))))
+                        .collect();
+                    child.f.params.extend(cells.iter().copied());
+                    child.group_binds.insert(raw(pb), (cells, shape));
+                }
+                None => {
+                    let cell = child.f.new_cell(Some(pname));
+                    child.f.params.push(cell);
+                    child.binds.insert(raw(pb), cell);
+                }
+            }
         }
 
         child.defers.push(Vec::new());
@@ -2664,8 +2764,8 @@ impl Builder<'_> {
                 Statement::Static { name, value } => {
                     self.lower_static(name, value)?;
                 }
-                Statement::Fn { name, params, ret_ty: _, body } => {
-                    self.lower_nested_fn(name, params, body)?;
+                Statement::Fn { name, params, ret_ty, body } => {
+                    self.lower_nested_fn(name, params, ret_ty, body)?;
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {
@@ -2871,7 +2971,7 @@ impl Builder<'_> {
             // A nested fn used as a value: reference the hoisted top-level fn by
             // name (a plain global read -- zero closure alloc).
             Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
-                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)])))
+                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)].hoisted)))
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -4187,17 +4287,36 @@ impl Builder<'_> {
                     Err(gap_err)
                 }
             },
-            // A fn-typed local: load the cell and call through the value. An
-            // indirect call can't splat — args are boxed.
+            // A fn-typed local: load the cell and call through the value.
             Callee::Local(b) => {
                 // A nested fn: call the hoisted top-level fn by name (no closure).
-                if let Some(&hoisted) = self.nested_fn_globals.get(&raw(b)) {
-                    let g = self.emit_cur(Inst::Global(hoisted));
-                    let arg_vals: Vec<Idx<Inst>> =
-                        arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                    let v = self.emit_call_value(e, g, arg_vals);
-                    return Ok(ValueRepr::Scalar(v));
+                // Under its scalar ABI (`nested_fn_abi`) value args splat to leaves
+                // and a value return arrives as leaves via `CallValueMulti`.
+                if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
+                    let g = self.emit_cur(Inst::Global(abi.hoisted));
+                    let mut arg_vals: Vec<Idx<Inst>> = Vec::new();
+                    for (i, &a) in arg_idxs.iter().enumerate() {
+                        match abi.param_shapes.get(i).and_then(|s| s.clone()) {
+                            Some(shape) => {
+                                let r = self.lower_expr_repr(a)?;
+                                arg_vals.extend(self.repr_to_leaves(&r, &shape));
+                            }
+                            None => arg_vals.push(self.lower_expr(a)?),
+                        }
+                    }
+                    let Some(shape) = abi.ret_shape else {
+                        let v = self.emit_call_value(e, g, arg_vals);
+                        return Ok(ValueRepr::Scalar(v));
+                    };
+                    let dests: Vec<Idx<Cell>> =
+                        (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
+                    self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee: g, args: arg_vals });
+                    let leaves: Vec<Idx<Inst>> =
+                        dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                    let mut idx = 0;
+                    return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx));
                 }
+                // An indirect call can't splat -- args are boxed.
                 let cell = *self
                     .binds
                     .get(&raw(b))

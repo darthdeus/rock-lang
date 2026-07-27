@@ -90,6 +90,24 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// The body of the single emitted function whose name contains `needle`.
+/// Synthetic callables carry a generated suffix (`<mangled>__lambda0`) or a
+/// hash (`__local_go_<hash>_inner_0`), so they are found by pattern rather
+/// than spelled out. Panics if it is not unique -- an ambiguous match would
+/// silently assert against the wrong body.
+pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
+    let names: Vec<&str> = lua
+        .match_indices("\nfunction ")
+        .map(|(i, m)| {
+            let rest = &lua[i + m.len()..];
+            &rest[..rest.find('(').expect("fn header has `(`")]
+        })
+        .filter(|n| n.contains(needle))
+        .collect();
+    assert_eq!(names.len(), 1, "expected exactly one fn containing `{needle}`, got {names:?}");
+    function_body(lua, names[0])
+}
+
 /// The full emitted (mangled) name of the top-level fn whose SOURCE name is
 /// `src`, read out of emitted `lua`. Every non-exempt fn mangles by signature
 /// (`free_loop` -> `free_loop_ret_unit`), so this recovers the base symbol from
