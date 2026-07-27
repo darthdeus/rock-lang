@@ -64,6 +64,17 @@ pub enum ContainerKind {
     /// the single `Float32Array(n * k)` backing (Arc-2 P3 representation), which
     /// has no per-element cdata view.
     NativeBufferValue(Ustr),
+    /// `[E]` where `E` is an all-scalar `value` struct (`elem` = its name):
+    /// element storage is FLAT — one ordinary 1-indexed Lua array per leaf,
+    /// `{ <leaf0> = {..}, .., len = n }` — so no per-element table exists.
+    /// Replaces the single `_data` backing of [`ContainerKind::Vec`].
+    /// Eligibility + layout rationale: `docs/vec-value-columns-plan.md`.
+    VecValueColumns(Ustr),
+    /// One leaf column OF a [`ContainerKind::VecValueColumns`] Vec — a bare
+    /// 1-indexed Lua array. The index is ALREADY 1-based and already
+    /// bounds-checked (`__vec_checked_index` against the owning Vec's `len`),
+    /// so this indexes raw: no `+1`, no check. Never a user-facing type.
+    VecColumn,
     /// `Map<K,V>` — keyed directly by K, no `+1`.
     Map,
 }
@@ -72,6 +83,11 @@ impl ContainerKind {
     /// Either NativeBuffer flavor — the `{ ptr, len }` C-array shape.
     pub fn is_native_buffer(self) -> bool {
         matches!(self, ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_))
+    }
+
+    /// Either Vec flavor — the `{ .., len }` growable shape, 1-indexed.
+    pub fn is_vec(self) -> bool {
+        matches!(self, ContainerKind::Vec | ContainerKind::VecValueColumns(_))
     }
 }
 
@@ -246,6 +262,13 @@ pub enum Inst {
     MakeTuple(Vec<Idx<Inst>>),
     /// A `Vec`/`[T]` literal -> `{ data = {v0, ...}, len = N }` (the stdlib rep).
     MakeVec(Vec<Idx<Inst>>),
+    /// A `[T]` literal in COLUMN storage — `{ <leaf0> = {..}, .., len = N }`.
+    /// `columns` is one (leaf path, per-element values) pair per leaf, all of
+    /// length `len`, in the element's declaration order.
+    MakeVecColumns {
+        columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
+        len: usize,
+    },
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field
     /// (`None` for an unknown/foreign nominal).
     MakeStruct {
@@ -328,6 +351,12 @@ pub enum Inst {
         index: Idx<Inst>,
         kind: ContainerKind,
     },
+    /// `__vec_checked_index(vec, index)` — bounds-check `index` against
+    /// `vec.len` and yield the 1-based backing index. Emitted only for
+    /// [`ContainerKind::VecValueColumns`] access, where the K column reads that
+    /// follow share ONE check; each then indexes raw via
+    /// [`ContainerKind::VecColumn`].
+    VecCheckedIndex { vec: Idx<Inst>, index: Idx<Inst> },
     /// Element count: `Vec` -> `base.len`, `NativeBuffer` -> `base.len`.
     Len {
         base: Idx<Inst>,

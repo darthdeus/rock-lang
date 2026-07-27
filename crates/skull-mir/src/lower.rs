@@ -136,6 +136,47 @@ pub fn is_ffi_clean_value_struct(ws: &Workspace, name: Ustr) -> bool {
     value_shape_rec(ws, name, &mut Vec::new()).is_some()
 }
 
+/// Max leaf count that stores as columns. Above it, columns fall off a measured
+/// write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86; 17.1x / 11.7x on
+/// arm64) and strided AoS wins -- so a wider type keeps today's representation
+/// rather than silently taking the slow layout. Every collection site in the
+/// tree is K <= 4. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
+const MAX_COLUMN_LEAVES: usize = 4;
+
+/// The element name of `[E]` eligible for flat column storage: `E` is an
+/// all-scalar `value` struct of at most [`MAX_COLUMN_LEAVES`] leaves.
+///
+/// `len` is excluded as a top-level leaf name because the columns share the
+/// container table with the Vec's own `len` key, and a leaf column would
+/// clobber the length. Only a TOP-LEVEL leaf can collide -- a nested leaf path
+/// contains a `.`, which no identifier can. An excluded type is not an error:
+/// it simply keeps the boxed representation.
+pub fn vec_column_elem(ws: &Workspace, name: Ustr) -> Option<Ustr> {
+    let shape = value_shape_rec(ws, name, &mut Vec::new())?;
+    let paths = value_leaf_paths(&shape);
+    (paths.len() <= MAX_COLUMN_LEAVES && !paths.iter().any(|p| p.as_str() == "len")).then_some(name)
+}
+
+/// Every leaf path of value shape `shape`, declaration order, dotted for nested
+/// value fields (`min.x`). These ARE the column keys. Dotted for the same
+/// reason `embed` storage is: `.` cannot appear in a Rock identifier, so the
+/// encoding is injective and can never collide with a sibling leaf.
+pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
+    let mut out = Vec::new();
+    leaf_paths_rec(shape, "", &mut out);
+    out
+}
+
+fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
+    for (fname, fs) in &shape.fields {
+        match fs {
+            FieldShape::Prim if prefix.is_empty() => out.push(*fname),
+            FieldShape::Prim => out.push(Ustr::from(&format!("{prefix}{fname}"))),
+            FieldShape::Nested(sub) => leaf_paths_rec(sub, &format!("{prefix}{fname}."), out),
+        }
+    }
+}
+
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
 #[derive(Clone, Debug)]
@@ -2768,7 +2809,7 @@ impl Builder<'_> {
                 let vs = self.lower_exprs(elems)?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
-            Expr::Array(elems) => self.lower_array_literal(elems),
+            Expr::Array(elems) => self.lower_array_literal(e, elems),
             Expr::Index { base, index } => {
                 // A whole-value read of a value-struct element COPIES (via the repr
                 // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
@@ -3447,12 +3488,51 @@ impl Builder<'_> {
     /// `..x` element, build the empty Vec then push each element / splice each
     /// spread (`ArrayPush`), so spreads of tuples/structs/arrays splice
     /// element-wise.
-    fn lower_array_literal(&mut self, elems: IdxRange<Expr>) -> Result<Idx<Inst>, CompilerError> {
+    /// A `[T]` literal whose element stores as columns: lower each element to
+    /// its leaves and transpose, so column `k` holds leaf `k` of every element.
+    fn column_vec_literal(
+        &mut self,
+        elems: &[Idx<Expr>],
+        elem: Ustr,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let paths = value_leaf_paths(&shape);
+        let mut columns: Vec<(Ustr, Vec<Idx<Inst>>)> =
+            paths.iter().map(|p| (*p, Vec::with_capacity(elems.len()))).collect();
+        for &e in elems {
+            let repr = self.lower_expr_repr(e)?;
+            let leaves = self.repr_to_leaves(&repr, &shape);
+            if leaves.len() != paths.len() {
+                return Err(gap(format!(
+                    "column literal arity mismatch for [{elem}]: {} leaves vs {} columns",
+                    leaves.len(),
+                    paths.len()
+                )));
+            }
+            for (col, leaf) in columns.iter_mut().zip(leaves) {
+                col.1.push(leaf);
+            }
+        }
+        Ok(self.emit_cur(Inst::MakeVecColumns { columns, len: elems.len() }))
+    }
+
+    fn lower_array_literal(
+        &mut self,
+        lit: Idx<Expr>,
+        elems: IdxRange<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let idxs: Vec<Idx<Expr>> = elems.into_iter().collect();
         let has_spread = idxs
             .iter()
             .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
         if !has_spread {
+            // Column storage: transpose the literal's elements into one array
+            // per leaf. Each element lowers as a repr, so no element box is
+            // built even for a literal with entries.
+            if let Some(elem) = self.vec_column_elem_of(lit) {
+                return self.column_vec_literal(&idxs, elem);
+            }
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
@@ -3599,6 +3679,20 @@ impl Builder<'_> {
                     fields: vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)],
                 });
                 return Ok(ValueRepr::Scalar(nb));
+            }
+        }
+        // `xs.push(v)` / `vec_push(xs, v)` onto a COLUMN-stored Vec. The stdlib
+        // push bodies write one element into a single `_data` backing, which
+        // column storage does not have -- so the call is replaced here, where
+        // the receiver's element type is concrete. (Inside `Vec<T>.push` itself
+        // the element is an opaque `T`, so the kind is undecidable there.)
+        if let Callee::Unresolved { name, .. } = callee {
+            if matches!(name.as_str(), "push" | "vec_push") {
+                if let [recv, item] = arg_idxs[..] {
+                    if let Some(elem) = self.vec_column_elem_of(recv) {
+                        return self.column_push(recv, item, elem);
+                    }
+                }
             }
         }
         // `on_killed(f)` / `on_resume(f)` inside a `co fn` register a lifecycle
@@ -4234,6 +4328,87 @@ impl Builder<'_> {
         self.rebuild_from_leaves(&shape, &leaves, &mut idx)
     }
 
+    /// A column-stored element (`xs[i]` where `xs: [E]` stores flat columns) as
+    /// an unboxed `Group`: bounds-check `i` once, then read leaf `k` from column
+    /// `k`. No element table is touched because none exists.
+    ///
+    /// `value_leaf_paths` and `rebuild_from_leaves` both walk fields in
+    /// declaration order depth-first, so the flat read order lines up with the
+    /// nested shape without a second traversal.
+    fn column_element_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let one_based = self.checked_column_index(vec, index);
+        let leaves: Vec<Idx<Inst>> = value_leaf_paths(&shape)
+            .into_iter()
+            .map(|path| {
+                let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                self.emit_cur(Inst::Index {
+                    base: col,
+                    index: one_based,
+                    kind: ContainerKind::VecColumn,
+                })
+            })
+            .collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+    }
+
+    /// `xs.push(v)` onto a column-stored Vec: bump the shared `len` once, then
+    /// store leaf `k` into column `k` at the new slot. The element is consumed
+    /// as leaves (`repr_to_leaves`), so a literal argument never builds a box.
+    fn column_push(
+        &mut self,
+        recv: Idx<Expr>,
+        item: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let vec = self.lower_expr(recv)?;
+        let repr = self.lower_expr_repr(item)?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        let paths = value_leaf_paths(&shape);
+        if leaves.len() != paths.len() {
+            return Err(gap(format!(
+                "column push arity mismatch for [{elem}]: {} leaves vs {} columns",
+                leaves.len(),
+                paths.len()
+            )));
+        }
+        // `len` is shared by every column, so it advances ONCE. Bumping per
+        // column would desync them.
+        let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let next = self.emit_cur(Inst::IntAdd(len, one));
+        self.emit_cur(Inst::StoreField {
+            base: vec,
+            field: Ustr::from("len"),
+            value: next,
+        });
+        for (path, leaf) in paths.into_iter().zip(leaves) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col,
+                index: next,
+                value: leaf,
+                kind: ContainerKind::VecColumn,
+            });
+        }
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// `__vec_checked_index(vec, i)` — the 1-based backing index, bounds-checked
+    /// against `vec.len`. One call per ELEMENT access, not per column.
+    fn checked_column_index(&mut self, vec: Idx<Inst>, index: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::VecCheckedIndex { vec, index })
+    }
+
     /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse
     /// of `repr_to_leaves`), consuming leaves depth-first from `*idx`.
     fn rebuild_from_leaves(
@@ -4376,6 +4551,12 @@ impl Builder<'_> {
                 let name = self.value_struct_of(e).unwrap();
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
+                // Column storage: there is no element slot to read leaves off --
+                // each leaf lives in its own array, so the Group is built from K
+                // direct column reads. Bounds are checked ONCE for the element.
+                if let ContainerKind::VecValueColumns(elem) = kind {
+                    return self.column_element_repr(b, i, elem);
+                }
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 Ok(self.boxed_value_copy_repr(slot, name))
             }
@@ -5593,13 +5774,19 @@ impl Builder<'_> {
             // (bone routes Array to the stdlib VecIter protocol); reaching the
             // dispatch means bone and skull disagree -- reject, don't emit a
             // second lowering. `enumerate(vec)` keeps its own path above.
-            ContainerKind::Vec => Err(gap(
+            // Either Vec flavor: columns change storage, not the iteration
+            // protocol -- `VecIter.next` reads `it.vec[it.i]`, which is an
+            // `Index` and picks up the column kind on its own.
+            ContainerKind::Vec | ContainerKind::VecValueColumns(_) => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
             )),
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 self.lower_for_array(vars, iter, body)
             }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
+            // Synthetic: a leaf column is minted during element lowering and is
+            // never a user type, so it cannot be a `for` head.
+            ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
         }
     }
 
@@ -8037,6 +8224,31 @@ impl Builder<'_> {
         is_ffi_clean_value_struct(self.ws, en).then_some(en)
     }
 
+    /// The Vec container kind for base expr `e`: an all-scalar value-struct
+    /// element stores as flat columns, everything else keeps the single `_data`
+    /// backing. An unresolved / generic element is NOT eligible -- the columns
+    /// need a concrete leaf list, and an opaque `T` has none.
+    fn vec_kind(&self, e: Idx<Expr>) -> ContainerKind {
+        match self.vec_column_elem_of(e) {
+            Some(elem) => ContainerKind::VecValueColumns(elem),
+            None => ContainerKind::Vec,
+        }
+    }
+
+    /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
+    fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Array, params } = self.ty_node(ty)? else {
+            return None;
+        };
+        let p = params.into_iter().next()?;
+        let elem = self.resolve_tyid(ty.with_idx(p))?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(en), .. } = self.ty_node(elem)? else {
+            return None;
+        };
+        vec_column_elem(self.ws, en)
+    }
+
     /// The NativeBuffer container kind for base expr `e`: value-struct elements
     /// carry their name so the JS emitter can lower flat slots (Lua identical).
     fn nb_kind(&self, e: Idx<Expr>) -> ContainerKind {
@@ -8076,7 +8288,7 @@ impl Builder<'_> {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Array,
                 ..
-            }) => ContainerKind::Vec,
+            }) => self.vec_kind(base),
             Some(TypeExpr::App {
                 ctor: TypeCtor::Map,
                 ..

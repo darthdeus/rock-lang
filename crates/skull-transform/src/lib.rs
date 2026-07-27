@@ -1302,6 +1302,9 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
         Inst::CallValueMulti { callee, args, .. } => { p(callee); args.iter().for_each(&mut p); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
+        Inst::MakeVecColumns { columns, .. } => {
+            columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
+        }
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(&mut p);
@@ -1315,6 +1318,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::FfiNewArray { count, .. } => p(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => p(base),
         Inst::Index { base, index, .. } => { p(base); p(index); }
+        Inst::VecCheckedIndex { vec, index } => { p(vec); p(index); }
         Inst::Len { base, .. } => p(base),
         Inst::Store { value, .. } => p(value),
         Inst::StoreField { base, value, .. } => { p(base); p(value); }
@@ -1346,6 +1350,9 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::CallValueMulti { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
+        Inst::MakeVecColumns { columns, .. } => {
+            columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
+        }
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter_mut().for_each(&mut f);
@@ -1359,6 +1366,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::FfiNewArray { count, .. } => f(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => f(base),
         Inst::Index { base, index, .. } => { f(base); f(index); }
+        Inst::VecCheckedIndex { vec, index } => { f(vec); f(index); }
         Inst::Len { base, .. } => f(base),
         Inst::Store { value, .. } => f(value),
         Inst::StoreField { base, value, .. } => { f(base); f(value); }

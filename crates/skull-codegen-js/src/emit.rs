@@ -1025,6 +1025,12 @@ impl Emitter<'_> {
                     );
                     let line = match kind {
                         ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
+                        // Column storage has no JS emitter arm yet -- reject so
+                        // the case lands in the SKIP histogram (the emitter
+                        // worklist) instead of emitting a wrong single-slot write.
+                        ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
+                            return Err(err("JS subset: column-stored [T] not supported"));
+                        }
                         // Whole value-struct element write: per-leaf stores into
                         // the flat backing from the value object (a MakeValueStruct
                         // renders as an object literal; a copy read is an object).
@@ -1447,6 +1453,9 @@ impl Emitter<'_> {
                         self.nbv_copy_expr(&b, &i, *elem, 0, *elem)?
                     }
                     ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
+                    ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
+                        return Err(err("JS subset: column-stored [T] not supported"));
+                    }
                     // Map miss returns nil (raw VM op in Lua); JS Map.get returns
                     // undefined on miss, which `== null` treats as nil.
                     ContainerKind::Map => format!("{b}.get({i})"),
@@ -1455,9 +1464,11 @@ impl Emitter<'_> {
             Inst::Len { base, kind } => match kind {
                 ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferValue(_)
-                | ContainerKind::Vec => {
+                | ContainerKind::Vec
+                | ContainerKind::VecValueColumns(_) => {
                     format!("{}.len", self.render_val(*base)?)
                 }
+                ContainerKind::VecColumn => format!("{}.length", self.render_val(*base)?),
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
             },
             // The `native_buffer_alloc<T>` primitive lowers to this MIR node
@@ -4119,6 +4130,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             mark(args);
         }
         Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems),
+        Inst::MakeVecColumns { columns, .. } => columns.iter().for_each(|(_, vs)| mark(vs)),
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => {
             for (_, v) in fields {
                 f(*v);
@@ -4139,6 +4151,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         }
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => mark(&[*base]),
         Inst::Index { base, index, .. } => mark(&[*base, *index]),
+        Inst::VecCheckedIndex { vec, index } => mark(&[*vec, *index]),
         Inst::Len { base, .. } => mark(&[*base]),
         Inst::FfiNewArray { count, .. } => mark(&[*count]),
         Inst::Store { value, .. } => mark(&[*value]),

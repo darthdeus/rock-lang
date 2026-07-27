@@ -150,6 +150,14 @@ fn fmt_inst(
 
         Inst::MakeTuple(vs) => format!("tuple [{}]", list(vs)),
         Inst::MakeVec(vs) => format!("vec [{}]", list(vs)),
+        Inst::MakeVecColumns { columns, len } => format!(
+            "vec.columns len={len} {{{}}}",
+            columns
+                .iter()
+                .map(|(name, vs)| format!("{name}: [{}]", list(vs)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Inst::MakeStruct { ty, fields } => {
             let fs = fields
                 .iter()
@@ -193,6 +201,9 @@ fn fmt_inst(
             format!("index.{kind:?} v{}[v{}]", v(*base), v(*index))
         }
         Inst::Len { base, kind } => format!("len.{kind:?} v{}", v(*base)),
+        Inst::VecCheckedIndex { vec, index } => {
+            format!("vec_checked_index v{}, v{}", v(*vec), v(*index))
+        }
         Inst::FfiNewArray { ctype, count } => format!("ffi_new_array {ctype}[?], v{}", v(*count)),
 
         Inst::Store { cell, value } => format!("store c{}, v{}", raw(*cell), v(*value)),

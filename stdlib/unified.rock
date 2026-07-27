@@ -1050,6 +1050,18 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     return vec._data[i + 1]
 """
 
+// Bounds-check once, return the 1-based backing index. Column-storage Vecs
+// (`ContainerKind::VecValueColumns`) read K leaf arrays per element; checking
+// here keeps the debug bounds contract at ONE call per access regardless of K,
+// instead of one per column.
+@nomangle inline(lua) fn __vec_checked_index(vec: any, i: int) -> int = """
+    if i < 0 or i >= vec.len then
+        error("Vec index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(vec.len) .. ")")
+    end
+    return i + 1
+"""
+
 @nomangle inline(lua) fn __vec_checked_set(vec: any, i: int, v: any) = """
     if i < 0 or i >= vec.len then
         error("Vec index out of bounds: index " .. tostring(i) ..

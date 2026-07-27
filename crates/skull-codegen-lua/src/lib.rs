@@ -1632,6 +1632,20 @@ impl Emitter<'_> {
                 self.write_csv(out, vs);
                 let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", vs.len());
             }
+            // Column storage: one array per leaf, sharing the single `len`.
+            // Keys are written in brackets because a nested leaf path is dotted
+            // (`min.x`), which is not a bare Lua identifier.
+            Inst::MakeVecColumns { columns, len } => {
+                out.push('{');
+                for (name, vs) in columns {
+                    out.push('[');
+                    write_lua_string(out, name.as_str());
+                    out.push_str("] = {");
+                    self.write_csv(out, vs);
+                    out.push_str("}, ");
+                }
+                let _ = write!(out, "len = {len}, __ty = \"Vec\"}}");
+            }
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');
                 let mut first = true;
@@ -1722,12 +1736,26 @@ impl Emitter<'_> {
             }
 
             Inst::Index { base, index, kind } => self.write_index(out, *base, *index, *kind),
+            Inst::VecCheckedIndex { vec, index } => {
+                out.push_str("__vec_checked_index(");
+                self.write_opnd(out, *vec);
+                out.push_str(", ");
+                self.write_opnd(out, *index);
+                out.push(')');
+            }
             Inst::Len { base, kind } => match kind {
                 ContainerKind::Vec
+                | ContainerKind::VecValueColumns(_)
                 | ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferValue(_) => {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
+                }
+                // A bare leaf column has no `len` of its own -- the owning Vec
+                // holds the single shared length, so lowering asks it there.
+                ContainerKind::VecColumn => {
+                    out.push('#');
+                    self.write_opnd(out, *base);
                 }
                 ContainerKind::Map => {
                     // No O(1) length on a Map; lowering shouldn't emit this kind.
@@ -1825,6 +1853,22 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
+            // A leaf column: `index` is already 1-based and already checked
+            // (`VecCheckedIndex`), so this is a raw array read.
+            ContainerKind::VecColumn => {
+                self.write_opnd(out, base);
+                out.push('[');
+                self.write_opnd(out, index);
+                out.push(']');
+            }
+            // A whole-element read has no single slot to name -- column storage
+            // has no element table. Lowering decomposes every such read into
+            // per-column reads (`column_element_repr`), so reaching emit means
+            // that decomposition was bypassed. Fail loudly: emitting ANY Lua
+            // here would be silently wrong code.
+            ContainerKind::VecValueColumns(elem) => {
+                unreachable!("whole-element index of column-stored [{elem}] reached emit")
+            }
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 out.push_str("__nb_checked_get(");
                 self.write_opnd(out, base);
@@ -1884,7 +1928,9 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push_str(")\n");
                     }
-                    ContainerKind::Map => {
+                    // Raw 1-based write into one leaf column; the owning Vec's
+                    // `len` was checked once by `VecCheckedIndex`.
+                    ContainerKind::Map | ContainerKind::VecColumn => {
                         out.push_str("  ");
                         self.write_opnd(out, *base);
                         out.push('[');
@@ -1892,6 +1938,11 @@ impl Emitter<'_> {
                         out.push_str("] = ");
                         self.write_opnd(out, *value);
                         out.push('\n');
+                    }
+                    // One `value` operand cannot carry K leaves; lowering splits
+                    // an element write into per-column stores.
+                    ContainerKind::VecValueColumns(elem) => {
+                        unreachable!("whole-element store into column-stored [{elem}] reached emit")
                     }
                 }
             }
@@ -1911,8 +1962,12 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
+                    // Column push bumps the shared `len` once, then writes K
+                    // columns -- more than one `value`, so lowering splits it.
                     ContainerKind::NativeBuffer
                     | ContainerKind::NativeBufferValue(_)
+                    | ContainerKind::VecValueColumns(_)
+                    | ContainerKind::VecColumn
                     | ContainerKind::Map => {
                         unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }
