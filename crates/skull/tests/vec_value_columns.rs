@@ -132,11 +132,13 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
 // inside one reaches the SHARED generic `VecIter<T>.next`, which reads the
 // `_data` that column storage does not have.
 //
-// All four are RED and stay red until specialization works in every emitted
-// callable context. Each currently stops at the same emit rejection, which is
-// the safety net working -- `column_iteration_rejects_where_it_cannot_specialize`
-// pins that, so a REGRESSION to a silent miscompile fails a test rather than
-// merely leaving these red for a new reason.
+// The lambda and nested-fn cases WORK: `convert_closures` splits those bodies
+// into standalone functions with their own top-level CFG, at which point the
+// upvalue reason is gone and the inliner runs over them. The `co fn` and
+// global-init cases are still RED -- neither runs the inliner at all -- and
+// `column_iteration_rejects_where_it_cannot_specialize` pins that they REJECT
+// meanwhile, so a regression to a silent miscompile fails a test rather than
+// merely leaving them red for a new reason.
 //
 // The ordinary-call guard (`in_unspliced_ctx` -> keep the shared boxed ABI,
 // `lower.rs:3965`) is NOT the fix here: for a boxed value the shared body is
@@ -308,22 +310,23 @@ fn column_vec_iterated_in_a_global_initializer() {
     assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "col_ginit"), "4");
 }
 
-/// Until specialization reaches those four bodies, each must REJECT rather than
-/// emit. This is the property that keeps the tests above honest: they are red
-/// either way, so without this a regression from "loud rejection" back to
-/// "silent miscompile" would not fail anything.
+/// The two contexts specialization does not reach yet must REJECT rather than
+/// emit. This is what keeps the tests above honest: they are red either way, so
+/// without this a regression from "loud rejection" back to "silent miscompile"
+/// would not fail anything.
+///
+/// Neither remaining context runs the inliner AT ALL, which is why hoisting did
+/// not fix them the way it fixed the lambda and nested-fn cases: a coroutine
+/// deliberately neither inlines nor is inlined into, and a global-init unit has
+/// no inline pass. Reaching them wants the specialized callee emitted as its own
+/// top-level function and CALLED, rather than spliced.
 ///
 /// The global-initializer case additionally pins that the rejection travels the
 /// hard-error channel and not `UnitOut::skipped`, which is silent unless
 /// `SKULL_DEBUG_SKIPPED` is set.
 #[test]
 fn column_iteration_rejects_where_it_cannot_specialize() {
-    for (ctx, src) in [
-        ("lambda", VEC_IN_LAMBDA),
-        ("nested fn", VEC_IN_NESTED_FN),
-        ("co fn", VEC_IN_CO_FN),
-        ("global init", VEC_IN_GLOBAL_INIT),
-    ] {
+    for (ctx, src) in [("co fn", VEC_IN_CO_FN), ("global init", VEC_IN_GLOBAL_INIT)] {
         let err = common::try_emit_module(src)
             .err()
             .unwrap_or_else(|| panic!("{ctx}: unspliceable column iteration must not emit"));

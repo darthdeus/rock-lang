@@ -951,6 +951,17 @@ fn emit_body_chunk(
         cg.mint_synthetic(nf.name.to_string());
     }
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
+    // Hoisted bodies inline in their own right, and only HERE. The inliner scans a
+    // caller's top-level blocks and never a closure sub-CFG, because a cell used in
+    // a lambda body is an upvalue and splicing there piles onto LuaJIT's 60-upvalue
+    // cap. Once `convert_closures` has split those bodies out they are ordinary
+    // standalone functions with their own top-level CFG, so that reason is gone --
+    // running the pass before the split would hit it, running it after does not.
+    //
+    // Correctness, not just an optimization: a call the lowerer gave the
+    // specialized scalar ABI has no serviceable shared body, and for a
+    // column-stored element the shared `next` reads a `_data` that does not exist.
+    inline_hoisted_bodies(ws, scx, self_ref, &mut mf.nested_fns, inline_cache, &mut deps)?;
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
     validate_emitted_body(&mf)?;
@@ -1053,8 +1064,12 @@ fn is_stdlib_module_file(file: &str) -> bool {
 /// unoptimized but WRONG (it reads a `_data` that column storage does not have),
 /// so a rejection is the only correct outcome.
 fn validate_no_residual_spec_bindings(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
-    for (_, block) in mf.blocks.iter() {
-        for &iid in &block.insts {
+    // REACHABLE blocks only, as the rule has always been stated: a hoisted lambda
+    // body is a full arena clone of its parent that differs only in `entry`, so it
+    // carries the parent's unreachable blocks and their bindings with it. Judging
+    // those would reject a body for a call it does not contain.
+    for bid in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
+        for &iid in &mf.blocks[bid].insts {
             if mf.spec_bindings.contains_key(&iid)
                 && matches!(
                     &mf.insts[iid],
@@ -1066,6 +1081,31 @@ fn validate_no_residual_spec_bindings(mf: &skull_mir::mir::MirFunc) -> Result<()
                     .to_string());
             }
         }
+    }
+    Ok(())
+}
+
+/// Run the inliner over a hoisted-body tree (named nested `fn`s and the lambda
+/// bodies `convert_closures` appends), depth-first so a lambda nested in a lambda
+/// is reached too. Splices fold into the enclosing chunk's `deps`: the chunk now
+/// contains a copy of each spliced callee's body, so an edit to that callee has to
+/// invalidate this chunk.
+fn inline_hoisted_bodies(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    self_ref: FuncRef,
+    nested: &mut [MirFunc],
+    inline_cache: &mut skull_transform::InlineCache,
+    deps: &mut FxHashSet<FuncRef>,
+) -> Result<(), String> {
+    for nf in nested.iter_mut() {
+        let (spliced, _) = skull_transform::inline_functions(ws, scx, self_ref, nf, inline_cache)
+            .map_err(|e| e.message)?;
+        deps.extend(spliced);
+        skull_transform::cleanup(nf);
+        let mut children = std::mem::take(&mut nf.nested_fns);
+        inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, deps)?;
+        nf.nested_fns = children;
     }
     Ok(())
 }
