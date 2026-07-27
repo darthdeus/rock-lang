@@ -3160,6 +3160,12 @@ impl Builder<'_> {
                 self.emit_cur(Inst::Store { cell, value: v });
             }
             Expr::FieldAccess { base, field } => {
+                // `xs[i].x = v` on a column-stored Vec: there is no element slot
+                // to take a place base of, so the write lands directly in the
+                // leaf's own column.
+                if let Some((vec, idx, elem)) = self.column_index_place(base)? {
+                    return self.column_leaf_store(vec, idx, elem, field, value);
+                }
                 // A whole embedded field (`p.f = Foo { .. }`): the child has no
                 // slot of its own, so write its leaves. Composition happens
                 // BEFORE this, so `p.f` here is the child, not a physical key.
@@ -3189,6 +3195,12 @@ impl Builder<'_> {
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
+                // Column storage has no element slot: the write goes leaf-wise
+                // into K columns, so the value is consumed as a repr and never
+                // boxed. Mirrors `column_element_repr` on the read side.
+                if let ContainerKind::VecValueColumns(elem) = kind {
+                    return self.column_element_store(b, i, value, elem);
+                }
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreIndex {
                     base: b,
@@ -4440,6 +4452,90 @@ impl Builder<'_> {
             });
         }
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// `Some((vec, one_based_index, elem))` iff `e` is `xs[i]` over a
+    /// column-stored Vec — the shape that has no element slot to serve as a
+    /// place base.
+    fn column_index_place(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr)>, CompilerError> {
+        let Expr::Index { base, index } = self.body.expr_arena[e] else {
+            return Ok(None);
+        };
+        let Some(elem) = self.vec_column_elem_of(base) else {
+            return Ok(None);
+        };
+        let vec = self.lower_expr(base)?;
+        let i = self.lower_expr(index)?;
+        let one_based = self.checked_column_index(vec, i);
+        Ok(Some((vec, one_based, elem)))
+    }
+
+    /// `xs[i].<field> = v` on a column-stored Vec: store into the column that
+    /// holds that leaf. `field` must name a PRIMITIVE leaf — a nested value
+    /// field (`xs[i].inner = ..`, `xs[i].inner.a = ..`) spans several columns
+    /// and is rejected rather than silently writing one.
+    fn column_leaf_store(
+        &mut self,
+        vec: Idx<Inst>,
+        one_based: Idx<Inst>,
+        elem: Ustr,
+        field: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        if !value_leaf_paths(&shape).iter().any(|p| *p == field) {
+            return Err(gap(format!(
+                "`{field}` is not a scalar leaf of column-stored `[{elem}]`; a \
+                 nested value field spans several columns and needs a whole-element store"
+            )));
+        }
+        let v = self.lower_expr(value)?;
+        let col = self.emit_cur(Inst::Field { base: vec, field });
+        self.emit_cur(Inst::StoreIndex {
+            base: col,
+            index: one_based,
+            value: v,
+            kind: ContainerKind::VecColumn,
+        });
+        Ok(())
+    }
+
+    /// `xs[i] = v` into a column-stored Vec: bounds-check once, then store leaf
+    /// `k` into column `k`. The element never materializes.
+    fn column_element_store(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        let paths = value_leaf_paths(&shape);
+        if leaves.len() != paths.len() {
+            return Err(gap(format!(
+                "column store arity mismatch for [{elem}]: {} leaves vs {} columns",
+                leaves.len(),
+                paths.len()
+            )));
+        }
+        let one_based = self.checked_column_index(vec, index);
+        for (path, leaf) in paths.into_iter().zip(leaves) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col,
+                index: one_based,
+                value: leaf,
+                kind: ContainerKind::VecColumn,
+            });
+        }
+        Ok(())
     }
 
     /// `__vec_checked_index(vec, i)` — the 1-based backing index, bounds-checked
