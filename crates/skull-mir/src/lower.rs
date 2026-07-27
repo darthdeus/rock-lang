@@ -2038,9 +2038,9 @@ struct Builder<'a> {
     /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
     /// the next `resume(arg)`). `None` outside a coroutine.
     resume_arg: Option<Idx<Cell>>,
-    /// True while lowering a body the MIR inliner will NOT splice into: a closure
-    /// sub-CFG (upvalue cap), a hoisted nested fn, a coroutine, a global init, or
-    /// a decorator (none run `inline_functions`). A call here must NOT take the
+    /// True while lowering a body whose calls this pass cannot give the
+    /// specialized scalar ABI: a closure sub-CFG, a hoisted nested fn, a
+    /// coroutine, a global init, or a decorator. A call here must NOT take the
     /// SPECIALIZED scalar ABI (splatting a value arg to leaves), which is only
     /// sound when the inliner replaces the call with the matching specialized
     /// body -- an unspliced residual would call the SHARED generic body (`T` = one
@@ -2979,8 +2979,10 @@ impl Builder<'_> {
                 // the reset unmasks no diagnostic -- it just makes the flag honest).
                 let saved_defers = std::mem::take(&mut self.defers);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
-                // A lambda body is a sub-CFG the inliner refuses (upvalue cap), so
-                // its calls are never spliced -- box value args (see field docs).
+                // Box value args (see field docs). A lambda body IS spliced into
+                // now -- `convert_closures` splits it out and the inliner runs
+                // over the standalone body -- but that happens after lowering, so
+                // this decision cannot see the specialized callee it would need.
                 let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
                 self.ret_tuple = self.lambda_ret_tuple_arity(e);
                 let v = self.lower_expr(body)?;
