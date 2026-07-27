@@ -9407,11 +9407,20 @@ impl Builder<'_> {
             .map(|pd| pd.ty)
     }
 
+    /// The caller gates this on `!fn_uses_scalar_abi`, which reads as "this callee
+    /// takes a real boxed value" only where the scalar ABI is the alternative.
+    /// Under `values_first_class` that flag is forced false for EVERY fn because a
+    /// `value` struct is already a first-class `vecN` -- there is no box on that
+    /// target, and no collection to put one in, so the proxy inverts and every
+    /// shader call would reject a nobox arg.
     fn reject_nobox_boxed_call_args(
         &self,
         func: FuncRef,
         args: &[Idx<Expr>],
     ) -> Result<(), CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(());
+        }
         let callee = &self.ws.module(func.module).functions[func.func];
         for &arg in args {
             if self.is_explicit_materialize_call(arg) {

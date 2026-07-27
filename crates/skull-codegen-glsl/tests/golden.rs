@@ -13,9 +13,32 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
+/// The stdlib with `Vec2` marked `nobox`. `nobox` is a whole-language guarantee,
+/// and a tier-0 `vecN` is the type anyone would mark first, so the GLSL surface
+/// has to carry one. Built here rather than in `stdlib/vec.rock` so the fixture
+/// does not depend on whether the real stdlib has opted in yet.
+static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| {
+            let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
+            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module(&src, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
 /// Emit GLSL for `roots` from `src` (the `<test>` module).
 fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
-    let mut modules = STDLIB.clone();
+    emit_with(&STDLIB, src, roots)
+}
+
+fn emit_with(
+    stdlib: &[skull_parser::Ast],
+    src: &str,
+    roots: &[&str],
+) -> Result<String, String> {
+    let mut modules = stdlib.to_vec();
     modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
@@ -812,4 +835,27 @@ fn mat4_native_multiply() {
     assert!(glsl.contains("return (m * p);"), "got:\n{glsl}");
     assert!(glsl.contains("mat4 compose_Mat4_Mat4_ret_Mat4(mat4 a, mat4 b) {"), "got:\n{glsl}");
     assert!(glsl.contains("return (a * b);"), "got:\n{glsl}");
+}
+
+/// A `nobox` value crossing a call on the GLSL path must NOT be rejected as a
+/// boxed boundary. GLSL has no collections and no boxes: a `value` struct is a
+/// first-class `vecN`, which is exactly what `ScalarCtx::values_first_class`
+/// says. The nobox sink classifier used `!fn_uses_scalar_abi` as its proxy for
+/// "this callee takes a real boxed value", and that flag INVERTS under
+/// values-first-class -- so every shader call rejected.
+#[test]
+fn nobox_value_crosses_a_glsl_call_without_materializing() {
+    let src = r#"
+        @pure fn len2(v: Vec2) -> float { return v.x * v.x + v.y * v.y }
+        @pure fn shade(p: Vec2) -> float { return len2(p) }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"]).expect("nobox Vec2 must emit GLSL");
+    assert!(
+        glsl.contains("vec2 v") || glsl.contains("(vec2 "),
+        "nobox Vec2 must lower to a first-class vec2 parameter:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("materialize"),
+        "GLSL emission must not route a nobox value through materialization:\n{glsl}"
+    );
 }
