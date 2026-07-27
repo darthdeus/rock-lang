@@ -411,6 +411,9 @@ enum StructId {
 enum FieldSrc {
     Operand(Idx<Inst>),
     ConstStr(ustr::Ustr),
+    /// Leaf-wise copy from another family's field cell (a value-struct alias
+    /// member, see `copy_alias`) -- materializes a `Load` at the store site.
+    CellLoad(Idx<Cell>),
 }
 
 /// If `inst` is a scalarizable aggregate ctor, its identity + logical field list.
@@ -691,6 +694,28 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         }
     }
 
+    // A VALUE-struct alias member is a distinct BINDING, not the same object.
+    // `value` types are immutable, so unification buys no by-ref sharing, while
+    // collapsing the cells hands the member the ROOT's live range -- which a
+    // closure capture observes: the leaves of a per-iteration `for` binding
+    // become the loop cursor's multi-store slots, boxed once for the whole
+    // function and nil-ed on the exhausted path. Such a member keeps its own
+    // leaf cells and its alias store expands to leaf-wise copies. Reference
+    // structs still unify: there `let q = p` aliases and by-ref mutation must
+    // land in shared cells.
+    let mut copy_alias: Vec<Option<Idx<Cell>>> = vec![None; nc];
+    for k in 0..nc {
+        if rep[k] == k || disq[k] || !matches!(cand[rep[k]], Some(StructId::Value(_))) {
+            continue;
+        }
+        copy_alias[k] = Some(Idx::from_raw(RawIdx::from_u32(rep[k] as u32)));
+        cand_fields[k] = cand_fields[rep[k]].clone();
+        if let Some(order) = value_order.get(&rep[k]).cloned() {
+            value_order.insert(k, order);
+        }
+        rep[k] = k;
+    }
+
     // A `Load` of a candidate cell may be used ONLY as a `Field`/`StoreField`
     // base of a declared field -- or as the value of an accepted alias store
     // within the same family (that store deletes). Map each such load to its
@@ -724,13 +749,15 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                             *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
                         }
                         // The alias store itself: `Store(y, Load(x))` where y and x
-                        // unify to the same root. It is deleted by the rewrite.
+                        // unify to the same root (deleted by the rewrite), or where
+                        // y copies x's leaves (expanded to leaf-wise stores).
                         Inst::Store { cell, value } => {
                             let yk = raw(*cell) as usize;
                             *value == op
                                 && alias[yk].is_some()
                                 && !disq[yk]
-                                && rep[yk] == rep[raw(c) as usize]
+                                && (rep[yk] == rep[raw(c) as usize]
+                                    || copy_alias[yk] == Some(c))
                         }
                         _ => false,
                     };
@@ -767,6 +794,19 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                     disq[rep[k]] = true;
                 }
                 if disq[rep[k]] || cand[rep[k]].is_none() {
+                    disq[k] = true;
+                }
+            }
+            // A copy member reads the root's leaf cells, so a whole root takes
+            // the member with it -- and a whole member's surviving `Store(k,
+            // Load(root))` would read the root's now-uninit aggregate, so it
+            // takes the root too.
+            if let Some(root) = copy_alias[k] {
+                let rk = raw(root) as usize;
+                if disq[k] {
+                    disq[rk] = true;
+                }
+                if disq[rk] || cand[rk].is_none() {
                     disq[k] = true;
                 }
             }
@@ -888,6 +928,21 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                         fs.into_iter().map(|f| (f, FieldSrc::Operand(*value))).collect(),
                     ));
                 }
+                // A value-struct alias member copies the root's leaves.
+                if let (Inst::Load(_), Some(root)) =
+                    (&func.insts[*value], copy_alias[raw(*cell) as usize])
+                {
+                    let mut fs: Vec<ustr::Ustr> = cand_fields[raw(*cell) as usize]
+                        .as_ref()
+                        .map(|s| s.iter().copied().collect())
+                        .unwrap_or_default();
+                    fs.sort_unstable();
+                    return Some((
+                        i,
+                        *cell,
+                        fs.into_iter().map(|f| (f, FieldSrc::CellLoad(root))).collect(),
+                    ));
+                }
                 ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
                     .map(|(_, fields)| (i, *cell, fields))
             }
@@ -907,6 +962,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                 let ck = raw(*cell) as usize;
                 ck < nc
                     && alias[ck].is_some()
+                    && copy_alias[ck].is_none()
                     && !disq[ck]
                     && matches!(&func.insts[*value], Inst::Load(_))
             }
@@ -933,6 +989,12 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                     let cv = func.insts.alloc(Inst::Const(Lit::Str(s)));
                     news.push(cv);
                     cv
+                }
+                FieldSrc::CellLoad(root) => {
+                    let rc = get_field_cell(func, root, fname);
+                    let lv = func.insts.alloc(Inst::Load(rc));
+                    news.push(lv);
+                    lv
                 }
             };
             let fc = get_field_cell(func, c, fname);
