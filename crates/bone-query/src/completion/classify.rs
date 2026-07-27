@@ -520,7 +520,8 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     // .. }` literal to report `run`'s own param type, which is the WRONG,
     // less specific slot). So field_value must win whenever it fires;
     // arg_call is the fallback for a direct (non-record) call arg.
-    let arg_call = if field_value.is_none() { cx.and_then(|c| c.call_arg()) } else { None };
+    let has_field_value = field_value.is_some();
+    let arg_call = if has_field_value { None } else { cx.and_then(|c| c.call_arg()) };
     let expr_position = !cx.is_some_and(|c| c.is_type_position());
     CompletionCx {
         member: cx.and_then(|c| c.member_path()),
@@ -534,7 +535,13 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
         bool_chain: cx.is_some_and(|c| c.bool_condition_chain()),
         after_yield: expr_position && cx.is_some_and(|c| c.after_yield()),
         param_type: if expr_position { None } else { cx.and_then(|c| c.param_type()) },
-        named_arg: cx.and_then(|c| c.named_arg_slot()),
+        // Same precedence as `arg_call` above: `named_arg_slot` is built on
+        // the same `enclosing_arg_call` walk, so it has the identical bug --
+        // typing a nested record literal's field VALUE (`run(Widget { x:
+        // <cursor> })`) reports the OUTER call's still-unsupplied params as
+        // `name:` candidates, leaking an unrelated arg-name suggestion into
+        // an unrelated struct's field-value slot.
+        named_arg: if has_field_value { None } else { cx.and_then(|c| c.named_arg_slot()) },
         coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
         pattern_scrutinee: match_arm_scrutinee(src, offset),
         for_in: for_in_iterable_slot(src, offset),

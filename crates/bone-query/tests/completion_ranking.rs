@@ -399,6 +399,26 @@ fn struct_field_value_type_directs_even_when_the_literal_is_a_call_arg() {
     );
 }
 
+#[test]
+fn named_arg_completion_does_not_leak_from_the_enclosing_call() {
+    // `named_arg_slot` shares `struct_field_value`'s `enclosing_arg_call` bug:
+    // typing a nested record literal's field VALUE (`run(Widget { x: <cursor>
+    // })`) walked past `Widget { .. }` to the outer `run(..)` call and offered
+    // its own still-unsupplied param (`replace_me`) as a `name:` candidate --
+    // an arg-name suggestion for a totally different call leaking into an
+    // unrelated struct's field-value slot. `replace_me` fuzzy-matches the
+    // typed prefix `repl` here on purpose (regression for exactly that leak).
+    let labels = labels_at(
+        "struct Widget { x: int }\n\
+         fn run(w: Widget, replace_me: int) {}\n\
+         fn probe() {\n  run(Widget { x: repl$0 })\n}\n",
+    );
+    assert!(
+        !labels.iter().any(|l| l.starts_with("replace_me")),
+        "run's own unsupplied param must not leak into Widget's field-value slot: {labels:?}"
+    );
+}
+
 // -- after_yield: coroutine-fn boost fires only on a REAL yield operand -------
 
 #[test]

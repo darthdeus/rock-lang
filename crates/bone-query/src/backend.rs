@@ -2521,8 +2521,13 @@ impl BoneWorkspace {
         // serve a signature even when the file doesn't fully type-check.
         let inf = ws.inference(mid);
         let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
-        // Active argument = top-level commas between the call's `(` and the cursor.
-        let mut active = active_param(src, call_span.offset_range.0, offset);
+        let call_start = call_span.offset_range.0;
+        let paren_start = active_call_paren_start(src, call_start, offset);
+        // Active argument = top-level commas between the call's OWN `(` (not
+        // necessarily the first `(` after `call_start` -- a UFCS receiver
+        // that is itself a call, `get_screen().rect_outline(|)`, has its own
+        // sibling paren pair) and the cursor.
+        let mut active = paren_start.map_or(0, |p| active_param(src, p, offset));
         // UFCS: `recv.callee(..)` folds the receiver into HIR arg 0 (the
         // signature's params include it, e.g. `dl: DrawList` ahead of
         // `pos: Vec2`), but the WRITTEN paren list the cursor sits in only
@@ -2530,7 +2535,7 @@ impl BoneWorkspace {
         // over that written list alone. Shift by one so a dot-call cursor in
         // the first written arg highlights the SECOND declared param, not
         // the receiver's.
-        if call_is_ufcs_dot_syntax(src, call_span.offset_range.0) {
+        if paren_start.is_some_and(|p| call_is_ufcs_dot_syntax(src, call_start, p)) {
             active += 1;
         }
         Some(SignatureHelp {
@@ -3411,14 +3416,56 @@ fn line_indent_at(src: &str, pos: usize) -> String {
         .collect()
 }
 
-/// Active argument index for signature help: count of top-level commas between
-/// the call's opening `(` and the cursor. Depth tracks nested parens so a comma
-/// inside a nested call doesn't advance the outer arg; a naive string-skip keeps
-/// commas inside string literals from counting (no escape handling -- fine for a
-/// cursor heuristic). `call_start` is the byte offset of the call expression.
-fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
-    let end = offset.min(src.len());
+/// Byte offset of the call's OWN opening `(` -- the top-level paren group
+/// that is still unclosed at `offset` (i.e. actually contains the cursor).
+/// `call_start` is the byte offset of the whole call EXPRESSION, which for a
+/// UFCS/method call includes the receiver (`get_screen().rect_outline(|)`
+/// starts at `get_screen`, not `rect_outline`); a receiver that is itself a
+/// call has its own top-level paren pair, fully closed before the real one
+/// opens, so tracking depth alone and taking the FIRST `(` would anchor on
+/// the receiver's parens instead. Depth resets to 0 between sibling groups,
+/// so the position is retaken (and forgotten again if that group closes
+/// too) every time depth returns to 0 -- the group left open at `offset` is
+/// the answer. `None` when no paren is still open at `offset` (shouldn't
+/// happen for a real call/struct-literal site, but the caller degrades to
+/// arg 0 / non-UFCS rather than panic).
+fn active_call_paren_start(src: &str, call_start: usize, offset: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    let end = offset.min(b.len());
     let start = call_start.min(end);
+    let mut depth = 0i32;
+    let mut active: Option<usize> = None;
+    let mut in_str = false;
+    for (i, &c) in b[start..end].iter().enumerate() {
+        match c {
+            b'"' => in_str = !in_str,
+            b'(' if !in_str => {
+                if depth == 0 {
+                    active = Some(start + i);
+                }
+                depth += 1;
+            }
+            b')' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    active = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    active
+}
+
+/// Active argument index for signature help: count of top-level commas
+/// between the call's own opening `(` (`paren_start`, from
+/// `active_call_paren_start`) and the cursor. Depth tracks nested parens so a
+/// comma inside a nested call doesn't advance the outer arg; a naive
+/// string-skip keeps commas inside string literals from counting (no escape
+/// handling -- fine for a cursor heuristic).
+fn active_param(src: &str, paren_start: usize, offset: usize) -> u32 {
+    let end = offset.min(src.len());
+    let start = paren_start.min(end);
     let mut depth = 0i32;
     let mut arg = 0u32;
     let mut in_str = false;
@@ -3434,19 +3481,15 @@ fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
     arg
 }
 
-/// Whether the call starting at `call_start` is written as `recv.name(..)`
-/// (a UFCS/method dot-call) rather than a bare `name(..)`. Scans forward for
-/// the call's own opening `(` (same first-`(` assumption `active_param`
-/// makes -- a receiver that is itself a call, `get_screen().rect_outline()`,
-/// is out of scope), then checks whether the callee name it immediately
-/// follows is itself preceded by a `.`.
-fn call_is_ufcs_dot_syntax(src: &str, call_start: usize) -> bool {
+/// Whether the call whose own opening paren sits at `paren_start` is written
+/// as `recv.name(..)` (a UFCS/method dot-call) rather than a bare `name(..)`:
+/// the identifier immediately before `paren_start` is itself preceded by a
+/// `.`. `call_start` (the whole call expression's start) bounds the
+/// backward walk so it can't run past the receiver into unrelated code.
+fn call_is_ufcs_dot_syntax(src: &str, call_start: usize, paren_start: usize) -> bool {
     let b = src.as_bytes();
     let start = call_start.min(b.len());
-    let Some(rel_paren) = b[start..].iter().position(|&c| c == b'(') else {
-        return false;
-    };
-    let mut j = start + rel_paren;
+    let mut j = paren_start.min(b.len()).max(start);
     while j > start && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
         j -= 1;
     }

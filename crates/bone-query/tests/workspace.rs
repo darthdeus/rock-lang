@@ -1305,3 +1305,31 @@ fn matching_backend_siblings_publish_nothing() {
         "identical siblings must not warn: {diags:?}"
     );
 }
+
+#[test]
+fn signature_help_active_param_shifts_past_a_ufcs_receiver_that_is_itself_a_call() {
+    // `get_screen().rect_outline(<cursor>)`: same UFCS param-shift as
+    // `signature_help_active_param_shifts_past_the_ufcs_receiver`, but the
+    // receiver is itself a call with its own paren pair
+    // (`get_screen()`), fully closed before `rect_outline`'s parens open.
+    // A naive "first `(` after the call expression's start" scan anchors on
+    // the RECEIVER's parens instead of the real one, so neither the arg
+    // count nor the UFCS dot-check see the right paren group.
+    let src = "struct DrawList { x: int }\n\
+               fn get_screen() -> DrawList { DrawList { x: 0 } }\n\
+               fn rect_outline(dl: DrawList, pos: int, size: int) { }\n\
+               fn probe() {\n\
+                 get_screen().rect_outline()\n\
+               }\n";
+    let bone = fresh(src);
+    // line 4 "get_screen().rect_outline()": cursor between rect_outline's own parens.
+    let sh = bone
+        .signature_help(PATH, Position::new(4, 26))
+        .expect("signature help resolves the get_screen().rect_outline(...) call");
+    assert_eq!(sh.signatures[0].label, "fn rect_outline(dl: DrawList, pos: int, size: int)");
+    assert_eq!(
+        sh.active_parameter,
+        Some(1),
+        "UFCS receiver (itself a call) fills param 0 (dl); cursor in the written arg list must highlight param 1 (pos)"
+    );
+}
