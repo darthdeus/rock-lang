@@ -1315,12 +1315,22 @@ impl BoneWorkspace {
         if space_triggered && line_prefix_is_blank(src, offset) {
             return Vec::new();
         }
-        // Inside a `// rock: ...` magic comment: a separate early-exit context
-        // (the `allow` verb / known lint names), NOT a name-gate through `admit`.
-        // A comment is not code, so generic symbol/type completion is
-        // short-circuited here.
-        if let Some(items) = magic_comment_completions(src, offset) {
-            return items;
+        // A comment is not code: generic symbol/type completion is
+        // short-circuited inside one. The `// rock: ...` directive is the sole
+        // exception -- its own early-exit context (the `allow` verb / known lint
+        // names), NOT a name-gate through `admit`.
+        match cursor_comment(src, offset) {
+            CommentProbe::Inside => {
+                return magic_comment_completions(src, offset).unwrap_or_default();
+            }
+            // Source that doesn't tokenize: keep the line-prefix-only behavior
+            // rather than guessing the cursor out of a directive.
+            CommentProbe::Unknown => {
+                if let Some(items) = magic_comment_completions(src, offset) {
+                    return items;
+                }
+            }
+            CommentProbe::Outside => {}
         }
         let prefix_raw = ident_prefix(src, offset).to_string();
         // A token starting with a digit is a numeric literal, never an identifier
@@ -4111,6 +4121,47 @@ fn finding_diagnostic(f: &bone_lints::Finding) -> Diagnostic {
     let mut d = compiler_error_to_diagnostic(&f.error);
     d.code = Some(NumberOrString::String(f.lint.to_string()));
     d
+}
+
+/// Where the cursor sits relative to the source's comments.
+enum CommentProbe {
+    Inside,
+    Outside,
+    /// The source doesn't tokenize -- no answer, don't guess.
+    Unknown,
+}
+
+/// Whether `offset` sits inside a comment (`//`, `#`, `/* */`). Tokenizer-based
+/// so a `//` inside a string literal doesn't read as a comment opener; the
+/// line-prefix pre-filter keeps the tokenize off the common keystroke path.
+fn cursor_comment(src: &str, offset: usize) -> CommentProbe {
+    let line_start = src[..offset].rfind('\n').map_or(0, |i| i + 1);
+    let line_prefix = &src[line_start..offset];
+    let block_open = src[..offset]
+        .rfind("/*")
+        .is_some_and(|open| !src[open..offset].contains("*/"));
+    if !line_prefix.contains("//") && !line_prefix.contains('#') && !block_open {
+        return CommentProbe::Outside;
+    }
+    let Ok(toks) = rock_tokenizer::Tokenizer::new(src, Ustr::from("<completion>")).tokenize() else {
+        return CommentProbe::Unknown;
+    };
+    for tok in &toks {
+        if !matches!(tok.kind, rock_tokenizer::TokenKind::Comment(_)) {
+            continue;
+        }
+        let (start, end) = tok.span.offset_range;
+        if offset <= start {
+            continue;
+        }
+        // A closed `/* */` ends AT `end`, so a cursor there is back in code; a
+        // line comment's end is the newline, and typing at it is still inside.
+        let closed = src.get(start..end).is_some_and(|body| body.ends_with("*/"));
+        if offset < end || (offset == end && !closed) {
+            return CommentProbe::Inside;
+        }
+    }
+    CommentProbe::Outside
 }
 
 /// Completion inside a `// rock: ...` magic comment. `Some(items)` when the
