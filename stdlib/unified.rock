@@ -1552,6 +1552,117 @@ inline(lua) fn table_new() -> any = """return {}"""
 @nomangle @inline inline(lua) fn __vec_data_set(vec: any, index: int, value: any) = "vec._data[index + 1] = value"
 @nomangle @inline inline(lua) fn __vec_data_unset(vec: any, index: int) = "vec._data[index + 1] = nil"
 
+// The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
+// reaches storage one element at a time; these are the ops that touch the
+// backing AS A WHOLE (allocate it, measure it, copy it, shift it, reorder it),
+// which a per-element accessor cannot express. Same contract: the body below is
+// the boxed lowering, and a column-stored receiver is intercepted at lowering,
+// statically per instantiation -- never a runtime `_data` test.
+//
+// Not `@inline`: these are cold (construction, clone, sort), so a call frame is
+// the right trade and splicing them into every caller is not.
+@nomangle inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
+    local tbl = {}
+    for i = 1, capacity do tbl[i] = false end
+    return { _data = tbl, len = 0, __ty = "Vec" }
+"""
+
+@nomangle inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
+
+@nomangle inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+    table.insert(vec._data, lua_index, value)
+"""
+
+@nomangle inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
+    local copy = {}
+    for i = 1, #vec._data do copy[i] = vec._data[i] end
+    return { _data = copy, len = vec.len, __ty = "Vec" }
+"""
+
+@nomangle inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+    table.sort(vec._data, function(a, b)
+        return key_fn(a) < key_fn(b)
+    end)
+"""
+
+// Column-storage counterparts, called by the lowering with ONE column table at
+// a time -- so the leaf count stays a compile-time fact and no runtime key walk
+// is needed.
+@nomangle inline(lua) fn __rock_col_insert(col: any, lua_index: int, value: any) = """
+    table.insert(col, lua_index, value)
+"""
+
+@nomangle inline(lua) fn __rock_col_copy(col: any) -> any = """
+    local copy = {}
+    for i = 1, #col do copy[i] = col[i] end
+    return copy
+"""
+
+// Whether `v` is a column-stored Vec: tagged `Vec` but with no `_data` backing.
+@nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
+    return type(v) == "table" and v.__ty == "Vec" and v._data == nil and v.len ~= nil
+"""
+
+// The sorted leaf paths of a column Vec -- the shared key discovery, so zip and
+// sort can never disagree about column order.
+@nomangle inline(lua) fn __rock_col_paths(vec: any) -> any = """
+    local names = {}
+    for k, v in pairs(vec) do
+        if k ~= "len" and k ~= "__ty" and k ~= "_data" and type(v) == "table" then
+            names[#names + 1] = k
+        end
+    end
+    table.sort(names)
+    return names
+"""
+
+// Zip K leaf columns back into logical element tables. The ONLY place a column
+// Vec materializes its elements, and it exists because its consumers are
+// inherently reflective or foreign: `inspect`, the dump-state serializer, and
+// `__rock_vec_to_lua_array` all need a logical value no physical column holds.
+// A dotted leaf path nests back into sub-tables. Never called from a hot Vec
+// primitive.
+@nomangle inline(lua) fn __rock_vec_column_elements(vec: any) -> any = """
+    local names = __rock_col_paths(vec)
+    local out = {}
+    for i = 1, vec.len or 0 do
+        local e = {}
+        for _, path in ipairs(names) do
+            local slot = e
+            local last = path
+            local dot = last:find("%.")
+            while dot do
+                local head = last:sub(1, dot - 1)
+                slot[head] = slot[head] or {}
+                slot = slot[head]
+                last = last:sub(dot + 1)
+                dot = last:find("%.")
+            end
+            slot[last] = vec[path][i]
+        end
+        out[i] = e
+    end
+    return out
+"""
+
+// Sort a column Vec: decide the order ONCE from the key values, then replay it
+// on every column so they stay in lockstep. The key is read from a zipped
+// element -- the only materialization, and it is per-sort, not per-access.
+@nomangle inline(lua) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+    local n = vec.len or 0
+    local elems = __rock_vec_column_elements(vec)
+    local keys = {}
+    local order = {}
+    for i = 1, n do keys[i] = key_fn(elems[i]); order[i] = i end
+    table.sort(order, function(a, b) return keys[a] < keys[b] end)
+    for _, path in ipairs(__rock_col_paths(vec)) do
+        local col = vec[path]
+        local tmp = {}
+        for i = 1, n do tmp[i] = col[order[i]] end
+        for i = 1, n do col[i] = tmp[i] end
+    end
+"""
+
 inline(lua) fn table_clear(tbl: any) = """
     for k in pairs(tbl) do
         tbl[k] = nil
@@ -1629,10 +1740,14 @@ global PI: float = 3.141592653589793
     local type_name = __rock_get_type(t)
 
     -- Vec type
-    if type_name == "Vec" and t._data and t.len then
+    -- A column-stored Vec has no `_data`; zip its leaf columns into logical
+    -- elements first, else it falls through to the generic struct branch and
+    -- renders its PHYSICAL layout (`Vec { _data = nil, x = {..}, y = {..} }`).
+    if type_name == "Vec" and t.len and (t._data or __rock_is_column_vec(t)) then
+        local elems = t._data or __rock_vec_column_elements(t)
         local parts = {}
         for i = 1, t.len do
-            parts[i] = __rock_inspect_value(t._data[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
+            parts[i] = __rock_inspect_value(elems[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
         end
         if visited then visited[t] = nil end
         if #parts == 0 then return "Vec { }" end
@@ -2559,29 +2674,27 @@ fn RingIter<T>.next(it) -> (bool, T) {
 // deleted: `v.iter().<combinators>().<terminal>()` is the one mechanism.
 
 fn vec_new_with_capacity<T>(capacity: int) -> [T] {
-    return Vec { _data: table_new_with_size(capacity), len: 0 }
+    return __vec_data_alloc(capacity)
 }
 
-fn Vec<T>.capacity(vec) -> int { return table_len(vec._data) }
+fn Vec<T>.capacity(vec) -> int { return __vec_data_capacity(vec) }
 
 fn Vec<T>.insert_at(vec, index: int, value: T) {
     if index < 0 || index > vec.len { error("Error: Index out of bounds") }
 
     // Convert 0-based to 1-based for Lua
     let lua_index = index + 1
-    table_insert_at(vec._data, lua_index, value)
+    __vec_data_insert(vec, lua_index, value)
     vec.len += 1
 }
 
 fn Vec<T>.clone(vec) -> [T] {
-    return Vec { _data: table_copy_array(vec._data), len: vec.len }
+    return __vec_data_clone(vec)
 }
 
-inline(lua) fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) = """
-    table.sort(vec._data, function(a, b)
-        return key_fn(a) < key_fn(b)
-    end)
-"""
+fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) {
+    __vec_data_sort(vec, key_fn)
+}
 
 fn Vec<T>.sample(vec) -> T? {
     let len = vec_len(vec)

@@ -3921,6 +3921,16 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("__vec_data_get", 2) => Some("$1._data[$2]"),
         ("__vec_data_set", 3) => Some("$1._data[$2] = $3"),
         ("__vec_data_unset", 2) => Some("$1._data[$2] = undefined"),
+        // The COLD half of the same boundary (allocate / measure / shift / copy
+        // / reorder the backing as a whole). JS has no column storage -- columns
+        // go to the SKIP histogram -- so each is just the boxed form, but they
+        // must be mapped or the ops routed through them stop emitting.
+        // `lua_index` arrives 1-based from the shared Rock body; JS is 0-based.
+        ("__vec_data_alloc", 1) => Some("({_data: new Array($1).fill(false), len: 0, __ty: \"Vec\"})"),
+        ("__vec_data_capacity", 1) => Some("$1._data.length"),
+        ("__vec_data_insert", 3) => Some("$1._data.splice($2 - 1, 0, $3)"),
+        ("__vec_data_clone", 1) => Some("({_data: $1._data.slice(), len: $1.len, __ty: \"Vec\"})"),
+        ("__vec_data_sort", 2) => Some("__vec_sort($1, $2)"),
         ("table_new", 0) => Some("({})"),
         // Vec: `{_data, len, __ty}` 0-based. `vec_new` builds it; `vec_push`
         // writes `_data[len]` (the new tail slot) THEN increments `len` -- the
@@ -3975,10 +3985,6 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // to `undefined` above and defaulted inside the runtime.
         ("inspect", 3) => Some("inspect($1, $2, $3)"),
         ("inspect_formatted", 2) => Some("inspect_formatted($1, $2)"),
-        // `Vec.sort(key_fn)`: sort the 0-based `_data[0..len)` slice in place
-        // through the `__vec_sort` runtime (the pure-Rock FlatVec.sort co-emits
-        // instead).
-        ("sort", 2) => Some("__vec_sort($1, $2)"),
         // The `{x:spec}` interpolation format helpers -> their JS runtime ports.
         ("__rock_fmt_pad", 4) => Some("__rock_fmt_pad($1, $2, $3, $4)"),
         ("__rock_fmt_grouping", 3) => Some("__rock_fmt_grouping($1, $2, $3)"),

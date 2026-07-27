@@ -3774,6 +3774,22 @@ impl Builder<'_> {
             // never specializes (`compute_call_spec` bails on an inline body) --
             // the opaque body would hand back a `_data` table that every later
             // column access then indexes as nil.
+            // `__vec_data_alloc(cap)` is `vec_new` with a capacity hint. Columns
+            // do NOT pre-fill: the boxed body's `false` fill is a poor man's
+            // prealloc, and writing sentinels into a dense numeric column is the
+            // array->hash hazard `__vec_data_unset` exists to avoid. So the hint
+            // is dropped and `capacity()` reports 0 until the first push -- a
+            // hint, not a contract.
+            if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
+                if let Some(shape) = self.vec_column_elem_of(e).and_then(|el| value_shape(self.ws, el))
+                {
+                    let columns =
+                        value_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
+                    return Ok(ValueRepr::Scalar(
+                        self.emit_cur(Inst::MakeVecColumns { columns, len: 0 }),
+                    ));
+                }
+            }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
                 if let Some(shape) = self.vec_column_elem_of(e).and_then(|el| value_shape(self.ws, el))
                 {
@@ -4505,6 +4521,18 @@ impl Builder<'_> {
         Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
     }
 
+    /// The unique stdlib function `name`, for a lowering that SYNTHESIZES a call
+    /// (the cold column ops, which have no call expr of their own to resolve
+    /// through). Rejects rather than falling back: a missing or ambiguous name
+    /// means the stdlib and this lowering have drifted apart.
+    fn stdlib_funcref(&self, name: &str) -> Result<FuncRef, CompilerError> {
+        match self.ws.functions_by_name.get(&Ustr::from(name)).map(|l| l.as_slice()) {
+            Some([(module, func)]) => Ok(FuncRef { module: *module, func: *func }),
+            Some(_) => Err(gap(format!("stdlib `{name}` is ambiguous"))),
+            None => Err(gap(format!("stdlib `{name}` not found"))),
+        }
+    }
+
     /// Column-aware lowering of `__vec_data_get/_set/_unset` when the receiver's
     /// element type is concretely column-stored. `Ok(None)` = not one of these, or
     /// a boxed element, in which case the stdlib `inline(lua)` body stands.
@@ -4539,8 +4567,95 @@ impl Builder<'_> {
                 let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
+            // Physical capacity is `#<any column>` -- every column is the same
+            // length by construction, so the first one answers for all of them.
+            ("__vec_data_capacity", [recv]) => {
+                let Some(paths) = self.column_paths_of(*recv)? else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let col = self.emit_cur(Inst::Field { base: vec, field: paths[0] });
+                let f = self.stdlib_funcref("table_len")?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Call { func: f, args: vec![col] }),
+                )))
+            }
+            // Shift every column at the same slot, so they stay in lockstep. The
+            // element is consumed as LEAVES, so the inserted value never boxes.
+            ("__vec_data_insert", [recv, index, value]) => {
+                let Some(paths) = self.column_paths_of(*recv)? else { return Ok(None) };
+                let elem = self.vec_column_elem_of(*recv).expect("column receiver");
+                let shape =
+                    value_shape(self.ws, elem).ok_or_else(|| gap("column element is not a value"))?;
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                let repr = self.lower_expr_repr(*value)?;
+                let leaves = self.repr_to_leaves(&repr, &shape);
+                if leaves.len() != paths.len() {
+                    return Err(gap(format!("column insert arity mismatch for [{elem}]")));
+                }
+                let f = self.stdlib_funcref("__rock_col_insert")?;
+                for (path, leaf) in paths.into_iter().zip(leaves) {
+                    let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, leaf] });
+                }
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            // A fresh column table whose columns are copies -- the clone must not
+            // share a column with the original, or a later push would be seen by
+            // both.
+            ("__vec_data_clone", [recv]) => {
+                let Some(paths) = self.column_paths_of(*recv)? else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let f = self.stdlib_funcref("__rock_col_copy")?;
+                // Built as a `Vec`-tagged struct: `write_table_key` brackets a
+                // dotted leaf path, so the emitted table is the same shape
+                // `MakeVecColumns` writes for a literal.
+                let mut fields = Vec::with_capacity(paths.len() + 1);
+                for path in paths {
+                    let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                    fields.push((path, self.emit_cur(Inst::Call { func: f, args: vec![col] })));
+                }
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+                fields.push((Ustr::from("len"), len));
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+                    ty: Some(Ustr::from("Vec")),
+                    fields,
+                }))))
+            }
+            // The two ops that need the LOGICAL elements, not the physical
+            // columns: a sort key is a function of the whole element, and
+            // `to_lua_array`'s whole contract is handing a Lua array of elements
+            // to a foreign API. Both redirect to the one materializing helper --
+            // the storage contract's third category (erased/external boundaries
+            // materialize explicitly), and the only place a column Vec builds
+            // element tables.
+            ("__vec_data_sort", [recv, key_fn]) => {
+                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key_fn)?;
+                let f = self.stdlib_funcref("__rock_col_sort")?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
+                )))
+            }
+            ("__rock_vec_to_lua_array", [recv]) => {
+                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let f = self.stdlib_funcref("__rock_vec_column_elements")?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Call { func: f, args: vec![vec] }),
+                )))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// The leaf column paths of `e`'s element type, `None` if `e` is not a
+    /// column-stored Vec. The cold ops all need the path list and nothing else.
+    fn column_paths_of(&mut self, e: Idx<Expr>) -> Result<Option<Vec<Ustr>>, CompilerError> {
+        let Some(elem) = self.vec_column_elem_of(e) else { return Ok(None) };
+        let shape =
+            value_shape(self.ws, elem).ok_or_else(|| gap("column element is not a value struct"))?;
+        Ok(Some(value_leaf_paths(&shape)))
     }
 
     /// `xs.push(v)` onto a column-stored Vec: bump the shared `len` once, then
