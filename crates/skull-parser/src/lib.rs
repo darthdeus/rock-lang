@@ -34,7 +34,7 @@ use ustr::Ustr;
 /// errors surface as diagnostics.
 pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
     let tokens = Tokenizer::new(source, file).tokenize()?;
-    let mut ast = Parser::new(tokens).parse_module()?;
+    let mut ast = Parser::new(tokens, source, 0).parse_module()?;
     ast.file = file;
     Ok(ast)
 }
@@ -54,7 +54,7 @@ pub fn parse_one_item(
     column: usize,
 ) -> Result<Ast, CompilerError> {
     let tokens = Tokenizer::new_with_offset(source, file, offset, line, column).tokenize()?;
-    let mut ast = Parser::new(tokens).parse_single_item()?;
+    let mut ast = Parser::new(tokens, source, offset).parse_single_item()?;
     ast.file = file;
     // Total, like `parse_module`. The incremental fast path inspects
     // `recovery_errors` itself: a body-level recovery (e.g. a stray `)` inside the

@@ -74,108 +74,54 @@ fn scan(src: &str, limit: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) 
                     i = end;
                 }
             }
-            b'\'' => {
-                let end = memchr(b, i + 1, b'\'').unwrap_or(n);
-                emit(i, end, LexRegion::StringText);
-                i = (end + 1).min(n);
-            }
             // `r"` opens a raw string only in identifier-start position;
             // otherwise the `r` is the tail of a longer identifier.
-            b'r' if i + 1 < n
-                && b[i + 1] == b'"'
-                && (i == 0 || !is_ident_byte(b[i - 1])) =>
-            {
-                i = raw_string(b, i, emit);
-            }
-            b'"' => {
-                i = string(src, i, emit);
+            b'"' | b'\'' | b'r' if literal_opens_at(src, i) => {
+                i = string_regions(src, i, emit);
             }
             _ => i += 1,
         }
     }
 }
 
-/// A raw string (`r"..."` / `r"""..."""`): no escapes, no interpolation.
-fn raw_string(b: &[u8], start: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) -> usize {
-    let n = b.len();
-    let (body, close) = if b[start + 1..].starts_with(b"\"\"\"") {
-        (start + 4, &b"\"\"\""[..])
-    } else {
-        (start + 2, &b"\""[..])
-    };
-    match find(b, body, close) {
-        Some(c) => {
-            emit(start, c + close.len() - 1, LexRegion::StringText);
-            c + close.len()
-        }
-        None => {
-            emit(start, n, LexRegion::StringText);
-            n
-        }
+fn literal_opens_at(src: &str, i: usize) -> bool {
+    let b = src.as_bytes();
+    if b[i] == b'r' && (i > 0 && is_ident_byte(b[i - 1])) {
+        return false;
     }
+    crate::interp::Flavor::at(src, i).is_some()
 }
 
-/// A `"` or `"""` string: interpolation holes are emitted as `Code`, the rest as
-/// `StringText`. Escapes are honored in the `"` form only, matching the
-/// tokenizer's readers.
-fn string(src: &str, start: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) -> usize {
-    let b = src.as_bytes();
-    let n = b.len();
-    let triple = b[start..].starts_with(b"\"\"\"");
-    let close: &[u8] = if triple { b"\"\"\"" } else { b"\"" };
-    let mut i = start + close.len();
-    // Start of the string-text run that the next hole (or the closer) ends.
-    let mut text_start = start;
-    let mut depth: usize = 0;
-    let mut hole_open = 0usize;
-    while i < n {
-        if depth == 0 && b[i..].starts_with(close) {
-            emit(text_start, i + close.len() - 1, LexRegion::StringText);
-            return i + close.len();
-        }
-        if !triple && b[i] == b'\\' {
-            i += 2;
-            continue;
-        }
-        if depth == 0 && (b[i] == b'{' || b[i] == b'}') && b.get(i + 1) == Some(&b[i]) {
-            // `{{` / `}}` emit a literal brace and never open a hole.
-            i += 2;
-            continue;
-        }
-        if b[i] == b'{' {
-            if depth == 0 {
-                emit(text_start, i, LexRegion::StringText);
-                hole_open = i;
+/// Emit the regions of the literal opening at `src[start]`: its text pieces as
+/// `StringText`, its interpolation holes as `Code`, and (recursively) any
+/// literal nested inside a hole. Returns the index just past the literal.
+fn string_regions(
+    src: &str,
+    start: usize,
+    emit: &mut dyn FnMut(usize, usize, LexRegion),
+) -> usize {
+    let scan = crate::interp::scan_string(src, start);
+    // The whole literal is text; the holes carve `Code` back out of it, and
+    // `region_at` takes the innermost match.
+    let last = if scan.terminated { scan.end - 1 } else { scan.end };
+    emit(start, last, LexRegion::StringText);
+    for piece in &scan.pieces {
+        if let crate::interp::Piece::Hole { range, closed, .. } = piece {
+            // An unclosed hole that ran to end of input has no `}` to exclude.
+            let hole_last =
+                if !closed && range.1 == src.len() { range.1 } else { range.1 - 1 };
+            emit(range.0, hole_last, LexRegion::Code);
+            let mut j = range.0 + 1;
+            while j < range.1 {
+                if literal_opens_at(src, j) {
+                    j = string_regions(src, j, emit).max(j + 1);
+                } else {
+                    j += 1;
+                }
             }
-            depth += 1;
-            i += 1;
-            continue;
         }
-        if b[i] == b'}' && depth > 0 {
-            depth -= 1;
-            if depth == 0 {
-                emit(hole_open, i, LexRegion::Code);
-                text_start = i;
-            }
-            i += 1;
-            continue;
-        }
-        // A nested literal inside a hole is opaque -- its quotes, braces and
-        // colons belong to it, not to the enclosing string.
-        if depth > 0 && b[i] == b'"' {
-            let inner_end = string(src, i, emit);
-            i = inner_end.max(i + 1);
-            continue;
-        }
-        i += 1;
     }
-    // Unterminated: whatever was open runs to end of input.
-    if depth > 0 {
-        emit(hole_open, n, LexRegion::Code);
-    } else {
-        emit(text_start, n, LexRegion::StringText);
-    }
-    n
+    scan.end
 }
 
 fn line_end(b: &[u8], from: usize) -> usize {
