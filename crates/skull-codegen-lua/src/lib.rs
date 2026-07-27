@@ -1867,7 +1867,10 @@ impl Emitter<'_> {
             // that decomposition was bypassed. Fail loudly: emitting ANY Lua
             // here would be silently wrong code.
             ContainerKind::VecValueColumns(elem) => {
-                unreachable!("whole-element index of column-stored [{elem}] reached emit")
+                unreachable!(
+                    "whole-element index of column-stored [{elem}] reached emit, in `{}`",
+                    self.func.name
+                )
             }
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 out.push_str("__nb_checked_get(");

@@ -335,6 +335,42 @@ fn column_iteration_rejects_where_it_cannot_specialize() {
     }
 }
 
+const VEC_ENUMERATE: &str = r#"
+value V2 { x: float, y: float }
+
+fn total(xs: [V2]) -> float {
+    let a = 0.0
+    for (i, v) in enumerate(xs) { a = a + v.x + i }
+    return a
+}
+
+fn main() { let xs: [V2] = [V2 { x: 1.0, y: 2.0 }]; print("{total(xs)}") }
+"#;
+
+/// `enumerate` is the first confirmed casualty of the un-audited stdlib Vec
+/// surface, and the one real game code hits: bitgun's `update_survivors`
+/// enumerates a `[Vec2]`, which is why the game no longer compiles. It reads a
+/// whole element out of the boxed `_data` backing, so under columns there is no
+/// slot to name.
+///
+/// The requirement pinned here is only that it FAILS AS A DIAGNOSTIC. The
+/// emitter's own `unreachable!` already refused to emit, but a panic in a
+/// parallel emit worker carries no span and no source location -- `just
+/// test-games` reported a backtrace naming a codegen line rather than the
+/// function at fault. Making `enumerate` column-aware is the actual fix and
+/// belongs with the rest of the stdlib Vec surface.
+#[test]
+fn enumerate_over_column_storage_rejects_rather_than_panicking() {
+    let err = common::try_emit_module(VEC_ENUMERATE)
+        .err()
+        .expect("`enumerate` over column storage must not emit");
+    assert!(
+        err.message.contains("whole-element access to a column-stored"),
+        "rejected for the wrong reason: {}",
+        err.message
+    );
+}
+
 const VEC_BOXED_ELEMS_UNSPLICED: &str = r#"
 value WithRef { name: string, k: int }
 value Wide { a: int, b: int, c: int, d: int, e: int }

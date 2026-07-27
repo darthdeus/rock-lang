@@ -909,7 +909,7 @@ fn emit_body_chunk(
         // Coroutines never inline, so a combinator chain here would leave a
         // call to a bounded fn that has no standalone emission -- reject.
         skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
-        validate_no_residual_spec_bindings(&mf)?;
+        validate_emitted_body(&mf)?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let lua = crate::coroutine_emit::emit_coroutine(ws, cg, self_ref, &mf);
@@ -953,8 +953,7 @@ fn emit_body_chunk(
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
-    validate_no_residual_spec_bindings(&mf)?;
-    validate_nested_spec_bindings(&mf.nested_fns)?;
+    validate_emitted_body(&mf)?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -1071,16 +1070,56 @@ fn validate_no_residual_spec_bindings(mf: &skull_mir::mir::MirFunc) -> Result<()
     Ok(())
 }
 
+/// Post-transform gate: no whole-element access to a column-stored Vec may reach
+/// the emitter. Column storage has no element table, so there is no single slot
+/// to read or write; lowering decomposes every such access into per-column ones
+/// (`column_element_repr` / `column_element_store`). Anything left is a
+/// decomposition the lowerer does not implement yet -- today, a stdlib Vec entry
+/// point that still goes through the boxed `_data` (`enumerate` is the one real
+/// game code hits, in bitgun's `update_survivors`).
+///
+/// The emitter already refuses these (`write_index`'s `unreachable!`), but a
+/// panic in a parallel emit worker is the wrong shape of loud: no span, no source
+/// location, and the process exit code depends on the caller. Rejecting here
+/// gives the same guarantee as a spanned `CompilerError`.
+fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
+    use skull_mir::mir::{ContainerKind::VecValueColumns, Inst};
+    for (_, block) in mf.blocks.iter() {
+        for &iid in &block.insts {
+            let elem = match &mf.insts[iid] {
+                Inst::Index { kind: VecValueColumns(e), .. }
+                | Inst::StoreIndex { kind: VecValueColumns(e), .. }
+                | Inst::ArrayPush { kind: VecValueColumns(e), .. } => e,
+                _ => continue,
+            };
+            return Err(format!(
+                "whole-element access to a column-stored `[{elem}]` survived lowering \
+                 (column storage has no element table, so there is no slot to name)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// [`validate_no_residual_spec_bindings`] over a hoisted-body tree (named nested
 /// `fn`s and the lambda bodies `convert_closures` appends), each of which emits as
 /// its own top-level Lua function and so needs the check in its own right.
 fn validate_nested_spec_bindings(nested: &[MirFunc]) -> Result<(), String> {
     for nf in nested {
-        validate_no_residual_spec_bindings(nf)
-            .and_then(|()| validate_nested_spec_bindings(&nf.nested_fns))
+        validate_emitted_body(nf)
             .map_err(|msg| format!("in nested body `{}`: {msg}", nf.name))?;
     }
     Ok(())
+}
+
+/// Every post-transform invariant one about-to-be-emitted body must hold, and its
+/// hoisted children with it. The single entry point on purpose: each check below
+/// was added because some emitted-body kind was missing it, so a new check joins
+/// here rather than at one call site.
+fn validate_emitted_body(mf: &MirFunc) -> Result<(), String> {
+    validate_no_residual_spec_bindings(mf)?;
+    validate_no_whole_element_column_access(mf)?;
+    validate_nested_spec_bindings(&mf.nested_fns)
 }
 
 /// The spec-binding check for a decorator / global-init unit, whose body and
@@ -1094,8 +1133,7 @@ fn check_unit_spec_bindings(
     mf: &MirFunc,
     span: bone_semantic::prelude::Span,
 ) -> Result<(), CompilerError> {
-    let r = validate_no_residual_spec_bindings(mf)
-        .and_then(|()| validate_nested_spec_bindings(&mf.nested_fns));
+    let r = validate_emitted_body(mf);
     match r {
         Ok(()) => Ok(()),
         Err(_) if is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
