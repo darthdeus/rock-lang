@@ -203,6 +203,15 @@ fn column_vec_iterated_inside_a_lambda() {
         !body.contains("_data"),
         "lambda body read the single `_data` backing of a column-stored [V2]:\n{body}"
     );
+    // Columns were actually CHOSEN here: the column path bounds-checks once with
+    // `__vec_checked_index` then reads each leaf array raw, where the boxed path
+    // fetches the whole element with `__vec_checked_get`. Without this the test
+    // survives column storage being switched off entirely -- the `_data` absence
+    // above is equally true of a boxed element read that lives in the stdlib.
+    assert!(
+        body.contains("__vec_checked_index") && !body.contains("__vec_checked_get"),
+        "lambda body must iterate COLUMN storage (one index check + per-leaf reads):\n{body}"
+    );
     assert_eq!(
         common::run_luajit(&format!("{lua}\nmain()\n"), "col_lambda"),
         "4",
@@ -224,6 +233,13 @@ fn column_vec_iterated_inside_a_nested_fn() {
         !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "nested fn called the UNSPECIALIZED VecIter `next` over column storage \
          (the specialized copy is `..._spec_V2`):\n{body}"
+    );
+    // As in the lambda case: pin that columns were CHOSEN, not merely that the
+    // unspecialized `next` is absent -- the loop inlines to a FORL with no `next`
+    // call at all, so the negative above holds under boxed storage too.
+    assert!(
+        body.contains("__vec_checked_index") && !body.contains("__vec_checked_get"),
+        "nested fn must iterate COLUMN storage (one index check + per-leaf reads):\n{body}"
     );
     assert_eq!(
         common::run_luajit(&format!("{lua}\nmain()\n"), "col_nested"),
@@ -346,6 +362,15 @@ fn main() {
 #[test]
 fn stdlib_vec_surface_works_over_column_storage() {
     let lua = common::try_emit_module(VEC_STDLIB_SURFACE).expect("stdlib Vec surface must emit");
+    // The values below are correct under BOXED storage too, so pin the mechanism
+    // this test is named for: each plain-generic entry point reaches a standalone
+    // `_spec_V2` copy rather than the shared `_data` body.
+    for callee in ["vec_set_spec_V2(", "pop_arr_T_ret_T_opt_spec_V2(", "clear_arr_T_ret_unit_spec_V2("] {
+        assert!(
+            lua.contains(callee),
+            "the stdlib Vec surface must call the specialized `{callee}` over column storage"
+        );
+    }
     assert_eq!(
         common::run_luajit(&format!("{lua}\nmain()\n"), "col_surface"),
         "set:9,90\nget:2,20\npop:3 len2\nswap:9 now2 len1\nclear len0\nrepush:7,70 len1"
