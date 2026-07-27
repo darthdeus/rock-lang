@@ -8236,6 +8236,12 @@ impl Builder<'_> {
     }
 
     /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
+    ///
+    /// Resolves through the active [`SpecSubst`], so inside a SPECIALIZED body
+    /// (`VecIter<Vec2>.next`, `fn f<T>(xs: [T])` at a `[Vec2]` site) the element
+    /// is the concrete struct rather than an opaque `T`. Without this the
+    /// stdlib iterator lowers `it.vec[it.i]` against the boxed representation
+    /// and reads a `_data` that column storage does not have.
     fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let TypeExpr::App { ctor: TypeCtor::Array, params } = self.ty_node(ty)? else {
@@ -8243,8 +8249,16 @@ impl Builder<'_> {
         };
         let p = params.into_iter().next()?;
         let elem = self.resolve_tyid(ty.with_idx(p))?;
-        let TypeExpr::App { ctor: TypeCtor::Nominal(en), .. } = self.ty_node(elem)? else {
-            return None;
+        let en = match self.ty_node(elem)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+            // An UNSUBSTITUTED generic element stays boxed: the shared
+            // (non-specialized) snapshot of a generic body must keep the
+            // representation that every instantiation can read.
+            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+                Some(ReifiedLeaf::Nominal(n)) => *n,
+                _ => return None,
+            },
+            _ => return None,
         };
         vec_column_elem(self.ws, en)
     }
