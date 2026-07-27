@@ -530,6 +530,22 @@ pub enum ReifiedLeaf {
     Prim(&'static str),
 }
 
+/// Whether any generic in `key` binds a column-eligible element type -- i.e.
+/// whether specializing is a CORRECTNESS requirement rather than an optimization.
+///
+/// In a context the inliner never enters, an ordinary call simply forgoes the
+/// scalar ABI (`in_unspliced_ctx`) because the shared generic body still serves a
+/// boxed value correctly. The `for`-protocol `next` can only do the same for an
+/// element the boxed representation still stores: under column storage the shared
+/// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
+/// spec binding exactly when the element is column-stored, and the post-emit
+/// validator turns that into a rejection instead of a miscompile.
+fn spec_key_has_column_elem(ws: &Workspace, key: &SpecKey) -> bool {
+    key.iter().flatten().any(
+        |leaf| matches!(leaf, ReifiedLeaf::Nominal(n) if vec_column_elem(ws, *n).is_some()),
+    )
+}
+
 /// A callee's per-generic instantiation at one call site, in declaration order.
 /// `None` = that generic did not reify to a leaf (no specialization for it).
 /// The snapshot cache key alongside the `FuncRef`.
@@ -5992,7 +6008,9 @@ impl Builder<'_> {
                 // splices the SHARED generic snapshot, whose element access was
                 // lowered against the boxed representation -- which reads a
                 // `_data` that column storage does not have.
-                let spec = self.next_call_spec(func, next_generics);
+                let spec = self
+                    .next_call_spec(func, next_generics)
+                    .filter(|k| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k));
                 let call = self.emit_cur(Inst::CallMulti {
                     dests: dests.clone(),
                     func,

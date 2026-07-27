@@ -125,18 +125,26 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
 
 // --- separately-emitted callable bodies ------------------------------------
 //
-// A lambda body / nested fn is its own emitted callable, and the inliner scans
-// only TOP-LEVEL CFG blocks (a cell used in a lambda body is an upvalue, so
-// splicing there piles onto LuaJIT's 60-upvalue cap). So a `for` over a
-// column-stored Vec inside one reaches the SHARED generic `VecIter<T>.next`,
-// which reads the `_data` that column storage does not have.
+// A lambda body, a nested `fn`, a `co fn`'s state machine and a global
+// initializer are each their own emitted callable, and the inliner scans only
+// TOP-LEVEL CFG blocks (a cell used in a lambda body is an upvalue, so splicing
+// there piles onto LuaJIT's 60-upvalue cap). So a `for` over a column-stored Vec
+// inside one reaches the SHARED generic `VecIter<T>.next`, which reads the
+// `_data` that column storage does not have.
 //
-// These are RED and stay red until specialization works in every emitted
-// callable context. The ordinary-call guard (`in_unspliced_ctx` -> keep the
-// shared boxed ABI, `lower.rs:3965`) is NOT the fix here: for a boxed value the
-// shared body is CORRECT and the guard merely forgoes an optimization, whereas
-// for columns the shared body is WRONG -- taking that branch would turn a loud
-// rejection into a miscompile.
+// All four are RED and stay red until specialization works in every emitted
+// callable context. Each currently stops at the same emit rejection, which is
+// the safety net working -- `column_iteration_rejects_where_it_cannot_specialize`
+// pins that, so a REGRESSION to a silent miscompile fails a test rather than
+// merely leaving these red for a new reason.
+//
+// The ordinary-call guard (`in_unspliced_ctx` -> keep the shared boxed ABI,
+// `lower.rs:3965`) is NOT the fix here: for a boxed value the shared body is
+// CORRECT and the guard merely forgoes an optimization, whereas for columns the
+// shared body is WRONG -- taking that branch would turn a loud rejection into a
+// miscompile. That distinction is what
+// `unspliceable_iteration_of_boxed_elements_still_emits` guards from the other
+// side: the rejection must reach column-eligible elements ONLY.
 
 const VEC_IN_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
@@ -180,11 +188,9 @@ fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
     common::function_body(lua, names[0])
 }
 
-/// Iterating a column-stored Vec inside a LAMBDA. Today this is a hard emit
-/// rejection ("a value-specialized generic call was not spliced") -- the
-/// residual-specialization validator catching it, which is the safety net
-/// working. Real engine code hits it (`draw_glow_lights`, a `for` over
-/// `GLOW_LIGHTS` inside a `with_blend_mode(..., () => ..)` callback).
+/// Iterating a column-stored Vec inside a LAMBDA. Real engine code hits it
+/// (`draw_glow_lights`, a `for` over `GLOW_LIGHTS` inside a
+/// `with_blend_mode(..., () => ..)` callback).
 ///
 /// Scoped to the LAMBDA's own body: the stdlib always emits `_data`, so a
 /// module-wide assertion could never go green even after a correct fix.
@@ -204,11 +210,8 @@ fn column_vec_iterated_inside_a_lambda() {
     );
 }
 
-/// The same shape in a NESTED FN is worse than the lambda case: it emits
-/// silently. The nested fn becomes its own top-level function whose loop calls
-/// the UNSPECIALIZED `next_VecIter_T_..`, and the residual-specialization
-/// validator does not fire -- so there is no compile-time signal at all and it
-/// dies at runtime on `_data` being nil.
+/// The same shape in a NESTED FN, which becomes its own top-level function whose
+/// loop calls the UNSPECIALIZED `next_VecIter_T_..`.
 ///
 /// Scoped to the nested fn's own body: the SHARED generic `next` stays emitted
 /// module-wide even when this call site correctly splices a specialized one.
@@ -227,6 +230,142 @@ fn column_vec_iterated_inside_a_nested_fn() {
         "4",
         "nested fn over column storage computed the wrong sum"
     );
+}
+
+const VEC_IN_CO_FN: &str = r#"
+value V2 { x: float, y: float }
+
+co fn walk(xs: [V2]) -> Coroutine<float> {
+    for v in xs {
+        yield v.x
+    }
+}
+
+fn go() -> float {
+    let xs: [V2] = [V2 { x: 1.0, y: 0.0 }, V2 { x: 3.0, y: 0.0 }]
+    let c = walk(xs)
+    let a = c.resume() ?? 0.0
+    let b = c.resume() ?? 0.0
+    return a + b
+}
+
+fn main() { print("{go()}") }
+"#;
+
+/// The same shape in a `co fn` -- the state-machine `__step` is its own emitted
+/// top-level function, so it is the nested-fn case again.
+///
+/// A coroutine is why this context must reject at COMPILE time and cannot be
+/// left to fail loudly at runtime: `__resume` wraps `__step` in a `pcall` and, on
+/// error, parks the error in `s.__error`, sets `__state = -2` and returns nil. An
+/// unspecialized `next` therefore raises `attempt to index field '_data' (a nil
+/// value)` that never reaches stderr -- the caller reads an exhausted coroutine
+/// and computes a wrong answer (`go()` yielded 0, not 4).
+///
+/// Scoped to `__step`'s own body for the same reason as the nested-fn case.
+#[test]
+fn column_vec_iterated_inside_a_co_fn() {
+    let lua = common::try_emit_module(VEC_IN_CO_FN)
+        .expect("column [V2] iterated in a co fn must emit");
+    let body = body_of_synthetic(&lua, "__step");
+    assert!(
+        !body.contains("next_VecIter_T_"),
+        "co fn `__step` called the UNSPECIALIZED VecIter `next` over column \
+         storage (the raised error is swallowed by `__resume`'s pcall):\n{body}"
+    );
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "col_cofn"),
+        "4",
+        "co fn over column storage computed the wrong sum"
+    );
+}
+
+const VEC_IN_GLOBAL_INIT: &str = r#"
+value V2 { x: float, y: float }
+
+global TOTAL: float = {
+    let xs: [V2] = [V2 { x: 1.0, y: 0.0 }, V2 { x: 3.0, y: 0.0 }]
+    let a = 0.0
+    for v in xs { a = a + v.x }
+    a
+}
+
+fn main() { print("{TOTAL}") }
+"#;
+
+/// A global initializer is the fourth separately-emitted body: `__skull_ginit_*`
+/// is lowered and emitted by its own unit, which the inliner never enters.
+#[test]
+fn column_vec_iterated_in_a_global_initializer() {
+    let lua = common::try_emit_module(VEC_IN_GLOBAL_INIT)
+        .expect("column [V2] iterated in a global initializer must emit");
+    let body = body_of_synthetic(&lua, "ginit_TOTAL");
+    assert!(
+        !body.contains("next_VecIter_T_"),
+        "global initializer called the UNSPECIALIZED VecIter `next` over column \
+         storage:\n{body}"
+    );
+    assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "col_ginit"), "4");
+}
+
+/// Until specialization reaches those four bodies, each must REJECT rather than
+/// emit. This is the property that keeps the tests above honest: they are red
+/// either way, so without this a regression from "loud rejection" back to
+/// "silent miscompile" would not fail anything.
+///
+/// The global-initializer case additionally pins that the rejection travels the
+/// hard-error channel and not `UnitOut::skipped`, which is silent unless
+/// `SKULL_DEBUG_SKIPPED` is set.
+#[test]
+fn column_iteration_rejects_where_it_cannot_specialize() {
+    for (ctx, src) in [
+        ("lambda", VEC_IN_LAMBDA),
+        ("nested fn", VEC_IN_NESTED_FN),
+        ("co fn", VEC_IN_CO_FN),
+        ("global init", VEC_IN_GLOBAL_INIT),
+    ] {
+        let err = common::try_emit_module(src)
+            .err()
+            .unwrap_or_else(|| panic!("{ctx}: unspliceable column iteration must not emit"));
+        assert!(
+            err.message.contains("was not spliced"),
+            "{ctx}: rejected for the wrong reason: {}",
+            err.message
+        );
+    }
+}
+
+const VEC_BOXED_ELEMS_UNSPLICED: &str = r#"
+value WithRef { name: string, k: int }
+value Wide { a: int, b: int, c: int, d: int, e: int }
+
+co fn walk_ref(xs: [WithRef]) -> Coroutine<int> {
+    for v in xs { yield v.k }
+}
+
+fn nested_wide(xs: [Wide]) -> int {
+    fn inner(ys: [Wide]) -> int { let a = 0; for v in ys { a = a + v.a }; return a }
+    return inner(xs)
+}
+
+fn main() {
+    let c = walk_ref([WithRef { name: "a", k: 1 }])
+    let one = c.resume() ?? 0
+    print("{one + nested_wide([Wide { a: 3, b: 0, c: 0, d: 0, e: 0 }])}")
+}
+"#;
+
+/// The other side of the rejection: it must fire ONLY where the representation
+/// differs. `WithRef` has a reference leaf and `Wide` exceeds
+/// `MAX_COLUMN_LEAVES`, so both keep the boxed `_data` -- for them the shared
+/// generic `next` is CORRECT and an unspliceable context simply forgoes the
+/// scalar ABI, exactly as an ordinary call does. Rejecting here would bounce
+/// working code, which is what the first cut of the validator did.
+#[test]
+fn unspliceable_iteration_of_boxed_elements_still_emits() {
+    let lua = common::try_emit_module(VEC_BOXED_ELEMS_UNSPLICED)
+        .expect("boxed element types must still emit in unspliceable contexts");
+    assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "boxed_unspliced"), "4");
 }
 
 const VEC_CONTROLS: &str = r#"

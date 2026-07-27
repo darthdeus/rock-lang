@@ -355,6 +355,12 @@ struct UnitOut {
     lua: String,
     /// `(lua_name, reason)` if the new path could not lower this definition.
     skipped: Option<(String, String)>,
+    /// A REJECTION, as opposed to the lenient `skipped` channel above (which is
+    /// only ever printed under `SKULL_DEBUG_SKIPPED`). A decorator body or global
+    /// initializer that lowered but then failed a post-lowering invariant must
+    /// fail the compile: routing it to `skipped` would emit the broken Lua and say
+    /// nothing, which is the miscompile this check exists to prevent.
+    hard_error: Option<CompilerError>,
     /// `(emit_key, direct_global_reads, direct_callees)` for global-init ordering.
     refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     /// `(global_name, init_key, load_line)` for a global initializer.
@@ -416,6 +422,10 @@ fn emit_decorator_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
+            if let Err(e) = check_unit_spec_bindings(ws, mid, &deco_name, &mf, d.span) {
+                out.hard_error = Some(e);
+                return out;
+            }
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, &deco_name, &mf);
@@ -458,6 +468,10 @@ fn emit_global_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
+            if let Err(e) = check_unit_spec_bindings(ws, mid, g.name.as_str(), &mf, g.name_span) {
+                out.hard_error = Some(e);
+                return out;
+            }
             let key = Ustr::from(&init_name);
             skull_codegen_lua::regalloc_time_reset();
             let te = Instant::now();
@@ -895,6 +909,7 @@ fn emit_body_chunk(
         // Coroutines never inline, so a combinator chain here would leave a
         // call to a bounded fn that has no standalone emission -- reject.
         skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
+        validate_no_residual_spec_bindings(&mf)?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let lua = crate::coroutine_emit::emit_coroutine(ws, cg, self_ref, &mf);
@@ -938,7 +953,8 @@ fn emit_body_chunk(
     skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf).map_err(|e| e.message)?;
-    validate_no_residual_spec_bindings(f, &mf)?;
+    validate_no_residual_spec_bindings(&mf)?;
+    validate_nested_spec_bindings(&mf.nested_fns)?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -1022,14 +1038,22 @@ fn is_stdlib_module_file(file: &str) -> bool {
 /// `T` as one boxed slot and would drop every leaf but the first. A surviving
 /// (still block-reachable) entry means the splice was skipped; that is the
 /// documented hard rejection (`MirFunc::spec_bindings` docs) rather than emitting
-/// broken Lua. The lowerer boxes value args in contexts the inliner never enters
-/// (closures, nested fns, coroutines, globals, decorators) and the inliner
-/// force-splices specialized calls past the cell budget, so this never fires on a
-/// well-formed program -- it guards the invariant, not a known reachable case.
-fn validate_no_residual_spec_bindings(
-    f: &bone_semantic::hir::Function,
-    mf: &skull_mir::mir::MirFunc,
-) -> Result<(), String> {
+/// broken Lua.
+///
+/// Must run on EVERY separately-emitted body, not just the top-level one: a
+/// nested `fn` and a `co fn`'s state machine are their own emitted callables, and
+/// leaving them unchecked made a missing splice silent (the nested fn died at
+/// runtime on a nil `_data`; the `co fn` did not even do that -- `__resume`'s
+/// pcall parked the error in `s.__error` and returned nil, so the caller read an
+/// exhausted coroutine and computed a wrong answer).
+///
+/// Ordinary calls in those contexts never reach here: the lowerer boxes their
+/// value args (`in_unspliced_ctx`), forgoing the scalar ABI to keep the shared
+/// generic body serviceable. The `for`-protocol `next` is the exception, and only
+/// for a column-eligible element -- there the shared body is not merely
+/// unoptimized but WRONG (it reads a `_data` that column storage does not have),
+/// so a rejection is the only correct outcome.
+fn validate_no_residual_spec_bindings(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
     for (_, block) in mf.blocks.iter() {
         for &iid in &block.insts {
             if mf.spec_bindings.contains_key(&iid)
@@ -1038,15 +1062,54 @@ fn validate_no_residual_spec_bindings(
                     skull_mir::mir::Inst::Call { .. } | skull_mir::mir::Inst::CallMulti { .. }
                 )
             {
-                return Err(format!(
-                    "`{}`: a value-specialized generic call was not spliced (its args are \
-                     splatted to leaves, so the shared generic body cannot serve it)",
-                    f.name
-                ));
+                return Err("a value-specialized generic call was not spliced (its args are \
+                     splatted to leaves, so the shared generic body cannot serve it)"
+                    .to_string());
             }
         }
     }
     Ok(())
+}
+
+/// [`validate_no_residual_spec_bindings`] over a hoisted-body tree (named nested
+/// `fn`s and the lambda bodies `convert_closures` appends), each of which emits as
+/// its own top-level Lua function and so needs the check in its own right.
+fn validate_nested_spec_bindings(nested: &[MirFunc]) -> Result<(), String> {
+    for nf in nested {
+        validate_no_residual_spec_bindings(nf)
+            .and_then(|()| validate_nested_spec_bindings(&nf.nested_fns))
+            .map_err(|msg| format!("in nested body `{}`: {msg}", nf.name))?;
+    }
+    Ok(())
+}
+
+/// The spec-binding check for a decorator / global-init unit, whose body and
+/// hoisted lambdas are emitted without ever passing through the inliner. Lenient
+/// for stdlib modules on the same grounds as the fn path: their emit gaps are the
+/// known parity list, a user definition that cannot emit is a hard error.
+fn check_unit_spec_bindings(
+    ws: &Workspace,
+    mid: ModuleId,
+    name: &str,
+    mf: &MirFunc,
+    span: bone_semantic::prelude::Span,
+) -> Result<(), CompilerError> {
+    let r = validate_no_residual_spec_bindings(mf)
+        .and_then(|()| validate_nested_spec_bindings(&mf.nested_fns));
+    match r {
+        Ok(()) => Ok(()),
+        Err(_) if is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
+        Err(msg) => Err(CompilerError::new_with_label(span, format!("cannot emit `{name}`: {msg}"))),
+    }
+}
+
+/// Surface the first [`UnitOut::hard_error`] in a parallel batch, in source order
+/// so the reported rejection does not depend on thread scheduling.
+fn first_unit_error(units: &[UnitOut]) -> Result<(), CompilerError> {
+    match units.iter().find_map(|u| u.hard_error.clone()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Assemble the full Lua program: prelude + decorator defs + the function section
@@ -1303,6 +1366,7 @@ fn assemble(
     let deco_results = par_map(deco_items, |(mid, did)| {
         emit_decorator_unit(ws, scx, cg, mid, did)
     });
+    first_unit_error(&deco_results)?;
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
     merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut times);
@@ -1330,6 +1394,7 @@ fn assemble(
     let global_results = par_map(global_items, |(mid, gid)| {
         emit_global_unit(ws, scx, cg, mid, gid)
     });
+    first_unit_error(&global_results)?;
     let mut globals_lua = String::new();
     // Held back and appended after the fn-def skips so the reported order is
     // unchanged by the hoist.
