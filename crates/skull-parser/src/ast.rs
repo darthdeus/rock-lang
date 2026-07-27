@@ -585,6 +585,7 @@ pub struct StructDef {
     pub generics: Vec<Generic>,
     pub fields: Vec<Field>,
     pub is_value: bool,
+    pub is_nobox: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

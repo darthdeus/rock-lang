@@ -294,6 +294,11 @@ pub enum Inst {
         /// fields hold the nested `MakeValueStruct`, not its flattened leaves.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
+    /// A value-struct box requested explicitly by `materialize(value)`.
+    MaterializeValueStruct {
+        name: Ustr,
+        fields: Vec<(Ustr, Idx<Inst>)>,
+    },
     /// An enum-variant value as a tagged table `{ __variant, __ty, <payload> }`.
     /// Tuple-payload variants fill `positional`; record-payload variants fill
     /// `named`; unit variants leave both empty.

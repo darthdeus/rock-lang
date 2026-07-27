@@ -265,6 +265,27 @@ mod tests {
     }
 
     #[test]
+    fn nobox_value_marks_the_value_type() {
+        let src = "nobox value V { x: int }";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let s = first_struct(&ast);
+        assert!(s.is_value);
+        assert!(s.is_nobox);
+    }
+
+    #[test]
+    fn nobox_rejects_a_reference_struct() {
+        let ast = parse_module("nobox struct S { x: int }", Ustr::from("test.rock"))
+            .expect("parser recovers the invalid item");
+        assert!(
+            ast.recovery_errors.iter().any(|err| err.message.contains("`nobox` requires `value`")),
+            "{:?}",
+            ast.recovery_errors
+        );
+    }
+
+    #[test]
     fn item_and_param_annotations_coexist() {
         // An item-level annotation on the fn plus a param annotation must both
         // land -- existing item-annotation parsing is untouched.

@@ -80,7 +80,13 @@ impl Ast {
                 )
             }
             ItemKind::Struct(s) => {
-                let tag = if s.is_value { "value-struct" } else { "struct" };
+                let tag = if s.is_nobox {
+                    "nobox-value"
+                } else if s.is_value {
+                    "value-struct"
+                } else {
+                    "struct"
+                };
                 let fields = s
                     .fields
                     .iter()

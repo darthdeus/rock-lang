@@ -20,6 +20,9 @@ pub struct Workspace {
     /// all. Monotonic on purpose: staying true after the last embed field is
     /// deleted costs a check, whereas a stale false would skip enforcement.
     pub has_embed_fields: bool,
+    /// Any value type is declared `nobox`. Monotonic for the same incremental
+    /// safety reason as `has_embed_fields`.
+    pub has_nobox_types: bool,
     pub enums_by_name: FxHashMap<Ustr, EnumId>,
     pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
     /// Declared generic-parameter count for every nominal type (struct / enum /
@@ -99,6 +102,7 @@ impl Workspace {
 
             struct_by_name: Default::default(),
             has_embed_fields: false,
+            has_nobox_types: false,
             enums_by_name: Default::default(),
             newtypes_by_name: Default::default(),
             type_generic_arity: Default::default(),

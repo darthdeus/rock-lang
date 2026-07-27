@@ -1349,6 +1349,10 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     return __rock_deepcopy_value(obj, {})
 """
 
+@materialize @intrinsic @pure fn materialize<T>(value: T) -> T {
+    return value
+}
+
 // Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
 // the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
 // at each call site with zero overhead. See docs/compiler-architecture.md.
@@ -1667,10 +1671,13 @@ inline(lua) fn table_new() -> any = """return {}"""
 @nomangle inline(lua) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     local n = vec.len or 0
     local order = {}
-    for i = 1, n do order[i] = i end
+    local elements = {}
+    for i = 1, n do
+        order[i] = i
+        elements[i] = __rock_materialize_column_element(vec, i)
+    end
     table.sort(order, function(a, b)
-        return key_fn(__rock_materialize_column_element(vec, a))
-            < key_fn(__rock_materialize_column_element(vec, b))
+        return key_fn(elements[a]) < key_fn(elements[b])
     end)
     for _, path in ipairs(__rock_col_paths(vec)) do
         local col = vec[path]

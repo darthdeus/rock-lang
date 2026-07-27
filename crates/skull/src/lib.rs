@@ -132,16 +132,19 @@ fn struct_shape_hash(
     let mut h = rustc_hash::FxHasher::default();
     "struct".hash(&mut h);
     s.is_value.hash(&mut h);
+    s.is_nobox.hash(&mut h);
     for f in s.fields.iter() {
         f.name.as_str().hash(&mut h);
         f.is_embed.hash(&mut h);
         ws.render(None, f.ty).hash(&mut h);
-        if !f.is_embed {
+        let child = nominal_field_type(ws, f.ty)
+            .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
+        let flattened = f.is_embed
+            || child.is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox);
+        if !flattened {
             continue;
         }
-        match nominal_field_type(ws, f.ty)
-            .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied())
-        {
+        match child {
             Some(sid) if !visiting.contains(&s.name) => {
                 let child = &ws.modules[sid.module.index()].structs[sid.def];
                 visiting.push(s.name);
@@ -845,9 +848,10 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     let mut out = String::new();
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
-            // A cdata-eligible enum is a value cdata `{__tag, _0}` (no singleton, no
-            // names table -- reflection is sacrificed); its defs come from
-            // `enum_cdata_defs`.
+            // A cdata-eligible enum is a value cdata `{__tag, _0}` with no
+            // singleton or names table; its ctype defs come from
+            // `enum_cdata_defs`, while `type_table_defs` records its physical
+            // slots and logical variants for typed runtime consumers.
             if skull_mir::lower::enum_value_shape(ws, e.name).is_some() {
                 continue;
             }
@@ -1004,16 +1008,22 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
                 .iter()
                 .map(|f| {
                     let (tystr, nullable) = reflect_field_type(ws, f.ty);
+                    let child = nominal_field_type(ws, f.ty)
+                        .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
+                    let flattened = f.is_embed
+                        || child.is_some_and(|sid| {
+                            ws.modules[sid.module.index()].structs[sid.def].is_nobox
+                        });
                     // `embed` marks a field whose leaves are THIS struct's
                     // physical keys (`f.x`), so reflection has to rebuild the
                     // logical child from them -- the declared name indexes
                     // nothing (a presence slot when nullable). The child's name
                     // must survive nullability for that rebuild to be possible.
-                    let tystr = match f.is_embed.then(|| nominal_field_type(ws, f.ty)).flatten() {
+                    let tystr = match flattened.then(|| nominal_field_type(ws, f.ty)).flatten() {
                         Some(n) => n,
                         None => tystr,
                     };
-                    let embed = if f.is_embed { ", embed = true" } else { "" };
+                    let embed = if flattened { ", embed = true" } else { "" };
                     format!(
                         "{{ name = \"{}\", type = \"{}\", nullable = {}{} }}",
                         f.name, tystr, nullable, embed
@@ -1040,6 +1050,8 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
     }
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
+            use bone_semantic::hir::VariantPayload;
+
             let Some(shape) = skull_mir::lower::enum_value_shape(ws, e.name) else {
                 continue;
             };
@@ -1052,11 +1064,50 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
                     "{{ name = \"{name}\", type = \"{field_type}\", nullable = false }}"
                 )
             }));
+            let variants: Vec<String> = e
+                .variants
+                .iter()
+                .enumerate()
+                .map(|(tag, variant)| {
+                    let payload: Vec<String> = match &variant.payload {
+                        VariantPayload::Unit => Vec::new(),
+                        VariantPayload::Tuple(types) => types
+                            .iter()
+                            .enumerate()
+                            .map(|(index, ty)| {
+                                let (field_type, _) = reflect_field_type(ws, *ty);
+                                format!(
+                                    "{{ name = \"{}\", slot = \"_{}\", type = \"{}\" }}",
+                                    index + 1,
+                                    index,
+                                    field_type
+                                )
+                            })
+                            .collect(),
+                        VariantPayload::Record(fields) => fields
+                            .iter()
+                            .map(|field| {
+                                let (field_type, _) = reflect_field_type(ws, field.ty);
+                                format!(
+                                    "{{ name = \"{0}\", slot = \"_{0}\", type = \"{1}\" }}",
+                                    field.name, field_type
+                                )
+                            })
+                            .collect(),
+                    };
+                    format!(
+                        "[{tag}] = {{ name = \"{}\", fields = {{ {} }} }}",
+                        variant.name,
+                        payload.join(", ")
+                    )
+                })
+                .collect();
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }}, variants = {{ {v} }} }}\n",
                 n = e.name,
                 id = type_id,
-                f = fields.join(", ")
+                f = fields.join(", "),
+                v = variants.join(", ")
             ));
             type_id += 1;
         }

@@ -175,7 +175,10 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => {
             vs.iter().for_each(|a| push(*a))
         }
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(|a| push(*a));
             named.iter().for_each(|(_, a)| push(*a));

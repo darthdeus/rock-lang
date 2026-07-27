@@ -237,6 +237,11 @@ fn fmt_inst(
                 fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
             format!("{name}_ct({})", parts.join(", "))
         }
+        Inst::MaterializeValueStruct { name, fields } => {
+            let parts: Vec<String> =
+                fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
+            format!("materialize {name}_ct({})", parts.join(", "))
+        }
         Inst::CoroHook { kind, lambda } => {
             format!("coro_hook {} v{}", kind.slot(), v(*lambda))
         }

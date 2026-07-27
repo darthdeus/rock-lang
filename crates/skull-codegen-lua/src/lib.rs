@@ -402,7 +402,8 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
             // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
             // global, cell) stores the REFERENCE and is what aliases.
-            Inst::MakeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields }
+            | Inst::MaterializeValueStruct { name, fields } => {
                 !fields.iter().any(|(_, v)| *v == cand)
                     || !skull_mir::lower::value_struct_is_gc(ws, *name)
             }
@@ -1691,7 +1692,8 @@ impl Emitter<'_> {
                 }
                 out.push('}');
             }
-            Inst::MakeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields }
+            | Inst::MaterializeValueStruct { name, fields } => {
                 // Positional ctor in declared field order; field names are for MIR
                 // passes only (SROA), not the wire shape. The ctor NAME is chosen
                 // by tier from the ONE classification: `_vt` (table) for a

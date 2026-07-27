@@ -821,6 +821,7 @@ pub struct StructDef {
     pub name: Ustr,
     pub name_span: Span,
     pub is_value: bool,
+    pub is_nobox: bool,
     pub span: Span,
     pub generics: Vec<TyId>,
     pub fields: Vec<StructFieldDef>,

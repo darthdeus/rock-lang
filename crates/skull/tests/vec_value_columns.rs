@@ -163,7 +163,7 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
 // own top-level CFG, at which point the upvalue reason expires and the inliner
 // runs over them. A `co fn`'s `__step` and a global initializer never run an
 // inliner at all, so they CALL a standalone specialized copy of the callee
-// (`next_..._spec_V2`) emitted once for the program.
+// (`next_..._spec_a_n2_V2_0_z`) emitted once for the program.
 //
 // The ordinary-call guard (`in_unspliced_ctx` -> keep the shared boxed ABI) is
 // still not the fix: for a boxed value the shared body is CORRECT and the guard
@@ -258,7 +258,7 @@ fn column_vec_iterated_inside_a_nested_fn() {
     assert!(
         !body.contains("next_VecIter_T_ret_tuple2_bool_T("),
         "nested fn called the UNSPECIALIZED VecIter `next` over column storage \
-         (the specialized copy is `..._spec_V2`):\n{body}"
+         (the specialized copy is `..._spec_a_n2_V2_0_z`):\n{body}"
     );
     // As in the lambda case: pin that columns were CHOSEN, not merely that the
     // unspecialized `next` is absent -- the loop inlines to a FORL with no `next`
@@ -390,8 +390,12 @@ fn stdlib_vec_surface_works_over_column_storage() {
     let lua = common::try_emit_module(VEC_STDLIB_SURFACE).expect("stdlib Vec surface must emit");
     // The values below are correct under BOXED storage too, so pin the mechanism
     // this test is named for: each plain-generic entry point reaches a standalone
-    // `_spec_V2` copy rather than the shared `_data` body.
-    for callee in ["vec_set_spec_V2(", "pop_arr_T_ret_T_opt_spec_V2(", "clear_arr_T_ret_unit_spec_V2("] {
+    // The encoded `a_n2_V2_0_z` key is the parameterless nominal `V2`.
+    for callee in [
+        "vec_set_spec_a_n2_V2_0_z(",
+        "pop_arr_T_ret_T_opt_spec_a_n2_V2_0_z(",
+        "clear_arr_T_ret_unit_spec_a_n2_V2_0_z(",
+    ] {
         assert!(
             lua.contains(callee),
             "the stdlib Vec surface must call the specialized `{callee}` over column storage"
@@ -521,42 +525,16 @@ fn main() {
 }
 "#;
 
-/// SENTINEL -- pins a KNOWN BUG. A combinator that wraps `VecIter` in ANOTHER
-/// iterator (`map`, `filter`, `any`, `collect`, ...) loses the element type, so
-/// the inner `VecIter<V2>.next` is spliced UNSPECIALIZED and reads the boxed
-/// `_data` a column Vec does not have. It dies at runtime with `_data` nil.
-///
-/// Direct iteration is fine -- `for v in a.iter()` and `enumerate(a)` both work
-/// -- so the trigger is exactly the wrapping, not iteration.
-///
-/// Root cause, and why this is not a stdlib conversion: `ReifiedLeaf::Nominal`
-/// carries an EMPTY param range by design (leaf-only reification), so
-/// `VecIter<V2>` reifies as a bare `Nominal("VecIter")` and the `V2` is
-/// structurally absent from the `SpecKey`. `spec_key_has_column_elem` therefore
-/// cannot see it, no specialization is forced, and the shared boxed body wins.
-/// Fixing it means making reification a TREE rather than a leaf, which touches
-/// `SpecKey`, `SpecSubst`, `spec_fn_name`, `reified_leaf_node` and
-/// `spec_subst_from_key`.
-///
-/// INVERTED ON PURPOSE: it asserts today's WRONG emission (a whole-element
-/// `__vec_checked_get` against column storage). When reification carries type
-/// arguments this goes RED -- flip both assertions to require the specialized
-/// call and a per-leaf read, and assert the runtime sum is "4".
 #[test]
-fn combinator_chain_over_columns_is_unspecialized_sentinel() {
+fn combinator_chain_preserves_column_element_type() {
     let lua = common::try_emit_module(VEC_COMBINATOR_CHAIN).expect("chain must emit");
     let body = common::function_body(&lua, "main");
     assert!(
-        body.contains("__vec_checked_get("),
-        "PINNED BEHAVIOR (BUG): a combinator chain over a column [V2] splices the \
-         UNSPECIALIZED VecIter next, which fetches a whole element. If this no \
-         longer holds the fix landed -- flip to `!body.contains(..)` plus a \
-         `__vec_checked_index` assertion and a runtime check of \"4\":\n{body}"
+        !body.contains("__vec_checked_get(") && body.contains("__vec_checked_index("),
+        "the wrapped VecIter<V2> must retain V2 and read its columns:\n{body}"
     );
-    assert!(
-        !lua.contains("_spec_V2"),
-        "PINNED BEHAVIOR (BUG): nothing in the chain specializes at V2, because \
-         `VecIter<V2>` reifies to a param-less `Nominal(\"VecIter\")`. If a \
-         specialized copy now appears the fix landed -- flip this assertion."
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "col_combinator"),
+        "4"
     );
 }

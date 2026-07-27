@@ -24,10 +24,14 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use bone_semantic::inference::Workspace;
+use bone_semantic::hir::BodyOwner;
+use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
-use skull_mir::lower::{lower_function_spec, spec_subst_from_key, ScalarCtx, SpecKey};
+use skull_mir::lower::{
+    lower_function_spec, spec_key_from_next_generics, spec_subst_from_key, ScalarCtx, SpecKey,
+    SpecSubst,
+};
 use skull_mir::mir::*;
 
 use crate::top_level_blocks;
@@ -658,6 +662,9 @@ fn resolve_cloned_bound_calls(
     callee: &MirFunc,
     inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
     site_tree: Option<&BoundTree>,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
 ) -> Result<(), CompilerError> {
     let empty = BoundTree::default();
     let n = site_tree.unwrap_or(&empty);
@@ -677,7 +684,11 @@ fn resolve_cloned_bound_calls(
         debug_assert!(matches!(callee.insts[old_id], Inst::CallBoundMulti { .. }));
         let g = *generic_idx as usize;
         match n.next.get(&g) {
-            Some(BoundNext::Concrete { func: (m, f), sub, .. }) => {
+            Some(BoundNext::Concrete {
+                func: (m, f),
+                sub,
+                next_generics,
+            }) => {
                 let concrete = FuncRef { module: *m, func: *f };
                 let (dests, args) = (dests.clone(), args.clone());
                 if !sub.is_empty() {
@@ -689,6 +700,17 @@ fn resolve_cloned_bound_calls(
                     }
                 }
                 func.insts[new_id] = Inst::CallMulti { dests, func: concrete, args };
+                if let Some(inf) = caller_inf {
+                    if let Some(key) = spec_key_from_next_generics(
+                        ws,
+                        inf,
+                        concrete,
+                        next_generics,
+                        caller_subst,
+                    ) {
+                        func.spec_bindings.insert(new_id, key);
+                    }
+                }
             }
             Some(BoundNext::CallerGeneric(_)) | None => {
                 return Err(CompilerError::new_no_location(format!(
@@ -720,13 +742,20 @@ fn import_spec_bindings(
 /// Splice candidate `cand` into `func` at `site`, removing the call. Returns the
 /// new top-level (reachable) blocks the splice added, for the driver to fold into
 /// its top-level set (straight adds none).
-fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<Block>>, CompilerError> {
+fn splice(
+    func: &mut MirFunc,
+    site: Site,
+    cand: &CalleeBody,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
+) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand)?;
+            splice_straight(func, site, cand, ws, caller_inf, caller_subst)?;
             Ok(Vec::new())
         }
-        Kind::General => splice_general(func, site, cand),
+        Kind::General => splice_general(func, site, cand, ws, caller_inf, caller_subst),
     }
 }
 
@@ -734,7 +763,14 @@ fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<B
 /// insts into the caller block in place of the call; no new blocks (the callee
 /// is lambda-free, so its insts reference no block). The caller block keeps its
 /// own terminator.
-fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<(), CompilerError> {
+fn splice_straight(
+    func: &mut MirFunc,
+    site: Site,
+    cand: &CalleeBody,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
+) -> Result<(), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
@@ -742,7 +778,15 @@ fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<
     let site_tree = func.bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
     let (inst_map, cell_map) = clone_cells_insts(func, callee, &overrides);
-    resolve_cloned_bound_calls(func, callee, &inst_map, site_tree.as_ref())?;
+    resolve_cloned_bound_calls(
+        func,
+        callee,
+        &inst_map,
+        site_tree.as_ref(),
+        ws,
+        caller_inf,
+        caller_subst,
+    )?;
     import_spec_bindings(func, callee, &inst_map);
 
     // Arg -> param-cell stores (coalesced params are aliased to the caller cell,
@@ -805,7 +849,14 @@ fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<
 /// at the call; the prefix arg-stores + `Goto` the cloned entry; a continuation
 /// block holds the post-call tail. Each cloned `Return` binds its values and
 /// `Goto`s the continuation.
-fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<Block>>, CompilerError> {
+fn splice_general(
+    func: &mut MirFunc,
+    site: Site,
+    cand: &CalleeBody,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
+) -> Result<Vec<Idx<Block>>, CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
@@ -813,7 +864,15 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<V
     let site_tree = func.bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
     let (inst_map, cell_map, block_map) = clone_all(func, callee, &overrides);
-    resolve_cloned_bound_calls(func, callee, &inst_map, site_tree.as_ref())?;
+    resolve_cloned_bound_calls(
+        func,
+        callee,
+        &inst_map,
+        site_tree.as_ref(),
+        ws,
+        caller_inf,
+        caller_subst,
+    )?;
     import_spec_bindings(func, callee, &inst_map);
     let entry_clone = block_map[&callee.entry];
 
@@ -933,12 +992,26 @@ pub fn inline_functions(
     func: &mut MirFunc,
     cache: &mut InlineCache,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::new())
+}
+
+pub fn inline_functions_with_subst(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    self_ref: FuncRef,
+    func: &mut MirFunc,
+    cache: &mut InlineCache,
+    caller_subst: &SpecSubst,
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
     // Kill-switch for perf attribution / bisecting a suspected inline bug.
     if std::env::var("SKULL_INLINE_OFF").is_ok() {
         return Ok((spliced, records));
     }
+    let caller_inf = ws
+        .inference(self_ref.module)
+        .and_then(|result| result.per_fn.get(&BodyOwner::Function(self_ref.func)));
     // The caller's top-level blocks (excludes closure sub-CFGs), maintained
     // incrementally so neither find_site nor the loop recomputes reachability.
     let mut top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
@@ -967,7 +1040,7 @@ pub fn inline_functions(
             forced: cand.forced,
             callee_insts: cand.insts,
         });
-        let added = splice(func, site, cand)?;
+        let added = splice(func, site, cand, ws, caller_inf, caller_subst)?;
         top.extend(added);
         spliced.insert(fref);
         resume = Some(pos);

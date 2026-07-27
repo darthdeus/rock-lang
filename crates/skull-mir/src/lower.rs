@@ -183,6 +183,7 @@ fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
 pub struct ValueShape {
     name: Ustr,
     fields: Vec<(Ustr, FieldShape)>,
+    nullable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -200,7 +201,8 @@ impl ValueShape {
                 FieldShape::Prim => 1,
                 FieldShape::Nested(s) => s.leaf_count(),
             })
-            .sum()
+            .sum::<usize>()
+            + usize::from(self.nullable)
     }
 }
 
@@ -235,7 +237,17 @@ fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) -> Option<i64
 #[derive(Clone)]
 enum ValueRepr {
     Scalar(Idx<Inst>),
-    Group { name: Ustr, parts: Vec<ValueRepr> },
+    Group {
+        name: Ustr,
+        parts: Vec<ValueRepr>,
+        present: Option<Idx<Inst>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum SpreadDest {
+    Container(ContainerKind),
+    Columns(Ustr),
 }
 
 /// The result repr of a swizzle: one selected component is the bare scalar;
@@ -249,7 +261,11 @@ fn swizzle_group(parts: Vec<ValueRepr>) -> ValueRepr {
             3 => "Vec3",
             _ => "Vec4",
         };
-        ValueRepr::Group { name: Ustr::from(name), parts }
+        ValueRepr::Group {
+            name: Ustr::from(name),
+            parts,
+            present: None,
+        }
     }
 }
 
@@ -325,7 +341,11 @@ fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Opti
         fields.push((f.name, fs));
     }
     visiting.pop();
-    Some(ValueShape { name, fields })
+    Some(ValueShape {
+        name,
+        fields,
+        nullable: false,
+    })
 }
 
 /// The scalar-ABI shape of a GC-CARRYING value struct (`value_struct_is_gc`):
@@ -379,7 +399,11 @@ fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> O
         fields.push((f.name, fs));
     }
     visiting.pop();
-    Some(ValueShape { name, fields })
+    Some(ValueShape {
+        name,
+        fields,
+        nullable: false,
+    })
 }
 
 /// Declared field names of struct `name`, in declaration order (the positional
@@ -503,7 +527,17 @@ fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
             .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape())),
         TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                flat_enum_shape(ws, n).map(|s| s.value_shape())
+                if ws
+                    .struct_by_name
+                    .get(&n)
+                    .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+                {
+                    let mut shape = value_shape(ws, n).or_else(|| value_shape_gc(ws, n))?;
+                    shape.nullable = true;
+                    Some(shape)
+                } else {
+                    flat_enum_shape(ws, n).map(|s| s.value_shape())
+                }
             }
             _ => None,
         },
@@ -518,16 +552,42 @@ fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
         .or_else(|| flat_enum_shape(ws, name).map(|s| s.value_shape()))
 }
 
-/// An arena-free concrete binding for a generic param at a specialized call site:
-/// a nominal type with no params (a value struct / enum) or a scalar primitive
-/// (carried as its C type name). A binding that reifies to one of these
-/// specializes; a nested generic, a `string`, or an unresolved var does not (v0
-/// leaf-only scope). Arena-free so it keys the cross-body snapshot cache and
-/// threads into the callee lowering without a caller-arena `TyId`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum ReifiedLeaf {
+pub enum ReifiedCtor {
+    Array,
+    Map,
     Nominal(Ustr),
+}
+
+/// An arena-free concrete type binding for a generic param at a specialized
+/// call site. It keys cross-body snapshots without retaining caller-arena
+/// `TyId`s, and preserves nested arguments such as `VecIter<Vec2>`.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ReifiedType {
     Prim(&'static str),
+    App {
+        ctor: ReifiedCtor,
+        params: Vec<ReifiedType>,
+    },
+}
+
+impl ReifiedType {
+    fn nominal(&self) -> Option<Ustr> {
+        match self {
+            Self::App { ctor: ReifiedCtor::Nominal(name), .. } => Some(*name),
+            _ => None,
+        }
+    }
+
+    fn any_nominal(&self, pred: &impl Fn(Ustr) -> bool) -> bool {
+        match self {
+            Self::Prim(_) => false,
+            Self::App { ctor, params } => {
+                matches!(ctor, ReifiedCtor::Nominal(name) if pred(*name))
+                    || params.iter().any(|param| param.any_nominal(pred))
+            }
+        }
+    }
 }
 
 /// Whether any generic in `key` binds a column-eligible element type -- i.e.
@@ -541,46 +601,63 @@ pub enum ReifiedLeaf {
 /// spec binding exactly when the element is column-stored, and the post-emit
 /// validator turns that into a rejection instead of a miscompile.
 fn spec_key_has_column_elem(ws: &Workspace, key: &SpecKey) -> bool {
-    key.iter().flatten().any(
-        |leaf| matches!(leaf, ReifiedLeaf::Nominal(n) if vec_column_elem(ws, *n).is_some()),
-    )
+    key.iter()
+        .flatten()
+        .any(|ty| ty.any_nominal(&|name| vec_column_elem(ws, name).is_some()))
 }
 
 /// A callee's per-generic instantiation at one call site, in declaration order.
-/// `None` = that generic did not reify to a leaf (no specialization for it).
+/// `None` = that generic did not reify (no specialization for it).
 /// The snapshot cache key alongside the `FuncRef`.
-pub type SpecKey = Vec<Option<ReifiedLeaf>>;
+pub type SpecKey = Vec<Option<ReifiedType>>;
 
-/// Callee generic `VarId` -> its concrete leaf, for the specialized lowering.
+/// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
 /// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
-pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, ReifiedLeaf>;
+pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, ReifiedType>;
 
-/// The synthesized `TypeExpr` a substituted generic resolves to. A `Nominal`
-/// leaf carries an EMPTY param range (v0 leaf-only scope), so no consumer indexes
-/// into it; a `Prim` maps to its builtin.
-fn reified_leaf_node(leaf: ReifiedLeaf) -> TypeExpr {
-    match leaf {
-        ReifiedLeaf::Nominal(n) => TypeExpr::App {
-            ctor: TypeCtor::Nominal(n),
+/// The root `TypeExpr` a substituted generic resolves to. Nested arguments stay
+/// in [`SpecSubst`] for recursive call specialization; the synthesized root has
+/// no arena range of its own.
+fn reified_type_node(ty: &ReifiedType) -> TypeExpr {
+    match ty {
+        ReifiedType::App { ctor, .. } => TypeExpr::App {
+            ctor: match ctor {
+                ReifiedCtor::Array => TypeCtor::Array,
+                ReifiedCtor::Map => TypeCtor::Map,
+                ReifiedCtor::Nominal(name) => TypeCtor::Nominal(*name),
+            },
             params: IdxRange::new_empty(),
         },
-        ReifiedLeaf::Prim("int") => TypeExpr::Builtin(BuiltinTy::Int),
-        ReifiedLeaf::Prim("float") => TypeExpr::Builtin(BuiltinTy::Float),
-        ReifiedLeaf::Prim("bool") => TypeExpr::Builtin(BuiltinTy::Bool),
-        ReifiedLeaf::Prim(_) => TypeExpr::Builtin(BuiltinTy::Error),
+        ReifiedType::Prim("int") => TypeExpr::Builtin(BuiltinTy::Int),
+        ReifiedType::Prim("float") => TypeExpr::Builtin(BuiltinTy::Float),
+        ReifiedType::Prim("bool") => TypeExpr::Builtin(BuiltinTy::Bool),
+        ReifiedType::Prim(_) => TypeExpr::Builtin(BuiltinTy::Error),
     }
 }
 
-/// Reify a `call_generic_bindings` `TyId` (caller-arena, possibly an unbound var)
-/// to an arena-free leaf, or `None` if it is not a v0-specializable leaf.
-fn reify_leaf(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<ReifiedLeaf> {
+fn reify_type(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ty: TyId,
+    enclosing: &SpecSubst,
+) -> Option<ReifiedType> {
     let ty = resolve_tyid(ws, inf, ty)?;
     match ty_node(ws, inf, ty)? {
-        TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedLeaf::Prim("int")),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedLeaf::Prim("float")),
-        TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedLeaf::Prim("bool")),
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), params } if params.into_iter().next().is_none() => {
-            Some(ReifiedLeaf::Nominal(n))
+        TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedType::Prim("int")),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedType::Prim("float")),
+        TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedType::Prim("bool")),
+        TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
+        TypeExpr::App { ctor, params } => {
+            let ctor = match ctor {
+                TypeCtor::Array => ReifiedCtor::Array,
+                TypeCtor::Map => ReifiedCtor::Map,
+                TypeCtor::Nominal(name) => ReifiedCtor::Nominal(name),
+            };
+            let params = params
+                .into_iter()
+                .map(|param| reify_type(ws, inf, ty.with_idx(param), enclosing))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ReifiedType::App { ctor, params })
         }
         _ => None,
     }
@@ -647,20 +724,11 @@ fn compute_spec_from_bindings(
             key.push(None);
             continue;
         };
-        // Reify the binding; if it is itself one of the ENCLOSING body's generics
-        // (a nested call `push -> grow` inside an already-specialized `push`),
-        // resolve it through the enclosing substitution.
-        let leaf = reify_leaf(ws, inf, *b).or_else(|| match resolve_tyid(ws, inf, *b).and_then(|t| ty_node(ws, inf, t)) {
-            Some(TypeExpr::Generic(ev, _)) => enclosing.get(&ev).copied(),
-            _ => None,
-        });
-        match leaf {
-            Some(leaf) => {
-                if matches!(leaf, ReifiedLeaf::Nominal(n) if map_is_value_struct(ws, n)) {
-                    any_value = true;
-                }
-                subst.insert(var, leaf);
-                key.push(Some(leaf));
+        match reify_type(ws, inf, *b, enclosing) {
+            Some(ty) => {
+                any_value |= ty.any_nominal(&|name| map_is_value_struct(ws, name));
+                subst.insert(var, ty.clone());
+                key.push(Some(ty));
             }
             None => key.push(None),
         }
@@ -668,17 +736,36 @@ fn compute_spec_from_bindings(
     any_value.then_some((key, subst))
 }
 
-/// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete leaf) for `fref`
-/// from a [`SpecKey`] (leaves in declaration order). The inliner holds only the
+pub fn spec_key_from_next_generics(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+    enclosing: &SpecSubst,
+) -> Option<SpecKey> {
+    let f = &ws.module(func.module).functions[func.func];
+    let bindings: Vec<TyId> = f
+        .generics
+        .iter()
+        .map(|generic| match ty_node(ws, inf, *generic) {
+            Some(TypeExpr::Generic(var, _)) => next_generics.get(&var).copied(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    compute_spec_from_bindings(ws, inf, func, &bindings, enclosing).map(|(key, _)| key)
+}
+
+/// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
+/// from a [`SpecKey`] (trees in declaration order). The inliner holds only the
 /// arena-free key in its cache; this re-pairs it with the callee's generic
 /// `VarId`s to drive [`lower_function_spec`]. An empty / all-`None` key yields an
 /// empty subst (the shared snapshot).
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::new();
-    for (g, leaf) in f.generics.iter().zip(key) {
-        if let (Some(TypeExpr::Generic(var, _)), Some(l)) = (static_ty(ws, *g), leaf) {
-            subst.insert(var, *l);
+    for (g, ty) in f.generics.iter().zip(key) {
+        if let (Some(TypeExpr::Generic(var, _)), Some(reified)) = (static_ty(ws, *g), ty) {
+            subst.insert(var, reified.clone());
         }
     }
     subst
@@ -691,7 +778,7 @@ fn sig_value_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<V
     if let TyId::Static(m, idx) = ty {
         if let TypeExpr::Generic(var, _) = ws.module(m).ty_arena[idx] {
             return match subst.get(&var) {
-                Some(ReifiedLeaf::Nominal(n)) => value_shape_of_nominal(ws, *n),
+                Some(ty) => ty.nominal().and_then(|name| value_shape_of_nominal(ws, name)),
                 _ => None,
             };
         }
@@ -752,6 +839,7 @@ impl EnumCdataShape {
         ValueShape {
             name: self.name,
             fields: self.field_names().into_iter().map(|n| (n, FieldShape::Prim)).collect(),
+            nullable: false,
         }
     }
 }
@@ -948,7 +1036,11 @@ impl EnumFlatShape {
         for rf in &self.record_fields {
             fields.push((*rf, FieldShape::Prim));
         }
-        ValueShape { name: self.name, fields }
+        ValueShape {
+            name: self.name,
+            fields,
+            nullable: false,
+        }
     }
 }
 
@@ -2022,7 +2114,7 @@ struct Builder<'a> {
     scx: &'a ScalarCtx,
     /// Per-instantiation generic substitution (`docs/flatvec-plan.md` call-site
     /// specialization). Empty for the shared generic / non-generic snapshot; a
-    /// value-instantiated splice carries `callee generic VarId -> concrete leaf`
+    /// value-instantiated splice carries `callee generic VarId -> concrete type`
     /// so type resolution (`type_of`/`native_buffer_alloc_ctype`/param shapes)
     /// sees the concrete type and the body scalarizes.
     spec_subst: &'a SpecSubst,
@@ -2442,12 +2534,13 @@ impl Builder<'_> {
         for sidx in stmts {
             match self.body.statement_arena[sidx].clone() {
                 Statement::Let { name, value } => {
-                    // A flat-enum local threads as leaf cells (like a scalarized
-                    // param), so a later `match x` reads the cells with no box and a
-                    // whole-value use rebuilds the box on demand. A NULLABLE flat-enum
-                    // local threads too -- `tag = nil` is the null sentinel, handled by
-                    // the nil-safe spread / `== null` tag test / conditional materialize.
-                    if let Some(shape) = self.flat_enum_value_shape_of(value) {
+                    // Flat enums and guaranteed no-box values live in leaf cells,
+                    // matching the scalar ABI instead of relying on later SROA.
+                    let threaded_shape = self
+                        .flat_enum_value_shape_of(value)
+                        .or_else(|| self.nobox_binding_shape(name))
+                        .or_else(|| self.nobox_value_shape_of(value));
+                    if let Some(shape) = threaded_shape {
                         let r = self.lower_expr_repr(value)?;
                         let leaves = self.repr_to_leaves(&r, &shape);
                         let bname = self.body.binding_arena[name].name;
@@ -3602,7 +3695,7 @@ impl Builder<'_> {
             let arr = self.empty_column_vec(elem, capacity)?;
             for &e in &idxs {
                 if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                    self.spread_into_columns(arr, inner, elem)?;
+                    self.spread_into(arr, inner, SpreadDest::Columns(elem))?;
                 } else {
                     let repr = self.lower_expr_repr(e)?;
                     self.column_append_repr(arr, &repr, elem)?;
@@ -3613,7 +3706,7 @@ impl Builder<'_> {
         let arr = self.emit_cur(Inst::MakeVec(vec![]));
         for &e in &idxs {
             if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                self.spread_into(arr, inner, ContainerKind::Vec)?;
+                self.spread_into(arr, inner, SpreadDest::Container(ContainerKind::Vec))?;
             } else {
                 let v = self.lower_expr(e)?;
                 self.emit_cur(Inst::ArrayPush { arr, value: v, kind: ContainerKind::Vec });
@@ -3622,13 +3715,34 @@ impl Builder<'_> {
         Ok(arr)
     }
 
-    fn spread_into_columns(
+    fn append_spread_repr(
+        &mut self,
+        arr: Idx<Inst>,
+        repr: ValueRepr,
+        dest: SpreadDest,
+    ) -> Result<(), CompilerError> {
+        match dest {
+            SpreadDest::Container(kind) => {
+                let value = self.pack(repr);
+                self.emit_cur(Inst::ArrayPush { arr, value, kind });
+                Ok(())
+            }
+            SpreadDest::Columns(elem) => self.column_append_repr(arr, &repr, elem),
+        }
+    }
+
+    /// Splice `inner` into `arr`: a tuple by static arity, a struct by declared
+    /// fields, or an array/Vec through one runtime loop. Only the destination
+    /// append differs between ordinary and column storage.
+    fn spread_into(
         &mut self,
         arr: Idx<Inst>,
         inner: Idx<Expr>,
-        elem: Ustr,
+        dest: SpreadDest,
     ) -> Result<(), CompilerError> {
-        if let Expr::Tuple(elements) = self.body.expr_arena[inner] {
+        if let (SpreadDest::Columns(elem), Expr::Tuple(elements)) =
+            (dest, self.body.expr_arena[inner])
+        {
             for element in elements {
                 let repr = self.lower_expr_repr(element)?;
                 self.column_append_repr(arr, &repr, elem)?;
@@ -3640,12 +3754,12 @@ impl Builder<'_> {
             Some(TypeExpr::Tuple { elements }) => {
                 for i in 0..elements.into_iter().count() {
                     let value = self.emit_cur(Inst::TupleIndex { base: v, index: i });
-                    self.column_append_repr(arr, &ValueRepr::Scalar(value), elem)?;
+                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
                 }
                 Ok(())
             }
             Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                self.spread_array_loop_columns(arr, inner, v, elem)
+                self.spread_array_loop(arr, inner, v, dest)
             }
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
                 let fields = self
@@ -3653,43 +3767,7 @@ impl Builder<'_> {
                     .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
                 for field in fields {
                     let value = self.emit_cur(Inst::Field { base: v, field });
-                    self.column_append_repr(arr, &ValueRepr::Scalar(value), elem)?;
-                }
-                Ok(())
-            }
-            _ => Err(gap("spread of an unsupported type")),
-        }
-    }
-
-    /// Splice `inner` into the array `arr` (representation `kind`): a tuple by its
-    /// static arity, a struct by its declared fields in order, an array/Vec via a
-    /// runtime copy loop. Other shapes gap.
-    fn spread_into(
-        &mut self,
-        arr: Idx<Inst>,
-        inner: Idx<Expr>,
-        kind: ContainerKind,
-    ) -> Result<(), CompilerError> {
-        let v = self.lower_expr(inner)?;
-        match self.expr_ty(inner) {
-            Some(TypeExpr::Tuple { elements }) => {
-                for i in 0..elements.into_iter().count() {
-                    let comp = self.emit_cur(Inst::TupleIndex { base: v, index: i });
-                    self.emit_cur(Inst::ArrayPush { arr, value: comp, kind });
-                }
-                Ok(())
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                self.spread_array_loop(arr, inner, v, kind);
-                Ok(())
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
-                let fields = self
-                    .struct_field_names(name)
-                    .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
-                for field in fields {
-                    let comp = self.emit_cur(Inst::Field { base: v, field });
-                    self.emit_cur(Inst::ArrayPush { arr, value: comp, kind });
+                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
                 }
                 Ok(())
             }
@@ -3698,49 +3776,13 @@ impl Builder<'_> {
     }
 
     /// Runtime copy of every element of `src` (read per its `coll_kind`) into
-    /// `arr` (appended per `dest_kind`).
+    /// `arr` through the destination's append operation.
     fn spread_array_loop(
         &mut self,
         arr: Idx<Inst>,
         src_expr: Idx<Expr>,
         src: Idx<Inst>,
-        dest_kind: ContainerKind,
-    ) {
-        let src_kind = self.coll_kind(src_expr);
-        let n = self.emit_cur(Inst::Len { base: src, kind: src_kind });
-        let i_cell = self.f.new_cell(None);
-        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
-
-        let header = self.f.new_block();
-        let body = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        let i = self.emit_cur(Inst::Load(i_cell));
-        let cmp = self.emit_cur(Inst::IntLt(i, n));
-        self.f.set_term(self.cur, Term::Branch { cond: cmp, then_bb: body, else_bb: exit });
-
-        self.cur = body;
-        let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.emit_cur(Inst::Index { base: src, index: i_now, kind: src_kind });
-        self.emit_cur(Inst::ArrayPush { arr, value: elem, kind: dest_kind });
-        let i2 = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let inc = self.emit_cur(Inst::IntAdd(i2, one));
-        self.emit_cur(Inst::Store { cell: i_cell, value: inc });
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = exit;
-    }
-
-    fn spread_array_loop_columns(
-        &mut self,
-        arr: Idx<Inst>,
-        src_expr: Idx<Expr>,
-        src: Idx<Inst>,
-        elem: Ustr,
+        dest: SpreadDest,
     ) -> Result<(), CompilerError> {
         let src_kind = self.coll_kind(src_expr);
         let n = self.emit_cur(Inst::Len { base: src, kind: src_kind });
@@ -3760,8 +3802,8 @@ impl Builder<'_> {
 
         self.cur = body;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let value = self.loop_element_at(src, i_now, src_kind)?;
-        self.column_append_repr(arr, &ValueRepr::Scalar(value), elem)?;
+        let repr = self.loop_element_repr_at(src, i_now, src_kind)?;
+        self.append_spread_repr(arr, repr, dest)?;
         let i2 = self.emit_cur(Inst::Load(i_cell));
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let inc = self.emit_cur(Inst::IntAdd(i2, one));
@@ -3794,6 +3836,23 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+        if let Callee::Unresolved { name, .. } = callee {
+            if matches!(name.as_str(), "inspect" | "inspect_formatted") {
+                if let Some(&arg) = arg_idxs.first() {
+                    if let Some(elem) = self.vec_column_elem_of(arg) {
+                        if self.is_nobox_struct(elem) {
+                            return Err(CompilerError::new_with_label(
+                                self.body.expr_spans[e],
+                                format!(
+                                    "cannot inspect a column-stored nobox value `{elem}`: \
+                                     inspection requires implicit element materialization"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         // Scalar arithmetic: rock desugars `+ - * / %` to `__op_*` calls; turn
         // them back into native typed ops when both operands are scalars.
         // (Non-scalar `__op_*` falls through to a real overload Call below.)
@@ -3997,6 +4056,9 @@ impl Builder<'_> {
                 Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::StructPairs)) => {
                     self.expand_struct_pairs(e, func, &arg_idxs)
                 }
+                Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::Materialize)) => {
+                    self.expand_materialize(&arg_idxs)
+                }
                 Ok(func)
                     if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) =>
                 {
@@ -4086,17 +4148,7 @@ impl Builder<'_> {
         next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
     ) -> Option<SpecKey> {
         let inf = self.inf?;
-        let f = &self.ws.module(func.module).functions[func.func];
-        let bindings: Vec<TyId> = f
-            .generics
-            .iter()
-            .map(|g| match ty_node(self.ws, inf, *g) {
-                Some(TypeExpr::Generic(var, _)) => next_generics.get(&var).copied(),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        compute_spec_from_bindings(self.ws, inf, func, &bindings, self.spec_subst)
-            .map(|(key, _)| key)
+        spec_key_from_next_generics(self.ws, inf, func, next_generics, self.spec_subst)
     }
 
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar
@@ -4147,7 +4199,9 @@ impl Builder<'_> {
         let ret_tuple = self.ws.module(func.module).functions[func.func]
             .return_ty
             .and_then(|t| tuple_arity(self.ws, t));
-        if !fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst) {
+        let uses_scalar_abi = fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst);
+        if !uses_scalar_abi {
+            self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
@@ -4405,7 +4459,7 @@ impl Builder<'_> {
             ValueRepr::Scalar(v) => v,
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
             // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
-            ValueRepr::Group { name, parts } if flat_enum_shape(self.ws, name).is_some() => {
+            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
                 let shape = flat_enum_shape(self.ws, name).unwrap();
                 let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
                 let tag = packed[0];
@@ -4446,7 +4500,11 @@ impl Builder<'_> {
                 self.cur = join;
                 self.emit_cur(Inst::Load(result))
             }
-            ValueRepr::Group { name, parts } => {
+            ValueRepr::Group {
+                name,
+                parts,
+                present: _,
+            } => {
                 // The Group's parts are in declared field order (the positional
                 // `<name>_ct` ABI requires it), so they line up with the declared
                 // names. The names let MIR passes forward a `Field` read to its
@@ -4471,14 +4529,77 @@ impl Builder<'_> {
     /// ABI). A boxed `Scalar` (e.g. a global cdata / if-join) is field-read.
     fn repr_to_leaves(&mut self, r: &ValueRepr, shape: &ValueShape) -> Vec<Idx<Inst>> {
         match r {
-            ValueRepr::Group { parts, .. } => {
+            ValueRepr::Group {
+                parts, present, ..
+            } => {
                 let mut out = Vec::new();
+                if shape.nullable {
+                    out.push(match present {
+                        Some(value) => *value,
+                        None => self.emit_cur(Inst::Const(Lit::Bool(true))),
+                    });
+                }
                 for ((_, fs), part) in shape.fields.iter().zip(parts) {
                     match fs {
                         FieldShape::Prim => out.push(self.pack(part.clone())),
                         FieldShape::Nested(sub) => out.extend(self.repr_to_leaves(part, sub)),
                     }
                 }
+                out
+            }
+            ValueRepr::Scalar(v) if shape.nullable => {
+                let field_count = shape.leaf_count() - 1;
+                if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
+                    let mut out = Vec::with_capacity(1 + field_count);
+                    out.push(self.emit_cur(Inst::Const(Lit::Bool(false))));
+                    for _ in 0..field_count {
+                        out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+                    }
+                    return out;
+                }
+
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let present = self.emit_cur(Inst::NotEq(*v, nil));
+                let cells: Vec<Idx<Cell>> =
+                    (0..field_count).map(|_| self.f.new_cell(None)).collect();
+                let nil_bb = self.f.new_block();
+                let value_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.f.set_term(
+                    self.cur,
+                    Term::Branch {
+                        cond: present,
+                        then_bb: value_bb,
+                        else_bb: nil_bb,
+                    },
+                );
+
+                self.cur = nil_bb;
+                for cell in &cells {
+                    let value = self.emit_cur(Inst::Const(Lit::Nil));
+                    self.emit_cur(Inst::Store {
+                        cell: *cell,
+                        value,
+                    });
+                }
+                self.f.set_term(self.cur, Term::Goto(join));
+
+                self.cur = value_bb;
+                let mut inner = shape.clone();
+                inner.nullable = false;
+                let leaves = self.cdata_leaves(*v, &inner);
+                for (cell, value) in cells.iter().zip(leaves) {
+                    self.emit_cur(Inst::Store {
+                        cell: *cell,
+                        value,
+                    });
+                }
+                self.f.set_term(self.cur, Term::Goto(join));
+
+                self.cur = join;
+                let mut out = Vec::with_capacity(1 + field_count);
+                out.push(present);
+                out.extend(cells.iter().map(|cell| self.emit_cur(Inst::Load(*cell))));
                 out
             }
             ValueRepr::Scalar(v) => self.cdata_leaves(*v, shape),
@@ -4561,19 +4682,30 @@ impl Builder<'_> {
     /// SROA peels the pack wherever the binding is only projected from. Emitting a
     /// whole-element `Index` here instead is what made bitgun stop compiling: it
     /// reaches the emitter with no slot to name.
+    fn loop_element_repr_at(
+        &mut self,
+        arr: Idx<Inst>,
+        index: Idx<Inst>,
+        kind: ContainerKind,
+    ) -> Result<ValueRepr, CompilerError> {
+        match kind {
+            ContainerKind::VecValueColumns(elem) => self.column_element_repr(arr, index, elem),
+            _ => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Index {
+                base: arr,
+                index,
+                kind,
+            }))),
+        }
+    }
+
     fn loop_element_at(
         &mut self,
         arr: Idx<Inst>,
         index: Idx<Inst>,
         kind: ContainerKind,
     ) -> Result<Idx<Inst>, CompilerError> {
-        match kind {
-            ContainerKind::VecValueColumns(elem) => {
-                let repr = self.column_element_repr(arr, index, elem)?;
-                Ok(self.pack(repr))
-            }
-            _ => Ok(self.emit_cur(Inst::Index { base: arr, index, kind })),
-        }
+        let repr = self.loop_element_repr_at(arr, index, kind)?;
+        Ok(self.pack(repr))
     }
 
     /// A column-stored element (`xs[i]` where `xs: [E]` stores flat columns) as
@@ -4747,7 +4879,16 @@ impl Builder<'_> {
             // materialize explicitly), and the only place a column Vec builds
             // element tables.
             ("__vec_data_sort", [recv, key_fn]) => {
-                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                if self.is_nobox_struct(elem) {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[*recv],
+                        format!(
+                            "cannot sort a column-stored nobox value `{elem}`: \
+                             the key function requires implicit element materialization"
+                        ),
+                    ));
+                }
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
                 let f = self.stdlib_funcref("__rock_col_sort")?;
@@ -4756,7 +4897,16 @@ impl Builder<'_> {
                 )))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
-                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                if self.is_nobox_struct(elem) {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[*recv],
+                        format!(
+                            "cannot convert column-stored nobox value `{elem}` to a Lua array: \
+                             the bridge requires implicit element materialization"
+                        ),
+                    ));
+                }
                 let vec = self.lower_expr(*recv)?;
                 let f = self.stdlib_funcref("__rock_vec_column_elements")?;
                 Ok(Some(ValueRepr::Scalar(
@@ -5013,6 +5163,11 @@ impl Builder<'_> {
         // shapes first to avoid holding the borrow across `&mut self` calls.
         let fields: Vec<FieldShape> = shape.fields.iter().map(|(_, fs)| fs.clone()).collect();
         let name = shape.name;
+        let present = shape.nullable.then(|| {
+            let value = leaves[*idx];
+            *idx += 1;
+            value
+        });
         let mut parts = Vec::with_capacity(fields.len());
         for fs in &fields {
             let part = match fs {
@@ -5025,7 +5180,11 @@ impl Builder<'_> {
             };
             parts.push(part);
         }
-        ValueRepr::Group { name, parts }
+        ValueRepr::Group {
+            name,
+            parts,
+            present,
+        }
     }
 
     /// Index of `field` in value struct `name`'s declared field order.
@@ -5091,7 +5250,7 @@ impl Builder<'_> {
                     ));
                 }
                 let br = self.lower_expr_repr(base)?;
-                if let ValueRepr::Group { name, parts } = &br {
+                if let ValueRepr::Group { name, parts, .. } = &br {
                     if let Some(i) = self.field_index(*name, field) {
                         return Ok(parts[i].clone());
                     }
@@ -5200,7 +5359,7 @@ impl Builder<'_> {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
                         None => match (&base_repr, base_boxed) {
-                            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+                            (Some(ValueRepr::Group { name: bn, parts, .. }), _) => {
                                 let i = self
                                     .field_index(*bn, fname)
                                     .expect("functional-update base covers every field");
@@ -5222,7 +5381,11 @@ impl Builder<'_> {
             }
             None => litmap.into_iter().map(|(_, r)| r).collect(),
         };
-        Ok(ValueRepr::Group { name, parts })
+        Ok(ValueRepr::Group {
+            name,
+            parts,
+            present: None,
+        })
     }
 
     /// Reorder a call's arguments (some written `name = value`) into the callee's
@@ -5648,10 +5811,18 @@ impl Builder<'_> {
             let s = match self.body.interp_part_arena[p].clone() {
                 InterpPart::Literal(lit) => self.emit_cur(Inst::Const(Lit::Str(lit))),
                 InterpPart::Value { expr, spec } => {
-                    let v = self.lower_expr(expr)?;
                     match spec {
-                        None => self.stringify(expr, v)?,
-                        Some(spec) => self.lower_format(expr, v, &spec)?,
+                        None if self.nobox_value_name(expr).is_some() => {
+                            self.stringify_nobox_expr(expr)?
+                        }
+                        None => {
+                            let v = self.lower_expr(expr)?;
+                            self.stringify(expr, v)?
+                        }
+                        Some(spec) => {
+                            let v = self.lower_expr(expr)?;
+                            self.lower_format(expr, v, &spec)?
+                        }
                     }
                 }
             };
@@ -5661,6 +5832,173 @@ impl Builder<'_> {
             });
         }
         Ok(acc.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Str(Ustr::from(""))))))
+    }
+
+    fn stringify_nobox_expr(&mut self, expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let name = self
+            .nobox_value_name(expr)
+            .ok_or_else(|| gap("nobox interpolation type"))?;
+        let repr = self.lower_expr_repr(expr)?;
+        self.stringify_nobox_repr(name, repr)
+    }
+
+    fn stringify_nobox_repr(
+        &mut self,
+        name: Ustr,
+        repr: ValueRepr,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let ValueRepr::Group {
+            parts, present, ..
+        } = repr
+        else {
+            return Err(gap(format!(
+                "nobox value `{name}` reached interpolation boxed"
+            )));
+        };
+        if let Some(present) = present {
+            let result = self.f.new_cell(None);
+            let value_bb = self.f.new_block();
+            let nil_bb = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: present,
+                    then_bb: value_bb,
+                    else_bb: nil_bb,
+                },
+            );
+
+            self.cur = nil_bb;
+            let nil = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("nil"))));
+            self.store_and_join(result, nil, join);
+
+            self.cur = value_bb;
+            let rendered = self.stringify_nobox_repr(
+                name,
+                ValueRepr::Group {
+                    name,
+                    parts,
+                    present: None,
+                },
+            )?;
+            self.store_and_join(result, rendered, join);
+
+            self.cur = join;
+            return Ok(self.emit_cur(Inst::Load(result)));
+        }
+        let sid = *self
+            .ws
+            .struct_by_name
+            .get(&name)
+            .ok_or_else(|| gap(format!("nobox value `{name}` has no definition")))?;
+        let fields = self.ws.modules[sid.module.index()].structs[sid.def]
+            .fields
+            .clone();
+        if fields.len() != parts.len() {
+            return Err(gap(format!(
+                "nobox value `{name}` interpolation shape mismatch"
+            )));
+        }
+
+        let mut out = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+            format!("{name} {{ ").as_str(),
+        ))));
+        for (i, (field, part)) in fields.into_iter().zip(parts).enumerate() {
+            if i > 0 {
+                let comma = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(", "))));
+                out = self.emit_cur(Inst::StringConcat(out, comma));
+            }
+            let label = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                format!("{} = ", field.name).as_str(),
+            ))));
+            out = self.emit_cur(Inst::StringConcat(out, label));
+            let rendered = match part {
+                ValueRepr::Group {
+                    name: child_name,
+                    parts,
+                    ..
+                } => self.stringify_nobox_repr(
+                    child_name,
+                    ValueRepr::Group {
+                        name: child_name,
+                        parts,
+                        present: None,
+                    },
+                )?,
+                ValueRepr::Scalar(value) => self.stringify_struct_leaf(field.ty, value)?,
+            };
+            out = self.emit_cur(Inst::StringConcat(out, rendered));
+        }
+        let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(" }"))));
+        Ok(self.emit_cur(Inst::StringConcat(out, close)))
+    }
+
+    fn stringify_struct_leaf(
+        &mut self,
+        ty: TyId,
+        value: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let ty = self
+            .resolve_tyid(ty)
+            .ok_or_else(|| gap("nobox interpolation field type"))?;
+        if matches!(self.ty_node(ty), Some(TypeExpr::Nullable(_))) {
+            let inspect = self.resolve_global_fn("inspect")?;
+            return Ok(self.emit_cur(Inst::Call {
+                func: inspect,
+                args: vec![value],
+            }));
+        }
+        match self.resolve_ty(ty) {
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool)) => {
+                Ok(self.emit_cur(Inst::ToString(value)))
+            }
+            Some(TypeExpr::Builtin(BuiltinTy::String)) => {
+                let quote = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("\""))));
+                let open = self.emit_cur(Inst::StringConcat(quote, value));
+                Ok(self.emit_cur(Inst::StringConcat(open, quote)))
+            }
+            Some(TypeExpr::Builtin(BuiltinTy::Float)) => {
+                let format = self.resolve_global_fn("__rock_format_float")?;
+                Ok(self.emit_cur(Inst::Call {
+                    func: format,
+                    args: vec![value],
+                }))
+            }
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if self.ws.newtypes_by_name.contains_key(&name) => {
+                let open = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                    format!("{name}(").as_str(),
+                ))));
+                let inner = self.emit_cur(Inst::ToString(value));
+                let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(")"))));
+                let out = self.emit_cur(Inst::StringConcat(open, inner));
+                Ok(self.emit_cur(Inst::StringConcat(out, close)))
+            }
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if payload_free_enum_variants(self.ws, name).is_some() => {
+                let names = self.emit_cur(Inst::Global(Ustr::from(
+                    format!("__rock_enum_{name}_names").as_str(),
+                )));
+                Ok(self.emit_cur(Inst::Index {
+                    base: names,
+                    index: value,
+                    kind: ContainerKind::Map,
+                }))
+            }
+            Some(_) => {
+                let inspect = self.resolve_global_fn("inspect")?;
+                Ok(self.emit_cur(Inst::Call {
+                    func: inspect,
+                    args: vec![value],
+                }))
+            }
+            None => Err(gap("nobox interpolation field type")),
+        }
     }
 
     /// Default `{x}` stringify for value `v` of expression `expr`, dispatched on
@@ -6023,6 +6361,27 @@ impl Builder<'_> {
                     None
                 };
                 if let Some(v) = null_side {
+                    if self.nobox_value_name(v).is_some() {
+                        let repr = self.lower_expr_repr(v)?;
+                        let present = match repr {
+                            ValueRepr::Group {
+                                present: Some(value),
+                                ..
+                            } => value,
+                            ValueRepr::Group { present: None, .. } => {
+                                self.emit_cur(Inst::Const(Lit::Bool(true)))
+                            }
+                            ValueRepr::Scalar(value) => {
+                                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                                self.emit_cur(Inst::NotEq(value, nil))
+                            }
+                        };
+                        return Ok(if matches!(op, BinOp::Eq) {
+                            self.emit_cur(Inst::Not(present))
+                        } else {
+                            present
+                        });
+                    }
                     if self.expr_is_flat_enum(v) {
                         let tag = match self.lower_expr_repr(v)? {
                             ValueRepr::Group { parts, .. } => {
@@ -6037,6 +6396,26 @@ impl Builder<'_> {
                         } else {
                             Inst::NotEq(tag, nil)
                         }));
+                    }
+                }
+                if let (Some(ln), Some(rn)) =
+                    (self.nobox_value_name(lhs), self.nobox_value_name(rhs))
+                {
+                    if ln == rn {
+                        let mut shape = value_shape_of_nominal(self.ws, ln)
+                            .ok_or_else(|| gap(format!("nobox value `{ln}` has no scalar shape")))?;
+                        shape.nullable =
+                            self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);
+                        let lhs_repr = self.lower_expr_repr(lhs)?;
+                        let lhs_leaves = self.repr_to_leaves(&lhs_repr, &shape);
+                        let rhs_repr = self.lower_expr_repr(rhs)?;
+                        let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
+                        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
+                        return Ok(if matches!(op, BinOp::Eq) {
+                            equal
+                        } else {
+                            self.emit_cur(Inst::Not(equal))
+                        });
                     }
                 }
                 let scalar = self.eq_is_scalar(lhs)
@@ -7918,7 +8297,11 @@ impl Builder<'_> {
             };
             parts.push(ValueRepr::Scalar(v));
         }
-        Ok(ValueRepr::Group { name: shape.name, parts })
+        Ok(ValueRepr::Group {
+            name: shape.name,
+            parts,
+            present: None,
+        })
     }
 
     /// The compile-time expansion kind for `func`, routed through the intrinsic
@@ -7926,6 +8309,35 @@ impl Builder<'_> {
     /// there is no second bespoke annotation check.
     fn fn_expand_kind(&self, func: FuncRef) -> Option<ExpandKind> {
         crate::intrinsics::expand_kind(&self.ws.module(func.module).functions[func.func])
+    }
+
+    fn expand_materialize(
+        &mut self,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let [arg] = arg_idxs else {
+            return Err(gap("materialize expects one argument"));
+        };
+        let repr = self.lower_expr_repr(*arg)?;
+        Ok(ValueRepr::Scalar(self.materialize_repr(repr)))
+    }
+
+    fn materialize_repr(&mut self, repr: ValueRepr) -> Idx<Inst> {
+        match repr {
+            ValueRepr::Scalar(value) => value,
+            ValueRepr::Group { name, parts, .. } => {
+                let names = struct_field_names(self.ws, name);
+                let fields = parts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, part)| {
+                        let field = names.get(i).copied().unwrap_or(name);
+                        (field, self.materialize_repr(part))
+                    })
+                    .collect();
+                self.emit_cur(Inst::MaterializeValueStruct { name, fields })
+            }
+        }
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
@@ -7968,7 +8380,12 @@ impl Builder<'_> {
         // The argument must be a value struct: its Group's parts are the field
         // values in declaration order, each lowered exactly once.
         let repr = self.lower_expr_repr(arg)?;
-        let ValueRepr::Group { name: struct_name, parts } = repr else {
+        let ValueRepr::Group {
+            name: struct_name,
+            parts,
+            ..
+        } = repr
+        else {
             return Err(reject(
                 arg_span,
                 format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
@@ -8041,7 +8458,11 @@ impl Builder<'_> {
                 };
                 parts.push(ValueRepr::Scalar(v));
             }
-            return Ok(self.pack(ValueRepr::Group { name: enum_name, parts }));
+            return Ok(self.pack(ValueRepr::Group {
+                name: enum_name,
+                parts,
+                present: None,
+            }));
         }
         Ok(self.emit_cur(Inst::MakeEnum {
             tag: variant,
@@ -8178,20 +8599,25 @@ impl Builder<'_> {
         // declares no embed field at all. The flag is set while registering
         // fields and never cleared: a stale `true` costs one bool check, a
         // stale `false` would silently skip the flattening.
-        if !self.ws.has_embed_fields || self.is_value_struct(sname) {
+        if !(self.ws.has_embed_fields || self.ws.has_nobox_types) || self.is_value_struct(sname) {
             return None;
         }
         let sid = *self.ws.struct_by_name.get(&sname)?;
         let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
         let fdef = sd.fields.iter().find(|f| f.name == field)?;
-        if !fdef.is_embed {
-            return None;
-        }
         // `resolve_ty` peels `Nullable`, which is what a nullable embed needs:
         // presence is a separate leaf, the child's own leaves are unchanged.
         let TypeExpr::App { ctor: TypeCtor::Nominal(cname), .. } = self.resolve_ty(fdef.ty)? else {
             return None;
         };
+        let child = self
+            .ws
+            .struct_by_name
+            .get(&cname)
+            .map(|sid| &self.ws.modules[sid.module.index()].structs[sid.def]);
+        if !fdef.is_embed && !child.is_some_and(|s| s.is_nobox) {
+            return None;
+        }
         Some(cname)
     }
 
@@ -8614,7 +9040,7 @@ impl Builder<'_> {
         // spread back out.
         let r = self.lower_expr_repr(value)?;
         match r {
-            ValueRepr::Group { name, parts } if flat_enum_shape(self.ws, name).is_some() => {
+            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
                 Ok(self.repr_group_to_cells(shape, parts))
             }
             other => {
@@ -8733,7 +9159,11 @@ impl Builder<'_> {
         parts.push(ValueRepr::Scalar(cells.tag));
         parts.extend(cells.positional.into_iter().map(ValueRepr::Scalar));
         parts.extend(cells.named.into_iter().map(|(_, c)| ValueRepr::Scalar(c)));
-        ValueRepr::Group { name: shape.name, parts }
+        ValueRepr::Group {
+            name: shape.name,
+            parts,
+            present: None,
+        }
     }
 
     /// Read a boxed enum's keys back out into flattened cells (`__variant` -> tag,
@@ -8823,7 +9253,7 @@ impl Builder<'_> {
     /// The Vec container kind for base expr `e`: an all-scalar value-struct
     /// element stores as flat columns, everything else keeps the single `_data`
     /// backing. An unresolved / generic element is NOT eligible -- the columns
-    /// need a concrete leaf list, and an opaque `T` has none.
+    /// need a concrete value-struct leaf list, and an opaque `T` has none.
     fn vec_kind(&self, e: Idx<Expr>) -> ContainerKind {
         match self.vec_column_elem_of(e) {
             Some(elem) => ContainerKind::VecValueColumns(elem),
@@ -8851,7 +9281,7 @@ impl Builder<'_> {
             // (non-specialized) snapshot of a generic body must keep the
             // representation that every instantiation can read.
             TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
-                Some(ReifiedLeaf::Nominal(n)) => *n,
+                Some(ty) => ty.nominal()?,
                 _ => return None,
             },
             _ => return None,
@@ -8977,6 +9407,52 @@ impl Builder<'_> {
             .map(|pd| pd.ty)
     }
 
+    fn reject_nobox_boxed_call_args(
+        &self,
+        func: FuncRef,
+        args: &[Idx<Expr>],
+    ) -> Result<(), CompilerError> {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        for &arg in args {
+            if self.is_explicit_materialize_call(arg) {
+                continue;
+            }
+            let Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) = self.expr_ty(arg)
+            else {
+                continue;
+            };
+            let Some(sid) = self.ws.struct_by_name.get(&name) else {
+                continue;
+            };
+            if self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[arg],
+                    format!(
+                        "nobox value `{name}` cannot cross boxed call boundary `{}`",
+                        callee.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn is_explicit_materialize_call(&self, expr: Idx<Expr>) -> bool {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            ..
+        } = self.body.expr_arena[expr]
+        else {
+            return false;
+        };
+        self.resolve_funcref(expr, name)
+            .ok()
+            .is_some_and(|func| matches!(self.fn_expand_kind(func), Some(ExpandKind::Materialize)))
+    }
+
     /// A (value) struct field's declared type, for the value-struct-literal
     /// construction sink (`Vec2 { x: 0 }` -> the `x` field coerces int->float).
     fn struct_field_ty(&self, name: Ustr, field: Ustr) -> Option<TyId> {
@@ -9025,6 +9501,94 @@ impl Builder<'_> {
                 BuiltinTy::Int | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
             ))
         ) || self.is_payloadless_enum(e)
+    }
+
+    fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } = self.expr_ty(e)?
+        else {
+            return None;
+        };
+        self.is_nobox_struct(name).then_some(name)
+    }
+
+    fn is_nobox_struct(&self, name: Ustr) -> bool {
+        self.ws
+            .struct_by_name
+            .get(&name)
+            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+    }
+
+    fn nobox_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
+        let mut shape = value_shape_of_nominal(self.ws, self.nobox_value_name(e)?)?;
+        shape.nullable = self.expr_is_nullable(e);
+        Some(shape)
+    }
+
+    fn nobox_binding_shape(&self, binding: Idx<BindingInfo>) -> Option<ValueShape> {
+        let ty = self.resolve_tyid(self.binding_ty(binding)?)?;
+        match self.ty_node(ty)? {
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } if self.is_nobox_struct(name) => value_shape_of_nominal(self.ws, name),
+            TypeExpr::Nullable(inner) => {
+                let inner = self.resolve_tyid(ty.with_idx(inner))?;
+                let TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                } = self.ty_node(inner)?
+                else {
+                    return None;
+                };
+                if !self.is_nobox_struct(name) {
+                    return None;
+                }
+                let mut shape = value_shape_of_nominal(self.ws, name)?;
+                shape.nullable = true;
+                Some(shape)
+            }
+            _ => None,
+        }
+    }
+
+    fn emit_all_equal(&mut self, lhs: &[Idx<Inst>], rhs: &[Idx<Inst>]) -> Idx<Inst> {
+        debug_assert_eq!(lhs.len(), rhs.len());
+        let result = self.f.new_cell(None);
+        let fail = self.f.new_block();
+        let join = self.f.new_block();
+        for (&a, &b) in lhs.iter().zip(rhs) {
+            let equal = self.emit_cur(Inst::Eq(a, b));
+            let next = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: equal,
+                    then_bb: next,
+                    else_bb: fail,
+                },
+            );
+            self.cur = next;
+        }
+        let yes = self.emit_cur(Inst::Const(Lit::Bool(true)));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: yes,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = fail;
+        let no = self.emit_cur(Inst::Const(Lit::Bool(false)));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: no,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
     }
 
     /// Whether `e`'s static type is an enum ALL of whose variants are unit (no
@@ -9201,7 +9765,7 @@ impl Builder<'_> {
         fname: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
         Ok(match (base_repr, base_boxed) {
-            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+            (Some(ValueRepr::Group { name: bn, parts, .. }), _) => {
                 let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
                 parts[i].clone()
             }
@@ -9259,7 +9823,7 @@ impl Builder<'_> {
             CompilerError::new_with_label(span, "`native_buffer_alloc` call is untyped".into())
         })?;
         // In a specialized splice the `NativeBuffer<T>` element resolves through
-        // `spec_subst` to a concrete leaf, so the intrinsic can name the ctype the
+        // `spec_subst` to a concrete type, so the intrinsic can name the ctype the
         // shared generic body could not. An empty subst is exactly the shared path.
         let r = if self.spec_subst.is_empty() {
             native_buffer_alloc_elem_ctype(self.ws, inf, ret)
@@ -9304,8 +9868,8 @@ impl Builder<'_> {
         // App params -- v0 specializes leaf types only -- so no consumer indexes
         // into `new_empty()`.
         if let TypeExpr::Generic(var, _) = node {
-            if let Some(leaf) = self.spec_subst.get(&var) {
-                return Some(reified_leaf_node(*leaf));
+            if let Some(ty) = self.spec_subst.get(&var) {
+                return Some(reified_type_node(ty));
             }
         }
         Some(node)
@@ -9572,7 +10136,8 @@ fn fn_opaque_intrinsic_transitive(
     for (c, resolved) in inf.resolved_overload_calls.iter() {
         let callee = FuncRef { module: resolved.0, func: resolved.1 };
         let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
-        if bindings.iter().all(|&b| reify_leaf(ws, inf, b).is_some()) {
+        let empty = SpecSubst::new();
+        if bindings.iter().all(|&b| reify_type(ws, inf, b, &empty).is_some()) {
             continue;
         }
         if fn_opaque_intrinsic_transitive(ws, callee, seen) {
@@ -9584,8 +10149,8 @@ fn fn_opaque_intrinsic_transitive(
 
 /// [`native_buffer_alloc_elem_ctype`] under a specialization `subst`: a
 /// `NativeBuffer<T>` element that is a generic bound in `subst` resolves to its
-/// concrete leaf's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
-/// if that concrete leaf still is not allocatable (a GC-carrying value struct).
+/// concrete type's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
+/// if that type still is not allocatable (a GC-carrying value struct).
 /// A non-substituted element defers to the concrete [`native_buffer_alloc_elem_ctype`].
 fn native_buffer_alloc_elem_ctype_spec(
     ws: &Workspace,
@@ -9603,15 +10168,16 @@ fn native_buffer_alloc_elem_ctype_spec(
                 .next()
                 .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
                 .and_then(|e| match ty_node(ws, inf, e) {
-                    Some(TypeExpr::Generic(var, _)) => subst.get(&var).copied(),
+                    Some(TypeExpr::Generic(var, _)) => subst.get(&var).cloned(),
                     _ => None,
                 })
         }
         _ => None,
     };
     match leaf {
-        Some(ReifiedLeaf::Prim(p)) => Ok(Ustr::from(p)),
-        Some(ReifiedLeaf::Nominal(n)) => {
+        Some(ReifiedType::Prim(p)) => Ok(Ustr::from(p)),
+        Some(ty) if ty.nominal().is_some() => {
+            let n = ty.nominal().unwrap();
             if !map_is_value_struct(ws, n) {
                 Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
             } else if value_struct_is_gc(ws, n) {
@@ -9623,6 +10189,10 @@ fn native_buffer_alloc_elem_ctype_spec(
                 Ok(n)
             }
         }
+        Some(_) => Err(
+            "`native_buffer_alloc<T>` requires a primitive or FFI-clean value-struct element"
+                .to_string(),
+        ),
         None => native_buffer_alloc_elem_ctype(ws, inf, ret),
     }
 }
@@ -9734,8 +10304,10 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
                     None => compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(
                         |(key, _)| {
                             key.iter().all(|l| match l {
-                                Some(ReifiedLeaf::Prim(_)) => true,
-                                Some(ReifiedLeaf::Nominal(n)) => !nominal_is_gc_value(ws, *n),
+                                Some(ReifiedType::Prim(_)) => true,
+                                Some(ty) => {
+                                    !ty.any_nominal(&|name| nominal_is_gc_value(ws, name))
+                                }
                                 None => false,
                             })
                         },
@@ -10273,6 +10845,19 @@ mod tests {
         assert!(
             esc.contains("Wide_ct(a:"),
             "an escaping ineligible value literal must build a cdata ctor, got:\n{esc}"
+        );
+    }
+
+    #[test]
+    fn dynamic_column_spread_keeps_element_repr_unboxed() {
+        let dump = mir_std(
+            "value V2 { x: int, y: int }\n\
+             fn copy(xs: [V2]) -> [V2] { [...xs] }",
+            "copy",
+        );
+        assert!(
+            !dump.contains("V2_ct"),
+            "dynamic column spread must carry leaves into the destination, got:\n{dump}"
         );
     }
 

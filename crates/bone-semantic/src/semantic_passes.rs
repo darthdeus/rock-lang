@@ -96,6 +96,7 @@ pub fn lower_modules(
                     ws.type_generic_arity.insert(s.name.name, s.generics.len());
                     ws.type_generic_defaults
                         .insert(s.name.name, trailing_generic_defaults(rock_mod, &s.generics));
+                    ws.has_nobox_types |= s.is_nobox;
                 }
                 ItemKind::Enum(e) => {
                     ws.type_generic_arity.insert(e.name.name, e.generics.len());
@@ -659,6 +660,7 @@ pub fn pass_register_forward_decls(
                 name: s.name.name,
                 name_span: s.name.span,
                 is_value: s.is_value,
+                is_nobox: s.is_nobox,
                 span: item.span,
                 generics: Vec::new(),
                 fields: Vec::new(),

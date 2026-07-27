@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
@@ -44,6 +45,46 @@ pub struct GlobalCtx {
 
 fn err(msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(Span::default(), msg.into())
+}
+
+fn nobox_nominal_ty(ws: &Workspace, ty: TyId) -> Option<ustr::Ustr> {
+    let te = match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        TyId::Local(_) => return None,
+    };
+    match te {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => {
+            let sid = ws.struct_by_name.get(&name)?;
+            ws.modules[sid.module.index()].structs[sid.def]
+                .is_nobox
+                .then_some(name)
+        }
+        TypeExpr::Nullable(inner) => nobox_nominal_ty(ws, ty.with_idx(inner)),
+        _ => None,
+    }
+}
+
+fn validate_js_nobox_return(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+    mf: &MirFunc,
+) -> Result<(), CompilerError> {
+    let Some(name) = f.return_ty.and_then(|ty| nobox_nominal_ty(ws, ty)) else {
+        return Ok(());
+    };
+    let packs_return = mf
+        .blocks
+        .iter()
+        .any(|(_, block)| matches!(&block.term, Term::Return(values) if values.len() > 1));
+    if packs_return {
+        return Err(err(format!(
+            "JS subset: nobox value `{name}` return requires an implicit array materialization"
+        )));
+    }
+    Ok(())
 }
 
 /// A cell's JS identifier (`c<raw>`). Params and locals share the scheme; params
@@ -1402,7 +1443,8 @@ impl Emitter<'_> {
             // registry (`build_vt_eq_defs`) supplies that split and `__op_eq`
             // consults it before the generic walk -- mirroring luajit's `_vt.__eq`
             // metatable-authority rule. Construction is identical for both tiers.
-            Inst::MakeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields }
+            | Inst::MaterializeValueStruct { name, fields } => {
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
@@ -2637,6 +2679,13 @@ impl JsReach<'_> {
             }
         }
         skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf)?;
+        skull_transform::validate_no_implicit_nobox_materialization(self.ws, &mf)
+            .map_err(err)?;
+        validate_js_nobox_return(self.ws, f, &mf)?;
+        for nf in &mf.nested_fns {
+            skull_transform::validate_no_implicit_nobox_materialization(self.ws, nf)
+                .map_err(err)?;
+        }
         self.discover(&mf)?;
         self.st.lowered.push((fr, mf));
         Ok(())
@@ -2656,6 +2705,12 @@ impl JsReach<'_> {
         skull_transform::recover_counted_loops(self.ws, &mut mf);
         for nf in &mut mf.nested_fns {
             skull_transform::recover_counted_loops(self.ws, nf);
+        }
+        skull_transform::validate_no_implicit_nobox_materialization(self.ws, &mf)
+            .map_err(err)?;
+        for nf in &mf.nested_fns {
+            skull_transform::validate_no_implicit_nobox_materialization(self.ws, nf)
+                .map_err(err)?;
         }
         self.discover(&mf)?;
         let is_const = self.ws.module(site.module).globals[site.gid].is_const;
@@ -4142,7 +4197,10 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             mark(&[*capacity]);
             columns.iter().for_each(|(_, vs)| mark(vs));
         }
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => {
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => {
             for (_, v) in fields {
                 f(*v);
             }

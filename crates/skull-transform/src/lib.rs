@@ -27,6 +27,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 
@@ -37,10 +38,33 @@ pub mod scope;
 pub use closure::{convert_closures, convert_closures_framed, FrameInfo};
 pub use forl::recover_counted_loops;
 pub use inline::{
-    fn_has_bounds, inline_functions, validate_no_residual_bound_calls, InlineCache, SpliceRecord,
+    fn_has_bounds, inline_functions, inline_functions_with_subst, validate_no_residual_bound_calls,
+    InlineCache, SpliceRecord,
 };
 
 pub const STATE: &str = "__state";
+
+pub fn validate_no_implicit_nobox_materialization(
+    ws: &Workspace,
+    func: &MirFunc,
+) -> Result<(), String> {
+    for (_, block) in func.blocks.iter() {
+        for &iid in &block.insts {
+            let Inst::MakeValueStruct { name, .. } = &func.insts[iid] else {
+                continue;
+            };
+            let Some(sid) = ws.struct_by_name.get(name) else {
+                continue;
+            };
+            if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                return Err(format!(
+                    "nobox value `{name}` survived lowering as an implicit materialization"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Dead-code elimination over a [`MirFunc`] (a CFG->CFG cleanup, run before emit).
 /// Removes, to a fixpoint: (a) pure value-producing insts with no users — the
@@ -1370,7 +1394,10 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             p(capacity);
             columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
         }
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
@@ -1421,7 +1448,10 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             f(capacity);
             columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
         }
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));

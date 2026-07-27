@@ -420,7 +420,13 @@ impl<'a> Printer<'a> {
     }
 
     fn struct_def(&self, s: &StructDef) -> Doc {
-        let prefix = if s.is_value { "value " } else { "struct " };
+        let prefix = if s.is_nobox {
+            "nobox value "
+        } else if s.is_value {
+            "value "
+        } else {
+            "struct "
+        };
         let head = Doc::concat([
             Doc::text(prefix),
             Doc::text(kw(s.name.name)),
