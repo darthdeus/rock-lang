@@ -4395,6 +4395,29 @@ impl Builder<'_> {
         self.rebuild_from_leaves(&shape, &leaves, &mut idx)
     }
 
+    /// One element of an indexable collection, for the loop lowerings that bind a
+    /// whole element per iteration (`for x in coll`, `for (i, x) in enumerate`).
+    ///
+    /// Column storage has no element slot to index, so the read decomposes into K
+    /// leaf reads and packs -- the same shape `let v = xs[i]` takes, which means
+    /// SROA peels the pack wherever the binding is only projected from. Emitting a
+    /// whole-element `Index` here instead is what made bitgun stop compiling: it
+    /// reaches the emitter with no slot to name.
+    fn loop_element_at(
+        &mut self,
+        arr: Idx<Inst>,
+        index: Idx<Inst>,
+        kind: ContainerKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        match kind {
+            ContainerKind::VecValueColumns(elem) => {
+                let repr = self.column_element_repr(arr, index, elem)?;
+                Ok(self.pack(repr))
+            }
+            _ => Ok(self.emit_cur(Inst::Index { base: arr, index, kind })),
+        }
+    }
+
     /// A column-stored element (`xs[i]` where `xs: [E]` stores flat columns) as
     /// an unboxed `Group`: bounds-check `i` once, then read leaf `k` from column
     /// `k`. No element table is touched because none exists.
@@ -6432,11 +6455,7 @@ impl Builder<'_> {
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.emit_cur(Inst::Index {
-            base: arr_v,
-            index: i_now,
-            kind,
-        });
+        let elem = self.loop_element_at(arr_v, i_now, kind)?;
         match &split {
             // split: index already bound to i_cell; bind the element pattern.
             Some((_, xpat)) => self.bind_for_pattern(xpat, elem),
@@ -6518,11 +6537,7 @@ impl Builder<'_> {
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.emit_cur(Inst::Index {
-            base: arr_v,
-            index: i_now,
-            kind,
-        });
+        let elem = self.loop_element_at(arr_v, i_now, kind)?;
         self.bind_for_pattern(&vars, elem);
         self.loop_targets.push((latch, exit));
         self.lower_stmt_expr(body)?;
