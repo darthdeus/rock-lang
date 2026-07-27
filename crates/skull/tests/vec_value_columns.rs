@@ -374,6 +374,37 @@ fn enumerate_over_column_storage_yields_correct_pairs() {
     );
 }
 
+const VEC_GET_VIA_PRIMITIVE: &str = r#"
+value V2 { x: float, y: float }
+
+fn main() {
+    let xs: [V2] = [V2 { x: 1.0, y: 10.0 }, V2 { x: 2.0, y: 20.0 }]
+    let g = xs.get(1)
+    if g != null { print("{g.x},{g.y}") }
+}
+"#;
+
+/// `__vec_data_get/_set/_unset` are the representation boundary: nearly the whole
+/// stdlib Vec surface (`get`, `set`, `pop`, `clear`, `insert_at`, `remove_at`,
+/// `swap_remove`) reaches storage only through them, so they are lowered
+/// column-aware instead of each helper being intercepted by name.
+///
+/// It is a STATIC decision per instantiation, not a runtime test for whether
+/// `_data` exists: `vec_column_elem_of` resolves through the active `SpecSubst`,
+/// so the shared snapshot of a generic body keeps the boxed backing while the
+/// snapshot specialized at `T = V2` lowers to column operations.
+///
+/// `get` is the one that proves the mechanism today, because `vec_get` is
+/// `@inline` and so actually gets specialized at a concrete site. `set`, `pop`,
+/// `clear`, `remove_at` and `swap_remove` are plain generics that nothing
+/// specializes yet, so they still reach the shared `_data` body and still fail --
+/// that is the standalone-specialized-callee work, not a gap in this lowering.
+#[test]
+fn vec_data_primitives_are_column_aware_when_specialized() {
+    let lua = common::try_emit_module(VEC_GET_VIA_PRIMITIVE).expect("`get` over columns must emit");
+    assert_eq!(common::run_luajit(&format!("{lua}\nmain()\n"), "col_vec_get"), "2,20");
+}
+
 const VEC_BOXED_ELEMS_UNSPLICED: &str = r#"
 value WithRef { name: string, k: int }
 value Wide { a: int, b: int, c: int, d: int, e: int }

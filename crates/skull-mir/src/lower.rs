@@ -3741,6 +3741,21 @@ impl Builder<'_> {
                     }
                 }
             }
+            // The three raw-backing primitives ARE the representation boundary.
+            // Nearly every stdlib Vec helper -- `get`, `set`, `pop`, `clear`,
+            // `insert_at`, `remove_at`, `swap_remove` -- reaches storage only
+            // through these, so making them column-aware here converts that whole
+            // surface at once instead of intercepting each helper by name.
+            //
+            // This works inside a GENERIC body because `vec_column_elem_of`
+            // resolves through the active `SpecSubst`: in the shared snapshot of
+            // `Vec<T>.clear` the element is an opaque `T` and the boxed `_data`
+            // body stands, while the snapshot specialized at `T = Vec2` sees the
+            // concrete element and lowers to column operations. Static, per
+            // instantiation -- never a runtime test for whether `_data` exists.
+            if let Some(r) = self.column_data_primitive(name.as_str(), &arg_idxs)? {
+                return Ok(r);
+            }
         }
         // `on_killed(f)` / `on_resume(f)` inside a `co fn` register a lifecycle
         // hook. bone desugars `on_killed { body }` to a call of an `on_killed`
@@ -4449,6 +4464,44 @@ impl Builder<'_> {
             .collect();
         let mut idx = 0;
         Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+    }
+
+    /// Column-aware lowering of `__vec_data_get/_set/_unset` when the receiver's
+    /// element type is concretely column-stored. `Ok(None)` = not one of these, or
+    /// a boxed element, in which case the stdlib `inline(lua)` body stands.
+    ///
+    /// `unset` is deliberately a NO-OP. On the boxed backing it exists to drop the
+    /// reference so the element can be collected; a column holds scalars, so there
+    /// is nothing to release, and nothing reads past `len` (every column access
+    /// goes through `__vec_checked_index`, which bounds-checks against it). Writing
+    /// nil into the columns would also be actively harmful: it punches holes in
+    /// dense numeric arrays and can push them from array to hash part, which is the
+    /// representation's whole advantage.
+    fn column_data_primitive(
+        &mut self,
+        name: &str,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        match (name, arg_idxs) {
+            ("__vec_data_get", [recv, index]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                Ok(Some(self.column_element_repr(vec, i, elem)?))
+            }
+            ("__vec_data_set", [recv, index, value]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                self.column_element_store(vec, i, *value, elem)?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            ("__vec_data_unset", [recv, _index]) => {
+                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// `xs.push(v)` onto a column-stored Vec: bump the shared `len` once, then
