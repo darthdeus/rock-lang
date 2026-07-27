@@ -111,29 +111,6 @@ fn single_char_token(ch: char) -> Option<TokenKind> {
 }
 
 impl<'a> Tokenizer<'a> {
-    fn read_quoted_text(&mut self, delimiter: char) -> String {
-        let mut text = String::new();
-        while let Some(next) = self.current {
-            self.advance();
-            if next == delimiter { break; }
-            text.push(next);
-        }
-        text
-    }
-
-    fn at(&self, want: char) -> bool {
-        self.current == Some(want)
-    }
-
-    fn eat(&mut self, want: char) -> bool {
-        if self.at(want) {
-            self.advance();
-            true
-        } else {
-            false
-        }
-    }
-
     /// Create a tokenizer from a SourceFile Arc (convenience method for tests and utils)
     pub fn from_source_file(input: &'a str, source_file: &Arc<AtomicRefCell<SourceFile>>) -> Self {
         let file_path = source_file.borrow().file.to_id_path();
@@ -233,29 +210,31 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn peek_n(&self, n: usize) -> Option<char> {
-        // `n` is the number of CHARS to skip ahead from the current
-        // position. ASCII fast-path: if every byte from byte_index up to
-        // (byte_index + n) is ASCII, peeking n chars == peeking n bytes.
-        let bytes = self.input.as_bytes();
-        let start = self.byte_index;
-        if start + n < bytes.len() {
-            let mut all_ascii = true;
-            for i in 0..n {
-                if bytes[start + i] >= 0x80 {
-                    all_ascii = false;
-                    break;
-                }
+        let raw = self.input.as_bytes();
+        let base = self.byte_index;
+        let fast_ok = base + n < raw.len()
+            && raw[base..base + n].iter().all(|b| b.is_ascii());
+        if fast_ok {
+            let ahead = raw[base + n];
+            if ahead.is_ascii() {
+                return Some(ahead as char);
             }
-            if all_ascii {
-                let b = bytes[start + n];
-                if b < 0x80 {
-                    return Some(b as char);
-                }
-                return decode_at(bytes, start + n).map(|(c, _)| c);
-            }
+            return decode_at(raw, base + n).map(|(got, _)| got);
         }
-        // Slow path: walk chars from current position.
-        self.input[start..].chars().nth(n)
+        self.input.get(base..)?.chars().nth(n)
+    }
+
+    fn at(&self, want: char) -> bool {
+        self.current == Some(want)
+    }
+
+    fn eat(&mut self, want: char) -> bool {
+        if self.at(want) {
+            self.advance();
+            true
+        } else {
+            false
+        }
     }
 
     fn skip_whitespace(&mut self) {
@@ -350,50 +329,6 @@ impl<'a> Tokenizer<'a> {
         &input[start..i]
     }
 
-    /// Scan a `"""`-delimited multiline string body from the current position
-    /// (just past the opening `"""`) up to -- but NOT consuming -- the closing
-    /// `"""`. The body is verbatim (no escapes), so it's returned as a borrowed
-    /// slice; the cursor plus full line/column bookkeeping (newlines included)
-    /// are advanced over the body. Returns `None` on EOF before a closing
-    /// `"""`, having advanced to EOF so the caller's error span is sane.
-    fn read_triple_quote_body(&mut self) -> Option<&'a str> {
-        let input = self.input;
-        let bytes = input.as_bytes();
-        let n = bytes.len();
-        let start = self.byte_index;
-        let mut i = start;
-        let mut line = self.line;
-        let mut col = self.column;
-        let found = loop {
-            if i + 2 < n && bytes[i] == b'"' && bytes[i + 1] == b'"' && bytes[i + 2] == b'"' {
-                break true;
-            }
-            if i >= n {
-                break false;
-            }
-            if bytes[i] == b'\n' {
-                line += 1;
-                col = 0;
-                i += 1;
-            } else {
-                if bytes[i] & 0xC0 != 0x80 {
-                    col += 1;
-                }
-                i += 1;
-            }
-        };
-        self.byte_index = i;
-        self.byte_offset += i - start;
-        self.line = line;
-        self.column = col;
-        self.current = decode_at(bytes, i).map(|(c, _)| c);
-        if found {
-            Some(&input[start..i])
-        } else {
-            None
-        }
-    }
-
     /// Fast path for a single-line string with no escapes, interpolation, or
     /// raw newline: scan to the closing `"` and return a verbatim slice. Bails
     /// (returns `None`, cursor untouched) the instant a `\`, `{`, or newline
@@ -432,224 +367,73 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Slow path for single-line strings: processes escape sequences (`\n`,
-    /// `\t`, ...) and tracks `{}` interpolation depth, including nested string
-    /// literals inside `{...}`. The opening `"` must already be consumed. Used
-    /// when [`try_read_plain_string`] bails.
-    fn read_escaped_string(&mut self) -> Result<TokenKind, CompilerError> {
-        let mut string = String::new();
-        let mut interp_depth: usize = 0; // Track {}-nesting for interpolation
-        // `closed` distinguishes clean termination on the
-        // matching `"` from falling out of the loop because
-        // we ran off the end of input. Without this flag,
-        // `"foo{"` (bare `{` with no closing `}`) silently
-        // compiled to a garbage string because the nested-
-        // string handler gobbled the rest of the file
-        // looking for a closing quote.
-        let mut closed = false;
-        let string_open_span = self.start_span();
-        while let Some(ch) = self.current {
-            if ch == '"' && interp_depth == 0 {
-                // Closing quote — only if not inside an interpolation expression
-                self.advance();
-                closed = true;
-                break;
-            }
-            if ch == '"' && interp_depth > 0 {
-                // String literal inside interpolation: skip to its closing quote
-                string.push(ch);
-                self.advance();
-                let mut inner_closed = false;
-                while let Some(inner_ch) = self.current {
-                    string.push(inner_ch);
-                    self.advance();
-                    if inner_ch == '\\' {
-                        // Escape inside nested string
-                        if let Some(esc) = self.current {
-                            string.push(esc);
-                            self.advance();
-                        }
-                    } else if inner_ch == '"' {
-                        inner_closed = true;
-                        break;
-                    }
-                }
-                if !inner_closed {
-                    // Most likely the user wrote a bare `{`
-                    // that was meant to be literal; the lexer
-                    // treated it as opening an interpolation,
-                    // then hit a nested `"` and gobbled the
-                    // rest of the input looking for its
-                    // close. Surface the probable root cause
-                    // in the error message.
-                    return Err(CompilerError::new_with_label(
-                        self.end_span(string_open_span),
-                        "unterminated string literal: a bare `{` opens an interpolation; use `{{` to emit a literal `{`".to_string(),
-                    ));
-                }
-                continue;
-            }
-            // Doubled-brace escapes (`{{` / `}}`) are only
-            // literal when we're NOT inside an interpolation
-            // expression (depth == 0). Inside `{...}` the
-            // braces are part of the expression's own syntax.
-            // We consume both chars as a single literal and
-            // DON'T touch interp_depth, so the lexer keeps
-            // looking for the real string terminator.
-            if ch == '{' && interp_depth == 0 && self.peek_n(1) == Some('{') {
-                string.push('{');
-                string.push('{');
-                self.advance();
-                self.advance();
-                continue;
-            }
-            if ch == '}' && interp_depth == 0 && self.peek_n(1) == Some('}') {
-                string.push('}');
-                string.push('}');
-                self.advance();
-                self.advance();
-                continue;
-            }
-
-            if ch == '{' {
-                interp_depth += 1;
-            } else if ch == '}' && interp_depth > 0 {
-                interp_depth -= 1;
-            }
-            if ch == '\\' {
-                self.advance();
-                if let Some(escaped_ch) = self.current {
-                    match escaped_ch {
-                        'n' => string.push('\n'),
-                        't' => string.push('\t'),
-                        '\\' => string.push('\\'),
-                        '"' => string.push('"'),
-                        '\'' => string.push('\''),
-                        other => string.push(other),
-                    }
-                    self.advance();
-                } else {
-                    return Err(CompilerError::new_with_label(
-                        self.end_span(self.start_span()),
-                        "Unexpected escape at end of input".to_string(),
-                    ));
-                }
-            } else {
-                string.push(ch);
-                self.advance();
-            }
-        }
-
-        // Post-loop checks for diagnostic failure modes.
-        //
-        // - `!closed`: we ran off the end of input without ever
-        //   seeing the matching `"`. Either the string literal
-        //   is simply unterminated, OR a bare `{` started an
-        //   interpolation that was never closed — in which
-        //   case the nested-string handler above would have
-        //   consumed past the intended terminator.
-        // - `interp_depth > 0`: more specific — we saw the
-        //   closing `"` but there's still an open `{` on the
-        //   interpolation stack. (Unreachable in practice
-        //   because `"` at depth>0 goes through the nested
-        //   handler, but kept as a belt-and-braces check.)
-        //
-        // The actionable hint steers users toward `{{` for
-        // literal open-braces, which is the only way in
-        // Rock to put a literal `{` inside a string.
-        if !closed {
+    /// Read the string literal starting at `start` (the opening delimiter's
+    /// first byte), advancing the cursor past it. One reader for every flavor --
+    /// `"`, `"""`, `r"`, `r"""`, `'` -- over the shared `interp::scan_string`,
+    /// so the terminator rule the lexer applies is the same one the parser and
+    /// the LSP see. The cursor may already sit anywhere from `start` up to the
+    /// literal's end (the `"` fast path pre-consumes the opening quote).
+    fn read_string_literal(&mut self, start: usize) -> Result<TokenKind, CompilerError> {
+        let open_span = self.start_span();
+        let scan = crate::interp::scan_string(self.input, start);
+        // Only `"..."` raises on an unclosed hole: there a bare `{` makes the
+        // next `"` non-closing, so the literal would swallow the rest of the
+        // file. `"""` closes on its own delimiter regardless of brace depth, so
+        // a stray `{` is just text -- which is exactly why `inline(lua)` bodies
+        // (full of braces) are written triple-quoted.
+        let unclosed_hole = scan.flavor == crate::interp::Flavor::Quoted
+            && matches!(
+                scan.pieces.last(),
+                Some(crate::interp::Piece::Hole { closed: false, .. })
+            );
+        // The actionable hint steers toward `{{` for a literal open-brace, which
+        // is the only way in Rock to emit one.
+        if !scan.terminated {
+            self.advance_to(scan.end);
             return Err(CompilerError::new_with_label(
-                self.end_span(string_open_span),
-                "unterminated string literal: a bare `{` opens an interpolation that must be closed with `}`; use `{{` to emit a literal `{`".to_string(),
+                self.end_span(open_span),
+                match scan.flavor {
+                    crate::interp::Flavor::Triple => {
+                        "unterminated multiline string".to_string()
+                    }
+                    crate::interp::Flavor::RawTriple => {
+                        "unterminated multiline raw string".to_string()
+                    }
+                    crate::interp::Flavor::Raw => "unterminated raw string".to_string(),
+                    _ => "unterminated string literal: a bare `{` opens an interpolation \
+                          that must be closed with `}`; use `{{` to emit a literal `{`"
+                        .to_string(),
+                },
             ));
         }
-        if interp_depth > 0 {
+        if unclosed_hole {
+            self.advance_to(scan.end);
             return Err(CompilerError::new_with_label(
-                self.end_span(string_open_span),
-                "unmatched `{` in string literal: use `{{` to emit a literal `{`".to_string(),
+                self.end_span(open_span),
+                "unmatched `{` in string literal: use `{{` to emit a literal `{`"
+                    .to_string(),
             ));
         }
+        let content = scan.content(self.input);
+        self.advance_to(scan.end);
+        Ok(match scan.flavor {
+            crate::interp::Flavor::Raw | crate::interp::Flavor::RawTriple => {
+                TokenKind::RawString(content.into())
+            }
+            _ => TokenKind::String(content.into()),
+        })
+    }
 
-        Ok(TokenKind::String(string.into()))
+    /// Advance the cursor to byte index `target`, keeping line/column in step.
+    fn advance_to(&mut self, target: usize) {
+        while self.byte_index < target && self.current.is_some() {
+            self.advance();
+        }
     }
 
     fn read_keyword_or_ident(&mut self) -> Result<TokenKind, CompilerError> {
-        // Check if this might be a raw string literal (r" or r""")
-        if self.current == Some('r') && (self.peek_n(1) == Some('"')) {
-            // Save current position in case we need to backtrack
-            let start_byte_index = self.byte_index;
-            let start_byte_offset = self.byte_offset;
-            let start_line = self.line;
-            let start_column = self.column;
-
-            self.advance(); // consume 'r'
-
-            // Check for multiline raw string r"""
-            if self.current == Some('"')
-                && self.peek_n(1) == Some('"')
-                && self.peek_n(2) == Some('"')
-            {
-                self.advance(); // consume first "
-                self.advance(); // consume second "
-                self.advance(); // consume third "
-
-                let mut string = String::new();
-                let mut quote_count = 0;
-
-                while let Some(ch) = self.current {
-                    if ch == '"' {
-                        quote_count += 1;
-                        self.advance();
-                        if quote_count == 3 {
-                            break;
-                        }
-                    } else {
-                        // If we had some quotes but not 3, add them to the string
-                        for _ in 0..quote_count {
-                            string.push('"');
-                        }
-                        quote_count = 0;
-                        string.push(ch);
-                        self.advance();
-                    }
-                }
-
-                if quote_count != 3 {
-                    return Err(CompilerError::new_with_label(
-                        self.end_span(self.start_span()),
-                        "unterminated multiline raw string".to_string(),
-                    ));
-                }
-
-                return Ok(TokenKind::RawString(string.into()));
-            }
-            // Check for single-line raw string r"
-            else if self.current == Some('"') {
-                self.advance(); // consume opening "
-
-                let mut text = String::new();
-                while let Some(ch) = self.current {
-                    if ch == '"' {
-                        self.advance(); // consume closing "
-                        return Ok(TokenKind::RawString(text.into()));
-                    }
-                    text.push(ch);
-                    self.advance();
-                }
-
-                return Err(CompilerError::new_with_label(
-                    self.end_span(self.start_span()),
-                    "unterminated raw string".to_string(),
-                ));
-            }
-            // Not a raw string, backtrack and continue with normal identifier parsing
-            else {
-                self.byte_index = start_byte_index;
-                self.byte_offset = start_byte_offset;
-                self.line = start_line;
-                self.column = start_column;
-                self.current = decode_at(self.input.as_bytes(), self.byte_index).map(|(c, _)| c);
-            }
+        if self.current == Some('r') && self.peek_n(1) == Some('"') {
+            return self.read_string_literal(self.byte_index);
         }
 
         let ident = self.read_ident();
@@ -748,15 +532,23 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn lookahead_number(&self) -> bool {
-        match self.current {
-            Some('0'..='9') => true,
-            Some('-') => {
-                let numeric = self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) || (self.peek_n(1) == Some('.') && self.peek_n(2).is_some_and(|c| c.is_ascii_digit()));
-                numeric && self.minus_can_start_number()
-            },
-            Some('.') if self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) => { self.minus_can_start_number() },
-            _ => false,
+        if self.current.is_some_and(|c| c.is_ascii_digit()) {
+            return true;
         }
+        if self.at('-') {
+            let after = self.peek_n(1);
+            let numeric = match after {
+                Some(d) if d.is_ascii_digit() => true,
+                Some('.') => self.peek_n(2).is_some_and(|c| c.is_ascii_digit()),
+                _ => false,
+            };
+            return numeric && self.minus_can_start_number();
+        }
+        if self.at('.') {
+            return self.peek_n(1).is_some_and(|c| c.is_ascii_digit())
+                && self.minus_can_start_number();
+        }
+        false
     }
 
     /// Determines if a '-' can start a negative number based on the previous token context
@@ -826,139 +618,225 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn read_number(&mut self) -> Result<TokenKind, CompilerError> {
+        enum Radix {
+            Decimal,
+            Binary,
+            Hex,
+        }
         let origin = self.start_span();
-        let mut digits = String::new();
-        let mut spelling = String::new();
-        let mut radix = 10u32;
+        let mut digits = String::with_capacity(16);
+        let mut kept = String::with_capacity(16);
+        let mut dot_seen = false;
         let mut floaty = false;
-        let mut dotted = false;
-        if self.current == Some('-') {
+        let mut radix = Radix::Decimal;
+
+        if self.at('-') {
             digits.push('-');
-            spelling.push('-');
+            kept.push('-');
             self.advance();
         }
-        if self.current == Some('0') {
-            radix = match self.peek_n(1) {
-                Some('b' | 'B') => 2,
-                Some('x' | 'X') => 16,
-                _ => 10,
-            };
-            if radix != 10 {
-                spelling.push_str(if radix == 2 { "0b" } else { "0x" });
-                self.advance();
-                self.advance();
-            } else {
-                digits.push('0');
-                spelling.push('0');
-                self.advance();
-            }
-        }
-        loop {
-            let Some(next) = self.current else { break };
-            if radix != 10 {
-                let valid = match radix {
-                    2 => matches!(next, '0' | '1'),
-                    _ => next.is_ascii_hexdigit(),
-                };
-                if valid {
-                    digits.push(next);
-                } else if next != '_' {
-                    break;
-                }
-                spelling.push(next);
-                self.advance();
-                continue;
-            }
-            match next {
-                '0'..='9' => {},
-                '.' => {
-                    if dotted || self.peek_n(1) == Some('.') || !self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) || matches!(&self.last_token_kind, Some(TokenKind::Dot)) { break; }
-                    dotted = true;
-                    floaty = true;
-                },
-                'e' | 'E' => {
-                    floaty = true;
-                    digits.push(next);
-                    spelling.push(next);
+
+        if self.at('0') {
+            match self.peek_n(1) {
+                Some('b') | Some('B') => {
+                    kept.push_str("0b");
                     self.advance();
-                    if let Some(sign @ ('+' | '-')) = self.current {
-                        digits.push(sign);
-                        spelling.push(sign);
-                        self.advance();
-                    }
-                    let mut exponent_digits = 0usize;
-                    while self.current.is_some_and(|c| c.is_ascii_digit()) {
-                        let digit = self.current.unwrap();
-                        digits.push(digit);
-                        spelling.push(digit);
-                        exponent_digits += 1;
-                        self.advance();
-                    }
-                    if exponent_digits == 0 {
-                        return Err(CompilerError::new_with_label(
-                            self.end_span(origin.clone()),
-                            format!("Invalid scientific notation: expected digits after exponent in '{}'", spelling),
-                        ).with_code(CompilerErrorCode::TokenizerError));
-                    }
-                    break;
-                },
-                _ => break,
+                    self.advance();
+                    radix = Radix::Binary;
+                }
+                Some('x') | Some('X') => {
+                    kept.push_str("0x");
+                    self.advance();
+                    self.advance();
+                    radix = Radix::Hex;
+                }
+                Some(_) => {
+                    digits.push('0');
+                    kept.push('0');
+                    self.advance();
+                }
+                None => {
+                    digits.push('0');
+                    kept.push('0');
+                    self.advance();
+                }
             }
-            digits.push(next);
-            spelling.push(next);
-            self.advance();
         }
-        if radix != 10 {
-            let label = if radix == 2 { "binary" } else { "hex" };
-            let prefix = if radix == 2 { "0b" } else { "0x" };
+
+        match radix {
+            Radix::Binary => {
+            loop {
+                let Some(cur) = self.current else { break };
+                match cur {
+                    '0' | '1' => {
+                        digits.push(cur);
+                        kept.push(cur);
+                        self.advance();
+                    }
+                    '_' => {
+                        kept.push(cur);
+                        self.advance();
+                    }
+                    _ => break,
+                }
+            }
+
             if digits.is_empty() {
                 return Err(CompilerError::new_with_label(
                     self.end_span(origin.clone()),
-                    format!("Invalid {label} literal: no digits after {prefix}"),
-                ).with_code(CompilerErrorCode::TokenizerError));
+                    "Invalid binary literal: no digits after 0b".to_string(),
+                )
+                .with_code(CompilerErrorCode::TokenizerError));
             }
-            let value = i64::from_str_radix(&digits, radix).map_err(|error| {
+
+            let value = i64::from_str_radix(&digits, 2).map_err(|e| {
                 CompilerError::new_with_label(
                     self.end_span(origin.clone()),
-                    format!("Invalid {label} literal '{}': {}", digits, error),
-                ).with_code(CompilerErrorCode::TokenizerError)
+                    format!("Invalid binary literal '{}': {}", digits, e),
+                )
+                .with_code(CompilerErrorCode::TokenizerError)
             })?;
-            return Ok(TokenKind::Int(value, spelling.into()));
+            Ok(TokenKind::Int(value, kept.into()))
+            }
+            Radix::Hex => {
+            loop {
+                let Some(cur) = self.current else { break };
+                if cur.is_ascii_hexdigit() {
+                    digits.push(cur);
+                    kept.push(cur);
+                    self.advance();
+                } else if cur == '_' {
+                    kept.push(cur);
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+
+            if digits.is_empty() {
+                return Err(CompilerError::new_with_label(
+                    self.end_span(origin.clone()),
+                    "Invalid hex literal: no digits after 0x".to_string(),
+                )
+                .with_code(CompilerErrorCode::TokenizerError));
+            }
+
+            let value = i64::from_str_radix(&digits, 16).map_err(|e| {
+                CompilerError::new_with_label(
+                    self.end_span(origin.clone()),
+                    format!("Invalid hex literal '{}': {}", digits, e),
+                )
+                .with_code(CompilerErrorCode::TokenizerError)
+            })?;
+            Ok(TokenKind::Int(value, kept.into()))
+            }
+            Radix::Decimal => {
+            loop {
+                let Some(cur) = self.current else { break };
+                match cur {
+                    '0'..='9' => {
+                        digits.push(cur);
+                        kept.push(cur);
+                        self.advance();
+                        continue;
+                    }
+                    '.' => {
+                        if dot_seen {
+                            break;
+                        }
+                        if matches!(&self.last_token_kind, Some(TokenKind::Dot)) {
+                            break;
+                        }
+                        if !self.peek_n(1).is_some_and(|c| c.is_ascii_digit()) {
+                            break;
+                        }
+                        floaty = true;
+                        digits.push(cur);
+                        kept.push(cur);
+                        dot_seen = true;
+                        self.advance();
+                        continue;
+                    }
+                    'e' | 'E' => {
+                        floaty = true;
+                        digits.push(cur);
+                        kept.push(cur);
+                        self.advance();
+                        if let Some(sign) = self.current {
+                            if sign == '+' || sign == '-' {
+                                digits.push(sign);
+                                kept.push(sign);
+                                self.advance();
+                            }
+                        }
+                        let mut exp_digits = false;
+                        loop {
+                            let Some(ec) = self.current else { break };
+                            if !ec.is_ascii_digit() {
+                                break;
+                            }
+                            digits.push(ec);
+                            kept.push(ec);
+                            exp_digits = true;
+                            self.advance();
+                        }
+                        if !exp_digits {
+                            return Err(CompilerError::new_with_label(
+                                self.end_span(origin.clone()),
+                                format!("Invalid scientific notation: expected digits after exponent in '{}'", kept),
+                            )
+                            .with_code(CompilerErrorCode::TokenizerError));
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+
+            Ok(if floaty {
+                let parsed_float = digits.parse().map_err(|_| {
+                    CompilerError::new_with_label(
+                        self.end_span(origin.clone()),
+                        format!("Invalid floating point literal: '{}'", digits),
+                    )
+                    .with_code(CompilerErrorCode::TokenizerError)
+                })?;
+                TokenKind::Float(parsed_float)
+            } else {
+                let parsed_int = digits.parse::<i64>().map_err(|e| {
+                    CompilerError::new_with_label(
+                        self.end_span(origin.clone()),
+                        format!("Invalid integer literal '{}': {}", digits, e),
+                    )
+                    .with_code(CompilerErrorCode::TokenizerError)
+                })?;
+                TokenKind::Int(parsed_int, kept.into())
+            })
+            }
         }
-        let token = if floaty {
-            let value = digits.parse().map_err(|_| {
-                CompilerError::new_with_label(self.end_span(origin.clone()),
-                    format!("Invalid floating point literal: '{}'", digits))
-                    .with_code(CompilerErrorCode::TokenizerError)
-            })?;
-            TokenKind::Float(value)
-        } else {
-            let value = digits.parse::<i64>().map_err(|error| {
-                CompilerError::new_with_label(self.end_span(origin.clone()),
-                    format!("Invalid integer literal '{}': {}", digits, error))
-                    .with_code(CompilerErrorCode::TokenizerError)
-            })?;
-            TokenKind::Int(value, spelling.into())
-        };
-        Ok(token)
     }
 
     pub fn next_token(&mut self) -> Result<Option<Token>, CompilerError> {
         self.skip_whitespace();
-
-        let start = self.start_span();
-
-        let kind = match self.current {
-            None => return Ok(None),
-            Some(ch) if ch.is_ascii_alphabetic() || ch == '_' => self.read_keyword_or_ident()?,
-
-            // `lookahead_number` only ever returns true for a digit, `-`, or a
-            // prefix-position `.` (leading-dot float), so gate the call to those
-            // chars instead of paying it on every operator/punctuation.
-            Some(ch) if ch.is_ascii_digit() => self.read_number()?,
-            Some('-') if self.lookahead_number() => self.read_number()?,
-            Some('.') if self.lookahead_number() => self.read_number()?,
-
+        let origin = self.start_span();
+        let Some(head) = self.current else {
+            return Ok(None);
+        };
+        if head.is_ascii_alphabetic() || head == '_' {
+            let kind = self.read_keyword_or_ident()?;
+            return self.finish_token(origin, kind);
+        }
+        if head.is_ascii_digit()
+            || ((head == '-' || head == '.') && self.lookahead_number())
+        {
+            let kind = self.read_number()?;
+            return self.finish_token(origin, kind);
+        }
+        if let Some(kind) = single_char_token(head) {
+            self.advance();
+            return self.finish_token(origin, kind);
+        }
+        let kind: TokenKind = match self.current {
             Some('\r') => {
                 self.advance();
                 if self.current == Some('\n') {
@@ -1123,37 +1001,16 @@ impl<'a> Tokenizer<'a> {
             }
 
             Some('"') => {
-                // detect triple-quote multiline string """ ... """
+                let lit_at = self.byte_index;
                 if self.peek_n(1) == Some('"') && self.peek_n(2) == Some('"') {
-                    // consume the opening """
-                    self.advance();
-                    self.advance();
-                    self.advance();
-                    match self.read_triple_quote_body() {
-                        Some(body) => {
-                            // consume the closing """
-                            self.advance();
-                            self.advance();
-                            self.advance();
-                            TokenKind::String(body.into())
-                        }
-                        None => {
-                            return Err(CompilerError::new_with_label(
-                                self.end_span(self.start_span()),
-                                "unterminated multiline string".to_string(),
-                            ));
-                        }
-                    }
+                    self.read_string_literal(lit_at)?
                 } else {
-                    // single-line string
-                    self.advance(); // consume opening "
-                    // Fast path: plain string with no escape / interpolation /
-                    // raw newline -> a verbatim slice. Anything else falls back
-                    // to the full escape + interpolation scanner.
+                    // Verbatim slice applies only without escapes or holes.
+                    self.advance();
                     if let Some(body) = self.try_read_plain_string() {
                         TokenKind::String(body.into())
                     } else {
-                        self.read_escaped_string()?
+                        self.read_string_literal(lit_at)?
                     }
                 }
             }
@@ -1176,97 +1033,72 @@ impl<'a> Tokenizer<'a> {
                 }
             }
 
-            Some('\'') => {
-                self.advance();
-                let text = self.read_quoted_text('\'');
-                TokenKind::String(text.into())
-            }
+            Some('\'') => self.read_string_literal(self.byte_index)?,
 
             Some('#') => {
-                // Peek ahead to determine what kind of # construct this is
-                if let Some(next_ch) = self.peek_n(1) {
-                    // Check if it's a lowercase letter (potential directive)
-                    if next_ch.is_ascii_lowercase() {
-                        self.advance(); // consume #
-                        let input = self.input;
-                        let word_start = self.byte_index;
-
-                        // Read the directive word (ASCII alphabetic only) as a
-                        // byte slice -- no per-char String.
+                match self.peek_n(1) {
+                    Some(nxt) if nxt.is_ascii_lowercase() => {
+                        self.advance();
+                        let src = self.input;
+                        let word_at = self.byte_index;
                         {
-                            let bytes = input.as_bytes();
-                            let mut i = self.byte_index;
-                            while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
-                                i += 1;
+                            let raw = src.as_bytes();
+                            let mut j = self.byte_index;
+                            while j < raw.len() && raw[j].is_ascii_alphabetic() {
+                                j += 1;
                             }
-                            let consumed = i - self.byte_index;
-                            self.byte_index = i;
-                            self.byte_offset += consumed;
-                            self.column += consumed; // all ASCII: chars == bytes
-                            self.current = decode_at(bytes, i).map(|(c, _)| c);
+                            let took = j - self.byte_index;
+                            self.byte_index = j;
+                            self.byte_offset += took;
+                            self.column += took;
+                            self.current = decode_at(raw, j).map(|(got, _)| got);
                         }
-
-                        // Check if it's a known directive
-                        match &input[word_start..self.byte_index] {
+                        match &src[word_at..self.byte_index] {
                             "if" => TokenKind::DirectiveIf,
                             "elseif" => TokenKind::DirectiveElseIf,
                             "else" => TokenKind::DirectiveElse,
                             "end" => TokenKind::DirectiveEnd,
                             _ => {
-                                // Not a directive: the comment is the word plus
-                                // the rest of the line -- contiguous in source,
-                                // so re-slice from the word start to the newline.
                                 let _ = self.read_line_rest();
-                                TokenKind::Comment(input[word_start..self.byte_index].into())
+                                TokenKind::Comment(src[word_at..self.byte_index].into())
                             }
                         }
-                    } else {
-                        // Regular # comment
-                        self.advance(); // consume #
+                    }
+                    Some(_) => {
+                        self.advance();
                         TokenKind::Comment(self.read_line_rest().into())
                     }
-                } else {
-                    // Just # at end of file: treat as an empty comment.
-                    self.advance();
-                    TokenKind::Comment(String::new().into())
+                    None => {
+                        self.advance();
+                        TokenKind::Comment(String::new().into())
+                    }
                 }
             }
 
-            Some(ch) => match single_char_token(ch) {
-                Some(kind) => {
-                    self.advance();
-                    kind
-                }
-                None => {
-                    return Err(CompilerError::new_with_label(
-                        Span::unknown(),
-                        format!("I done a bad thing: {:?}", self.current),
-                    ))
-                }
-            },
+            _ => {
+                return Err(CompilerError::new_with_label(
+                    Span::unknown(),
+                    format!("I done a bad thing: {:?}", self.current),
+                ))
+            }
         };
 
-        // return Err(CompilerError::new(self.start_span(), "fart".to_string()));
-        //
-        // let span = self.end_span(start.clone());
-        //
-        // self.end_span(start.clone()).print(format!("line {:?} col {:?} offset {:?}", span.line_range, span.col_range, span.offset_range));
-        //
-        // println!(" ... end -> {:?}", self.end_span(start.clone()));
+        self.finish_token(origin, kind)
+    }
 
-        // Update last token kind for context-aware parsing. Skip newlines
-        // and comments — both are non-meaningful trivia for tokenization
-        // decisions like "is the next `.` a tuple index or a decimal?"
-        if !matches!(kind, TokenKind::Newline | TokenKind::Comment(_)) {
+    fn finish_token(
+        &mut self,
+        origin: LineCol,
+        kind: TokenKind,
+    ) -> Result<Option<Token>, CompilerError> {
+        let meaningful = !matches!(kind, TokenKind::Newline | TokenKind::Comment(_));
+        if meaningful {
             self.last_token_kind = Some(kind.clone());
         }
-
-        // Reset the whitespace flag for next token
         self.just_skipped_whitespace = false;
-
         Ok(Some(Token {
             kind,
-            span: self.end_span(start),
+            span: self.end_span(origin),
             trailing_newlines: 0,
         }))
     }
@@ -1304,36 +1136,32 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn empty_span(&self) -> Span {
-        Span {
-            file: self.source_file,
-            line_range: (self.line, self.line),
-            col_range: (self.column, self.column),
-            offset_range: (self.byte_offset, self.byte_offset),
-        }
+        Span::from_linecol(self.start_span())
     }
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, CompilerError> {
-        // Tokens average roughly 4-5 source bytes each (idents, operators,
-        // whitespace); pre-size to skip the growth reallocations of the output
-        // vector. Over-estimates are harmless (one transient allocation).
-        let mut tokens: Vec<Token> = Vec::with_capacity(self.input.len() / 4);
-
-        while let Some(token) = self.next_token()? {
-            if token.kind == TokenKind::Newline {
-                if let Some(last) = tokens.last_mut() {
-                    last.trailing_newlines += 1;
+        let mut out: Vec<Token> = Vec::with_capacity(self.input.len() / 5 + 8);
+        loop {
+            let nxt = self.next_token()?;
+            let Some(tok) = nxt else { break };
+            if tok.kind == TokenKind::Newline {
+                if let Some(prev) = out.last_mut() {
+                    prev.trailing_newlines += 1;
                 }
             } else {
-                tokens.push(token)
+                out.push(tok)
             }
         }
-
-        Ok(tokens)
+        Ok(out)
     }
 
     pub fn tokenize_kinds(&mut self) -> Result<Vec<TokenKind>, CompilerError> {
-        self.tokenize()
-            .map(|v| v.into_iter().map(|x| x.kind).collect_vec())
+        let all = self.tokenize()?;
+        let mut kinds = Vec::with_capacity(all.len());
+        for tok in all {
+            kinds.push(tok.kind);
+        }
+        Ok(kinds)
     }
 }
 

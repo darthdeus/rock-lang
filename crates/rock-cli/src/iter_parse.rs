@@ -126,8 +126,8 @@ pub fn iter_parse_skull(path: &str, iters: usize) -> Result<()> {
     let t = Instant::now();
     let mut parsed = 0usize;
     for _ in 0..iters {
-        for (tokens, _, _, _) in &prepared {
-            if skull_parser::Parser::new(tokens.clone()).parse_module().is_ok() {
+        for (tokens, _, _, contents) in &prepared {
+            if skull_parser::Parser::new(tokens.clone(), contents, 0).parse_module().is_ok() {
                 parsed += 1;
             }
         }

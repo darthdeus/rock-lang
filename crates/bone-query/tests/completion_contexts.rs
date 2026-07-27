@@ -2019,17 +2019,12 @@ fn enum_record_field_filter_is_fuzzy() {
 }
 
 #[test]
-fn qualifier_inside_a_comment_gets_global_completion() {
+fn qualifier_inside_a_comment_gets_nothing() {
     // The byte scanner is comment-blind: `// SpellState::i|` classified as
-    // enum-qualified and served ONLY the variants. The AST classifier sees no
-    // qualified expr at the cursor, so scope completion runs. (Comment
-    // suppression as such is a separate question; this pins the dispatch.)
+    // enum-qualified and served ONLY the variants. A comment is not code, so
+    // neither the variants nor scope symbols surface.
     let src = "enum SpellState { Idle, Loaded(int) }\nfn idle_check() {}\nfn r() {\n  // SpellState::i\n}\n";
-    let l = labels(src, 3, 18);
-    assert!(
-        l.contains(&"idle_check".to_string()),
-        "global fn must be offered inside a comment: {l:?}"
-    );
+    assert_eq!(labels(src, 3, 18), Vec::<String>::new());
 }
 
 #[test]
@@ -2059,16 +2054,12 @@ fn decl_field_default_value_slot_type_directs() {
 }
 
 #[test]
-fn member_path_inside_a_comment_gets_global_completion() {
+fn member_path_inside_a_comment_gets_nothing() {
     // The byte scanner is comment-blind: `// cfg.vol|` classified as member
-    // access and served Config's fields inside a comment. The AST classifier
-    // sees no field access there, so scope completion runs.
+    // access and served Config's fields inside a comment. A comment is not
+    // code, so neither the fields nor scope symbols surface.
     let src = "struct Config { volume: float }\nglobal cfg: Config = Config { volume: 1.0 }\nfn volume_reset() {}\nfn r() {\n  // cfg.vol\n}\n";
-    let l = labels(src, 4, 11);
-    assert!(
-        l.contains(&"volume_reset".to_string()),
-        "global fn must be offered inside a comment (not member fields): {l:?}"
-    );
+    assert_eq!(labels(src, 4, 11), Vec::<String>::new());
 }
 
 /// Response labels in RANK order (unsorted) -- for ordering assertions.
