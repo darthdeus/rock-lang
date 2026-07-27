@@ -123,6 +123,77 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
     );
 }
 
+// --- separately-emitted callable bodies ------------------------------------
+//
+// A lambda body / nested fn is its own emitted callable, and the inliner scans
+// only TOP-LEVEL CFG blocks (a cell used in a lambda body is an upvalue, so
+// splicing there piles onto LuaJIT's 60-upvalue cap). So a `for` over a
+// column-stored Vec inside one reaches the SHARED generic `VecIter<T>.next`,
+// which reads the `_data` that column storage does not have.
+//
+// These are RED and stay red until specialization works in every emitted
+// callable context. The ordinary-call guard (`in_unspliced_ctx` -> keep the
+// shared boxed ABI, `lower.rs:3965`) is NOT the fix here: for a boxed value the
+// shared body is CORRECT and the guard merely forgoes an optimization, whereas
+// for columns the shared body is WRONG -- taking that branch would turn a loud
+// rejection into a miscompile.
+
+const VEC_IN_LAMBDA: &str = r#"
+value V2 { x: float, y: float }
+
+fn go() -> float {
+    let xs: [V2] = [V2 { x: 1.0, y: 2.0 }]
+    let f = () => { let a = 0.0; for v in xs { a = a + v.x }; return a }
+    return f()
+}
+
+fn main() { let _ = go() }
+"#;
+
+const VEC_IN_NESTED_FN: &str = r#"
+value V2 { x: float, y: float }
+
+fn go() -> float {
+    let xs: [V2] = [V2 { x: 1.0, y: 0.0 }]
+    fn inner(ys: [V2]) -> float { let a = 0.0; for v in ys { a = a + v.x }; return a }
+    return inner(xs)
+}
+
+fn main() { let _ = go() }
+"#;
+
+/// Iterating a column-stored Vec inside a LAMBDA. Today this is a hard emit
+/// rejection ("a value-specialized generic call was not spliced") -- the
+/// residual-specialization validator catching it, which is the safety net
+/// working. Real engine code hits it (`draw_glow_lights`, a `for` over
+/// `GLOW_LIGHTS` inside a `with_blend_mode(..., () => ..)` callback).
+#[test]
+fn column_vec_iterated_inside_a_lambda() {
+    let lua = common::try_emit_module(VEC_IN_LAMBDA)
+        .expect("column [V2] iterated in a lambda must emit");
+    assert!(
+        !lua.contains("_data"),
+        "lambda body iterated a column-stored [V2] through the shared generic \
+         `next`, which reads `_data`:\n{lua}"
+    );
+}
+
+/// The same shape in a NESTED FN is worse than the lambda case: it emits
+/// silently. The nested fn becomes its own top-level function whose loop calls
+/// the UNSPECIALIZED `next_VecIter_T_..`, and the residual-specialization
+/// validator does not fire -- so there is no compile-time signal at all and it
+/// dies at runtime on `_data` being nil.
+#[test]
+fn column_vec_iterated_inside_a_nested_fn() {
+    let lua = common::try_emit_module(VEC_IN_NESTED_FN)
+        .expect("column [V2] iterated in a nested fn must emit");
+    assert!(
+        !lua.contains("next_VecIter_T"),
+        "nested fn called the UNSPECIALIZED VecIter next over column storage \
+         (silent miscompile, no validator error):\n{lua}"
+    );
+}
+
 const VEC_CONTROLS: &str = r#"
 value WithRef { name: string, k: int }
 struct Plain { a: int }
