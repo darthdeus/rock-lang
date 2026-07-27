@@ -634,9 +634,10 @@ fn graft_bound_tree(tree: &BoundTree, n: &BoundTree) -> Result<BoundTree, Compil
 
 fn graft_bound_next(bn: &BoundNext, n: &BoundTree) -> Result<BoundNext, CompilerError> {
     match bn {
-        BoundNext::Concrete { func, sub } => Ok(BoundNext::Concrete {
+        BoundNext::Concrete { func, sub, next_generics } => Ok(BoundNext::Concrete {
             func: *func,
             sub: graft_bound_tree(sub, n)?,
+            next_generics: next_generics.clone(),
         }),
         BoundNext::CallerGeneric(g) => n.next.get(g).cloned().ok_or_else(|| {
             CompilerError::new_no_location(format!(
@@ -676,7 +677,7 @@ fn resolve_cloned_bound_calls(
         debug_assert!(matches!(callee.insts[old_id], Inst::CallBoundMulti { .. }));
         let g = *generic_idx as usize;
         match n.next.get(&g) {
-            Some(BoundNext::Concrete { func: (m, f), sub }) => {
+            Some(BoundNext::Concrete { func: (m, f), sub, .. }) => {
                 let concrete = FuncRef { module: *m, func: *f };
                 let (dests, args) = (dests.clone(), args.clone());
                 if !sub.is_empty() {

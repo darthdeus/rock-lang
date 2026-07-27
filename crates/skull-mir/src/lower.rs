@@ -591,6 +591,23 @@ fn compute_call_spec(
         return None;
     }
     let bindings = inf.call_generic_bindings.get(&e)?;
+    compute_spec_from_bindings(ws, inf, func, bindings, enclosing)
+}
+
+/// [`compute_call_spec`] against an explicit binding list instead of a call
+/// expr. The for-protocol `next` call is SYNTHESIZED and has no expr to key
+/// `call_generic_bindings` by, so it supplies its bindings from
+/// `BoundNext::Concrete::next_generics` (which bone records at resolution).
+/// Shared body so an iterator call and a direct call can never disagree on
+/// which instantiations specialize.
+fn compute_spec_from_bindings(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    bindings: &[TyId],
+    enclosing: &SpecSubst,
+) -> Option<(SpecKey, SpecSubst)> {
+    let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
         return None;
     }
@@ -3885,6 +3902,28 @@ impl Builder<'_> {
         compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst)
     }
 
+    /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
+    /// come from bone's `next_generics` rather than a call expr. Ordered into
+    /// the callee's generic declaration order, which is what [`SpecKey`] is.
+    fn next_call_spec(
+        &self,
+        func: FuncRef,
+        next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+    ) -> Option<SpecKey> {
+        let inf = self.inf?;
+        let f = &self.ws.module(func.module).functions[func.func];
+        let bindings: Vec<TyId> = f
+            .generics
+            .iter()
+            .map(|g| match ty_node(self.ws, inf, *g) {
+                Some(TypeExpr::Generic(var, _)) => next_generics.get(&var).copied(),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        compute_spec_from_bindings(self.ws, inf, func, &bindings, self.spec_subst)
+            .map(|(key, _)| key)
+    }
+
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar
     /// value ABI, value args splat to leaves and a value return arrives as N
     /// leaves via [`Inst::CallMulti`] (rebuilt into a `Group`); otherwise it is a
@@ -5849,8 +5888,15 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub } => {
+            BoundNext::Concrete { func: (m, f), sub, next_generics } => {
                 let func = FuncRef { module: *m, func: *f };
+                // The synthesized `next` call has no expr to key
+                // `call_generic_bindings` by, so its instantiation comes from
+                // bone's recorded `next_generics`. Without this the inliner
+                // splices the SHARED generic snapshot, whose element access was
+                // lowered against the boxed representation -- which reads a
+                // `_data` that column storage does not have.
+                let spec = self.next_call_spec(func, next_generics);
                 let call = self.emit_cur(Inst::CallMulti {
                     dests: dests.clone(),
                     func,
@@ -5858,6 +5904,9 @@ impl Builder<'_> {
                 });
                 if !sub.is_empty() {
                     self.f.bound_trees.insert(call, sub.clone());
+                }
+                if let Some(key) = spec {
+                    self.f.spec_bindings.insert(call, key);
                 }
             }
             BoundNext::CallerGeneric(gidx) => {

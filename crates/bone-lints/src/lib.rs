@@ -745,7 +745,7 @@ fn collect_bound_tree(tree: &BoundTree, out: &mut Vec<(ModuleId, Idx<Function>)>
 }
 
 fn collect_bound_next(bn: &BoundNext, out: &mut Vec<(ModuleId, Idx<Function>)>) {
-    if let BoundNext::Concrete { func, sub } = bn {
+    if let BoundNext::Concrete { func, sub, .. } = bn {
         out.push(*func);
         collect_bound_tree(sub, out);
     }

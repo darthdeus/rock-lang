@@ -295,6 +295,14 @@ pub enum BoundNext {
     Concrete {
         func: (ModuleId, Idx<Function>),
         sub: BoundTree,
+        /// `func`'s own generic instantiation at this site, callee `VarId` ->
+        /// caller-arena `TyId`. A `for`-protocol `next` call is SYNTHESIZED (it
+        /// has no call expr), so it can never be keyed in
+        /// `call_generic_bindings` -- this is the only record of what its
+        /// generics bound to, and skull needs it to specialize the callee body
+        /// (`VecIter<Vec2>.next` reading flat element storage rather than the
+        /// shared generic snapshot's boxed one).
+        next_generics: FxHashMap<VarId, TyId>,
     },
     /// The instantiation was the ENCLOSING fn's own bounded generic (bound
     /// propagation): resolves via the caller's placeholder for that generic
