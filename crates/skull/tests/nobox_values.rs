@@ -616,6 +616,36 @@ fn a_nested_fn_threads_nobox_leaves_through_params_and_return() {
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_fn"), "27");
 }
 
+const NOBOX_NESTED_FN_INFERRED_RETURN: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn outer(k: float) -> float {
+    fn make(v: float) {
+        NV2 { x: v, y: v + 1.0 }
+    }
+    let p = make(k)
+    return p.x + p.y
+}
+
+fn main() { print("{outer(1.0)}") }
+"#;
+
+#[test]
+fn a_nested_fn_with_an_inferred_nobox_return_threads_leaves() {
+    // An inferred return is as much a part of the signature as a written one:
+    // reading only the optional annotation drops the callee to the boxed ABI.
+    let lua = emit_module(NOBOX_NESTED_FN_INFERRED_RETURN);
+    let body = body_of_synthetic(&lua, "_make_");
+    assert!(
+        !body.contains("NV2_ct("),
+        "an inferred nobox return materialized:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_fn_inferred"),
+        "3"
+    );
+}
+
 const VALUE_NESTED_FN_BY_VALUE: &str = r#"
 value V2 { x: float, y: float }
 

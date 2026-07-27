@@ -1442,6 +1442,9 @@ fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst
 #[derive(Clone)]
 struct NestedFn {
     hoisted: Ustr,
+    /// Declared param names, so a call site can place named args into slots
+    /// (`slotted_call_args`) exactly as a top-level callee's would be.
+    param_names: Vec<Ustr>,
     /// Per-param value shape; all-`None` when the fn keeps the boxed ABI.
     param_shapes: Vec<Option<ValueShape>>,
     ret_shape: Option<ValueShape>,
@@ -2544,7 +2547,10 @@ impl Builder<'_> {
         ret_ty: Option<TyId>,
         hoisted: Ustr,
     ) -> NestedFn {
-        let boxed = NestedFn { hoisted, param_shapes: Vec::new(), ret_shape: None };
+        let param_names: Vec<Ustr> =
+            params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
+        let boxed =
+            NestedFn { hoisted, param_names: param_names.clone(), param_shapes: Vec::new(), ret_shape: None };
         let taken_by_value = self
             .body
             .expr_arena
@@ -2555,13 +2561,30 @@ impl Builder<'_> {
         }
         let abi = NestedFn {
             hoisted,
+            param_names,
             param_shapes: params
                 .into_iter()
                 .map(|pb| self.binding_ty(pb).and_then(|t| self.body_sig_value_shape(t)))
                 .collect(),
-            ret_shape: ret_ty.and_then(|t| self.body_sig_value_shape(t)),
+            ret_shape: self.nested_fn_ret_ty(name, ret_ty).and_then(|t| self.body_sig_value_shape(t)),
         };
         if abi.uses_scalar_abi() { abi } else { boxed }
+    }
+
+    /// A nested `fn`'s return type. An ANNOTATION is authoritative when present;
+    /// without one the type is inferred, and it must be read off the binding's own
+    /// `fn(..) -> R` type rather than defaulted away -- an inferred value return is
+    /// as much a part of the signature as a written one, and treating it as absent
+    /// silently drops the callee back to the boxed ABI.
+    fn nested_fn_ret_ty(&self, name: Idx<BindingInfo>, ret_ty: Option<TyId>) -> Option<TyId> {
+        if ret_ty.is_some() {
+            return ret_ty;
+        }
+        let fty = self.resolve_tyid(self.binding_ty(name)?)?;
+        match self.ty_node(fty)? {
+            TypeExpr::Function { ret, .. } => Some(fty.with_idx(ret)),
+            _ => None,
+        }
     }
 
     /// [`sig_value_shape`] for a type that may live in the BODY's inference arena
@@ -4294,16 +4317,8 @@ impl Builder<'_> {
                 // and a value return arrives as leaves via `CallValueMulti`.
                 if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
-                    let mut arg_vals: Vec<Idx<Inst>> = Vec::new();
-                    for (i, &a) in arg_idxs.iter().enumerate() {
-                        match abi.param_shapes.get(i).and_then(|s| s.clone()) {
-                            Some(shape) => {
-                                let r = self.lower_expr_repr(a)?;
-                                arg_vals.extend(self.repr_to_leaves(&r, &shape));
-                            }
-                            None => arg_vals.push(self.lower_expr(a)?),
-                        }
-                    }
+                    let arg_vals =
+                        self.slotted_call_args(&abi.param_names, &abi.param_shapes, &arg_idxs)?;
                     let Some(shape) = abi.ret_shape else {
                         let v = self.emit_call_value(e, g, arg_vals);
                         return Ok(ValueRepr::Scalar(v));
@@ -4618,13 +4633,27 @@ impl Builder<'_> {
             }
             return Ok(out);
         }
-        // Named/gap path: lower each arg into its param SLOT (source order), then
-        // splat/nil-fill per slot. Mirrors `reorder_named_args` + splatting.
         let param_names: Vec<Ustr> = self.ws.module(func.module).functions[func.func]
             .param_decls
             .iter()
             .map(|pd| pd.name)
             .collect();
+        self.slotted_call_args(&param_names, &param_shapes, arg_idxs)
+    }
+
+    /// Build a call's argument list by placing each argument into its PARAM SLOT
+    /// (source order) and then splatting/nil-filling per slot: a named arg lands
+    /// in the slot of that name, a struct spread `..op` by field name, everything
+    /// else positionally. This is the one slot-placement rule, shared by every
+    /// calling convention that has param names -- a convention with its own
+    /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
+    /// `param_shapes` shorter than `param_names` (or all-`None`) is the boxed ABI.
+    fn slotted_call_args(
+        &mut self,
+        param_names: &[Ustr],
+        param_shapes: &[Option<ValueShape>],
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
