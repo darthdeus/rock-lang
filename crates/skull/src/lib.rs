@@ -1038,6 +1038,29 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             type_id += 1;
         }
     }
+    for module in ws.modules.iter() {
+        for (_, e) in module.enums.iter() {
+            let Some(shape) = skull_mir::lower::enum_value_shape(ws, e.name) else {
+                continue;
+            };
+            let mut fields = vec![
+                "{ name = \"__tag\", type = \"int\", nullable = false }".to_string(),
+            ];
+            fields.extend(shape.slots.iter().map(|(name, c_type)| {
+                let field_type = if *c_type == "double" { "float" } else { c_type };
+                format!(
+                    "{{ name = \"{name}\", type = \"{field_type}\", nullable = false }}"
+                )
+            }));
+            out.push_str(&format!(
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }} }}\n",
+                n = e.name,
+                id = type_id,
+                f = fields.join(", ")
+            ));
+            type_id += 1;
+        }
+    }
     out
 }
 

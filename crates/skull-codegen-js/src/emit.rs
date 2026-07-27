@@ -4136,7 +4136,12 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             mark(args);
         }
         Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems),
-        Inst::MakeVecColumns { columns, .. } => columns.iter().for_each(|(_, vs)| mark(vs)),
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            mark(&[*capacity]);
+            columns.iter().for_each(|(_, vs)| mark(vs));
+        }
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => {
             for (_, v) in fields {
                 f(*v);

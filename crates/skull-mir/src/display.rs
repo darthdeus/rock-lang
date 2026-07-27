@@ -150,8 +150,14 @@ fn fmt_inst(
 
         Inst::MakeTuple(vs) => format!("tuple [{}]", list(vs)),
         Inst::MakeVec(vs) => format!("vec [{}]", list(vs)),
-        Inst::MakeVecColumns { columns, len } => format!(
-            "vec.columns len={len} {{{}}}",
+        Inst::MakeVecColumns {
+            elem,
+            columns,
+            len,
+            capacity,
+        } => format!(
+            "vec.columns {elem} len={len} cap=v{} {{{}}}",
+            num[capacity],
             columns
                 .iter()
                 .map(|(name, vs)| format!("{name}: [{}]", list(vs)))

@@ -1598,9 +1598,16 @@ inline(lua) fn table_new() -> any = """return {}"""
     return copy
 """
 
-// Whether `v` is a column-stored Vec: tagged `Vec` but with no `_data` backing.
+@nomangle inline(lua) fn __rock_col_capacity(reserved: int, physical: int) -> int = """
+    if reserved > physical then return reserved end
+    return physical
+"""
+
+// Whether `v` is a column-stored Vec.
 @nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
-    return type(v) == "table" and v.__ty == "Vec" and v._data == nil and v.len ~= nil
+    if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
+    local h = rawget(v, "@vec")
+    return type(h) == "table" and h.repr == "columns"
 """
 
 // The sorted leaf paths of a column Vec -- the shared key discovery, so zip and
@@ -1608,7 +1615,7 @@ inline(lua) fn table_new() -> any = """return {}"""
 @nomangle inline(lua) fn __rock_col_paths(vec: any) -> any = """
     local names = {}
     for k, v in pairs(vec) do
-        if k ~= "len" and k ~= "__ty" and k ~= "_data" and type(v) == "table" then
+        if k ~= "len" and k ~= "__ty" and k ~= "@vec" and type(v) == "table" then
             names[#names + 1] = k
         end
     end
@@ -1616,45 +1623,55 @@ inline(lua) fn table_new() -> any = """return {}"""
     return names
 """
 
-// Zip K leaf columns back into logical element tables. The ONLY place a column
-// Vec materializes its elements, and it exists because its consumers are
-// inherently reflective or foreign: `inspect`, the dump-state serializer, and
-// `__rock_vec_to_lua_array` all need a logical value no physical column holds.
-// A dotted leaf path nests back into sub-tables. Never called from a hot Vec
-// primitive.
+@nomangle inline(lua) fn __rock_materialize_column_type(
+    vec: any,
+    index: int,
+    type_name: string,
+    prefix: string
+) -> any = """
+    local decl = _G.__ROCK_TYPE_TABLE[type_name]
+    local ctor = _G[type_name .. "_ct"]
+    if not decl or (decl.kind ~= "c_struct" and decl.kind ~= "c_enum") or not ctor then
+        error("invalid column element type: " .. tostring(type_name))
+    end
+    local args = {}
+    for i = 1, #decl.fields do
+        local field = decl.fields[i]
+        local path = prefix == "" and field.name or (prefix .. "." .. field.name)
+        local child = _G.__ROCK_TYPE_TABLE[field.type]
+        if child and (child.kind == "c_struct" or child.kind == "c_enum") then
+            args[i] = __rock_materialize_column_type(vec, index, field.type, path)
+        else
+            args[i] = vec[path][index]
+        end
+    end
+    return ctor(unpack(args))
+"""
+
+@nomangle inline(lua) fn __rock_materialize_column_element(vec: any, index: int) -> any = """
+    local h = rawget(vec, "@vec")
+    if type(h) ~= "table" or h.repr ~= "columns" then
+        error("expected column Vec")
+    end
+    return __rock_materialize_column_type(vec, index, h.elem, "")
+"""
+
 @nomangle inline(lua) fn __rock_vec_column_elements(vec: any) -> any = """
-    local names = __rock_col_paths(vec)
     local out = {}
     for i = 1, vec.len or 0 do
-        local e = {}
-        for _, path in ipairs(names) do
-            local slot = e
-            local last = path
-            local dot = last:find("%.")
-            while dot do
-                local head = last:sub(1, dot - 1)
-                slot[head] = slot[head] or {}
-                slot = slot[head]
-                last = last:sub(dot + 1)
-                dot = last:find("%.")
-            end
-            slot[last] = vec[path][i]
-        end
-        out[i] = e
+        out[i] = __rock_materialize_column_element(vec, i)
     end
     return out
 """
 
-// Sort a column Vec: decide the order ONCE from the key values, then replay it
-// on every column so they stay in lockstep. The key is read from a zipped
-// element -- the only materialization, and it is per-sort, not per-access.
 @nomangle inline(lua) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     local n = vec.len or 0
-    local elems = __rock_vec_column_elements(vec)
-    local keys = {}
     local order = {}
-    for i = 1, n do keys[i] = key_fn(elems[i]); order[i] = i end
-    table.sort(order, function(a, b) return keys[a] < keys[b] end)
+    for i = 1, n do order[i] = i end
+    table.sort(order, function(a, b)
+        return key_fn(__rock_materialize_column_element(vec, a))
+            < key_fn(__rock_materialize_column_element(vec, b))
+    end)
     for _, path in ipairs(__rock_col_paths(vec)) do
         local col = vec[path]
         local tmp = {}
@@ -1740,11 +1757,15 @@ global PI: float = 3.141592653589793
     local type_name = __rock_get_type(t)
 
     -- Vec type
-    -- A column-stored Vec has no `_data`; zip its leaf columns into logical
-    -- elements first, else it falls through to the generic struct branch and
-    -- renders its PHYSICAL layout (`Vec { _data = nil, x = {..}, y = {..} }`).
+    -- The explicit column marker wins even when the element itself has an
+    -- `_data` leaf column.
     if type_name == "Vec" and t.len and (t._data or __rock_is_column_vec(t)) then
-        local elems = t._data or __rock_vec_column_elements(t)
+        local elems
+        if __rock_is_column_vec(t) then
+            elems = __rock_vec_column_elements(t)
+        else
+            elems = t._data
+        end
         local parts = {}
         for i = 1, t.len do
             parts[i] = __rock_inspect_value(elems[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
@@ -3081,4 +3102,3 @@ struct FunctionCallInfo {
     name: string,
     stage: int,
 }
-

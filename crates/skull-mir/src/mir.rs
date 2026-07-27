@@ -27,6 +27,9 @@ use bone_semantic::hir::TyId;
 use comfy_la_arena::{Arena, Idx};
 use ustr::Ustr;
 
+pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
+pub const VEC_COLUMN_REPR: &str = "columns";
+
 /// A resolved call target: which function in which module. Mangling (rock's
 /// overload scheme) is deferred to codegen, which also reads `is_extern` /
 /// `lua_body` off this ref to pick the emission shape. (bone-mir-design line
@@ -266,8 +269,10 @@ pub enum Inst {
     /// `columns` is one (leaf path, per-element values) pair per leaf, all of
     /// length `len`, in the element's declaration order.
     MakeVecColumns {
+        elem: Ustr,
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
+        capacity: Idx<Inst>,
     },
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field
     /// (`None` for an unknown/foreign nominal).

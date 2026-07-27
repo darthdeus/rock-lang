@@ -10,9 +10,8 @@
 //! false. Behavioral coverage belongs beside this in a `.rock` test.
 //!
 //! Layout under test (K <= 4 leaves, the only tier v1 builds):
-//!     { <leaf0> = {..}, <leaf1> = {..}, len = n }
-//! so `V2 { x, y }` is `{ x = {..}, y = {..}, len = n }`, columns 1-indexed to
-//! match today's `_data`.
+//!     { ["@vec"] = { repr, elem, cap }, <leaf0> = {..}, .., len = n }
+//! Columns are 1-indexed to match today's `_data`.
 
 mod common;
 use common::{emit_module, function_body};
@@ -82,6 +81,33 @@ fn projecting_read_indexes_one_column() {
         !body.contains("__vec_checked_get("),
         "`xs[i].x` still fetched the whole element; a column read indexes the \
          `x` column directly:\n{body}"
+    );
+}
+
+const VEC_SPREAD_LITERAL: &str = r#"
+value V2 { x: float, y: float }
+
+fn make() -> [V2] {
+    return [...(
+        V2 { x: 1.0, y: 2.0 },
+        V2 { x: 3.0, y: 4.0 },
+    )]
+}
+
+fn main() { let _ = make() }
+"#;
+
+#[test]
+fn tuple_spread_literal_never_boxes_column_elements() {
+    let lua = emit_module(VEC_SPREAD_LITERAL);
+    let body = function_body(&lua, "make");
+    assert!(
+        !body.contains("V2_ct("),
+        "tuple spread built temporary V2 elements before storing their leaves:\n{body}"
+    );
+    assert!(
+        body.contains(r#"["@vec"] = {repr = "columns", elem = "V2""#),
+        "tuple spread did not produce the marked column representation:\n{body}"
     );
 }
 

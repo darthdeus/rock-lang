@@ -1649,8 +1649,21 @@ impl Emitter<'_> {
             // Column storage: one array per leaf, sharing the single `len`.
             // Keys are written in brackets because a nested leaf path is dotted
             // (`min.x`), which is not a bare Lua identifier.
-            Inst::MakeVecColumns { columns, len } => {
-                out.push('{');
+            Inst::MakeVecColumns {
+                elem,
+                columns,
+                len,
+                capacity,
+            } => {
+                out.push_str("{[");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
+                out.push_str("] = {repr = ");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
+                out.push_str(", elem = ");
+                write_lua_string(out, elem.as_str());
+                out.push_str(", cap = ");
+                self.write_opnd(out, *capacity);
+                out.push_str("}, ");
                 for (name, vs) in columns {
                     out.push('[');
                     write_lua_string(out, name.as_str());

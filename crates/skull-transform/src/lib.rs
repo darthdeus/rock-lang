@@ -1364,7 +1364,10 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
         Inst::CallValueMulti { callee, args, .. } => { p(callee); args.iter().for_each(&mut p); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
-        Inst::MakeVecColumns { columns, .. } => {
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            p(capacity);
             columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
         }
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
@@ -1412,7 +1415,10 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::CallValueMulti { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
-        Inst::MakeVecColumns { columns, .. } => {
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            f(capacity);
             columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
         }
         Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),

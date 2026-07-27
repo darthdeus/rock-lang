@@ -166,7 +166,10 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         // A closure captures cells (not values); its body's value uses live in
         // its own scope, colored separately.
         Inst::Lambda { .. } => {}
-        Inst::MakeVecColumns { columns, .. } => {
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            push(*capacity);
             columns.iter().flat_map(|(_, vs)| vs).for_each(|&i| push(i));
         }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => {

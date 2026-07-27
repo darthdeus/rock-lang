@@ -3543,12 +3543,8 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    /// `[..]`, with spread support. No spread -> a single `MakeVec`. With a
-    /// `..x` element, build the empty Vec then push each element / splice each
-    /// spread (`ArrayPush`), so spreads of tuples/structs/arrays splice
-    /// element-wise.
-    /// A `[T]` literal whose element stores as columns: lower each element to
-    /// its leaves and transpose, so column `k` holds leaf `k` of every element.
+    /// A `[T]` literal whose element stores as columns lowers every element to
+    /// its leaves, including elements supplied through a spread.
     fn column_vec_literal(
         &mut self,
         elems: &[Idx<Expr>],
@@ -3573,7 +3569,13 @@ impl Builder<'_> {
                 col.1.push(leaf);
             }
         }
-        Ok(self.emit_cur(Inst::MakeVecColumns { columns, len: elems.len() }))
+        let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
+        Ok(self.emit_cur(Inst::MakeVecColumns {
+            elem,
+            columns,
+            len: elems.len(),
+            capacity,
+        }))
     }
 
     fn lower_array_literal(
@@ -3595,6 +3597,19 @@ impl Builder<'_> {
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
+        if let Some(elem) = self.vec_column_elem_of(lit) {
+            let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+            let arr = self.empty_column_vec(elem, capacity)?;
+            for &e in &idxs {
+                if let Expr::Spread(inner) = self.body.expr_arena[e] {
+                    self.spread_into_columns(arr, inner, elem)?;
+                } else {
+                    let repr = self.lower_expr_repr(e)?;
+                    self.column_append_repr(arr, &repr, elem)?;
+                }
+            }
+            return Ok(arr);
+        }
         let arr = self.emit_cur(Inst::MakeVec(vec![]));
         for &e in &idxs {
             if let Expr::Spread(inner) = self.body.expr_arena[e] {
@@ -3605,6 +3620,45 @@ impl Builder<'_> {
             }
         }
         Ok(arr)
+    }
+
+    fn spread_into_columns(
+        &mut self,
+        arr: Idx<Inst>,
+        inner: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        if let Expr::Tuple(elements) = self.body.expr_arena[inner] {
+            for element in elements {
+                let repr = self.lower_expr_repr(element)?;
+                self.column_append_repr(arr, &repr, elem)?;
+            }
+            return Ok(());
+        }
+        let v = self.lower_expr(inner)?;
+        match self.expr_ty(inner) {
+            Some(TypeExpr::Tuple { elements }) => {
+                for i in 0..elements.into_iter().count() {
+                    let value = self.emit_cur(Inst::TupleIndex { base: v, index: i });
+                    self.column_append_repr(arr, &ValueRepr::Scalar(value), elem)?;
+                }
+                Ok(())
+            }
+            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
+                self.spread_array_loop_columns(arr, inner, v, elem)
+            }
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
+                let fields = self
+                    .struct_field_names(name)
+                    .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
+                for field in fields {
+                    let value = self.emit_cur(Inst::Field { base: v, field });
+                    self.column_append_repr(arr, &ValueRepr::Scalar(value), elem)?;
+                }
+                Ok(())
+            }
+            _ => Err(gap("spread of an unsupported type")),
+        }
     }
 
     /// Splice `inner` into the array `arr` (representation `kind`): a tuple by its
@@ -3679,6 +3733,43 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;
+    }
+
+    fn spread_array_loop_columns(
+        &mut self,
+        arr: Idx<Inst>,
+        src_expr: Idx<Expr>,
+        src: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let src_kind = self.coll_kind(src_expr);
+        let n = self.emit_cur(Inst::Len { base: src, kind: src_kind });
+        let i_cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
+
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = header;
+        let i = self.emit_cur(Inst::Load(i_cell));
+        let cmp = self.emit_cur(Inst::IntLt(i, n));
+        self.f.set_term(self.cur, Term::Branch { cond: cmp, then_bb: body, else_bb: exit });
+
+        self.cur = body;
+        let i_now = self.emit_cur(Inst::Load(i_cell));
+        let value = self.loop_element_at(src, i_now, src_kind)?;
+        self.column_append_repr(arr, &ValueRepr::Scalar(value), elem)?;
+        let i2 = self.emit_cur(Inst::Load(i_cell));
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let inc = self.emit_cur(Inst::IntAdd(i2, one));
+        self.emit_cur(Inst::Store { cell: i_cell, value: inc });
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = exit;
+        Ok(())
     }
 
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is
@@ -3774,29 +3865,24 @@ impl Builder<'_> {
             // never specializes (`compute_call_spec` bails on an inline body) --
             // the opaque body would hand back a `_data` table that every later
             // column access then indexes as nil.
-            // `__vec_data_alloc(cap)` is `vec_new` with a capacity hint. Columns
-            // do NOT pre-fill: the boxed body's `false` fill is a poor man's
-            // prealloc, and writing sentinels into a dense numeric column is the
-            // array->hash hazard `__vec_data_unset` exists to avoid. So the hint
-            // is dropped and `capacity()` reports 0 until the first push -- a
-            // hint, not a contract.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
-                if let Some(shape) = self.vec_column_elem_of(e).and_then(|el| value_shape(self.ws, el))
-                {
-                    let columns =
-                        value_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
-                    return Ok(ValueRepr::Scalar(
-                        self.emit_cur(Inst::MakeVecColumns { columns, len: 0 }),
-                    ));
+                if let Some(elem) = self.vec_column_elem_of(e) {
+                    let capacity = self.lower_expr(arg_idxs[0])?;
+                    return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
                 }
             }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
-                if let Some(shape) = self.vec_column_elem_of(e).and_then(|el| value_shape(self.ws, el))
-                {
-                    let columns =
-                        value_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
+                if let Some(elem) = self.vec_column_elem_of(e) {
+                    let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+                    return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
+                }
+            }
+            if name.as_str() == "__rock_vec_from_lua_array" {
+                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)) {
+                    let raw = self.lower_expr(*raw)?;
+                    let len = self.lower_expr(*len)?;
                     return Ok(ValueRepr::Scalar(
-                        self.emit_cur(Inst::MakeVecColumns { columns, len: 0 }),
+                        self.column_vec_from_raw_array(raw, len, elem)?,
                     ));
                 }
             }
@@ -4567,24 +4653,46 @@ impl Builder<'_> {
                 let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
-            // Physical capacity is `#<any column>` -- every column is the same
-            // length by construction, so the first one answers for all of them.
             ("__vec_data_capacity", [recv]) => {
-                let Some(paths) = self.column_paths_of(*recv)? else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape = value_shape(self.ws, elem)
+                    .ok_or_else(|| gap("column element is not a value struct"))?;
                 let vec = self.lower_expr(*recv)?;
-                let col = self.emit_cur(Inst::Field { base: vec, field: paths[0] });
-                let f = self.stdlib_funcref("table_len")?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Call { func: f, args: vec![col] }),
-                )))
+                let header = self.column_header(vec);
+                let reserved = self.emit_cur(Inst::Field {
+                    base: header,
+                    field: Ustr::from("cap"),
+                });
+                let physical = match value_leaf_paths(&shape).first() {
+                    Some(path) => {
+                        let col = self.emit_cur(Inst::Field {
+                            base: vec,
+                            field: *path,
+                        });
+                        let f = self.stdlib_funcref("table_len")?;
+                        self.emit_cur(Inst::Call {
+                            func: f,
+                            args: vec![col],
+                        })
+                    }
+                    None => self.emit_cur(Inst::Field {
+                        base: vec,
+                        field: Ustr::from("len"),
+                    }),
+                };
+                let f = self.stdlib_funcref("__rock_col_capacity")?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
+                    func: f,
+                    args: vec![reserved, physical],
+                }))))
             }
             // Shift every column at the same slot, so they stay in lockstep. The
             // element is consumed as LEAVES, so the inserted value never boxes.
             ("__vec_data_insert", [recv, index, value]) => {
-                let Some(paths) = self.column_paths_of(*recv)? else { return Ok(None) };
-                let elem = self.vec_column_elem_of(*recv).expect("column receiver");
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
                 let shape =
                     value_shape(self.ws, elem).ok_or_else(|| gap("column element is not a value"))?;
+                let paths = value_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 let repr = self.lower_expr_repr(*value)?;
@@ -4603,19 +4711,29 @@ impl Builder<'_> {
             // share a column with the original, or a later push would be seen by
             // both.
             ("__vec_data_clone", [recv]) => {
-                let Some(paths) = self.column_paths_of(*recv)? else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape = value_shape(self.ws, elem)
+                    .ok_or_else(|| gap("column element is not a value struct"))?;
+                let paths = value_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
                 let f = self.stdlib_funcref("__rock_col_copy")?;
                 // Built as a `Vec`-tagged struct: `write_table_key` brackets a
                 // dotted leaf path, so the emitted table is the same shape
                 // `MakeVecColumns` writes for a literal.
-                let mut fields = Vec::with_capacity(paths.len() + 1);
+                let mut fields = Vec::with_capacity(paths.len() + 2);
                 for path in paths {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
                     fields.push((path, self.emit_cur(Inst::Call { func: f, args: vec![col] })));
                 }
                 let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 fields.push((Ustr::from("len"), len));
+                let old_header = self.column_header(vec);
+                let capacity = self.emit_cur(Inst::Field {
+                    base: old_header,
+                    field: Ustr::from("cap"),
+                });
+                let header = self.make_column_header(elem, capacity);
+                fields.push((Ustr::from(VEC_COLUMN_HEADER_FIELD), header));
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
                     ty: Some(Ustr::from("Vec")),
                     fields,
@@ -4649,13 +4767,82 @@ impl Builder<'_> {
         }
     }
 
-    /// The leaf column paths of `e`'s element type, `None` if `e` is not a
-    /// column-stored Vec. The cold ops all need the path list and nothing else.
-    fn column_paths_of(&mut self, e: Idx<Expr>) -> Result<Option<Vec<Ustr>>, CompilerError> {
-        let Some(elem) = self.vec_column_elem_of(e) else { return Ok(None) };
-        let shape =
-            value_shape(self.ws, elem).ok_or_else(|| gap("column element is not a value struct"))?;
-        Ok(Some(value_leaf_paths(&shape)))
+    fn make_column_header(&mut self, elem: Ustr, capacity: Idx<Inst>) -> Idx<Inst> {
+        let repr = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(VEC_COLUMN_REPR))));
+        let elem = self.emit_cur(Inst::Const(Lit::Str(elem)));
+        self.emit_cur(Inst::MakeStruct {
+            ty: None,
+            fields: vec![
+                (Ustr::from("repr"), repr),
+                (Ustr::from("elem"), elem),
+                (Ustr::from("cap"), capacity),
+            ],
+        })
+    }
+
+    fn column_header(&mut self, vec: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from(VEC_COLUMN_HEADER_FIELD),
+        })
+    }
+
+    fn empty_column_vec(
+        &mut self,
+        elem: Ustr,
+        capacity: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let columns = value_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
+        Ok(self.emit_cur(Inst::MakeVecColumns {
+            elem,
+            columns,
+            len: 0,
+            capacity,
+        }))
+    }
+
+    fn column_vec_from_raw_array(
+        &mut self,
+        raw: Idx<Inst>,
+        len: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let vec = self.empty_column_vec(elem, len)?;
+        let i_cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
+
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = header;
+        let i = self.emit_cur(Inst::Load(i_cell));
+        let cmp = self.emit_cur(Inst::IntLt(i, len));
+        self.f.set_term(self.cur, Term::Branch { cond: cmp, then_bb: body, else_bb: exit });
+
+        self.cur = body;
+        let i_now = self.emit_cur(Inst::Load(i_cell));
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let one_based = self.emit_cur(Inst::IntAdd(i_now, one));
+        let value = self.emit_cur(Inst::Index {
+            base: raw,
+            index: one_based,
+            kind: ContainerKind::VecColumn,
+        });
+        self.column_append_repr(vec, &ValueRepr::Scalar(value), elem)?;
+        let next = self.emit_cur(Inst::IntAdd(i_now, one));
+        self.emit_cur(Inst::Store {
+            cell: i_cell,
+            value: next,
+        });
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = exit;
+        Ok(vec)
     }
 
     /// `xs.push(v)` onto a column-stored Vec: bump the shared `len` once, then
@@ -4671,7 +4858,29 @@ impl Builder<'_> {
             .ok_or_else(|| gap("column element is not a value struct"))?;
         let vec = self.lower_expr(recv)?;
         let repr = self.lower_expr_repr(item)?;
-        let leaves = self.repr_to_leaves(&repr, &shape);
+        self.column_append_repr_with_shape(vec, &repr, elem, &shape)?;
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    fn column_append_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        self.column_append_repr_with_shape(vec, repr, elem, &shape)
+    }
+
+    fn column_append_repr_with_shape(
+        &mut self,
+        vec: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: Ustr,
+        shape: &ValueShape,
+    ) -> Result<(), CompilerError> {
+        let leaves = self.repr_to_leaves(repr, shape);
         let paths = value_leaf_paths(&shape);
         if leaves.len() != paths.len() {
             return Err(gap(format!(
@@ -4699,7 +4908,7 @@ impl Builder<'_> {
                 kind: ContainerKind::VecColumn,
             });
         }
-        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+        Ok(())
     }
 
     /// `Some((vec, one_based_index, elem))` iff `e` is `xs[i]` over a
