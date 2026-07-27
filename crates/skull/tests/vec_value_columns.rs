@@ -485,3 +485,52 @@ fn vec_new_at_a_column_element_builds_empty_columns() {
         "push onto a vec_new-ed column Vec must land in the columns"
     );
 }
+
+const VEC_COMBINATOR_CHAIN: &str = r#"
+value V2 { x: float, y: float }
+
+fn main() {
+    let a: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
+    print("{a.map(_.x).sum_f()}")
+}
+"#;
+
+/// SENTINEL -- pins a KNOWN BUG. A combinator that wraps `VecIter` in ANOTHER
+/// iterator (`map`, `filter`, `any`, `collect`, ...) loses the element type, so
+/// the inner `VecIter<V2>.next` is spliced UNSPECIALIZED and reads the boxed
+/// `_data` a column Vec does not have. It dies at runtime with `_data` nil.
+///
+/// Direct iteration is fine -- `for v in a.iter()` and `enumerate(a)` both work
+/// -- so the trigger is exactly the wrapping, not iteration.
+///
+/// Root cause, and why this is not a stdlib conversion: `ReifiedLeaf::Nominal`
+/// carries an EMPTY param range by design (leaf-only reification), so
+/// `VecIter<V2>` reifies as a bare `Nominal("VecIter")` and the `V2` is
+/// structurally absent from the `SpecKey`. `spec_key_has_column_elem` therefore
+/// cannot see it, no specialization is forced, and the shared boxed body wins.
+/// Fixing it means making reification a TREE rather than a leaf, which touches
+/// `SpecKey`, `SpecSubst`, `spec_fn_name`, `reified_leaf_node` and
+/// `spec_subst_from_key`.
+///
+/// INVERTED ON PURPOSE: it asserts today's WRONG emission (a whole-element
+/// `__vec_checked_get` against column storage). When reification carries type
+/// arguments this goes RED -- flip both assertions to require the specialized
+/// call and a per-leaf read, and assert the runtime sum is "4".
+#[test]
+fn combinator_chain_over_columns_is_unspecialized_sentinel() {
+    let lua = common::try_emit_module(VEC_COMBINATOR_CHAIN).expect("chain must emit");
+    let body = common::function_body(&lua, "main");
+    assert!(
+        body.contains("__vec_checked_get("),
+        "PINNED BEHAVIOR (BUG): a combinator chain over a column [V2] splices the \
+         UNSPECIALIZED VecIter next, which fetches a whole element. If this no \
+         longer holds the fix landed -- flip to `!body.contains(..)` plus a \
+         `__vec_checked_index` assertion and a runtime check of \"4\":\n{body}"
+    );
+    assert!(
+        !lua.contains("_spec_V2"),
+        "PINNED BEHAVIOR (BUG): nothing in the chain specializes at V2, because \
+         `VecIter<V2>` reifies to a param-less `Nominal(\"VecIter\")`. If a \
+         specialized copy now appears the fix landed -- flip this assertion."
+    );
+}
