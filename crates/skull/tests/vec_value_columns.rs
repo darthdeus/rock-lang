@@ -142,39 +142,65 @@ const VEC_IN_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
 
 fn go() -> float {
-    let xs: [V2] = [V2 { x: 1.0, y: 2.0 }]
+    let xs: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
     let f = () => { let a = 0.0; for v in xs { a = a + v.x }; return a }
     return f()
 }
 
-fn main() { let _ = go() }
+fn main() { print("{go()}") }
 "#;
 
 const VEC_IN_NESTED_FN: &str = r#"
 value V2 { x: float, y: float }
 
 fn go() -> float {
-    let xs: [V2] = [V2 { x: 1.0, y: 0.0 }]
+    let xs: [V2] = [V2 { x: 1.0, y: 0.0 }, V2 { x: 3.0, y: 0.0 }]
     fn inner(ys: [V2]) -> float { let a = 0.0; for v in ys { a = a + v.x }; return a }
     return inner(xs)
 }
 
-fn main() { let _ = go() }
+fn main() { print("{go()}") }
 "#;
+
+/// The body of the single emitted function whose name contains `needle`.
+/// Synthetic callables carry a generated suffix (`<mangled>__lambda0`) or a
+/// hash (`__local_go_<hash>_inner_0`), so they are found by pattern rather
+/// than spelled out. Panics if it is not unique -- an ambiguous match would
+/// silently assert against the wrong body.
+fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
+    let names: Vec<&str> = lua
+        .match_indices("\nfunction ")
+        .map(|(i, m)| {
+            let rest = &lua[i + m.len()..];
+            &rest[..rest.find('(').expect("fn header has `(`")]
+        })
+        .filter(|n| n.contains(needle))
+        .collect();
+    assert_eq!(names.len(), 1, "expected exactly one fn containing `{needle}`, got {names:?}");
+    common::function_body(lua, names[0])
+}
 
 /// Iterating a column-stored Vec inside a LAMBDA. Today this is a hard emit
 /// rejection ("a value-specialized generic call was not spliced") -- the
 /// residual-specialization validator catching it, which is the safety net
 /// working. Real engine code hits it (`draw_glow_lights`, a `for` over
 /// `GLOW_LIGHTS` inside a `with_blend_mode(..., () => ..)` callback).
+///
+/// Scoped to the LAMBDA's own body: the stdlib always emits `_data`, so a
+/// module-wide assertion could never go green even after a correct fix.
 #[test]
 fn column_vec_iterated_inside_a_lambda() {
     let lua = common::try_emit_module(VEC_IN_LAMBDA)
         .expect("column [V2] iterated in a lambda must emit");
+    let body = body_of_synthetic(&lua, "__lambda");
     assert!(
-        !lua.contains("_data"),
-        "lambda body iterated a column-stored [V2] through the shared generic \
-         `next`, which reads `_data`:\n{lua}"
+        !body.contains("_data"),
+        "lambda body read the single `_data` backing of a column-stored [V2]:\n{body}"
+    );
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "col_lambda"),
+        "4",
+        "lambda over column storage computed the wrong sum"
     );
 }
 
@@ -183,14 +209,23 @@ fn column_vec_iterated_inside_a_lambda() {
 /// the UNSPECIALIZED `next_VecIter_T_..`, and the residual-specialization
 /// validator does not fire -- so there is no compile-time signal at all and it
 /// dies at runtime on `_data` being nil.
+///
+/// Scoped to the nested fn's own body: the SHARED generic `next` stays emitted
+/// module-wide even when this call site correctly splices a specialized one.
 #[test]
 fn column_vec_iterated_inside_a_nested_fn() {
     let lua = common::try_emit_module(VEC_IN_NESTED_FN)
         .expect("column [V2] iterated in a nested fn must emit");
+    let body = body_of_synthetic(&lua, "_inner_");
     assert!(
-        !lua.contains("next_VecIter_T"),
-        "nested fn called the UNSPECIALIZED VecIter next over column storage \
-         (silent miscompile, no validator error):\n{lua}"
+        !body.contains("next_VecIter_T_"),
+        "nested fn called the UNSPECIALIZED VecIter `next` over column storage \
+         (silent miscompile -- no validator error):\n{body}"
+    );
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "col_nested"),
+        "4",
+        "nested fn over column storage computed the wrong sum"
     );
 }
 
