@@ -10,6 +10,7 @@
 
 pub mod cfg;
 pub mod decorator;
+pub mod gpu_layout;
 pub mod display;
 pub mod intrinsics;
 pub mod lower;
