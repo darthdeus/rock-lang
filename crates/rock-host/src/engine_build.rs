@@ -37,6 +37,7 @@ pub fn game_requests_video(game_path: &str) -> Result<bool> {
     let cfg = crate::stick::StickConfig::from_path_optional(&manifest)?;
     if let Some(ref cfg) = cfg {
         cfg.validate_engine_needs()?;
+        cfg.validate_ios()?;
     }
     Ok(cfg.as_ref().map_or(false, |c| c.needs_engine_lib("video")))
 }
