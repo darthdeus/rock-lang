@@ -5612,16 +5612,21 @@ impl Builder<'_> {
         if hit.is_empty() {
             return Err(gap(format!("`{path}` is not a leaf of NativeBuffer<{elem}>")));
         }
-        // One leaf -> a plain scalar; several -> the value's own leaves, in the
-        // same declaration order the plan is built in.
-        let leaves = if hit.len() == 1 {
+        // An exact primitive leaf is the one hit whose path IS `path`. A NESTED
+        // field spanning a single leaf also yields one hit, but its path is
+        // `<path>.<leaf>` -- so discriminating on hit COUNT lowers that field's
+        // aggregate RHS as a scalar and writes the whole cdata through a
+        // primitive view. Everything that is not an exact leaf is an aggregate.
+        let leaves = if hit.len() == 1 && hit[0].path.as_str() == path {
             vec![self.lower_expr(value)?]
         } else {
             let sub = self
-                .value_struct_of(value)
+                .value_aggregate_of(value)
                 .and_then(|n| value_shape(self.ws, n))
                 .ok_or_else(|| {
-                    gap(format!("whole write to `{path}` needs a value-struct RHS"))
+                    gap(format!(
+                        "whole write to `{path}` needs a value-struct or cdata-enum RHS"
+                    ))
                 })?;
             let repr = self.lower_expr_repr(value)?;
             self.repr_to_leaves(&repr, &sub)
@@ -9491,6 +9496,21 @@ impl Builder<'_> {
             return None;
         };
         self.is_value_struct(name).then_some(name)
+    }
+
+    /// The nominal type name of a non-nullable AGGREGATE expression -- a value
+    /// struct or a cdata-payload enum. [`Self::value_struct_of`] gates on
+    /// `is_value_struct`, which excludes enums; `value_shape` accepts both (it
+    /// falls back to `enum_value_shape`), so resolving the name is enough and
+    /// the shape lookup stays the thing that fails closed on a non-aggregate.
+    fn value_aggregate_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if self.expr_is_nullable(e) {
+            return None;
+        }
+        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
+            return None;
+        };
+        Some(name)
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
