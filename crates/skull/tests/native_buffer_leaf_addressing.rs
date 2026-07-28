@@ -121,3 +121,51 @@ fn nested_value_read_takes_no_slot_reference() {
         "a leaf read must address the view directly, not take a slot ref:\n{body}"
     );
 }
+
+/// A read of ONE field must load one leaf. `is_dead_value` treats every
+/// `Inst::Index` as effectful because a Vec/NativeBuffer index errors on OOB --
+/// but a leaf index is a raw pointer read whose bounds check was already hoisted
+/// into `__nb_checked_index`, so the unused leaf loads are pure and dead.
+/// Without the exemption an 8-leaf element pays 8 loads per single-field read,
+/// in exactly the hot loops leaf addressing exists to speed up.
+const SINGLE_FIELD_READ: &str = r#"
+value V2 { x: float, y: float }
+value Vert { pos: V2, uv: V2, id: int, w: float }
+
+@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
+fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
+
+fn read_one(buf: NativeBuffer<Vert>, i: int) -> float {
+    return buf[i].pos.x
+}
+
+fn main() {
+    let b = nb_vert(2)
+    print("{read_one(b, 0)}")
+}
+"#;
+
+#[test]
+fn a_single_field_leaf_read_loads_only_that_leaf() {
+    let lua = emit_module(SINGLE_FIELD_READ);
+    let body = function_body(&lua, "read_one");
+    // Count the view-indexed loads. `Vert` has 6 leaves; only `pos.x` is used.
+    let loads = body.matches("[(").count() + body.matches("[__").count();
+    let view_reads = body.matches(".__v").count();
+    assert!(
+        view_reads <= 1,
+        "a one-field read must bind at most one typed view, found {view_reads}:\n{body}"
+    );
+    assert!(
+        loads <= 1,
+        "a one-field read must emit one leaf load, found {loads}:\n{body}"
+    );
+    // The PRECONDITION for dropping the other loads: the element's bounds check
+    // is hoisted, so each leaf read carries no error of its own. If this ever
+    // stops being emitted, the DCE exemption is deleting a real check --
+    // `leaf_read_still_bounds_checks` in the .rock suite is the runtime half.
+    assert!(
+        body.contains("__nb_checked_index("),
+        "the hoisted bounds check must survive; it is what makes the leaf loads pure:\n{body}"
+    );
+}

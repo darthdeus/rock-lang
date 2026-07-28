@@ -222,12 +222,32 @@ fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
+/// Whether an `Index` read must execute even when its result is unused -- i.e.
+/// whether the bounds check rides ON this inst. Every ordinary container index
+/// errors on OOB, so it does.
+///
+/// LEAF reads are the exception: one ELEMENT access is decomposed into K leaf
+/// reads sharing ONE hoisted check (`__nb_checked_index` for a NativeBuffer;
+/// `Inst::VecCheckedIndex` for columns -- "one call per ELEMENT access, not per
+/// column"). Each leaf read is then a raw pointer read carrying no error of its
+/// own, so reading one field of a K-leaf element would otherwise emit all K
+/// loads and discard K-1.
+///
+/// Consulted by BOTH [`is_dead_rc`] (initial seeding) and [`is_dead_value`]
+/// (cascade). They must agree: a kind dead in one and live in the other either
+/// leaks the loads back or deletes a real bounds error.
+fn index_read_is_checked(kind: &ContainerKind) -> bool {
+    !matches!(kind, ContainerKind::NativeBufferLeaf | ContainerKind::VecColumn)
+}
+
 /// Whether a value-producing inst is pure enough that an unused result is dead.
-/// `Call`/`CallValue` run for effect; an `Index` read is bounds-checked (errors),
-/// so a discarded result must still execute.
+/// `Call`/`CallValue` run for effect; a checked `Index` must still execute.
 fn is_dead_value(inst: &Inst) -> bool {
-    !matches!(inst, Inst::Call { .. } | Inst::CallValue { .. } | Inst::Index { .. })
-        && inst.produces_value()
+    match inst {
+        Inst::Call { .. } | Inst::CallValue { .. } => false,
+        Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
+        _ => inst.produces_value(),
+    }
 }
 
 /// The pre-emit MIR cleanup: copy-propagate intra-block loads, then DCE the dead
@@ -1449,7 +1469,8 @@ fn resolve_subst(subst: &[Option<Idx<Inst>>], mut x: Idx<Inst>) -> Idx<Inst> {
 /// checked `Index` read can error, so a discarded read must still run.
 fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) -> bool {
     match inst {
-        Inst::Call { .. } | Inst::CallValue { .. } | Inst::Index { .. } => false,
+        Inst::Call { .. } | Inst::CallValue { .. } => false,
+        Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
         Inst::Store { cell, .. } => load_count[raw(*cell) as usize] == 0,
         _ if inst.produces_value() => use_count[raw(i) as usize] == 0,
         _ => false,
