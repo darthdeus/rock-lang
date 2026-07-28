@@ -1790,6 +1790,8 @@ inline(lua) fn random_seed(seed: int) = """
 @intrinsic @pure @inline inline(lua) fn sqrt(x: float) -> float = "math.sqrt(x)"
 @intrinsic @pure @inline inline(lua) fn exp(x: float) -> float = "math.exp(x)"
 @intrinsic @pure @inline inline(lua) fn pow(a: float, b: float) -> float = "math.pow(a, b)"
+@intrinsic @pure @inline inline(lua) fn log(x: float) -> float = "math.log(x)"
+@intrinsic @pure @inline inline(lua) fn log2(x: float) -> float = "math.log(x) / 0.6931471805599453"
 @intrinsic @pure @inline inline(lua) fn atan2(y: float, x: float) -> float = "math.atan2(y, x)"
 @intrinsic @pure fn round(x: float) -> float { return floor(x + 0.5) }
 @pure fn round_to_places(x: float, places: int) -> float {
