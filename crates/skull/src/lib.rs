@@ -425,9 +425,20 @@ fn runtime_prelude() -> &'static str {
     // codegen test harness) -- the record metatable is where the emitter's
     // `setmetatable({..}, __rock_fn_mt)` output lands.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        PRELUDE_TEMPLATE
+        let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
-            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
+            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table());
+        // `str::replace` on a placeholder that drifted out of the template is a
+        // NO-OP, and the survivor is valid Lua: `= {LEAF_VIEWS}` reads an unset
+        // global, so the table is EMPTY rather than a syntax error. `pairs({})`
+        // then makes `__nb_refresh_views` do nothing and every view dangles
+        // after a grow -- silently, which is the class that killed mag's
+        // spell_damages once already. Fail loudly at build time instead.
+        assert!(
+            !out.contains('{') || !out.contains("{LEAF_VIEWS}"),
+            "prelude template still contains an unsubstituted {{LEAF_VIEWS}} placeholder"
+        );
+        out
     });
     &PRELUDE
 }
@@ -441,6 +452,9 @@ if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
 -- from skull_mir::lower::LEAF_VIEWS. Views are DERIVED (pointers over the
 -- buffer's own `ptr`), so refresh reseats them and serialize/inspect skip them.
 _G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
+-- Never legitimately empty: an empty table means the generator emitted nothing,
+-- which would make view refresh a silent no-op and leave every view dangling.
+assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refresh would silently do nothing")
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
 -- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
