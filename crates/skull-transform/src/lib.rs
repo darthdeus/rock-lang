@@ -30,6 +30,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
+use ustr::Ustr;
 
 mod closure;
 mod forl;
@@ -409,6 +410,173 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
         }
         func.blocks[bid].insts = new;
     }
+}
+
+/// Whether `mvs`'s constructor tree transitively contains an IMPLICIT nobox
+/// materialization. The trigger is recursive on purpose: for
+/// `Outer { b: Box2 { lo: NV2 {..} } }` the outer's immediate operand is a
+/// `Box2` literal, which is not itself nobox. A `MaterializeValueStruct`
+/// operand is the SANCTIONED escape and is never a violation.
+fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) -> bool {
+    let Inst::MakeValueStruct { name, fields } = &func.insts[mvs] else {
+        return false;
+    };
+    if let Some(sid) = ws.struct_by_name.get(name) {
+        if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+            return true;
+        }
+    }
+    fields.iter().any(|(_, op)| ctor_tree_has_implicit_nobox(ws, func, *op))
+}
+
+/// Resolve one dotted leaf path against a ctor tree, emitting `Field` reads for
+/// any OPAQUE operand the path passes through (a nested value read off an
+/// existing cdata is legal and must be decomposed, not rejected). `None` when
+/// the path does not resolve, which the caller turns into a rejection rather
+/// than a guess.
+fn leaf_operand(
+    func: &mut MirFunc,
+    root: Idx<Inst>,
+    path: &str,
+    out: &mut Vec<Idx<Inst>>,
+) -> Option<Idx<Inst>> {
+    let mut cur = root;
+    for comp in path.split('.') {
+        let comp = Ustr::from(comp);
+        let next = match &func.insts[cur] {
+            Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
+                fields.iter().find(|(n, _)| *n == comp).map(|(_, op)| *op)
+            }
+            // Opaque: read the field off the existing value.
+            _ => {
+                let f = func.insts.alloc(Inst::Field { base: cur, field: comp });
+                out.push(f);
+                Some(f)
+            }
+        }?;
+        cur = next;
+    }
+    Some(cur)
+}
+
+/// Flatten a value-struct ctor whose tree implicitly materializes a `nobox`
+/// field into one carrying that type's COMPLETE primitive leaf list, keyed by
+/// dotted path (`("pos.x", ..)`). The nested ctors then have no users and DCE
+/// removes them.
+///
+/// Flattening happens at the OUTERMOST materialization: rewriting bottom-up
+/// would satisfy the guarantee too, but allocate an intermediate cdata per
+/// construction. A ctor that is itself a field operand of another ctor is
+/// therefore skipped -- the outer one absorbs it.
+///
+/// The dotted form exists only between here (end of `cleanup`) and emit. Field
+/// names are documented as MIR-pass metadata rather than the wire shape, and
+/// every pass that runs in between (`convert_closures`, `recover_counted_loops`,
+/// `inline_hoisted_bodies`, the verifier) remaps operands or matches the struct
+/// NAME only -- none interpret field names.
+pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
+    let all: Vec<Idx<Inst>> =
+        func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
+    // A ctor used as a field operand of another ctor is not the outermost one.
+    let mut inner: HashSet<Idx<Inst>> = HashSet::default();
+    for &i in &all {
+        if let Inst::MakeValueStruct { fields, .. } = &func.insts[i] {
+            inner.extend(fields.iter().map(|(_, op)| *op));
+        }
+    }
+    let targets: Vec<Idx<Inst>> = all
+        .iter()
+        .copied()
+        .filter(|i| !inner.contains(i) && ctor_tree_has_implicit_nobox(ws, func, *i))
+        .collect();
+    if targets.is_empty() {
+        return;
+    }
+    let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
+    for t in targets {
+        let Inst::MakeValueStruct { name, .. } = &func.insts[t] else { continue };
+        let name = *name;
+        // A GC-tier outer stores fields as table entries, so there is no cdata
+        // to write leaves into; leave it for the verifier to reject.
+        if skull_mir::lower::value_struct_is_gc(ws, name) {
+            continue;
+        }
+        let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, name) else { continue };
+        let mut pre: Vec<Idx<Inst>> = Vec::new();
+        let mut leaves: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(paths.len());
+        let mut ok = true;
+        for path in &paths {
+            match leaf_operand(func, t, path.as_str(), &mut pre) {
+                Some(op) => leaves.push((*path, op)),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        let span = func.inst_spans.get(t).copied();
+        let flat = func.insts.alloc(Inst::MakeValueStruct { name, fields: leaves });
+        // Minted insts inherit the outer ctor's span: a rejection downstream must
+        // still name the user's line.
+        if let Some(sp) = span {
+            for &n in pre.iter().chain(std::iter::once(&flat)) {
+                func.inst_spans.insert(n, sp);
+            }
+        }
+        pre.push(flat);
+        replacement.insert(t, pre);
+    }
+    if replacement.is_empty() {
+        return;
+    }
+    // The flattened ctor takes the original's slot, so every existing user of
+    // `t` now reads the flat form.
+    let remap: HashMap<Idx<Inst>, Idx<Inst>> =
+        replacement.iter().map(|(k, v)| (*k, *v.last().unwrap())).collect();
+    let m = |o: Idx<Inst>| remap.get(&o).copied().unwrap_or(o);
+    for i in func.insts.iter_mut().map(|(id, _)| id).collect::<Vec<_>>() {
+        remap_inst(&mut func.insts[i], &m);
+    }
+    // Terminators too: a `Term` still pointing at the replaced ctor references an
+    // inst that is no longer in any block, which regalloc later reads as an
+    // unassigned value index and panics rather than failing anywhere useful.
+    let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
+    for bid in &block_ids {
+        remap_term(&mut func.blocks[*bid].term, &m);
+    }
+    for bid in block_ids {
+        if !func.blocks[bid].insts.iter().any(|i| replacement.contains_key(i)) {
+            continue;
+        }
+        let old = std::mem::take(&mut func.blocks[bid].insts);
+        let mut new = Vec::with_capacity(old.len());
+        for i in old {
+            match replacement.get(&i) {
+                Some(ins) => new.extend_from_slice(ins),
+                None => new.push(i),
+            }
+        }
+        func.blocks[bid].insts = new;
+    }
+}
+
+/// [`cleanup`] plus nobox nested-ctor normalization and the DCE that clears the
+/// ctors it orphans. Every emit path that is followed by
+/// `validate_no_implicit_nobox_materialization` must use THIS, not `cleanup`:
+/// normalization has to run before the verifier, and after `cleanup`'s own final
+/// DCE (the verifier walks `block.insts`, so an orphaned inner ctor left in the
+/// list still rejects). Idempotent -- the rewritten form no longer matches the
+/// trigger -- which matters because `cleanup` is called from many sites.
+///
+/// A site that keeps plain `cleanup` FAILS CLOSED: the verifier reports a
+/// spurious rejection rather than emitting a silent miscompile.
+pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) {
+    cleanup(func);
+    flatten_nobox_nested_ctors(ws, func);
+    dce(func);
 }
 
 /// Emit one `StoreField(slot, field, value)` per IMMEDIATE field of `mvs` (a

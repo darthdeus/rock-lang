@@ -302,7 +302,18 @@ pub enum Inst {
         /// `(declared field name, value)` in declared field order (the `<name>_ct`
         /// ctor is positional, so order is load-bearing; the names let MIR passes
         /// forward a `Field` read to its operand -- SROA). Nested value-struct
-        /// fields hold the nested `MakeValueStruct`, not its flattened leaves.
+        /// fields normally hold the nested `MakeValueStruct`, not its flattened
+        /// leaves.
+        ///
+        /// ONE EXCEPTION, the LEAF FORM: names may instead be DOTTED paths
+        /// naming every primitive leaf (`("pos.x", ..), ("pos.y", ..)`), which is
+        /// what keeps a `nobox` field from materializing when its parent boxes
+        /// (`flatten_nobox_nested_ctors`, `docs/nobox-nested-ctor-plan.md`). It
+        /// exists only between the end of `cleanup` and emit, so no MIR pass sees
+        /// it; luajit emits a generated `<name>_lct` and JS rebuilds the nested
+        /// objects. Partial flattening is invalid: when any name is dotted the
+        /// sequence must equal `value_leaf_paths_of` exactly, which the Lua
+        /// emitter asserts.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// A value-struct box requested explicitly by `materialize(value)`.

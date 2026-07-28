@@ -496,6 +496,52 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
     v
 }
 
+
+/// `<Name>_lct(<one param per primitive leaf, in `value_leaf_paths` order>)`:
+/// allocate the cdata and write each leaf through a hoisted nested reference.
+/// The call site stays a single expression, so const-hoisting and the
+/// read-only-use analysis are untouched.
+fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
+    let param = |p: &str| format!("l_{}", p.replace('.', "_"));
+    let params: Vec<String> = paths.iter().map(|p| param(p.as_str())).collect();
+    let mut body = String::from("  local t = ");
+    let _ = std::fmt::Write::write_fmt(&mut body, format_args!("{name}_ct()\n"));
+    // One local per distinct nested prefix, so a leaf write never re-indexes an
+    // aggregate field (each such index allocates a reference cdata).
+    let mut refs: Vec<String> = Vec::new();
+    for p in paths {
+        // EVERY ancestor prefix, not just the leaf's immediate parent: `b.lo.x`
+        // needs a local for `b` before one for `b.lo`.
+        let comps: Vec<&str> = p.as_str().split('.').collect();
+        for n in 1..comps.len() {
+            let prefix = comps[..n].join(".");
+            if !refs.iter().any(|r| *r == prefix) {
+                refs.push(prefix);
+            }
+        }
+    }
+    refs.sort_by_key(|r| r.matches('.').count());
+    for r in &refs {
+        let local = format!("r_{}", r.replace('.', "_"));
+        let base = match r.rsplit_once('.') {
+            Some((pre, last)) => format!("r_{}.{last}", pre.replace('.', "_")),
+            None => format!("t.{r}"),
+        };
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  local {local} = {base}\n"));
+    }
+    for p in paths {
+        let target = match p.as_str().rsplit_once('.') {
+            Some((prefix, last)) => format!("r_{}.{last}", prefix.replace('.', "_")),
+            None => format!("t.{p}"),
+        };
+        let _ = std::fmt::Write::write_fmt(
+            &mut body,
+            format_args!("  {target} = {}\n", param(p.as_str())),
+        );
+    }
+    format!("{name}_lct = function({})\n{body}  return t\nend\n", params.join(", "))
+}
+
 /// Emit the `ffi.cdef` typedefs + `<Name>_ct = ffi.typeof(...)` constructors for
 /// every FFI-clean `value` struct, so value-struct construction (`V2_ct(x, y)`)
 /// and `NativeBuffer<V2>` (`ffi.new("V2[?]", n)`) work. Returns
@@ -564,6 +610,16 @@ fn value_struct_defs(
             } else {
                 typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, s.name));
                 ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = s.name));
+                // Leaf-taking ctor: LuaJIT has no brace elision, so a nested
+                // field cannot be passed as loose scalars to `_ct`. Allocate and
+                // write leaves instead, hoisting each nested reference once.
+                // Used by the normalization that keeps a `nobox` field from
+                // materializing when its parent boxes.
+                if let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, s.name) {
+                    if paths.iter().any(|p| p.contains('.')) {
+                        ctors.push_str(&leaf_ctor_def(s.name, &paths));
+                    }
+                }
                 emitted.insert(s.name);
                 progress = true;
             }

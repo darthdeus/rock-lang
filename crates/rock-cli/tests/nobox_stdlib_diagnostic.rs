@@ -1,9 +1,16 @@
-//! A `nobox` rejection that lands inside an inlined stdlib body must still be
-//! readable: the stdlib source has to be registered with the renderer (it is
-//! parsed under `<bone-stdlib:NAME>`, which no project source set contains), and
-//! the message has to name the function being emitted -- otherwise every
-//! `xs.push(..)` site in a project reports as the same `unified.rock` line and
-//! the diagnostic carries no information about WHICH site is at fault.
+//! A `nobox` rejection must render its snippet and name the function being
+//! emitted. Both were missing: stdlib modules are parsed under
+//! `<bone-stdlib:NAME>`, which no project source set contains, so a rejection
+//! landing in an inlined stdlib body dropped its snippet and every label; and
+//! without the enclosing function every `xs.push(..)` site in a project reported
+//! as the same `unified.rock` line, carrying no information about WHICH site was
+//! at fault.
+//!
+//! The fixture no longer lands IN stdlib: nested-ctor normalization fixed the
+//! FFI-clean case that used to, so what remains (a GC-tier outer) boxes at the
+//! user's own ctor. The stdlib registration in `render_errs` is therefore no
+//! longer covered end-to-end here -- re-point this fixture if a stdlib-landing
+//! rejection reappears.
 
 use std::process::Command;
 
@@ -11,17 +18,19 @@ fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
-// A nobox field inside a >4-leaf value struct: the Vec keeps boxed elements, so
-// the element ctor materializes the nobox field and the guarantee fires. The
-// rejection surfaces inside the inlined `Vec<T>.push` body in stdlib.
+// A nobox field inside a GC-TIER outer (the nullable field makes `Opt` emit as a
+// `_vt` table), so there is no cdata to write leaves into and the nested ctor
+// still materializes. The rejection surfaces inside the inlined `Vec<T>.push`
+// body in stdlib, which is what this file is about -- an FFI-clean outer is
+// flattened by normalization now and no longer rejects.
 const NOBOX_IN_STDLIB_PUSH: &str = r#"
 nobox value NB { x: float, y: float }
-value E5 { pos: NB, a: float, b: float, c: float }
-global XS: [E5]
+value Opt { pos: NB?, a: float, b: float, c: float }
+global XS: [Opt]
 fn setup() { XS = vec_new() }
 fn main() {
     setup()
-    XS.push(E5 { pos: NB { x: 1.0, y: 2.0 }, a: 1.0, b: 2.0, c: 3.0 })
+    XS.push(Opt { pos: NB { x: 1.0, y: 2.0 }, a: 1.0, b: 2.0, c: 3.0 })
     print("{XS.len}")
 }
 "#;
@@ -51,8 +60,8 @@ fn a_nobox_rejection_inside_stdlib_renders_its_snippet() {
     // The snippet itself, not just the file id -- an unregistered source drops
     // the source line and every label while still printing the header.
     assert!(
-        stderr.contains("Vec<T>.push"),
-        "the stdlib source line must be rendered, not silently dropped:\n{stderr}"
+        stderr.contains("XS.push"),
+        "the source line must be rendered, not silently dropped:\n{stderr}"
     );
 }
 

@@ -14,7 +14,7 @@
 //! delete this note.
 
 mod common;
-use common::{run_luajit, try_emit_module};
+use common::{function_body, run_luajit, try_emit_module};
 
 /// A global forces the outer struct to materialize with no `Vec` in the program,
 /// which is what separates this class from the `MAX_COLUMN_LEAVES` trigger.
@@ -62,8 +62,11 @@ fn main() {
 }
 "#;
 
-/// A nullable nobox field inside an FFI-clean outer: shapes carry a presence
-/// leaf, so the canonical leaf list must include it and round-trip both ways.
+/// SENTINEL, and it pins a RESIDUAL CLASS rather than a gap in the pass: a
+/// nullable field makes the outer GC-tier (it emits `Opt_vt`, a table), so there
+/// is no cdata to write leaves into and allocate-then-write cannot apply. Flip
+/// only if GC-tier outers ever learn to carry nobox leaves; the design's answer
+/// today is an explicit `materialize`.
 const NULLABLE_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
 value Opt { pos: NV2?, a: float, b: float, c: float }
@@ -131,30 +134,53 @@ fn assert_rejects_today(src: &str, what: &str) {
 /// and the emitted writes cannot hide behind symmetric literals.
 #[test]
 fn a_nested_nobox_field_does_not_box_when_the_outer_materializes() {
-    // WHEN FLIPPED: emit must succeed, the Lua must contain no `NV2_ct(`, and
-    // `main()` must print "1 2 3 4 5".
-    assert_rejects_today(GLOBAL_OUTER, "a global outer with a nested nobox field");
+    let lua = emit_ok(GLOBAL_OUTER, "a global outer with a nested nobox field");
+    assert!(
+        !function_body(&lua, "setup").contains("NV2_ct("),
+        "the nested nobox field materialized a cdata:
+{lua}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}
+main()
+"), "global_outer").trim(), "1 2 3 4 5");
 }
 
 #[test]
 fn a_two_level_nesting_flattens_through_the_intermediate() {
-    // WHEN FLIPPED: emit must succeed, the Lua must contain no `NV2_ct(`, and
-    // `main()` must print "1 2 3 4 5 6".
-    assert_rejects_today(TWO_LEVEL, "a two-level nesting");
+    let lua = emit_ok(TWO_LEVEL, "a two-level nesting");
+    assert!(
+        !function_body(&lua, "setup").contains("NV2_ct("),
+        "the nested nobox field materialized a cdata:
+{lua}"
+    );
+    // Flattening happens at the OUTERMOST materialization: a bottom-up rewrite
+    // would allocate an intermediate Box2 per construction.
+    assert!(
+        !function_body(&lua, "setup").contains("Box2_ct("),
+        "an intermediate cdata was allocated instead of flattening at the outermost ctor:
+{lua}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}
+main()
+"), "two_level").trim(), "1 2 3 4 5 6");
 }
 
 #[test]
 fn an_opaque_nested_operand_is_decomposed_not_rejected() {
-    // WHEN FLIPPED: emit must succeed, the Lua must contain no `NV2_ct(`, and
-    // `main()` must print "6 7 1 2 8".
-    assert_rejects_today(MIXED_LITERAL_AND_OPAQUE, "a mixed literal/opaque ctor");
+    let lua = emit_ok(MIXED_LITERAL_AND_OPAQUE, "a mixed literal/opaque ctor");
+    assert!(
+        !function_body(&lua, "setup").contains("NV2_ct("),
+        "the nested nobox field materialized a cdata:
+{lua}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}
+main()
+"), "mixed").trim(), "6 7 1 2 8");
 }
 
 #[test]
 fn a_nullable_nobox_field_round_trips_both_ways() {
-    // WHEN FLIPPED: emit must succeed, the Lua must contain no `NV2_ct(`, and
-    // `main()` must print "1 -1".
-    assert_rejects_today(NULLABLE_FIELD, "a nullable nobox field");
+    assert_rejects_today(NULLABLE_FIELD, "a nullable nobox field in a GC-tier outer");
 }
 
 #[test]

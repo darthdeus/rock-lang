@@ -1470,6 +1470,14 @@ impl Emitter<'_> {
             // metatable-authority rule. Construction is identical for both tiers.
             Inst::MakeValueStruct { name, fields }
             | Inst::MaterializeValueStruct { name, fields } => {
+                // Dotted keys are the post-normalization LEAF form (a nested
+                // nobox field flattened into its parent so it never boxes). JS
+                // has no cdata layout to write leaves into -- a value struct is
+                // a plain object -- so rebuild the nested objects the declared
+                // shape expects. luajit instead calls the generated `_lct`.
+                if fields.iter().any(|(f, _)| f.contains('.')) {
+                    return self.render_leaf_form_value_struct(*name, fields);
+                }
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
                     // Leaf VIEWS are a luajit-representation detail (`ffi.cast`
@@ -1634,6 +1642,57 @@ impl Emitter<'_> {
     /// `tag_expr` is a rendered JS expression (a string literal for `MakeEnum`, the
     /// dynamic tag operand for `MakeEnumDyn`). The ctor drops nil `kv` slots so a
     /// union-wide rebox owns exactly the active variant's keys.
+    /// Rebuild the declared nested-object shape from a flattened leaf field list
+    /// (`("pos.x", ..), ("pos.y", ..)` -> `{pos: {__ty:"NV2", x:.., y:..}}`).
+    /// The leaf form exists only between the end of `cleanup` and emit; luajit
+    /// consumes it via a generated leaf ctor, JS has to reassemble.
+    fn render_leaf_form_value_struct(
+        &self,
+        name: ustr::Ustr,
+        fields: &[(ustr::Ustr, Idx<Inst>)],
+    ) -> Result<String, CompilerError> {
+        // Nested groups in first-seen order, so the emitted object matches the
+        // declared field order the non-leaf path produces.
+        let mut top: Vec<(ustr::Ustr, String)> = Vec::new();
+        let mut groups: Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
+        for (f, v) in fields {
+            match f.as_str().split_once('.') {
+                None => top.push((*f, self.render_val(*v)?)),
+                Some((head, rest)) => {
+                    let rest = ustr::Ustr::from(rest);
+                    match groups.iter_mut().find(|(h, _)| h == head) {
+                        Some((_, sub)) => sub.push((rest, *v)),
+                        None => groups.push((head.to_string(), vec![(rest, *v)])),
+                    }
+                }
+            }
+        }
+        // The nested field's own type name, so the rebuilt sub-object carries the
+        // same `__ty` the non-leaf path would give it.
+        let field_ty = |head: &str| -> Option<ustr::Ustr> {
+            let sid = self.ws.struct_by_name.get(&name)?;
+            let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+            let f = sd.fields.iter().find(|f| f.name.as_str() == head)?;
+            let rendered = self.ws.render(None, f.ty);
+            let n = ustr::Ustr::from(rendered.trim_end_matches('?'));
+            self.ws.struct_by_name.contains_key(&n).then_some(n)
+        };
+        let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
+        for (f, rendered) in &top {
+            parts.push(format!("{}: {rendered}", js_key(f)?));
+        }
+        for (head, sub) in &groups {
+            let sub_name = field_ty(head).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "leaf-form ctor for `{name}`: field `{head}` is not a value struct"
+                ))
+            })?;
+            let inner = self.render_leaf_form_value_struct(sub_name, sub)?;
+            parts.push(format!("{}: {inner}", js_key(&ustr::Ustr::from(head))?));
+        }
+        Ok(format!("({{{}}})", parts.join(", ")))
+    }
+
     fn render_make_enum(
         &self,
         tag_expr: &str,
@@ -2177,7 +2236,7 @@ fn build_program_core(
                 skull_mir::lower::lower_decorator(ws, scx, module.id, did, ustr::Ustr::from(deco_name.as_str()))?;
             let self_ref = safe_self_ref(ws, &mf);
             skull_transform::inline_functions(ws, scx, self_ref, &mut mf, &mut st.cache)?;
-            skull_transform::cleanup(&mut mf);
+            skull_transform::cleanup_with_nobox(ws, &mut mf);
             skull_transform::convert_closures(&mut mf, &deco_name);
             skull_transform::recover_counted_loops(ws, &mut mf);
             for nf in &mut mf.nested_fns {
@@ -2712,10 +2771,10 @@ impl JsReach<'_> {
         let f = &self.ws.module(fr.module).functions[fr.func];
         let mut mf = skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func)?;
         if mf.is_coroutine {
-            skull_transform::cleanup(&mut mf);
+            skull_transform::cleanup_with_nobox(self.ws, &mut mf);
         } else {
             skull_transform::inline_functions(self.ws, self.scx, fr, &mut mf, &mut self.st.cache)?;
-            skull_transform::cleanup(&mut mf);
+            skull_transform::cleanup_with_nobox(self.ws, &mut mf);
             skull_transform::convert_closures(&mut mf, &self.st.names[&fr]);
             skull_transform::recover_counted_loops(self.ws, &mut mf);
             for nf in &mut mf.nested_fns {
@@ -2744,7 +2803,7 @@ impl JsReach<'_> {
             self.ws, self.scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()),
         )?;
         let Some(mut mf) = lowered else { return Ok(()) };
-        skull_transform::cleanup(&mut mf);
+        skull_transform::cleanup_with_nobox(self.ws, &mut mf);
         skull_transform::convert_closures(&mut mf, &init_name);
         skull_transform::recover_counted_loops(self.ws, &mut mf);
         for nf in &mut mf.nested_fns {
@@ -3730,7 +3789,7 @@ fn emit_coroutine_js(
     // are already `e.c<S>.c<slot>` MIR) -- the normal structured path.
     let mut nested = std::mem::take(&mut lowered.step.nested_fns);
     for nf in nested.iter_mut() {
-        skull_transform::cleanup(nf);
+        skull_transform::cleanup_with_nobox(ws, nf);
         skull_transform::recover_counted_loops(ws, nf);
         out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, globals)?);
     }

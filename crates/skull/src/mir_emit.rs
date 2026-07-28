@@ -416,7 +416,7 @@ fn emit_decorator_unit(
     match lowered {
         Ok(mut mf) => {
             let tc = Instant::now();
-            skull_transform::cleanup(&mut mf);
+            skull_transform::cleanup_with_nobox(ws, &mut mf);
             // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
             let pre_nested = mf.nested_fns.len();
             skull_transform::convert_closures(&mut mf, &deco_name);
@@ -476,7 +476,7 @@ fn emit_global_unit(
     match lowered {
         Ok(Some(mut mf)) => {
             let tc = Instant::now();
-            skull_transform::cleanup(&mut mf);
+            skull_transform::cleanup_with_nobox(ws, &mut mf);
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
             // literal with fn fields) -- route them through the shared pass, same
             // as an ordinary fn. Their global reads are NOT init-ordering
@@ -934,7 +934,7 @@ fn emit_body_chunk(
         // invalidated only by their own body edit. (Mirrors the old path, which
         // recorded no global-init facts for coroutines.)
         let tc = Instant::now();
-        skull_transform::cleanup(&mut mf);
+        skull_transform::cleanup_with_nobox(ws, &mut mf);
         times.cleanup = tc.elapsed();
         // Coroutines never inline, so a combinator chain here would leave a
         // call to a bounded fn that has no standalone emission -- reject.
@@ -964,7 +964,7 @@ fn emit_body_chunk(
         skull_transform::inline_functions(ws, scx, self_ref, &mut mf, inline_cache)?;
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
-    skull_transform::cleanup(&mut mf); // drop dead values + dead-cell stores
+    skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
     // Shared closure conversion (S2 cutover, docs/closure-conversion-mir-plan.md):
     // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
     // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
@@ -1030,7 +1030,7 @@ fn emit_nested_fns(
     out: &mut String,
 ) {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup(nf);
+        skull_transform::cleanup_with_nobox(ws, nf);
         skull_transform::recover_counted_loops(ws, nf);
         collect_callee_frefs(nf, deps);
         statics.extend(nf.statics.iter().cloned());
@@ -1048,7 +1048,7 @@ fn emit_nested_fns(
 /// same as the co-fn step).
 fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc], out: &mut String) {
     for nf in nested.iter_mut() {
-        skull_transform::cleanup(nf);
+        skull_transform::cleanup_with_nobox(ws, nf);
         out.push_str(&emit_named(ws, cg, nf.name.as_str(), nf));
     }
 }
@@ -1157,7 +1157,7 @@ fn emit_specialized_callees(
             &subst,
         )
             .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
-        skull_transform::cleanup(&mut mf);
+        skull_transform::cleanup_with_nobox(ws, &mut mf);
         skull_transform::convert_closures(&mut mf, &name);
         skull_transform::recover_counted_loops(ws, &mut mf);
         validate_emitted_body(ws, &mf, pending)
@@ -1186,7 +1186,7 @@ fn inline_hoisted_bodies(
         let (spliced, _) = skull_transform::inline_functions(ws, scx, self_ref, nf, inline_cache)
             .map_err(|e| e.message)?;
         deps.extend(spliced);
-        skull_transform::cleanup(nf);
+        skull_transform::cleanup_with_nobox(ws, nf);
         let mut children = std::mem::take(&mut nf.nested_fns);
         inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, deps)?;
         nf.nested_fns = children;

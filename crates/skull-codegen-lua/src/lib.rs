@@ -435,6 +435,29 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
     })
 }
 
+
+/// Whether these ctor operands are the flattened LEAF form (dotted field names
+/// naming primitive leaves) rather than the declared-field form.
+///
+/// Deliberately NOT "some name contains a dot": the sequence must equal
+/// `value_leaf_paths_of` EXACTLY. The ctor is positional, so a partially or
+/// wrongly flattened field list would emit silently against the wrong
+/// signature; requiring the canonical sequence turns that into a loud panic at
+/// emit instead -- the same fail-closed move `value_leaf_layout_checked` makes.
+fn is_leaf_form(ws: &Workspace, name: ustr::Ustr, fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
+    if !fields.iter().any(|(n, _)| n.contains('.')) {
+        return false;
+    }
+    let canonical = skull_mir::lower::value_leaf_paths_of(ws, name).unwrap_or_default();
+    let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        got, canonical,
+        "`{name}` ctor carries dotted field names that are not its canonical leaf \
+         sequence -- the positional ctor would be called with the wrong shape"
+    );
+    true
+}
+
 /// Group every all-constant `MakeValueStruct` (every field operand a `Const`) by
 /// (struct name, field literals). Returns `(inst -> group, group -> global name,
 /// def lines)`: each group becomes one function-owned global
@@ -456,9 +479,20 @@ fn collect_const_hoists(
     func: &MirFunc,
     base: &str,
 ) -> (HashMap<Idx<Inst>, u32>, Vec<String>, String) {
-    let mut groups: Vec<(ustr::Ustr, Vec<Lit>)> = Vec::new();
+    // The leaf-form flag rides with the group: a flattened all-const ctor must
+    // hoist against `_lct`, whose arity and signature differ from `_ct`.
+    let mut groups: Vec<(ustr::Ustr, Vec<Lit>, bool)> = Vec::new();
     let mut hoist: HashMap<Idx<Inst>, u32> = HashMap::default();
+    // Only insts still REACHED BY A BLOCK. The arena keeps orphans (DCE unlinks
+    // from blocks, it does not free), and hoisting one emits a module-scope ctor
+    // call for a value the program never builds -- which for a nobox type is a
+    // materialization the verifier cannot see, since it walks `block.insts`.
+    let live: HashSet<Idx<Inst>> =
+        func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
     for (id, inst) in func.insts.iter() {
+        if !live.contains(&id) {
+            continue;
+        }
         let Inst::MakeValueStruct { name, fields } = inst else {
             continue;
         };
@@ -480,10 +514,11 @@ fn collect_const_hoists(
         if !const_hoist_uses_are_read_only(ws, func, id) {
             continue;
         }
-        let g = match groups.iter().position(|(n, l)| *n == *name && *l == lits) {
+        let leaf_form = is_leaf_form(ws, *name, fields);
+        let g = match groups.iter().position(|(n, l, lf)| *n == *name && *l == lits && *lf == leaf_form) {
             Some(p) => p as u32,
             None => {
-                groups.push((*name, lits));
+                groups.push((*name, lits, leaf_form));
                 (groups.len() - 1) as u32
             }
         };
@@ -494,9 +529,9 @@ fn collect_const_hoists(
     }
     let mut names = Vec::with_capacity(groups.len());
     let mut defs = String::new();
-    for (g, (name, lits)) in groups.iter().enumerate() {
+    for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
+        let suffix = if *leaf_form { "_lct" } else if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
@@ -1698,7 +1733,9 @@ impl Emitter<'_> {
                 // passes only (SROA), not the wire shape. The ctor NAME is chosen
                 // by tier from the ONE classification: `_vt` (table) for a
                 // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
-                let suffix = if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
+                let suffix = if is_leaf_form(self.ws, *name, fields) {
+                    "_lct"
+                } else if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
                     "_vt"
                 } else {
                     "_ct"
