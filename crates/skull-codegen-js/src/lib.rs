@@ -1644,6 +1644,10 @@ function stone_play_sound(h, volume, speed, decay) {
   }
   A.sfxSources[h] = src;
 }
+function stone_get_sound_duration(h) {
+  var s = __SW.audio.sounds[h];
+  return (s && s.buffer) ? s.buffer.duration : 0;
+}
 function stone_stop_sound(h) {
   var src = __SW.audio.sfxSources[h];
   // stop() on an already-ended source throws InvalidStateError -- benign here.
