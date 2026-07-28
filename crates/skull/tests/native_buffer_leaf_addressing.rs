@@ -98,17 +98,16 @@ fn a_whole_element_store_bounds_checks_exactly_once_first() {
         "one element store must bounds-check once, not once per leaf; found {checks}:\n{body}"
     );
 
-    // Ordering: the check has to come before the first leaf write into the
-    // buffer. `w` is the last declared leaf and cannot be constant-folded away,
-    // so it stands in for "a leaf access happened".
+    // Ordering: the check has to come before the buffer is addressed through a
+    // typed view (`r6 = r3.__vf`), which is where every leaf write goes.
     let check_at = body.find("checked").expect("a bounds check");
-    let first_leaf_write = body.find(".w = ").or_else(|| body.find("[o"));
-    if let Some(w) = first_leaf_write {
-        assert!(
-            check_at < w,
-            "the bounds check must PRECEDE the leaf writes it guards:\n{body}"
-        );
-    }
+    let first_view_use = body
+        .find(".__v")
+        .unwrap_or_else(|| panic!("a typed-view use, so the ordering below is checked:\n{body}"));
+    assert!(
+        check_at < first_view_use,
+        "the bounds check must PRECEDE the leaf writes it guards:\n{body}"
+    );
 }
 
 #[test]
