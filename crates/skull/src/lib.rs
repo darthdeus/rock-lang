@@ -425,7 +425,9 @@ fn runtime_prelude() -> &'static str {
     // codegen test harness) -- the record metatable is where the emitter's
     // `setmetatable({..}, __rock_fn_mt)` output lands.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        PRELUDE_TEMPLATE.replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+        PRELUDE_TEMPLATE
+            .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
     });
     &PRELUDE
 }
@@ -435,6 +437,10 @@ const PRELUDE_TEMPLATE: &str =
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
+-- Compiler-minted NativeBuffer leaf views: field -> ffi.cast type. Generated
+-- from skull_mir::lower::LEAF_VIEWS. Views are DERIVED (pointers over the
+-- buffer's own `ptr`), so refresh reseats them and serialize/inspect skip them.
+_G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
 -- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.

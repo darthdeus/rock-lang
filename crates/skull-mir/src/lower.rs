@@ -177,21 +177,43 @@ fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
     }
 }
 
+/// Every leaf VIEW the compiler mints: `(leaf C type, buffer field, cast type)`.
+///
+/// THE single source of truth. [`leaf_view_field`] selects from it,
+/// [`is_leaf_view_field`] tests it, and the runtime `__ROCK_LEAF_VIEWS` table is
+/// GENERATED from it (`skull::prelude`) so the Rock-side consumers -- view
+/// refresh, serialization, inspect -- cannot drift from the emitter. Adding a
+/// leaf type here reaches all of them; a hand-written list in any of them is the
+/// bug this replaces.
+pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
+    ("float", "__vf", "float*"),
+    ("int", "__vi", "int*"),
+    ("bool", "__vb", "bool*"),
+];
+
 /// The buffer-table field holding the typed leaf VIEW for primitive C type
 /// `cty`. One field per distinct leaf type, made once at construction
 /// ([`Inst::FfiViewCast`]) and read per element access, never per leaf.
 pub fn leaf_view_field(cty: &str) -> Ustr {
-    match cty {
-        "float" => Ustr::from("__vf"),
-        "int" => Ustr::from("__vi"),
-        "bool" => Ustr::from("__vb"),
-        other => unreachable!("no leaf view for non-primitive C type `{other}`"),
+    match LEAF_VIEWS.iter().find(|(t, ..)| *t == cty) {
+        Some((_, field, _)) => Ustr::from(field),
+        None => unreachable!("no leaf view for non-primitive C type `{cty}`"),
     }
 }
 
 /// Whether `field` is one of the leaf-view keys [`leaf_view_field`] mints.
 pub fn is_leaf_view_field(field: &str) -> bool {
-    matches!(field, "__vf" | "__vi" | "__vb")
+    LEAF_VIEWS.iter().any(|(_, f, _)| *f == field)
+}
+
+/// The `__ROCK_LEAF_VIEWS` prelude table: leaf-view field -> `ffi.cast` type.
+/// Rock-side consumers key off it instead of spelling `__vf`/`__vi`/`__vb`.
+pub fn leaf_views_lua_table() -> String {
+    let entries: Vec<String> = LEAF_VIEWS
+        .iter()
+        .map(|(_, field, cast)| format!("{field} = \"{cast}\""))
+        .collect();
+    format!("{{ {} }}", entries.join(", "))
 }
 
 /// Where one leaf lives, in units of ITS OWN view's element size: the buffer

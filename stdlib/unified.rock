@@ -531,9 +531,9 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // must call this. A regular Rock reallocation (`native_buffer_alloc`) builds a
 // fresh buffer with fresh views and needs nothing.
 @nomangle inline(lua) fn __nb_refresh_views(buf: any) = """
-    if buf.__vf ~= nil then buf.__vf = ffi.cast("float*", buf.ptr) end
-    if buf.__vi ~= nil then buf.__vi = ffi.cast("int*", buf.ptr) end
-    if buf.__vb ~= nil then buf.__vb = ffi.cast("bool*", buf.ptr) end
+    for field, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
+        if buf[field] ~= nil then buf[field] = ffi.cast(cast_ty, buf.ptr) end
+    end
 """
 
 // Bounds-check WITHOUT taking a slot reference: returns the index unchanged.
@@ -1847,8 +1847,12 @@ global PI: float = 3.141592653589793
             -- A dotted key is a compiler-minted PHYSICAL slot (an `embed` leaf,
             -- a flattened enum's discriminant/payload). It has no source-level
             -- name, so it is never shown; the declared field it belongs to is
-            -- rendered from the leaves instead.
+            -- rendered from the leaves instead. A leaf VIEW is likewise derived
+            -- -- an ffi.cast pointer over the buffer's own storage -- and would
+            -- render as a run-varying address, so it is skipped for the same
+            -- reason serialization skips it (`__ROCK_LEAF_VIEWS`).
             if k ~= "__variant" and k ~= "__ty"
+               and not _G.__ROCK_LEAF_VIEWS[k]
                and not (type(k) == "string" and string.find(k, ".", 1, true)) then
                 keys[#keys + 1] = k
                 seen[k] = true
