@@ -585,7 +585,49 @@ fn value_struct_defs(
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    Ok((format!("ffi.cdef[[\n{}]]\n{}", typedefs, ctors), emitted, gc))
+    let checks = value_leaf_layout_checks(ws, &emitted);
+    Ok((format!("ffi.cdef[[\n{}]]\n{}{}", typedefs, ctors, checks), emitted, gc))
+}
+
+/// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
+/// for every leaf of every FFI-clean value struct.
+///
+/// Leaf addressing (`docs/native-buffer-leaf-addressing-plan.md`) indexes typed
+/// views with COMPILER-COMPUTED byte offsets — a literal constant per leaf, which
+/// is the whole point, since a runtime offset lookup would cost what the boxing
+/// cost. If that model ever disagreed with LuaJIT's, every element access would
+/// read and write the wrong address: silent memory corruption, not a failure.
+/// So the two are cross-checked against `ffi.offsetof` composed along each leaf's
+/// field chain, and a mismatch aborts loudly at load.
+fn value_leaf_layout_checks(
+    ws: &Workspace,
+    emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> String {
+    use std::fmt::Write as _;
+    let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
+    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let mut out = String::new();
+    for name in names {
+        let Some((leaves, size, _align)) = skull_mir::lower::value_leaf_layout(ws, name) else {
+            continue;
+        };
+        let _ = writeln!(
+            out,
+            "if ffi.sizeof(\"{name}\") ~= {size} then error(\"skull layout drift: \
+             sizeof({name}) = \" .. ffi.sizeof(\"{name}\") .. \", expected {size}\", 0) end"
+        );
+        for l in leaves {
+            let _ = writeln!(
+                out,
+                "if ({expr}) ~= {off} then error(\"skull layout drift: {name}.{path} at \" \
+                 .. ({expr}) .. \", expected {off}\", 0) end",
+                expr = l.offsetof_expr,
+                off = l.byte_off,
+                path = l.path,
+            );
+        }
+    }
+    out
 }
 
 /// Emit the table-repr materialization defs for every GC-carrying value struct:

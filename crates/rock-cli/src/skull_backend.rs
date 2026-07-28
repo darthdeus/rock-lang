@@ -3565,7 +3565,7 @@ mod overlay_runtime_tests {
     /// value. Not even a fresh post-reload construction is safe -- this is the
     /// class where no in-process response exists, the core restart argument.
     #[test]
-    fn value_struct_reorder_full_reload_misassigns_positional_ctor() {
+    fn value_struct_reorder_full_reload_is_caught_by_the_layout_check() {
         let v0 = "value P { x: int, y: int }\n\
                   global CUR: P = P { x: 0, y: 0 }\n\
                   @nomangle\n\
@@ -3605,10 +3605,20 @@ mod overlay_runtime_tests {
         }
 
         // Composed: the v1 chunk re-cdefs P (silent no-op), then a FRESH
-        // post-reload `set()` constructs `P { x: 1, y: 2 }` through the v1
-        // positional order (y first) against the frozen v0 ctype (x first):
-        // x=2, y=1. The pinned output is the SWAP -- silently wrong values,
-        // no error anywhere.
+        // Composed: the v1 chunk re-cdefs P (silent no-op), so LuaJIT keeps the
+        // v0 layout. Left alone this misassigns silently -- the v1 positional
+        // ctor (y first) feeds the frozen v0 ctype (x first) and `show()` prints
+        // the SWAP, `2,1`, with no error anywhere.
+        //
+        // It no longer gets that far. The emitted leaf-layout check
+        // (`value_leaf_layout_checks`) compares skull's computed offsets against
+        // `ffi.offsetof` at chunk load, sees v1's `y@0` against the frozen
+        // `y@4`, and aborts. The restart policy is still the PRIMARY response --
+        // `struct_shape_hash` hashes fields in order, so the real driver drifts
+        // and respawns cold long before a chunk like this loads (this fixture
+        // composes the two chunks by hand, bypassing that gate). The check is
+        // the loud backstop for anything that ever slips past it, which is what
+        // makes this class detectable rather than silent.
         let composed = run_parts(&[
             &full0.lua,
             stub_for(&full0.lua),
@@ -3620,14 +3630,11 @@ mod overlay_runtime_tests {
             "show()",
         ]);
         match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1,2\n2,1",
-                "expected the frozen-ctype positional misassignment (the pinned corruption)"
-            ),
-            ExecOutcome::Errored => panic!(
-                "value-struct reorder fixture errored -- if ffi.cdef redefinition \
-                 started FAILING loudly, the premise (and the plan doc) needs updating"
+            ExecOutcome::Errored => {} // the layout check caught the drift
+            ExecOutcome::Output(o) => panic!(
+                "a reordered value struct reloaded into a frozen ctype must be caught \
+                 by the leaf-layout check, not silently misassigned; got:\n{}",
+                normalize_stdout(&o)
             ),
         }
     }

@@ -177,6 +177,170 @@ fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
     }
 }
 
+/// One primitive leaf of an FFI-clean value struct's C layout: its dotted path
+/// (the same key [`value_leaf_paths`] produces), its C type, and its BYTE offset
+/// from the start of the struct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeafSlot {
+    pub path: Ustr,
+    pub cty: &'static str,
+    pub byte_off: usize,
+    /// The same offset expressed as a LuaJIT `ffi.offsetof` composition along
+    /// this leaf's field chain (`ffi.offsetof("Vert","pos")+ffi.offsetof("V2","x")`).
+    /// Emitted as a start-up assertion against `byte_off`: the Rust layout model
+    /// and LuaJIT's must agree, and a divergence corrupts memory silently rather
+    /// than failing, so it is checked rather than trusted.
+    pub offsetof_expr: String,
+}
+
+/// Size and alignment of a primitive C type as LuaJIT lays it out. The only
+/// types [`value_field_c_type`] admits as leaves.
+fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
+    match cty {
+        "int" | "float" => Some((4, 4)),
+        "bool" => Some((1, 1)),
+        _ => None,
+    }
+}
+
+/// The C layout of FFI-clean value struct `name`: every primitive leaf with its
+/// byte offset, plus the struct's own `(size, align)`.
+///
+/// Standard C rules, matching what LuaJIT computes for the emitted typedef: each
+/// member is padded up to its own alignment, the struct's alignment is the max
+/// of its members', and its size is rounded up to that. The agreement is NOT
+/// taken on trust -- `value_leaf_layout_matches_luajit` cross-checks every
+/// offset against `ffi.offsetof` at run time, because a divergence here is
+/// silent memory corruption rather than a failure.
+///
+/// The traversal mirrors [`value_shape_rec`] arm for arm, so the leaf ORDER is
+/// identical to [`value_leaf_paths`] by construction -- leaves are matched to
+/// offsets positionally, and a divergence would write every leaf to the wrong
+/// address. `value_leaf_layout_agrees_with_leaf_paths` pins it.
+pub fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
+    let mut out = Vec::new();
+    let (size, align) = layout_rec(ws, name, "", 0, "", &mut out, &mut Vec::new())?;
+    Some((out, size, align))
+}
+
+/// Append `name`'s leaves at `base` (a byte offset), returning its `(size, align)`.
+/// `ofs` is the `ffi.offsetof` composition accumulated down to `name`'s start.
+fn layout_rec(
+    ws: &Workspace,
+    name: Ustr,
+    prefix: &str,
+    base: usize,
+    ofs: &str,
+    out: &mut Vec<LeafSlot>,
+    visiting: &mut Vec<Ustr>,
+) -> Option<(usize, usize)> {
+    // A cdata-eligible enum is a struct in its own right (`{ int __tag; <prim>
+    // _0; .. }`), not a value struct -- `value_shape_rec` nests it, so this
+    // must nest it identically.
+    if let Some(es) = enum_value_shape(ws, name) {
+        let mut off = base;
+        let mut align = 4; // the `int __tag`
+        let mut push = |nm: &str, cty: &'static str, off: &mut usize, align: &mut usize| {
+            let (sz, al) = c_prim_size_align(cty)?;
+            *off = round_up(*off, al);
+            out.push(LeafSlot {
+                path: leaf_path(prefix, nm),
+                cty,
+                byte_off: *off,
+                offsetof_expr: join_offsetof(ofs, name, nm),
+            });
+            *off += sz;
+            *align = (*align).max(al);
+            Some(())
+        };
+        push("__tag", "int", &mut off, &mut align)?;
+        for (nm, cty) in &es.slots {
+            push(nm.as_str(), cty, &mut off, &mut align)?;
+        }
+        return Some((round_up(off - base, align), align));
+    }
+
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !sd.is_value || visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
+    let mut off = base;
+    let mut align = 1usize;
+    for f in &sd.fields {
+        let cty = value_field_c_type(ws, f.ty)?;
+        match c_prim_size_align(&cty) {
+            Some((sz, al)) => {
+                // Leak-free: the only strings reaching here are the three
+                // literals `value_field_c_type` returns for primitives.
+                let cty: &'static str = match cty.as_str() {
+                    "int" => "int",
+                    "float" => "float",
+                    "bool" => "bool",
+                    _ => return None,
+                };
+                off = round_up(off, al);
+                out.push(LeafSlot {
+                    path: leaf_path(prefix, f.name.as_str()),
+                    cty,
+                    byte_off: off,
+                    offsetof_expr: join_offsetof(ofs, name, f.name.as_str()),
+                });
+                off += sz;
+                align = align.max(al);
+            }
+            // A nested value struct or a cdata enum: recurse under the dotted
+            // prefix, aligning to the nested aggregate's own alignment.
+            None => {
+                let nested = Ustr::from(cty.as_str());
+                let probe_at = round_up(off, nested_align(ws, nested, visiting)?);
+                let (sz, al) = layout_rec(
+                    ws,
+                    nested,
+                    &format!("{prefix}{}.", f.name),
+                    probe_at,
+                    &join_offsetof(ofs, name, f.name.as_str()),
+                    out,
+                    visiting,
+                )?;
+                off = probe_at + sz;
+                align = align.max(al);
+            }
+        }
+    }
+    visiting.pop();
+    Some((round_up(off - base, align), align))
+}
+
+/// The alignment of a nested aggregate, computed without emitting its leaves.
+fn nested_align(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
+    let mut scratch = Vec::new();
+    Some(layout_rec(ws, name, "", 0, "", &mut scratch, visiting)?.1)
+}
+
+/// Extend an `ffi.offsetof` composition by one field hop.
+fn join_offsetof(prefix: &str, owner: Ustr, field: &str) -> String {
+    let hop = format!("ffi.offsetof(\"{owner}\", \"{field}\")");
+    if prefix.is_empty() {
+        hop
+    } else {
+        format!("{prefix} + {hop}")
+    }
+}
+
+fn leaf_path(prefix: &str, name: &str) -> Ustr {
+    if prefix.is_empty() {
+        Ustr::from(name)
+    } else {
+        Ustr::from(&format!("{prefix}{name}"))
+    }
+}
+
+fn round_up(n: usize, align: usize) -> usize {
+    n.div_ceil(align) * align
+}
+
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
 #[derive(Clone, Debug)]
