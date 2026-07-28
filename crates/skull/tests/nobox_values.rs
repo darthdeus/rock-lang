@@ -672,6 +672,36 @@ fn a_nested_fn_taken_by_value_keeps_one_boxed_abi_at_every_call() {
     );
 }
 
+const NOBOX_SCALAR_ABI_FFI: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+@scalar_abi inline(lua) fn ffi_take(p: NV2, k: float) -> float = "return p__x + p__y + k"
+@scalar_abi inline(lua) fn ffi_make() -> NV2 = "return 3.0, 4.0"
+
+fn main() {
+    let v = ffi_make()
+    print("{ffi_take(v, 1.0)} {ffi_take(k: 1.0, p: v)}")
+}
+"#;
+
+/// `@scalar_abi` is how an `inline(lua)` FFI wrapper takes a nobox value without
+/// materializing it -- the alternative at every call site is `materialize(v)`.
+/// The whole imgui surface (`stone/engine/ui/imgui.rock`) rests on this working
+/// in BOTH directions, and on named args reaching the right leaf group.
+#[test]
+fn a_scalar_abi_ffi_wrapper_threads_nobox_leaves_both_ways() {
+    let lua = emit_module(NOBOX_SCALAR_ABI_FFI);
+    let body = function_body(&lua, "main");
+    assert!(
+        !body.contains("NV2_ct("),
+        "a scalar-ABI FFI boundary materialized a nobox value:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_scalar_abi_ffi"),
+        "8 8"
+    );
+}
+
 const NOBOX_NESTED_FN_BY_VALUE: &str = r#"
 nobox value NV2 { x: float, y: float }
 
