@@ -5009,6 +5009,7 @@ impl Builder<'_> {
                 // specialized). `key` is intentionally unused here.
                 return Ok(self.emit_tuple_call_tree(func, args, shape, tree));
             }
+            self.authorize_gpu_boundary_boxes(&func, &args);
             let call = self.emit_cur(Inst::Call { func, args });
             if let Some(t) = tree {
                 self.f.bound_trees.insert(call, t);
@@ -10761,6 +10762,31 @@ impl Builder<'_> {
     /// `value` struct is already a first-class `vecN` -- there is no box on that
     /// target, and no collection to put one in, so the proxy inverts and every
     /// shader call would reject a nobox arg.
+    /// Re-mark a nobox box packed for a `@gpu_only` callee as an EXPLICIT one.
+    ///
+    /// Emission is identical (both render `<name>_ct`), the verifier ignores
+    /// `MaterializeValueStruct`, and the flatten pass already treats it as
+    /// sanctioned -- so this authorizes exactly the box the GPU boundary needs
+    /// through the channel that already exists for authorized boxes, instead of
+    /// switching the guarantee off for the calling body.
+    ///
+    /// Args are lowered per call site, so each box here is this call's own.
+    fn authorize_gpu_boundary_boxes(&mut self, func: &FuncRef, args: &[Idx<Inst>]) {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        if !crate::intrinsics::is_gpu_only(callee) {
+            return;
+        }
+        for &a in args {
+            let Inst::MakeValueStruct { name, fields } = &self.f.insts[a] else { continue };
+            let Some(sid) = self.ws.struct_by_name.get(name) else { continue };
+            if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                continue;
+            }
+            let (name, fields) = (*name, fields.clone());
+            self.f.insts[a] = Inst::MaterializeValueStruct { name, fields };
+        }
+    }
+
     fn reject_nobox_boxed_call_args(
         &self,
         func: FuncRef,
@@ -10770,11 +10796,12 @@ impl Builder<'_> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
-        // A `@gpu_only` intrinsic has no boxed boundary to cross. Boxing is a
-        // Lua-representation concept; these compile to GLSL, where a value is a
-        // native `vec2`/`vec4` and no box exists. Their `inline(lua)` bodies only
-        // `error(...)`, and `gpu_only_call_rejection` already refuses a CPU
-        // caller, so the only callers reaching here are GPU contexts.
+        // A `@gpu_only` intrinsic's boxed param is not a real boundary: on the
+        // GPU the arg is a native `vec2`/`vec4` and no box exists, and the Lua
+        // body only `error(...)`s. Rather than exempting the CALLER's whole
+        // body, the box is AUTHORIZED at this one boundary
+        // ([`Self::authorize_gpu_boundary_boxes`]) -- the guarantee keeps
+        // applying to everything else the caller does.
         // Rationale for shader work: docs/shaders.md, "nobox values and shaders".
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());

@@ -316,7 +316,12 @@ pub enum Inst {
         /// emitter asserts.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
-    /// A value-struct box requested explicitly by `materialize(value)`.
+    /// A value-struct box that is AUTHORIZED rather than implicit: requested by
+    /// `materialize(value)`, or minted by the compiler at a `@gpu_only` call
+    /// boundary (`authorize_gpu_boundary_boxes`), where the callee's boxed param
+    /// is a Lua-side artifact of an arg that is a native `vec2`/`vec4` on the
+    /// GPU. Emission is identical to `MakeValueStruct`; the difference is that
+    /// the `nobox` verifier ignores this variant.
     MaterializeValueStruct {
         name: Ustr,
         fields: Vec<(Ustr, Idx<Inst>)>,

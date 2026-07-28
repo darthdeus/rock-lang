@@ -257,6 +257,7 @@ fn profile_body(
             | Inst::Eq(..) | Inst::NotEq(..)
             | Inst::Neg(_) | Inst::Not(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
             | Inst::MakeValueStruct { .. }
+            | Inst::MaterializeValueStruct { .. }
             | Inst::Field { .. }
             | Inst::Store { .. } => {}
             // Everything else is above tier 0 (strings, containers, closures,
@@ -944,14 +945,16 @@ impl FnEmit<'_> {
                     GlslTy::Float // Vec component
                 }
             }
-            Inst::MakeValueStruct { name, .. } => match name.as_str() {
+            Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => {
+                match name.as_str() {
                 "Vec2" => GlslTy::Vec2,
                 "Vec3" => GlslTy::Vec3,
                 "Vec4" => GlslTy::Vec4,
                 "Bvec3" => GlslTy::Bvec3,
                 "Mat4" => GlslTy::Mat4,
                 _ => GlslTy::Float,
-            },
+                }
+            }
             Inst::Call { func, args } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
                 match cf.return_ty.and_then(|rt| glsl_ty(self.ws, rt, cf.name_span, "return").ok()) {
@@ -1071,7 +1074,22 @@ impl FnEmit<'_> {
                     format!("{}.{}", self.render_val(*base)?, field)
                 }
             }
-            Inst::MakeValueStruct { name, fields } => {
+            // `MaterializeValueStruct` renders identically: on the GPU an
+            // authorized box is just a `vec2(..)` ctor -- the authorization is a
+            // Lua-side concept (`authorize_gpu_boundary_boxes`).
+            Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields } => {
+                // GLSL must never see the post-normalization LEAF form (dotted
+                // field names, `flatten_nobox_nested_ctors`). It cannot today --
+                // this crate never calls `skull_transform`, so it never runs
+                // `cleanup` -- and it must not start: GLSL has real nested ctors
+                // where the nested form is correct and free, so flattening would
+                // be actively wrong here. Fail loud if a pipeline change ever
+                // routes normalized MIR to this emitter.
+                debug_assert!(
+                    !fields.iter().any(|(f, _)| f.contains('.')),
+                    "GLSL received the nobox leaf form for `{name}`: this emitter \
+                     must not run on `cleanup`-normalized MIR"
+                );
                 // Bvec3 components render at a bool context; the vecN ctors take
                 // float components (int operands materialize an IntToFloat).
                 let (ctor, comp_ty) = match name.as_str() {
@@ -1358,7 +1376,10 @@ impl FnEmit<'_> {
                 return Err(err(self.span(), "shader entry: a void-main entry must return its output struct"));
             };
             let fields: Vec<(Ustr, Idx<Inst>)> = match &self.f.insts[*v] {
-                Inst::MakeValueStruct { fields, .. } => fields.iter().map(|&(n, x)| (n, x)).collect(),
+                Inst::MakeValueStruct { fields, .. }
+                | Inst::MaterializeValueStruct { fields, .. } => {
+                    fields.iter().map(|&(n, x)| (n, x)).collect()
+                }
                 _ => {
                     return Err(err(
                         self.span(),
