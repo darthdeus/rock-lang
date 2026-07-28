@@ -4886,6 +4886,27 @@ mod shape_drift_tests {
         );
     }
 
+    /// Marking a `value` type `nobox` moves every global of that type from one
+    /// boxed slot to K leaf globals, while the rendered type stays `"NV2"`. The
+    /// emitted per-global preservation guard compares only that rendered type, so
+    /// it would preserve across the move and leave the new leaves nil -- this
+    /// restart is what stops the reload reaching it. `struct_shape_hash` hashing
+    /// `is_nobox` is the one line that makes it fire.
+    #[test]
+    fn marking_a_type_nobox_requests_restart() {
+        let v0 = "value NV2 { x: float, y: float }\n\
+                  global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
+        let v1 = "nobox value NV2 { x: float, y: float }\n\
+                  global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        std::fs::write(&rock, v1).unwrap();
+        let reload = stone.recompile(&[rock], &main_lua, &inc_lua).expect("recompile v1");
+        assert!(
+            matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "NV2")),
+            "a nobox flip relocates live global storage -- must restart, got {reload:?}"
+        );
+    }
+
     #[test]
     fn value_struct_layout_edit_requests_restart() {
         let v0 = "value P { x: int, y: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";

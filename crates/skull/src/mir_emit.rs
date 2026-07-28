@@ -512,6 +512,18 @@ fn emit_global_unit(
             // written into `__rock_known_globals` below (which lists const + mutable
             // alike); both come from the same render so "type unchanged" compares
             // equal.
+            //
+            // "Same type" is NOT "same layout" -- a `value` struct renders as its
+            // bare name whatever fields it holds and whether or not it is `nobox`,
+            // so this guard alone would preserve a boxed slot across a move to leaf
+            // globals (leaving them nil) or hand new-shape readers an old ctype.
+            // It does not have to detect that: a layout change drifts
+            // `type_shape_hashes` and `SkullStone::recompile` returns
+            // `ShapeChanged`, which kills the process and respawns rather than
+            // reloading -- and a respawn is a cold start, which never takes this
+            // branch. Keep layout detection THERE, in one place; a second
+            // layout-aware key here would be a parallel mechanism to keep in sync.
+            // Pinned by `shape_drift_tests::marking_a_type_nobox_requests_restart`.
             let target = global_init_target(ws, cg, g);
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
