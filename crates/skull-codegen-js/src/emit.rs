@@ -1656,6 +1656,47 @@ impl Emitter<'_> {
     /// (`("pos.x", ..), ("pos.y", ..)` -> `{pos: {__ty:"NV2", x:.., y:..}}`).
     /// The leaf form exists only between the end of `cleanup` and emit; luajit
     /// consumes it via a generated leaf ctor, JS has to reassemble.
+    /// The struct type of `name`'s field `head`, when that field is itself a
+    /// value struct -- so a rebuilt sub-object carries the `__ty` the non-leaf
+    /// path would give it, and the inspect renderer can recurse into a
+    /// flattened group. Fails closed: a non-struct field yields `None`.
+    fn nested_field_struct_name(&self, name: ustr::Ustr, head: &str) -> Option<ustr::Ustr> {
+        let sid = self.ws.struct_by_name.get(&name)?;
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let f = sd.fields.iter().find(|f| f.name.as_str() == head)?;
+        let rendered = self.ws.render(None, f.ty);
+        let n = ustr::Ustr::from(rendered.trim_end_matches('?'));
+        self.ws.struct_by_name.contains_key(&n).then_some(n)
+    }
+
+    /// Split a possibly-FLATTENED field list into exact fields and per-head
+    /// groups of dotted leaves. Shared by the leaf-form object renderer and the
+    /// inspect renderer so the two read the same shape the same way.
+    fn split_leaf_fields(
+        fields: &[(ustr::Ustr, Idx<Inst>)],
+    ) -> (
+        HashMap<ustr::Ustr, Idx<Inst>>,
+        Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)>,
+    ) {
+        let mut exact: HashMap<ustr::Ustr, Idx<Inst>> = HashMap::new();
+        let mut groups: Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
+        for (f, v) in fields {
+            match f.as_str().split_once('.') {
+                None => {
+                    exact.insert(*f, *v);
+                }
+                Some((head, rest)) => {
+                    let rest = ustr::Ustr::from(rest);
+                    match groups.iter_mut().find(|(h, _)| h == head) {
+                        Some((_, sub)) => sub.push((rest, *v)),
+                        None => groups.push((head.to_string(), vec![(rest, *v)])),
+                    }
+                }
+            }
+        }
+        (exact, groups)
+    }
+
     fn render_leaf_form_value_struct(
         &self,
         name: ustr::Ustr,
@@ -1677,16 +1718,7 @@ impl Emitter<'_> {
                 }
             }
         }
-        // The nested field's own type name, so the rebuilt sub-object carries the
-        // same `__ty` the non-leaf path would give it.
-        let field_ty = |head: &str| -> Option<ustr::Ustr> {
-            let sid = self.ws.struct_by_name.get(&name)?;
-            let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-            let f = sd.fields.iter().find(|f| f.name.as_str() == head)?;
-            let rendered = self.ws.render(None, f.ty);
-            let n = ustr::Ustr::from(rendered.trim_end_matches('?'));
-            self.ws.struct_by_name.contains_key(&n).then_some(n)
-        };
+        let field_ty = |head: &str| self.nested_field_struct_name(name, head);
         let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
         for (f, rendered) in &top {
             parts.push(format!("{}: {rendered}", js_key(f)?));
@@ -1860,25 +1892,57 @@ impl Emitter<'_> {
         cyc: &str,
         prec: &str,
     ) -> Result<String, CompilerError> {
-        if let Inst::MakeValueStruct { name, fields } = &self.mf.insts[id] {
-            if let Some(order) = skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name) {
-                let fmap: HashMap<ustr::Ustr, Idx<Inst>> = fields.iter().copied().collect();
-                let mut expr = js_string_lit(&format!("{name} {{ "))?;
-                for (i, fname) in order.iter().enumerate() {
-                    let vid = *fmap.get(fname).ok_or_else(|| {
-                        err(format!("value struct `{name}` field `{fname}` absent at inspect boundary"))
-                    })?;
-                    if i > 0 {
-                        expr.push_str(&format!(" + {}", js_string_lit(", ")?));
-                    }
-                    expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
-                    expr.push_str(&format!(" + {}", self.render_value_struct_inspect(vid, cyc, prec)?));
-                }
-                expr.push_str(&format!(" + {}", js_string_lit(" }")?));
-                return Ok(format!("({expr})"));
+        // `MaterializeValueStruct` is the same box, explicitly authorized -- it
+        // inspects identically.
+        if let Inst::MakeValueStruct { name, fields }
+        | Inst::MaterializeValueStruct { name, fields } = &self.mf.insts[id]
+        {
+            if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
+                return self.render_value_struct_inspect_fields(*name, fields, cyc, prec);
             }
         }
         Ok(format!("inspect({}, {cyc}, {prec})", self.render_val(id)?))
+    }
+
+    /// `Name { f: v, .. }` in DECLARED field order, from a field list that may be
+    /// the flattened leaf form. A nested `nobox` field arrives as dotted leaves
+    /// (`pos.x`, `pos.y`) with no `pos` entry, so a lookup by declared name alone
+    /// misses it -- and a missed lookup here is an emit REJECTION, which turns
+    /// every print of such a struct into a skip rather than a diagnosis.
+    fn render_value_struct_inspect_fields(
+        &self,
+        name: ustr::Ustr,
+        fields: &[(ustr::Ustr, Idx<Inst>)],
+        cyc: &str,
+        prec: &str,
+    ) -> Result<String, CompilerError> {
+        let order = skull_mir::lower::gc_free_value_struct_field_order(self.ws, name)
+            .ok_or_else(|| err(format!("`{name}` is not a GC-free value struct")))?;
+        let (exact, groups) = Self::split_leaf_fields(fields);
+        let mut expr = js_string_lit(&format!("{name} {{ "))?;
+        for (i, fname) in order.iter().enumerate() {
+            if i > 0 {
+                expr.push_str(&format!(" + {}", js_string_lit(", ")?));
+            }
+            expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
+            let rendered = if let Some(vid) = exact.get(fname) {
+                self.render_value_struct_inspect(*vid, cyc, prec)?
+            } else if let Some((_, sub)) = groups.iter().find(|(h, _)| h == fname.as_str()) {
+                let sub_name = self.nested_field_struct_name(name, fname).ok_or_else(|| {
+                    err(format!(
+                        "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
+                    ))
+                })?;
+                self.render_value_struct_inspect_fields(sub_name, sub, cyc, prec)?
+            } else {
+                return Err(err(format!(
+                    "value struct `{name}` field `{fname}` absent at inspect boundary"
+                )));
+            };
+            expr.push_str(&format!(" + {rendered}"));
+        }
+        expr.push_str(&format!(" + {}", js_string_lit(" }")?));
+        Ok(format!("({expr})"))
     }
 
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
