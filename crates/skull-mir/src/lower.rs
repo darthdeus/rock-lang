@@ -177,6 +177,80 @@ fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
     }
 }
 
+/// The buffer-table field holding the typed leaf VIEW for primitive C type
+/// `cty`. One field per distinct leaf type, made once at construction
+/// ([`Inst::FfiViewCast`]) and read per element access, never per leaf.
+pub fn leaf_view_field(cty: &str) -> Ustr {
+    match cty {
+        "float" => Ustr::from("__vf"),
+        "int" => Ustr::from("__vi"),
+        "bool" => Ustr::from("__vb"),
+        other => unreachable!("no leaf view for non-primitive C type `{other}`"),
+    }
+}
+
+/// Whether `field` is one of the leaf-view keys [`leaf_view_field`] mints.
+pub fn is_leaf_view_field(field: &str) -> bool {
+    matches!(field, "__vf" | "__vi" | "__vb")
+}
+
+/// Where one leaf lives, in units of ITS OWN view's element size: the buffer
+/// field holding that view, the per-element stride, and the leaf's offset within
+/// an element. Both numbers are compile-time constants, so a leaf access is
+/// `view[i * stride + offset]` -- pure arithmetic, no allocation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeafAddr {
+    pub path: Ustr,
+    pub view_field: Ustr,
+    pub stride: i64,
+    pub offset: i64,
+}
+
+/// The leaf addressing plan for FFI-clean value struct `elem`: one [`LeafAddr`]
+/// per leaf, in [`value_leaf_paths`] order (the order reprs are flattened in).
+///
+/// The unit conversions are exact by construction: `sizeof(elem)` is a multiple
+/// of `elem`'s alignment, which is the max leaf size, and every leaf size is a
+/// power of two no larger than that; a leaf's own byte offset is a multiple of
+/// its size because C aligns each member. Both divisions are checked anyway --
+/// an inexact one would silently address the wrong element.
+pub fn leaf_addr_plan(ws: &Workspace, elem: Ustr) -> Result<Vec<LeafAddr>, String> {
+    let (leaves, size, _align) = value_leaf_layout_checked(ws, elem)?;
+    leaves
+        .into_iter()
+        .map(|l| {
+            let (sz, _) = c_prim_size_align(l.cty)
+                .ok_or_else(|| format!("leaf `{}` of `{elem}` is not primitive", l.path))?;
+            if size % sz != 0 || l.byte_off % sz != 0 {
+                return Err(format!(
+                    "leaf `{}` of `{elem}` ({} bytes) does not divide its {sz}-byte view: \
+                     stride {size}, offset {}",
+                    l.path, sz, l.byte_off
+                ));
+            }
+            Ok(LeafAddr {
+                path: l.path,
+                view_field: leaf_view_field(l.cty),
+                stride: (size / sz) as i64,
+                offset: (l.byte_off / sz) as i64,
+            })
+        })
+        .collect()
+}
+
+/// The distinct leaf view C types of `elem`, in first-use order -- the views a
+/// buffer of `elem` must carry.
+pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, String> {
+    let (leaves, _, _) = value_leaf_layout_checked(ws, elem)?;
+    let mut out: Vec<&'static str> = Vec::new();
+    for l in leaves {
+        if !out.contains(&l.cty) {
+            out.push(l.cty);
+        }
+    }
+    Ok(out)
+}
+
 /// [`value_leaf_paths`] by type name -- the `ValueShape`-side leaf order, for
 /// callers outside this module that need to compare it against a layout walk
 /// (`value_shape` itself is internal).
@@ -3610,7 +3684,7 @@ impl Builder<'_> {
                 Ok(self.pack(r))
             }
             Expr::StructLiteral { name, fields, bases } => {
-                self.lower_struct_literal(name, fields, bases)
+                self.lower_struct_literal(e, name, fields, bases)
             }
             Expr::EnumVariant {
                 enum_name,
@@ -3944,6 +4018,14 @@ impl Builder<'_> {
                 if let Some((vec, idx, elem)) = self.column_index_place(base)? {
                     return self.column_leaf_store(vec, idx, elem, field, value);
                 }
+                // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
+                // leaf-addressed NativeBuffer: there is no element slot to take a
+                // place base of, so the write lands in the leaves under this
+                // field's path. A whole nested field spans several leaves; a
+                // primitive field is exactly one.
+                if let Some((buf, idx, elem, path)) = self.nb_leaf_field_place(base, field)? {
+                    return self.nb_leaf_field_store(buf, idx, elem, &path, value);
+                }
                 // A whole embedded field (`p.f = Foo { .. }`): the child has no
                 // slot of its own, so write its leaves. Composition happens
                 // BEFORE this, so `p.f` here is the child, not a physical key.
@@ -3978,6 +4060,11 @@ impl Builder<'_> {
                 // boxed. Mirrors `column_element_repr` on the read side.
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return self.column_element_store(b, i, value, elem);
+                }
+                if let ContainerKind::NativeBufferValue(elem) = kind {
+                    if self.is_leaf_addressed(elem) {
+                        return self.nb_leaf_element_store(b, i, value, elem);
+                    }
                 }
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreIndex {
@@ -4564,9 +4651,12 @@ impl Builder<'_> {
                 let ctype = self.native_buffer_alloc_ctype(e, span)?;
                 let count = self.lower_expr(n_arg)?;
                 let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count });
+                let mut fields =
+                    vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
+                fields.extend(self.leaf_view_fields(ctype, ptr));
                 let nb = self.emit_cur(Inst::MakeStruct {
                     ty: Some(Ustr::from("NativeBuffer")),
-                    fields: vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)],
+                    fields,
                 });
                 return Ok(ValueRepr::Scalar(nb));
             }
@@ -5433,6 +5523,9 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         match kind {
             ContainerKind::VecValueColumns(elem) => self.column_element_repr(arr, index, elem),
+            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem) => {
+                self.nb_leaf_element_repr(arr, index, elem)
+            }
             _ => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Index {
                 base: arr,
                 index,
@@ -5458,6 +5551,239 @@ impl Builder<'_> {
     /// `value_leaf_paths` and `rebuild_from_leaves` both walk fields in
     /// declaration order depth-first, so the flat read order lines up with the
     /// nested shape without a second traversal.
+    /// `Some((buf, checked_index, elem, dotted_path))` iff `<base>.<field>` is a
+    /// field path rooted at `buf[i]` over a leaf-addressed NativeBuffer.
+    ///
+    /// Peels the FieldAccess chain to build the dotted path the leaf plan is
+    /// keyed by (`buf[i].lo.n` -> `"lo.n"`), so a write at ANY depth lands on
+    /// the right leaves. The bounds check is emitted once, here.
+    fn nb_leaf_field_place(
+        &mut self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, String)>, CompilerError> {
+        // Walk down through nested field accesses to the `buf[i]` root.
+        let mut segs = vec![field];
+        let mut cur = base;
+        loop {
+            match self.body.expr_arena[cur] {
+                Expr::FieldAccess { base: b, field: f } => {
+                    segs.push(f);
+                    cur = b;
+                }
+                Expr::Index { base: ib, index } => {
+                    let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib) else {
+                        return Ok(None);
+                    };
+                    if !self.is_leaf_addressed(elem) {
+                        return Ok(None);
+                    }
+                    let (b, _) = self.lower_index_base(ib)?;
+                    let i = self.lower_expr(index)?;
+                    let checked = self.nb_checked_index(b, i)?;
+                    segs.reverse();
+                    let path =
+                        segs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+                    return Ok(Some((b, checked, elem, path)));
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// Write `buf[i].<path> = value` leaf-wise. `path` names either one
+    /// primitive leaf or a nested value field spanning several; both are just a
+    /// prefix match over the element's leaf plan, so depth costs nothing.
+    fn nb_leaf_field_store(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        elem: Ustr,
+        path: &str,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let dot = format!("{path}.");
+        let hit: Vec<LeafAddr> = plan
+            .into_iter()
+            .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
+            .collect();
+        if hit.is_empty() {
+            return Err(gap(format!("`{path}` is not a leaf of NativeBuffer<{elem}>")));
+        }
+        // One leaf -> a plain scalar; several -> the value's own leaves, in the
+        // same declaration order the plan is built in.
+        let leaves = if hit.len() == 1 {
+            vec![self.lower_expr(value)?]
+        } else {
+            let sub = self
+                .value_struct_of(value)
+                .and_then(|n| value_shape(self.ws, n))
+                .ok_or_else(|| {
+                    gap(format!("whole write to `{path}` needs a value-struct RHS"))
+                })?;
+            let repr = self.lower_expr_repr(value)?;
+            self.repr_to_leaves(&repr, &sub)
+        };
+        if leaves.len() != hit.len() {
+            return Err(gap(format!(
+                "leaf store arity mismatch for `{elem}.{path}`: {} leaves vs {} slots",
+                leaves.len(),
+                hit.len()
+            )));
+        }
+        let mut views = HashMap::new();
+        for (a, leaf) in hit.iter().zip(leaves) {
+            let at = self.leaf_index(checked, a);
+            let view = self.leaf_view(buf, a.view_field, &mut views);
+            self.emit_cur(Inst::StoreIndex {
+                base: view,
+                index: at,
+                value: leaf,
+                kind: ContainerKind::NativeBufferLeaf,
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether `elem` is leaf-addressable: it has a validated C leaf layout
+    /// whose every leaf divides its view cleanly. `false` keeps the buffer on
+    /// the existing slot-reference path, which is CORRECT, just boxier --
+    /// leaf addressing does not change storage, so the two address the same
+    /// bytes and a program may mix them freely.
+    fn is_leaf_addressed(&self, elem: Ustr) -> bool {
+        // LuaJIT only. Leaf addressing IS `ffi.cast` views over the element
+        // storage; JS backs a NativeBuffer with a TypedArray and lowers element
+        // access through its own flat-slot arithmetic, which already allocates
+        // nothing. Emitting the leaf shape there would only push every buffer
+        // test into the skip histogram. The JS analogue (a TypedArray per leaf C
+        // type over one ArrayBuffer) is S6 in
+        // docs/native-buffer-leaf-addressing-plan.md.
+        if self.scx.target == bone_semantic::hir::FnBackend::Js {
+            return false;
+        }
+        leaf_addr_plan(self.ws, elem).is_ok()
+    }
+
+    /// `buf[i]` on a leaf-addressed NativeBuffer: bounds-check the ELEMENT once,
+    /// then read each leaf from its own view. No slot reference is taken, so the
+    /// read allocates nothing; the element is rebuilt as a `Group`, exactly the
+    /// shape `let v = buf[i]` takes, so SROA peels it wherever the binding is
+    /// only projected from.
+    fn nb_leaf_element_repr(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let checked = self.nb_checked_index(buf, index)?;
+        let mut views = HashMap::new();
+        let leaves: Vec<Idx<Inst>> = plan
+            .iter()
+            .map(|a| {
+                let at = self.leaf_index(checked, a);
+                let view = self.leaf_view(buf, a.view_field, &mut views);
+                self.emit_cur(Inst::Index {
+                    base: view,
+                    index: at,
+                    kind: ContainerKind::NativeBufferLeaf,
+                })
+            })
+            .collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+    }
+
+    /// `buf[i] = v` into a leaf-addressed NativeBuffer: bounds-check once, then
+    /// store leaf `k` through its view. The element never materializes, which is
+    /// what lets a `nobox` type live in one.
+    fn nb_leaf_element_store(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        if leaves.len() != plan.len() {
+            return Err(gap(format!(
+                "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
+                leaves.len(),
+                plan.len()
+            )));
+        }
+        // The check precedes every leaf write: checking after would let the
+        // out-of-bounds writes happen first.
+        let checked = self.nb_checked_index(buf, index)?;
+        let mut views = HashMap::new();
+        for (a, leaf) in plan.iter().zip(leaves) {
+            let at = self.leaf_index(checked, a);
+            let view = self.leaf_view(buf, a.view_field, &mut views);
+            self.emit_cur(Inst::StoreIndex {
+                base: view,
+                index: at,
+                value: leaf,
+                kind: ContainerKind::NativeBufferLeaf,
+            });
+        }
+        Ok(())
+    }
+
+    /// The view projection for `field`, read ONCE per element access and reused
+    /// across that element's leaves -- a table read per leaf is pure waste when
+    /// every leaf of one type shares a view.
+    fn leaf_view(
+        &mut self,
+        buf: Idx<Inst>,
+        field: Ustr,
+        cache: &mut HashMap<Ustr, Idx<Inst>>,
+    ) -> Idx<Inst> {
+        if let Some(v) = cache.get(&field) {
+            return *v;
+        }
+        let v = self.emit_cur(Inst::Field { base: buf, field });
+        cache.insert(field, v);
+        v
+    }
+
+    /// `i * stride + offset` in the leaf's own view units. Both constants; the
+    /// `+ 0` and `* 1` cases fold so a flat all-one-type element reads as
+    /// plainly as it did before.
+    fn leaf_index(&mut self, checked: Idx<Inst>, a: &LeafAddr) -> Idx<Inst> {
+        let mut at = checked;
+        if a.stride != 1 {
+            let s = self.emit_cur(Inst::Const(Lit::Int(a.stride)));
+            at = self.emit_cur(Inst::IntMul(at, s));
+        }
+        if a.offset != 0 {
+            let o = self.emit_cur(Inst::Const(Lit::Int(a.offset)));
+            at = self.emit_cur(Inst::IntAdd(at, o));
+        }
+        at
+    }
+
+    /// `__nb_checked_index(buf, i)` -- bounds-check the element access WITHOUT
+    /// taking a slot reference, returning the index. One call per element
+    /// access, never per leaf.
+    fn nb_checked_index(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let f = self.stdlib_funcref("__nb_checked_index")?;
+        Ok(self.emit_cur(Inst::Call {
+            func: f,
+            args: vec![buf, index],
+        }))
+    }
+
     fn column_element_repr(
         &mut self,
         vec: Idx<Inst>,
@@ -6066,6 +6392,13 @@ impl Builder<'_> {
                 // direct column reads. Bounds are checked ONCE for the element.
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return self.column_element_repr(b, i, elem);
+                }
+                // Leaf addressing: no slot reference, no nested ctor -- each
+                // leaf comes straight from its typed view.
+                if let ContainerKind::NativeBufferValue(elem) = kind {
+                    if self.is_leaf_addressed(elem) {
+                        return self.nb_leaf_element_repr(b, i, elem);
+                    }
                 }
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 Ok(self.boxed_value_copy_repr(slot, name))
@@ -7580,9 +7913,11 @@ impl Builder<'_> {
                 self.lower_for_array(vars, iter, body)
             }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
-            // Synthetic: a leaf column is minted during element lowering and is
-            // never a user type, so it cannot be a `for` head.
+            // Synthetic: a leaf column and a leaf VIEW are both minted during
+            // element lowering and are never user types, so neither can be a
+            // `for` head.
             ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
+            ContainerKind::NativeBufferLeaf => Err(gap("for over a synthetic NativeBuffer leaf view")),
         }
     }
 
@@ -8939,6 +9274,7 @@ impl Builder<'_> {
     /// step. Emitting an incomplete struct would be a silent miscompile.
     fn lower_struct_literal(
         &mut self,
+        e: Idx<Expr>,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
         bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
@@ -9054,6 +9390,13 @@ impl Builder<'_> {
             }
             None => lit_box, // unknown nominal (foreign module): emit as-given
         };
+        // A hand-built `NativeBuffer { ptr: .., len: .. }` must carry the same
+        // leaf views the `native_buffer_alloc` intrinsic attaches -- element
+        // access decides on the TYPE, so a buffer of a leaf-addressed element
+        // would otherwise index a nil view. (Loud, not silent: leaf addressing
+        // never changes storage, so the only failure available is a missing
+        // view, and that errors on first access.)
+        let out = self.with_leaf_views(e, name, out);
         // Non-value structs only — a `value` literal is built via the repr layer
         // (`value_literal_repr` -> `pack`, the single value-cdata source), so it
         // never reaches here.
@@ -9061,6 +9404,31 @@ impl Builder<'_> {
             ty: Some(name),
             fields: out,
         }))
+    }
+
+    /// Append the leaf-view fields to a hand-written `NativeBuffer` literal's
+    /// fields, keyed off its declared element type. A no-op for any other
+    /// struct, for a primitive element, and for one already carrying views.
+    fn with_leaf_views(
+        &mut self,
+        e: Idx<Expr>,
+        name: Ustr,
+        mut fields: Vec<(Ustr, Idx<Inst>)>,
+    ) -> Vec<(Ustr, Idx<Inst>)> {
+        if name.as_str() != "NativeBuffer" {
+            return fields;
+        }
+        // The element comes from the literal's own inferred type, the same
+        // oracle element ACCESS consults -- so construction and access can never
+        // disagree about whether a buffer is leaf-addressed.
+        let Some(elem) = self.nb_value_elem(e) else {
+            return fields;
+        };
+        let Some(&(_, ptr)) = fields.iter().find(|(f, _)| f.as_str() == "ptr") else {
+            return fields;
+        };
+        fields.extend(self.leaf_view_fields(elem, ptr));
+        fields
     }
 
     fn struct_field_names(&self, name: Ustr) -> Option<Vec<Ustr>> {
@@ -10211,8 +10579,21 @@ impl Builder<'_> {
         }
         let p = params.into_iter().next()?;
         let elem = self.resolve_tyid(ty.with_idx(p))?;
-        let TypeExpr::App { ctor: TypeCtor::Nominal(en), .. } = self.ty_node(elem)? else {
-            return None;
+        let en = match self.ty_node(elem)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+            // Resolve through the active specialization, exactly as
+            // `vec_column_elem_of` does. Inside a SPECIALIZED body (the `@inline`
+            // FlatVec surface at a concrete site) the element is the real struct
+            // rather than an opaque `T`; without this the stdlib bodies keep the
+            // boxed path, which for a `nobox` element is not merely slower but a
+            // guarantee violation. An UNSUBSTITUTED generic stays boxed on
+            // purpose -- the shared snapshot must keep the representation every
+            // instantiation can read.
+            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+                Some(ty) => ty.nominal()?,
+                _ => return None,
+            },
+            _ => return None,
         };
         is_ffi_clean_value_struct(self.ws, en).then_some(en)
     }
@@ -10943,6 +11324,26 @@ impl Builder<'_> {
     /// generic `T`), or any other element rejects with a spanned emit-time error:
     /// the intrinsic can only emit `ffi.new("<ctype>[?]")` when the concrete
     /// element type is known here. `span` labels the call expression.
+    /// The `(field, view)` pairs a `NativeBuffer` of element `ctype` carries --
+    /// one typed leaf view per distinct primitive C type among its leaves.
+    /// Empty for a primitive or non-leaf-addressable element, which keeps those
+    /// buffers exactly as they are today.
+    ///
+    /// Attached at CONSTRUCTION so the cast happens once per buffer. Casting per
+    /// access would allocate a pointer cdata each time, which is the allocation
+    /// leaf addressing exists to remove.
+    fn leaf_view_fields(&mut self, ctype: Ustr, ptr: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
+        let Ok(ctys) = leaf_view_ctys(self.ws, ctype) else {
+            return Vec::new();
+        };
+        ctys.into_iter()
+            .map(|cty| {
+                let view = self.emit_cur(Inst::FfiViewCast { cty: Ustr::from(cty), ptr });
+                (leaf_view_field(cty), view)
+            })
+            .collect()
+    }
+
     fn native_buffer_alloc_ctype(&self, e: Idx<Expr>, span: Span) -> Result<Ustr, CompilerError> {
         let inf = self.inf.ok_or_else(|| {
             CompilerError::new_with_label(span, "`native_buffer_alloc` needs inference".into())

@@ -1078,6 +1078,9 @@ impl Emitter<'_> {
                         ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
                             return Err(err("JS subset: column-stored [T] not supported"));
                         }
+                        ContainerKind::NativeBufferLeaf => {
+                            return Err(err("JS subset: NativeBuffer leaf views not supported"));
+                        }
                         // Whole value-struct element write: per-leaf stores into
                         // the flat backing from the value object (a MakeValueStruct
                         // renders as an object literal; a copy read is an object).
@@ -1193,6 +1196,13 @@ impl Emitter<'_> {
                 Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. }
                     if self.nbv_bypass.contains(&raw(iid)) => {}
                 Inst::Field { .. } if self.nbv_bypass.contains(&raw(iid)) => {}
+                // A leaf VIEW is a luajit-representation artifact: an `ffi.cast`
+                // pointer over the element storage, consumed only by the buffer
+                // literal's view fields, which JS drops (it backs a NativeBuffer
+                // with a TypedArray and has no pointer views). Nothing on JS can
+                // read one -- a path that needed leaf views hits the
+                // `NativeBufferLeaf` reject -- so it emits no statement.
+                Inst::FfiViewCast { .. } => {}
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
@@ -1436,6 +1446,15 @@ impl Emitter<'_> {
                     parts.push(format!("__ty: {}", js_string_lit(&name)?));
                 }
                 for (f, v) in fields {
+                    // Leaf VIEWS are a luajit-representation detail (`ffi.cast`
+                    // pointers over the element storage). JS backs a NativeBuffer
+                    // with a TypedArray and lowers element access through its own
+                    // flat-slot arithmetic, so a pointer view has no meaning here
+                    // and no JS path reads these keys -- one that needed them
+                    // would hit the `NativeBufferLeaf` reject instead.
+                    if skull_mir::lower::is_leaf_view_field(f.as_str()) {
+                        continue;
+                    }
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
@@ -1453,6 +1472,15 @@ impl Emitter<'_> {
             | Inst::MaterializeValueStruct { name, fields } => {
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
+                    // Leaf VIEWS are a luajit-representation detail (`ffi.cast`
+                    // pointers over the element storage). JS backs a NativeBuffer
+                    // with a TypedArray and lowers element access through its own
+                    // flat-slot arithmetic, so a pointer view has no meaning here
+                    // and no JS path reads these keys -- one that needed them
+                    // would hit the `NativeBufferLeaf` reject instead.
+                    if skull_mir::lower::is_leaf_view_field(f.as_str()) {
+                        continue;
+                    }
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
@@ -1504,6 +1532,13 @@ impl Emitter<'_> {
                     ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
                         return Err(err("JS subset: column-stored [T] not supported"));
                     }
+                    // Leaf addressing is Lua-side today (`ffi.cast` views). The
+                    // JS analogue is a TypedArray per leaf C type over one
+                    // ArrayBuffer -- see docs/native-buffer-leaf-addressing-plan.md
+                    // S6. Until that lands, skip rather than emit a wrong shape.
+                    ContainerKind::NativeBufferLeaf => {
+                        return Err(err("JS subset: NativeBuffer leaf views not supported"));
+                    }
                     // Map miss returns nil (raw VM op in Lua); JS Map.get returns
                     // undefined on miss, which `== null` treats as nil.
                     ContainerKind::Map => format!("{b}.get({i})"),
@@ -1517,6 +1552,9 @@ impl Emitter<'_> {
                     format!("{}.len", self.render_val(*base)?)
                 }
                 ContainerKind::VecColumn => format!("{}.length", self.render_val(*base)?),
+                ContainerKind::NativeBufferLeaf => {
+                    return Err(err("JS subset: NativeBuffer leaf views not supported"));
+                }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
             },
             // The `native_buffer_alloc<T>` primitive lowers to this MIR node
@@ -4155,6 +4193,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
     let mut mark = |ids: &[Idx<Inst>]| ids.iter().for_each(|&i| f(i));
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. } => {}
+        Inst::FfiViewCast { ptr, .. } => mark(&[*ptr]),
         Inst::IntAdd(a, b)
         | Inst::IntSub(a, b)
         | Inst::IntMul(a, b)

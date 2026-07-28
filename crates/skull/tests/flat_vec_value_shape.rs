@@ -40,10 +40,16 @@ fn flat_vec_push_read_loop_is_zero_box() {
         !body.contains("V2_ct("),
         "FlatVec push must not box the element (`V2_ct(..)`); got:\n{body}"
     );
-    // The push scalarizes to in-place field writes on the fetched slot.
+    // The push writes the element's LEAVES through typed views -- no slot
+    // reference is fetched at all, so there is no `slot.x = ..` to look for.
+    // The bounds check moves to the index (`__nb_checked_index`).
     assert!(
-        body.contains(".x = ") && body.contains(".y = "),
-        "FlatVec push must write the fields in place (`slot.x = ..`); got:\n{body}"
+        !body.contains("__nb_checked_get("),
+        "FlatVec push should take no slot reference; got:\n{body}"
+    );
+    assert!(
+        body.contains("__nb_checked_index("),
+        "FlatVec push must still bounds-check the element access; got:\n{body}"
     );
     // The ffi array is the concrete element ctype (the specialized alloc intrinsic).
     assert!(

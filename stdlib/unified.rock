@@ -518,6 +518,38 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     return buf.ptr[i]
 """
 
+// Refresh a NativeBuffer's leaf VIEWS after its `ptr` has been reseated.
+//
+// The views (`__vf`/`__vi`/`__vb`) are `ffi.cast` pointers over the element
+// storage, made once at construction. `ffi.cast` does NOT anchor its target, so
+// any code that reassigns `buf.ptr` -- a hand-written `inline(lua)` grow/realloc
+// -- leaves every view pointing at the OLD array, which is then collected: the
+// views dangle and reads return garbage from reused memory.
+//
+// The compiler cannot see into an `inline(lua)` body, so this is an UNCHECKED
+// CONTRACT of the same family as `@nomangle`: reseat `buf.ptr` by hand and you
+// must call this. A regular Rock reallocation (`native_buffer_alloc`) builds a
+// fresh buffer with fresh views and needs nothing.
+@nomangle inline(lua) fn __nb_refresh_views(buf: any) = """
+    if buf.__vf ~= nil then buf.__vf = ffi.cast("float*", buf.ptr) end
+    if buf.__vi ~= nil then buf.__vi = ffi.cast("int*", buf.ptr) end
+    if buf.__vb ~= nil then buf.__vb = ffi.cast("bool*", buf.ptr) end
+"""
+
+// Bounds-check WITHOUT taking a slot reference: returns the index unchanged.
+// Leaf addressing turns one element access into K leaf accesses, and the check
+// belongs to the ELEMENT -- checking each leaf would pay K times for one access,
+// and checking after would let the out-of-bounds access happen first. So the
+// check runs once, up front, and the leaves then index their views raw.
+// (Sibling of `__vec_checked_index` for column storage.)
+@nomangle inline(lua) fn __nb_checked_index(buf: any, i: int) -> int = """
+    if i < 0 or i >= buf.len then
+        error("NativeBuffer index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(buf.len) .. ")")
+    end
+    return i
+"""
+
 @nomangle inline(lua) fn __nb_checked_set(buf: any, i: int, v: any) = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..

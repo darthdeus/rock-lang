@@ -1753,6 +1753,11 @@ impl Emitter<'_> {
                 self.write_opnd(out, *count);
                 out.push(')');
             }
+            Inst::FfiViewCast { cty, ptr } => {
+                let _ = write!(out, "ffi.cast(\"{cty}*\", ");
+                self.write_opnd(out, *ptr);
+                out.push(')');
+            }
             Inst::Field { base, field } => {
                 self.write_opnd(out, *base);
                 write_field_key(out, field.as_str());
@@ -1780,8 +1785,12 @@ impl Emitter<'_> {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
                 }
-                // A bare leaf column has no `len` of its own -- the owning Vec
-                // holds the single shared length, so lowering asks it there.
+                // Neither a bare leaf column nor a leaf VIEW has a `len` of its
+                // own -- the owning container holds the single length, so
+                // lowering asks it there.
+                ContainerKind::NativeBufferLeaf => {
+                    unreachable!("`len` of a leaf view: lowering must ask the owning buffer")
+                }
                 ContainerKind::VecColumn => {
                     out.push('#');
                     self.write_opnd(out, *base);
@@ -1908,7 +1917,9 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
-            ContainerKind::Map => {
+            // A leaf view is a raw C pointer: index it directly. The index is
+            // absolute and the ELEMENT access was bounds-checked once already.
+            ContainerKind::NativeBufferLeaf | ContainerKind::Map => {
                 self.write_opnd(out, base);
                 out.push('[');
                 self.write_opnd(out, index);
@@ -1962,7 +1973,9 @@ impl Emitter<'_> {
                     }
                     // Raw 1-based write into one leaf column; the owning Vec's
                     // `len` was checked once by `VecCheckedIndex`.
-                    ContainerKind::Map | ContainerKind::VecColumn => {
+                    ContainerKind::Map
+                    | ContainerKind::VecColumn
+                    | ContainerKind::NativeBufferLeaf => {
                         out.push_str("  ");
                         self.write_opnd(out, *base);
                         out.push('[');
@@ -1998,6 +2011,7 @@ impl Emitter<'_> {
                     // columns -- more than one `value`, so lowering splits it.
                     ContainerKind::NativeBuffer
                     | ContainerKind::NativeBufferValue(_)
+                    | ContainerKind::NativeBufferLeaf
                     | ContainerKind::VecValueColumns(_)
                     | ContainerKind::VecColumn
                     | ContainerKind::Map => {

@@ -75,6 +75,7 @@ fn fmt_inst(
             .join(", ")
     };
     match inst {
+        Inst::FfiViewCast { cty, ptr } => format!("ffi_view_cast {cty}* r{}", raw(*ptr)),
         Inst::Const(l) => format!("const {}", fmt_lit(l)),
         Inst::Global(g) => format!("global {g}"),
         Inst::Load(c) => format!("load c{}", raw(*c)),

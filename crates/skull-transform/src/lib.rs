@@ -1391,6 +1391,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
         | Inst::CoroHook { .. } => {}
+        Inst::FfiViewCast { ptr, .. } => p(ptr),
         Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
@@ -1445,6 +1446,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
         | Inst::CoroHook { .. } => {}
+        Inst::FfiViewCast { ptr, .. } => f(ptr),
         Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)

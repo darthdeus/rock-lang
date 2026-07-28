@@ -117,6 +117,7 @@ fn raw<T>(i: Idx<T>) -> usize {
 pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
+        Inst::FfiViewCast { ptr, .. } => push(*ptr),
         Inst::IntAdd(a, b)
         | Inst::IntSub(a, b)
         | Inst::IntMul(a, b)

@@ -78,6 +78,17 @@ pub enum ContainerKind {
     /// bounds-checked (`__vec_checked_index` against the owning Vec's `len`),
     /// so this indexes raw: no `+1`, no check. Never a user-facing type.
     VecColumn,
+    /// One typed LEAF VIEW over a `NativeBuffer`'s storage — a raw C pointer of
+    /// a primitive type ([`Inst::FfiViewCast`]), indexed in units of that type.
+    /// The index is absolute (`i * stride + leaf_off`, both compile-time
+    /// constants from the element's C layout) and already bounds-checked once
+    /// per ELEMENT access, so this indexes raw: no `+1`, no check.
+    ///
+    /// This is what makes an element access allocate nothing: indexing a
+    /// primitive pointer yields a number, where indexing a struct-typed pointer
+    /// yields a reference cdata. Never a user-facing type.
+    /// See `docs/native-buffer-leaf-addressing-plan.md`.
+    NativeBufferLeaf,
     /// `Map<K,V>` — keyed directly by K, no `+1`.
     Map,
 }
@@ -346,6 +357,17 @@ pub enum Inst {
     /// `int`/`float`). Emitted only by the `native_buffer_alloc<T>` intrinsic,
     /// which resolves `ctype` from the concrete element type at the call site.
     FfiNewArray { ctype: Ustr, count: Idx<Inst> },
+
+    /// `ffi.cast("<cty>*", <ptr>)` -- a typed LEAF VIEW over a NativeBuffer's
+    /// storage, one per distinct primitive C type among the element's leaves.
+    /// Made ONCE per buffer at construction and stored on the buffer table, not
+    /// per access: the cast itself allocates a pointer cdata, so doing it per
+    /// access would reintroduce exactly the allocation leaf addressing removes.
+    ///
+    /// `cty` is a primitive C type (`int` / `float` / `bool`). The view aliases
+    /// the SAME bytes as `.ptr`, so leaf-addressed and slot-addressed accesses
+    /// to one buffer stay coherent -- which is what lets the two coexist.
+    FfiViewCast { cty: Ustr, ptr: Idx<Inst> },
 
     // --- projections ---
     /// `base.field` (struct field, or an enum record-payload field).

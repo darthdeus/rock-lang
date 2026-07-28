@@ -1,0 +1,124 @@
+//! Emitted-shape contract for leaf-addressed `NativeBuffer<T>` elements.
+//!
+//! A behavioral test cannot see a surviving ctor -- `tests/native_buffer_
+//! leaf_addressing.rock` asserts VALUES, and every one of its cases is already
+//! green on the boxed path. What distinguishes the two representations is the
+//! emitted ACCESS SHAPE, so that is what these assert: no `<name>_ct(` on the
+//! buffer path, and no struct-slot reference.
+//!
+//! Design + measurements: docs/native-buffer-leaf-addressing-plan.md.
+
+mod common;
+use common::{emit_module, function_body};
+
+/// A NESTED value field is the case that forces a ctor today: `gen_leaf_stores`
+/// (skull-transform) writes immediate fields into the slot but does not descend,
+/// so the nested field is assigned whole as `slot.pos = V2_ct(x, y)`.
+const NESTED_STORE: &str = r#"
+value V2 { x: float, y: float }
+value Vert { pos: V2, uv: V2, id: int, w: float }
+
+@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
+fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
+
+fn fill(buf: NativeBuffer<Vert>, n: int) {
+    for i in 0..n {
+        let f = i as float
+        buf[i] = Vert { pos: V2 { x: f, y: f }, uv: V2 { x: f, y: f }, id: i, w: 1.0 }
+    }
+}
+
+fn main() {
+    let buf = nb_vert(4)
+    fill(buf, 4)
+}
+"#;
+
+#[test]
+fn nested_value_store_materializes_no_ctor() {
+    let lua = emit_module(NESTED_STORE);
+    let body = function_body(&lua, "fill");
+    assert!(
+        !body.contains("V2_ct("),
+        "a nested value field must be stored leaf-wise, not as a whole cdata:\n{body}"
+    );
+}
+
+#[test]
+fn nested_value_store_takes_no_slot_reference() {
+    // Indexing a cdata array of struct type returns a REFERENCE cdata (24 B,
+    // measured). Leaf addressing goes through a typed view instead, so no slot
+    // is taken at all -- neither the checked-get form nor the block local.
+    let lua = emit_module(NESTED_STORE);
+    let body = function_body(&lua, "fill");
+    assert!(
+        !body.contains("local __nbslot"),
+        "leaf addressing must not take a struct-slot reference:\n{body}"
+    );
+}
+
+const NESTED_READ: &str = r#"
+value V2 { x: float, y: float }
+value Vert { pos: V2, uv: V2, id: int, w: float }
+
+@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
+fn nb_vert(n: int) -> NativeBuffer<Vert> { return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n } }
+
+fn total(buf: NativeBuffer<Vert>, n: int) -> float {
+    let acc = 0.0
+    for i in 0..n {
+        acc = acc + buf[i].pos.x + buf[i].w
+    }
+    return acc
+}
+
+fn main() {
+    let buf = nb_vert(4)
+    print("{total(buf, 4)}")
+}
+"#;
+
+/// S5: the debug bounds check is per ELEMENT ACCESS, not per leaf, and it must
+/// PRECEDE the leaf accesses it guards.
+///
+/// Two separate failures are possible and only one is a count: bounds-checking
+/// each of the K leaf writes (K times the cost the boxed path paid once, on the
+/// hot path), or checking AFTER writing, which reads and writes out of bounds
+/// before the check that was supposed to prevent it ever runs. Matched on the
+/// `checked` helper call rather than a specific name, so this survives naming
+/// the new helper.
+#[test]
+fn a_whole_element_store_bounds_checks_exactly_once_first() {
+    let lua = emit_module(NESTED_STORE);
+    let body = function_body(&lua, "fill");
+
+    let checks = body.matches("checked").count();
+    assert_eq!(
+        checks, 1,
+        "one element store must bounds-check once, not once per leaf; found {checks}:\n{body}"
+    );
+
+    // Ordering: the check has to come before the first leaf write into the
+    // buffer. `w` is the last declared leaf and cannot be constant-folded away,
+    // so it stands in for "a leaf access happened".
+    let check_at = body.find("checked").expect("a bounds check");
+    let first_leaf_write = body.find(".w = ").or_else(|| body.find("[o"));
+    if let Some(w) = first_leaf_write {
+        assert!(
+            check_at < w,
+            "the bounds check must PRECEDE the leaf writes it guards:\n{body}"
+        );
+    }
+}
+
+#[test]
+fn nested_value_read_takes_no_slot_reference() {
+    // A read costs TWO reference cdatas today: the slot, then the nested field
+    // (`r1 = __nb_checked_get(..)`, `r2 = r1.pos`). Both must be gone.
+    let lua = emit_module(NESTED_READ);
+    let body = function_body(&lua, "total");
+    assert!(
+        !body.contains("__nb_checked_get("),
+        "a leaf read must address the view directly, not take a slot ref:\n{body}"
+    );
+}
