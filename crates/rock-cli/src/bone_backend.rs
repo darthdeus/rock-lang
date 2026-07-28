@@ -72,7 +72,20 @@ pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<Compi
 /// the first — a project with 5 type errors must not force a
 /// fix-one-recompile-repeat loop.
 pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
-    rock_core::errors::render_all(errs, sources)
+    // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
+    // under `<bone-stdlib:NAME>` and appear in no caller's source set -- the
+    // span lookup then fails and the snippet plus every label is dropped. Added
+    // here, the one sink all render paths share, rather than per caller.
+    let mut sf = SourceFiles { files: sources.files.clone() };
+    for f in rock_host::stdlib_loader::stdlib_files() {
+        let id = format!("<bone-stdlib:{}>", f.name);
+        sf.add_or_update_file(source_file_from_path_and_contents(
+            id.clone(),
+            id,
+            f.contents.to_string(),
+        ));
+    }
+    rock_core::errors::render_all(errs, &sf)
 }
 
 /// The bone stdlib with `user` modules appended — the checkable module set every

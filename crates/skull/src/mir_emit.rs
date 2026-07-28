@@ -1289,8 +1289,15 @@ fn validate_emitted_body(
 ) -> Result<(), BodyRejection> {
     collect_residual_spec_bindings(mf, specs);
     validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap)?;
+    // Name the function being emitted: the span often points into an INLINED
+    // stdlib body (every `xs.push(..)` reports at the same `Vec<T>.push` line),
+    // so without the caller the diagnostic cannot tell two sites apart.
     skull_transform::validate_no_implicit_nobox_materialization(ws, mf)
-        .map_err(|(message, site)| BodyRejection { message, guarantee: true, site })?;
+        .map_err(|(message, site)| BodyRejection {
+            message: format!("{message}, while emitting `{}`", mf.name),
+            guarantee: true,
+            site,
+        })?;
     validate_nested_bodies(ws, &mf.nested_fns, specs)
 }
 
