@@ -5580,8 +5580,69 @@ impl Builder<'_> {
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
                 Ok(self.boxed_value_copy_repr(slot, name))
             }
+            Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs }
+                if self.nobox_value_name(e).is_some() =>
+            {
+                self.nullcoalesce_repr(e, lhs, rhs)
+            }
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
         }
+    }
+
+    /// `a ?? b` whose RESULT is a `nobox` value: both arms thread leaves and join
+    /// through cells, so the coalesce never packs a cdata just to choose between
+    /// them. The lhs leaves are read before the branch (their block dominates
+    /// both arms) and its presence leaf IS the condition -- no nil compare.
+    fn nullcoalesce_repr(
+        &mut self,
+        e: Idx<Expr>,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let name = self.nobox_value_name(e).expect("caller checked");
+        let shape = value_shape_of_nominal(self.ws, name)
+            .ok_or_else(|| gap(format!("nobox value `{name}` has no scalar shape")))?;
+        let mut lhs_shape = shape.clone();
+        lhs_shape.nullable = true;
+
+        let lhs_repr = self.lower_expr_repr(lhs)?;
+        let lhs_leaves = self.repr_to_leaves(&lhs_repr, &lhs_shape);
+        let (present, lhs_values) = lhs_leaves
+            .split_first()
+            .expect("a nullable shape carries its presence leaf first");
+        let (present, lhs_values) = (*present, lhs_values.to_vec());
+
+        let cells: Vec<Idx<Cell>> = lhs_values.iter().map(|_| self.f.new_cell(None)).collect();
+        let lhs_bb = self.f.new_block();
+        let rhs_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: lhs_bb, else_bb: rhs_bb },
+        );
+
+        self.cur = rhs_bb;
+        let rhs_repr = self.lower_expr_repr(rhs)?;
+        let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
+        for (&c, &value) in cells.iter().zip(&rhs_leaves) {
+            self.emit_cur(Inst::Store { cell: c, value });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = lhs_bb;
+        for (&c, &value) in cells.iter().zip(&lhs_values) {
+            self.emit_cur(Inst::Store { cell: c, value });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = join;
+        let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
     }
 
     /// A value-struct literal as an unboxed `Group` (declared field order, defaults
@@ -8090,6 +8151,11 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
+            if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
+                return self.lower_if_let_nobox(b, value, then_branch, else_branch);
+            }
+        }
         let result = self.f.new_cell(None);
         let scrut = self.lower_scrut(value)?;
         let else_bb = self.f.new_block();
@@ -8110,6 +8176,61 @@ impl Builder<'_> {
         let variants = self.scrut_variants(value);
         let scrut_enum = self.scrut_enum_name(value);
         self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
+        let tv = self.lower_expr(then_branch)?;
+        self.store_and_join(result, tv, join);
+
+        self.cur = else_bb;
+        let ev = match else_branch {
+            Some(eb) => self.lower_expr(eb)?,
+            None => self.emit_cur(Inst::Const(Lit::Nil)),
+        };
+        self.store_and_join(result, ev, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// `if let q = p` binding a nullable `nobox` value: the scrutinee's presence
+    /// leaf IS the branch condition and `q` binds the remaining leaves as cells,
+    /// so nothing is packed to be tested and immediately unpacked again. Only a
+    /// plain `Bind` takes this path -- a destructuring pattern still matches
+    /// against the boxed scrutinee.
+    fn lower_if_let_nobox(
+        &mut self,
+        b: Idx<BindingInfo>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = self.nobox_binding_shape(b).expect("caller checked");
+        let mut scrut_shape = shape.clone();
+        scrut_shape.nullable = true;
+
+        let result = self.f.new_cell(None);
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves(&repr, &scrut_shape);
+        let (present, values) = leaves
+            .split_first()
+            .expect("a nullable shape carries its presence leaf first");
+        let (present, values) = (*present, values.to_vec());
+
+        let then_bb = self.f.new_block();
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
+
+        self.cur = then_bb;
+        let bname = self.body.binding_arena[b].name;
+        let cells: Vec<Idx<Cell>> = values
+            .iter()
+            .enumerate()
+            .map(|(li, &value)| {
+                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
+                self.emit_cur(Inst::Store { cell: c, value });
+                c
+            })
+            .collect();
+        self.group_binds.insert(raw(b), (cells, shape));
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 

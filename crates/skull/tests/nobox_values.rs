@@ -802,3 +802,44 @@ fn a_generic_nullable_param_keeps_the_single_cdata_abi_for_an_unmarked_value() {
         "an unmarked nullable value struct left the single-cdata ABI: {head}"
     );
 }
+
+const NOBOX_NULLABLE_BINDINGS: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn coalesce(p: NV2?) -> float {
+    let q = p ?? NV2 { x: 5.0, y: 6.0 }
+    return q.x + q.y
+}
+
+fn if_let(p: NV2?) -> float {
+    if let q = p { return q.x + q.y }
+    return -1.0
+}
+
+fn main() {
+    print("{coalesce(NV2 { x: 1.0, y: 2.0 })} {coalesce(null)} {if_let(NV2 { x: 3.0, y: 4.0 })} {if_let(null)}")
+}
+"#;
+
+#[test]
+fn null_coalescing_a_nobox_nullable_stays_on_leaves() {
+    let lua = emit_module(NOBOX_NULLABLE_BINDINGS);
+    let body = function_body(&lua, "coalesce");
+    assert!(!body.contains("NV2_ct("), "`??` materialized a nobox cdata:\n{body}");
+}
+
+#[test]
+fn if_let_binding_a_nobox_nullable_stays_on_leaves() {
+    let lua = emit_module(NOBOX_NULLABLE_BINDINGS);
+    let body = function_body(&lua, "if_let");
+    assert!(!body.contains("NV2_ct("), "`if let` materialized a nobox cdata:\n{body}");
+}
+
+#[test]
+fn nobox_nullable_bindings_evaluate_correctly() {
+    let lua = emit_module(NOBOX_NULLABLE_BINDINGS);
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable_bindings"),
+        "3 11 7 -1"
+    );
+}
