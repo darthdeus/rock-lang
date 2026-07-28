@@ -1,16 +1,20 @@
-//! Vertex layout computed from a value struct's fields -- the first slice of
+//! Vertex attributes derived from a value struct's fields -- the first slice of
 //! the target-neutral interface artifact (docs/shader-binding-layout-plan.md
-//! P1). One computation feeds the cdata declaration, glVertexAttribPointer,
-//! and the shader's attribute locations, so the three cannot disagree.
+//! P1).
 //!
-//! The live lockstep this replaces: bitgun/grass.rock passes stride `5` and
-//! attr sizes `[2, 1, 1, 1]` by hand, both derived from GrassInstance's
-//! fields, with grass_shader.rock carrying a comment asserting the agreement.
+//! Scope note: these assert kinds, locations and component counts ONLY. Byte
+//! offsets and stride are the struct's C layout, owned by skull-mir's layout
+//! walker and cross-checked against LuaJIT -- see the module docs. Nothing here
+//! may grow an offset assertion; that would be a second offset model.
+//!
+//! The live lockstep this replaces: bitgun/grass.rock:133 passes attr sizes
+//! `[2, 1, 1, 1]` by hand, derived from GrassInstance's fields, with
+//! grass_shader.rock:5 carrying a comment asserting the agreement.
 
 use std::sync::LazyLock;
 use ustr::Ustr;
 
-use skull_mir::gpu_layout::{vertex_layout, AttrKind, VertexLayout};
+use skull_mir::gpu_layout::{vertex_attrs, AttrKind, VertexAttrs};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -32,88 +36,85 @@ fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
     ws
 }
 
-fn layout_of(src: &str, struct_name: &str) -> VertexLayout {
+fn attrs_of(src: &str, struct_name: &str) -> VertexAttrs {
     let ws = ws_of(src);
-    vertex_layout(&ws, Ustr::from(struct_name)).expect("layout must compute")
+    vertex_attrs(&ws, Ustr::from(struct_name)).expect("attributes must compute")
 }
 
-/// The live shape: bitgun's GrassInstance. Field order is attribute order,
-/// tightly packed, no padding -- vertex buffers are not std140.
+/// The live shape: bitgun's GrassInstance.
 #[test]
-fn grass_instance_layout_matches_the_hand_written_constants() {
-    let l = layout_of(
+fn grass_instance_attrs_match_the_hand_written_sizes() {
+    let a = attrs_of(
         "value GrassInstance { pos: Vec2, rot: float, scale: float, height: float }",
         "GrassInstance",
     );
 
-    // The `5` in gpu_mesh_set_instances(.., 5, ..)
-    assert_eq!(l.stride_floats(), 5, "stride in floats");
-    assert_eq!(l.stride_bytes, 20, "stride in bytes");
+    // The `[2, 1, 1, 1]` in gpu_mesh_set_instances(.., 5, [2, 1, 1, 1]).
+    assert_eq!(a.attr_sizes(), vec![2, 1, 1, 1]);
 
-    // The `[2, 1, 1, 1]` in the same call.
-    assert_eq!(l.attr_sizes(), vec![2, 1, 1, 1], "per-attribute component counts");
-
-    let names: Vec<&str> = l.attrs.iter().map(|a| a.name.as_str()).collect();
+    let names: Vec<&str> = a.attrs.iter().map(|x| x.name.as_str()).collect();
     assert_eq!(names, vec!["pos", "rot", "scale", "height"]);
 
     // Locations are RECORDED, not an enumerate() index materialized during
     // printing (the emitter's current shape, lib.rs:2255).
-    let locs: Vec<u32> = l.attrs.iter().map(|a| a.location).collect();
+    let locs: Vec<u32> = a.attrs.iter().map(|x| x.location).collect();
     assert_eq!(locs, vec![0, 1, 2, 3]);
 
-    let offsets: Vec<u32> = l.attrs.iter().map(|a| a.offset_bytes).collect();
-    assert_eq!(offsets, vec![0, 8, 12, 16]);
-
-    assert_eq!(l.attrs[0].kind, AttrKind::F32x2);
-    assert_eq!(l.attrs[1].kind, AttrKind::F32);
+    assert_eq!(a.attrs[0].kind, AttrKind::F32x2);
+    assert_eq!(a.attrs[1].kind, AttrKind::F32);
 }
 
-/// The engine's sprite vertex: pos(2)+uv(2)+color(4)+pivotY(1)+entityId(1),
-/// stride 10 floats. These are the MESH_*_OFFSET constants in
-/// stone-rs/src/sprite.rs:585-586 that the layout must reproduce exactly.
+/// The engine's sprite vertex: pos(2)+uv(2)+color(4)+pivotY(1)+entityId(1).
+/// Component counts only -- the matching MESH_*_OFFSET constants
+/// (stone-rs/src/sprite.rs:585-586) are offsets, so they are the C layout's to
+/// reproduce, not this module's.
 #[test]
-fn sprite_vertex_layout_matches_the_mesh_offset_constants() {
-    let l = layout_of(
+fn sprite_vertex_attr_sizes() {
+    let a = attrs_of(
         "value SpriteVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4, aPivotY: float, aEntityId: float }",
         "SpriteVert",
     );
-
-    assert_eq!(l.stride_floats(), 10, "the hard-coded stride at every draw site");
-    assert_eq!(l.attr_sizes(), vec![2, 2, 4, 1, 1]);
-
-    // MESH_POS_OFFSET 0, MESH_UV_OFFSET 2, MESH_COLOR_OFFSET 4,
-    // MESH_PIVOT_Y_OFFSET 8, MESH_ENTITY_ID_OFFSET 9 -- in floats.
-    let float_offsets: Vec<u32> = l.attrs.iter().map(|a| a.offset_bytes / 4).collect();
-    assert_eq!(float_offsets, vec![0, 2, 4, 8, 9]);
+    assert_eq!(a.attr_sizes(), vec![2, 2, 4, 1, 1]);
+    assert_eq!(a.attrs.len(), 5);
+    assert_eq!(a.attrs[4].location, 4);
 }
 
 /// An int field is a distinct attribute kind: GL needs glVertexAttribIPointer,
 /// and a float-path upload of an int attr is a silent wrong-value class.
 #[test]
 fn int_fields_are_a_distinct_attr_kind() {
-    let l = layout_of("value WithId { pos: Vec2, id: int }", "WithId");
-    assert_eq!(l.attrs[0].kind, AttrKind::F32x2);
-    assert_eq!(l.attrs[1].kind, AttrKind::I32);
-    assert_eq!(l.stride_bytes, 12);
+    let a = attrs_of("value WithId { pos: Vec2, id: int }", "WithId");
+    assert_eq!(a.attrs[0].kind, AttrKind::F32x2);
+    assert_eq!(a.attrs[1].kind, AttrKind::I32);
+    assert!(a.attrs[1].kind.is_integer());
+    assert!(!a.attrs[0].kind.is_integer());
 }
 
-/// Vertex layout is tightly packed. A Vec3 does NOT round up to 16 bytes the
-/// way it would under std140 -- that rule belongs to the uniform family, and
-/// applying it here would silently corrupt every buffer.
+/// A Vec3 attribute has THREE components. This is the component count the
+/// attribute pointer needs; it makes no claim about the 12-vs-16 byte question,
+/// which is the C layout's (and where std140's rounding must never be applied).
 #[test]
-fn vec3_is_tightly_packed_not_std140_padded() {
-    let l = layout_of("value V3Vert { a: Vec3, b: float }", "V3Vert");
-    assert_eq!(l.attrs[0].offset_bytes, 0);
-    assert_eq!(l.attrs[1].offset_bytes, 12, "b follows a with no padding");
-    assert_eq!(l.stride_bytes, 16);
+fn vec3_has_three_components() {
+    let a = attrs_of("value V3Vert { a: Vec3, b: float }", "V3Vert");
+    assert_eq!(a.attrs[0].kind, AttrKind::F32x3);
+    assert_eq!(a.attr_sizes(), vec![3, 1]);
 }
 
-/// A non-tier-0 field cannot live in a vertex buffer. Reject with a span
-/// rather than emitting a layout that silently disagrees with the GPU.
+/// A non-tier-0 field cannot be a vertex attribute. Reject with a span rather
+/// than admitting a field the GPU cannot receive.
 #[test]
 fn non_numeric_field_rejects() {
     let ws = ws_of("value Bad { pos: Vec2, name: string }");
-    let e = vertex_layout(&ws, Ustr::from("Bad")).expect_err("a string field must reject");
+    let e = vertex_attrs(&ws, Ustr::from("Bad")).expect_err("a string field must reject");
     let msg = format!("{e:?}");
     assert!(msg.contains("name"), "the error must name the offending field: {msg}");
+}
+
+/// A non-`value` struct has no guaranteed C layout, so it cannot back a vertex
+/// buffer at all.
+#[test]
+fn non_value_struct_rejects() {
+    let ws = ws_of("struct Boxed { pos: Vec2 }");
+    let e = vertex_attrs(&ws, Ustr::from("Boxed")).expect_err("a boxed struct must reject");
+    assert!(format!("{e:?}").contains("value"));
 }

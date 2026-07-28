@@ -1,21 +1,32 @@
-//! GPU memory layout computed from a value struct's fields.
+//! The GPU attribute view of a value struct: what each field is as a vertex
+//! attribute, and which location it binds to.
 //!
-//! The first slice of the target-neutral interface artifact
-//! (`docs/shader-binding-layout-plan.md`). ONE computation feeds the cdata
-//! declaration, the attribute-pointer setup, and the shader's attribute
-//! locations -- so the three cannot disagree. Two implementations that agree
-//! today is the silent-divergence trap; a disagreement here is garbage
-//! geometry, not a compile error.
+//! Part of the target-neutral interface artifact
+//! (`docs/shader-binding-layout-plan.md` P1). [`AttrKind`] is a scalar kind +
+//! arity, never a GLSL type name (`GlslTy::name()` prints `vec4`), so a WGSL or
+//! Metal backend spells the same attribute its own way.
 //!
-//! Target-neutral on purpose: [`AttrKind`] is a scalar kind + arity, not a
-//! GLSL type name, so a WGSL or Metal backend spells it its own way from the
-//! same layout. Lives in `skull-mir` because all three codegen backends
-//! already depend on it and none of them owns the interface.
+//! # This module does NOT own memory layout
 //!
-//! **Vertex layout is tightly packed** -- no std140 rounding. A `Vec3` field
-//! occupies 12 bytes and the next field follows immediately. The 16-byte
-//! alignment rules belong to the uniform family; applying them here would
-//! silently corrupt every vertex buffer.
+//! Everything here is derived from field TYPES and field ORDER. Byte offsets,
+//! struct size and stride are deliberately absent: those are the value struct's
+//! **C layout**, which `skull-mir`'s layout walker already computes and
+//! cross-checks against LuaJIT (`ffi.offsetof` / `ffi.sizeof` assertions emitted
+//! per FFI-clean value struct, aborting at chunk load on drift -- the
+//! `value_leaf_layout` / `value_leaf_layout_checked` pair on the `inline-lua`
+//! branch). A second offset model is exactly the bypass that walker is private
+//! to prevent, and a wrong vertex offset corrupts geometry silently rather than
+//! failing.
+//!
+//! So when the vertex-attribute consumers need offsets and stride, they take
+//! them from the checked C layout and use this module only for the grouping:
+//! the C layout flattens to primitive leaves (`pos.x`, `pos.y`), while an
+//! attribute is the whole top-level field (`pos` = one `F32x2` at location 0).
+//!
+//! Worth stating because it is the trap: a vertex buffer is laid out by C
+//! rules, NOT std140. A `Vec3` occupies 12 bytes with the next field
+//! immediately after; std140's 16-byte rounding belongs to the uniform family
+//! and applying it to a vertex buffer would corrupt every one of them.
 
 use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
@@ -44,6 +55,9 @@ pub enum AttrKind {
 impl AttrKind {
     /// Component count -- the `size` argument of an attribute pointer, and the
     /// per-attribute entries of `gpu_mesh_set_instances`' `attr_sizes`.
+    ///
+    /// A count of components, not a size in bytes: this says nothing about
+    /// where the attribute sits.
     pub fn components(self) -> u32 {
         match self {
             AttrKind::F32 | AttrKind::I32 => 1,
@@ -53,44 +67,36 @@ impl AttrKind {
         }
     }
 
-    /// Size in bytes. Every component is 4 bytes today (f32 / i32).
-    pub fn size_bytes(self) -> u32 {
-        self.components() * 4
-    }
-
     pub fn is_integer(self) -> bool {
         matches!(self, AttrKind::I32)
     }
 }
 
-/// One attribute of a vertex or instance buffer.
+/// One attribute: a top-level field of the vertex/instance struct.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Attr {
     pub name: Ustr,
     pub kind: AttrKind,
     /// Attribute location. RECORDED here rather than materialized as an
-    /// `enumerate()` index while printing GLSL, so the engine can bind against
+    /// `enumerate()` index while printing GLSL (the emitter's shape today,
+    /// `skull-codegen-glsl/src/lib.rs:2255`), so the engine can bind against
     /// the same numbering the shader declares.
     pub location: u32,
-    /// Byte offset from the start of the vertex.
-    pub offset_bytes: u32,
 }
 
-/// The layout of one vertex or instance buffer element.
+/// The attributes of one vertex or instance struct, in location order.
+///
+/// Named for what it is: NOT a layout. It carries no offsets and no stride --
+/// see the module docs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VertexLayout {
+pub struct VertexAttrs {
     pub struct_name: Ustr,
     pub attrs: Vec<Attr>,
-    pub stride_bytes: u32,
 }
 
-impl VertexLayout {
-    /// Stride in floats -- the unit the engine's mesh draws speak today.
-    pub fn stride_floats(&self) -> u32 {
-        self.stride_bytes / 4
-    }
-
-    /// Per-attribute component counts, in location order.
+impl VertexAttrs {
+    /// Per-attribute component counts, in location order -- the `attr_sizes`
+    /// argument of `gpu_mesh_new` / `gpu_mesh_set_instances`.
     pub fn attr_sizes(&self) -> Vec<u32> {
         self.attrs.iter().map(|a| a.kind.components()).collect()
     }
@@ -103,8 +109,8 @@ fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     }
 }
 
-/// The attribute kind for a declared field type, or `None` if it cannot live
-/// in a vertex buffer.
+/// The attribute kind for a declared field type, or `None` if it cannot be a
+/// vertex attribute.
 fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(AttrKind::F32),
@@ -119,15 +125,14 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
     }
 }
 
-/// Compute the vertex layout of the value struct named `struct_name`.
+/// The vertex attributes of the value struct named `struct_name`.
 ///
-/// Field order is attribute order is location order -- the same contract
-/// `@attr` already carries. Fields are packed tightly, with no alignment
-/// padding inserted between them.
-pub fn vertex_layout(ws: &Workspace, struct_name: Ustr) -> Result<VertexLayout, CompilerError> {
+/// Field order is attribute order is location order -- the contract `@attr`
+/// already carries.
+pub fn vertex_attrs(ws: &Workspace, struct_name: Ustr) -> Result<VertexAttrs, CompilerError> {
     let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
         return Err(CompilerError::new_no_location(format!(
-            "vertex layout: no struct named `{struct_name}`"
+            "vertex attributes: no struct named `{struct_name}`"
         )));
     };
     let sd = &ws.modules[sid.module.index()].structs[sid.def];
@@ -136,31 +141,29 @@ pub fn vertex_layout(ws: &Workspace, struct_name: Ustr) -> Result<VertexLayout, 
         return Err(err(
             sd.name_span,
             format!(
-                "vertex layout: `{struct_name}` must be a `value` struct -- only value structs have a \
-                 guaranteed C layout to upload"
+                "vertex attributes: `{struct_name}` must be a `value` struct -- only value structs \
+                 have a C layout to upload"
             ),
         ));
     }
     if sd.fields.is_empty() {
-        return Err(err(sd.name_span, format!("vertex layout: `{struct_name}` has no fields")));
+        return Err(err(sd.name_span, format!("vertex attributes: `{struct_name}` has no fields")));
     }
 
     let mut attrs = Vec::with_capacity(sd.fields.len());
-    let mut offset = 0u32;
     for (i, fd) in sd.fields.iter().enumerate() {
         let Some(kind) = attr_kind(ws, fd.ty) else {
             return Err(err(
                 fd.span,
                 format!(
-                    "vertex layout: `{struct_name}` field `{}` is not a vertex-attribute type \
+                    "vertex attributes: `{struct_name}` field `{}` is not a vertex-attribute type \
                      (want float/int/Vec2/Vec3/Vec4)",
                     fd.name
                 ),
             ));
         };
-        attrs.push(Attr { name: fd.name, kind, location: i as u32, offset_bytes: offset });
-        offset += kind.size_bytes();
+        attrs.push(Attr { name: fd.name, kind, location: i as u32 });
     }
 
-    Ok(VertexLayout { struct_name, attrs, stride_bytes: offset })
+    Ok(VertexAttrs { struct_name, attrs })
 }
