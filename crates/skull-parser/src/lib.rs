@@ -93,7 +93,7 @@ pub fn cook_one(ast: &mut Ast, registry: &macro_expand::MacroRegistry) {
     desugar::desugar(ast);
 }
 
-pub use macro_expand::{check_macro_name_uniqueness, collect_registry, MacroRegistry};
+pub use macro_expand::{check_macro_call_labels, check_macro_name_uniqueness, collect_registry, MacroRegistry};
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
 use skull_parser::{
-    Ast, FunctionBody, ItemKind, MacroRegistry, check_macro_name_uniqueness, collect_registry,
+    Ast, FunctionBody, ItemKind, MacroRegistry, check_macro_call_labels, check_macro_name_uniqueness, collect_registry,
     cook_one,
 };
 
@@ -151,12 +151,17 @@ pub enum FileDiff {
     Interface,
 }
 
-/// Reject a macro name colliding with a function name (call-position ambiguity),
-/// cross-module, on the pre-expansion module set (macros still present). The
-/// same gate `check_modules` applies on the CLI compile path, so sim / stone /
-/// LSP rebuilds refuse the same programs. Returns the first collision.
+/// Reject a macro name colliding with a function name (call-position ambiguity)
+/// and a macro call whose argument labels don't fit its parameters, cross-module,
+/// on the pre-expansion module set (macros still present). The same gates
+/// `check_modules` applies on the CLI compile path, so sim / stone / LSP rebuilds
+/// refuse the same programs. Returns the first offender.
 fn reject_macro_name_collisions(modules: &[Ast]) -> Result<(), CompilerError> {
-    match check_macro_name_uniqueness(modules).into_iter().next() {
+    match check_macro_name_uniqueness(modules)
+        .into_iter()
+        .chain(check_macro_call_labels(modules))
+        .next()
+    {
         Some(e) => Err(e),
         None => Ok(()),
     }
