@@ -1169,6 +1169,39 @@ fn emit_specialized_callees(
     Ok(())
 }
 
+/// Every OTHER chunk rejection that would also have aborted the build, so one
+/// run reports the whole site list instead of its first entry. Bodies lower in
+/// parallel and every rejection is already computed when the first is pulled --
+/// the abort was hiding them, not preventing them.
+///
+/// Applies the same stdlib-gap filter as the pull site: a non-guarantee
+/// rejection in a stdlib body is a known parity gap that downgrades to
+/// `skipped`, so surfacing it here would report a non-error. Ordered by span so
+/// the list is stable across runs (chunks are a hash map, filled in parallel).
+fn other_chunk_rejections(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    primary: FuncRef,
+) -> Vec<CompilerError> {
+    let mut out: Vec<(bone_semantic::prelude::Span, CompilerError)> = cache
+        .chunks
+        .iter()
+        .filter(|(fref, _)| **fref != primary)
+        .filter_map(|(fref, chunk)| {
+            let err = chunk.as_ref().err()?;
+            let module = ws.module(fref.module);
+            if is_stdlib_module_file(module.file.as_str())
+                && err.kind != skull_parser::CompilerErrorKind::NoboxGuaranteeViolated
+            {
+                return None;
+            }
+            Some((module.functions[fref.func].name_span, err.clone()))
+        })
+        .collect();
+    out.sort_by_key(|(span, _)| (span.file, span.offset_range));
+    out.into_iter().map(|(_, e)| e).collect()
+}
+
 /// Run the inliner over a hoisted-body tree (named nested `fn`s and the lambda
 /// bodies `convert_closures` appends), depth-first so a lambda nested in a lambda
 /// is reached too. Splices fold into the enclosing chunk's `deps`: the chunk now
@@ -1736,7 +1769,9 @@ fn assemble(
                     {
                         skipped.push((mangle_fn(ws, f), err.message.clone()));
                     } else {
-                        return Err(err.clone());
+                        return Err(err
+                            .clone()
+                            .with_siblings(other_chunk_rejections(ws, cache, self_ref)));
                     }
                 }
                 None => {

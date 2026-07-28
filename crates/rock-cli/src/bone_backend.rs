@@ -85,7 +85,18 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
             f.contents.to_string(),
         ));
     }
-    rock_core::errors::render_all(errs, &sf)
+    // An emit path that can only return ONE error attaches the rest as
+    // siblings; expanded here for the same reason as the stdlib sources above --
+    // this is the shared sink, and rendering only the primary is how a
+    // twenty-site sink list got read as three.
+    let expanded: Vec<CompilerError> = errs
+        .iter()
+        .flat_map(|e| {
+            std::iter::once(CompilerError { siblings: Vec::new(), ..e.clone() })
+                .chain(e.siblings.iter().cloned())
+        })
+        .collect();
+    rock_core::errors::render_all(&expanded, &sf)
 }
 
 /// The bone stdlib with `user` modules appended — the checkable module set every
