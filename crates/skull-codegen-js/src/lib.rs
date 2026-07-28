@@ -1626,15 +1626,22 @@ function stone_reload_sound(h, path) {
   return __sw_audio_decode(h, path) !== 0;
 }
 function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
-function stone_play_sound(h, volume, speed) {
+function stone_play_sound(h, volume, speed, decay) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
   src.buffer = s.buffer;
   src.playbackRate.value = Math.min(Math.max(speed, 0.05), 8);
   var g = A.ctx.createGain();
-  g.gain.value = Math.max(volume, 0);
+  var vol = Math.max(volume, 0);
+  g.gain.value = vol;
   src.connect(g); g.connect(A.sfxGain); src.start();
+  if (decay > 0) {
+    var t = A.ctx.currentTime;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.linearRampToValueAtTime(0, t + decay);
+    src.stop(t + decay);
+  }
   A.sfxSources[h] = src;
 }
 function stone_stop_sound(h) {
