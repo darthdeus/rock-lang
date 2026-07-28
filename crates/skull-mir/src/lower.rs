@@ -220,15 +220,18 @@ fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
 /// offset against `ffi.offsetof` at run time, because a divergence here is
 /// silent memory corruption rather than a failure.
 ///
-/// The traversal mirrors [`value_shape_rec`] arm for arm so the leaf ORDER
-/// matches [`value_leaf_paths`] -- but that is a property of two separate
-/// walkers staying in step, NOT something the code enforces. Leaves are matched
-/// to offsets POSITIONALLY, so if they ever drift, every runtime `ffi.offsetof`
-/// assertion still passes (each path/offset pair is self-consistent) while repr
-/// leaves are written to the wrong addresses. Use
-/// [`value_leaf_layout_checked`], which verifies the agreement, at any site that
-/// consumes the offsets.
-pub fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
+/// PRIVATE on purpose: the raw walker is the bypass this module exists to
+/// prevent. Its traversal mirrors [`value_shape_rec`] arm for arm so the leaf
+/// ORDER matches [`value_leaf_paths`], but that is two separate walkers staying
+/// in step, NOT something this function enforces. Leaves are matched to offsets
+/// POSITIONALLY, so if they drift, every runtime `ffi.offsetof` assertion still
+/// passes (each path/offset pair is self-consistent) while repr leaves are
+/// written to the wrong addresses.
+///
+/// [`value_leaf_layout_checked`] is the only way out of this module, and it
+/// REJECTS on drift. Keep it that way -- a `pub` raw walker is an offset source
+/// a future lowering can reach for without the invariant.
+fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
     let mut out = Vec::new();
     let (size, align) = layout_rec(ws, name, "", 0, "", &mut out, &mut Vec::new())?;
     Some((out, size, align))

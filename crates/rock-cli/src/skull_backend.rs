@@ -3562,13 +3562,15 @@ mod overlay_runtime_tests {
             &full1.lua,
             "describe()",
         ]);
-        match composed {
-            ExecOutcome::Errored(_) => {} // the pinned corruption
-            ExecOutcome::Output(o) => panic!(
-                "expected the recompiled reader to die on the nil-valued added field, got output:\n{}",
-                normalize_stdout(&o)
-            ),
-        }
+        // Assert the SPECIFIC failure: any-error-is-success would also pass on a
+        // timeout or an unrelated load error, which is how a pin like this rots
+        // into proving nothing.
+        let diag = composed
+            .expect_errored("expected the recompiled reader to die on the nil-valued added field");
+        assert!(
+            diag.contains("arithmetic on") && diag.contains("nil"),
+            "expected nil-arithmetic on the field the live instance never had, got:\n{diag}"
+        );
     }
 
     /// PREMISE pin for the schema-drift restart policy, value-struct class
@@ -3620,7 +3622,6 @@ mod overlay_runtime_tests {
             ExecOutcome::Errored(_) => panic!("value-struct v0 fixture failed to run"),
         }
 
-        // Composed: the v1 chunk re-cdefs P (silent no-op), then a FRESH
         // Composed: the v1 chunk re-cdefs P (silent no-op), so LuaJIT keeps the
         // v0 layout. Left alone this misassigns silently -- the v1 positional
         // ctor (y first) feeds the frozen v0 ctype (x first) and `show()` prints
