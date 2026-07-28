@@ -85,3 +85,49 @@ fn reassigned_param_stays_shared() {
 
 // Value-struct emission (all-scalar emit, GC-carrying reject) is covered by
 // tests/value_structs.rs (T8b); the T7-era whole-value reject pin retired there.
+
+// A `nobox` element of a tuple return carries its LEAVES into the return array,
+// so no `NV2` object crosses the boundary; an UNMARKED value keeps its single
+// boxed slot (the asymmetry guard). JS gets this from the shared MIR shape, not
+// a backend-local rule.
+#[test]
+fn nobox_tuple_element_splats_into_the_return_array() {
+    let ws = ws_with(
+        "nobox value NV2 { x: float, y: float }\n\
+         fn mk(v: NV2) -> (bool, NV2) { (true, v) }",
+    );
+    let js = emit_user(&ws, "mk");
+    assert!(!js.contains("\"NV2\""), "nobox element materialized an object:\n{js}");
+    assert_eq!(
+        return_array_len(&js),
+        3,
+        "the flag plus two leaves must come back as three values:\n{js}"
+    );
+}
+
+#[test]
+fn unmarked_value_tuple_element_keeps_its_box() {
+    let ws = ws_with(
+        "value BV2 { x: float, y: float }\n\
+         fn mk(v: BV2) -> (bool, BV2) { (true, v) }",
+    );
+    let js = emit_user(&ws, "mk");
+    // Assert the WIRE, not the presence of a `BV2` literal: a splatting return
+    // that packs and re-splits still builds one, so only the array's LENGTH
+    // distinguishes the two ABIs. Every element is a hoisted temp, so the
+    // return line is `return [v.., v..]` and commas count elements.
+    assert_eq!(
+        return_array_len(&js),
+        2,
+        "unmarked element lost its single boxed slot:\n{js}"
+    );
+}
+
+/// Element count of the emitted `return [..]` -- the tuple ABI's arity.
+fn return_array_len(js: &str) -> usize {
+    let ret = js
+        .lines()
+        .find(|l| l.trim_start().starts_with("return ["))
+        .unwrap_or_else(|| panic!("no multi-return in:\n{js}"));
+    ret.matches(',').count() + 1
+}

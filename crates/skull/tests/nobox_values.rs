@@ -847,11 +847,13 @@ fn nobox_nullable_bindings_evaluate_correctly() {
 const NOBOX_REJECTION_SITE: &str = r#"
 nobox value NV2 { x: float, y: float }
 
+@nomangle inline(lua) fn sink(v: NV2) = "return"
+
 fn last(ps: [NV2]) -> float {
-    let seen: NV2? = null
-    for p in ps { seen = p }
-    if let q = seen { return q.x }
-    return 0.0
+    let total = 0.0
+    for p in ps { total = total + p.x }
+    sink(NV2 { x: total, y: 0.0 })
+    return total
 }
 
 fn main() { let _ = last([]) }
@@ -860,17 +862,148 @@ fn main() { let _ = last([]) }
 #[test]
 fn a_nobox_rejection_anchors_on_the_offending_expression() {
     let err = try_emit_module(NOBOX_REJECTION_SITE)
-        .expect_err("a whole-value use of a loop element boxes it");
+        .expect_err("a boxed sink materializes the value");
     // Assert on the byte offset, not `line`/`col`: the three coordinate systems
     // in `docs/span-position-units.md` disagree on their base, and the offset is
     // the one that needs no conversion. The `fn` header is the anchor this used
     // to report, and a whole-fn anchor cannot tell two violations in one body
     // apart -- which is how one sink hid another inside `draw_fractures`.
-    let start = NOBOX_REJECTION_SITE.find("    for p in ps").expect("fixture line");
+    let start = NOBOX_REJECTION_SITE.find("    sink(NV2").expect("fixture line");
     let end = start + NOBOX_REJECTION_SITE[start..].find('\n').expect("fixture line ends");
     assert!(
         (start..=end).contains(&err.location.offset),
-        "rejection did not anchor on the assignment that boxes: {err:?}"
+        "rejection did not anchor on the call that boxes: {err:?}"
+    );
+}
+
+const PLAIN_VALUE_TUPLE_RETURN: &str = r#"
+value V2 { x: float, y: float }
+
+fn split(v: V2) -> (bool, V2) {
+    return (true, v)
+}
+
+fn main() {
+    let (ok, w) = split(V2 { x: 1.0, y: 2.0 })
+    print("{ok} {w.x} {w.y}")
+}
+"#;
+
+// The asymmetry guard for the nobox tuple-return ABI: an UNMARKED value struct
+// keeps its single boxed tuple slot. Marked is a guarantee that changes the
+// wire; unmarked is an optimization that must not silently re-shape a return an
+// `@scalar_abi inline(lua)` body (`imgui_slider_float2`) hand-writes.
+#[test]
+fn a_non_nobox_value_in_a_tuple_return_keeps_the_boxed_abi() {
+    let lua = emit_module(PLAIN_VALUE_TUPLE_RETURN);
+    // Assert the WIRE, not just the presence of a box: a splatting return that
+    // packs and re-splits still contains a `V2_ct(`, so only the caller's dest
+    // count distinguishes the two ABIs.
+    assert_eq!(
+        multi_return_dests(&lua, "split"),
+        2,
+        "an unmarked value lost its single boxed tuple slot:\n{lua}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "plain_value_tuple_return"), "true 1 2");
+}
+
+/// The `a, b = <fn>(..)` destination count at a multi-return call site -- the
+/// tuple ABI's arity as the CALLER sees it.
+fn multi_return_dests(lua: &str, fn_name: &str) -> usize {
+    let call = format!("= {fn_name}_");
+    let line = lua
+        .lines()
+        .find(|l| l.contains(&call))
+        .unwrap_or_else(|| panic!("no multi-return call of `{fn_name}` in:\n{lua}"));
+    line.split(" = ").next().expect("an assignment lhs").split(',').count()
+}
+
+const NOBOX_TUPLE_RETURN: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn split(v: NV2) -> (bool, NV2) {
+    return (true, v)
+}
+
+fn main() {
+    let (ok, w) = split(NV2 { x: 1.0, y: 2.0 })
+    print("{ok} {w.x} {w.y}")
+}
+"#;
+
+#[test]
+fn a_nobox_value_in_a_tuple_return_carries_its_leaves() {
+    let lua = emit_module(NOBOX_TUPLE_RETURN);
+    let body = function_body(&lua, "split");
+    assert!(
+        !body.contains("NV2_ct("),
+        "a nobox tuple element materialized:\n{body}"
+    );
+    assert_eq!(
+        multi_return_dests(&lua, "split"),
+        3,
+        "the flag plus two leaves must come back as three values:\n{lua}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_tuple_return"), "true 1 2");
+}
+
+const NOBOX_OPAQUE_TUPLE_RETURN: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+@nomangle inline(lua) fn foreign_pair() -> (bool, NV2) = """return true, NV2_ct(1.0, 2.0)"""
+
+fn use_it() -> float {
+    let (ok, v) = foreign_pair()
+    if !ok { return -1.0 }
+    return v.x + v.y
+}
+
+fn main() {
+    print("{use_it()}")
+}
+"#;
+
+// The return-position twin of `nobox_value_rejects_an_inline_lua_sink`: the
+// hand-written body writes its own `return`, so it cannot carry leaves. Without
+// the rejection the call site read a leaf the body never returned and the
+// program faulted at runtime.
+#[test]
+fn nobox_tuple_return_rejects_an_opaque_callee() {
+    let err = try_emit_module(NOBOX_OPAQUE_TUPLE_RETURN)
+        .expect_err("an inline(lua) tuple return cannot carry nobox leaves");
+    assert!(
+        err.message.contains("nobox") && err.message.contains("foreign_pair"),
+        "{err:?}"
+    );
+}
+
+const NOBOX_SCALAR_ABI_TUPLE_RETURN: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+@scalar_abi @nomangle inline(lua) fn foreign_pair() -> (bool, NV2) = """return true, 1.0, 2.0"""
+
+fn use_it() -> float {
+    let (ok, v) = foreign_pair()
+    if !ok { return -1.0 }
+    return v.x + v.y
+}
+
+fn main() {
+    print("{use_it()}")
+}
+"#;
+
+#[test]
+fn a_scalar_abi_inline_lua_tuple_return_carries_leaves() {
+    let lua = emit_module(NOBOX_SCALAR_ABI_TUPLE_RETURN);
+    let body = function_body(&lua, "use_it");
+    assert!(
+        !body.contains("NV2_ct("),
+        "an opted-in inline(lua) tuple return still boxed:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_scalar_abi_tuple_return"),
+        "3"
     );
 }
 
@@ -889,22 +1022,19 @@ fn main() {
 }
 "#;
 
-// PINNED BUG: a `for` over a Vec goes through the user-iterator protocol, whose
-// `next` returns `(bool, T)`. That tuple return has no nobox-aware ABI, so the
-// element arrives as ONE boxed value (measured: n=2 dests for a 2-leaf type)
-// and a whole-value use of the loop variable materializes it. CORRECT behavior
-// is that the loop element binds its leaves, like every other binding form.
-// Inverted because the fix is the tuple-return-carrying-a-nobox-element ABI --
-// the sink class `docs/parked/inline-lua.md` recorded as possibly dissolving,
-// which did NOT dissolve; it moved inside the iterator protocol.
-// WHEN THIS FAILS: the ABI landed. Delete the `expect_err`, assert the emitted
-// body has no `NV2_ct(` and that running it prints "3 -1", and drop this note.
+// A `for` over a Vec goes through the user-iterator protocol, whose `next`
+// returns `(bool, T)` -- so the loop element only stays unboxed if that tuple
+// return carries T's leaves.
 #[test]
-fn a_loop_element_boxes_a_nobox_value_sentinel() {
-    let err = try_emit_module(NOBOX_LOOP_ELEMENT)
-        .expect_err("SENTINEL: the iterator protocol still boxes a nobox element");
+fn a_loop_element_binds_a_nobox_value_by_leaves() {
+    let lua = emit_module(NOBOX_LOOP_ELEMENT);
+    let body = function_body(&lua, "last_x");
     assert!(
-        err.message.contains("nobox") && err.message.contains("NV2"),
-        "{err:?}"
+        !body.contains("NV2_ct("),
+        "the iterator protocol boxed a nobox element:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_loop_element"),
+        "3 -1"
     );
 }

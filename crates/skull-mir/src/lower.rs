@@ -242,6 +242,12 @@ enum ValueRepr {
         parts: Vec<ValueRepr>,
         present: Option<Idx<Inst>>,
     },
+    /// A tuple whose elements are still reprs -- produced only by a tuple return
+    /// that splats (`TupleRetShape::splats`), so an element that arrived as
+    /// leaves can reach a destructure without being packed. Packing one emits
+    /// the ordinary `MakeTuple` of packed parts, which is how a whole-tuple use
+    /// of a `nobox` element still reaches the guarantee's rejection.
+    Tuple(Vec<ValueRepr>),
 }
 
 #[derive(Clone, Copy)]
@@ -860,16 +866,113 @@ fn spec_nominal(subst: &SpecSubst, var: bone_semantic::hir::VarId) -> Option<Ust
     subst.get(&var)?.nominal()
 }
 
-/// Arity of a tuple RETURN type -- `Some(n)` iff `ty` is a (non-nullable) tuple
-/// `(A, B, ...)`. Drives the multi-return ABI: a tuple-returning fn returns its N
-/// elements as N Lua values instead of one heap table (slice 1,
-/// `docs/iterator-implementation-plan.md`). A `Nullable(Tuple)` return stays boxed
-/// (no room for the null discriminant across a multi-value boundary).
-fn tuple_arity(ws: &Workspace, ty: TyId) -> Option<usize> {
-    match static_ty(ws, ty)? {
-        TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
-        _ => None,
+/// The wire shape of ONE element of a tuple return.
+#[derive(Clone, Debug)]
+enum RetSlot {
+    /// One opaque value -- today's ABI, and what every element that is not a
+    /// `nobox` value keeps.
+    Opaque,
+    /// A `nobox` value: its leaves ride the return directly, so the element
+    /// never needs a box to cross the boundary.
+    Leaves(ValueShape),
+    /// A nested tuple that itself carries a `nobox` element somewhere inside.
+    Nested(TupleRetShape),
+}
+
+impl RetSlot {
+    fn slot_count(&self) -> usize {
+        match self {
+            RetSlot::Opaque => 1,
+            RetSlot::Leaves(shape) => shape.leaf_count(),
+            RetSlot::Nested(inner) => inner.slot_count(),
+        }
     }
+
+    fn splats(&self) -> bool {
+        !matches!(self, RetSlot::Opaque)
+    }
+}
+
+/// Per-element wire shape of a tuple RETURN under the multi-return ABI.
+///
+/// Only a `nobox` element splats. An unmarked value struct keeps its single
+/// boxed slot: marking a type is the one thing that re-shapes a return, which
+/// is what lets an `@scalar_abi inline(lua)` body hand-write a `(bool, Vec2)`
+/// return without the compiler moving the wire underneath it.
+///
+/// The shape is derived from the return TYPE alone -- no callee identity -- so a
+/// direct call, an indirect call through a fn value and the definition all
+/// agree by construction, exactly as the plain multi-return arity does.
+#[derive(Clone, Debug)]
+struct TupleRetShape {
+    slots: Vec<RetSlot>,
+}
+
+impl TupleRetShape {
+    /// Total returned values.
+    fn slot_count(&self) -> usize {
+        self.slots.iter().map(RetSlot::slot_count).sum()
+    }
+
+    /// Whether any element carries leaves -- `false` means this is byte-for-byte
+    /// the pre-existing ABI and every splat-aware path stays off.
+    fn splats(&self) -> bool {
+        self.slots.iter().any(RetSlot::splats)
+    }
+}
+
+/// The multi-return ABI of a tuple RETURN type: `Some` iff `ty` is a
+/// (non-nullable) tuple `(A, B, ...)`, which returns its slots as separate
+/// values instead of one heap table (slice 1,
+/// `docs/iterator-implementation-plan.md`). `None` for a non-tuple -- a
+/// `Nullable(Tuple)` included, since a multi-value boundary has no room for the
+/// null discriminant.
+fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleRetShape> {
+    let TypeExpr::Tuple { elements } = static_ty(ws, ty)? else {
+        return None;
+    };
+    let slots = elements
+        .into_iter()
+        .map(|el| ret_slot(ws, subst, ty.with_idx(el)))
+        .collect();
+    Some(TupleRetShape { slots })
+}
+
+fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    if let Some(shape) = nobox_sig_shape_spec(ws, subst, ty) {
+        return RetSlot::Leaves(shape);
+    }
+    match tuple_ret_shape(ws, subst, ty) {
+        Some(inner) if inner.splats() => RetSlot::Nested(inner),
+        _ => RetSlot::Opaque,
+    }
+}
+
+/// [`sig_value_shape_spec`] narrowed to `nobox` nominals -- the splat gate. A
+/// generic resolves through the substitution, so a `VecIter<NV2>.next` reaches
+/// the same answer a spelled-out `-> (bool, NV2)` does.
+fn nobox_sig_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
+    let nominal = match static_ty(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+        TypeExpr::Generic(var, _) => spec_nominal(subst, var)?,
+        TypeExpr::Nullable(inner) => {
+            let inner = ty.with_idx(inner);
+            let n = match static_ty(ws, inner)? {
+                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+                TypeExpr::Generic(var, _) => spec_nominal(subst, var)?,
+                _ => return None,
+            };
+            if !is_nobox_nominal(ws, n) {
+                return None;
+            }
+            return sig_shape_of_nullable_nominal(ws, n);
+        }
+        _ => return None,
+    };
+    if !is_nobox_nominal(ws, nominal) {
+        return None;
+    }
+    sig_shape_of_nominal(ws, nominal)
 }
 
 /// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE
@@ -2055,7 +2158,7 @@ pub fn lower_function_spec(
         in_unspliced_ctx: func.is_coroutine,
         param_shapes,
         ret_shape,
-        ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
+        ret_tuple: func.return_ty.and_then(|t| tuple_ret_shape(ws, subst, t)),
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
         cur_span: None,
@@ -2259,10 +2362,10 @@ struct Builder<'a> {
     param_shapes: Vec<Option<ValueShape>>,
     /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
     ret_shape: Option<ValueShape>,
-    /// `Some(n)` when the fn's return type is a tuple of arity `n` -- it returns
-    /// N Lua values (multi-return ABI), not one heap table. Set for named fns;
-    /// lambdas decide per-body at their own return site.
-    ret_tuple: Option<usize>,
+    /// `Some` when the fn's return type is a tuple -- it returns its slots as
+    /// separate values (multi-return ABI), not one heap table. Set for named
+    /// fns; lambdas decide per-body at their own return site.
+    ret_tuple: Option<TupleRetShape>,
     /// The fn's declared return type -- the expected type at a scalar `return`
     /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
     ret_ty: Option<TyId>,
@@ -2491,9 +2594,13 @@ impl Builder<'_> {
             let r = self.lower_expr_repr(e)?;
             return Ok(self.repr_to_leaves(&r, &shape));
         }
-        if let Some(n) = self.ret_tuple {
+        if let Some(shape) = self.ret_tuple.clone() {
+            if shape.splats() {
+                let r = self.lower_expr_repr(e)?;
+                return Ok(self.tuple_repr_to_slots(r, &shape));
+            }
             let v = self.lower_expr(e)?;
-            return Ok(self.tuple_return_operands(v, n));
+            return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
         let v = self.lower_expr(e)?;
         let v = match self.ret_ty {
@@ -2517,6 +2624,77 @@ impl Builder<'_> {
         (0..n)
             .map(|i| self.emit_cur(Inst::TupleIndex { base: v, index: i }))
             .collect()
+    }
+
+    /// Flatten a tuple repr to the slot values `shape` describes -- the tuple
+    /// analogue of [`Self::repr_to_leaves`]. A `Tuple` repr (a splatting call
+    /// forwarded straight out, or a tuple literal) yields its parts; anything
+    /// else is a packed tuple, so each element is read back with `TupleIndex`
+    /// and a `Leaves` slot is field-read off the box.
+    fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        let parts: Vec<ValueRepr> = match r {
+            ValueRepr::Tuple(parts) if parts.len() == shape.slots.len() => parts,
+            other => {
+                let base = self.pack(other);
+                (0..shape.slots.len())
+                    .map(|index| ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
+                    .collect()
+            }
+        };
+        let mut out = Vec::with_capacity(shape.slot_count());
+        for (slot, part) in shape.slots.iter().zip(parts) {
+            match slot {
+                RetSlot::Opaque => out.push(self.pack(part)),
+                // A BOXED source at a non-nullable splatting slot is the iterator
+                // protocol's "no element" placeholder (`return (false,
+                // phantom())`), which is nil -- field-reading it would fault, and
+                // the slot is dead anyway because the tuple's own flag guards it.
+                // The nullable spread already branches on nil, so borrow it and
+                // drop the presence leaf.
+                RetSlot::Leaves(vs)
+                    if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) =>
+                {
+                    let mut nullable = vs.clone();
+                    nullable.nullable = true;
+                    let leaves = self.repr_to_leaves(&part, &nullable);
+                    out.extend(leaves.into_iter().skip(1));
+                }
+                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves(&part, vs)),
+                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)),
+            }
+        }
+        out
+    }
+
+    /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
+    /// inverse of [`Self::tuple_repr_to_slots`], used at a call site to hand a
+    /// destructure its elements without ever boxing a `nobox` one.
+    fn tuple_from_slots(
+        &mut self,
+        shape: &TupleRetShape,
+        slots: &[Idx<Inst>],
+        idx: &mut usize,
+    ) -> ValueRepr {
+        let parts = shape
+            .slots
+            .clone()
+            .iter()
+            .map(|slot| self.slot_repr(slot, slots, idx))
+            .collect();
+        ValueRepr::Tuple(parts)
+    }
+
+    /// One element of [`Self::tuple_from_slots`], consuming its slots from `*idx`.
+    fn slot_repr(&mut self, slot: &RetSlot, slots: &[Idx<Inst>], idx: &mut usize) -> ValueRepr {
+        match slot {
+            RetSlot::Opaque => {
+                let v = slots[*idx];
+                *idx += 1;
+                ValueRepr::Scalar(v)
+            }
+            RetSlot::Leaves(vs) => self.rebuild_from_leaves(vs, slots, idx),
+            RetSlot::Nested(inner) => self.tuple_from_slots(inner, slots, idx),
+        }
     }
 
     /// Lower a statement sequence into the current block. Returns `true` if a
@@ -2819,8 +2997,16 @@ impl Builder<'_> {
                 // `let (a, b) = e` — destructure via TupleIndex into a cell per
                 // leaf (the same machinery `for (k,v)` uses).
                 Statement::LetTuple { vars, value } => {
-                    let v = self.lower_expr(value)?;
-                    self.bind_for_pattern(&vars, v);
+                    match self.expr_tuple_shape(value).filter(TupleRetShape::splats) {
+                        Some(shape) => {
+                            let r = self.lower_expr_repr(value)?;
+                            self.bind_tuple_repr(&vars, &shape, r);
+                        }
+                        None => {
+                            let v = self.lower_expr(value)?;
+                            self.bind_for_pattern(&vars, v);
+                        }
+                    }
                 }
                 // `let Wrapper(x) = e` — a transparent newtype's runtime value IS
                 // the inner, so `x` binds directly to the value.
@@ -3295,7 +3481,7 @@ impl Builder<'_> {
                 // so an indirect call site can capture them (multi-return ABI); the
                 // enclosing value-struct `ret_shape` never applies (a lambda is
                 // called through a boxed fn-value). Save/restore around the body.
-                let saved_ret_tuple = self.ret_tuple;
+                let saved_ret_tuple = self.ret_tuple.take();
                 let saved_ret_shape = self.ret_shape.take();
                 // Isolate the defer state, like `lower_nested_fn`. A lambda body
                 // is its OWN fn scope: bone desugars `() => e` to a block with
@@ -3316,14 +3502,27 @@ impl Builder<'_> {
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
                 let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
-                self.ret_tuple = self.lambda_ret_tuple_arity(e);
-                let v = self.lower_expr(body)?;
-                if self.is_open() {
-                    let leaves = match self.ret_tuple {
-                        Some(n) => self.tuple_return_operands(v, n),
-                        None => vec![v],
-                    };
-                    self.f.set_term(self.cur, Term::Return(leaves));
+                self.ret_tuple = self.lambda_ret_tuple_shape(e);
+                match self.ret_tuple.clone() {
+                    // A splatting tuple return needs the body as a repr, so a
+                    // `nobox` element reaches the wire as leaves.
+                    Some(shape) if shape.splats() => {
+                        let r = self.lower_expr_repr(body)?;
+                        if self.is_open() {
+                            let leaves = self.tuple_repr_to_slots(r, &shape);
+                            self.f.set_term(self.cur, Term::Return(leaves));
+                        }
+                    }
+                    other => {
+                        let v = self.lower_expr(body)?;
+                        if self.is_open() {
+                            let leaves = match other {
+                                Some(shape) => self.tuple_return_operands(v, shape.slots.len()),
+                                None => vec![v],
+                            };
+                            self.f.set_term(self.cur, Term::Return(leaves));
+                        }
+                    }
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
@@ -3845,8 +4044,8 @@ impl Builder<'_> {
             for a in args {
                 argv.push(self.lower_expr(a)?);
             }
-            let arity = self.peeled_tuple_arity(e);
-            self.emit_call_value_n(arity, fieldv, argv)
+            let shape = self.peeled_tuple_shape(e);
+            self.emit_call_value_n(shape, fieldv, argv)
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             let func = self.resolve_funcref(e, method)?;
@@ -3863,9 +4062,9 @@ impl Builder<'_> {
                 // A tuple-returning method splats N values; capture + pack into
                 // the single (boxed, nullable) safe-nav result.
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
-                match ret_ty.and_then(|t| tuple_arity(self.ws, t)) {
-                    Some(n) => {
-                        let r = self.emit_tuple_call(func, argv, n);
+                match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
+                    Some(shape) => {
+                        let r = self.emit_tuple_call(func, argv, &shape);
                         self.pack(r)
                     }
                     None => self.emit_cur(Inst::Call { func, args: argv }),
@@ -4483,7 +4682,10 @@ impl Builder<'_> {
         let key = spec.as_ref().map(|(k, _)| k.clone());
         let ret_tuple = self.ws.module(func.module).functions[func.func]
             .return_ty
-            .and_then(|t| tuple_arity(self.ws, t));
+            .and_then(|t| tuple_ret_shape(self.ws, subst, t));
+        if let Some(shape) = &ret_tuple {
+            self.reject_nobox_opaque_tuple_return(e, func, shape)?;
+        }
         let uses_scalar_abi = fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst);
         if !uses_scalar_abi {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
@@ -4502,12 +4704,12 @@ impl Builder<'_> {
                     })
                     .collect::<Result<_, CompilerError>>()?
             };
-            if let Some(n) = ret_tuple {
+            if let Some(shape) = &ret_tuple {
                 // A specialized generic returning a tuple is out of v0 scope: the
                 // call inst is buried inside the MakeTuple, so no key is attached
                 // and it falls back to the shared snapshot (still correct, just not
                 // specialized). `key` is intentionally unused here.
-                return Ok(self.emit_tuple_call_tree(func, args, n, tree));
+                return Ok(self.emit_tuple_call_tree(func, args, shape, tree));
             }
             let call = self.emit_cur(Inst::Call { func, args });
             if let Some(t) = tree {
@@ -4539,8 +4741,8 @@ impl Builder<'_> {
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
-            None => match ret_tuple {
-                Some(n) => Ok(self.emit_tuple_call_tree(func, args, n, tree)),
+            None => match &ret_tuple {
+                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, tree)),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
                     if let Some(t) = tree {
@@ -4556,11 +4758,14 @@ impl Builder<'_> {
     }
 
     /// A direct call to a tuple-returning fn under the multi-return ABI: the
-    /// callee returns N values, captured into N dest cells via [`Inst::CallMulti`].
-    /// The result value is `MakeTuple(loads)` -- a boxed use materializes the
-    /// table (same as the old ABI), a destructure elides it (`bind_for_pattern`).
-    fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, n: usize) -> ValueRepr {
-        self.emit_tuple_call_tree(func, args, n, None)
+    /// callee returns its slots, captured into that many dest cells via
+    /// [`Inst::CallMulti`]. The result value is `MakeTuple(loads)` -- a boxed use
+    /// materializes the table (same as the old ABI), a destructure elides it
+    /// (`bind_for_pattern`). When the shape splats, the result is instead a
+    /// `Tuple` repr whose splatting elements are Groups rebuilt from their
+    /// leaves, so a `nobox` element never becomes a box on the way to a bind.
+    fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, shape: &TupleRetShape) -> ValueRepr {
+        self.emit_tuple_call_tree(func, args, shape, None)
     }
 
     /// [`Self::emit_tuple_call`] recording an `Iterator`-bound resolution tree
@@ -4570,16 +4775,28 @@ impl Builder<'_> {
         &mut self,
         func: FuncRef,
         args: Vec<Idx<Inst>>,
-        n: usize,
+        shape: &TupleRetShape,
         tree: Option<bone_semantic::prelude::BoundTree>,
     ) -> ValueRepr {
-        let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        let dests: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
         if let Some(t) = tree {
             self.f.bound_trees.insert(call, t);
         }
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-        ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads)))
+        self.tuple_result(shape, &loads)
+    }
+
+    /// The call-site result for a captured tuple return: the plain
+    /// `MakeTuple(slots)` when nothing splats, else the `Tuple` repr rebuilt
+    /// from the slots.
+    fn tuple_result(&mut self, shape: &TupleRetShape, slots: &[Idx<Inst>]) -> ValueRepr {
+        if !shape.splats() {
+            return ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(slots.to_vec())));
+        }
+        let mut idx = 0;
+        self.tuple_from_slots(shape, slots, &mut idx)
     }
 
     /// An indirect call `callee(args)`. If the call's result type is a tuple, the
@@ -4591,19 +4808,26 @@ impl Builder<'_> {
     /// call's STATIC type, so direct and indirect callees of the same fn-type
     /// agree with no callee-identity analysis.
     fn emit_call_value(&mut self, e: Idx<Expr>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
-        self.emit_call_value_n(self.expr_tuple_arity(e), callee, args)
+        self.emit_call_value_n(self.expr_tuple_shape(e), callee, args)
     }
 
-    /// [`Self::emit_call_value`] with an explicit tuple arity (the safe-nav call
-    /// paths pass the nil-peeled arity, since their expr type is `(..)?`).
-    fn emit_call_value_n(&mut self, arity: Option<usize>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
-        match arity {
-            Some(n) => {
-                let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+    /// [`Self::emit_call_value`] with an explicit tuple shape (the safe-nav call
+    /// paths pass the nil-peeled shape, since their expr type is `(..)?`).
+    fn emit_call_value_n(
+        &mut self,
+        shape: Option<TupleRetShape>,
+        callee: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+    ) -> Idx<Inst> {
+        match shape {
+            Some(shape) => {
+                let dests: Vec<Idx<Cell>> =
+                    (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
                 self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args });
                 let loads: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-                self.emit_cur(Inst::MakeTuple(loads))
+                let r = self.tuple_result(&shape, &loads);
+                self.pack(r)
             }
             None => self.emit_cur(Inst::CallValue { callee, args }),
         }
@@ -4756,6 +4980,12 @@ impl Builder<'_> {
     fn pack(&mut self, r: ValueRepr) -> Idx<Inst> {
         match r {
             ValueRepr::Scalar(v) => v,
+            // A splatting tuple's box. Its `nobox` elements pack too, which is
+            // exactly how a whole-tuple use reaches the guarantee's rejection.
+            ValueRepr::Tuple(parts) => {
+                let vs = parts.into_iter().map(|p| self.pack(p)).collect();
+                self.emit_cur(Inst::MakeTuple(vs))
+            }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
             // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
             ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
@@ -4828,6 +5058,12 @@ impl Builder<'_> {
     /// ABI). A boxed `Scalar` (e.g. a global cdata / if-join) is field-read.
     fn repr_to_leaves(&mut self, r: &ValueRepr, shape: &ValueShape) -> Vec<Idx<Inst>> {
         match r {
+            // A tuple at a value-shaped sink is a boxed source: pack and
+            // field-read, the `Scalar` treatment.
+            ValueRepr::Tuple(_) => {
+                let v = self.pack(r.clone());
+                self.repr_to_leaves(&ValueRepr::Scalar(v), shape)
+            }
             ValueRepr::Group {
                 parts, present, ..
             } => {
@@ -5497,6 +5733,16 @@ impl Builder<'_> {
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         match self.body.expr_arena[e].clone() {
+            // A tuple literal whose type splats stays a `Tuple` repr, so a
+            // `nobox` element reaches the return boundary as leaves instead of
+            // being packed into the table first.
+            Expr::Tuple(elems) if self.expr_tuple_shape(e).is_some_and(|s| s.splats()) => {
+                let parts = elems
+                    .into_iter()
+                    .map(|el| self.lower_expr_repr(el))
+                    .collect::<Result<_, CompilerError>>()?;
+                Ok(ValueRepr::Tuple(parts))
+            }
             // A scalarized value param: rebuild the unboxed Group from leaf cells.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
@@ -6293,6 +6539,10 @@ impl Builder<'_> {
                     },
                 )?,
                 ValueRepr::Scalar(value) => self.stringify_struct_leaf(field.ty, value)?,
+                part @ ValueRepr::Tuple(_) => {
+                    let value = self.pack(part);
+                    self.stringify_struct_leaf(field.ty, value)?
+                }
             };
             out = self.emit_cur(Inst::StringConcat(out, rendered));
         }
@@ -6737,7 +6987,8 @@ impl Builder<'_> {
                             ValueRepr::Group { present: None, .. } => {
                                 self.emit_cur(Inst::Const(Lit::Bool(true)))
                             }
-                            ValueRepr::Scalar(value) => {
+                            other => {
+                                let value = self.pack(other);
                                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                                 self.emit_cur(Inst::NotEq(value, nil))
                             }
@@ -6754,7 +7005,7 @@ impl Builder<'_> {
                                 self.pack(parts.into_iter().next().expect("flat enum group has a tag leaf"))
                             }
                             // a boxed flat enum: nil-or-table, compare directly.
-                            ValueRepr::Scalar(s) => s,
+                            other => self.pack(other),
                         };
                         let nil = self.emit_cur(Inst::Const(Lit::Nil));
                         return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
@@ -7158,22 +7409,40 @@ impl Builder<'_> {
         let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
         self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
 
-        // next returns `(bool, E)` / `(bool, A, B, ...)`: arity = 1 + element
-        // leaves. A placeholder next is always arity 2 (bound conformance
-        // requires exactly `(bool, E)`).
-        let n = match &info.next {
-            BoundNext::Concrete { func: (m, f), .. } => self
-                .ws
-                .module(*m)
-                .functions[*f]
-                .return_ty
-                .and_then(|t| tuple_arity(self.ws, t))
-                .ok_or_else(|| gap("for-iter `next` must return a tuple"))?,
-            BoundNext::CallerGeneric(_) => 2,
+        // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
+        // the SPECIALIZATION the emitted call will carry, not the caller's own:
+        // when the spec is dropped the call reaches the shared generic body,
+        // whose `E` is unbound and therefore never splats -- so the two sides
+        // agree about how many values come back.
+        let spec = match &info.next {
+            BoundNext::Concrete { func: (m, f), next_generics, .. } => self
+                .next_call_spec(FuncRef { module: *m, func: *f }, next_generics)
+                .filter(|k| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)),
+            BoundNext::CallerGeneric(_) => None,
         };
-        if n < 2 {
+        // A placeholder next is always `(bool, E)` with `E` opaque (bound
+        // conformance requires exactly that shape, and the placeholder body is
+        // substituted later).
+        let ret_shape = match &info.next {
+            BoundNext::Concrete { func: (m, f), .. } => {
+                let func = FuncRef { module: *m, func: *f };
+                let subst = spec
+                    .as_ref()
+                    .map(|k| spec_subst_from_key(self.ws, func, k))
+                    .unwrap_or_default();
+                self.ws.module(*m).functions[*f]
+                    .return_ty
+                    .and_then(|t| tuple_ret_shape(self.ws, &subst, t))
+                    .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
+            }
+            BoundNext::CallerGeneric(_) => TupleRetShape {
+                slots: vec![RetSlot::Opaque, RetSlot::Opaque],
+            },
+        };
+        if ret_shape.slots.len() < 2 {
             return Err(gap("for-iter `next` must return `(bool, E)`"));
         }
+        let n = ret_shape.slot_count();
 
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
@@ -7186,7 +7455,7 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub, next_generics } => {
+            BoundNext::Concrete { func: (m, f), sub, .. } => {
                 let func = FuncRef { module: *m, func: *f };
                 // The synthesized `next` call has no expr to key
                 // `call_generic_bindings` by, so its instantiation comes from
@@ -7194,9 +7463,6 @@ impl Builder<'_> {
                 // splices the SHARED generic snapshot, whose element access was
                 // lowered against the boxed representation -- which reads a
                 // `_data` that column storage does not have.
-                let spec = self
-                    .next_call_spec(func, next_generics)
-                    .filter(|k| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k));
                 let call = self.emit_cur(Inst::CallMulti {
                     dests: dests.clone(),
                     func,
@@ -7220,18 +7486,19 @@ impl Builder<'_> {
         let ok = self.emit_cur(Inst::Load(dests[0]));
         self.f.set_term(self.cur, Term::Branch { cond: ok, then_bb: body_bb, else_bb: exit });
 
-        // body: bind the pattern to the element leaves. A single element binds
-        // directly; multiple (`next -> (bool, A, B)`) pack into a MakeTuple that
-        // `bind_for_pattern` elides against a matching tuple pattern (no alloc).
+        // body: bind the pattern to the element slots. One element binds
+        // directly (its leaves, if it splats); multiple (`next -> (bool, A, B)`)
+        // are a tuple `bind_pattern_slot` destructures against a matching tuple
+        // pattern (no alloc).
         self.cur = body_bb;
-        let elem_val = if n == 2 {
-            self.emit_cur(Inst::Load(dests[1]))
-        } else {
-            let loads: Vec<Idx<Inst>> =
-                dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-            self.emit_cur(Inst::MakeTuple(loads))
+        let loads: Vec<Idx<Inst>> =
+            dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let elem_slot = match &ret_shape.slots[1..] {
+            [one] => one.clone(),
+            rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec() }),
         };
-        self.bind_for_pattern(vars, elem_val);
+        let mut idx = 0;
+        self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx);
         self.loop_targets.push((header, exit));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
@@ -7757,6 +8024,78 @@ impl Builder<'_> {
         }
     }
 
+    /// [`Self::bind_for_pattern`] against a SPLATTING tuple's flat slot values.
+    /// A `Leaves` slot binds its leaves into `group_binds` cells -- the same form
+    /// a scalarized value param takes -- so reading the binding never rebuilds a
+    /// box. Any pattern/slot pairing that does not line up (a single binding for
+    /// a whole nested tuple, say) rebuilds and falls back to the boxed bind,
+    /// which is where a whole-value use of a `nobox` element meets the
+    /// guarantee's rejection.
+    fn bind_pattern_slot(
+        &mut self,
+        vars: &BindingPattern,
+        slot: &RetSlot,
+        values: &[Idx<Inst>],
+        idx: &mut usize,
+    ) {
+        match (vars, slot) {
+            (BindingPattern::Leaf(b), RetSlot::Leaves(shape)) => {
+                let n = shape.leaf_count();
+                let leaves = values[*idx..*idx + n].to_vec();
+                *idx += n;
+                self.bind_leaves(*b, &leaves, shape.clone());
+            }
+            (BindingPattern::Tuple(subs), RetSlot::Nested(inner))
+                if subs.len() == inner.slots.len() =>
+            {
+                for (sub, s) in subs.iter().zip(inner.slots.clone()) {
+                    self.bind_pattern_slot(sub, &s, values, idx);
+                }
+            }
+            (vars, slot) => {
+                let r = self.slot_repr(slot, values, idx);
+                let v = self.pack(r);
+                self.bind_for_pattern(vars, v);
+            }
+        }
+    }
+
+    /// Bind `b` to a value's LEAVES: one cell per leaf, registered in
+    /// `group_binds`. The single form for "this binding is a scalarized value",
+    /// shared by `if let` and the splatting tuple destructures.
+    fn bind_leaves(&mut self, b: Idx<BindingInfo>, leaves: &[Idx<Inst>], shape: ValueShape) {
+        let bname = self.body.binding_arena[b].name;
+        let cells: Vec<Idx<Cell>> = leaves
+            .iter()
+            .enumerate()
+            .map(|(li, &value)| {
+                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
+                self.emit_cur(Inst::Store { cell: c, value });
+                c
+            })
+            .collect();
+        self.group_binds.insert(raw(b), (cells, shape));
+    }
+
+    /// Destructure a splatting tuple into `vars`. The elements arrive as flat
+    /// slots, so an element that is a `nobox` value binds its leaves directly.
+    fn bind_tuple_repr(&mut self, vars: &BindingPattern, shape: &TupleRetShape, r: ValueRepr) {
+        let values = self.tuple_repr_to_slots(r, shape);
+        let mut idx = 0;
+        match vars {
+            BindingPattern::Tuple(subs) if subs.len() == shape.slots.len() => {
+                for (sub, slot) in subs.iter().zip(shape.slots.clone()) {
+                    self.bind_pattern_slot(sub, &slot, &values, &mut idx);
+                }
+            }
+            _ => {
+                let r = self.tuple_from_slots(shape, &values, &mut idx);
+                let v = self.pack(r);
+                self.bind_for_pattern(vars, v);
+            }
+        }
+    }
+
     /// `match scrut { pat => body, ... }` as a value. Each arm is a test block
     /// (branch to its body on match, else to the next arm) and a body block that
     /// binds, checks the guard, then stores its value into a result **cell** and
@@ -8256,17 +8595,7 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
 
         self.cur = then_bb;
-        let bname = self.body.binding_arena[b].name;
-        let cells: Vec<Idx<Cell>> = values
-            .iter()
-            .enumerate()
-            .map(|(li, &value)| {
-                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
-                self.emit_cur(Inst::Store { cell: c, value });
-                c
-            })
-            .collect();
-        self.group_binds.insert(raw(b), (cells, shape));
+        self.bind_leaves(b, &values, shape);
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 
@@ -8751,6 +9080,10 @@ impl Builder<'_> {
     fn materialize_repr(&mut self, repr: ValueRepr) -> Idx<Inst> {
         match repr {
             ValueRepr::Scalar(value) => value,
+            ValueRepr::Tuple(parts) => {
+                let vs = parts.into_iter().map(|p| self.materialize_repr(p)).collect();
+                self.emit_cur(Inst::MakeTuple(vs))
+            }
             ValueRepr::Group { name, parts, .. } => {
                 let names = struct_field_names(self.ws, name);
                 let fields = parts
@@ -9875,6 +10208,38 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// The return-position companion of [`Self::reject_nobox_boxed_call_args`]:
+    /// a `nobox` element only rides a tuple return as leaves if skull emits the
+    /// callee's body. An `extern`, or an `inline(lua)` body that has not opted
+    /// in with `@scalar_abi`, writes its own `return` -- so the call site would
+    /// read leaves the body never produced. That is a boxed boundary; reject it
+    /// where an argument would be rejected.
+    fn reject_nobox_opaque_tuple_return(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        shape: &TupleRetShape,
+    ) -> Result<(), CompilerError> {
+        if self.scx.values_first_class || !shape.splats() {
+            return Ok(());
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        let opaque = callee.is_extern
+            || (callee.inline_body.is_some()
+                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        if !opaque {
+            return Ok(());
+        }
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "nobox value cannot cross the boxed tuple return of `{}` \
+                 (an `inline(lua)` body must opt in with `@scalar_abi` and return the leaves)",
+                callee.name
+            ),
+        ))
+    }
+
     fn is_explicit_materialize_call(&self, expr: Idx<Expr>) -> bool {
         let Expr::Call {
             callee: Callee::Unresolved { name, .. },
@@ -10299,28 +10664,67 @@ impl Builder<'_> {
         self.resolve_ty(ty)
     }
 
-    /// `Some(n)` iff `e`'s inferred type is a (non-nullable) tuple of arity `n`.
-    /// Used to route a tuple result across a call boundary (the call expr's own
-    /// type IS the callee's return type, so direct and INDIRECT calls agree).
+    /// `Some` iff `e`'s inferred type is a (non-nullable) tuple. Used to route a
+    /// tuple result across a call boundary (the call expr's own type IS the
+    /// callee's return type, so direct and INDIRECT calls agree).
     /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
     /// bare tuple and get mis-splatted.
-    fn expr_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
-        self.tyid_tuple_arity(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
+    fn expr_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
     }
 
-    /// `Some(n)` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple of
-    /// arity `n` -- the lambda body then splats N values so an indirect call site
-    /// captures them (multi-return ABI). Read off the lambda's inferred `fn(..) ->
-    /// (..)` type so it agrees with the call site's `expr_tuple_arity`.
-    fn lambda_ret_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+    /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
+    /// the lambda body then splats its slots so an indirect call site captures
+    /// them (multi-return ABI). Read off the lambda's inferred `fn(..) -> (..)`
+    /// type so it agrees with the call site's `expr_tuple_shape`.
+    fn lambda_ret_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let TypeExpr::Function { ret, .. } = self.ty_node(ty)? else { return None };
-        self.tyid_tuple_arity(self.resolve_tyid(ty.with_idx(ret))?)
+        self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(ret))?)
     }
 
-    fn tyid_tuple_arity(&self, ty: TyId) -> Option<usize> {
+    /// [`tuple_ret_shape`] for a type that may live in the BODY's inference arena
+    /// (a call expression's own type, a lambda's return) rather than the
+    /// workspace one. `ty_node` applies the enclosing specialization
+    /// substitution, so a generic element resolves to the same slot the
+    /// signature-side walker sees.
+    fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
+        let ty = self.resolve_tyid(ty)?;
+        let TypeExpr::Tuple { elements } = self.ty_node(ty)? else { return None };
+        let slots = elements
+            .into_iter()
+            .map(|el| self.body_ret_slot(ty.with_idx(el)))
+            .collect();
+        Some(TupleRetShape { slots })
+    }
+
+    fn body_ret_slot(&self, ty: TyId) -> RetSlot {
+        if let Some(shape) = self.body_nobox_shape(ty) {
+            return RetSlot::Leaves(shape);
+        }
+        match self.tyid_tuple_ret_shape(ty) {
+            Some(inner) if inner.splats() => RetSlot::Nested(inner),
+            _ => RetSlot::Opaque,
+        }
+    }
+
+    /// [`Self::body_sig_value_shape`] narrowed to `nobox` nominals -- the splat
+    /// gate, mirroring [`nobox_sig_shape_spec`] on the body arena.
+    fn body_nobox_shape(&self, ty: TyId) -> Option<ValueShape> {
+        let ty = self.resolve_tyid(ty)?;
         match self.ty_node(ty)? {
-            TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.is_nobox_struct(n) => {
+                sig_shape_of_nominal(self.ws, n)
+            }
+            TypeExpr::Nullable(inner) => {
+                let inner = self.resolve_tyid(ty.with_idx(inner))?;
+                match self.ty_node(inner)? {
+                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.is_nobox_struct(n) => {
+                        sig_shape_of_nullable_nominal(self.ws, n)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -10349,16 +10753,16 @@ impl Builder<'_> {
         r.map_err(|msg| CompilerError::new_with_label(span, msg))
     }
 
-    /// `Some(n)` iff `e`'s type is a tuple OR a `(tuple)?` of arity `n` -- the
-    /// nil-peeled form for safe-nav calls, whose result type is nullable but whose
-    /// callee still splats the inner tuple.
-    fn peeled_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+    /// `Some` iff `e`'s type is a tuple OR a `(tuple)?` -- the nil-peeled form
+    /// for safe-nav calls, whose result type is nullable but whose callee still
+    /// splats the inner tuple.
+    fn peeled_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let inner = match self.ty_node(ty)? {
             TypeExpr::Nullable(i) => self.resolve_tyid(ty.with_idx(i))?,
             _ => ty,
         };
-        self.tyid_tuple_arity(inner)
+        self.tyid_tuple_ret_shape(inner)
     }
 
     fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
