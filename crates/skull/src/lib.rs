@@ -585,7 +585,7 @@ fn value_struct_defs(
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    let checks = value_leaf_layout_checks(ws, &emitted);
+    let checks = value_leaf_layout_checks(ws, &emitted)?;
     Ok((format!("ffi.cdef[[\n{}]]\n{}{}", typedefs, ctors, checks), emitted, gc))
 }
 
@@ -599,18 +599,27 @@ fn value_struct_defs(
 /// read and write the wrong address: silent memory corruption, not a failure.
 /// So the two are cross-checked against `ffi.offsetof` composed along each leaf's
 /// field chain, and a mismatch aborts loudly at load.
+///
+/// Every name here is already in the FFI-clean emitted set, so a missing layout
+/// (or a disagreement between the two leaf walkers) is an INVARIANT FAILURE, not
+/// an optional check to skip: skipping would emit a type whose offsets nothing
+/// validated, and leaf addressing would then read and write unvalidated
+/// addresses. Rejected with the type named.
 fn value_leaf_layout_checks(
     ws: &Workspace,
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
-) -> String {
+) -> Result<String, CompilerError> {
     use std::fmt::Write as _;
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
     for name in names {
-        let Some((leaves, size, _align)) = skull_mir::lower::value_leaf_layout(ws, name) else {
-            continue;
-        };
+        let (leaves, size, _align) = skull_mir::lower::value_leaf_layout_checked(ws, name)
+            .map_err(|e| {
+                CompilerError::new_no_location(format!(
+                    "skull: cannot validate the C layout of FFI-clean value struct `{name}`: {e}"
+                ))
+            })?;
         let _ = writeln!(
             out,
             "if ffi.sizeof(\"{name}\") ~= {size} then error(\"skull layout drift: \
@@ -627,7 +636,7 @@ fn value_leaf_layout_checks(
             );
         }
     }
-    out
+    Ok(out)
 }
 
 /// Emit the table-repr materialization defs for every GC-carrying value struct:

@@ -177,6 +177,13 @@ fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
     }
 }
 
+/// [`value_leaf_paths`] by type name -- the `ValueShape`-side leaf order, for
+/// callers outside this module that need to compare it against a layout walk
+/// (`value_shape` itself is internal).
+pub fn value_leaf_paths_of(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
+    Some(value_leaf_paths(&value_shape(ws, name)?))
+}
+
 /// One primitive leaf of an FFI-clean value struct's C layout: its dotted path
 /// (the same key [`value_leaf_paths`] produces), its C type, and its BYTE offset
 /// from the start of the struct.
@@ -213,14 +220,48 @@ fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
 /// offset against `ffi.offsetof` at run time, because a divergence here is
 /// silent memory corruption rather than a failure.
 ///
-/// The traversal mirrors [`value_shape_rec`] arm for arm, so the leaf ORDER is
-/// identical to [`value_leaf_paths`] by construction -- leaves are matched to
-/// offsets positionally, and a divergence would write every leaf to the wrong
-/// address. `value_leaf_layout_agrees_with_leaf_paths` pins it.
+/// The traversal mirrors [`value_shape_rec`] arm for arm so the leaf ORDER
+/// matches [`value_leaf_paths`] -- but that is a property of two separate
+/// walkers staying in step, NOT something the code enforces. Leaves are matched
+/// to offsets POSITIONALLY, so if they ever drift, every runtime `ffi.offsetof`
+/// assertion still passes (each path/offset pair is self-consistent) while repr
+/// leaves are written to the wrong addresses. Use
+/// [`value_leaf_layout_checked`], which verifies the agreement, at any site that
+/// consumes the offsets.
 pub fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
     let mut out = Vec::new();
     let (size, align) = layout_rec(ws, name, "", 0, "", &mut out, &mut Vec::new())?;
     Some((out, size, align))
+}
+
+/// [`value_leaf_layout`] with the two-walker agreement enforced: the layout's
+/// leaf path sequence must equal [`value_leaf_paths`] over the same type, which
+/// is the invariant that lets leaves be matched to offsets positionally.
+///
+/// `Err` on either a missing layout or a disagreement. Both are invariant
+/// failures for a type that reached an offset-consuming site, not conditions to
+/// skip past -- skipping would let leaf addressing run on unvalidated offsets,
+/// which is silent memory corruption rather than a failure.
+pub fn value_leaf_layout_checked(
+    ws: &Workspace,
+    name: Ustr,
+) -> Result<(Vec<LeafSlot>, usize, usize), String> {
+    let Some((leaves, size, align)) = value_leaf_layout(ws, name) else {
+        return Err(format!("`{name}` has no C leaf layout"));
+    };
+    let Some(shape) = value_shape(ws, name) else {
+        return Err(format!("`{name}` has a C leaf layout but no value shape"));
+    };
+    let want = value_leaf_paths(&shape);
+    let got: Vec<Ustr> = leaves.iter().map(|l| l.path).collect();
+    if want != got {
+        return Err(format!(
+            "leaf walkers disagree for `{name}`: value_leaf_paths {want:?} vs \
+             value_leaf_layout {got:?} -- leaves are matched to offsets by \
+             position, so this would write every leaf to the wrong address"
+        ));
+    }
+    Ok((leaves, size, align))
 }
 
 /// Append `name`'s leaves at `base` (a byte offset), returning its `(size, align)`.

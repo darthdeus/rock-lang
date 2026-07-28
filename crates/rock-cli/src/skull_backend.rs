@@ -1646,17 +1646,33 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
 enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
     Output(String),
-    /// Runtime error, lua load failure, spawn failure, or timeout.
-    Errored,
+    /// Runtime error, lua load failure, spawn failure, or timeout -- carrying
+    /// the diagnostic. A test that pins a SPECIFIC failure has to be able to
+    /// tell it from an unrelated load error or a timeout; discarding the message
+    /// made every `Errored` arm accept any failure as proof.
+    Errored(String),
+}
+
+#[cfg(test)]
+impl ExecOutcome {
+    /// The failure diagnostic, or a panic naming `ctx` if the run succeeded.
+    fn expect_errored(self, ctx: &str) -> String {
+        match self {
+            ExecOutcome::Errored(d) => d,
+            ExecOutcome::Output(o) => {
+                panic!("{ctx}: expected a failure, got clean output:\n{}", normalize_stdout(&o))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 fn exec_lua(program: &str) -> ExecOutcome {
     let timeout = Some(Duration::from_secs(15));
     match rock_host::lua_runner::run_lua_code_with_timeout(program, timeout) {
-        Ok(out) if out.contains("STDERR:") => ExecOutcome::Errored,
+        Ok(out) if out.contains("STDERR:") => ExecOutcome::Errored(out),
         Ok(out) => ExecOutcome::Output(out),
-        Err(_) => ExecOutcome::Errored,
+        Err(e) => ExecOutcome::Errored(format!("lua runner failed: {e}")),
     }
 }
 
@@ -2048,13 +2064,13 @@ mod overlay_runtime_tests {
                      --- composed ---\n{nc}\n--- fresh ---\n{nf}"
                 );
             }
-            (ExecOutcome::Errored, ExecOutcome::Errored) => {
+            (ExecOutcome::Errored(_), ExecOutcome::Errored(_)) => {
                 panic!("{ctx}: BOTH sides errored -- harness bug (bad source or missing stub)");
             }
-            (ExecOutcome::Output(_), ExecOutcome::Errored) => {
+            (ExecOutcome::Output(_), ExecOutcome::Errored(_)) => {
                 panic!("{ctx}: composed (baseline+overlay) runs but fresh full build errors")
             }
-            (ExecOutcome::Errored, ExecOutcome::Output(_)) => {
+            (ExecOutcome::Errored(_), ExecOutcome::Output(_)) => {
                 panic!("{ctx}: fresh full build runs but composed (baseline+overlay) errors")
             }
         }
@@ -2262,7 +2278,7 @@ mod overlay_runtime_tests {
                 "5\n10",
                 "warm baseline prints 5; after the overlay reload the static re-inits to 10",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
         }
     }
 
@@ -2296,7 +2312,7 @@ mod overlay_runtime_tests {
                 "5\n10",
                 "nested-fn static must re-init on initializer edit through the overlay",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
         }
     }
 
@@ -2344,7 +2360,7 @@ mod overlay_runtime_tests {
                 "1\n2\n101\n102\n103\n104",
                 "reload1 re-inits to 100; reload2 (unrelated) must preserve, not re-reset",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlays run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlays run errored"),
         }
     }
 
@@ -2387,7 +2403,7 @@ mod overlay_runtime_tests {
                 "99\n99",
                 "unrelated edit must not reset the static: warmed 99 survives the reload",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
         }
     }
 
@@ -2690,12 +2706,12 @@ mod overlay_runtime_tests {
                     }
                 }
                 // Both error: out of scope (skull may not run this test standalone).
-                (ExecOutcome::Errored, ExecOutcome::Errored) => {}
-                (ExecOutcome::Output(_), ExecOutcome::Errored) => {
+                (ExecOutcome::Errored(_), ExecOutcome::Errored(_)) => {}
+                (ExecOutcome::Output(_), ExecOutcome::Errored(_)) => {
                     r.compared += 1;
                     r.divergences.push((file.to_string(), t.name.clone(), "composed runs, full errors".into()));
                 }
-                (ExecOutcome::Errored, ExecOutcome::Output(_)) => {
+                (ExecOutcome::Errored(_), ExecOutcome::Output(_)) => {
                     r.compared += 1;
                     r.divergences.push((file.to_string(), t.name.clone(), "overlay BREAKS a test the full build runs".into()));
                 }
@@ -2824,7 +2840,7 @@ mod overlay_runtime_tests {
         // Baseline: the registry runs the v0 body.
         match run_parts(&[&full0.lua, SIM_DRIVER]) {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1", "baseline frame should run the v0 system body"),
-            ExecOutcome::Errored => panic!("baseline fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("baseline fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
@@ -2881,7 +2897,7 @@ mod overlay_runtime_tests {
                 "1",
                 "without the rebind the registry must run the STALE body (this is the bug the rebind fixes)"
             ),
-            ExecOutcome::Errored => panic!("fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("fixture failed to run"),
         }
     }
 
@@ -2903,7 +2919,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1 2", "baseline co fn body"),
-            ExecOutcome::Errored => panic!("baseline coroutine fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("baseline coroutine fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -2962,7 +2978,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1 3", "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)"),
-            ExecOutcome::Errored => panic!("baseline flat-enum coroutine fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("baseline flat-enum coroutine fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
@@ -3046,7 +3062,7 @@ mod overlay_runtime_tests {
                 "1\n30\n100\n-1",
                 "live coroutine: v0 first yield (Tick=1), then v1 body across the reload (Pair=30, Done=100, done)"
             ),
-            ExecOutcome::Errored => panic!("live flat-enum coroutine reload fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("live flat-enum coroutine reload fixture failed to run"),
         }
     }
 
@@ -3111,7 +3127,7 @@ mod overlay_runtime_tests {
                 "7\n-1\n-1\n-1",
                 "a cell-shifting overlay must stamp-kill the live coroutine, not corrupt it"
             ),
-            ExecOutcome::Errored => panic!("cell-shift + live resume crashed -- the layout stamp regressed"),
+            ExecOutcome::Errored(_) => panic!("cell-shift + live resume crashed -- the layout stamp regressed"),
         }
     }
 
@@ -3163,7 +3179,7 @@ mod overlay_runtime_tests {
                 "1\n-1\n-1\n-1",
                 "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point"
             ),
-            ExecOutcome::Errored => panic!("yield-renumber + live resume errored (expected the clean kill output)"),
+            ExecOutcome::Errored(_) => panic!("yield-renumber + live resume errored (expected the clean kill output)"),
         }
     }
 
@@ -3213,7 +3229,7 @@ mod overlay_runtime_tests {
                 "1\n20\n-1",
                 "a live await chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)"
             ),
-            ExecOutcome::Errored => panic!("live await delegation reload fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("live await delegation reload fixture failed to run"),
         }
     }
 
@@ -3264,7 +3280,7 @@ mod overlay_runtime_tests {
                 "1\n-1\n1",
                 "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)"
             ),
-            ExecOutcome::Errored => panic!("stamp-kill inner-chain fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("stamp-kill inner-chain fixture failed to run"),
         }
     }
 
@@ -3313,7 +3329,7 @@ mod overlay_runtime_tests {
                 "7\n-1\nbusy:0",
                 "a stamp-killed coroutine must run its creation-time defers (invariant released, no soft-lock)"
             ),
-            ExecOutcome::Errored => panic!("stamp-kill defer fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("stamp-kill defer fixture failed to run"),
         }
     }
 
@@ -3442,7 +3458,7 @@ mod overlay_runtime_tests {
                 "7\ntrue",
                 "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)"
             ),
-            ExecOutcome::Errored => panic!("full-reload survival fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("full-reload survival fixture failed to run"),
         }
 
         // Resuming the survivor: the v1 step's layout stamp (yield channel
@@ -3466,7 +3482,7 @@ mod overlay_runtime_tests {
                 "7\ntrue\n-1",
                 "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it"
             ),
-            ExecOutcome::Errored => panic!("full-reload survivor resume crashed -- the layout stamp regressed"),
+            ExecOutcome::Errored(_) => panic!("full-reload survivor resume crashed -- the layout stamp regressed"),
         }
     }
 
@@ -3532,7 +3548,7 @@ mod overlay_runtime_tests {
                 "10\ntrue",
                 "a live struct instance must survive the full re-dofile WITHOUT the added field"
             ),
-            ExecOutcome::Errored => panic!("struct-shape survival fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("struct-shape survival fixture failed to run"),
         }
 
         // Corruption: the v1 reader assumes `armor: int` on an instance that
@@ -3547,7 +3563,7 @@ mod overlay_runtime_tests {
             "describe()",
         ]);
         match composed {
-            ExecOutcome::Errored => {} // the pinned corruption
+            ExecOutcome::Errored(_) => {} // the pinned corruption
             ExecOutcome::Output(o) => panic!(
                 "expected the recompiled reader to die on the nil-valued added field, got output:\n{}",
                 normalize_stdout(&o)
@@ -3601,7 +3617,7 @@ mod overlay_runtime_tests {
         let fresh = run_parts(&[&full0.lua, stub_for(&full0.lua), "store_p()", "show()"]);
         match fresh {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1,2"),
-            ExecOutcome::Errored => panic!("value-struct v0 fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("value-struct v0 fixture failed to run"),
         }
 
         // Composed: the v1 chunk re-cdefs P (silent no-op), then a FRESH
@@ -3629,14 +3645,17 @@ mod overlay_runtime_tests {
             "store_p()",
             "show()",
         ]);
-        match composed {
-            ExecOutcome::Errored => {} // the layout check caught the drift
-            ExecOutcome::Output(o) => panic!(
-                "a reordered value struct reloaded into a frozen ctype must be caught \
-                 by the leaf-layout check, not silently misassigned; got:\n{}",
-                normalize_stdout(&o)
-            ),
-        }
+        // Assert the SPECIFIC diagnostic: any-error-is-success would also pass on
+        // an unrelated load failure or a timeout, which is how a test like this
+        // rots into proving nothing.
+        let diag = composed.expect_errored(
+            "a reordered value struct reloaded into a frozen ctype must be caught by \
+             the leaf-layout check, not silently misassigned",
+        );
+        assert!(
+            diag.contains("skull layout drift") && diag.contains("P.y"),
+            "expected the leaf-layout drift diagnostic naming the moved field, got:\n{diag}"
+        );
     }
 
     /// A flat enum's DEFINITION change (here: a payload widening that adds a frame
@@ -3726,7 +3745,7 @@ mod overlay_runtime_tests {
                 "2",
                 "the @on_reload callback must fire on BOTH incremental reloads"
             ),
-            ExecOutcome::Errored => panic!("on_reload overlay fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("on_reload overlay fixture failed to run"),
         }
     }
 
@@ -3776,7 +3795,7 @@ mod overlay_runtime_tests {
                 "2",
                 "fire must run the EDITED @on_reload body (name-lookup), not the stale original"
             ),
-            ExecOutcome::Errored => panic!("on_reload body-edit fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("on_reload body-edit fixture failed to run"),
         }
     }
 
@@ -3921,7 +3940,7 @@ mod overlay_runtime_tests {
                 "12\n-1",
                 "a coroutine created after the reload runs the new hoisted lambda body (4*3=12)"
             ),
-            ExecOutcome::Errored => panic!("post-reload coroutine with hoisted lambda failed to run"),
+            ExecOutcome::Errored(_) => panic!("post-reload coroutine with hoisted lambda failed to run"),
         }
     }
 
@@ -3979,7 +3998,7 @@ mod overlay_runtime_tests {
                 "8\n8\n15\n-1",
                 "a pre-reload record is a stale fn snapshot (8), a post-reload record is fresh (15)"
             ),
-            ExecOutcome::Errored => panic!("live coroutine with stale lambda record failed to run"),
+            ExecOutcome::Errored(_) => panic!("live coroutine with stale lambda record failed to run"),
         }
     }
 
@@ -4047,7 +4066,7 @@ mod overlay_runtime_tests {
                 "7\n11\n-1",
                 "a layout-stable lambda-local edit keeps the live coroutine running (7 then 11)"
             ),
-            ExecOutcome::Errored => panic!("lambda-local edit scenario crashed instead of surviving"),
+            ExecOutcome::Errored(_) => panic!("lambda-local edit scenario crashed instead of surviving"),
         }
     }
 
@@ -4103,7 +4122,7 @@ mod overlay_runtime_tests {
                 "7\n-1\n-1",
                 "a co-fn-level local shift must stamp-kill the live coroutine cleanly"
             ),
-            ExecOutcome::Errored => panic!("co-fn local shift + live resume crashed instead of clean kill"),
+            ExecOutcome::Errored(_) => panic!("co-fn local shift + live resume crashed instead of clean kill"),
         }
     }
 }
