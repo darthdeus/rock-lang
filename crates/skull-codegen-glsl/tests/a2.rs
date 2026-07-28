@@ -830,3 +830,63 @@ fn reject_isampler_return() {
     "#;
     reject_pipeline(src, "vt", "fr", "sampler");
 }
+
+// --- Attribute locations are RECORDED, not invented while printing ----------
+// (docs/shader-binding-layout-plan.md P1). Emission consumes the locations
+// classification computed; it does not re-derive them with an enumerate()
+// index, which assumes one location per field and cannot express a type that
+// consumes several.
+
+/// Locations continue ACROSS the @attr and @instance structs -- one numbering
+/// for the whole vertex stage, not per-struct. This is bitgun grass's live
+/// shape (quad at 0..1, GrassInstance at 2..5).
+#[test]
+fn instance_attr_locations_continue_after_the_per_vertex_ones() {
+    let src = r#"
+        value Quad { aPos: Vec2, aTexCoord: Vec2 }
+        value Inst { pos: Vec2, rot: float, scale: float, height: float }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad, @instance i: Inst) -> Vary {
+            return Vary { position: v(a.aPos + i.pos, 0.0, 1.0), TexCoord: a.aTexCoord, uv: a.aTexCoord }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
+    "#;
+    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
+    for (loc, name) in
+        [(0, "aPos"), (1, "aTexCoord"), (2, "pos"), (3, "rot"), (4, "scale"), (5, "height")]
+    {
+        assert!(
+            glsl.contains(&format!("layout (location = {loc}) in ")),
+            "location {loc} missing:\n{glsl}"
+        );
+        assert!(glsl.contains(name), "attribute {name} missing:\n{glsl}");
+    }
+}
+
+/// A `mat4` attribute consumes FOUR locations in GL, so a one-location-per-field
+/// numbering silently misplaces every attribute after it. Nothing in the tree
+/// declares one today, and `struct_gl_fields` admits Mat4 in attribute position,
+/// so the shape is reachable and currently wrong. Reject it rather than emit a
+/// numbering the CPU side cannot match.
+#[test]
+fn mat4_attribute_rejects_rather_than_misnumbering_what_follows() {
+    let src = r#"
+        value Bad { m: Mat4, tail: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Bad) -> Vary {
+            return Vary { position: a.m * v(a.tail, 0.0, 1.0), uv: a.tail }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
+    "#;
+    match emit_pipeline(src, "vs", "fs") {
+        Ok(glsl) => panic!("a Mat4 attribute must reject, but emitted:\n{glsl}"),
+        Err(msg) => assert!(
+            msg.contains("m") && msg.to_lowercase().contains("attribute"),
+            "the error must name the offending attribute: {msg}"
+        ),
+    }
+}

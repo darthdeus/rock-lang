@@ -26,6 +26,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
 use skull_mir::cfg::reverse_postorder;
+use skull_mir::gpu_layout::vertex_attrs;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
@@ -1855,8 +1856,11 @@ struct VertexShape {
     /// Attribute struct param indices, in location-assignment order (per-vertex
     /// `@attr` first, then `@instance` -- the numbering continues).
     attr_params: Vec<usize>,
-    /// Attribute fields in location order: (name, GLSL type).
-    attrs: Vec<(Ustr, GlslTy)>,
+    /// Attribute fields in location order: (name, GLSL type, location).
+    /// The location is RECORDED by `gpu_layout::vertex_attrs`, not an
+    /// enumerate() index invented while printing -- an index assumes one
+    /// location per field, which a multi-location type (mat4) breaks.
+    attrs: Vec<(Ustr, GlslTy, u32)>,
     /// `@uniform` struct param indices (at most one).
     uniform_params: Vec<usize>,
     /// Uniform fields, declaration order.
@@ -2001,16 +2005,34 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     }
     let mut attr_params = Vec::new();
     let mut attrs = Vec::new();
+    // One numbering across ALL attribute structs: @attr params first, then
+    // @instance, locations continuing (bitgun grass: quad 0..1, instance 2..5).
+    let mut next_location: u32 = 0;
     for &i in per_vertex.iter().chain(instanced.iter()) {
         attr_params.push(i);
         let fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
-        // GLSL forbids `in bool` -- bool is legal only as a uniform.
+        // GLSL forbids `in bool` -- bool is legal only as a uniform. Checked
+        // here, before the artifact, so the GLSL-specific message survives.
         if let Some((n, _)) = fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
             return Err(err(span, format!(
                 "shader vertex: attribute `{n}` cannot be bool (GLSL forbids bool vertex inputs) -- use int or float"
             )));
         }
-        attrs.extend(fields);
+        // Locations come from the artifact, which also rejects any field whose
+        // type is not a single-location vertex attribute.
+        let sname = nominal_name(ws, f.param_decls[i].ty)
+            .ok_or_else(|| err(span, "shader vertex: attribute param must be a value struct"))?;
+        let va = vertex_attrs(ws, sname).map_err(|e| err(span, e.message))?;
+        if va.attrs.len() != fields.len() {
+            return Err(err(span, format!(
+                "shader vertex: attribute struct `{sname}` classified {} fields but {} attributes",
+                fields.len(), va.attrs.len()
+            )));
+        }
+        for ((n, t), a) in fields.into_iter().zip(va.attrs.iter()) {
+            attrs.push((n, t, next_location + a.location));
+        }
+        next_location += va.attrs.len() as u32;
     }
     let mut uniforms = Vec::new();
     for &i in &uniform_params {
@@ -2241,7 +2263,7 @@ fn emit_vertex_stage(
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let shape = EntryShape {
         global_params: v.attr_params.iter().copied().chain(v.uniform_params.iter().copied()).collect(),
-        uniform_fields: v.attrs.iter().copied().chain(v.uniforms.iter().copied()).collect(),
+        uniform_fields: v.attrs.iter().map(|&(n, t, _)| (n, t)).chain(v.uniforms.iter().copied()).collect(),
         samplers: v.samplers.clone(),
         arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
         main_out: Some(MainOut {
@@ -2252,7 +2274,7 @@ fn emit_vertex_stage(
     let (mf, helpers, dependencies) = lower_reach_helpers(ws, scx, fref, Stage::Vertex)?;
 
     let mut out = String::new();
-    for (loc, (n, t)) in v.attrs.iter().enumerate() {
+    for (n, t, loc) in &v.attrs {
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
     out.push('\n');
@@ -2350,7 +2372,7 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
         seen.insert(Ustr::from("FragColor"));
     }
     let mrt_outputs = fs.outputs.iter().flatten().map(|&(n, _)| n);
-    let names = v.attrs.iter().map(|&(n, _)| n)
+    let names = v.attrs.iter().map(|&(n, _, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n, _)| n))
         .chain(v.arrays.iter().map(|&(_, n, ..)| n))
