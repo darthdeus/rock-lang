@@ -859,3 +859,34 @@ fn nobox_value_crosses_a_glsl_call_without_materializing() {
         "GLSL emission must not route a nobox value through materialization:\n{glsl}"
     );
 }
+
+/// The `@gpu_only` intrinsic boundary is the ONE place a nobox value is
+/// authorized to box (`authorize_gpu_boundary_boxes`), and it authorizes by
+/// re-marking the packed arg `MaterializeValueStruct`. So on the GLSL side that
+/// variant is the shape a mapped intrinsic's argument arrives in, and every
+/// ctor arm has to render it exactly like `MakeValueStruct` -- a plain `vecN`.
+///
+/// Distinct from `nobox_value_crosses_a_glsl_call_without_materializing`, which
+/// pins the opposite property one layer out: an ORDINARY call is first-class and
+/// mints no Materialize at all. Here the boundary is `@gpu_only`, the MIR does
+/// carry a Materialize, and the requirement is that GLSL renders it as a ctor
+/// rather than dropping it. Neither test may be "fixed" against the other.
+///
+/// The argument must be a literal ctor AT the call. `authorize_gpu_boundary_boxes`
+/// re-marks only a `MakeValueStruct` operand, so passing a `Vec2` param whole --
+/// or building it through the stdlib `v(..)` helper -- mints nothing to authorize
+/// and leaves all four arms unexercised.
+#[test]
+fn a_materialized_nobox_value_at_a_gpu_intrinsic_lowers_to_a_vec_ctor() {
+    let src = r#"
+        fn shade(s: Sampler2D, u: float, v_: float) -> Vec4 {
+            return texture(s, Vec2 { x: u, y: v_ })
+        }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"])
+        .expect("a nobox Vec2 at a @gpu_only boundary must emit GLSL");
+    assert!(
+        glsl.contains("texture(s, vec2(u, v_))"),
+        "the authorized box must render as a plain vec2 ctor argument:\n{glsl}"
+    );
+}
