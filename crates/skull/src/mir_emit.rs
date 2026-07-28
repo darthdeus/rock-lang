@@ -1248,20 +1248,27 @@ fn validate_nested_bodies(
 struct BodyRejection {
     message: String,
     guarantee: bool,
+    /// The offending instruction's own source span, when the check could name
+    /// one. Outranks the enclosing fn's span at [`Self::into_error`] -- a
+    /// whole-fn anchor cannot distinguish two violations in one body, which is
+    /// how one `nobox` sink hid another inside `draw_fractures`.
+    site: Option<bone_semantic::prelude::Span>,
 }
 
 impl BodyRejection {
     fn gap(message: String) -> Self {
-        Self { message, guarantee: false }
+        Self { message, guarantee: false, site: None }
     }
 
     fn prefixed(self, what: &str) -> Self {
         Self { message: format!("{what}: {}", self.message), ..self }
     }
 
-    /// Spanned rejection at `span`, tagged so the stdlib leniency check can tell
+    /// Spanned rejection at the offending instruction, falling back to `span`
+    /// (the enclosing definition), tagged so the stdlib leniency check can tell
     /// a guarantee from a gap without matching on the message text.
     fn into_error(self, span: bone_semantic::prelude::Span, what: &str) -> CompilerError {
+        let span = self.site.unwrap_or(span);
         let mut e = CompilerError::new_with_label(span, format!("{what}{}", self.message));
         if self.guarantee {
             e.kind = skull_parser::CompilerErrorKind::NoboxGuaranteeViolated;
@@ -1283,7 +1290,7 @@ fn validate_emitted_body(
     collect_residual_spec_bindings(mf, specs);
     validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap)?;
     skull_transform::validate_no_implicit_nobox_materialization(ws, mf)
-        .map_err(|message| BodyRejection { message, guarantee: true })?;
+        .map_err(|(message, site)| BodyRejection { message, guarantee: true, site })?;
     validate_nested_bodies(ws, &mf.nested_fns, specs)
 }
 

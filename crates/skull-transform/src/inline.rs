@@ -737,6 +737,14 @@ fn import_spec_bindings(
             func.spec_bindings.insert(new_id, key.clone());
         }
     }
+    // The callee's instruction spans come across with its body, so a rejection
+    // raised after inlining still points at the construct in the CALLEE's source
+    // rather than at the call site that absorbed it.
+    for (old_id, span) in callee.inst_spans.iter() {
+        if let Some(&new_id) = inst_map.get(&old_id) {
+            func.inst_spans.insert(new_id, *span);
+        }
+    }
 }
 
 /// Splice candidate `cand` into `func` at `site`, removing the call. Returns the

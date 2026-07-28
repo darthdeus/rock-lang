@@ -843,3 +843,33 @@ fn nobox_nullable_bindings_evaluate_correctly() {
         "3 11 7 -1"
     );
 }
+
+const NOBOX_REJECTION_SITE: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn last(ps: [NV2]) -> float {
+    let seen: NV2? = null
+    for p in ps { seen = p }
+    if let q = seen { return q.x }
+    return 0.0
+}
+
+fn main() { let _ = last([]) }
+"#;
+
+#[test]
+fn a_nobox_rejection_anchors_on_the_offending_expression() {
+    let err = try_emit_module(NOBOX_REJECTION_SITE)
+        .expect_err("a whole-value use of a loop element boxes it");
+    // Assert on the byte offset, not `line`/`col`: the three coordinate systems
+    // in `docs/span-position-units.md` disagree on their base, and the offset is
+    // the one that needs no conversion. The `fn` header is the anchor this used
+    // to report, and a whole-fn anchor cannot tell two violations in one body
+    // apart -- which is how one sink hid another inside `draw_fractures`.
+    let start = NOBOX_REJECTION_SITE.find("    for p in ps").expect("fixture line");
+    let end = start + NOBOX_REJECTION_SITE[start..].find('\n').expect("fixture line ends");
+    assert!(
+        (start..=end).contains(&err.location.offset),
+        "rejection did not anchor on the assignment that boxes: {err:?}"
+    );
+}

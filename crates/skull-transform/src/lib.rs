@@ -47,18 +47,36 @@ pub const STATE: &str = "__state";
 pub fn validate_no_implicit_nobox_materialization(
     ws: &Workspace,
     func: &MirFunc,
-) -> Result<(), String> {
+) -> Result<(), (String, Option<bone_semantic::prelude::Span>)> {
     for (_, block) in func.blocks.iter() {
         for &iid in &block.insts {
             let Inst::MakeValueStruct { name, .. } = &func.insts[iid] else {
                 continue;
             };
+            // A cdata ENUM packs through `MakeValueStruct` under the enum's own
+            // name, which is correctly absent from `struct_by_name` -- `nobox` is
+            // a struct marker, so those are genuinely out of scope. Any OTHER
+            // unknown name is not a licence to skip: this rung enforces a
+            // GUARANTEE, so it is reported rather than passed over.
             let Some(sid) = ws.struct_by_name.get(name) else {
-                continue;
+                if skull_mir::lower::enum_value_shape(ws, *name).is_some() {
+                    continue;
+                }
+                return Err((
+                    format!(
+                        "`{name}` is constructed as a value struct here but is neither a struct \
+                         nor a cdata enum in the workspace, so the `nobox` guarantee cannot be \
+                         checked for it"
+                    ),
+                    func.inst_spans.get(iid).copied(),
+                ));
             };
             if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
-                return Err(format!(
-                    "nobox value `{name}` survived lowering as an implicit materialization"
+                return Err((
+                    format!(
+                        "nobox value `{name}` survived lowering as an implicit materialization"
+                    ),
+                    func.inst_spans.get(iid).copied(),
                 ));
             }
         }

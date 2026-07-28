@@ -2058,6 +2058,7 @@ pub fn lower_function_spec(
         ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
+        cur_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
@@ -2128,6 +2129,7 @@ pub fn lower_global(
         ret_tuple: None,
         ret_ty: None,
         fn_name_span: None,
+        cur_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -2191,6 +2193,7 @@ pub fn lower_decorator(
         ret_tuple: None,
         ret_ty: None,
         fn_name_span: None,
+        cur_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -2266,6 +2269,11 @@ struct Builder<'a> {
     /// The fn's name span, for spanned emit-time rejections that have no better
     /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
     fn_name_span: Option<Span>,
+    /// The source span currently being lowered, maintained by [`Builder::lower_expr`].
+    /// Instructions a post-transform check can reject stamp it into
+    /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
+    /// than at the enclosing fn.
+    cur_span: Option<Span>,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -2293,8 +2301,25 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    /// [`gap`] anchored at the construct currently being lowered. Use wherever a
+    /// gap names a user-visible type or expression -- an unspanned one leaves the
+    /// reader with a whole project to search.
+    fn gap_here(&self, msg: impl std::fmt::Display) -> CompilerError {
+        match self.cur_span {
+            Some(span) => CompilerError::new_with_label(
+                span,
+                format!("skull-mir: lowering gap: {msg}"),
+            ),
+            None => gap(msg),
+        }
+    }
+
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
-        self.f.emit(self.cur, inst)
+        let id = self.f.emit(self.cur, inst);
+        if let Some(span) = self.cur_span {
+            self.f.inst_spans.insert(id, span);
+        }
+        id
     }
 
     /// Whether the current block is still open (no terminator set yet). A
@@ -2674,6 +2699,7 @@ impl Builder<'_> {
             // Lua-identity only; leaving it off matches today's emitted text.
             ret_ty: None,
             fn_name_span: None,
+            cur_span: None,
             group_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
@@ -2723,6 +2749,10 @@ impl Builder<'_> {
 
     fn lower_stmts(&mut self, stmts: IdxRange<Statement>) -> Result<bool, CompilerError> {
         for sidx in stmts {
+            // Coarse anchor for anything lowered outside an expression (a `for`
+            // desugaring's element bind, a scope-exit splice). `lower_expr`
+            // narrows it wherever a real expression is in hand.
+            self.cur_span = self.body.statement_spans.get(sidx).copied();
             match self.body.statement_arena[sidx].clone() {
                 Statement::Let { name, value } => {
                     // Flat enums and guaranteed no-box values live in leaf cells,
@@ -2972,7 +3002,13 @@ impl Builder<'_> {
     }
 
     fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let v = self.lower_expr_inner(e)?;
+        // Source cursor for instruction-level diagnostics: whatever is lowered
+        // from here down came from `e` unless a nested `lower_expr` narrows it,
+        // and the restore puts the enclosing expression back on the way out.
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let v = self.lower_expr_inner(e);
+        self.cur_span = outer;
+        let v = v?;
         // Implicit iterable->iterator coercion at a bounded call arg: bone
         // recorded the resolved `iter` fn; wrap the arg value in that call
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
@@ -6167,7 +6203,7 @@ impl Builder<'_> {
     fn stringify_nobox_expr(&mut self, expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let name = self
             .nobox_value_name(expr)
-            .ok_or_else(|| gap("nobox interpolation type"))?;
+            .ok_or_else(|| self.gap_here("nobox interpolation type"))?;
         let repr = self.lower_expr_repr(expr)?;
         self.stringify_nobox_repr(name, repr)
     }
@@ -6181,7 +6217,7 @@ impl Builder<'_> {
             parts, present, ..
         } = repr
         else {
-            return Err(gap(format!(
+            return Err(self.gap_here(format!(
                 "nobox value `{name}` reached interpolation boxed"
             )));
         };

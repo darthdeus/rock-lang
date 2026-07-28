@@ -47,6 +47,12 @@ fn err(msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(Span::default(), msg.into())
 }
 
+/// A `(message, site)` rejection from a MIR-level check, anchored at the
+/// offending instruction when the check could name one.
+fn sited_err((msg, site): (String, Option<Span>)) -> CompilerError {
+    CompilerError::new_with_label(site.unwrap_or_default(), msg)
+}
+
 fn nobox_nominal_ty(ws: &Workspace, ty: TyId) -> Option<ustr::Ustr> {
     let te = match ty {
         TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
@@ -2680,11 +2686,11 @@ impl JsReach<'_> {
         }
         skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf)?;
         skull_transform::validate_no_implicit_nobox_materialization(self.ws, &mf)
-            .map_err(err)?;
+            .map_err(sited_err)?;
         validate_js_nobox_return(self.ws, f, &mf)?;
         for nf in &mf.nested_fns {
             skull_transform::validate_no_implicit_nobox_materialization(self.ws, nf)
-                .map_err(err)?;
+                .map_err(sited_err)?;
         }
         self.discover(&mf)?;
         self.st.lowered.push((fr, mf));
@@ -2707,10 +2713,10 @@ impl JsReach<'_> {
             skull_transform::recover_counted_loops(self.ws, nf);
         }
         skull_transform::validate_no_implicit_nobox_materialization(self.ws, &mf)
-            .map_err(err)?;
+            .map_err(sited_err)?;
         for nf in &mf.nested_fns {
             skull_transform::validate_no_implicit_nobox_materialization(self.ws, nf)
-                .map_err(err)?;
+                .map_err(sited_err)?;
         }
         self.discover(&mf)?;
         let is_const = self.ws.module(site.module).globals[site.gid].is_const;

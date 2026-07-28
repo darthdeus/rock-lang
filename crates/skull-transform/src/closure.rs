@@ -396,6 +396,9 @@ pub fn convert_closures_framed(
             // inliner and the residual-binding check work on reachable blocks.
             spec_bindings: mf.spec_bindings.clone(),
             nested_fns: Vec::new(),
+            // Same arena clone, same `Idx` space: the parent's spans address the
+            // instructions this body now owns.
+            inst_spans: mf.inst_spans.clone(),
         });
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named

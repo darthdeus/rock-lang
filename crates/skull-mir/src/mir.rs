@@ -603,6 +603,14 @@ pub struct MirFunc {
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
     pub nested_fns: Vec<MirFunc>,
+    /// Per-instruction source span: what an emit-time rejection points AT, rather
+    /// than at the enclosing definition. Stamped for every instruction lowering
+    /// emits, because a transform may REWRITE an instruction in place into the
+    /// offending one (SROA turns an escaping `Load` into a `MakeValueStruct`) --
+    /// stamping only the constructions lowering itself emits would miss exactly
+    /// those. Keys are remapped on splice, like [`Self::spec_bindings`];
+    /// transform-synthesized instructions simply have no entry.
+    pub inst_spans: bone_semantic::prelude::ArenaMap<Idx<Inst>, bone_semantic::prelude::Span>,
 }
 
 impl MirFunc {
@@ -624,6 +632,7 @@ impl MirFunc {
             bound_trees: Default::default(),
             spec_bindings: Default::default(),
             nested_fns: Vec::new(),
+            inst_spans: Default::default(),
         }
     }
 
