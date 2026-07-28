@@ -873,3 +873,38 @@ fn a_nobox_rejection_anchors_on_the_offending_expression() {
         "rejection did not anchor on the assignment that boxes: {err:?}"
     );
 }
+
+const NOBOX_LOOP_ELEMENT: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn last_x(ps: [NV2]) -> float {
+    let seen: NV2? = null
+    for p in ps { seen = p }
+    if let q = seen { return q.x }
+    return -1.0
+}
+
+fn main() {
+    print("{last_x([NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }])} {last_x([])}")
+}
+"#;
+
+// PINNED BUG: a `for` over a Vec goes through the user-iterator protocol, whose
+// `next` returns `(bool, T)`. That tuple return has no nobox-aware ABI, so the
+// element arrives as ONE boxed value (measured: n=2 dests for a 2-leaf type)
+// and a whole-value use of the loop variable materializes it. CORRECT behavior
+// is that the loop element binds its leaves, like every other binding form.
+// Inverted because the fix is the tuple-return-carrying-a-nobox-element ABI --
+// the sink class `docs/parked/inline-lua.md` recorded as possibly dissolving,
+// which did NOT dissolve; it moved inside the iterator protocol.
+// WHEN THIS FAILS: the ABI landed. Delete the `expect_err`, assert the emitted
+// body has no `NV2_ct(` and that running it prints "3 -1", and drop this note.
+#[test]
+fn a_loop_element_boxes_a_nobox_value_sentinel() {
+    let err = try_emit_module(NOBOX_LOOP_ELEMENT)
+        .expect_err("SENTINEL: the iterator protocol still boxes a nobox element");
+    assert!(
+        err.message.contains("nobox") && err.message.contains("NV2"),
+        "{err:?}"
+    );
+}
