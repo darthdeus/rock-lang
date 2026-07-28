@@ -1476,6 +1476,16 @@ impl Emitter<'_> {
                 // a plain object -- so rebuild the nested objects the declared
                 // shape expects. luajit instead calls the generated `_lct`.
                 if fields.iter().any(|(f, _)| f.contains('.')) {
+                    // Same strictness as the Lua emitter: a PARTIAL flattening
+                    // must reject, not silently emit a half-shaped object.
+                    let canonical =
+                        skull_mir::lower::value_leaf_paths_of(self.ws, *name).unwrap_or_default();
+                    let got: Vec<ustr::Ustr> = fields.iter().map(|(f, _)| *f).collect();
+                    if got != canonical {
+                        return Err(CompilerError::new_no_location(format!(
+                            "`{name}` ctor carries dotted field names that are not its canonical                              leaf sequence: {got:?} vs {canonical:?}"
+                        )));
+                    }
                     return self.render_leaf_form_value_struct(*name, fields);
                 }
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];

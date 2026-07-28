@@ -418,15 +418,25 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
 /// `Box2` literal, which is not itself nobox. A `MaterializeValueStruct`
 /// operand is the SANCTIONED escape and is never a violation.
 fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) -> bool {
-    let Inst::MakeValueStruct { name, fields } = &func.insts[mvs] else {
-        return false;
+    let (name, fields) = match &func.insts[mvs] {
+        Inst::MakeValueStruct { name, fields } => (name, fields),
+        // An EXPLICIT box is a sanctioned root, but its nested fields are still
+        // implicit: `materialize(E5 { pos: NV2 { .. } })` authorizes the E5 box,
+        // never a separate NV2 one.
+        Inst::MaterializeValueStruct { name, fields } => (name, fields),
+        _ => return false,
     };
     if let Some(sid) = ws.struct_by_name.get(name) {
         if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
             return true;
         }
     }
-    fields.iter().any(|(_, op)| ctor_tree_has_implicit_nobox(ws, func, *op))
+    fields.iter().any(|(_, op)| {
+        // A `materialize` OPERAND is the sanctioned escape -- never a violation,
+        // and not descended into.
+        !matches!(&func.insts[*op], Inst::MaterializeValueStruct { .. })
+            && ctor_tree_has_implicit_nobox(ws, func, *op)
+    })
 }
 
 /// Resolve one dotted leaf path against a ctor tree, emitting `Field` reads for
@@ -444,6 +454,15 @@ fn leaf_operand(
     for comp in path.split('.') {
         let comp = Ustr::from(comp);
         let next = match &func.insts[cur] {
+            // Reads THROUGH an explicit `materialize` operand, so the box it
+            // requested is DCE'd when the parent flattens for some other field.
+            // Deliberate: a value struct has no identity, so eliding a box of one
+            // is unobservable -- `materialize`'s contract is about what the
+            // program computes, not about a heap object surviving. Preserving it
+            // instead needs the `Field` reads ordered after the box, which the
+            // splice position does not currently give (they land at the parent
+            // ctor's slot, ahead of where emit places the operand). Recorded in
+            // `docs/nobox-nested-ctor-plan.md` as the open alternative.
             Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
                 fields.iter().find(|(n, _)| *n == comp).map(|(_, op)| *op)
             }
@@ -480,7 +499,9 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
     // A ctor used as a field operand of another ctor is not the outermost one.
     let mut inner: HashSet<Idx<Inst>> = HashSet::default();
     for &i in &all {
-        if let Inst::MakeValueStruct { fields, .. } = &func.insts[i] {
+        if let Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } =
+            &func.insts[i]
+        {
             inner.extend(fields.iter().map(|(_, op)| *op));
         }
     }
@@ -494,8 +515,11 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
     }
     let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
     for t in targets {
-        let Inst::MakeValueStruct { name, .. } = &func.insts[t] else { continue };
-        let name = *name;
+        let (name, explicit) = match &func.insts[t] {
+            Inst::MakeValueStruct { name, .. } => (*name, false),
+            Inst::MaterializeValueStruct { name, .. } => (*name, true),
+            _ => continue,
+        };
         // A GC-tier outer stores fields as table entries, so there is no cdata
         // to write leaves into; leave it for the verifier to reject.
         if skull_mir::lower::value_struct_is_gc(ws, name) {
@@ -518,7 +542,13 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
             continue;
         }
         let span = func.inst_spans.get(t).copied();
-        let flat = func.insts.alloc(Inst::MakeValueStruct { name, fields: leaves });
+        // Preserve the variant: an explicit box stays explicit, it just stops
+        // building a nested one on the way.
+        let flat = func.insts.alloc(if explicit {
+            Inst::MaterializeValueStruct { name, fields: leaves }
+        } else {
+            Inst::MakeValueStruct { name, fields: leaves }
+        });
         // Minted insts inherit the outer ctor's span: a rejection downstream must
         // still name the user's line.
         if let Some(sp) = span {

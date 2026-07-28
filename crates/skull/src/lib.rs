@@ -502,16 +502,20 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
 /// The call site stays a single expression, so const-hoisting and the
 /// read-only-use analysis are untouched.
 fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
-    let param = |p: &str| format!("l_{}", p.replace('.', "_"));
-    let params: Vec<String> = paths.iter().map(|p| param(p.as_str())).collect();
-    let mut body = String::from("  local t = ");
-    let _ = std::fmt::Write::write_fmt(&mut body, format_args!("{name}_ct()\n"));
-    // One local per distinct nested prefix, so a leaf write never re-indexes an
-    // aggregate field (each such index allocates a reference cdata).
+    // Names are POSITIONAL indices, never derived from the path. A
+    // dot->underscore mapping is not injective: sibling fields `pos` (holding
+    // `inner`) and `pos_inner` both render `l_pos_inner`, and Lua silently lets
+    // the later duplicate shadow the earlier, writing one leaf's value into the
+    // other. Dotted keys are injective precisely because `.` cannot appear in an
+    // identifier; deriving identifiers back from them throws that away.
+    let params: Vec<String> = (0..paths.len()).map(|i| format!("l{i}")).collect();
+    let mut body = String::new();
+    let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  local t = {name}_ct()\n"));
+    // One local per distinct nested prefix (EVERY ancestor, shortest first, so
+    // `b` is bound before `b.lo`), so a leaf write never re-indexes an aggregate
+    // field -- each such index allocates a reference cdata.
     let mut refs: Vec<String> = Vec::new();
     for p in paths {
-        // EVERY ancestor prefix, not just the leaf's immediate parent: `b.lo.x`
-        // needs a local for `b` before one for `b.lo`.
         let comps: Vec<&str> = p.as_str().split('.').collect();
         for n in 1..comps.len() {
             let prefix = comps[..n].join(".");
@@ -521,23 +525,25 @@ fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
         }
     }
     refs.sort_by_key(|r| r.matches('.').count());
+    let ref_local = |r: &str| -> String {
+        format!("r{}", refs.iter().position(|x| x == r).expect("prefix registered"))
+    };
     for r in &refs {
-        let local = format!("r_{}", r.replace('.', "_"));
         let base = match r.rsplit_once('.') {
-            Some((pre, last)) => format!("r_{}.{last}", pre.replace('.', "_")),
+            Some((pre, last)) => format!("{}.{last}", ref_local(pre)),
             None => format!("t.{r}"),
-        };
-        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  local {local} = {base}\n"));
-    }
-    for p in paths {
-        let target = match p.as_str().rsplit_once('.') {
-            Some((prefix, last)) => format!("r_{}.{last}", prefix.replace('.', "_")),
-            None => format!("t.{p}"),
         };
         let _ = std::fmt::Write::write_fmt(
             &mut body,
-            format_args!("  {target} = {}\n", param(p.as_str())),
+            format_args!("  local {} = {base}\n", ref_local(r)),
         );
+    }
+    for (i, p) in paths.iter().enumerate() {
+        let target = match p.as_str().rsplit_once('.') {
+            Some((prefix, last)) => format!("{}.{last}", ref_local(prefix)),
+            None => format!("t.{p}"),
+        };
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  {target} = {}\n", params[i]));
     }
     format!("{name}_lct = function({})\n{body}  return t\nend\n", params.join(", "))
 }
