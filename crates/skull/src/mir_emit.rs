@@ -940,7 +940,8 @@ fn emit_body_chunk(
         // call to a bounded fn that has no standalone emission -- reject.
         skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
         let mut specs = Vec::new();
-        validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+        validate_emitted_body_gpu(ws, &mf, &mut specs, skull_mir::intrinsics::is_gpu_context(f))
+            .map_err(|r| r.into_error(f.name_span, ""))?;
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
         let lua = crate::coroutine_emit::emit_coroutine(ws, cg, self_ref, &mf);
@@ -997,7 +998,8 @@ fn emit_body_chunk(
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
-    validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    validate_emitted_body_gpu(ws, &mf, &mut specs, skull_mir::intrinsics::is_gpu_context(f))
+        .map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -1287,8 +1289,25 @@ fn validate_emitted_body(
     mf: &MirFunc,
     specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
 ) -> Result<(), BodyRejection> {
+    validate_emitted_body_gpu(ws, mf, specs, false)
+}
+
+/// `gpu_context` marks a `@shader` / `@gpu_only` body. Its Lua emission is a
+/// stub that only `error(...)`s -- the real target is GLSL, where a value is a
+/// native `vec2`/`vec4` and boxing does not exist as a concept. Applying the
+/// nobox guarantee to that stub rejects programs that never box anything at
+/// runtime. See `docs/shaders.md`, "nobox values and shaders".
+fn validate_emitted_body_gpu(
+    ws: &Workspace,
+    mf: &MirFunc,
+    specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    gpu_context: bool,
+) -> Result<(), BodyRejection> {
     collect_residual_spec_bindings(mf, specs);
     validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap)?;
+    if gpu_context {
+        return validate_nested_bodies(ws, &mf.nested_fns, specs);
+    }
     // Name the function being emitted: the span often points into an INLINED
     // stdlib body (every `xs.push(..)` reports at the same `Vec<T>.push` line),
     // so without the caller the diagnostic cannot tell two sites apart.

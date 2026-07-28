@@ -10770,6 +10770,15 @@ impl Builder<'_> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
+        // A `@gpu_only` intrinsic has no boxed boundary to cross. Boxing is a
+        // Lua-representation concept; these compile to GLSL, where a value is a
+        // native `vec2`/`vec4` and no box exists. Their `inline(lua)` bodies only
+        // `error(...)`, and `gpu_only_call_rejection` already refuses a CPU
+        // caller, so the only callers reaching here are GPU contexts.
+        // Rationale for shader work: docs/shaders.md, "nobox values and shaders".
+        if crate::intrinsics::is_gpu_only(callee) {
+            return Ok(());
+        }
         for &arg in args {
             if self.is_explicit_materialize_call(arg) {
                 continue;
