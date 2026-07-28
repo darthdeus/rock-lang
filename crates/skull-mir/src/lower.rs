@@ -831,17 +831,33 @@ pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> Spec
 
 /// [`sig_value_shape`] under a specialization substitution: a param/return type
 /// that is a generic bound to a value-struct leaf resolves to that leaf's shape.
-/// Every non-generic type falls through to the plain [`sig_value_shape`].
+/// A `T?` resolves the same way through the NULLABLE policy, so a generic
+/// nullable inherits the same asymmetry a spelled-out one has
+/// ([`sig_shape_of_nullable_nominal`]) instead of falling through to
+/// [`sig_value_shape`], whose `Nullable` arm matches no nominal for a generic
+/// inner. Every non-generic type falls through to the plain [`sig_value_shape`].
 fn sig_value_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
     if let TyId::Static(m, idx) = ty {
-        if let TypeExpr::Generic(var, _) = ws.module(m).ty_arena[idx] {
-            return match subst.get(&var) {
-                Some(ty) => ty.nominal().and_then(|name| value_shape_of_nominal(ws, name)),
-                _ => None,
-            };
+        match ws.module(m).ty_arena[idx] {
+            TypeExpr::Generic(var, _) => {
+                return spec_nominal(subst, var).and_then(|n| value_shape_of_nominal(ws, n));
+            }
+            TypeExpr::Nullable(inner) => {
+                if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
+                    return spec_nominal(subst, var)
+                        .and_then(|n| sig_shape_of_nullable_nominal(ws, n));
+                }
+            }
+            _ => {}
         }
     }
     sig_value_shape(ws, ty)
+}
+
+/// The nominal `var` is bound to under `subst`, or `None` when it is unbound or
+/// bound to a non-nominal (a tuple, a fn type, a primitive).
+fn spec_nominal(subst: &SpecSubst, var: bone_semantic::hir::VarId) -> Option<Ustr> {
+    subst.get(&var)?.nominal()
 }
 
 /// Arity of a tuple RETURN type -- `Some(n)` iff `ty` is a (non-nullable) tuple

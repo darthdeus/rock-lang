@@ -1238,7 +1238,7 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
 @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
 
-@nomangle @inline fn unwrap<T>(value: T?) -> T {
+@inline fn unwrap<T>(value: T?) -> T {
     if value != null { return value }
     error("unwrap() called on null value\n" + __debug_traceback())
     return phantom()

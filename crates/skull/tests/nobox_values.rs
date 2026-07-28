@@ -757,3 +757,48 @@ fn nobox_global_places_reach_the_right_leaves() {
         "10 99 3 6 0 9901\n10 0"
     );
 }
+
+const NOBOX_THROUGH_GENERIC_NULLABLE: &str = r#"
+nobox value NV2 { x: float, y: float }
+value BV2 { x: float, y: float }
+
+fn nobox_sum(v: NV2?) -> float {
+    let u = unwrap(v)
+    return u.x + u.y
+}
+
+fn boxed_sum(v: BV2?) -> float {
+    let u = unwrap(v)
+    return u.x + u.y
+}
+
+fn main() {
+    print("{nobox_sum(NV2 { x: 1.0, y: 2.0 })} {boxed_sum(BV2 { x: 10.0, y: 20.0 })}")
+}
+"#;
+
+#[test]
+fn a_generic_nullable_param_threads_a_nobox_argument_as_leaves() {
+    let lua = emit_module(NOBOX_THROUGH_GENERIC_NULLABLE);
+    let body = function_body(&lua, "nobox_sum");
+    assert!(
+        !body.contains("NV2_ct("),
+        "a nobox value crossing `T?` materialized a cdata:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_generic_nullable"),
+        "3 30"
+    );
+}
+
+#[test]
+fn a_generic_nullable_param_keeps_the_single_cdata_abi_for_an_unmarked_value() {
+    let lua = emit_module(NOBOX_THROUGH_GENERIC_NULLABLE);
+    let head = function_body(&lua, "boxed_sum").lines().next().expect("header").to_string();
+    // cdata has no spare field for a nil discriminator, so an UNMARKED nullable
+    // value struct stays one boxed param -- only `nobox` buys the presence leaf.
+    assert!(
+        head.ends_with("(c0)"),
+        "an unmarked nullable value struct left the single-cdata ABI: {head}"
+    );
+}
