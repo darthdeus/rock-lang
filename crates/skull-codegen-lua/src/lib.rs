@@ -1232,23 +1232,8 @@ impl Emitter<'_> {
         push_uint(out, raw(bb));
         out.push_str("::\n");
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
-        let mut i = 0;
-        while i < insts.len() {
-            let id = insts[i];
-            // A NativeBuffer slot read (`__nb_checked_get`) feeding only field
-            // stores is emitted as a `do local __slot = ..; __slot.f = .. end`
-            // cluster -- a BLOCK-scoped local, not a reused function register. A
-            // function-level register holding the slot cdata gets a loop-carried
-            // PHI (it reads live at the loop header snapshot), which pins the
-            // pointer cdata so LuaJIT cannot sink it (24 B/elem); a block local is
-            // dead at the header, so it sinks to 0 -- matching rock. See the slot
-            // cluster method.
-            if let Some(consumed) = self.try_emit_nb_slot_cluster(out, bb, id, &insts[i + 1..]) {
-                i += 1 + consumed;
-                continue;
-            }
+        for &id in insts {
             self.emit_inst(out, id);
-            i += 1;
         }
         // A goto into an un-emitted counted-loop header becomes a structured
         // `for` (the preheader falls through into it); everything else is a goto.
@@ -1261,71 +1246,6 @@ impl Emitter<'_> {
             }
         }
         self.emit_term(out, &self.func.blocks[bb].term);
-    }
-
-    /// If `slot` is a non-inlinable `Index{NativeBuffer}` whose ONLY uses are the
-    /// field stores immediately following it (a `buf[i] = ValueStruct{..}` lowered
-    /// by `scalarize_native_buffer_stores`), emit it as a `do … end` cluster with
-    /// a BLOCK-scoped local for the slot, and return how many following stores it
-    /// consumed. Else `None` (the slot is emitted normally).
-    ///
-    /// Why: skull holds the slot in a function-level register, which LuaJIT keeps
-    /// live at the loop-header snapshot -> a loop-carried PHI on the `buf.ptr[i]`
-    /// pointer cdata -> it cannot sink (24 B/element). rock declares the slot as a
-    /// fresh `local` inside the loop body, dead at the header, so it sinks to 0. A
-    /// block-scoped local reproduces that.
-    fn try_emit_nb_slot_cluster(
-        &self,
-        out: &mut String,
-        bb: Idx<Block>,
-        slot: Idx<Inst>,
-        following: &[Idx<Inst>],
-    ) -> Option<usize> {
-        if self.inlinable[raw(slot) as usize]
-            || !matches!(
-                &self.func.insts[slot],
-                Inst::Index { kind, .. } if kind.is_native_buffer()
-            )
-        {
-            return None;
-        }
-        // Consecutive field stores into the slot. Even a SINGLE store keeps the
-        // pointer cdata live across the iteration in a function register (-> a
-        // loop-carried PHI that doesn't sink, 24 B/iter); block-scoping fixes any
-        // count >= 1.
-        let n = following
-            .iter()
-            .take_while(|&&fi| matches!(&self.func.insts[fi], Inst::StoreField { base, .. } if *base == slot))
-            .count();
-        if n == 0 {
-            return None;
-        }
-        // The slot must have NO use after the cluster (later insts or the term) --
-        // a block-scoped local would be out of scope there.
-        let mut escapes = false;
-        for &fi in &following[n..] {
-            regalloc::inst_uses(&self.func.insts[fi], &mut |u| escapes |= u == slot);
-        }
-        regalloc::term_uses(&self.func.blocks[bb].term, &mut |u| escapes |= u == slot);
-        if escapes {
-            return None;
-        }
-        let lname = format!("__nbslot{}", raw(slot));
-        out.push_str("  do\n");
-        let _ = write!(out, "    local {lname} = ");
-        self.write_value(out, slot, &self.func.insts[slot]);
-        out.push('\n');
-        for &fi in &following[..n] {
-            if let Inst::StoreField { field, value, .. } = &self.func.insts[fi] {
-                let _ = write!(out, "    {lname}");
-                write_field_key(out, field.as_str());
-                out.push_str(" = ");
-                self.write_opnd(out, *value);
-                out.push('\n');
-            }
-        }
-        out.push_str("  end\n");
-        Some(n)
     }
 
     /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.

@@ -183,13 +183,6 @@ fn native_buffer_value_store_writes_leaves_through_views() {
     for ct in ["Vert_ct(", "V2_ct("] {
         assert!(!body.contains(ct), "`{ct}` must not survive the store:\n{body}");
     }
-    // The block-scoped `__nbslot` local this used to require existed to keep the
-    // slot pointer cdata off a loop-carried PHI so LuaJIT could sink it. Leaf
-    // addressing creates no slot cdata to sink in the first place.
-    assert!(
-        !body.contains("local __nbslot"),
-        "leaf addressing should not need a slot local:\n{body}"
-    );
 }
 
 const NATIVE_BUFFER_SINGLE_FIELD: &str = r#"
@@ -212,15 +205,14 @@ fn main() {
 
 #[test]
 fn native_buffer_single_field_store_takes_no_slot() {
-    // A single-leaf element used to be the leakiest case: the slot pointer cdata
-    // stayed live across the iteration in a function register (loop-carried PHI,
-    // 24 B/iter), which the block-scope cluster existed to avoid. Leaf addressing
-    // takes no slot, so there is nothing to scope -- bench
-    // phi-scope/slot_write_single_field.rock is 0 B/iter with the JIT on AND off.
+    // A single-leaf element is the leakiest case for the slot form: the slot
+    // pointer cdata stays live across the iteration in a function register
+    // (loop-carried PHI, 24 B/iter). Leaf addressing takes no slot at all --
+    // bench phi-scope/slot_write_single_field.rock is 0 B/iter, JIT on AND off.
     let lua = emit_module(NATIVE_BUFFER_SINGLE_FIELD);
     let body = function_body(&lua, "fill");
     assert!(
-        !body.contains("local __nbslot"),
+        !body.contains("__nb_checked_get("),
         "single-field NativeBuffer store should take no slot reference:\n{body}"
     );
     assert!(

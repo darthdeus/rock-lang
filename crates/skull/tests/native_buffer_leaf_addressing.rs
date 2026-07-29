@@ -48,11 +48,11 @@ fn nested_value_store_materializes_no_ctor() {
 fn nested_value_store_takes_no_slot_reference() {
     // Indexing a cdata array of struct type returns a REFERENCE cdata (24 B,
     // measured). Leaf addressing goes through a typed view instead, so no slot
-    // is taken at all -- neither the checked-get form nor the block local.
+    // is taken at all.
     let lua = emit_module(NESTED_STORE);
     let body = function_body(&lua, "fill");
     assert!(
-        !body.contains("local __nbslot"),
+        !body.contains("__nb_checked_get("),
         "leaf addressing must not take a struct-slot reference:\n{body}"
     );
 }
