@@ -854,14 +854,52 @@ fn instance_attr_locations_continue_after_the_per_vertex_ones() {
         fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
     "#;
     let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
-    for (loc, name) in
-        [(0, "aPos"), (1, "aTexCoord"), (2, "pos"), (3, "rot"), (4, "scale"), (5, "height")]
-    {
+    // The whole declaration, not location-exists + name-appears-somewhere: the
+    // split form passes even when a location binds the wrong field, and the
+    // name half matches the fn body.
+    for (loc, ty, name) in [
+        (0, "vec2", "aPos"),
+        (1, "vec2", "aTexCoord"),
+        (2, "vec2", "pos"),
+        (3, "float", "rot"),
+        (4, "float", "scale"),
+        (5, "float", "height"),
+    ] {
         assert!(
-            glsl.contains(&format!("layout (location = {loc}) in ")),
-            "location {loc} missing:\n{glsl}"
+            glsl.contains(&format!("layout (location = {loc}) in {ty} {name};")),
+            "want `layout (location = {loc}) in {ty} {name};`:\n{glsl}"
         );
-        assert!(glsl.contains(name), "attribute {name} missing:\n{glsl}");
+    }
+}
+
+/// Attribute GLSL types are the artifact's `AttrKind` spelled for this backend,
+/// so every kind maps to exactly one declaration. A wrong entry (F32x3 -> vec4)
+/// is a silent geometry corruption: the shader reads a component the buffer
+/// never supplied.
+#[test]
+fn every_attr_kind_emits_its_glsl_type() {
+    let src = r#"
+        value All { f: float, i: int, v2: Vec2, v3: Vec3, v4: Vec4 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: All) -> Vary {
+            return Vary { position: a.v4 + v(a.v3, 0.0) * float(a.i) * a.f, uv: a.v2 }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
+    "#;
+    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
+    for (loc, ty, name) in [
+        (0, "float", "f"),
+        (1, "int", "i"),
+        (2, "vec2", "v2"),
+        (3, "vec3", "v3"),
+        (4, "vec4", "v4"),
+    ] {
+        assert!(
+            glsl.contains(&format!("layout (location = {loc}) in {ty} {name};")),
+            "want `layout (location = {loc}) in {ty} {name};`:\n{glsl}"
+        );
     }
 }
 
@@ -890,3 +928,4 @@ fn mat4_attribute_rejects_rather_than_misnumbering_what_follows() {
         ),
     }
 }
+

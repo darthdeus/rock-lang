@@ -26,7 +26,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
 use skull_mir::cfg::reverse_postorder;
-use skull_mir::gpu_layout::vertex_attrs;
+use skull_mir::gpu_layout::{AttrKind, vertex_attrs};
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
@@ -1857,9 +1857,12 @@ struct VertexShape {
     /// `@attr` first, then `@instance` -- the numbering continues).
     attr_params: Vec<usize>,
     /// Attribute fields in location order: (name, GLSL type, location).
-    /// The location is RECORDED by `gpu_layout::vertex_attrs`, not an
-    /// enumerate() index invented while printing -- an index assumes one
-    /// location per field, which a multi-location type (mat4) breaks.
+    ///
+    /// All three come from `gpu_layout::vertex_attrs` -- this is a view of the
+    /// artifact, not a second classification of the same struct. The type is
+    /// its `AttrKind` spelled for GLSL; the location is recorded there rather
+    /// than invented as an enumerate() index while printing, which assumes one
+    /// location per field and so breaks on a multi-location type (mat4).
     attrs: Vec<(Ustr, GlslTy, u32)>,
     /// `@uniform` struct param indices (at most one).
     uniform_params: Vec<usize>,
@@ -1962,6 +1965,19 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
     Ok(out)
 }
 
+/// How this backend spells an `AttrKind`. The artifact stays target-neutral
+/// (kind + arity); GLSL names live here, and a WGSL or Metal emitter writes its
+/// own version of this one function.
+fn attr_glsl_ty(k: AttrKind) -> GlslTy {
+    match k {
+        AttrKind::F32 => GlslTy::Float,
+        AttrKind::I32 => GlslTy::Int,
+        AttrKind::F32x2 => GlslTy::Vec2,
+        AttrKind::F32x3 => GlslTy::Vec3,
+        AttrKind::F32x4 => GlslTy::Vec4,
+    }
+}
+
 /// Classify a `@shader(vertex)` entry: value-struct params carry a role marker
 /// (`@attr` / `@instance` / `@uniform`); samplers are type-distinguished; the
 /// return type is the varyings struct.
@@ -2010,27 +2026,20 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let mut next_location: u32 = 0;
     for &i in per_vertex.iter().chain(instanced.iter()) {
         attr_params.push(i);
-        let fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
-        // GLSL forbids `in bool` -- bool is legal only as a uniform. Checked
-        // here, before the artifact, so the GLSL-specific message survives.
-        if let Some((n, _)) = fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
+        // GLSL forbids `in bool` -- bool is legal only as a uniform. A GLSL
+        // legality gate, not a source of attribute data: the artifact would
+        // reject bool too, but only as "not a vertex-attribute type".
+        let gl_fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
+        if let Some((n, _)) = gl_fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
             return Err(err(span, format!(
                 "shader vertex: attribute `{n}` cannot be bool (GLSL forbids bool vertex inputs) -- use int or float"
             )));
         }
-        // Locations come from the artifact, which also rejects any field whose
-        // type is not a single-location vertex attribute.
         let sname = nominal_name(ws, f.param_decls[i].ty)
             .ok_or_else(|| err(span, "shader vertex: attribute param must be a value struct"))?;
         let va = vertex_attrs(ws, sname).map_err(|e| err(span, e.message))?;
-        if va.attrs.len() != fields.len() {
-            return Err(err(span, format!(
-                "shader vertex: attribute struct `{sname}` classified {} fields but {} attributes",
-                fields.len(), va.attrs.len()
-            )));
-        }
-        for ((n, t), a) in fields.into_iter().zip(va.attrs.iter()) {
-            attrs.push((n, t, next_location + a.location));
+        for a in &va.attrs {
+            attrs.push((a.name, attr_glsl_ty(a.kind), next_location + a.location));
         }
         next_location += va.attrs.len() as u32;
     }
