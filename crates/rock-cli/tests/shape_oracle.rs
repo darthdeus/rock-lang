@@ -700,6 +700,35 @@ const SEEDS: &[SeedCase] = &[
     // shape. Unmarked on purpose: it is shipped-language behaviour, not a marking
     // cost. Both controls are separate FILES because a compile rejection aborts the
     // whole file, so a control beside the probe never runs.
+    // The controls for the three marked-tier classes below. Each is its OWN file:
+    // they used to sit beside their rejecting probe, where a compile rejection
+    // aborts the whole file, so they never executed and "the control emits" was a
+    // comment rather than a gate. All six pass in isolation, so the M5 judgements
+    // they support stand.
+    SeedCase {
+        name: "nobox_tuple_return_projected_control",
+        file: "nobox_tuple_return_projected_control.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: None,
+    },
+    SeedCase {
+        name: "nobox_coalesce_at_ctor_field_control",
+        file: "nobox_coalesce_at_ctor_field_control.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: None,
+    },
+    SeedCase {
+        name: "nobox_lambda_literal_position_control",
+        file: "nobox_lambda_literal_position_control.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: None,
+    },
     SeedCase {
         name: "index_place_refinement",
         file: "index_place_refinement.rock",

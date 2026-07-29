@@ -7,15 +7,15 @@
 // the value through `call_it(() => ..)`, so every one of them rejects here rather
 // than saying anything about capture.
 //
-// Capture itself is fine -- the last two cases are the controls that separate
-// them, and both emit.
+// Capture itself is fine: the two controls that separate capture from the
+// literal's position both emit, in `nobox_lambda_literal_position_control.rock`
+// -- their own file, because a compile rejection aborts this one and a control in
+// here would never run.
 
 nobox value NV { a: int, b: int }
 
 fn seed(n: int) -> int { return n }
 fn call_it(f: () -> NV) -> NV { return f() }
-fn call_int(f: () -> int) -> int { return f() }
-fn take(v: NV) -> int { return v.a }
 
 // The shape: the literal is an ARGUMENT, and its type returns a nobox value.
 @test(output = "7")
@@ -31,21 +31,4 @@ fn probe_lambda_literal_at_arg_capturing() {
     let captured: NV = NV { a: seed(7), b: 11 }
     let v = call_it(() => captured)
     print("{v.a}")
-}
-
-// CONTROL: a nobox value CAPTURED and used WHOLE, where the lambda's own return
-// type is a scalar. Emits and runs -- capture of a nobox value works.
-@test(output = "7")
-fn control_capture_used_whole_scalar_return() {
-    let captured: NV = NV { a: seed(7), b: 11 }
-    let n = call_int(() => take(captured))
-    print("{n}")
-}
-
-// CONTROL: capture reading only a leaf. Emits and runs.
-@test(output = "7")
-fn control_capture_leaf_only() {
-    let captured: NV = NV { a: seed(7), b: 11 }
-    let n = call_int(() => captured.a)
-    print("{n}")
 }
