@@ -1181,4 +1181,38 @@ mod tests {
         assert!(!rejected("global BAR: int = 5\nfn f() { BAR = 6 }"), "mutable global write");
         assert!(!rejected("global BAR: int = 5\nfn f() { BAR += 1 }"), "mutable global compound");
     }
+
+    // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
+    // under `<bone-stdlib:NAME>` and belong to no project's source set. Without
+    // the registration in `render_errs` the header still prints and the snippet
+    // plus every label is silently dropped. Renderer-level on purpose: a
+    // lowering change can move where a rejection LANDS -- which is how the
+    // end-to-end fixture that used to cover this went vacuous -- but it cannot
+    // move the span-to-source lookup this asserts.
+    #[test]
+    fn a_diagnostic_spanned_into_stdlib_renders_its_snippet() {
+        const NEEDLE: &str = "fn Vec<T>.push(";
+        let unified = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .find(|f| f.name == "unified.rock")
+            .expect("unified.rock is a stdlib module");
+        let offset = unified.contents.find(NEEDLE).expect("needle still in unified.rock");
+        let head = &unified.contents[..offset];
+        let line = head.matches('\n').count();
+        let col = offset - head.rfind('\n').map_or(0, |i| i + 1);
+        let span = rock_core::Span {
+            file: ustr::Ustr::from("<bone-stdlib:unified.rock>"),
+            line_range: (line, line),
+            col_range: (col, col + NEEDLE.len()),
+            offset_range: (offset, offset + NEEDLE.len()),
+        };
+        let err = CompilerError::new_with_label(span, "boxed here".to_string());
+        let rendered = render_errs(&SourceFiles { files: vec![] }, &[err]);
+
+        assert!(
+            rendered.contains(NEEDLE),
+            "the stdlib source line must render, not be dropped:\n{rendered}"
+        );
+        assert!(rendered.contains("boxed here"), "the label must render:\n{rendered}");
+    }
 }
