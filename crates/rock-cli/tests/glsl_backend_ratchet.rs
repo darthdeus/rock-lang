@@ -5,10 +5,11 @@
 //! readback regression that silently shrinks coverage goes red. Emitter growth
 //! (A1 fn-emission work) raises the floor.
 //!
-//! Skip-with-log ONLY when the runner is present but no GL context can be
-//! created (headless CI without a display, runner exit 2). A missing
-//! `stone-glsl-runner` binary is a hard error from `glsl_test_run` -- the gate
-//! must not read as green when its executor was never built. The runner is
+//! No GL context (headless, runner exit 2) FAILS unless `ROCK_ALLOW_NO_GL=1`
+//! acknowledges it: an early `return` here read as PASS in nextest's summary
+//! while enforcing nothing, which is the same swallow the gate exists to catch.
+//! A missing `stone-glsl-runner` binary is a hard error from `glsl_test_run` --
+//! the gate must not read as green when its executor was never built. The runner is
 //! located as a sibling of the test binary (`target/<profile>/stone-glsl-runner`);
 //! `just t` and CI both build it before running this.
 
@@ -27,17 +28,30 @@ fn corpus() -> Vec<String> {
     .collect()
 }
 
+fn allow_no_gl() -> bool {
+    std::env::var("ROCK_ALLOW_NO_GL").as_deref() == Ok("1")
+}
+
 #[test]
 fn glsl_runnable_coverage_ratchet() {
     let summary = rock_cli::glsl_test::glsl_test_run(&corpus(), false)
         .unwrap_or_else(|e| panic!("glsl gate cannot run: {e:#}"));
 
-    // Runner present but no GL context (headless CI) -> skip-with-log. A
-    // missing runner binary already panicked above.
+    // No GL context is an ENVIRONMENT fact, but a test that returns early here
+    // reports PASS while proving nothing -- and nextest reports it in the passed
+    // count, indistinguishable from real enforcement. So it fails by default and
+    // the escape hatch is explicit: a box that genuinely cannot make a GL context
+    // sets ROCK_ALLOW_NO_GL=1 and gets a loud skip line instead.
     if summary.per_profile.iter().all(|p| !p.gl_available) {
+        assert!(
+            allow_no_gl(),
+            "no GL context on any profile, so this ratchet enforced NOTHING. \
+             Ensure a display/driver the `stone-glsl-runner` can use, or set \
+             ROCK_ALLOW_NO_GL=1 to acknowledge an unenforced run."
+        );
         eprintln!(
-            "SKIP glsl_runnable_coverage_ratchet: runner present but no GL context \
-             (headless -- ensure a display for real enforcement)"
+            "SKIP glsl_runnable_coverage_ratchet: ROCK_ALLOW_NO_GL=1 and no GL context \
+             -- GLSL runnable coverage was NOT enforced"
         );
         return;
     }
@@ -60,7 +74,15 @@ fn glsl_runnable_coverage_ratchet() {
     const FLOOR: usize = 45;
     for p in &summary.per_profile {
         if !p.gl_available {
-            eprintln!("SKIP profile [{}]: no GL context", p.profile);
+            // One profile short is still a coverage hole, so it needs the same
+            // acknowledgement as the all-profiles case above.
+            assert!(
+                allow_no_gl(),
+                "profile [{}] had no GL context while another did, so its floor went \
+                 unchecked. Set ROCK_ALLOW_NO_GL=1 to acknowledge an unenforced profile.",
+                p.profile
+            );
+            eprintln!("SKIP profile [{}]: no GL context -- floor NOT enforced", p.profile);
             continue;
         }
         assert!(

@@ -1,0 +1,19 @@
+// EMITTED-SHAPE seed: an unmarked value struct that never leaves the function is
+// a register set, not an object. Pinned at ZERO materializations of `P`.
+//
+// The value oracle cannot see this property -- a program that builds the box and
+// reads its fields answers `7 11` exactly as well as one that never builds it. So
+// this file's gate is the emitted Lua, not the answer.
+//
+// `seed` keeps the ctor out of reach of const folding: a folded literal would emit
+// zero boxes for a reason that has nothing to do with scalarization.
+
+value P { a: int, b: int }
+
+fn seed(n: int) -> int { return n }
+
+@test(output = "7 11")
+fn scalarized_local() {
+    let slot: P = P { a: seed(7), b: 11 }
+    print("{slot.a} {slot.b}")
+}

@@ -1,0 +1,70 @@
+// SHAPE: field write consumption x every storage root bone accepts as a mutable
+// place. The sibling control for `value_local_field_write.rock` -- a leaf write
+// through a plain-struct field, a global, a Vec element, a NativeBuffer element
+// and a Map value must all land on the storage, not on a discarded copy.
+//
+// These are the roots the value-place lowering gets right today; they are here so
+// a future relaxation of the value-LOCAL root cannot regress them unnoticed.
+//
+// Corpus case: `value_place_roots`. Expected bucket: CORRECT.
+
+value Pt { x: int, y: int }
+struct Holder { p: Pt }
+
+global G: Pt = Pt { x: 1, y: 2 }
+global GH: Holder = Holder { p: Pt { x: 1, y: 2 } }
+
+fn seed(n: int) -> int { return n }
+
+@test(output = "5 2")
+fn a_struct_field_root_writes_through() {
+    let h = Holder { p: Pt { x: seed(1), y: 2 } }
+    h.p.x = 5
+    print("{h.p.x} {h.p.y}")
+}
+
+@test(output = "7 2")
+fn a_global_value_root_writes_through() {
+    G.x = 7
+    print("{G.x} {G.y}")
+}
+
+@test(output = "8 2")
+fn a_global_struct_field_root_writes_through() {
+    GH.p.x = 8
+    print("{GH.p.x} {GH.p.y}")
+}
+
+@test(output = "9 2")
+fn a_vec_element_root_writes_through() {
+    let xs: [Pt] = [Pt { x: seed(1), y: 2 }]
+    xs[0].x = 9
+    print("{xs[0].x} {xs[0].y}")
+}
+
+@test(output = "10 2")
+fn a_native_buffer_element_root_writes_through() {
+    let buf: NativeBuffer<Pt> = native_buffer_alloc(1)
+    buf[0] = Pt { x: 1, y: 2 }
+    buf[0].x = 10
+    print("{buf[0].x} {buf[0].y}")
+}
+
+@test(output = "11 2")
+fn a_map_value_root_writes_through() {
+    let m: Map<string, Holder> = map_new()
+    m["a"] = Holder { p: Pt { x: 1, y: 2 } }
+    m["a"].p.x = 11
+    print("{m["a"].p.x} {m["a"].p.y}")
+}
+
+@test(output = "12 2")
+fn a_param_held_struct_field_root_writes_through() {
+    let h = Holder { p: Pt { x: seed(1), y: 2 } }
+    print("{write_through(h)} {h.p.y}")
+}
+
+fn write_through(h: Holder) -> int {
+    h.p.x = 12
+    return h.p.x
+}

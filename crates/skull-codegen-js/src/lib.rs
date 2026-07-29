@@ -1212,12 +1212,15 @@ function __sw_adapt_es(src) {
   }
   return src;
 }
+var __sw_shader_errors = 0;
+function stone_shader_error_count() { return __sw_shader_errors; }
 function __sw_compile_stage(gl, type, src) {
   var s = gl.createShader(type);
   gl.shaderSource(s, src);
   gl.compileShader(s);
   if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
     console.error("[STONE-WEB] shader compile failed:\n" + gl.getShaderInfoLog(s) + "\n--- source ---\n" + src);
+    __sw_shader_errors++;
     gl.deleteShader(s);
     return null;
   }
@@ -1241,6 +1244,7 @@ function stone_create_shader_from_combined(src) {
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
     console.error("[STONE-WEB] shader link failed:\n" + gl.getProgramInfoLog(prog));
+    __sw_shader_errors++;
     gl.deleteProgram(prog);
     return 0;
   }

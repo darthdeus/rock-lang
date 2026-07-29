@@ -1,0 +1,34 @@
+// M3, marked tier: where the LAMBDA LITERAL sits decides whether a lambda whose
+// return type is a `nobox` value emits.
+//
+// `lambda_returning_nobox_at_let.rock` pins the `let` and struct-field spellings.
+// This widens the same class to an ARGUMENT position, which is what the sweep's
+// whole `CaptureCell` column turned out to be: all 11 of its marked shapes route
+// the value through `call_it(() => ..)`, so every one of them rejects here rather
+// than saying anything about capture.
+//
+// Capture itself is fine: the two controls that separate capture from the
+// literal's position both emit, in `nobox_lambda_literal_position_control.rock`
+// -- their own file, because a compile rejection aborts this one and a control in
+// here would never run.
+
+nobox value NV { a: int, b: int }
+
+fn seed(n: int) -> int { return n }
+fn call_it(f: () -> NV) -> NV { return f() }
+
+// The shape: the literal is an ARGUMENT, and its type returns a nobox value.
+@test(output = "7")
+fn probe_lambda_literal_at_arg() {
+    let v = call_it(() => NV { a: seed(7), b: 11 })
+    print("{v.a}")
+}
+
+// The same at an argument, capturing rather than constructing. Also rejects, so
+// the capture is not the discriminant.
+@test(output = "7")
+fn probe_lambda_literal_at_arg_capturing() {
+    let captured: NV = NV { a: seed(7), b: 11 }
+    let v = call_it(() => captured)
+    print("{v.a}")
+}

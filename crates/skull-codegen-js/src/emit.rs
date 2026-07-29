@@ -61,11 +61,51 @@ fn nobox_errs(
     ws: &bone_semantic::inference::Workspace,
     mf: &skull_mir::mir::MirFunc,
 ) -> Result<(), CompilerError> {
+    // Name the body: the span often points into an INLINED stdlib body, and a
+    // report now carries every body's sinks at once, so without the name two
+    // sites read as duplicates of each other (same as the luajit path).
+    let named = |(msg, site): (String, Option<Span>)| {
+        sited_err((format!("{msg}, while emitting `{}`", mf.name), site))
+    };
     let mut vs = skull_transform::nobox_materialization_violations(ws, mf).into_iter();
     let Some(first) = vs.next() else { return Ok(()) };
-    let mut e = sited_err(first);
-    e.siblings = vs.map(sited_err).collect();
+    let mut e = named(first);
+    e.siblings = vs.map(named).collect();
     Err(e)
+}
+
+/// Every finding in ONE definition as a single error carrying the rest as
+/// siblings. `None` when there was nothing to report.
+fn merge_findings(findings: Vec<CompilerError>) -> Option<CompilerError> {
+    let mut it = findings.into_iter();
+    let primary = it.next()?;
+    Some(primary.with_siblings(it))
+}
+
+/// Collect a fallible check's error instead of returning it, so the checks after
+/// it still run on the same body.
+fn collect<T>(findings: &mut Vec<CompilerError>, r: Result<T, CompilerError>) {
+    if let Err(e) = r {
+        findings.push(e);
+    }
+}
+
+/// The accumulated per-definition rejections as one failure: sorted by emitted
+/// name (definition names are unique, and the walk's post-order must not reach
+/// the report), first as primary and the rest as siblings.
+///
+/// Emission accumulates for the same reason the luajit path does: every
+/// rejection here is fully computed before any is reported, so bailing at the
+/// first definition hid the others rather than preventing them -- and the
+/// `--backend js` skip histogram IS the emitter worklist, so a first-only report
+/// makes that worklist a floor. Nothing is downgraded: a rejected definition
+/// contributes no JS and a non-empty set fails the whole emission.
+fn combine_rejections(mut rejections: Vec<(String, CompilerError)>) -> Result<(), CompilerError> {
+    rejections.sort_by(|(a, _), (b, _)| a.cmp(b));
+    match merge_findings(rejections.into_iter().map(|(_, e)| e).collect()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 fn nobox_nominal_ty(ws: &Workspace, ty: TyId) -> Option<ustr::Ustr> {
@@ -2140,8 +2180,9 @@ pub fn emit_with_closure(
     let mut st = WorklistState::new(ws, roots, false);
     drain_worklists(ws, scx, &mut st)?;
     st.canonicalize_emission_order();
+    let mut rejections = std::mem::take(&mut st.rejections);
     let bodies = st.top_bodies();
-    check_scalar_abi(ws, scx, &st.lowered, &st.spec_lowered, &bodies)?;
+    rejections.extend(check_scalar_abi(ws, scx, &st.lowered, &st.spec_lowered, &bodies));
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -2153,23 +2194,54 @@ pub fn emit_with_closure(
     // load-time assignment lines in dependency order, then the fn defs. (The
     // program path reorders these; per-test order is pinned by the JS suite.)
     for g in &st.ginits {
-        out.push_str(&emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?);
-        for nf in &g.mf.nested_fns {
-            out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?);
+        match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
+            Ok(js) => out.push_str(&js),
+            Err(e) => rejections.push((g.init_name.clone(), e)),
         }
     }
     for init in order_global_inits(&st.ginits, &st.lowered, &st.names)? {
         out.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
-        let name = st.names.get(fr).expect("emitted body has a name");
-        out.push_str(&emit_lowered_fn(ws, *fr, mf, name, &st.names, &hoisted, &st.gctx)?);
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(fr).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+            Ok(js) => out.push_str(&js),
+            Err(e) => rejections.push((st.names.get(fr).expect("emitted body has a name").clone(), e)),
+        }
     }
-    out.push_str(&emit_spec_bodies(ws, &st, &hoisted)?);
+    out.push_str(&emit_spec_bodies(ws, &st, &hoisted, &mut rejections));
+    combine_rejections(rejections)?;
     for fr in &st.inline_js {
         out.push_str(&emit_inline_js_fn(ws, scx, *fr, st.names.get(fr).expect("emitted body has a name")));
     }
     Ok(out)
+}
+
+/// One non-fn body (decorator definition, global initializer) plus its hoisted
+/// lambda bodies, as one string -- so a rejection anywhere in it drops the whole
+/// definition rather than half of it.
+fn emit_body_with_nested(
+    ws: &Workspace,
+    mf: &MirFunc,
+    js_name: &str,
+    names: &CalleeNames,
+    hoisted: &HashSet<ustr::Ustr>,
+    gctx: &GlobalCtx,
+) -> Result<String, CompilerError> {
+    let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
+    for nf in &mf.nested_fns {
+        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
+    }
+    Ok(out)
+}
+
+fn emit_ginit_with_nested(
+    ws: &Workspace,
+    g: &GlobalInit,
+    names: &CalleeNames,
+    hoisted: &HashSet<ustr::Ustr>,
+    gctx: &GlobalCtx,
+) -> Result<String, CompilerError> {
+    emit_body_with_nested(ws, &g.mf, &g.init_name, names, hoisted, gctx)
 }
 
 /// The whole workspace as ONE JS program (M1, `docs/js-deployment-plan.md`):
@@ -2301,10 +2373,22 @@ fn build_program_core(
                 continue;
             }
             let deco_name = decorator_js_name(d.name.as_str());
-            let mut mf =
-                skull_mir::lower::lower_decorator(ws, scx, module.id, did, ustr::Ustr::from(deco_name.as_str()))?;
+            let lowered = skull_mir::lower::lower_decorator(
+                ws, scx, module.id, did, ustr::Ustr::from(deco_name.as_str()),
+            );
+            let mut mf = match lowered {
+                Ok(mf) => mf,
+                Err(e) => {
+                    st.reject(&deco_name, e);
+                    continue;
+                }
+            };
             let self_ref = safe_self_ref(ws, &mf);
-            skull_transform::inline_functions(ws, scx, self_ref, &mut mf, &mut st.cache)?;
+            if let Err(e) = skull_transform::inline_functions(ws, scx, self_ref, &mut mf, &mut st.cache)
+            {
+                st.reject(&deco_name, e);
+                continue;
+            }
             skull_transform::cleanup_with_nobox(ws, &mut mf);
             skull_transform::convert_closures(&mut mf, &deco_name);
             skull_transform::recover_counted_loops(ws, &mut mf);
@@ -2312,22 +2396,30 @@ fn build_program_core(
                 skull_transform::recover_counted_loops(ws, nf);
             }
             register_statics(&mf, &mut st.gctx);
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
+            let mut findings: Vec<CompilerError> = Vec::new();
+            collect(
+                &mut findings,
+                discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
+            );
             discover_globals(
                 ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
                 &mut st.inline_js,
             )?;
-            deco_bodies.push((deco_name, mf));
+            match merge_findings(findings) {
+                Some(e) => st.reject(&deco_name, e),
+                None => deco_bodies.push((deco_name, mf)),
+            }
         }
     }
 
     drain_worklists(ws, scx, &mut st)?;
     st.canonicalize_emission_order();
 
+    let mut rejections = std::mem::take(&mut st.rejections);
     let mut bodies = st.top_bodies();
     bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
-    check_scalar_abi(ws, scx, &st.lowered, &st.spec_lowered, &bodies)?;
+    rejections.extend(check_scalar_abi(ws, scx, &st.lowered, &st.spec_lowered, &bodies));
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -2346,28 +2438,29 @@ fn build_program_core(
     stable.push_str(&col_mat);
     // 1. deco def fns.
     for (name, mf) in &deco_bodies {
-        let definition = emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?;
-        out.push_str(&definition);
-        stable.push_str(&definition);
-        for nf in &mf.nested_fns {
-            let definition =
-                emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?;
-            out.push_str(&definition);
-            stable.push_str(&definition);
+        match emit_body_with_nested(ws, mf, name, &st.names, &hoisted, &st.gctx) {
+            Ok(definition) => {
+                out.push_str(&definition);
+                stable.push_str(&definition);
+            }
+            Err(e) => rejections.push((name.clone(), e)),
         }
     }
     // 2. fn defs (main, decorated fns, transitive callees).
     let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
-        let name = st.names.get(fr).expect("emitted body has a name");
-        let js = emit_lowered_fn(ws, *fr, mf, name, &st.names, &hoisted, &st.gctx)?;
-        out.push_str(&js);
-        chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(fr).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+            Ok(js) => {
+                out.push_str(&js);
+                chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
+            }
+            Err(e) => rejections.push((st.names.get(fr).expect("emitted body has a name").clone(), e)),
+        }
     }
     // 2a. standalone specialized copies. STABLE, not a chunk: a chunk is keyed by
     // `FuncRef` and a callee has one copy per instantiation, so an edit that moves
     // a specialized body forces a full reload rather than a per-fn overlay.
-    let spec_bodies = emit_spec_bodies(ws, &st, &hoisted)?;
+    let spec_bodies = emit_spec_bodies(ws, &st, &hoisted, &mut rejections);
     out.push_str(&spec_bodies);
     stable.push_str(&spec_bodies);
     // 2b. inline(js) fns, emitted verbatim.
@@ -2379,23 +2472,18 @@ fn build_program_core(
     // 3. ginit def fns.
     let mut const_chunks = HashMap::new();
     for g in &st.ginits {
-        let definition =
-            emit_fn_with_callees(ws, &g.mf, &g.init_name, &st.names, &hoisted, &st.gctx)?;
+        let definition = match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
+            Ok(js) => js,
+            Err(e) => {
+                rejections.push((g.init_name.clone(), e));
+                continue;
+            }
+        };
         out.push_str(&definition);
         if g.is_const {
             const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
         } else {
             stable.push_str(&definition);
-        }
-        for nf in &g.mf.nested_fns {
-            let definition =
-                emit_fn_with_callees(ws, nf, nf.name.as_str(), &st.names, &hoisted, &st.gctx)?;
-            out.push_str(&definition);
-            if g.is_const {
-                const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
-            } else {
-                stable.push_str(&definition);
-            }
         }
     }
     // 4. load-time init lines (dependency-ordered).
@@ -2414,6 +2502,11 @@ fn build_program_core(
     let applications = decorator_application_lines_js(ws, &deco_names, &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
+
+    // Every definition has been visited, so this is the earliest point where the
+    // whole rejection list exists. A non-empty list fails the build and the
+    // assembled program is discarded with it.
+    combine_rejections(rejections)?;
 
     Ok(ProgramBuild {
         program: out,
@@ -2720,6 +2813,10 @@ struct WorklistState {
     ginit_queue: Vec<(ustr::Ustr, GlobalSite)>,
     ginit_seen: HashSet<ustr::Ustr>,
     ginits: Vec<GlobalInit>,
+    /// One entry per DEFINITION that could not be emitted, keyed by its emitted
+    /// JS name (unique per definition, so the key sorts the report into an order
+    /// that does not depend on the walk's post-order). See [`Rejections`].
+    rejections: Vec<(String, CompilerError)>,
 }
 
 impl WorklistState {
@@ -2740,7 +2837,15 @@ impl WorklistState {
             ginit_queue: Vec::new(),
             ginit_seen: HashSet::new(),
             ginits: Vec::new(),
+            rejections: Vec::new(),
         }
+    }
+
+    /// Record a definition that cannot be emitted and keep going. The definition
+    /// contributes no JS, and the caller fails the whole emission on the
+    /// accumulated set -- so the program is never returned with a hole in it.
+    fn reject(&mut self, name: &str, e: CompilerError) {
+        self.rejections.push((name.to_string(), e));
     }
 
     /// Every emitted top-level body (fn defs + ginit init fns) for the cross-
@@ -2880,29 +2985,49 @@ impl JsReach<'_> {
     /// Lower + transform one fn through the same per-body pipeline the luajit
     /// path runs (lower -> inline -> cleanup -> closures -> FORL -> residual-
     /// bound-call validation; coroutines skip inline/FORL), then record it.
+    /// A rejected body is RECORDED and the walk continues (an `Err` return means
+    /// abort the whole emission -- reserved for the decorator-application signal
+    /// [`JsReach::discover`] describes). Its callees are still discovered, which
+    /// is what makes the sibling definitions behind it visible at all; the body
+    /// itself is not recorded as lowered, so it contributes no JS.
     fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
         let f = &self.ws.module(fr.module).functions[fr.func];
-        let mut mf = skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func)?;
+        let name = self.st.names.get(&fr).expect("queued fn has a name").clone();
+        let mut mf = match skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func) {
+            Ok(mf) => mf,
+            Err(e) => {
+                self.st.reject(&name, e);
+                return Ok(());
+            }
+        };
         if mf.is_coroutine {
             skull_transform::cleanup_with_nobox(self.ws, &mut mf);
         } else {
-            skull_transform::inline_functions(self.ws, self.scx, fr, &mut mf, &mut self.st.cache)?;
+            if let Err(e) =
+                skull_transform::inline_functions(self.ws, self.scx, fr, &mut mf, &mut self.st.cache)
+            {
+                self.st.reject(&name, e);
+                return Ok(());
+            }
             skull_transform::cleanup_with_nobox(self.ws, &mut mf);
-            let js_name = self.st.names.get(&fr).expect("queued fn has a name").clone();
-            skull_transform::convert_closures(&mut mf, &js_name);
+            skull_transform::convert_closures(&mut mf, &name);
             skull_transform::recover_counted_loops(self.ws, &mut mf);
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(self.ws, nf);
             }
         }
-        skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf)?;
-        nobox_errs(self.ws, &mf)?;
-        validate_js_nobox_return(self.ws, f, &mf)?;
+        let mut findings: Vec<CompilerError> = Vec::new();
+        collect(&mut findings, skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf));
+        collect(&mut findings, nobox_errs(self.ws, &mf));
+        collect(&mut findings, validate_js_nobox_return(self.ws, f, &mf));
         for nf in &mf.nested_fns {
-            nobox_errs(self.ws, nf)?;
+            collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        self.discover(&mf)?;
-        self.st.lowered.push((fr, mf));
+        findings.extend(self.discover(&mf)?);
+        match merge_findings(findings) {
+            Some(e) => self.st.reject(&name, e),
+            None => self.st.lowered.push((fr, mf)),
+        }
         Ok(())
     }
 
@@ -2918,25 +3043,39 @@ impl JsReach<'_> {
             return Ok(()); // all-`None` key: the shared body already serves it
         };
         let subst = skull_mir::lower::spec_subst_from_key(self.ws, fr, &key);
-        let mut mf =
-            skull_mir::lower::lower_function_spec(self.ws, self.scx, fr.module, fr.func, &subst)?;
-        skull_transform::inline_functions_with_subst(
+        let mut mf = match skull_mir::lower::lower_function_spec(
+            self.ws, self.scx, fr.module, fr.func, &subst,
+        ) {
+            Ok(mf) => mf,
+            Err(e) => {
+                self.st.reject(&name, e);
+                return Ok(());
+            }
+        };
+        if let Err(e) = skull_transform::inline_functions_with_subst(
             self.ws, self.scx, fr, &mut mf, &mut self.st.cache, &subst,
-        )?;
+        ) {
+            self.st.reject(&name, e);
+            return Ok(());
+        }
         skull_transform::cleanup_with_nobox(self.ws, &mut mf);
         skull_transform::convert_closures(&mut mf, &name);
         skull_transform::recover_counted_loops(self.ws, &mut mf);
         for nf in &mut mf.nested_fns {
             skull_transform::recover_counted_loops(self.ws, nf);
         }
-        nobox_errs(self.ws, &mf)?;
+        let mut findings: Vec<CompilerError> = Vec::new();
+        collect(&mut findings, nobox_errs(self.ws, &mf));
         for nf in &mf.nested_fns {
-            nobox_errs(self.ws, nf)?;
+            collect(&mut findings, nobox_errs(self.ws, nf));
         }
         mf.name = ustr::Ustr::from(name.as_str());
-        self.st.names.spec.insert((fr, key.clone()), name);
-        self.discover(&mf)?;
-        self.st.spec_lowered.push((fr, key, mf));
+        self.st.names.spec.insert((fr, key.clone()), name.clone());
+        findings.extend(self.discover(&mf)?);
+        match merge_findings(findings) {
+            Some(e) => self.st.reject(&name, e),
+            None => self.st.spec_lowered.push((fr, key, mf)),
+        }
         Ok(())
     }
 
@@ -2947,7 +3086,14 @@ impl JsReach<'_> {
         let init_name = global_init_js_name(gname);
         let lowered = skull_mir::lower::lower_global(
             self.ws, self.scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()),
-        )?;
+        );
+        let lowered = match lowered {
+            Ok(l) => l,
+            Err(e) => {
+                self.st.reject(&init_name, e);
+                return Ok(());
+            }
+        };
         let Some(mut mf) = lowered else { return Ok(()) };
         skull_transform::cleanup_with_nobox(self.ws, &mut mf);
         skull_transform::convert_closures(&mut mf, &init_name);
@@ -2955,11 +3101,16 @@ impl JsReach<'_> {
         for nf in &mut mf.nested_fns {
             skull_transform::recover_counted_loops(self.ws, nf);
         }
-        nobox_errs(self.ws, &mf)?;
+        let mut findings: Vec<CompilerError> = Vec::new();
+        collect(&mut findings, nobox_errs(self.ws, &mf));
         for nf in &mf.nested_fns {
-            nobox_errs(self.ws, nf)?;
+            collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        self.discover(&mf)?;
+        findings.extend(self.discover(&mf)?);
+        if let Some(e) = merge_findings(findings) {
+            self.st.reject(&init_name, e);
+            return Ok(());
+        }
         let is_const = self.ws.module(site.module).globals[site.gid].is_const;
         self.st.ginits.push(GlobalInit {
             name: gname,
@@ -2971,16 +3122,30 @@ impl JsReach<'_> {
         Ok(())
     }
 
-    fn discover(&mut self, mf: &MirFunc) -> Result<(), CompilerError> {
+    /// Queue everything this body reaches, returning the body's own discovery
+    /// findings (unmapped callees) for the caller to accumulate.
+    ///
+    /// An `Err` is the ONE discovery outcome that is not a census finding:
+    /// [`discover_globals`] rejects exactly once, on a read of a
+    /// decorator-populated global, and the per-test driver matches that message
+    /// to RETRY the file in program mode (where the applications are emitted).
+    /// Demoting it to a sibling would turn a test that lifts into a test that
+    /// skips, so it aborts the emission immediately as before.
+    fn discover(&mut self, mf: &MirFunc) -> Result<Vec<CompilerError>, CompilerError> {
         let st = &mut *self.st;
         register_statics(mf, &mut st.gctx);
         collect_spec_bound_calls(mf, &mut st.spec_queue);
-        discover_callees(self.ws, mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
+        let mut findings = Vec::new();
+        collect(
+            &mut findings,
+            discover_callees(self.ws, mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
+        );
         discover_globals(
             self.ws, mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
             &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
             &mut st.inline_js,
-        )
+        )?;
+        Ok(findings)
     }
 }
 
@@ -3047,13 +3212,17 @@ fn emit_spec_bodies(
     ws: &Workspace,
     st: &WorklistState,
     hoisted: &HashSet<ustr::Ustr>,
-) -> Result<String, CompilerError> {
+    rejections: &mut Vec<(String, CompilerError)>,
+) -> String {
     let mut out = String::new();
     for (fr, key, mf) in &st.spec_lowered {
         let name = &st.names.spec[&(*fr, key.clone())];
-        out.push_str(&emit_lowered_fn(ws, *fr, mf, name, &st.names, hoisted, &st.gctx)?);
+        match emit_lowered_fn(ws, *fr, mf, name, &st.names, hoisted, &st.gctx) {
+            Ok(js) => out.push_str(&js),
+            Err(e) => rejections.push((name.clone(), e)),
+        }
     }
-    Ok(out)
+    out
 }
 
 /// Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values at
@@ -3062,13 +3231,16 @@ fn emit_spec_bodies(
 /// co-emitted callees were NOT inlined (whole-value use blocks eligibility), so
 /// reject rather than emit-and-hope. `argc < arity` down to the count of params
 /// WITHOUT a default is the legitimate omitted-defaulted-arg shape.
+///
+/// Every offending BODY, keyed by its name: one mismatch per body used to abort
+/// the emission, hiding the others.
 fn check_scalar_abi(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     lowered: &[(FuncRef, MirFunc)],
     spec_lowered: &[(FuncRef, SpecKey, MirFunc)],
     bodies: &[&MirFunc],
-) -> Result<(), CompilerError> {
+) -> Vec<(String, CompilerError)> {
     let arities: HashMap<FuncRef, usize> =
         lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
     // A SPECIALIZED callee takes the scalar ABI its instantiation implies, which
@@ -3078,7 +3250,9 @@ fn check_scalar_abi(
     // correct specialized call as a dropped-leaf bug.
     let spec_arities: HashMap<(FuncRef, SpecKey), usize> =
         spec_lowered.iter().map(|(fr, key, mf)| ((*fr, key.clone()), mf.params.len())).collect();
+    let mut out: Vec<(String, CompilerError)> = Vec::new();
     for mf in bodies {
+        let mut findings: Vec<CompilerError> = Vec::new();
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
                 let (callee, argc) = match &mf.insts[iid] {
@@ -3089,23 +3263,24 @@ fn check_scalar_abi(
                     match spec_arities.get(&(*callee, key.clone())) {
                         // An unemitted specialization is `callee_name`'s rejection
                         // to make -- it knows which name went missing.
-                        None => continue,
-                        Some(&arity) if argc == arity => continue,
+                        None => {}
+                        Some(&arity) if argc == arity => {}
                         Some(&arity) => {
                             let cf = &ws.module(callee.module).functions[callee.func];
-                            return Err(err(format!(
+                            findings.push(err(format!(
                                 "JS subset: value-struct scalar ABI mismatch calling specialized \
                                  `{}` ({argc} args vs {arity} params)",
                                 cf.name
                             )));
                         }
                     }
+                    continue;
                 }
                 if let Some(&arity) = arities.get(callee) {
                     let required = required_arg_count(ws, scx, *callee, arity);
                     if argc < required || argc > arity {
                         let cf = &ws.module(callee.module).functions[callee.func];
-                        return Err(err(format!(
+                        findings.push(err(format!(
                             "JS subset: value-struct scalar ABI mismatch calling `{}` \
                              ({argc} args vs {required}..={arity} params; callee not inlined)",
                             cf.name
@@ -3114,8 +3289,11 @@ fn check_scalar_abi(
                 }
             }
         }
+        if let Some(e) = merge_findings(findings) {
+            out.push((mf.name.to_string(), e));
+        }
     }
-    Ok(())
+    out
 }
 
 /// Program-wide hoisted closure-body names -- the only globals a capture-free
@@ -3503,6 +3681,7 @@ fn discover_callees(
     seen: &mut HashSet<FuncRef>,
     inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
+    let mut findings: Vec<CompilerError> = Vec::new();
     for callee in skull_mir::reach::call_targets(mf) {
         let cf = &ws.module(callee.module).functions[callee.func];
         // Only the BUILTIN Map renders inline (skip its co-emission); NativeBuffer
@@ -3534,17 +3713,24 @@ fn discover_callees(
             continue;
         }
         if cf.inline_body.is_some() || cf.is_extern {
-            return Err(err(format!(
+            // Every unmapped callee, not just the first: one body often calls
+            // several, and reporting one makes the skip histogram (the emitter
+            // worklist) a floor.
+            findings.push(err(format!(
                 "JS subset: call to `{}` is not a mapped JS intrinsic",
                 cf.name
             )));
+            continue;
         }
         if seen.insert(callee) {
             names.insert(callee, callee_js_name(ws, callee));
             queue.push(callee);
         }
     }
-    Ok(())
+    match merge_findings(findings) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Scan an emitted `inline(js)` fn's verbatim body for identifiers naming a
