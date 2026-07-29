@@ -726,6 +726,19 @@ const SEEDS: &[SeedCase] = &[
         expect: Expect::Correct,
         gap: None,
     },
+    // The exemption's SCOPE. `materialize` evaluates its argument, so a fn name there
+    // is a real runtime fn value: exempting every ExpandKind opened a hole that turned
+    // this spanned rejection into a runtime failure.
+    SeedCase {
+        name: "expansion_arg_exemption_scope",
+        file: "expansion_arg_exemption_scope.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::LoudReject {
+            names: "cannot be taken as a fn value",
+        },
+        gap: None,
+    },
     SeedCase {
         name: "index_place_refinement",
         file: "index_place_refinement.rock",
@@ -1152,22 +1165,42 @@ fn shape_indices(s: &Shape) -> [usize; 5] {
 /// The pairs that some RENDERABLE tuple can express. Not every pair can: `render`
 /// declines combinations the generator has no program for, and a pair whose only
 /// witnesses are all unrenderable is infeasible rather than missing.
-fn feasible_pairs() -> BTreeSet<(usize, usize, usize, usize)> {
+fn feasible_pairs(
+    axes: &[usize],
+    build: impl Fn(&[usize]) -> Shape,
+) -> BTreeSet<(usize, usize, usize, usize)> {
     let mut feasible = BTreeSet::new();
-    let mut idx = vec![0usize; AXES.len()];
+    let mut idx = vec![0usize; axes.len()];
     loop {
-        if render(shape_at(&idx)).is_some() {
-            for a in 0..AXES.len() {
-                for b in (a + 1)..AXES.len() {
+        if render(build(&idx)).is_some() {
+            for a in 0..axes.len() {
+                for b in (a + 1)..axes.len() {
                     feasible.insert((a, b, idx[a], idx[b]));
                 }
             }
         }
-        if !odometer_next(&mut idx, &AXES) {
+        if !odometer_next(&mut idx, axes) {
             break;
         }
     }
     feasible
+}
+
+fn pairs_present(
+    axes: &[usize],
+    executed: &[Shape],
+    indices: impl Fn(&Shape) -> Vec<usize>,
+) -> BTreeSet<(usize, usize, usize, usize)> {
+    let mut present = BTreeSet::new();
+    for s in executed {
+        let i = indices(s);
+        for a in 0..axes.len() {
+            for b in (a + 1)..axes.len() {
+                present.insert((a, b, i[a], i[b]));
+            }
+        }
+    }
+    present
 }
 
 fn pairwise_shapes() -> Vec<Shape> {
@@ -1188,58 +1221,57 @@ fn pairwise_shapes() -> Vec<Shape> {
 /// Cheap enough for the default profile: `render` is pure, so this spawns no `rock`.
 #[test]
 fn the_executed_corpus_covers_every_feasible_pair() {
-    let executed: Vec<Shape> = sweep_shapes()
-        .into_iter()
-        .filter(|s| render(*s).is_some())
-        .collect();
-    let mut present: BTreeSet<(usize, usize, usize, usize)> = BTreeSet::new();
-    for s in &executed {
-        let i = shape_indices(s);
-        for a in 0..AXES.len() {
-            for b in (a + 1)..AXES.len() {
-                present.insert((a, b, i[a], i[b]));
-            }
-        }
-    }
+    assert_pairwise("unmarked", &AXES, shape_at, &sweep_shapes(), |s| {
+        shape_indices(s).to_vec()
+    });
+    // The MARKED tier needs its own assertion, not the unmarked one: its cover runs
+    // over four axes with `repr` pinned, so unmarked coverage says nothing about it.
+    // Ten feasible marked pairs were missing while this test passed.
+    assert_pairwise(
+        "marked",
+        &MARKED_AXES,
+        marked_shape_at,
+        &marked_sweep_shapes(),
+        |s| marked_shape_indices(s).to_vec(),
+    );
+}
 
-    const NAMES: [&str; 5] = [
-        "repr",
-        "storage",
-        "production",
-        "consumption",
-        "nullability",
-    ];
+fn assert_pairwise(
+    tier: &str,
+    axes: &[usize],
+    build: fn(&[usize]) -> Shape,
+    shapes: &[Shape],
+    indices: impl Fn(&Shape) -> Vec<usize>,
+) {
+    let executed: Vec<Shape> = shapes.iter().copied().filter(|s| render(*s).is_some()).collect();
+    let present = pairs_present(axes, &executed, indices);
+    // Axis names in the order the tier's own array declares them.
+    let all_names = ["repr", "storage", "production", "consumption", "nullability"];
+    let names = &all_names[all_names.len() - axes.len()..];
     let describe = |(a, b, va, vb): &(usize, usize, usize, usize)| {
-        let mut i = vec![0usize; AXES.len()];
+        let mut i = vec![0usize; axes.len()];
         i[*a] = *va;
         i[*b] = *vb;
-        let s = shape_at(&i);
+        let s = build(&i);
         let val = |axis: usize| -> String {
-            match axis {
-                0 => format!("{:?}", s.repr),
-                1 => format!("{:?}", s.storage),
-                2 => format!("{:?}", s.production),
-                3 => format!("{:?}", s.consumption),
+            match names[axis] {
+                "repr" => format!("{:?}", s.repr),
+                "storage" => format!("{:?}", s.storage),
+                "production" => format!("{:?}", s.production),
+                "consumption" => format!("{:?}", s.consumption),
                 _ => format!("{:?}", s.nullability),
             }
         };
-        format!(
-            "{}={} x {}={}",
-            NAMES[*a],
-            val(*a),
-            NAMES[*b],
-            val(*b)
-        )
+        format!("{}={} x {}={}", names[*a], val(*a), names[*b], val(*b))
     };
-
-    let missing: Vec<String> = feasible_pairs()
+    let missing: Vec<String> = feasible_pairs(axes, build)
         .difference(&present)
         .map(describe)
         .collect();
     assert!(
         missing.is_empty(),
-        "{} FEASIBLE pair(s) appear in no executed shape, so the corpus is not \
-         pairwise over what it can render:\n  {}",
+        "{tier} tier: {} FEASIBLE pair(s) appear in no executed shape, so the corpus \
+         is not pairwise over what it can render:\n  {}",
         missing.len(),
         missing.join("\n  ")
     );
@@ -1909,14 +1941,43 @@ fn sweep_shapes() -> Vec<Shape> {
 /// axis appears but the marked tier's own cross-product does not -- and that
 /// tier is where "zero in-tree instances" has twice meant "nobody wrote it yet".
 /// Forcing the repr re-derives the whole sweep at the tier that gates marking.
+/// The marked tier's own axes: `repr` is PINNED, so the cover runs over the other
+/// four. Rewriting the repr of a mixed-repr cover afterwards does NOT give a pairwise
+/// marked corpus -- some shapes become unrenderable at `Nobox` and the pairs only
+/// they carried vanish, ten of them, with the unmarked coverage test blind to it.
+const MARKED_AXES: [usize; 4] = [
+    STORAGES.len(),
+    PRODUCTIONS.len(),
+    CONSUMPTIONS.len(),
+    NULLABILITIES.len(),
+];
+
+fn marked_shape_at(i: &[usize]) -> Shape {
+    Shape {
+        repr: Repr::Nobox,
+        storage: STORAGES[i[0]],
+        production: PRODUCTIONS[i[1]],
+        consumption: CONSUMPTIONS[i[2]],
+        nullability: NULLABILITIES[i[3]],
+    }
+}
+
+fn marked_shape_indices(s: &Shape) -> [usize; 4] {
+    let i = shape_indices(s);
+    [i[1], i[2], i[3], i[4]]
+}
+
 fn marked_sweep_shapes() -> Vec<Shape> {
-    let mut shapes: Vec<Shape> = sweep_shapes()
-        .into_iter()
-        .map(|mut s| {
-            s.repr = Repr::Nobox;
-            s
-        })
-        .collect();
+    let mut shapes: Vec<Shape> =
+        pairwise_cover(&MARKED_AXES, |i| render(marked_shape_at(i)).is_some())
+            .into_iter()
+            .map(|i| marked_shape_at(&i))
+            .collect();
+    // The dangerous triples still ride along, forced to the marked tier.
+    shapes.extend(dangerous_triples().into_iter().map(|mut s| {
+        s.repr = Repr::Nobox;
+        s
+    }));
     shapes.sort();
     shapes.dedup();
     shapes

@@ -1,0 +1,23 @@
+// CONTROL for the `rock_shader` fn-value exemption: it must cover ONLY
+// `ExpandKind::ShaderPipeline`, whose argument is resolved to a fn NAME and emitted
+// as a string literal.
+//
+// `materialize` is the near miss. It is also an `@materialize` expansion, but
+// `expand_materialize` calls `lower_expr_repr` on its argument -- the value is
+// EVALUATED -- so a fn name there really does become a runtime fn value and the
+// ABI-disagreement hazard is real. Exempting every `ExpandKind` let this shape
+// through, turning a spanned rejection into a runtime failure. It must reject.
+//
+// Sibling: `shader_registration_fn_value.rock` is the shape that legitimately does
+// NOT reject.
+
+nobox value NV { a: int, b: int }
+
+fn takes_nobox(v: NV) -> int { return v.a }
+fn call_it(f: (NV) -> int) -> int { return f(NV { a: 7, b: 11 }) }
+
+@test(output = "7")
+fn materialize_of_a_nobox_carrying_fn_still_rejects() {
+    let f = materialize(takes_nobox)
+    print("{call_it(f)}")
+}

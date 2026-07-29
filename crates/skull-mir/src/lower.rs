@@ -11439,7 +11439,7 @@ impl Builder<'_> {
     /// one with a `nobox` signature by value -- pinned in
     /// `tests/errors/nobox_toplevel_fn_by_value.rock.err`, which is where the
     /// fix goes if that changes.
-    /// Argument positions of a compile-time EXPANSION call, where a bare fn name is
+    /// Argument positions of a `ShaderPipeline` expansion, where a bare fn name is
     /// consumed by the compiler and never becomes a runtime fn value:
     /// `rock_shader(frag)` lowers its argument to the entry's NAME as a string
     /// literal, so the ABI-disagreement hazard [`Self::reject_nobox_fn_taken_by_value`]
@@ -11452,7 +11452,12 @@ impl Builder<'_> {
             let Expr::Call { callee, args } = expr else { continue };
             let Callee::Unresolved { name, .. } = callee else { continue };
             let Ok(func) = self.resolve_funcref(e, *name) else { continue };
-            if self.fn_expand_kind(func).is_some() {
+            // ONLY `ShaderPipeline`. It resolves its argument to a fn NAME and emits a
+            // string literal, so the name never becomes a runtime value. The sibling
+            // kinds evaluate theirs -- `expand_materialize` calls `lower_expr_repr` on
+            // it -- so exempting them let `materialize(<nobox-carrying fn>)` bypass the
+            // ABI rejection entirely, which is a hole, not a narrowing.
+            if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) {
                 out.extend(args.clone().into_iter());
             }
         }
