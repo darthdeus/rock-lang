@@ -467,10 +467,7 @@ fn observe(file: &Path, surface: Surface, stdlib: StdlibVariant) -> Observation 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Expect {
     Correct,
-    /// Live bug. `flip_when` says what closes it. Unconstructed whenever the
-    /// corpus happens to pin no live miscompile -- the vocabulary the sentinel
-    /// discipline needs, not dead code.
-    #[allow(dead_code)]
+    /// Live bug. `flip_when` says what closes it.
     Miscompile {
         flip_when: &'static str,
     },
@@ -764,6 +761,63 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::Vanilla,
         expect: Expect::Correct,
         gap: None,
+    },
+    // --- silent-class sentinels (docs/nobox-case-matrix.md 19-21) -----------
+    // Pinned per docs/test-sentinels.md: each `.rock` states the CORRECT
+    // output, and the expectation here records that we get something else
+    // TODAY. The fixing commit flips these to `Expect::Correct`.
+    SeedCase {
+        name: "embed_safenav_leaf_projection",
+        file: "embed_safenav_leaf_projection.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Miscompile {
+            flip_when: "`Expr::SafeNav` (lower.rs:3995) consults `embed_field_of` \
+                        BEFORE emitting the field read, as every other field path does",
+        },
+        gap: Some("H1: safe-nav leaf projection through an embed/nobox field (LIVE, shipped)"),
+    },
+    SeedCase {
+        name: "embed_safenav_leaf_projection_control",
+        file: "embed_safenav_leaf_projection_control.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: Some("H1 control: scopes the defect to safe-nav, not to embed fields"),
+    },
+    SeedCase {
+        name: "embed_safenav_nullable_field",
+        file: "embed_safenav_nullable_field.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Miscompile {
+            flip_when: "same as H1 -- a nullable embed field keeps its presence tag at \
+                        the bare key, so the premature read yields a boolean",
+        },
+        gap: Some("H1 nullable: reads the presence TAG and indexes it (LIVE, shipped)"),
+    },
+    SeedCase {
+        name: "embed_match_destructure",
+        file: "embed_match_destructure.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Miscompile {
+            flip_when: "a match pattern that BINDS a flattened field reads its leaves \
+                        instead of emitting `r1 = r0.p`",
+        },
+        gap: Some("H2: match-destructure binding of a flattened field (LIVE, shipped)"),
+    },
+    SeedCase {
+        name: "nobox_vec_combinator_element",
+        file: "nobox_vec_combinator_element.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Miscompile {
+            flip_when: "specialized bound calls (lower.rs:4957) consume the concrete \
+                        tuple return shape instead of a hardcoded 2 slots -- a \
+                        specialization/tuple-ABI fix, NOT the H1/H2 field-read fix",
+        },
+        gap: Some("I: generic return-shape mismatch at the bound-call boundary"),
     },
 ];
 

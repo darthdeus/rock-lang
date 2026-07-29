@@ -1,0 +1,27 @@
+// LIVE BUG, shipped language -- no `nobox` anywhere. The NULLABLE form of the
+// safe-nav defect pinned in `embed_safenav_leaf_projection.rock`, and it is
+// worse than a wrong answer: it faults.
+//
+// A nullable embed field keeps its PRESENCE TAG at the bare key -- the same key
+// `Expr::SafeNav` (`lower.rs:3995`) reads before consulting `embed_field_of`.
+// So the read yields the tag (a boolean) rather than nil-or-value, and the next
+// link indexes a boolean. Separate file from the non-nullable probe because the
+// fault aborts the chunk.
+//
+// `struct Slot { embed q: Pt?, tag: int }` is verbatim the shape at
+// `tests/embed_reflection.rock:43`.
+
+struct Pt { x: int, y: int }
+struct Slot { embed q: Pt?, tag: int }
+
+fn mk(present: bool) -> Slot? {
+    if present { return Slot { q: Pt { x: 1, y: 2 }, tag: 7 } }
+    return null
+}
+
+// Today: `attempt to index local 'r0' (a boolean value)`.
+@test(output = "1 7")
+fn probe_safenav_nullable_embed_field() {
+    let s = mk(true)
+    print("{s?.q?.x} {s?.tag}")
+}
