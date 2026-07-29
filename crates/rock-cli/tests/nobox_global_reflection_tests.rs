@@ -36,6 +36,14 @@ fn workspace_root() -> &'static Path {
 /// `stick.toml` is required -- a single `.rock` file reproduces nothing. The run
 /// must also start the engine (`stone_run_game`), or no dump is produced at all.
 fn dump_one_global_project(pkg: &str, marker: &str) -> serde_json::Value {
+    dump_project(pkg, marker, "", 1)
+}
+
+/// As above, plus `extra` Rock decls and a frame count. `snapshot_take` reaches
+/// engine FFI, so anything calling it must run from a frame hook (`@update`),
+/// never from `main` before `stone_run_game` -- that fails with "attempt to
+/// index global 'stone' (a nil value)".
+fn dump_project(pkg: &str, marker: &str, extra: &str, frames: u32) -> serde_json::Value {
     let dir = tempfile::tempdir().expect("project dir");
     let stone = workspace_root().join("stone");
     std::fs::write(
@@ -52,12 +60,14 @@ fn dump_one_global_project(pkg: &str, marker: &str) -> serde_json::Value {
         format!(
             "{marker}value Probe {{ x: int, y: int }}\n\n\
              global SPOT: Probe = Probe {{ x: 3, y: 4 }}\n\n\
+             {extra}\n\
              fn main() {{\n    \
              stone_run_game(GameConfig {{ title: \"j probe\", width: 64, height: 64 }})\n\
              }}\n"
         ),
     )
     .expect("write main.rock");
+    let frames = frames.to_string();
 
     let scratch = tempfile::tempdir().expect("scratch dir");
     let output = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -65,7 +75,7 @@ fn dump_one_global_project(pkg: &str, marker: &str) -> serde_json::Value {
             "frame",
             &dir.path().to_string_lossy(),
             "-n",
-            "1",
+            &frames,
             "--dump-state",
             "--output",
             &scratch.path().to_string_lossy(),
@@ -116,5 +126,93 @@ fn marked_global_leaks_physical_leaf_names() {
         serde_json::json!({ "__nbg_SPOT_0": 3, "__nbg_SPOT_1": 4 }),
         "PINNED BEHAVIOUR (BUG): a nobox global reflects as physical leaves. If \
          this now reads {{\"SPOT\": {{..}}}}, the fix landed -- flip the assertion."
+    );
+}
+
+/// A snapshot round-trip over a `nobox` global, driven from a frame hook: take,
+/// clobber, restore, read the logical field back.
+///
+/// This is the property J's fix ENDANGERS, not a bug -- it passes today and must
+/// keep passing. Restore works right now precisely BECAUSE the registry publishes
+/// physical leaves: they are real `_G` entries, so the consumers' `_G[name]` read
+/// and write hit the actual storage. Moving the registry to the logical name makes
+/// the reconstruct/destructure accessors load-bearing for exactly this path, so a
+/// fix that only relabels the dump would break it.
+#[test]
+#[ignore = "spawns `rock frame` against a generated project (-P full)"]
+fn marked_global_snapshot_round_trips() {
+    let pkg = dump_project(
+        "nobox_snap_probe",
+        "nobox ",
+        r#"global WITNESS: int = -1
+
+@update
+fn on_update(dt: float) {
+    if WITNESS == -1 {
+        snapshot_take(1)
+        SPOT = Probe { x: 99, y: 99 }
+        if snapshot_restore(1) {
+            WITNESS = materialize(SPOT).x
+        } else {
+            WITNESS = -2
+        }
+    }
+}
+"#,
+        3,
+    );
+    assert_eq!(
+        pkg.get("WITNESS"),
+        Some(&serde_json::json!(3)),
+        "a nobox global must survive snapshot take/restore: expected the restored \
+         x == 3 (-2 means restore reported no keyframe; 99 means it silently did \
+         not restore). Got package dump: {pkg:#}"
+    );
+}
+
+/// The keyframe itself stores the registry's names, so the leak reaches persisted
+/// replay checkpoints and saves -- not just `--dump-state`.
+///
+/// SENTINEL: pins today's physical-leaf keys. WHEN J LANDS: expect `SPOT` here
+/// instead of the two `__nbg_SPOT_*` entries, and drop the `_leaks` suffix.
+#[test]
+#[ignore = "spawns `rock frame` against a generated project (-P full)"]
+fn marked_global_keyframe_leaks_physical_leaf_names() {
+    let pkg = dump_project(
+        "nobox_kf_probe",
+        "nobox ",
+        r#"global KEYNAMES: string = "unset"
+
+@nomangle inline(lua) fn __probe_keyframe_keys(tick: int) -> string = """
+    local kf = _G.__stone_keyframes and _G.__stone_keyframes[tick]
+    if not kf then return "no-keyframe" end
+    local ks = {}
+    for k, _ in pairs(kf.globals) do ks[#ks+1] = k end
+    table.sort(ks)
+    return table.concat(ks, ",")
+"""
+
+@update
+fn on_update(dt: float) {
+    if KEYNAMES == "unset" {
+        snapshot_take(1)
+        KEYNAMES = __probe_keyframe_keys(1)
+    }
+}
+"#,
+        3,
+    );
+    let keys = pkg
+        .get("KEYNAMES")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("no KEYNAMES in the dump: {pkg:#}"))
+        .split(',')
+        .filter(|k| k.contains("SPOT"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        vec!["__nbg_SPOT_0", "__nbg_SPOT_1"],
+        "PINNED BEHAVIOUR (BUG): the keyframe records physical leaf names, so the \
+         leak is persisted. If this now reads [\"SPOT\"], J landed -- flip it."
     );
 }
