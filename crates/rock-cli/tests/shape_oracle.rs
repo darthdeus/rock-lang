@@ -405,11 +405,8 @@ const SEEDS: &[SeedCase] = &[
         file: "nullable_read_aliasing.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::Miscompile {
-            flip_when: "the presence-aware copy-out lands in skull-mir \
-                        (`value_struct_of`'s nullable guard) -- expect Correct",
-        },
-        gap: Some("nullable whole-value read aliases (LIVE)"),
+        expect: Expect::Correct,
+        gap: Some("nullable whole-value read aliases (fixed, presence-aware copy-out)"),
     },
     SeedCase {
         // The same lowering, one backend over. Kept separate because a fix that
@@ -418,11 +415,8 @@ const SEEDS: &[SeedCase] = &[
         file: "nullable_read_aliasing.rock",
         surface: Surface::Js,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::Miscompile {
-            flip_when: "the same fix -- the cause is in shared MIR lowering, so \
-                        both backends flip together",
-        },
-        gap: Some("nullable whole-value read aliases (LIVE, JS)"),
+        expect: Expect::Correct,
+        gap: Some("nullable whole-value read aliases (fixed, shared MIR lowering)"),
     },
     SeedCase {
         name: "value_local_field_write",
@@ -1327,38 +1321,7 @@ fn dedup(items: Vec<String>) -> Vec<String> {
 /// NEW miscompiles rather than a permanent red. Delete an entry in the commit
 /// that fixes it -- an entry whose shape has started passing fails the sweep too,
 /// so neither direction can drift.
-const KNOWN_MISCOMPILES: &[(&str, &str)] = &[
-    // The nullable whole-value read aliasing bug, one entry per representation
-    // that can hold the shape. Seed case: `nullable_read_aliasing.rock`. `nobox`
-    // is absent because a nullable nobox field forces a GC-tier outer and the
-    // materialization verifier rejects it first.
-    (
-        "unmarked_structfield_wholevalueread_copyonwriteprobe_refined",
-        "nullable aliasing",
-    ),
-    (
-        "gccarrying_structfield_wholevalueread_copyonwriteprobe_refined",
-        "nullable aliasing",
-    ),
-    (
-        "wideleaves_structfield_wholevalueread_copyonwriteprobe_refined",
-        "nullable aliasing",
-    ),
-    // The same read, into a GLOBAL instead of a struct field: the destination
-    // storage is not the discriminant, the nullable READ is.
-    (
-        "unmarked_global_wholevalueread_copyonwriteprobe_refined",
-        "nullable aliasing",
-    ),
-    (
-        "gccarrying_global_wholevalueread_copyonwriteprobe_refined",
-        "nullable aliasing",
-    ),
-    (
-        "wideleaves_global_wholevalueread_copyonwriteprobe_refined",
-        "nullable aliasing",
-    ),
-];
+const KNOWN_MISCOMPILES: &[(&str, &str)] = &[];
 
 /// Diagnostics the sweep has SEEN and judged. An unrecognised rejection is a
 /// finding OR a generator bug, and either way it must not pass quietly -- so the
