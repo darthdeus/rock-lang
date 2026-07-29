@@ -104,12 +104,16 @@ enum Surface {
     /// `rock shader <file> <entry>` for both profiles. The oracle is the emitted
     /// GLSL, since a shader is not `@test`-executable from here.
     Glsl { entry: &'static str },
+    /// `rock compile` -- emission only, nothing runs. For shapes whose runtime
+    /// needs the engine (an entry registered with `rock_shader`) but whose verdict
+    /// is decided at emit anyway. It can only ever say CORRECT or LOUD REJECT.
+    Emit,
 }
 
 /// Which stdlib the process reads. `stdlib/*.rock` is read from disk at runtime,
 /// so the marked variant is a patched COPY plus `ROCK_STDLIB_DIR` -- one binary,
 /// two stdlibs, the marker the only variable (`benchmarks/nobox-vec2/README.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum StdlibVariant {
     Vanilla,
     Vec2Nobox,
@@ -347,6 +351,31 @@ fn observe(file: &Path, surface: Surface, stdlib: StdlibVariant) -> Observation 
             classify_test_run(&text, ok)
         }
         Surface::Glsl { entry } => run_glsl(file, entry, stdlib),
+        Surface::Emit => {
+            let path = file.to_string_lossy().into_owned();
+            let out = std::env::temp_dir().join("rock_shape_oracle_emit.lua");
+            let (text, ok) = run_rock(
+                &["compile", &path, "--output", &out.to_string_lossy()],
+                stdlib,
+            );
+            if let Some(reason) = first_diagnostic(&text) {
+                return Observation {
+                    bucket: Bucket::LoudReject,
+                    detail: reason,
+                };
+            }
+            if !ok {
+                return Observation {
+                    bucket: Bucket::LoudReject,
+                    detail: last_nonempty(&text)
+                        .unwrap_or_else(|| "non-zero exit, no diagnostic".into()),
+                };
+            }
+            Observation {
+                bucket: Bucket::Correct,
+                detail: "emitted".to_string(),
+            }
+        }
     }
 }
 
@@ -362,7 +391,10 @@ fn observe(file: &Path, surface: Surface, stdlib: StdlibVariant) -> Observation 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Expect {
     Correct,
-    /// Live bug. `flip_when` says what closes it.
+    /// Live bug. `flip_when` says what closes it. Unconstructed whenever the
+    /// corpus happens to pin no live miscompile -- the vocabulary the sentinel
+    /// discipline needs, not dead code.
+    #[allow(dead_code)]
     Miscompile {
         flip_when: &'static str,
     },
@@ -483,6 +515,27 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::Vec2Nobox,
         expect: Expect::Correct,
         gap: Some("GLSL locals inherit nobox repr (fixed, `is_nobox_struct` gates on `values_first_class`)"),
+    },
+    SeedCase {
+        name: "shader_registration_unmarked",
+        file: "shader_registration_fn_value.rock",
+        surface: Surface::Emit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: None,
+    },
+    SeedCase {
+        name: "shader_registration_vec2_marked",
+        file: "shader_registration_fn_value.rock",
+        surface: Surface::Emit,
+        stdlib: StdlibVariant::Vec2Nobox,
+        expect: Expect::LoudReject {
+            names: "cannot be taken as a fn value",
+        },
+        gap: Some(
+            "NEW: marking `Vec2` rejects every in-game `rock_shader(<entry>)` \
+             registration (lambda wrapper is the prescribed fix)",
+        ),
     },
 ];
 
@@ -739,43 +792,25 @@ const NULLABILITIES: [Nullability; 3] = [
     Nullability::Coalesced,
 ];
 
-/// Greedy pairwise (all-pairs) selection: every PAIR of axis values from two
-/// different axes appears in at least one selected shape. Deterministic -- no
-/// RNG, so a failing sweep replays exactly.
-fn pairwise_shapes() -> Vec<Shape> {
-    let axes: [usize; 5] = [
-        REPRS.len(),
-        STORAGES.len(),
-        PRODUCTIONS.len(),
-        CONSUMPTIONS.len(),
-        NULLABILITIES.len(),
-    ];
-    let at = |shape: &Shape, axis: usize| -> usize {
-        match axis {
-            0 => REPRS.iter().position(|v| *v == shape.repr).unwrap(),
-            1 => STORAGES.iter().position(|v| *v == shape.storage).unwrap(),
-            2 => PRODUCTIONS
-                .iter()
-                .position(|v| *v == shape.production)
-                .unwrap(),
-            3 => CONSUMPTIONS
-                .iter()
-                .position(|v| *v == shape.consumption)
-                .unwrap(),
-            _ => NULLABILITIES
-                .iter()
-                .position(|v| *v == shape.nullability)
-                .unwrap(),
+/// Greedy all-pairs (pairwise) cover over axes of the given cardinalities: every
+/// PAIR of values drawn from two different axes appears in at least one returned
+/// index tuple. Deterministic -- no RNG, so a failing sweep replays exactly.
+///
+/// Each round walks the whole candidate lattice in odometer order (last axis
+/// fastest) and keeps the first tuple covering the most uncovered pairs. Bounded
+/// by the pair count, which shrinks strictly every round.
+fn odometer_next(idx: &mut [usize], axes: &[usize]) -> bool {
+    for a in (0..axes.len()).rev() {
+        idx[a] += 1;
+        if idx[a] < axes[a] {
+            return true;
         }
-    };
-    let build = |i: [usize; 5]| Shape {
-        repr: REPRS[i[0]],
-        storage: STORAGES[i[1]],
-        production: PRODUCTIONS[i[2]],
-        consumption: CONSUMPTIONS[i[3]],
-        nullability: NULLABILITIES[i[4]],
-    };
+        idx[a] = 0;
+    }
+    false
+}
 
+fn pairwise_cover(axes: &[usize]) -> Vec<Vec<usize>> {
     let mut wanted: BTreeSet<(usize, usize, usize, usize)> = BTreeSet::new();
     for a in 0..axes.len() {
         for b in (a + 1)..axes.len() {
@@ -787,32 +822,24 @@ fn pairwise_shapes() -> Vec<Shape> {
         }
     }
 
-    let mut chosen: Vec<Shape> = Vec::new();
-    // Each round walks the whole candidate lattice in index order and keeps the
-    // first combination covering the most uncovered pairs. Bounded by the pair
-    // count, which shrinks strictly every round.
+    let mut chosen: Vec<Vec<usize>> = Vec::new();
     while !wanted.is_empty() {
-        let mut best: Option<([usize; 5], usize)> = None;
-        for i0 in 0..axes[0] {
-            for i1 in 0..axes[1] {
-                for i2 in 0..axes[2] {
-                    for i3 in 0..axes[3] {
-                        for i4 in 0..axes[4] {
-                            let idx = [i0, i1, i2, i3, i4];
-                            let mut gain = 0;
-                            for a in 0..axes.len() {
-                                for b in (a + 1)..axes.len() {
-                                    if wanted.contains(&(a, b, idx[a], idx[b])) {
-                                        gain += 1;
-                                    }
-                                }
-                            }
-                            if gain > best.map(|(_, g)| g).unwrap_or(0) {
-                                best = Some((idx, gain));
-                            }
-                        }
+        let mut best: Option<(Vec<usize>, usize)> = None;
+        let mut idx = vec![0usize; axes.len()];
+        loop {
+            let mut gain = 0;
+            for a in 0..axes.len() {
+                for b in (a + 1)..axes.len() {
+                    if wanted.contains(&(a, b, idx[a], idx[b])) {
+                        gain += 1;
                     }
                 }
+            }
+            if gain > best.as_ref().map(|(_, g)| *g).unwrap_or(0) {
+                best = Some((idx.clone(), gain));
+            }
+            if !odometer_next(&mut idx, axes) {
+                break;
             }
         }
         let (idx, _) = best.expect("pairs remain but no candidate covers any");
@@ -821,11 +848,28 @@ fn pairwise_shapes() -> Vec<Shape> {
                 wanted.remove(&(a, b, idx[a], idx[b]));
             }
         }
-        let shape = build(idx);
-        let _ = at(&shape, 0);
-        chosen.push(shape);
+        chosen.push(idx);
     }
     chosen
+}
+
+fn pairwise_shapes() -> Vec<Shape> {
+    pairwise_cover(&[
+        REPRS.len(),
+        STORAGES.len(),
+        PRODUCTIONS.len(),
+        CONSUMPTIONS.len(),
+        NULLABILITIES.len(),
+    ])
+    .into_iter()
+    .map(|i| Shape {
+        repr: REPRS[i[0]],
+        storage: STORAGES[i[1]],
+        production: PRODUCTIONS[i[2]],
+        consumption: CONSUMPTIONS[i[3]],
+        nullability: NULLABILITIES[i[4]],
+    })
+    .collect()
 }
 
 /// The dangerous TRIPLES the plan's table names, hand-added on top of the
@@ -1478,10 +1522,8 @@ fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
 // gap in this harness: the shapes above are user value structs over `int` leaves,
 // while GLSL accepts only the tier-0 whitelist (`vecN`, `Mat4`) and turns the
 // scalar ABI off entirely (`values_first_class`). There is no GLSL-legal image of
-// the generated corpus to run. The GLSL oracle is therefore the SEED pair
-// (`glsl_local_unmarked` / `glsl_local_vec2_marked`), which is where the live gap
-// lives; widening it into a shader-shaped generator over `Vec2`/`Vec4` is A5's
-// job, gated by `shader-validate` on both profiles.
+// the generated corpus to run, so the GLSL rung has its OWN generator over
+// float-vector types -- `the_glsl_subset_agrees_across_backends` below.
 
 /// The JS backend over the SAME generated shapes. It is a real rung, not a
 /// placeholder -- but its verdict set differs on purpose: `--backend js` reports
@@ -1547,3 +1589,506 @@ fn indent_block(text: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// The GLSL-legal subset (A5)
+// ---------------------------------------------------------------------------
+//
+// A separate shape space, because the interesting question on this rung is not
+// "does the answer come out right" but "is the same shape legal on both sides".
+// GLSL admits only float-vector value types, has no nullability, no strings and
+// no collections; a `@shader` fn is nevertheless an ordinary Rock fn, so ONE
+// generated program is observable on all three backends and the DIVERGENCE
+// between their verdicts is the finding.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum VecTy {
+    Vec2,
+    Vec3,
+    Vec4,
+}
+
+impl VecTy {
+    fn name(self) -> &'static str {
+        match self {
+            VecTy::Vec2 => "Vec2",
+            VecTy::Vec3 => "Vec3",
+            VecTy::Vec4 => "Vec4",
+        }
+    }
+    fn fields(self) -> &'static [&'static str] {
+        match self {
+            VecTy::Vec2 => &["x", "y"],
+            VecTy::Vec3 => &["x", "y", "z"],
+            VecTy::Vec4 => &["x", "y", "z", "w"],
+        }
+    }
+    /// Dyadic component values, so every derived expectation prints identically
+    /// under LuaJIT's `%.14g` and JS `Number::toString`.
+    fn comps(self) -> Vec<f64> {
+        (0..self.fields().len())
+            .map(|i| 1.0 + 0.5 * i as f64)
+            .collect()
+    }
+    fn ctor(self, comps: &[f64]) -> String {
+        let inner: Vec<String> = self
+            .fields()
+            .iter()
+            .zip(comps)
+            .map(|(f, v)| format!("{f}: {}", fmt_lit(*v)))
+            .collect();
+        format!("{} {{ {} }}", self.name(), inner.join(", "))
+    }
+    fn zero(self) -> String {
+        self.ctor(&vec![0.0; self.fields().len()])
+    }
+    fn literal(self) -> String {
+        self.ctor(&self.comps())
+    }
+}
+
+/// Where the value the shape exercises comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GlslSource {
+    /// Literal constants in the shader body.
+    Local,
+    /// A `@uniform` value-struct field -- the CPU/GPU binding boundary.
+    UniformField,
+    /// A helper fn's parameter, with production AND consumption inside the helper.
+    HelperParam,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GlslProduction {
+    /// Rebuild field by field.
+    LiteralCtor,
+    /// Through a helper returning the vector whole.
+    CallResult,
+    /// Both arms of an `if` yield the vector.
+    PhiIf,
+    /// Vector `+` vector.
+    ArithAdd,
+    /// Read back out of a NON-whitelisted user value struct, RETURNED from a
+    /// helper so the ctor/field-read pair cannot fold away before GLSL sees it.
+    /// Inlined at the definition it folds to the bare vector and probes nothing.
+    UserStructField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GlslConsumption {
+    /// Rebind, then read components inline.
+    Bind,
+    /// Pass whole to a helper taking the vector.
+    HelperArg,
+    /// Return it whole from a helper, then read components.
+    ReturnWhole,
+    /// A tier-0 templated intrinsic (`dot`).
+    Intrinsic,
+    /// A `@gpu_only` intrinsic (`texture`). Legal on GLSL, and nowhere else.
+    GpuOnlyIntrinsic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GlslShape {
+    vec: VecTy,
+    source: GlslSource,
+    production: GlslProduction,
+    consumption: GlslConsumption,
+    stdlib: StdlibVariant,
+}
+
+impl GlslShape {
+    fn name(&self) -> String {
+        format!(
+            "{:?}_{:?}_{:?}_{:?}_{}",
+            self.vec,
+            self.source,
+            self.production,
+            self.consumption,
+            match self.stdlib {
+                StdlibVariant::Vanilla => "unmarked",
+                StdlibVariant::Vec2Nobox => "vec2nobox",
+            }
+        )
+        .to_lowercase()
+    }
+}
+
+const GLSL_VECS: [VecTy; 3] = [VecTy::Vec2, VecTy::Vec3, VecTy::Vec4];
+const GLSL_SOURCES: [GlslSource; 3] = [
+    GlslSource::Local,
+    GlslSource::UniformField,
+    GlslSource::HelperParam,
+];
+const GLSL_PRODUCTIONS: [GlslProduction; 5] = [
+    GlslProduction::LiteralCtor,
+    GlslProduction::CallResult,
+    GlslProduction::PhiIf,
+    GlslProduction::ArithAdd,
+    GlslProduction::UserStructField,
+];
+const GLSL_CONSUMPTIONS: [GlslConsumption; 5] = [
+    GlslConsumption::Bind,
+    GlslConsumption::HelperArg,
+    GlslConsumption::ReturnWhole,
+    GlslConsumption::Intrinsic,
+    GlslConsumption::GpuOnlyIntrinsic,
+];
+const GLSL_STDLIBS: [StdlibVariant; 2] = [StdlibVariant::Vanilla, StdlibVariant::Vec2Nobox];
+
+fn glsl_shapes() -> Vec<GlslShape> {
+    let mut shapes: Vec<GlslShape> = pairwise_cover(&[
+        GLSL_VECS.len(),
+        GLSL_SOURCES.len(),
+        GLSL_PRODUCTIONS.len(),
+        GLSL_CONSUMPTIONS.len(),
+        GLSL_STDLIBS.len(),
+    ])
+    .into_iter()
+    .map(|i| GlslShape {
+        vec: GLSL_VECS[i[0]],
+        source: GLSL_SOURCES[i[1]],
+        production: GLSL_PRODUCTIONS[i[2]],
+        consumption: GLSL_CONSUMPTIONS[i[3]],
+        stdlib: GLSL_STDLIBS[i[4]],
+    })
+    .collect();
+    // The Part-1 miscompile's own triple, both markings: a marked `Vec2` local in
+    // a shader body scalarized into reserved `<name>__<i>` identifiers.
+    for stdlib in GLSL_STDLIBS {
+        for vec in GLSL_VECS {
+            shapes.push(GlslShape {
+                vec,
+                source: GlslSource::Local,
+                production: GlslProduction::CallResult,
+                consumption: GlslConsumption::Bind,
+                stdlib,
+            });
+        }
+    }
+    shapes.sort();
+    shapes.dedup();
+    shapes
+}
+
+fn fmt_lit(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
+}
+
+/// What `print` renders on BOTH backends: LuaJIT's `%.14g` drops a zero fraction
+/// and JS `Number::toString` never adds one, so the two agree on every dyadic
+/// value the generator uses (verified, not assumed).
+fn fmt_expected(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+struct GlslProgram {
+    source: String,
+    expected: String,
+    /// The entry fn, for `rock shader`.
+    entry: String,
+    /// `Sampler2D` is not CPU-constructible, so a `@gpu_only` shape carries no
+    /// `@test` and the luajit/JS rungs have nothing to observe. Recorded rather
+    /// than silently skipped.
+    cpu_observable: bool,
+}
+
+/// One program per shape. Top-level names carry `id` so the whole subset can sit
+/// in one directory without colliding in Rock's single namespace.
+///
+/// Deliberately NO `rock_shader(<entry>)` registration: that global is installed
+/// by the stone engine, so a bare `rock test` dies at `__rock_shader_register (a
+/// nil value)` and every luajit rung would read as a backend failure. The
+/// registration shape is its own corpus case
+/// (`shader_registration_fn_value.rock`), observed on the emit-only surface.
+fn render_glsl(shape: GlslShape, id: usize) -> Option<GlslProgram> {
+    // Production and consumption both live inside the helper for `HelperParam`,
+    // and the `@gpu_only` arm needs the entry's sampler + varying. No overlap.
+    if shape.source == GlslSource::HelperParam
+        && shape.consumption == GlslConsumption::GpuOnlyIntrinsic
+    {
+        return None;
+    }
+    let t = shape.vec;
+    let comps = t.comps();
+    let sum: f64 = comps.iter().sum();
+    let dot: f64 = comps.iter().map(|c| c * c).sum();
+
+    let entry = format!("probe_{id}_frag");
+    let sum_fn = format!("probe_sum_{id}");
+    let pass_fn = format!("probe_pass_{id}");
+    let body_fn = format!("probe_body_{id}");
+    let hold_fn = format!("probe_hold_{id}");
+    let u_ty = format!("ProbeU{id}");
+    let holder_ty = format!("Holder{id}");
+
+    let sum_of = |v: &str| -> String {
+        t.fields()
+            .iter()
+            .map(|f| format!("{v}.{f}"))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    };
+
+    let src = match shape.source {
+        GlslSource::Local => t.literal(),
+        GlslSource::UniformField => "u.uA".to_string(),
+        GlslSource::HelperParam => "p".to_string(),
+    };
+
+    let produce = match shape.production {
+        GlslProduction::LiteralCtor => {
+            let inner: Vec<String> = t
+                .fields()
+                .iter()
+                .map(|f| format!("{f}: ({src}).{f}"))
+                .collect();
+            format!("{} {{ {} }}", t.name(), inner.join(", "))
+        }
+        GlslProduction::CallResult => format!("{pass_fn}({src})"),
+        GlslProduction::PhiIf => {
+            format!("if ({src}).{} >= 0.0 {{ {src} }} else {{ {} }}", t.fields()[0], t.zero())
+        }
+        GlslProduction::ArithAdd => format!("{src} + {}", t.zero()),
+        GlslProduction::UserStructField => format!("{hold_fn}({src}).inner"),
+    };
+
+    let (consume, expected_val) = match shape.consumption {
+        GlslConsumption::Bind => (format!("let z = w\n        {}", sum_of("z")), sum),
+        GlslConsumption::HelperArg => (format!("{sum_fn}(w)"), sum),
+        GlslConsumption::ReturnWhole => (format!("{sum_fn}({pass_fn}(w))"), sum),
+        GlslConsumption::Intrinsic => ("dot(w, w)".to_string(), dot),
+        // `* 0.0` keeps the sampler read load-bearing for emission while leaving
+        // the value the GPU rung would read unchanged.
+        GlslConsumption::GpuOnlyIntrinsic => {
+            (format!("{}(w) + texture(scene, tc).x * 0.0", sum_fn), sum)
+        }
+    };
+    // A multi-statement consumption cannot be inlined into the `let s = ..` form.
+    let consume_block = if consume.contains('\n') {
+        let (head, tail) = consume.rsplit_once('\n').unwrap();
+        format!("{head}\n        let s = {}", tail.trim_start())
+    } else {
+        format!("let s = {consume}")
+    };
+
+    let mut decls = String::new();
+    if shape.source == GlslSource::UniformField {
+        decls.push_str(&format!("value {u_ty} {{ uA: {} }}\n", t.name()));
+    }
+    if shape.production == GlslProduction::UserStructField {
+        decls.push_str(&format!(
+            "value {holder_ty} {{ inner: {ty} }}\n@pure fn {hold_fn}(q: {ty}) -> {holder_ty} {{ return {holder_ty} {{ inner: q }} }}\n",
+            ty = t.name()
+        ));
+    }
+    decls.push_str(&format!(
+        "@pure fn {sum_fn}(q: {ty}) -> float {{ return {} }}\n@pure fn {pass_fn}(q: {ty}) -> {ty} {{ return q }}\n",
+        sum_of("q"),
+        ty = t.name()
+    ));
+
+    let mut params: Vec<String> = Vec::new();
+    if shape.source == GlslSource::UniformField {
+        params.push(format!("@uniform u: {u_ty}"));
+    }
+    if shape.consumption == GlslConsumption::GpuOnlyIntrinsic {
+        params.push("scene: Sampler2D".to_string());
+    }
+    params.push("tc: Vec2".to_string());
+
+    let body = if shape.source == GlslSource::HelperParam {
+        decls.push_str(&format!(
+            "@pure fn {body_fn}(p: {ty}) -> float {{\n        let w = {produce}\n        {consume_block}\n        return s\n}}\n",
+            ty = t.name()
+        ));
+        format!("        let s = {body_fn}({})", t.literal())
+    } else {
+        format!("        let w = {produce}\n        {consume_block}")
+    };
+
+    let cpu_observable = shape.consumption != GlslConsumption::GpuOnlyIntrinsic;
+    let cpu_args = if shape.source == GlslSource::UniformField {
+        format!("{u_ty} {{ uA: {} }}, v(0.25, 0.5)", t.literal())
+    } else {
+        "v(0.25, 0.5)".to_string()
+    };
+    let expected = fmt_expected(expected_val);
+    let test = if cpu_observable {
+        format!(
+            "\n@test(output = \"{expected}\")\nfn probe_{id}_answers() {{\n    let r = {entry}({cpu_args})\n    print(\"{{r.x}}\")\n}}\n"
+        )
+    } else {
+        String::new()
+    };
+
+    let source = format!(
+        "// GLSL shape: {}\n{decls}\n@shader(fragment)\nfn {entry}({}) -> Vec4 {{\n{body}\n        return Vec4 {{ x: s, y: tc.x, z: 0.0, w: 1.0 }}\n}}\n{test}",
+        shape.name(),
+        params.join(", ")
+    );
+
+    Some(GlslProgram {
+        source,
+        expected,
+        entry,
+        cpu_observable,
+    })
+}
+
+/// The GLSL rung's verdict on one shape, per profile, plus the CPU rungs on the
+/// SAME file. Divergence between the three is the finding class.
+#[test]
+fn the_glsl_subset_agrees_across_backends() {
+    if gated_off() {
+        return;
+    }
+    let shapes = glsl_shapes();
+    let dir = std::env::temp_dir().join("rock_shape_oracle_glsl");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut glsl_counts: BTreeMap<Bucket, usize> = BTreeMap::new();
+    let mut lua_counts: BTreeMap<Bucket, usize> = BTreeMap::new();
+    let mut js_counts: BTreeMap<Bucket, usize> = BTreeMap::new();
+    let mut unrepresentable = 0usize;
+    let mut rows: Vec<String> = Vec::new();
+    let mut divergences: Vec<String> = Vec::new();
+    let mut glsl_miscompiles: Vec<String> = Vec::new();
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+
+    for (i, shape) in shapes.iter().enumerate() {
+        let Some(prog) = render_glsl(*shape, i) else {
+            unrepresentable += 1;
+            continue;
+        };
+        let name = shape.name();
+        let file = dir.join(format!("{name}.rock"));
+        std::fs::write(&file, &prog.source).unwrap();
+
+        let glsl = run_glsl(&file, &prog.entry, shape.stdlib);
+        *glsl_counts.entry(glsl.bucket).or_insert(0) += 1;
+        if glsl.bucket == Bucket::Miscompile {
+            glsl_miscompiles.push(format!(
+                "{name}: {}\n    source:\n{}",
+                glsl.detail,
+                indent_block(&prog.source)
+            ));
+        }
+        if glsl.bucket == Bucket::LoudReject {
+            *reasons.entry(format!("[glsl] {}", glsl.detail)).or_insert(0) += 1;
+        }
+
+        let (lua, js) = if prog.cpu_observable {
+            let lua = observe(&file, Surface::Luajit, shape.stdlib);
+            let js = observe(&file, Surface::Js, shape.stdlib);
+            *lua_counts.entry(lua.bucket).or_insert(0) += 1;
+            *js_counts.entry(js.bucket).or_insert(0) += 1;
+            if lua.bucket == Bucket::LoudReject {
+                *reasons.entry(format!("[luajit] {}", lua.detail)).or_insert(0) += 1;
+            }
+            (Some(lua), Some(js))
+        } else {
+            (None, None)
+        };
+
+        let cell = |o: &Option<Observation>| -> &'static str {
+            o.as_ref().map(|o| o.bucket.label()).unwrap_or("n/a")
+        };
+        rows.push(format!(
+            "  {:<62} glsl={:<12} luajit={:<12} js={}",
+            name,
+            glsl.bucket.label(),
+            cell(&lua),
+            cell(&js)
+        ));
+
+        // A shape whose GLSL and CPU verdicts differ. Some of these are expected
+        // (a `@gpu_only` call has no CPU image); each one still gets named, because
+        // "expected" is a judgement and it has to be visible to be judged.
+        if let (Some(lua), Some(js)) = (&lua, &js) {
+            if glsl.bucket != lua.bucket || lua.bucket != js.bucket {
+                divergences.push(format!(
+                    "{name}\n    glsl:   {} -- {}\n    luajit: {} -- {}\n    js:     {} -- {}\n    expected value {:?}\n    source:\n{}",
+                    glsl.bucket.label(),
+                    glsl.detail,
+                    lua.bucket.label(),
+                    lua.detail,
+                    js.bucket.label(),
+                    js.detail,
+                    prog.expected,
+                    indent_block(&prog.source)
+                ));
+            }
+        }
+    }
+
+    let mut report = format!(
+        "\nGLSL-legal subset: {} shapes, {} unrepresentable (not a verdict)\n",
+        shapes.len(),
+        unrepresentable
+    );
+    report.push_str(&rows.join("\n"));
+    report.push_str("\n\nGLSL (both profiles):");
+    report.push_str(&bucket_table(&glsl_counts));
+    report.push_str("\nluajit (same files):");
+    report.push_str(&bucket_table(&lua_counts));
+    report.push_str("\njs (same files):");
+    report.push_str(&bucket_table(&js_counts));
+    report.push_str("\nrejection reasons:\n");
+    for (reason, n) in &reasons {
+        report.push_str(&format!("  {n:>3}  {reason}\n"));
+    }
+    report.push_str(&format!(
+        "\ncross-backend divergences: {}\n{}\n",
+        divergences.len(),
+        divergences.join("\n")
+    ));
+    println!("{report}");
+
+    // Illegal GLSL emitted with no diagnostic is the Part-1 class and the reason
+    // this rung exists. Nothing is pinned: there is no known-live instance.
+    assert!(
+        glsl_miscompiles.is_empty(),
+        "{report}\nGLSL MISCOMPILES ({}):\n{}",
+        glsl_miscompiles.len(),
+        glsl_miscompiles.join("\n")
+    );
+    // Every divergence must be one of the recorded classes. An unrecognised one is
+    // a finding: the same shape legal on one backend and not another.
+    let unjudged: Vec<&String> = divergences
+        .iter()
+        .filter(|d| !KNOWN_GLSL_DIVERGENCES.iter().any(|k| d.contains(k)))
+        .collect();
+    assert!(
+        unjudged.is_empty(),
+        "{report}\nUNJUDGED cross-backend divergences ({}) -- classify each in \
+         KNOWN_GLSL_DIVERGENCES:\n{}",
+        unjudged.len(),
+        unjudged
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Divergence classes this rung has SEEN and judged. Matched against the whole
+/// rendered divergence block, so a substring of the diagnostic is enough.
+const KNOWN_GLSL_DIVERGENCES: &[&str] = &[
+    // A user `value` struct returned from a helper called inside a shader body:
+    // GLSL rejects (tier 0 is float/int/bool/VecN only), luajit and JS both run it.
+    // The intended legality difference, and the diagnostic names the type -- so it
+    // is recorded, not a finding. `Holder` only survives to the emitter because
+    // the ctor crosses a CALL; inlined at the definition it folds to the bare
+    // vector and GLSL never sees a struct.
+    "is not tier 0",
+];

@@ -1,0 +1,23 @@
+// SHAPE: a shader entry taken as a FN VALUE x nobox representation. `rock_shader`
+// is the in-game registration form for every game/engine shader
+// (`docs/shaders.md` S "Compilation routes"), and it takes the entry by name.
+//
+// A fullscreen entry's signature always mentions `Vec2` (the TexCoord varying),
+// so marking `Vec2` puts every registration in the top-level-fn-by-value
+// rejection class: a top-level fn's ABI depends on whether the program takes it
+// by value, which the fn TYPE at an indirect call site cannot see
+// (`tests/errors/nobox_toplevel_fn_by_value.rock.err`). The prescribed fix is the
+// lambda wrapper, which keeps the leaf ABI.
+//
+// The verdict lands at EMIT, so the surface is `rock compile` -- `rock_shader`
+// itself is a stone-engine global and a bare `rock test` would die at
+// `__rock_shader_register (a nil value)` before the shape could be judged.
+//
+// Corpus cases: `shader_registration_unmarked`, `shader_registration_vec2_marked`.
+
+@shader(fragment)
+fn shape_reg_frag(tc: Vec2) -> Vec4 {
+    return Vec4 { x: tc.x, y: tc.y, z: 0.0, w: 1.0 }
+}
+
+fn shape_reg_use() -> string { return rock_shader(shape_reg_frag) }
