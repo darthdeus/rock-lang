@@ -7,7 +7,7 @@
 //! program here computes a result whose expected value is known at GENERATION
 //! time and carries it as `@test(output = ..)`.
 //!
-//! Two rungs:
+//! Three rungs:
 //!
 //! - the SEED corpus (`tests/shape_corpus/*.rock`), hand-written, one file per
 //!   known gap plus its controls. Runs in the default nextest profile. Its gate
@@ -15,12 +15,14 @@
 //! - the pairwise SWEEP, generated here, behind `ROCK_SHAPE_SWEEP=1`. Samples
 //!   storage x production x consumption x nullability x representation so every
 //!   PAIR of axis values appears in at least one program.
+//! - the MARKED sweep, the same shapes with the repr forced to `Nobox`. The
+//!   pairwise array only samples the marked tier into a fraction of its shapes,
+//!   and that tier is the one that gates marking `Vec2`.
 //!
-//! Every case compiles in its OWN process. Emission aborts on the first failing
-//! specialization, so a multi-shape file reports one gap and hides its siblings
-//! (the plan's M4; A4 is fixing the accumulation in skull). One shape per
-//! process is the cheap workaround and it is what makes the bucket counts a
-//! ceiling rather than a floor.
+//! Every case compiles in its OWN process, which keeps one shape's verdict from
+//! depending on a sibling's. Emission also accumulates across every emitted
+//! definition now, so a single compile reports its whole rejection set -- between
+//! them the bucket counts are a ceiling rather than a floor.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -463,6 +465,39 @@ const SEEDS: &[SeedCase] = &[
             names: "survived lowering",
         },
         gap: Some("NEW: a lambda returning a nobox value rejects at a `let`"),
+    },
+    // M3's three, each reproduced minimally against a control that EMITS before
+    // being named. All are LOUD, so none is urgent; the judgement each wants is
+    // the plan's M5 question, recorded in `docs/nobox-nested-ctor-plan.md`.
+    SeedCase {
+        name: "nobox_tuple_return_projected",
+        file: "nobox_tuple_return_projected.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::LoudReject {
+            names: "survived lowering",
+        },
+        gap: Some("M3: a nobox projected off a fn's tuple return at the call (LIVE)"),
+    },
+    SeedCase {
+        name: "nobox_coalesce_at_ctor_field",
+        file: "nobox_coalesce_at_ctor_field.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::LoudReject {
+            names: "survived lowering",
+        },
+        gap: Some("M3: `??` recovering a nullable nobox at a ctor field (LIVE)"),
+    },
+    SeedCase {
+        name: "nobox_lambda_literal_position",
+        file: "nobox_lambda_literal_position.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::LoudReject {
+            names: "survived lowering",
+        },
+        gap: Some("M3: a nobox-returning lambda LITERAL at an argument (LIVE)"),
     },
     SeedCase {
         name: "glsl_local_unmarked",
@@ -1341,7 +1376,13 @@ const KNOWN_REJECTIONS: &[&str] = &[
     "cannot assign",
     "value struct",
     "`value` struct",
-    "nobox",
+    // NOT the bare substring "nobox". Every marked-tier diagnostic opens with
+    // "nobox value `P` ..", so a bare "nobox" entry classifies the WHOLE tier as
+    // already-judged and the unclassified gate stops gating exactly where it
+    // matters most. Found by mutation: renaming the "survived lowering" entry
+    // left the sweep GREEN, with its 44 shapes silently reabsorbed under
+    // "nobox". Keep every entry specific to one diagnostic.
+    "cannot cross boxed call boundary",
     "not a mutable place",
     "requires a value struct",
     "must be a `value` struct",
@@ -1361,6 +1402,24 @@ fn sweep_shapes() -> Vec<Shape> {
     shapes
 }
 
+/// M3's synthetic half: every sweep shape with its repr forced to `nobox`. The
+/// pairwise array only samples `Nobox` into a fraction of the shapes, so the
+/// axis appears but the marked tier's own cross-product does not -- and that
+/// tier is where "zero in-tree instances" has twice meant "nobody wrote it yet".
+/// Forcing the repr re-derives the whole sweep at the tier that gates marking.
+fn marked_sweep_shapes() -> Vec<Shape> {
+    let mut shapes: Vec<Shape> = sweep_shapes()
+        .into_iter()
+        .map(|mut s| {
+            s.repr = Repr::Nobox;
+            s
+        })
+        .collect();
+    shapes.sort();
+    shapes.dedup();
+    shapes
+}
+
 fn gated_off() -> bool {
     if std::env::var("ROCK_SHAPE_SWEEP").is_err() {
         println!(
@@ -1372,14 +1431,28 @@ fn gated_off() -> bool {
     false
 }
 
-#[test]
-fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
-    if gated_off() {
-        return;
-    }
-    let shapes = sweep_shapes();
+/// Collapse a diagnostic to the KNOWN_REJECTIONS key it matched, so the by-shape
+/// listing groups by the judged class rather than by incidental wording.
+fn reason_class(detail: &str) -> String {
+    KNOWN_REJECTIONS
+        .iter()
+        .find(|k| detail.contains(**k))
+        .map(|k| (*k).to_string())
+        .unwrap_or_else(|| format!("UNCLASSIFIED: {detail}"))
+}
 
-    let dir = std::env::temp_dir().join("rock_shape_oracle_sweep");
+/// One sweep's worth of observations, kept as data so each rung asserts what it
+/// means: the luajit rungs gate unclassified rejections, the JS one cannot
+/// (an unbuilt emitter arm is not a language rule).
+struct SweepRun {
+    report: String,
+    miscompiles: Vec<String>,
+    pinned_hits: Vec<String>,
+    unknown_rejections: Vec<String>,
+}
+
+fn run_sweep(label: &str, shapes: &[Shape], surface: Surface, tmp: &str) -> SweepRun {
+    let dir = std::env::temp_dir().join(tmp);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1389,15 +1462,16 @@ fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
     let mut pinned_hits: Vec<String> = Vec::new();
     let mut unknown_rejections: Vec<String> = Vec::new();
     let mut rejection_reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut rejections_by_shape: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-    for shape in &shapes {
+    for shape in shapes {
         let Some(prog) = render(*shape) else {
             unrepresentable += 1;
             continue;
         };
         let file = dir.join(format!("{}.rock", shape.name()));
         std::fs::write(&file, &prog.source).unwrap();
-        let obs = observe(&file, Surface::Luajit, StdlibVariant::Vanilla);
+        let obs = observe(&file, surface, StdlibVariant::Vanilla);
         *counts.entry(obs.bucket).or_insert(0) += 1;
         match obs.bucket {
             Bucket::Miscompile => {
@@ -1416,6 +1490,10 @@ fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
             }
             Bucket::LoudReject => {
                 *rejection_reasons.entry(obs.detail.clone()).or_insert(0) += 1;
+                rejections_by_shape
+                    .entry(reason_class(&obs.detail))
+                    .or_default()
+                    .push(shape.name());
                 if !KNOWN_REJECTIONS.iter().any(|k| obs.detail.contains(k)) {
                     unknown_rejections.push(format!(
                         "{}: {}\n    source:\n{}",
@@ -1436,7 +1514,7 @@ fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
     }
 
     let mut report = format!(
-        "\npairwise sweep: {} shapes, {} unrepresentable (not a verdict)\n",
+        "\n{label}: {} shapes, {} unrepresentable (not a verdict)\n",
         shapes.len(),
         unrepresentable
     );
@@ -1445,23 +1523,45 @@ fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
     for (reason, n) in &rejection_reasons {
         report.push_str(&format!("  {n:>3}  {reason}\n"));
     }
+    // Grouped BY SHAPE as well, because the reason text alone cannot be judged:
+    // in the marked tier every materialization rejection reads "survived
+    // lowering .. while emitting `shape_case`", so one histogram row can hide
+    // several distinct shape classes. M5 wants a judgement per class, and the
+    // class is a property of the shape.
+    report.push_str("\nrejections by shape:\n");
+    for (reason, names) in &rejections_by_shape {
+        report.push_str(&format!("  {} x {reason}\n", names.len()));
+        for n in names {
+            report.push_str(&format!("      {n}\n"));
+        }
+    }
     println!("{report}");
 
+    SweepRun {
+        report,
+        miscompiles,
+        pinned_hits,
+        unknown_rejections,
+    }
+}
+
+fn assert_sweep(run: &SweepRun, gate_rejections: bool) {
+    let report = &run.report;
     // A MISCOMPILE here is the whole point of the harness, so it fails loudly.
     // The live ones are pinned in KNOWN_MISCOMPILES; a NEW one must be reported,
     // not absorbed.
     assert!(
-        miscompiles.is_empty(),
+        run.miscompiles.is_empty(),
         "{report}\nMISCOMPILES ({}):\n{}",
-        miscompiles.len(),
-        miscompiles.join("\n")
+        run.miscompiles.len(),
+        run.miscompiles.join("\n")
     );
     // The other direction: a pinned shape that has started producing the right
     // answer is a FIX, and its entry has to go in the fixing commit.
     let stale: Vec<&str> = KNOWN_MISCOMPILES
         .iter()
         .map(|(n, _)| *n)
-        .filter(|n| !pinned_hits.iter().any(|hit| hit == n))
+        .filter(|n| !run.pinned_hits.iter().any(|hit| hit == n))
         .collect();
     assert!(
         stale.is_empty(),
@@ -1469,12 +1569,47 @@ fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
          KNOWN_MISCOMPILES in the commit that fixed them: {}",
         stale.join(", ")
     );
-    assert!(
-        unknown_rejections.is_empty(),
-        "{report}\nunclassified rejections -- judge each (intended residue, or a \
-         gap to build?) and add its text to KNOWN_REJECTIONS:\n{}",
-        unknown_rejections.join("\n")
+    if gate_rejections {
+        assert!(
+            run.unknown_rejections.is_empty(),
+            "{report}\nunclassified rejections -- judge each (intended residue, or a \
+             gap to build?) and add its text to KNOWN_REJECTIONS:\n{}",
+            run.unknown_rejections.join("\n")
+        );
+    }
+}
+
+#[test]
+fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
+    if gated_off() {
+        return;
+    }
+    let run = run_sweep(
+        "pairwise sweep",
+        &sweep_shapes(),
+        Surface::Luajit,
+        "rock_shape_oracle_sweep",
     );
+    assert_sweep(&run, true);
+}
+
+/// M3, the tier that GATES MARKING. Same shapes, repr forced to `nobox`, so the
+/// marked tier gets the whole cross-product instead of the slice the pairwise
+/// array happened to sample it into. Emission accumulates across definitions
+/// now, so a rejection here is a CEILING on the shape rather than the first
+/// sibling of an unknown set.
+#[test]
+fn the_marked_sweep_finds_no_unexpected_miscompile() {
+    if gated_off() {
+        return;
+    }
+    let run = run_sweep(
+        "marked sweep (every shape forced to `nobox`)",
+        &marked_sweep_shapes(),
+        Surface::Luajit,
+        "rock_shape_oracle_sweep_marked",
+    );
+    assert_sweep(&run, true);
 }
 
 // GLSL has NO generated rung, and that is a property of the target rather than a
