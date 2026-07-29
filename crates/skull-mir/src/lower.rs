@@ -766,6 +766,121 @@ fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
     Some(name)
 }
 
+/// Which half of the vertex layout a `@vertex_expand` fn asks for, chosen by
+/// its return type the way `@struct_expand` chooses by its pairs shape.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VertexExpandRet {
+    /// `-> int`: the element stride in floats.
+    Stride,
+    /// `-> [int]`: per-attribute component counts, in location order.
+    Sizes,
+}
+
+fn vertex_expand_return(ws: &Workspace, ret: TyId) -> Option<VertexExpandRet> {
+    match static_ty(ws, ret)? {
+        TypeExpr::Builtin(BuiltinTy::Int) => Some(VertexExpandRet::Stride),
+        TypeExpr::App { ctor: TypeCtor::Array, params } => {
+            let elem = ret.with_idx(params.into_iter().next()?);
+            matches!(static_ty(ws, elem)?, TypeExpr::Builtin(BuiltinTy::Int))
+                .then_some(VertexExpandRet::Sizes)
+        }
+        _ => None,
+    }
+}
+
+/// The two rejection messages, shared so the emit-time validator
+/// ([`vertex_expand_rejection`]) and the lowering expander cannot diverge in
+/// what they accept.
+fn vertex_expand_ret_msg(ws: &Workspace, fname: Ustr, ret: Option<TyId>) -> String {
+    format!(
+        "`@vertex_expand` fn `{fname}` must return `int` (the stride in floats) or `[int]` \
+         (per-attribute component counts), got `{}`",
+        ret.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
+    )
+}
+
+fn vertex_expand_arg_msg(fname: Ustr) -> String {
+    format!(
+        "`@vertex_expand` fn `{fname}` argument must be a `FlatVec<E>` or `NativeBuffer<E>` \
+         whose element is a concrete `value` struct -- the layout is derived from that \
+         element, so an unsubstituted generic has no layout to derive"
+    )
+}
+
+/// The `value`-struct element of a `FlatVec<E>` / `NativeBuffer<E>` expression,
+/// outside a lowering [`Builder`]. Mirrors [`Builder::nb_value_elem`] minus the
+/// specialization substitution, which the validator has no active
+/// specialization for -- an unsubstituted generic is exactly what this must
+/// reject anyway.
+fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, *inf.expr_types.get(arg)?)?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    if !matches!(n.as_str(), "NativeBuffer" | "FlatVec") {
+        return None;
+    }
+    let elem = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match ty_node(ws, inf, elem)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some(n),
+        _ => None,
+    }
+}
+
+/// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
+/// compile error, never a call that reaches the fn's error body.
+pub fn vertex_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let f = &ws.module(fmod).functions[fid];
+            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::VertexLayout)) {
+                continue;
+            }
+            let fname = f.name;
+            let call_span = body.expr_spans[e];
+            let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
+
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            let [arg] = arg_idxs[..] else {
+                return reject(
+                    call_span,
+                    format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
+                );
+            };
+
+            if f.return_ty.and_then(|r| vertex_expand_return(ws, r)).is_none() {
+                return reject(call_span, vertex_expand_ret_msg(ws, fname, f.return_ty));
+            }
+            let Some(elem) = flat_elem_of(ws, inf, arg) else {
+                return reject(body.expr_spans[arg], vertex_expand_arg_msg(fname));
+            };
+            // The derivation and both float-unit rejections, at validation time
+            // rather than only at lowering -- so a bad layout is reported even
+            // when the call sits in a body that never gets emitted.
+            let plan = match crate::vertex_plan::vertex_plan(ws, elem) {
+                Ok(p) => p,
+                Err(err) => {
+                    return reject(
+                        body.expr_spans[arg],
+                        format!("`@vertex_expand`: {}", err.message),
+                    )
+                }
+            };
+            if let Err(msg) = plan.float_unit_stride().and_then(|_| plan.float_unit_sizes()) {
+                return reject(body.expr_spans[arg], format!("`@vertex_expand`: {msg}"));
+            }
+        }
+    }
+    None
+}
+
 /// Value struct `name`'s fields as `(name, ty)` in declaration order. `None` when
 /// `name` is not a `value` struct.
 fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {
@@ -4942,6 +5057,11 @@ impl Builder<'_> {
                     if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) =>
                 {
                     self.expand_shader_pipeline(e, &arg_idxs)
+                }
+                Ok(func)
+                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::VertexLayout)) =>
+                {
+                    self.expand_vertex_layout(e, func, &arg_idxs)
                 }
                 Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
@@ -9964,6 +10084,59 @@ impl Builder<'_> {
         let pair = resolve_shader_pair(self.ws, self.body, call, arg_idxs)?;
         let key = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(pair.key.as_str()))));
         Ok(ValueRepr::Scalar(key))
+    }
+
+    /// `@vertex_expand` -> the element's vertex layout as a literal. The
+    /// argument is used for its TYPE only and is deliberately not lowered: the
+    /// call collapses to a constant, as `@shader_expand` does.
+    fn expand_vertex_layout(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let call_span = self.body.expr_spans[call];
+        let f = &self.ws.module(func.module).functions[func.func];
+        let (fname, ret) = (f.name, f.return_ty);
+        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
+
+        let [arg] = arg_idxs else {
+            return Err(reject(
+                call_span,
+                format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
+            ));
+        };
+        let arg = *arg;
+        let arg_span = self.body.expr_spans[arg];
+
+        let Some(kind) = ret.and_then(|r| vertex_expand_return(self.ws, r)) else {
+            return Err(reject(call_span, vertex_expand_ret_msg(self.ws, fname, ret)));
+        };
+        let Some(elem) = self.nb_value_elem(arg) else {
+            return Err(reject(arg_span, vertex_expand_arg_msg(fname)));
+        };
+
+        let plan = crate::vertex_plan::vertex_plan(self.ws, elem)
+            .map_err(|e| reject(arg_span, format!("`@vertex_expand`: {}", e.message)))?;
+        // `float_unit_*` carry the integer-attribute and cumulative-offset
+        // rejections, so the float-unit view is never emitted for a layout it
+        // cannot describe.
+        let bad = |m: String| reject(arg_span, format!("`@vertex_expand`: {m}"));
+        let v = match kind {
+            VertexExpandRet::Stride => {
+                let s = plan.float_unit_stride().map_err(bad)?;
+                self.emit_cur(Inst::Const(Lit::Int(s as i64)))
+            }
+            VertexExpandRet::Sizes => {
+                let sizes = plan.float_unit_sizes().map_err(bad)?;
+                let vs: Vec<Idx<Inst>> = sizes
+                    .iter()
+                    .map(|n| self.emit_cur(Inst::Const(Lit::Int(*n as i64))))
+                    .collect();
+                self.emit_cur(Inst::MakeVec(vs))
+            }
+        };
+        Ok(ValueRepr::Scalar(v))
     }
 
     /// Construct `enum_name::variant(payload)` for a variant with a single

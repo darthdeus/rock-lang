@@ -61,6 +61,7 @@ impl VertexPlan {
     /// `glVertexAttribIPointer`, which that API cannot express today.
     pub fn float_unit_sizes(&self) -> Result<Vec<u32>, String> {
         self.reject_integers()?;
+        self.check_cumulative_offsets()?;
         Ok(self.slots.iter().map(|s| s.kind.components()).collect())
     }
 
@@ -70,6 +71,7 @@ impl VertexPlan {
     /// all, so the whole `float*` view is wrong).
     pub fn float_unit_stride(&self) -> Result<usize, String> {
         self.reject_integers()?;
+        self.check_cumulative_offsets()?;
         if self.byte_stride % 4 != 0 {
             return Err(format!(
                 "`{}` has a {}-byte stride, which is not a whole number of floats",
@@ -77,6 +79,33 @@ impl VertexPlan {
             ));
         }
         Ok(self.byte_stride / 4)
+    }
+
+    /// The float-unit view carries component counts and a stride but NOT
+    /// offsets, and `stone-rs`'s `validate_layout` rebuilds them cumulatively.
+    /// So the view describes this struct only while every attribute sits at
+    /// exactly `4 * cumulative components` -- otherwise the engine would bind
+    /// each attribute at a position the checked C layout says is wrong, and the
+    /// only runtime guard (`sum(sizes) == stride`) would still pass.
+    ///
+    /// Holds for every struct expressible today, which is why this is a
+    /// compile-time assertion rather than a conversion: the alternative is
+    /// extending the FFI to take explicit offsets, and until something needs
+    /// that, rejecting beats silently emitting a layout the view cannot state.
+    fn check_cumulative_offsets(&self) -> Result<(), String> {
+        let mut want = 0usize;
+        for s in &self.slots {
+            if s.byte_offset != want {
+                return Err(format!(
+                    "`{}` field `{}` is at byte {} but the float-unit view can only \
+                     describe it at {want} (offsets are rebuilt cumulatively from \
+                     component counts, so this layout would bind at the wrong position)",
+                    self.struct_name, s.name, s.byte_offset
+                ));
+            }
+            want += s.kind.components() as usize * 4;
+        }
+        Ok(())
     }
 
     fn reject_integers(&self) -> Result<(), String> {

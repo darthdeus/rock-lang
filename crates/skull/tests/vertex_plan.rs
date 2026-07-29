@@ -17,7 +17,7 @@
 mod common;
 use common::ws_of;
 use skull_mir::gpu_layout::AttrKind;
-use skull_mir::vertex_plan::vertex_plan;
+use skull_mir::vertex_plan::{vertex_plan, AttrSlot, VertexPlan};
 use ustr::Ustr;
 
 // `ws_of` is a bare single-module workspace (no stdlib), and `attr_kind`
@@ -133,4 +133,57 @@ fn an_integer_attribute_rejects_the_float_unit_form() {
     let g = vertex_plan(&ws, Ustr::from("Grass")).expect("Grass");
     assert_eq!(g.float_unit_sizes().expect("all-float"), vec![2, 1, 1, 1]);
     assert_eq!(g.float_unit_stride().expect("all-float"), 5);
+}
+
+/// The float-unit view (`gpu_mesh_*`'s component-counts-plus-stride) DROPS
+/// `byte_offset`, and `stone-rs`'s `validate_layout` reconstructs offsets
+/// cumulatively -- so the two agree only while every attribute sits exactly at
+/// `4 * cumulative components`. That holds for every struct expressible today
+/// (all admitted kinds are 4-byte-aligned floats) and expires at the first
+/// `Mat4` or packed-u8 attribute.
+///
+/// Which is why this is pinned against a HAND-BUILT plan: no source struct can
+/// currently violate it, so a call-level RED is unreachable. Building the plan
+/// directly is what makes the check falsifiable at all -- without it the
+/// assertion would be untested code guarding a case nothing can produce yet.
+#[test]
+fn a_slot_off_its_cumulative_position_rejects_the_float_unit_view() {
+    let synthetic = VertexPlan {
+        struct_name: Ustr::from("Synthetic"),
+        slots: vec![
+            AttrSlot {
+                name: Ustr::from("pos"),
+                location: 0,
+                kind: AttrKind::F32x2,
+                byte_offset: 0,
+            },
+            // Cumulative position is 8; 12 is where a Vec3-shaped hole would put
+            // it. The float-unit view cannot express the difference.
+            AttrSlot {
+                name: Ustr::from("rot"),
+                location: 1,
+                kind: AttrKind::F32,
+                byte_offset: 12,
+            },
+        ],
+        byte_stride: 16,
+    };
+
+    let err = synthetic
+        .float_unit_sizes()
+        .expect_err("a slot off its cumulative position must not yield a float-unit view");
+    assert!(err.contains("rot"), "the rejection must name the field, got: {err}");
+    assert!(err.contains("Synthetic"), "the rejection must name the struct, got: {err}");
+    assert!(
+        synthetic.float_unit_stride().is_err(),
+        "the stride half of the same view must reject too, or a caller taking only \
+         the stride would proceed on a layout the view cannot describe"
+    );
+
+    // Positive control: the real derivation satisfies the invariant, so the
+    // check is not simply rejecting everything.
+    let ws = ws_of(SHAPES);
+    let real = vertex_plan(&ws, Ustr::from("Grass")).expect("Grass");
+    assert!(real.float_unit_sizes().is_ok());
+    assert!(real.float_unit_stride().is_ok());
 }

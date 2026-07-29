@@ -50,6 +50,12 @@ pub enum ExpandKind {
     /// `__rock_shader_register(key, glsl)` per distinct pair
     /// (docs/shaders.md).
     ShaderPipeline,
+    /// `@vertex_expand fn f<T>(v: FlatVec<T>) -> int | [int]` -> the element's
+    /// vertex layout as a literal: the stride for an `int` return, the
+    /// per-attribute component counts for `[int]`. Both from one
+    /// `vertex_plan`, so the two cannot drift
+    /// (docs/shader-binding-layout-plan.md, P1 wiring).
+    VertexLayout,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -71,6 +77,9 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "shader_expand") {
         return Some(ExpandKind::ShaderPipeline);
+    }
+    if has_anno(f, "vertex_expand") {
+        return Some(ExpandKind::VertexLayout);
     }
     None
 }
