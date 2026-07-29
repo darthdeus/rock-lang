@@ -481,11 +481,8 @@ const SEEDS: &[SeedCase] = &[
             entry: "shape_probe_frag",
         },
         stdlib: StdlibVariant::Vec2Nobox,
-        expect: Expect::Miscompile {
-            flip_when: "`nobox_binding_shape` gates on `values_first_class` \
-                        (GLSL has no boxed repr) -- expect Correct",
-        },
-        gap: Some("GLSL locals inherit nobox repr (LIVE)"),
+        expect: Expect::Correct,
+        gap: Some("GLSL locals inherit nobox repr (fixed, `is_nobox_struct` gates on `values_first_class`)"),
     },
 ];
 
