@@ -3,15 +3,12 @@
 //! struct materialized the inner one -- which the guarantee forbids. The outer
 //! struct boxing is fine and expected; building it *through* a nobox box is not.
 //!
-//! SENTINELS (`docs/test-sentinels.md`). The normalization pass that flattens a
-//! nested nobox ctor into its parent's leaves is NOT built yet, so each case
-//! below asserts TODAY'S REJECTION. Design + work list:
-//! `docs/nobox-nested-ctor-plan.md`.
-//!
-//! WHEN NORMALIZATION LANDS these go red. Flip each one in the same commit:
-//! swap `assert_rejects_today` for `emit_ok` + the `NV2_ct` absence assertion +
-//! the runtime round-trip already spelled out in each test's comment, and
-//! delete this note.
+//! Normalization flattens the nested ctor into its parent's leaves, so these
+//! assert the flattened emit plus a luajit round-trip. ONE case is still a
+//! SENTINEL (`docs/test-sentinels.md`): a nullable nobox field in a GC-tier
+//! outer has no cdata to write leaves into and still rejects --
+//! `assert_rejects_today` marks it, and it goes red the day that lands.
+//! Design + work list: `docs/nobox-nested-ctor-plan.md`.
 
 mod common;
 use common::{function_body, run_luajit, try_emit_module};
@@ -114,13 +111,13 @@ fn emit_ok(src: &str, what: &str) -> String {
     }
 }
 
-/// INVERTED: pins the rejection the missing normalization pass causes today.
-/// Flip to `emit_ok` + the assertions in each caller's comment when it lands.
+/// INVERTED: pins a shape that still rejects. Flip to `emit_ok` + the
+/// assertions in the caller's comment when it starts emitting.
 fn assert_rejects_today(src: &str, what: &str) {
     let Err(e) = try_emit_module(src) else {
         panic!(
-            "{what} now EMITS -- the nested-ctor normalization has landed. Flip \
-             this sentinel: see the module header."
+            "{what} now EMITS -- flip this sentinel: see the caller's comment \
+             for the assertions it should carry instead."
         )
     };
     let msg = format!("{e:?}");

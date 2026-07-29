@@ -621,8 +621,9 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
 /// list still rejects). Idempotent -- the rewritten form no longer matches the
 /// trigger -- which matters because `cleanup` is called from many sites.
 ///
-/// A site that keeps plain `cleanup` FAILS CLOSED: the verifier reports a
-/// spurious rejection rather than emitting a silent miscompile.
+/// Every emit-path caller uses this; plain `cleanup` survives only as this
+/// function's own first step. Were a site to miss it, the failure would be
+/// CLOSED -- a spurious rejection from the verifier, never a silent miscompile.
 pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) {
     cleanup(func);
     flatten_nobox_nested_ctors(ws, func);
