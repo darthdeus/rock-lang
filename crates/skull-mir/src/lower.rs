@@ -6349,11 +6349,21 @@ impl Builder<'_> {
                     // field load widen to `T?`: a Group carries no presence, so
                     // `repr_to_leaves` supplies it, exactly as it already does
                     // for a literal ctor or a call result at the same param.
-                    if !self.embed_read_is_nullable(base, field) {
-                        if let Some(shape) = self.nobox_embed_group_shape(cname) {
-                            let parent = self.lower_expr(base)?;
-                            return Ok(self.embed_group(parent, field, &shape));
+                    if let Some(shape) = self.nobox_embed_group_shape(cname) {
+                        let parent = self.lower_expr(base)?;
+                        let mut g = self.embed_group(parent, field, &shape);
+                        // A NULLABLE child carries presence in the field's own
+                        // (undotted) key, so the Group takes it as its presence
+                        // rather than gating the read: an absent child's leaves
+                        // are nil, and every consumer branches on presence
+                        // before touching them.
+                        if self.embed_read_is_nullable(base, field) {
+                            let present = self.emit_cur(Inst::Field { base: parent, field });
+                            if let ValueRepr::Group { present: p, .. } = &mut g {
+                                *p = Some(present);
+                            }
                         }
+                        return Ok(g);
                     }
                     let parent = self.lower_expr(base)?;
                     let v = if self.embed_read_is_nullable(base, field) {
@@ -10278,6 +10288,18 @@ impl Builder<'_> {
             let leaves = self.embed_leaf_values(cname, value)?;
             let present = self.emit_cur(Inst::Const(Lit::Bool(true)));
             return Ok((present, leaves));
+        }
+        // A `nobox` child already threads as presence-plus-leaves, so take the
+        // repr rather than a boxed value: no box to test, and no branch either,
+        // because the repr carries its own presence and its leaves are nil on
+        // the absent path by construction.
+        if let Some(mut shape) = self.nobox_embed_group_shape(cname) {
+            shape.nullable = true;
+            let r = self.lower_expr_repr(value)?;
+            let leaves = self.repr_to_leaves(&r, &shape);
+            let (present, rest) = leaves.split_first().expect("a nullable shape leads with presence");
+            debug_assert_eq!(paths.len(), rest.len(), "leaf path/value counts must agree");
+            return Ok((*present, paths.into_iter().zip(rest.iter().copied()).collect()));
         }
         // Dynamic `Child?`: one presence test, leaves read only on the present
         // arm and joined through cells.

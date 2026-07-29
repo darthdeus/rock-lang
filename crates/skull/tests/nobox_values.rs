@@ -248,6 +248,67 @@ fn a_field_load_widens_to_nullable_without_materializing() {
     );
 }
 
+const NOBOX_NULLABLE_FIELD: &str = r#"
+nobox value NV2 { x: float, y: float }
+struct Txt { pos: NV2?, t: float }
+
+// The write half: an OPAQUE nullable value into the field (the literal and the
+// `null` cases already threaded).
+fn spawn(p: NV2?) -> Txt { return Txt { pos: p, t: 1.0 } }
+fn spawn_literal() -> Txt { return Txt { pos: NV2 { x: 9.0, y: 8.0 }, t: 2.0 } }
+
+// The read half: presence test, then unwrap.
+fn read(c: Txt) -> float {
+    if c.pos != null { return c.pos.unwrap().x }
+    return -1.0
+}
+
+// Mutation through the field, both directions.
+fn clear(c: Txt) -> float {
+    c.pos = null
+    return read(c)
+}
+fn set(c: Txt, v: NV2) -> float {
+    c.pos = v
+    return read(c)
+}
+
+fn main() {
+    let a = spawn(NV2 { x: 3.0, y: 4.0 })
+    let b = spawn(null)
+    print(read(a))
+    print(read(b))
+    print(read(spawn_literal()))
+    print(clear(spawn(NV2 { x: 5.0, y: 6.0 })))
+    print(set(spawn(null), NV2 { x: 7.0, y: 0.0 }))
+}
+"#;
+
+/// Shape (b): a `T?` `nobox` value in a struct FIELD, stored as presence plus
+/// leaves rather than a box. Presence lives at the field's own undotted key,
+/// which flattening leaves free, so an absent child is a nil presence over nil
+/// leaves and no consumer needs a box to test against.
+#[test]
+fn a_nullable_nobox_field_is_stored_as_presence_and_leaves() {
+    let lua = emit_module(NOBOX_NULLABLE_FIELD);
+    for name in ["spawn", "spawn_literal", "read", "clear", "set"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "a nullable nobox field materialized in `{name}`:\n{body}"
+        );
+    }
+    let body = function_body(&lua, "spawn");
+    assert!(
+        body.contains(r#"["pos.x"]"#) && body.contains(r#"["pos.y"]"#),
+        "the nullable field did not flatten into its parent's leaves:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable_field"),
+        "3\n-1\n9\n-1\n7"
+    );
+}
+
 const NOBOX_TWO_SINKS_IN_ONE_BODY: &str = r#"
 nobox value NV2 { x: float, y: float }
 
