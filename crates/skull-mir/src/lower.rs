@@ -1845,7 +1845,8 @@ impl ScalarCtx {
 /// `inline(lua)` engine fns like `append_vertex`), or (b) it's an ordinary rock
 /// body that is NOT called by a fixed name from outside skull's view
 /// (`@nomangle` / `@test` / `main`) and NOT taken by reference (an indirect callee
-/// can't splat). A non-scalar callee receives/returns a single cdata.
+/// can't splat). A non-scalar callee receives/returns a single cdata. The
+/// `@nomangle` half of that is snapshot-scoped -- see [`fn_uses_scalar_abi_spec`].
 fn fn_uses_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> bool {
     fn_uses_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
 }
@@ -1867,10 +1868,20 @@ fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst
     if !has_scalar_abi {
         // Implicit scalarization is limited to ordinary rock-bodied fns reachable
         // only by direct call. `@scalar_abi` overrides all of these gates.
+        // `@nomangle` gates the SHARED snapshot only. It reserves the bare name
+        // for callers outside skull's view (codegen text, `inline(lua)` bodies),
+        // and those callers spell the bare name -- which `spec_fn_name` never
+        // hands to a specialized copy. A specialized instantiation is therefore
+        // reachable only by direct call, the condition this gate encodes.
+        let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
+            "nomangle" => subst.is_empty(),
+            "test" => true,
+            _ => false,
+        });
         if f.inline_body.is_some()
             || f.name.as_str() == "main"
             || scx.taken_by_ref.contains(&f.name)
-            || f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "nomangle" | "test"))
+            || name_is_fixed
         {
             return false;
         }
@@ -4726,6 +4737,21 @@ impl Builder<'_> {
                             ));
                         }
                     }
+                }
+            }
+        }
+        // `cast<T>(v)` is identity at runtime (`return value`), so a `nobox`
+        // RESULT threads the argument's repr instead of packing it for the boxed
+        // `any` param and field-reading the leaves back off that box. This is
+        // what lets a whole COLUMN element read widen to `T?`: every stdlib
+        // entry point that widens one spells it `cast(__vec_data_get(..))`, and
+        // `__vec_data_get` already lowers to a Group of column reads -- the box
+        // was minted only to cross `cast`. Same identity treatment the newtype
+        // ctor and the bound `iter` call below already get.
+        if let Callee::Unresolved { name, .. } = callee {
+            if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
+                if let [inner] = arg_idxs[..] {
+                    return self.lower_expr_repr(inner);
                 }
             }
         }
