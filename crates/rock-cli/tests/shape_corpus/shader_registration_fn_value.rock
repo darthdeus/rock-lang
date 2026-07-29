@@ -1,19 +1,30 @@
-// SHAPE: a shader entry taken as a FN VALUE x nobox representation. `rock_shader`
-// is the in-game registration form for every game/engine shader
-// (`docs/shaders.md` S "Compilation routes"), and it takes the entry by name.
+// SHAPE: `rock_shader(<entry>)` inside a FN BODY x nobox representation.
 //
-// A fullscreen entry's signature always mentions `Vec2` (the TexCoord varying),
-// so marking `Vec2` puts every registration in the top-level-fn-by-value
-// rejection class: a top-level fn's ABI depends on whether the program takes it
-// by value, which the fn TYPE at an indirect call site cannot see
-// (`tests/errors/nobox_toplevel_fn_by_value.rock.err`). The prescribed fix is the
-// lambda wrapper, which keeps the leaf ABI.
+// The rejection this pins is SPURIOUS. `rock_shader` is a compile-time expansion:
+// its argument lowers to the entry's NAME as a string literal (`do return
+// ("shape_reg_frag") end`, read off the emitted Lua), and what reaches the engine
+// is `__rock_shader_register("shape_reg_frag", [[<glsl>]])`. The fn is never taken
+// as a value at runtime, so the ABI-disagreement hazard
+// `reject_nobox_fn_taken_by_value` exists to prevent cannot arise here.
 //
-// The verdict lands at EMIT, so the surface is `rock compile` -- `rock_shader`
-// itself is a stone-engine global and a bare `rock test` would die at
-// `__rock_shader_register (a nil value)` before the shape could be judged.
+// It fires anyway once `Vec2` is marked, because a fullscreen entry's signature
+// always mentions `Vec2` (the TexCoord varying) and the check matches any
+// `Expr::Global(name)` naming a function, without excluding a compile-time
+// expansion's argument position.
 //
-// Corpus cases: `shader_registration_unmarked`, `shader_registration_vec2_marked`.
+// The discriminant is the SPELLING, not the marking: the global-initializer form
+// in `shader_registration_global_init.rock` emits clean under the same marking, and
+// that is the form every one of the ~20 real in-tree sites uses
+// (`stone/engine/rendering/draw.rock`). So this costs no in-tree annotation today.
+// What it is evidence for is that one expression rejects in a fn body and emits at
+// global scope.
+//
+// The verdict lands at EMIT, so the surface is `rock compile` -- `rock_shader` is a
+// stone-engine global and a bare `rock test` would die at `__rock_shader_register
+// (a nil value)` before the shape could be judged.
+//
+// Corpus cases: `shader_registration_fn_body_unmarked` (control),
+// `shader_registration_fn_body_vec2_marked` (the spurious rejection).
 
 @shader(fragment)
 fn shape_reg_frag(tc: Vec2) -> Vec4 {
