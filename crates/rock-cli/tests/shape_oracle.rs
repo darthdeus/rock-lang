@@ -127,8 +127,23 @@ enum StdlibVariant {
     Vec2Nobox,
 }
 
+/// Built ONCE per test process, into a directory unique to that process.
+///
+/// Both halves are load-bearing. It used to run per spawned `rock` against one
+/// FIXED path, so every marked observation delete-and-rebuilt the stdlib that other
+/// in-flight compiles were reading. `OnceLock` alone does not fix it: nextest runs
+/// each test in its own process, so a shared fixed path is still two processes
+/// clobbering one directory. Nothing had failed yet, which is luck rather than
+/// safety -- a torn read misclassifies a verdict instead of erroring, so the
+/// failure mode is a WRONG BUCKET, not a crash.
 fn marked_stdlib() -> PathBuf {
-    let dir = std::env::temp_dir().join("rock_shape_oracle_stdlib_vec2_nobox");
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(build_marked_stdlib).clone()
+}
+
+fn build_marked_stdlib() -> PathBuf {
+    let dir = std::env::temp_dir()
+        .join(format!("rock_shape_oracle_stdlib_vec2_nobox_{}", std::process::id()));
     let src = repo_root().join("stdlib");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -981,23 +996,44 @@ fn odometer_next(idx: &mut [usize], axes: &[usize]) -> bool {
     false
 }
 
-fn pairwise_cover(axes: &[usize]) -> Vec<Vec<usize>> {
+/// A greedy pairwise covering array over the tuples `renderable` accepts.
+///
+/// The predicate is the whole point and it must gate BOTH halves. This used to cover
+/// the full index lattice with no notion of renderability, and the sweeps then
+/// `continue`d past whatever `render` declined -- so a pair whose only covering tuple
+/// was unrenderable silently vanished from the executed corpus, 28 of them,
+/// falsifying the plan's defining premise while every rung stayed green. Restricting
+/// only the candidate walk is not enough either: `wanted` would still hold
+/// infeasible pairs and the greedy loop would spin to `expect`.
+/// `the_executed_corpus_covers_every_feasible_pair` is the standing check.
+fn pairwise_cover(axes: &[usize], renderable: impl Fn(&[usize]) -> bool) -> Vec<Vec<usize>> {
+    let candidates: Vec<Vec<usize>> = {
+        let mut out = Vec::new();
+        let mut idx = vec![0usize; axes.len()];
+        loop {
+            if renderable(&idx) {
+                out.push(idx.clone());
+            }
+            if !odometer_next(&mut idx, axes) {
+                break;
+            }
+        }
+        out
+    };
+
     let mut wanted: BTreeSet<(usize, usize, usize, usize)> = BTreeSet::new();
-    for a in 0..axes.len() {
-        for b in (a + 1)..axes.len() {
-            for va in 0..axes[a] {
-                for vb in 0..axes[b] {
-                    wanted.insert((a, b, va, vb));
-                }
+    for idx in &candidates {
+        for a in 0..axes.len() {
+            for b in (a + 1)..axes.len() {
+                wanted.insert((a, b, idx[a], idx[b]));
             }
         }
     }
 
     let mut chosen: Vec<Vec<usize>> = Vec::new();
     while !wanted.is_empty() {
-        let mut best: Option<(Vec<usize>, usize)> = None;
-        let mut idx = vec![0usize; axes.len()];
-        loop {
+        let mut best: Option<(&Vec<usize>, usize)> = None;
+        for idx in &candidates {
             let mut gain = 0;
             for a in 0..axes.len() {
                 for b in (a + 1)..axes.len() {
@@ -1007,13 +1043,11 @@ fn pairwise_cover(axes: &[usize]) -> Vec<Vec<usize>> {
                 }
             }
             if gain > best.as_ref().map(|(_, g)| *g).unwrap_or(0) {
-                best = Some((idx.clone(), gain));
-            }
-            if !odometer_next(&mut idx, axes) {
-                break;
+                best = Some((idx, gain));
             }
         }
-        let (idx, _) = best.expect("pairs remain but no candidate covers any");
+        let (idx, _) = best.expect("feasible pairs remain but no renderable tuple covers any");
+        let idx = idx.clone();
         for a in 0..axes.len() {
             for b in (a + 1)..axes.len() {
                 wanted.remove(&(a, b, idx[a], idx[b]));
@@ -1024,23 +1058,134 @@ fn pairwise_cover(axes: &[usize]) -> Vec<Vec<usize>> {
     chosen
 }
 
-fn pairwise_shapes() -> Vec<Shape> {
-    pairwise_cover(&[
-        REPRS.len(),
-        STORAGES.len(),
-        PRODUCTIONS.len(),
-        CONSUMPTIONS.len(),
-        NULLABILITIES.len(),
-    ])
-    .into_iter()
-    .map(|i| Shape {
+const AXES: [usize; 5] = [
+    REPRS.len(),
+    STORAGES.len(),
+    PRODUCTIONS.len(),
+    CONSUMPTIONS.len(),
+    NULLABILITIES.len(),
+];
+
+fn shape_at(i: &[usize]) -> Shape {
+    Shape {
         repr: REPRS[i[0]],
         storage: STORAGES[i[1]],
         production: PRODUCTIONS[i[2]],
         consumption: CONSUMPTIONS[i[3]],
         nullability: NULLABILITIES[i[4]],
-    })
-    .collect()
+    }
+}
+
+fn shape_indices(s: &Shape) -> [usize; 5] {
+    [
+        REPRS.iter().position(|v| *v == s.repr).unwrap(),
+        STORAGES.iter().position(|v| *v == s.storage).unwrap(),
+        PRODUCTIONS.iter().position(|v| *v == s.production).unwrap(),
+        CONSUMPTIONS
+            .iter()
+            .position(|v| *v == s.consumption)
+            .unwrap(),
+        NULLABILITIES
+            .iter()
+            .position(|v| *v == s.nullability)
+            .unwrap(),
+    ]
+}
+
+/// The pairs that some RENDERABLE tuple can express. Not every pair can: `render`
+/// declines combinations the generator has no program for, and a pair whose only
+/// witnesses are all unrenderable is infeasible rather than missing.
+fn feasible_pairs() -> BTreeSet<(usize, usize, usize, usize)> {
+    let mut feasible = BTreeSet::new();
+    let mut idx = vec![0usize; AXES.len()];
+    loop {
+        if render(shape_at(&idx)).is_some() {
+            for a in 0..AXES.len() {
+                for b in (a + 1)..AXES.len() {
+                    feasible.insert((a, b, idx[a], idx[b]));
+                }
+            }
+        }
+        if !odometer_next(&mut idx, &AXES) {
+            break;
+        }
+    }
+    feasible
+}
+
+fn pairwise_shapes() -> Vec<Shape> {
+    pairwise_cover(&AXES, |i| render(shape_at(i)).is_some())
+        .into_iter()
+        .map(|i| shape_at(&i))
+        .collect()
+}
+
+/// The plan's defining premise, asserted instead of assumed: *every PAIR of axis
+/// values appears in at least one program*. It was FALSE and silently so -- the
+/// cover was built over the full index lattice and `render` then filtered
+/// unrenderable tuples out at execution time, so any pair whose only covering tuple
+/// got filtered vanished from the corpus with nothing to say so. Measured before the
+/// fix: 41 pairs absent unmarked (~28 of them feasible), including
+/// `nobox x flatvecelement`, `global x coalesce` and `index x plainreturn`.
+///
+/// Cheap enough for the default profile: `render` is pure, so this spawns no `rock`.
+#[test]
+fn the_executed_corpus_covers_every_feasible_pair() {
+    let executed: Vec<Shape> = sweep_shapes()
+        .into_iter()
+        .filter(|s| render(*s).is_some())
+        .collect();
+    let mut present: BTreeSet<(usize, usize, usize, usize)> = BTreeSet::new();
+    for s in &executed {
+        let i = shape_indices(s);
+        for a in 0..AXES.len() {
+            for b in (a + 1)..AXES.len() {
+                present.insert((a, b, i[a], i[b]));
+            }
+        }
+    }
+
+    const NAMES: [&str; 5] = [
+        "repr",
+        "storage",
+        "production",
+        "consumption",
+        "nullability",
+    ];
+    let describe = |(a, b, va, vb): &(usize, usize, usize, usize)| {
+        let mut i = vec![0usize; AXES.len()];
+        i[*a] = *va;
+        i[*b] = *vb;
+        let s = shape_at(&i);
+        let val = |axis: usize| -> String {
+            match axis {
+                0 => format!("{:?}", s.repr),
+                1 => format!("{:?}", s.storage),
+                2 => format!("{:?}", s.production),
+                3 => format!("{:?}", s.consumption),
+                _ => format!("{:?}", s.nullability),
+            }
+        };
+        format!(
+            "{}={} x {}={}",
+            NAMES[*a],
+            val(*a),
+            NAMES[*b],
+            val(*b)
+        )
+    };
+
+    let missing: Vec<String> = feasible_pairs()
+        .difference(&present)
+        .map(describe)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} FEASIBLE pair(s) appear in no executed shape, so the corpus is not \
+         pairwise over what it can render:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
 }
 
 /// The dangerous TRIPLES the plan's table names, hand-added on top of the
@@ -2109,6 +2254,19 @@ fn the_pairwise_sweep_on_js_finds_no_unexpected_miscompile() {
         pinned_hits.len()
     ));
     println!("{report}");
+    // INCONCLUSIVE is a HARNESS bug, never a verdict about the language: zero
+    // `@test`s executed and no diagnostic, which is what summary-parser drift looks
+    // like. The luajit sweep already fails on it; this rung asserted only on
+    // miscompiles, so a parser break turned every shape INCONCLUSIVE and the rung
+    // still passed -- 339 of them, measured. `BackendSkip` stays permitted: an
+    // unbuilt emitter arm IS a real fact about the JS backend.
+    let inconclusive = counts.get(&Bucket::Inconclusive).copied().unwrap_or(0);
+    assert_eq!(
+        inconclusive, 0,
+        "{report}\n{inconclusive} shape(s) produced NO VERDICT on js. That is a \
+         harness fault, not a language finding -- the runner reported neither a \
+         `@test` count nor a diagnostic, so this rung proved nothing about them."
+    );
     assert!(
         miscompiles.is_empty(),
         "{report}\nMISCOMPILES on js that luajit does not have ({}):\n{}",
@@ -2270,23 +2428,30 @@ const GLSL_CONSUMPTIONS: [GlslConsumption; 5] = [
 ];
 const GLSL_STDLIBS: [StdlibVariant; 2] = [StdlibVariant::Vanilla, StdlibVariant::Vec2Nobox];
 
-fn glsl_shapes() -> Vec<GlslShape> {
-    let mut shapes: Vec<GlslShape> = pairwise_cover(&[
-        GLSL_VECS.len(),
-        GLSL_SOURCES.len(),
-        GLSL_PRODUCTIONS.len(),
-        GLSL_CONSUMPTIONS.len(),
-        GLSL_STDLIBS.len(),
-    ])
-    .into_iter()
-    .map(|i| GlslShape {
+const GLSL_AXES: [usize; 5] = [
+    GLSL_VECS.len(),
+    GLSL_SOURCES.len(),
+    GLSL_PRODUCTIONS.len(),
+    GLSL_CONSUMPTIONS.len(),
+    GLSL_STDLIBS.len(),
+];
+
+fn glsl_shape_at(i: &[usize]) -> GlslShape {
+    GlslShape {
         vec: GLSL_VECS[i[0]],
         source: GLSL_SOURCES[i[1]],
         production: GLSL_PRODUCTIONS[i[2]],
         consumption: GLSL_CONSUMPTIONS[i[3]],
         stdlib: GLSL_STDLIBS[i[4]],
-    })
-    .collect();
+    }
+}
+
+fn glsl_shapes() -> Vec<GlslShape> {
+    let mut shapes: Vec<GlslShape> =
+        pairwise_cover(&GLSL_AXES, |i| render_glsl(glsl_shape_at(i), 0).is_some())
+            .into_iter()
+            .map(|i| glsl_shape_at(&i))
+            .collect();
     // The Part-1 miscompile's own triple, both markings: a marked `Vec2` local in
     // a shader body scalarized into reserved `<name>__<i>` identifiers.
     for stdlib in GLSL_STDLIBS {
