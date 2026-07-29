@@ -4748,10 +4748,16 @@ impl Builder<'_> {
         // `__vec_data_get` already lowers to a Group of column reads -- the box
         // was minted only to cross `cast`. Same identity treatment the newtype
         // ctor and the bound `iter` call below already get.
+        // Keyed on the RESOLVED callee, never the spelling: a user fn named
+        // `cast` returning a nobox value is a different function, and threading
+        // its argument through would delete the call and emit a leaf read of
+        // whatever was passed in (pinned by tests/nobox_cast_identity.rock).
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
                 if let [inner] = arg_idxs[..] {
-                    return self.lower_expr_repr(inner);
+                    if self.resolves_to_inline_builtin(e, name) {
+                        return self.lower_expr_repr(inner);
+                    }
                 }
             }
         }
@@ -6845,6 +6851,21 @@ impl Builder<'_> {
                 "function value `{name}` is an unresolved overload (distinct signatures)"
             ))),
         }
+    }
+
+    /// Whether the call at `e` resolves to an `inline(lua)`-bodied definition of
+    /// `name`. Guards the name-keyed intrinsic fast paths: a user fn may legally
+    /// share a stdlib name, and rewriting ITS call as the intrinsic miscompiles.
+    /// A rock-bodied user fn has no inline body, which is the discriminant --
+    /// module identity is not, because the test harnesses build their own
+    /// stdlib. Fails CLOSED: an unresolved callee is not the intrinsic.
+    fn resolves_to_inline_builtin(&self, e: Idx<Expr>, name: ustr::Ustr) -> bool {
+        let Ok(fref) = self.resolve_funcref(e, name) else {
+            return false;
+        };
+        self.ws.module(fref.module).functions[fref.func]
+            .inline_body
+            .is_some()
     }
 
     fn resolve_funcref(
