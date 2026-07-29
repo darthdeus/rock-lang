@@ -174,6 +174,13 @@ pub const JS_TABLE_PRIM: &str = r#"
 function __table_get(t, k) { return (t instanceof Map) ? t.get(k) : t[k]; }
 function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v; }
 function __table_unset(t, k) { if (t instanceof Map) t.delete(k); else delete t[k]; }
+// Lua `#t`. Defined for a Map and for a hole-free array; a plain object has no
+// Lua sequence length, so throw rather than hand back a 0 that reads as empty.
+function __table_len(t) {
+  if (t instanceof Map) return t.size;
+  if (Array.isArray(t)) return t.length;
+  throw new Error("table_len of a non-sequence");
+}
 "#;
 
 /// Map iteration (`Inst::MapNext`, the Lua `k, v = next(t, k)` protocol). JS has
@@ -330,6 +337,16 @@ function __rock_make_enum(variant, ty, kv) {
 /// (`docs/runtime-globals-audit.md` S4.2b) -- no universal type table on JS.
 pub const JS_INSPECT_RUNTIME: &str = r#"
 var __rock_inspect_ty = {};
+var __rock_col_mat = {};
+// A column-stored Vec has no `_data`: one plain array per leaf, sharing the
+// Vec's `len`. Rendering its own keys would show the PHYSICAL layout (`@vec`,
+// `x = { 1 }`), so materialize each element first -- luajit's
+// `__rock_vec_column_elements`, over emitted per-type rebuilders instead of a
+// runtime type table.
+function __rock_col_header(t) {
+  var h = t["@vec"];
+  return (h !== null && typeof h === "object" && h.repr === "columns") ? h : null;
+}
 function __rock_inspect_key_lt(a, b) {
   var sa = lua_tostring(a), sb = lua_tostring(b);
   return sa < sb ? -1 : (sa > sb ? 1 : 0);
@@ -391,10 +408,16 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
     visited.set(t, path);
   }
   var type_name = t.__ty;
-  if (type_name === "Vec" && t._data && t.len !== undefined) {
+  var colh = type_name === "Vec" && t.len !== undefined ? __rock_col_header(t) : null;
+  if (type_name === "Vec" && t.len !== undefined && (t._data || colh)) {
+    var mat = colh ? __rock_col_mat[colh.elem] : null;
+    if (colh && mat === undefined) {
+      throw new Error("no column materializer emitted for element type " + colh.elem);
+    }
     var vparts = [];
     for (var i = 0; i < t.len; i++) {
-      vparts.push(__rock_inspect_value(t._data[i], indent, path + "[" + i + "]", visited, precision));
+      var elem = colh ? mat(t, i) : t._data[i];
+      vparts.push(__rock_inspect_value(elem, indent, path + "[" + i + "]", visited, precision));
     }
     if (visited) visited.delete(t);
     if (vparts.length === 0) return "Vec { }";

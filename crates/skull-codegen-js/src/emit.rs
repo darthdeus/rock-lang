@@ -2287,13 +2287,14 @@ pub fn emit_with_closure(
     drain_worklists(ws, scx, &mut st)?;
     st.canonicalize_emission_order();
     let bodies = st.top_bodies();
-    check_scalar_abi(ws, scx, &st.lowered, &bodies)?;
+    check_scalar_abi(ws, scx, &st.lowered, &st.spec_lowered, &bodies)?;
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
     out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
     out.push_str(&emit_vt_eq(ws, &bodies)?);
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
+    out.push_str(&emit_col_mat(ws, &bodies)?);
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
     // program path reorders these; per-test order is pinned by the JS suite.)
@@ -2472,7 +2473,7 @@ fn build_program_core(
 
     let mut bodies = st.top_bodies();
     bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
-    check_scalar_abi(ws, scx, &st.lowered, &bodies)?;
+    check_scalar_abi(ws, scx, &st.lowered, &st.spec_lowered, &bodies)?;
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -2486,6 +2487,9 @@ fn build_program_core(
     let inspect_ty = emit_inspect_ty(ws, &bodies)?;
     out.push_str(&inspect_ty);
     stable.push_str(&inspect_ty);
+    let col_mat = emit_col_mat(ws, &bodies)?;
+    out.push_str(&col_mat);
+    stable.push_str(&col_mat);
     // 1. deco def fns.
     for (name, mf) in &deco_bodies {
         let definition = emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?;
@@ -3208,10 +3212,18 @@ fn check_scalar_abi(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     lowered: &[(FuncRef, MirFunc)],
+    spec_lowered: &[(FuncRef, SpecKey, MirFunc)],
     bodies: &[&MirFunc],
 ) -> Result<(), CompilerError> {
     let arities: HashMap<FuncRef, usize> =
         lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
+    // A SPECIALIZED callee takes the scalar ABI its instantiation implies, which
+    // is exactly where a value-struct arg legitimately becomes several leaves --
+    // so a spec-bound call must be measured against its own copy, not the shared
+    // body it shares a `FuncRef` with. Checking the shared arity reads every
+    // correct specialized call as a dropped-leaf bug.
+    let spec_arities: HashMap<(FuncRef, SpecKey), usize> =
+        spec_lowered.iter().map(|(fr, key, mf)| ((*fr, key.clone()), mf.params.len())).collect();
     for mf in bodies {
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
@@ -3219,6 +3231,22 @@ fn check_scalar_abi(
                     Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (func, args.len()),
                     _ => continue,
                 };
+                if let Some(key) = mf.spec_bindings.get(&iid) {
+                    match spec_arities.get(&(*callee, key.clone())) {
+                        // An unemitted specialization is `callee_name`'s rejection
+                        // to make -- it knows which name went missing.
+                        None => continue,
+                        Some(&arity) if argc == arity => continue,
+                        Some(&arity) => {
+                            let cf = &ws.module(callee.module).functions[callee.func];
+                            return Err(err(format!(
+                                "JS subset: value-struct scalar ABI mismatch calling specialized \
+                                 `{}` ({argc} args vs {arity} params)",
+                                cf.name
+                            )));
+                        }
+                    }
+                }
                 if let Some(&arity) = arities.get(callee) {
                     let required = required_arg_count(ws, scx, *callee, arity);
                     if argc < required || argc > arity {
@@ -3273,9 +3301,126 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
     let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
     for mf in bodies {
         collect_struct_types(ws, mf, &mut names);
+        // A column element is DECOMPOSED at every construction site, so it never
+        // appears as a ctor inst -- yet a materialized one still has to render in
+        // its own (colon) tier rather than fall through to the generic walk.
+        skull_mir::mir::column_elem_types(mf, &mut names);
     }
+    names.retain(|n| ws.struct_by_name.contains_key(n));
     close_struct_field_types(ws, &mut names);
     build_inspect_ty_defs(ws, &names)
+}
+
+/// Per-type `__rock_col_mat` registry for every element type the program stores
+/// as columns: the JS half of luajit's `__rock_materialize_column_type`, which
+/// reads `_G.__ROCK_TYPE_TABLE` for the field walk. JS has no type table and is
+/// not getting one (`docs/runtime-globals-audit.md` S4.2b wants luajit's DELETED),
+/// and the element type is a compile-time fact at every column site anyway --
+/// that is exactly why `spec_key_has_column_elem` forces specialization for one.
+fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
+    let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
+    for mf in bodies {
+        skull_mir::mir::column_elem_types(mf, &mut names);
+    }
+    build_col_mat_defs(ws, &names)
+}
+
+/// Emit `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` -- one
+/// element rebuilt from its leaf columns, nested objects and all.
+///
+/// The leaf paths come from `value_leaf_paths_of`, THE column-key source (the
+/// lowering writes the same paths), so the reader cannot drift from the writer.
+/// A column element is a GC-free `value` struct by construction
+/// (`vec_column_elem`), so the rebuilt object is a plain `{__ty, ..}` -- the same
+/// shape `MakeValueStruct` renders -- and inspect's value tier renders it
+/// `E { x: 1, y: 2 }` with no further help.
+fn build_col_mat_defs(
+    ws: &Workspace,
+    names: &BTreeSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
+    let mut out = String::new();
+    for name in names {
+        // A `nobox` element has no materializer BY CONSTRUCTION: every op that
+        // would need one (inspect, sort, the Lua-array bridge) is a spanned
+        // rejection in the lowering, so emitting one would be unreachable code
+        // that reads as an escape hatch from the guarantee.
+        if skull_mir::lower::is_nobox_nominal(ws, *name) {
+            continue;
+        }
+        let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, *name) else {
+            // An enum value-shape has leaf paths but no struct declaration to
+            // rebuild against: its `{__tag, _n}` leaves cannot reproduce the
+            // named variant a JS enum box carries. Same honest rejection the
+            // static `inspect` of a scalarized enum already makes.
+            return Err(err(format!(
+                "JS subset: column element `{name}` is not a value struct \
+                 (no declared shape to rebuild an element from)"
+            )));
+        };
+        if out.is_empty() {
+            out.push_str("var __rock_col_mat = __rock_col_mat || {};\n");
+        }
+        let body = col_mat_object(ws, *name, &paths, "")?;
+        out.push_str(&format!(
+            "__rock_col_mat[{}] = function(v, i) {{ return {body}; }};\n",
+            js_string_lit(name.as_str())?
+        ));
+    }
+    Ok(out)
+}
+
+/// The object literal rebuilding `name` from the columns under `prefix`.
+/// Recurses on a dotted path exactly as `render_leaf_form_value_struct` does --
+/// same grouping rule, different leaf source (a column read, not a MIR value).
+fn col_mat_object(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    paths: &[ustr::Ustr],
+    prefix: &str,
+) -> Result<String, CompilerError> {
+    let mut top: Vec<(ustr::Ustr, String)> = Vec::new();
+    let mut groups: Vec<(ustr::Ustr, Vec<ustr::Ustr>)> = Vec::new();
+    for p in paths {
+        match p.as_str().split_once('.') {
+            None => {
+                let col = js_string_lit(&format!("{prefix}{p}"))?;
+                top.push((*p, format!("v[{col}][i]")));
+            }
+            Some((head, rest)) => {
+                let (head, rest) = (ustr::Ustr::from(head), ustr::Ustr::from(rest));
+                match groups.iter_mut().find(|(h, _)| *h == head) {
+                    Some((_, sub)) => sub.push(rest),
+                    None => groups.push((head, vec![rest])),
+                }
+            }
+        }
+    }
+    let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_str())?)];
+    for (f, read) in &top {
+        parts.push(format!("{}: {read}", js_key(f)?));
+    }
+    for (head, sub) in &groups {
+        let child = nested_value_field_struct_name(ws, name, head.as_str()).ok_or_else(|| {
+            err(format!(
+                "JS subset: column element `{name}` field `{head}` is not a value struct"
+            ))
+        })?;
+        let inner = col_mat_object(ws, child, sub, &format!("{prefix}{head}."))?;
+        parts.push(format!("{}: {inner}", js_key(head)?));
+    }
+    Ok(format!("({{{}}})", parts.join(", ")))
+}
+
+/// The nominal name of `parent`'s `field`, when that field is a struct.
+fn nested_value_field_struct_name(
+    ws: &Workspace,
+    parent: ustr::Ustr,
+    field: &str,
+) -> Option<ustr::Ustr> {
+    let sid = ws.struct_by_name.get(&parent)?;
+    let s = &ws.module(sid.module).structs[sid.def];
+    let f = s.fields.iter().find(|f| f.name.as_str() == field)?;
+    nominal_struct_name(ws, f.ty)
 }
 
 /// The `__deco_<name>` JS identity for a decorator (matches skull's Lua
@@ -4553,6 +4698,7 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // `t[k] = nil`: a Map key delete or an array/object hole, dispatched on
         // `instanceof Map`. Returns undefined -> Rock nil if the result is stored.
         ("table_unset", 2) => Some("__table_unset($1, $2)"),
+        ("table_len", 1) => Some("__table_len($1)"),
         // Base-agnostic Vec `_data` accessors (`__vec_data_*`): a logical 0-based
         // element index over the 0-based hole-free `_data` array (never a Map, so
         // index directly). `unset` writes `undefined` (the drain callers only
@@ -4562,9 +4708,9 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("__vec_data_set", 3) => Some("$1._data[$2] = $3"),
         ("__vec_data_unset", 2) => Some("$1._data[$2] = undefined"),
         // The COLD half of the same boundary (allocate / measure / shift / copy
-        // / reorder the backing as a whole). JS has no column storage -- columns
-        // go to the SKIP histogram -- so each is just the boxed form, but they
-        // must be mapped or the ops routed through them stop emitting.
+        // / reorder the backing as a whole), in its BOXED form -- a column vec
+        // never reaches these, because the lowering intercepts each one and
+        // decomposes it per column before a callee is chosen.
         // `lua_index` arrives 1-based from the shared Rock body; JS is 0-based.
         ("__vec_data_alloc", 1) => Some("({_data: new Array($1).fill(false), len: 0, __ty: \"Vec\"})"),
         ("__vec_data_capacity", 1) => Some("$1._data.length"),

@@ -53,3 +53,75 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   if (obj === null || typeof obj !== "object") return null;
   return obj.__ty === undefined ? null : obj.__ty;
 """
+
+// Column-storage boundary primitives (`docs/js-vec-columns-plan.md` stage B).
+// Their luajit siblings are in `unified.rock`; each is the same operation over a
+// 0-based JS array instead of a 1-based Lua table.
+
+@nomangle inline(js) fn __rock_col_insert(col: any, lua_index: int, value: any) = """
+  col.splice(lua_index - 1, 0, value);
+"""
+
+@nomangle inline(js) fn __rock_col_copy(col: any) -> any = "return col.slice();"
+
+@nomangle inline(js) fn __rock_col_capacity(reserved: int, physical: int) -> int = """
+  return reserved > physical ? reserved : physical;
+"""
+
+@nomangle inline(js) fn __rock_is_column_vec(v: any) -> bool = """
+  if (v === null || typeof v !== "object" || v.__ty !== "Vec") return false;
+  var h = v["@vec"];
+  return h !== null && typeof h === "object" && h.repr === "columns";
+"""
+
+@nomangle inline(js) fn __rock_col_paths(vec: any) -> any = """
+  var names = [];
+  for (var k in vec) {
+    if (Object.prototype.hasOwnProperty.call(vec, k) &&
+        k !== "len" && k !== "__ty" && k !== "@vec" && Array.isArray(vec[k])) {
+      names.push(k);
+    }
+  }
+  names.sort();
+  return names;
+"""
+
+// luajit walks `__ROCK_TYPE_TABLE` here; JS dispatches to the per-type rebuilder
+// the emitter wrote for this element (`build_col_mat_defs`). A missing entry is
+// a compiler bug, not a shape to guess at, so it throws.
+@nomangle inline(js) fn __rock_materialize_column_element(vec: any, index: int) -> any = """
+  var h = vec["@vec"];
+  if (h === null || typeof h !== "object" || h.repr !== "columns") {
+    throw new Error("expected column Vec");
+  }
+  var mat = __rock_col_mat[h.elem];
+  if (mat === undefined) {
+    throw new Error("no column materializer emitted for element type " + h.elem);
+  }
+  return mat(vec, index);
+"""
+
+@nomangle inline(js) fn __rock_vec_column_elements(vec: any) -> any = """
+  var out = [];
+  for (var i = 0; i < (vec.len || 0); i++) out.push(__rock_materialize_column_element(vec, i));
+  return out;
+"""
+
+@nomangle inline(js) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+  var n = vec.len || 0;
+  var order = [], elements = [];
+  for (var i = 0; i < n; i++) {
+    order.push(i);
+    elements.push(__rock_materialize_column_element(vec, i));
+  }
+  order.sort(function(a, b) {
+    var ka = __rock_call(key_fn, elements[a]), kb = __rock_call(key_fn, elements[b]);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+  var paths = __rock_col_paths(vec);
+  for (var p = 0; p < paths.length; p++) {
+    var col = vec[paths[p]], tmp = [];
+    for (var i = 0; i < n; i++) tmp.push(col[order[i]]);
+    for (var i = 0; i < n; i++) col[i] = tmp[i];
+  }
+"""

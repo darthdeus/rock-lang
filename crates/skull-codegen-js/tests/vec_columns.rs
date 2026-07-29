@@ -1,12 +1,8 @@
-//! `Vec<T>` column storage on the JS backend (`docs/js-vec-columns-plan.md`
-//! stage A): `[E]` over an all-scalar `value` `E` stores one plain array per
-//! leaf, sharing the Vec's single `len`, with no per-element object.
-//!
-//! A `nobox` element forces columns on every target, so this exercises the JS
-//! column path without anything in the stdlib being marked. The UNMARKED half
-//! deliberately still keeps the box on JS -- the cold boundary primitives
-//! (`inspect`, `sort`, `to_array`) have no JS siblings yet (stage B), so
-//! switching unmarked types over would turn working web builds into rejections.
+//! `Vec<T>` column storage on the JS backend (`docs/js-vec-columns-plan.md`):
+//! `[E]` over an all-scalar `value` `E` stores one plain array per leaf, sharing
+//! the Vec's single `len`, with no per-element object. Marked or not -- both
+//! targets column now, so the `nobox` half here is about the GUARANTEE (no
+//! materializer exists at all), not about reaching the column path.
 //!
 //! Emitted-shape assertions alone cannot tell "flat" from "boxed and unboxed
 //! again", so the round-trips below RUN under node.
@@ -21,12 +17,18 @@ use common::ws_with;
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }
+value Vert { pos: V2, uv: V2 }
 nobox value NV2 { x: float, y: float }
 
 fn unmarked() -> float {
     let xs: [V2] = []
     xs.push(V2 { x: 1.0, y: 2.0 })
     return xs[0].x
+}
+
+fn nested() -> float {
+    let xs: [Vert] = [Vert { pos: V2 { x: 1.0, y: 2.0 }, uv: V2 { x: 3.0, y: 4.0 } }]
+    return xs[0].pos.x
 }
 
 fn marked() -> int {
@@ -94,6 +96,15 @@ fn lua_mir(name: &str) -> String {
         .to_string()
 }
 
+/// Just `function <name>(` .. the next top-level `}`, so a body assertion is not
+/// fooled by the registry defs the same program carries.
+fn fn_body<'a>(js: &'a str, name: &str) -> &'a str {
+    let start = js.find(&format!("function {name}(")).expect("emitted fn is in the program");
+    let rest = &js[start..];
+    let end = rest.find("\n}").map(|e| e + 2).unwrap_or(rest.len());
+    &rest[..end]
+}
+
 fn eval_int(name: &str, expect: i64) {
     if !node_available() {
         eprintln!("SKIP {name}: node not found");
@@ -130,14 +141,60 @@ fn an_unmarked_element_still_columns_for_lua() {
     );
 }
 
-/// Unmarked stays BOXED on JS until stage B lands the cold primitives. A
-/// rejection here is `rock web` broken for every game.
+/// An UNMARKED element columns on JS too, since stage B: the boundary primitives
+/// have JS siblings and `inspect` rebuilds an element from its leaf columns, so
+/// the two backends now agree on the representation as well as the semantics.
 #[test]
-fn an_unmarked_element_stays_boxed_for_js() {
-    let js = emit_js("unmarked").expect("[V2] must emit on JS by keeping the boxed form");
+fn an_unmarked_element_columns_for_js() {
+    let js = emit_js("unmarked").expect("[V2] must emit columns on JS");
+    assert!(js.contains("\"@vec\""), "expected the column header in the emitted JS:\n{js}");
+    // The materializer legitimately names the element type, so scope this to the
+    // body: it is the push/read path that must never build one.
+    let body = fn_body(&js, "unmarked");
     assert!(
-        js.contains("__vec_checked_get"),
-        "expected the boxed Vec accessor in the emitted JS:\n{js}"
+        !body.contains("__ty: \"V2\""),
+        "column push boxed the element; the element object must never exist:\n{body}"
+    );
+}
+
+/// The per-type materializer is the JS replacement for luajit's
+/// `__ROCK_TYPE_TABLE` walk, so it must be EMITTED, keyed by the element name the
+/// runtime header carries, and read the dotted leaf columns for a nested field.
+/// Without it `inspect` renders the physical layout.
+#[test]
+fn a_column_element_gets_an_emitted_materializer() {
+    let js = emit_js("unmarked").expect("[V2] must emit columns on JS");
+    assert!(
+        js.contains("__rock_col_mat[\"V2\"] = function(v, i)"),
+        "no per-type column materializer was emitted:\n{js}"
+    );
+    assert!(
+        js.contains("v[\"x\"][i]") && js.contains("v[\"y\"][i]"),
+        "the materializer must read each leaf column by its path:\n{js}"
+    );
+    assert!(
+        !js.contains("__ROCK_TYPE_TABLE"),
+        "JS must not grow a runtime type table:\n{js}"
+    );
+}
+
+/// A nested element's columns are DOTTED paths (`pos.x`), and the rebuilt object
+/// has to be nested again -- a flat `{pos.x: ..}` would render nothing like the
+/// declared shape. Same grouping rule the leaf-form value ctor uses.
+#[test]
+fn a_nested_column_element_rebuilds_its_child_object() {
+    let js = emit_js("nested").expect("[Vert] must emit columns on JS");
+    assert!(
+        js.contains("__rock_col_mat[\"Vert\"] = function(v, i)"),
+        "no materializer for the nested element:\n{js}"
+    );
+    assert!(
+        js.contains("v[\"pos.x\"][i]"),
+        "a nested leaf must be read from its dotted column:\n{js}"
+    );
+    assert!(
+        js.contains("pos: ({__ty: \"V2\""),
+        "the nested child must be rebuilt as its own object:\n{js}"
     );
 }
 
@@ -152,6 +209,13 @@ fn a_nobox_element_never_builds_an_element_object() {
         "column push boxed the element; the element object must never exist:\n{js}"
     );
     assert!(js.contains("\"@vec\""), "expected the column header in the emitted JS:\n{js}");
+    // Not even a materializer: every op that would call one is a spanned
+    // rejection for a `nobox` element, so the guarantee has no escape hatch to
+    // find in the emitted program.
+    assert!(
+        !js.contains("__rock_col_mat[\"NV2\"]"),
+        "a `nobox` element must not get a materializer:\n{js}"
+    );
 }
 
 /// Push then read back, under node. `marked` pushes two elements and reads a

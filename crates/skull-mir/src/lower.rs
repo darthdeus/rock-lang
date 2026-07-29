@@ -901,7 +901,7 @@ pub fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
 }
 
 /// Whether `name` is a `nobox` value struct.
-fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
+pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
@@ -1005,18 +1005,16 @@ fn spec_key_has_column_elem(
 
 /// Whether `[elem]` takes column storage when lowering for `target`.
 ///
-/// For an UNMARKED element columns are a representation OPTIMIZATION, so a
-/// backend without the emitter arm keeps the boxed form -- same semantics,
-/// different bytes, which is this repo's cross-backend doctrine. A `nobox`
-/// element is a language-level GUARANTEE, so it columns on every target and a
-/// backend that cannot serve it rejects at emit rather than silently handing
-/// back the box the program was promised would not exist.
+/// Every target now serves columns, so this is unconditional. It survives as a
+/// named predicate because [`spec_key_has_column_elem`] asks the question for a
+/// DIFFERENT reason -- whether specializing a generic callee is a correctness
+/// requirement -- and that reasoning is only sound while the two agree.
 fn columns_available(
-    ws: &Workspace,
-    target: bone_semantic::hir::FnBackend,
-    elem: Ustr,
+    _ws: &Workspace,
+    _target: bone_semantic::hir::FnBackend,
+    _elem: Ustr,
 ) -> bool {
-    target != bone_semantic::hir::FnBackend::Js || is_nobox_nominal(ws, elem)
+    true
 }
 
 /// A callee's per-generic instantiation at one call site, in declaration order.
@@ -5997,11 +5995,28 @@ impl Builder<'_> {
     /// (the cold column ops, which have no call expr of their own to resolve
     /// through). Rejects rather than falling back: a missing or ambiguous name
     /// means the stdlib and this lowering have drifted apart.
+    /// A stdlib helper the lowering calls by NAME (never through overload
+    /// resolution, which needs a call expression). Multiple decls of one name are
+    /// the backend-sibling scheme, so pick the one serving this target; only a
+    /// residual tie is ambiguous.
     fn stdlib_funcref(&self, name: &str) -> Result<FuncRef, CompilerError> {
-        match self.ws.functions_by_name.get(&Ustr::from(name)).map(|l| l.as_slice()) {
-            Some([(module, func)]) => Ok(FuncRef { module: *module, func: *func }),
-            Some(_) => Err(gap(format!("stdlib `{name}` is ambiguous"))),
-            None => Err(gap(format!("stdlib `{name}` not found"))),
+        let Some(decls) = self.ws.functions_by_name.get(&Ustr::from(name)) else {
+            return Err(gap(format!("stdlib `{name}` not found")));
+        };
+        let serving: Vec<FuncRef> = decls
+            .iter()
+            .filter(|(module, func)| {
+                serves_target(self.ws.modules[module.index()].functions[*func].backend, self.scx.target)
+            })
+            .map(|(module, func)| FuncRef { module: *module, func: *func })
+            .collect();
+        match serving.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(gap(format!(
+                "stdlib `{name}` has no body serving the {:?} backend",
+                self.scx.target
+            ))),
+            _ => Err(gap(format!("stdlib `{name}` is ambiguous"))),
         }
     }
 
