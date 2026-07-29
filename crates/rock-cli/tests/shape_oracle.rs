@@ -65,6 +65,11 @@ enum Bucket {
     /// thing. Derived, not observed: an expectation of LOUD REJECT that came
     /// back CORRECT, or a rejection whose text does not name the shape.
     SilentReject,
+    /// Compiles, runs, RIGHT answer -- reached through a materialization the
+    /// shape does not need. Not a wrong answer, so not a MISCOMPILE; but the
+    /// value oracle is blind to it, which is the whole reason the emitted-shape
+    /// surface exists.
+    Materialized,
     /// The backend cannot express the shape and said so (`SKIP(reason)` on JS).
     /// Not a verdict about the language.
     BackendSkip,
@@ -80,6 +85,7 @@ impl Bucket {
             Bucket::Miscompile => "MISCOMPILE",
             Bucket::LoudReject => "LOUD REJECT",
             Bucket::SilentReject => "SILENT REJECT",
+            Bucket::Materialized => "MATERIALIZED",
             Bucket::BackendSkip => "BACKEND SKIP",
             Bucket::Inconclusive => "INCONCLUSIVE",
         }
@@ -338,6 +344,61 @@ fn run_glsl(file: &Path, entry: &str, stdlib: StdlibVariant) -> Observation {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The emitted-shape surface
+// ---------------------------------------------------------------------------
+
+/// Every way the Lua emitter can build a whole `P` at runtime. `<name>_ct(` is the
+/// FFI-clean cdata ctor, `<name>_vt(` the GC-carrying table ctor, and
+/// `__rock_create_struct("P"` the plain-struct one -- so between them they name
+/// every materialization of the type, whatever tier it landed in.
+///
+/// The value oracle cannot see any of this: a program that boxes three times and
+/// answers 7 11 reads CORRECT. That blindness is the class this surface exists for
+/// -- silent inefficiency, and silent repr drift, both of which change the emitted
+/// shape without changing the answer.
+fn materializations(lua: &str) -> Vec<String> {
+    lua.lines()
+        .map(str::trim)
+        // The one FIXED per-struct shim: `_G.__ROCK_C_STRUCT["P"].copy`, emitted
+        // for every cdata-tier value struct whether the program boxes or not.
+        .filter(|l| !l.starts_with("return P_ct(v.") && !l.starts_with("return P_vt(v."))
+        .filter(|l| {
+            l.contains("P_ct(") || l.contains("P_vt(") || l.contains("__rock_create_struct(\"P\"")
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// A materialization compared straight to `nil` is statically always non-nil, so
+/// both the box and the branch are dead. Reported rather than gated: it is waste,
+/// not a wrong answer, and the fix is a lowering change with its own blast radius.
+fn dead_nil_compares(lua: &str) -> Vec<String> {
+    materializations(lua)
+        .into_iter()
+        .filter(|l| l.contains("== (nil)") || l.contains("~= (nil)"))
+        .collect()
+}
+
+/// Compile to Lua and hand back the emitted chunk, or the diagnostic that stopped
+/// it. A rejection here is not a finding -- the value sweep already classified it.
+fn emitted_lua(file: &Path, stdlib: StdlibVariant) -> Result<String, String> {
+    // Never beside the input: the seed rung's inputs live in the checked-in corpus
+    // dir, and an emitted `.lua` next to them is tree pollution.
+    let scratch = std::env::temp_dir().join("rock_shape_oracle_emit_out");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let out = scratch.join(file.with_extension("lua").file_name().unwrap());
+    let path = file.to_string_lossy().into_owned();
+    let out_path = out.to_string_lossy().into_owned();
+    let (text, ok) = run_rock(&["compile", &path, &out_path], stdlib);
+    if !ok {
+        return Err(
+            first_diagnostic(&text).unwrap_or_else(|| last_nonempty(&text).unwrap_or_default())
+        );
+    }
+    std::fs::read_to_string(&out).map_err(|e| e.to_string())
+}
+
 fn observe(file: &Path, surface: Surface, stdlib: StdlibVariant) -> Observation {
     match surface {
         Surface::Luajit => {
@@ -431,6 +492,24 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::Vanilla,
         expect: Expect::Correct,
         gap: Some("`cast` name hijack (fixed, b10cf9274)"),
+    },
+    SeedCase {
+        name: "cast_shadow_call_shapes",
+        file: "cast_shadow_call_shapes.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: Some("`cast` name hijack, deepened to a value-struct argument"),
+    },
+    SeedCase {
+        name: "cast_shadow_fn_value_reference",
+        file: "cast_shadow_fn_value_reference.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::LoudReject {
+            names: "ambiguous fn-value reference",
+        },
+        gap: Some("NEW: a user `cast` is callable but not nameable as a fn value"),
     },
     SeedCase {
         name: "nullable_read_aliasing",
@@ -638,6 +717,7 @@ fn bucket_table(counts: &BTreeMap<Bucket, usize>) -> String {
         Bucket::Miscompile,
         Bucket::LoudReject,
         Bucket::SilentReject,
+        Bucket::Materialized,
         Bucket::BackendSkip,
         Bucket::Inconclusive,
     ] {
@@ -713,6 +793,13 @@ enum Storage {
     FlatVecElement,
     ArenaElement,
     CaptureCell,
+    /// A closure REBINDS the captured name and the read happens through the
+    /// outer one, so a cell that is not shared loses the write and the sentinel
+    /// leaks into the answer.
+    CaptureCellWritten,
+    /// A local of a `co fn` written before a `yield` and consumed after the
+    /// resume, so the value has to survive a suspend point in the frame.
+    CoFrameAcrossYield,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -781,7 +868,7 @@ const REPRS: [Repr; 4] = [
     Repr::GcCarrying,
     Repr::WideLeaves,
 ];
-const STORAGES: [Storage; 11] = [
+const STORAGES: [Storage; 13] = [
     Storage::Local,
     Storage::Param,
     Storage::StructField,
@@ -793,6 +880,8 @@ const STORAGES: [Storage; 11] = [
     Storage::FlatVecElement,
     Storage::ArenaElement,
     Storage::CaptureCell,
+    Storage::CaptureCellWritten,
+    Storage::CoFrameAcrossYield,
 ];
 const PRODUCTIONS: [Production; 9] = [
     Production::LiteralCtor,
@@ -941,21 +1030,39 @@ fn dangerous_triples() -> Vec<Shape> {
             }
         }
     }
-    // fn-value x field-call.
-    for repr in [Repr::Unmarked, Repr::Nobox] {
+    // fn-value x field-call. The seed pair puts the discriminant on the CALL SHAPE
+    // (`h.cb(arg)` rejects, `let f = h.cb; f(arg)` runs), which says nothing about
+    // where the ARGUMENT came from -- so vary that: every repr, every nullability,
+    // both cell-shaped storages, and the productions that read out of a place.
+    for repr in REPRS {
         for nullability in NULLABILITIES {
-            out.push(Shape {
-                repr,
-                storage: Storage::StructField,
-                production: Production::LiteralCtor,
-                consumption: Consumption::FnValueOffField,
-                nullability,
-            });
+            for storage in [
+                Storage::Local,
+                Storage::StructField,
+                Storage::VecElement,
+                Storage::CaptureCellWritten,
+            ] {
+                for production in [
+                    Production::LiteralCtor,
+                    Production::CallResult,
+                    Production::WholeValueRead,
+                    Production::Index,
+                ] {
+                    out.push(Shape {
+                        repr,
+                        storage,
+                        production,
+                        consumption: Consumption::FnValueOffField,
+                        nullability,
+                    });
+                }
+            }
         }
     }
     // cast x user-shadowing is not a shape in these axes -- a user `cast` decl
-    // is a whole-program property, so it stays a seed case
-    // (`cast_name_hijack.rock`) rather than a generated axis value.
+    // is a whole-program property, so it deepens in the seed corpus
+    // (`cast_name_hijack.rock`, `cast_shadow_call_shapes.rock`) rather than as a
+    // generated axis value.
     out
 }
 
@@ -1003,7 +1110,12 @@ fn leaves(repr: Repr) -> Leaves {
 /// report instead of being folded into a bucket.
 fn render(shape: Shape) -> Option<Program> {
     let l = leaves(shape.repr);
-    let ctor7 = format!("P {{ {} }}", (l.ctor_args)(7, 11));
+    // Every `??` fallback in a generated program is DEAD: the place always holds a
+    // present value, so the coalesce must yield the place. Giving the fallback
+    // leaves the expectation does NOT have keeps a wrongly-taken fallback from
+    // reading as CORRECT -- a fallback spelled `P { a: 7, .. }` would answer right
+    // for the wrong reason.
+    let ctor_dead = format!("P {{ {} }}", (l.ctor_args)(-1, -1));
     let mut decls: Vec<String> = vec![l.decl.clone(), "fn seed(n: int) -> int { return n }".into()];
     let mut body: Vec<String> = Vec::new();
     // Statements go in already indented: a nullable source or a refinement opens
@@ -1088,7 +1200,7 @@ fn render(shape: Shape) -> Option<Program> {
                 "fn maybe(n: int) -> P? {{ if n > 0 {{ return P {{ {} }} }} return null }}",
                 (l.ctor_args)(7, 11).replace("a: 7", "a: n")
             ));
-            format!("(maybe(seed(7)) ?? {ctor7})")
+            format!("(maybe(seed(7)) ?? {ctor_dead})")
         }
     };
 
@@ -1201,14 +1313,44 @@ fn render(shape: Shape) -> Option<Program> {
             "cell.p".into()
         }
         Storage::CaptureCell => {
-            decls.push(format!(
-                "fn call_it(f: () -> {stored_ty}) -> {stored_ty} {{ return f() }}"
-            ));
+            // The lambda is BOUND to a local and then called, not handed to a
+            // higher-order fn as a literal: `call_it(() => captured)` puts the
+            // shape's weight on lambda-literal-in-argument-position, where a
+            // compiler is free to inline the body at the call site and never build
+            // a cell at all -- so it was not testing capture.
             body.push(format!(
                 "{}let captured: {stored_ty} = {produced}",
                 ind(depth)
             ));
-            body.push(format!("{}let slot = call_it(() => captured)", ind(depth)));
+            body.push(format!("{}let f = () => captured", ind(depth)));
+            body.push(format!("{}let slot: {stored_ty} = f()", ind(depth)));
+            "slot".into()
+        }
+        Storage::CaptureCellWritten => {
+            // The SENTINEL is what makes a lost write visible: the produced value
+            // arrives only through the closure, so a cell that is not shared with
+            // the outer name leaves 0/null in the answer instead of 7/11.
+            let sentinel = if nullable {
+                "null".to_string()
+            } else {
+                format!("P {{ {} }}", (l.ctor_args)(0, 0))
+            };
+            body.push(format!(
+                "{}let captured: {stored_ty} = {sentinel}",
+                ind(depth)
+            ));
+            body.push(format!(
+                "{}let w = () => {{ captured = {produced} }}",
+                ind(depth)
+            ));
+            body.push(format!("{}w()", ind(depth)));
+            "captured".into()
+        }
+        Storage::CoFrameAcrossYield => {
+            body.push(format!("{}let slot: {stored_ty} = {produced}", ind(depth)));
+            // The suspend point. Everything above it runs on the first resume,
+            // everything below on the second, so `slot` has to live in the frame.
+            body.push(format!("{}yield 0", ind(depth)));
             "slot".into()
         }
     };
@@ -1233,7 +1375,7 @@ fn render(shape: Shape) -> Option<Program> {
                 place.clone()
             }
             _ => {
-                body.push(format!("{}let got: P = {place} ?? {ctor7}", ind(depth)));
+                body.push(format!("{}let got: P = {place} ?? {ctor_dead}", ind(depth)));
                 "got".into()
             }
         }
@@ -1372,6 +1514,20 @@ fn render(shape: Shape) -> Option<Program> {
         source.push_str(&d);
         source.push('\n');
     }
+    if shape.storage == Storage::CoFrameAcrossYield {
+        // The shape lives in the co fn; `shape_case` only drives it. Two resumes:
+        // the first runs up to the suspend point, the second runs the consumption.
+        source.push_str("\nco fn probe() -> Coroutine<int> {\n");
+        for stmt in body {
+            source.push_str(&format!("{stmt}\n"));
+        }
+        source.push_str("    yield 1\n}\n");
+        source.push_str(&format!(
+            "\n@test(output = \"{expected}\")\nfn shape_case() {{\n    \
+             let co = probe()\n    co.resume()\n    co.resume()\n}}\n"
+        ));
+        return Some(Program { source, expected });
+    }
     source.push_str(&format!(
         "\n@test(output = \"{expected}\")\nfn shape_case() {{\n"
     ));
@@ -1400,21 +1556,33 @@ const KNOWN_MISCOMPILES: &[(&str, &str)] = &[];
 /// Diagnostics the sweep has SEEN and judged. An unrecognised rejection is a
 /// finding OR a generator bug, and either way it must not pass quietly -- so the
 /// sweep fails on one until it is classified here.
+///
+/// **Every entry must be specific to ONE diagnostic.** A substring broad enough to
+/// match a family turns the gate off for that whole family, silently: a bare
+/// `"nobox"` entry matched every marked-tier message (they all open ``nobox value
+/// `P` ..``) and classified 44 shapes as already-judged. Mutation-test the GATE,
+/// not only the cases -- renaming a sibling entry must make the sweep red.
 const KNOWN_REJECTIONS: &[&str] = &[
     // Null refinement does not reach an INDEX place: `if xs[0] != null { xs[0].a }`
     // and the `Map` equivalent both reject, while the same shape through a FIELD
     // place refines. Recorded as a judgement, per the plan's M5: a queued
     // feature, not intended residue -- but a loud rejection, not a miscompile.
     "on non-struct type",
+    // The SAME gap one consumption over: at a call ARGUMENT the unrefined index
+    // place is reported as a type mismatch instead, so one cause has two
+    // diagnostic spellings and a text-keyed reader would have judged them
+    // separately.
+    "type mismatch: expected `P`, found `P?`",
     // Correct diagnostics on shapes the generator can spell but that are
     // statically redundant once refinement has run.
     "is not nullable",
     "with null",
-    "immutable local",
+    // ONE entry for the value-local field write, not three. `"immutable local"`,
+    // `"cannot assign"` and ``"`value` struct"`` all matched this same message, so
+    // deleting any one of them left the gate green -- the milder form of the bare
+    // `"nobox"` failure, and just as invisible.
+    "it is an immutable local/temporary",
     "survived lowering",
-    "cannot assign",
-    "value struct",
-    "`value` struct",
     // NOT the bare substring "nobox". Every marked-tier diagnostic opens with
     // "nobox value `P` ..", so a bare "nobox" entry classifies the WHOLE tier as
     // already-judged and the unclassified gate stops gating exactly where it
@@ -1636,6 +1804,161 @@ fn the_marked_sweep_finds_no_unexpected_miscompile() {
         "rock_shape_oracle_sweep_marked",
     );
     assert_sweep(&run, true);
+}
+
+/// Hand-written shapes whose property under test is the EMITTED SHAPE, not the
+/// answer. `boxes` is the observed count today; the file's own header says why it
+/// is what it is, so a change in either direction lands as a red test with a
+/// readable reason rather than as invisible drift.
+struct EmitSeed {
+    name: &'static str,
+    file: &'static str,
+    boxes: usize,
+}
+
+const EMIT_SEEDS: &[EmitSeed] = &[
+    // The floor: an unmarked value struct that never leaves the function is a
+    // register set, not an object. If this ever stops being 0, scalarization has
+    // regressed for the plainest shape in the language.
+    EmitSeed {
+        name: "scalarized_local",
+        file: "emit_scalarized_local.rock",
+        boxes: 0,
+    },
+    // The scalar ABI's whole point: a value crossing a call boundary travels as
+    // leaves, so neither the caller nor the callee builds one.
+    EmitSeed {
+        name: "call_boundary",
+        file: "emit_call_boundary.rock",
+        boxes: 0,
+    },
+    // The GC-carrying tier through a `Map<string, P?>` -- a real box is owed here
+    // (a Map value is a Lua table slot), but THREE is not one, and one of them is
+    // fed straight into a `== nil` test that cannot be false. This count is the
+    // finding, and the value oracle reads the same program as CORRECT.
+    EmitSeed {
+        name: "nullable_map_roundtrip",
+        file: "emit_nullable_map_roundtrip.rock",
+        boxes: 3,
+    },
+];
+
+/// The emitted-shape rung. Two gates that need no per-shape hand-counting:
+///
+/// - sweep-wide: a `nobox` shape that EMITTED must materialize `P` zero times.
+///   That is the marking guarantee itself, and a violation is a SILENT REJECT --
+///   the materialization verifier owed a diagnostic and did not give one.
+/// - the `EMIT_SEEDS` rung: hand-checked counts on hand-written files.
+#[test]
+#[ignore = "opt-in: spawns one rock process per shape (`just shape-sweep`)"]
+fn the_emitted_shape_holds_the_materialization_invariants() {
+    let dir = std::env::temp_dir().join("rock_shape_oracle_emit");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut complaints: Vec<String> = Vec::new();
+    let mut counts: BTreeMap<Bucket, usize> = BTreeMap::new();
+    let mut box_histogram: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut dead_compares: Vec<String> = Vec::new();
+
+    for shape in &sweep_shapes() {
+        let Some(prog) = render(*shape) else { continue };
+        let name = shape.name();
+        let file = dir.join(format!("{name}.rock"));
+        std::fs::write(&file, &prog.source).unwrap();
+        let lua = match emitted_lua(&file, StdlibVariant::Vanilla) {
+            Ok(lua) => lua,
+            Err(_) => {
+                *counts.entry(Bucket::LoudReject).or_insert(0) += 1;
+                continue;
+            }
+        };
+        let boxes = materializations(&lua);
+        *box_histogram.entry(boxes.len()).or_insert(0) += 1;
+        if !dead_nil_compares(&lua).is_empty() {
+            dead_compares.push(name.clone());
+        }
+        if shape.repr == Repr::Nobox && !boxes.is_empty() {
+            *counts.entry(Bucket::SilentReject).or_insert(0) += 1;
+            complaints.push(format!(
+                "{name}: a `nobox` shape EMITTED with {} materialization(s) of P -- \
+                 the guarantee was violated with no diagnostic:\n      {}",
+                boxes.len(),
+                boxes.join("\n      ")
+            ));
+            continue;
+        }
+        *counts
+            .entry(if boxes.is_empty() {
+                Bucket::Correct
+            } else {
+                Bucket::Materialized
+            })
+            .or_insert(0) += 1;
+    }
+
+    let corpus = corpus_dir();
+    let mut seed_report = String::from("\nemitted-shape seeds:\n");
+    for seed in EMIT_SEEDS {
+        let lua = match emitted_lua(&corpus.join(seed.file), StdlibVariant::Vanilla) {
+            Ok(lua) => lua,
+            Err(e) => {
+                complaints.push(format!("{}: expected to EMIT, rejected: {e}", seed.name));
+                continue;
+            }
+        };
+        // A pinned box count on a program that answers WRONG would be a seed that
+        // proves nothing, so the value oracle still runs over these too.
+        let obs = observe(
+            &corpus.join(seed.file),
+            Surface::Luajit,
+            StdlibVariant::Vanilla,
+        );
+        if obs.bucket != Bucket::Correct {
+            complaints.push(format!(
+                "{}: the emitted-shape seed must also ANSWER right, got {}: {}",
+                seed.name,
+                obs.bucket.label(),
+                obs.detail
+            ));
+        }
+        let boxes = materializations(&lua);
+        seed_report.push_str(&format!(
+            "  {:<24} {} box(es), expected {}\n",
+            seed.name,
+            boxes.len(),
+            seed.boxes
+        ));
+        if boxes.len() != seed.boxes {
+            complaints.push(format!(
+                "{}: {} materialization(s) of P, pinned at {} -- if this is an \
+                 intended change, update the count AND the file's header:\n      {}",
+                seed.name,
+                boxes.len(),
+                seed.boxes,
+                boxes.join("\n      ")
+            ));
+        }
+    }
+
+    let mut report = String::from("\nemitted shape over the sweep:\n");
+    report.push_str(&bucket_table(&counts));
+    report.push_str("\nmaterializations per emitting shape:\n");
+    for (boxes, n) in &box_histogram {
+        report.push_str(&format!("  {boxes:>3} box(es)  {n} shape(s)\n"));
+    }
+    report.push_str(&format!(
+        "\nshapes emitting a materialization fed straight into a `== nil` test \
+         (dead box + dead branch): {}\n",
+        dead_compares.len()
+    ));
+    for name in &dead_compares {
+        report.push_str(&format!("  {name}\n"));
+    }
+    report.push_str(&seed_report);
+    println!("{report}");
+
+    assert!(complaints.is_empty(), "{report}\n{}", complaints.join("\n"));
 }
 
 // GLSL has NO generated rung, and that is a property of the target rather than a

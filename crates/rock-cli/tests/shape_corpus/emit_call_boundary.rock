@@ -1,0 +1,20 @@
+// EMITTED-SHAPE seed: the scalar ABI's whole point. A value struct crossing a call
+// boundary travels as LEAVES, so neither the caller nor the callee builds one --
+// including on the way back out of a `-> P` return. Pinned at ZERO.
+//
+// If this count ever rises, a value param or return has started packing at the ABI
+// and every call site in every game pays for it, with no test failing.
+
+value P { a: int, b: int }
+
+fn seed(n: int) -> int { return n }
+
+fn bump(p: P) -> P { return P { a: p.a, b: p.b } }
+
+fn sum(p: P) -> int { return p.a + p.b }
+
+@test(output = "18")
+fn call_boundary() {
+    let p = bump(P { a: seed(7), b: 11 })
+    print(sum(p))
+}

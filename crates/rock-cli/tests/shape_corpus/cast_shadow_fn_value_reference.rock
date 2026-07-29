@@ -1,0 +1,32 @@
+// SHAPE: `cast` x user shadowing x fn-value reference -- the composite of two of
+// the plan's dangerous triples, and a gap the direct-call cases hide.
+//
+// A user `cast` is CALLABLE (`cast_shadow_call_shapes.rock`): overload resolution
+// picks it from the argument type. But naming it as a fn VALUE has no argument to
+// resolve against, and the stdlib intrinsic `cast<T>(any) -> T` occupies the same
+// name -- so `Conv { f: cast }` rejects as ambiguous and the user's fn cannot be
+// stored, passed or returned by name at all.
+//
+// Loud, which is why it is not urgent. The M5 judgement wanted is
+// queued-feature-or-intended: a `cast` the user declared with a concrete signature
+// is unambiguous against a generic intrinsic if resolution used the SINK type, and
+// nothing else in the language lets a name be callable but not referenceable.
+//
+// Corpus case: `cast_shadow_fn_value_reference`. Expected bucket: LOUD REJECT.
+
+nobox value NV { x: int, y: int }
+value BV { u: int, v: int }
+
+fn cast(p: BV) -> NV {
+    return NV { x: p.u + 1, y: p.v + 1 }
+}
+
+struct Conv { f: (BV) -> NV }
+
+@test(output = "8 12")
+fn a_user_cast_named_as_a_fn_value() {
+    let c = Conv { f: cast }
+    let g = c.f
+    let v = g(BV { u: 7, v: 11 })
+    print("{v.x} {v.y}")
+}
