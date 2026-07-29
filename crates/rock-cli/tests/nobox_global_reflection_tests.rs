@@ -1,18 +1,14 @@
-//! Mechanism J of `docs/nobox-case-matrix.md`: a `nobox` global is published to
-//! the reflection registry by its PHYSICAL leaf names, so every consumer of
-//! `_G.__ROCK_GLOBALS` sees `__nbg_SPOT_0` / `__nbg_SPOT_1` where an unmarked
-//! global gives the logical `SPOT`.
+//! Mechanism J of `docs/nobox-case-matrix.md`: marking a global `nobox` must not
+//! change what reflection shows. Its storage IS its leaf globals, so the registry
+//! publishes the logical name and `__ROCK_NOBOX_GLOBALS` carries the
+//! rebuild/take-apart pair that `__rock_global_get`/`_set` call.
 //!
-//! SENTINEL, per `docs/test-sentinels.md`: the assertions below encode today's
-//! WRONG behaviour so they pass now and go RED when J lands. WHEN FIXED: flip
-//! `marked_global_leaks_physical_leaf_names` to assert the logical shape (the
-//! control already spells what that looks like) and drop the `_leaks` suffix.
-//!
-//! Four consumers read that registry as raw name strings, so this is not a
-//! dump-state cosmetic -- `stone/engine/serialization.rock:434`,
-//! `stone/engine/snapshot.rock:104` + `:138`, and
-//! `stone/engine/replay.rock:545` + `:595` all do `_G[name]`. A dump-only patch
-//! would leave physical leaves in saves and replay checkpoints.
+//! Three properties, all of which a wrong fix breaks differently: the dump reads
+//! logically (identical to the unmarked control), the persisted keyframe records
+//! the logical name, and the snapshot round-trip still restores the value. The
+//! last one passed BEFORE the fix -- physical leaves are real `_G` entries, so the
+//! consumers' `_G[name]` reached the storage -- which makes it the property the
+//! fix endangered rather than one it repaired.
 //!
 //! Heavy: spawns `rock frame` against a generated project. Excluded from the
 //! default nextest profile; runs under `-P full`.
@@ -44,6 +40,18 @@ fn dump_one_global_project(pkg: &str, marker: &str) -> serde_json::Value {
 /// never from `main` before `stone_run_game` -- that fails with "attempt to
 /// index global 'stone' (a nil value)".
 fn dump_project(pkg: &str, marker: &str, extra: &str, frames: u32) -> serde_json::Value {
+    dump_source_project(
+        pkg,
+        &format!(
+            "{marker}value Probe {{ x: int, y: int }}\n\n\
+             global SPOT: Probe = Probe {{ x: 3, y: 4 }}\n\n{extra}"
+        ),
+        frames,
+    )
+}
+
+/// As above over a whole `main.rock` body (`main` is appended).
+fn dump_source_project(pkg: &str, source: &str, frames: u32) -> serde_json::Value {
     let dir = tempfile::tempdir().expect("project dir");
     let stone = workspace_root().join("stone");
     std::fs::write(
@@ -58,9 +66,7 @@ fn dump_project(pkg: &str, marker: &str, extra: &str, frames: u32) -> serde_json
     std::fs::write(
         dir.path().join("main.rock"),
         format!(
-            "{marker}value Probe {{ x: int, y: int }}\n\n\
-             global SPOT: Probe = Probe {{ x: 3, y: 4 }}\n\n\
-             {extra}\n\
+            "{source}\n\
              fn main() {{\n    \
              stone_run_game(GameConfig {{ title: \"j probe\", width: 64, height: 64 }})\n\
              }}\n"
@@ -99,8 +105,8 @@ fn dump_project(pkg: &str, marker: &str, extra: &str, frames: u32) -> serde_json
         .clone()
 }
 
-/// The CONTROL, and the shape the sentinel should be flipped to: an unmarked
-/// value global reflects logically, under its own name, with its fields.
+/// The CONTROL: an unmarked value global reflects logically, under its own name,
+/// with its fields. The marked case must be indistinguishable from it.
 #[test]
 #[ignore = "spawns `rock frame` against a generated project (-P full)"]
 fn unmarked_global_reflects_logically() {
@@ -112,20 +118,16 @@ fn unmarked_global_reflects_logically() {
     );
 }
 
+/// Marking must not change what reflection shows: a `nobox` global reflects under
+/// its logical name with its logical fields, exactly as the unmarked control does.
 #[test]
 #[ignore = "spawns `rock frame` against a generated project (-P full)"]
-fn marked_global_leaks_physical_leaf_names() {
+fn marked_global_reflects_logically() {
     let pkg = dump_one_global_project("nobox_dump_probe", "nobox ");
-    // PINNED BUG. `skull_backend.rs` extends the registry with
-    // `nobox_global_leaves(..)` rather than the base name; its comment argues the
-    // base name "would dump nil and restore nothing", which is true and is
-    // exactly the unbuilt alternative -- RECONSTRUCT the logical value. If this
-    // assertion fails, J landed: flip it to the control's shape above.
     assert_eq!(
         pkg,
-        serde_json::json!({ "__nbg_SPOT_0": 3, "__nbg_SPOT_1": 4 }),
-        "PINNED BEHAVIOUR (BUG): a nobox global reflects as physical leaves. If \
-         this now reads {{\"SPOT\": {{..}}}}, the fix landed -- flip the assertion."
+        serde_json::json!({ "SPOT": { "__ty": "Probe", "x": 3, "y": 4 } }),
+        "a nobox global must reflect logically -- identical to the unmarked control"
     );
 }
 
@@ -170,14 +172,12 @@ fn on_update(dt: float) {
     );
 }
 
-/// The keyframe itself stores the registry's names, so the leak reaches persisted
-/// replay checkpoints and saves -- not just `--dump-state`.
-///
-/// SENTINEL: pins today's physical-leaf keys. WHEN J LANDS: expect `SPOT` here
-/// instead of the two `__nbg_SPOT_*` entries, and drop the `_leaks` suffix.
+/// The keyframe stores the registry's names, so this is what reaches persisted
+/// replay checkpoints and save files -- the reason a `--dump-state`-only fix would
+/// not have been one.
 #[test]
 #[ignore = "spawns `rock frame` against a generated project (-P full)"]
-fn marked_global_keyframe_leaks_physical_leaf_names() {
+fn marked_global_keyframe_records_logical_name() {
     let pkg = dump_project(
         "nobox_kf_probe",
         "nobox ",
@@ -211,8 +211,66 @@ fn on_update(dt: float) {
         .collect::<Vec<_>>();
     assert_eq!(
         keys,
-        vec!["__nbg_SPOT_0", "__nbg_SPOT_1"],
-        "PINNED BEHAVIOUR (BUG): the keyframe records physical leaf names, so the \
-         leak is persisted. If this now reads [\"SPOT\"], J landed -- flip it."
+        vec!["SPOT"],
+        "the keyframe must record the logical name, not physical leaves -- these \
+         keys are persisted into replay checkpoints and saves"
+    );
+}
+
+/// The reconstruct call is the positional leaf ctor, and which ctor depends on the
+/// shape: dotted leaf paths mean the flattened `_lct`, a GC-tier struct means the
+/// table ctor `_vt`, and a plain FFI-clean one means `_ct`. Only `_ct` is covered
+/// by the flat `Probe` above, so both other tiers are pinned here -- the suffix
+/// rule mirrors `skull-codegen-lua`'s pack-site choice and would otherwise be an
+/// analytic claim about two paths nothing exercises.
+///
+/// `Mid` is nested (leaf paths `inner.v`, `m` -> `_lct`); `Opt` carries a nullable
+/// nested field, which puts it on the GC tier (paths `inner`, `m` -> `_vt`). Both
+/// are checked in both directions: the dump reads logically, and a snapshot
+/// round-trip through the accessors restores the value.
+#[test]
+#[ignore = "spawns `rock frame` against a generated project (-P full)"]
+fn nested_and_gc_tier_nobox_globals_reflect_and_round_trip() {
+    let pkg = dump_source_project(
+        "nobox_tier_probe",
+        r#"value Leaf { v: int }
+nobox value Mid { inner: Leaf, m: int }
+nobox value Opt { inner: Leaf?, m: int }
+
+global NEST: Mid = Mid { inner: Leaf { v: 1 }, m: 2 }
+global ONUL: Opt = Opt { inner: Leaf { v: 5 }, m: 6 }
+global RT_NEST: int = -1
+global RT_ONUL: int = -1
+
+@update
+fn on_update(dt: float) {
+    if RT_NEST == -1 {
+        snapshot_take(1)
+        NEST = Mid { inner: Leaf { v: 77 }, m: 88 }
+        ONUL = Opt { inner: Leaf { v: 77 }, m: 88 }
+        if snapshot_restore(1) {
+            RT_NEST = materialize(NEST).m
+            RT_ONUL = materialize(ONUL).m
+        }
+    }
+}
+"#,
+        3,
+    );
+    assert_eq!(
+        pkg.get("NEST"),
+        Some(&serde_json::json!({ "__ty": "Mid", "inner": { "__ty": "Leaf", "v": 1 }, "m": 2 })),
+        "a nested nobox global must reflect logically (`_lct` tier). Dump: {pkg:#}"
+    );
+    assert_eq!(
+        pkg.get("ONUL"),
+        Some(&serde_json::json!({ "__ty": "Opt", "inner": { "__ty": "Leaf", "v": 5 }, "m": 6 })),
+        "a GC-tier nobox global must reflect logically (`_vt` tier). Dump: {pkg:#}"
+    );
+    assert_eq!(
+        (pkg.get("RT_NEST"), pkg.get("RT_ONUL")),
+        (Some(&serde_json::json!(2)), Some(&serde_json::json!(6))),
+        "both tiers must survive snapshot take/restore through the accessors (88 \
+         means the restore did not take). Dump: {pkg:#}"
     );
 }
