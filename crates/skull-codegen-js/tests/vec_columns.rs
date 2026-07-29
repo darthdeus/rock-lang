@@ -1,17 +1,17 @@
-//! Column storage (`docs/vec-value-columns-plan.md`) is a luajit-only emitter
-//! arm, so `[V2]` lowering has to ask the TARGET before choosing it.
+//! `Vec<T>` column storage on the JS backend (`docs/js-vec-columns-plan.md`
+//! stage A): `[E]` over an all-scalar `value` `E` stores one plain array per
+//! leaf, sharing the Vec's single `len`, with no per-element object.
 //!
-//! The two halves are decided differently on purpose. For an UNMARKED value
-//! struct columns are a representation OPTIMIZATION, so a backend without the
-//! arm keeps the box -- same semantics, different bytes. For a `nobox` one they
-//! are a language-level GUARANTEE, so the column form is still chosen and JS
-//! rejects it: silently handing back the box a program was promised would not
-//! exist is the failure this pins against.
+//! A `nobox` element forces columns on every target, so this exercises the JS
+//! column path without anything in the stdlib being marked. The UNMARKED half
+//! deliberately still keeps the box on JS -- the cold boundary primitives
+//! (`inspect`, `sort`, `to_array`) have no JS siblings yet (stage B), so
+//! switching unmarked types over would turn working web builds into rejections.
 //!
-//! Without the target check every game broke on `rock web`: `[Vec2]`-shaped
-//! storage is everywhere, so the whole-program emit hit either the missing
-//! `MakeVecColumns` arm or a scalar-ABI mismatch at a `push` whose specialized
-//! callee only Lua emits.
+//! Emitted-shape assertions alone cannot tell "flat" from "boxed and unboxed
+//! again", so the round-trips below RUN under node.
+
+use std::process::Command;
 
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::FuncRef;
@@ -29,18 +29,37 @@ fn unmarked() -> float {
     return xs[0].x
 }
 
-fn marked() -> float {
+fn marked() -> int {
     let xs: [NV2] = []
     xs.push(NV2 { x: 1.0, y: 2.0 })
-    return xs[0].x
+    xs.push(NV2 { x: 30.0, y: 40.0 })
+    return int(xs[1].x) * 100 + int(xs[0].y) * 10 + xs.len
+}
+
+fn literal() -> int {
+    let xs: [NV2] = [NV2 { x: 5.0, y: 6.0 }, NV2 { x: 7.0, y: 8.0 }]
+    return int(xs[1].y) * 10 + xs.len
+}
+
+fn written() -> int {
+    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]
+    xs[0].x = 9.0
+    return int(xs[0].x) * 10 + int(xs[0].y)
 }
 
 fn main() { let _ = unmarked() }
 "#;
 
-fn emit_for(target: bone_semantic::hir::FnBackend, name: &str) -> Result<String, String> {
+fn node_available() -> bool {
+    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Whole-program JS for `name`: `push` is a stdlib callee, so emitting the root
+/// body alone rejects it as an unmapped intrinsic long before the storage
+/// question is reached.
+fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
-    let scx = ScalarCtx::new(&ws).with_target(target);
+    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -49,57 +68,125 @@ fn emit_for(target: bone_semantic::hir::FnBackend, name: &str) -> Result<String,
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .expect("fn in <test>");
-    if target == bone_semantic::hir::FnBackend::Js {
-        // Whole-closure emission, not a single body: `push` is a stdlib callee,
-        // and emitting the root alone rejects it as an unmapped intrinsic long
-        // before the storage question is reached.
-        return skull_codegen_js::emit::emit_with_closure(
-            &ws,
-            &scx,
-            &[(FuncRef { module: mid, func: fid }, name.to_string())],
-        )
-        .map_err(|e| e.message);
-    }
-    // Lua's own emission is covered by `skull/tests/vec_value_columns.rs`; here
-    // the MIR text is enough to show the same source DID take columns.
-    let mf = lower_function(&ws, &scx, mid, fid)
-        .unwrap_or_else(|e| panic!("lower `{name}` for {target:?}: {}", e.message));
-    Ok(mf.to_string())
+    skull_codegen_js::emit::emit_with_closure(
+        &ws,
+        &scx,
+        &[(FuncRef { module: mid, func: fid }, name.to_string())],
+    )
+    .map_err(|e| e.message)
 }
 
-/// The control: the same source still columns for luajit. Without this the JS
-/// assertions below would pass just as well if columns had stopped happening
-/// everywhere, which is the vacuity class this whole area keeps producing.
+/// The luajit MIR for `name` -- the control that the same source DID take
+/// columns on the backend that has always had them.
+fn lua_mir(name: &str) -> String {
+    let ws = ws_with(SRC);
+    let scx = ScalarCtx::new(&ws);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == name)
+        .map(|(fid, _)| fid)
+        .expect("fn in <test>");
+    lower_function(&ws, &scx, mid, fid)
+        .unwrap_or_else(|e| panic!("lower `{name}`: {}", e.message))
+        .to_string()
+}
+
+fn eval_int(name: &str, expect: i64) {
+    if !node_available() {
+        eprintln!("SKIP {name}: node not found");
+        return;
+    }
+    let defs = emit_js(name).unwrap_or_else(|e| panic!("emit `{name}`: {e}"));
+    let program = format!(
+        "{}{}{}{}\n{defs}\nconsole.log({name}());",
+        skull_codegen_js::JS_NB_CHECK_SHIMS,
+        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        skull_codegen_js::JS_TABLE_PRIM,
+        skull_codegen_js::JS_STRUCTURAL_EQ,
+    );
+    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node failed for `{name}`:\n--- program ---\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    let got: i64 = s.trim().parse().unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
+    assert_eq!(got, expect, "wrong result for `{name}`\n{program}");
+}
+
+/// The control: the same source still columns for luajit. Without it every
+/// assertion here would pass just as well if columns had stopped happening at
+/// all, which is the vacuity class this area keeps producing.
 #[test]
 fn an_unmarked_element_still_columns_for_lua() {
-    let mir = emit_for(bone_semantic::hir::FnBackend::Lua, "unmarked").expect("lua lowering");
+    let mir = lua_mir("unmarked");
     assert!(
         mir.contains("VecColumn"),
         "[V2] stopped taking column storage on the luajit target:\n{mir}"
     );
 }
 
-/// The regression: JS keeps the boxed representation and EMITS. A rejection
-/// here is `rock web` broken for every game.
+/// Unmarked stays BOXED on JS until stage B lands the cold primitives. A
+/// rejection here is `rock web` broken for every game.
 #[test]
 fn an_unmarked_element_stays_boxed_for_js() {
-    let js = emit_for(bone_semantic::hir::FnBackend::Js, "unmarked")
-        .expect("[V2] must emit on JS by keeping the boxed representation");
+    let js = emit_js("unmarked").expect("[V2] must emit on JS by keeping the boxed form");
     assert!(
         js.contains("__vec_checked_get"),
         "expected the boxed Vec accessor in the emitted JS:\n{js}"
     );
 }
 
-/// The other half: a `nobox` element is a GUARANTEE, so it columns on every
-/// target and JS rejects rather than silently boxing. The message must name the
-/// element and say why, so the reader is not left diffing MIR dumps.
+/// The headline property: nothing in the push/read path constructs an element.
+/// A `NV2`-shaped object literal in the body means the leaves were boxed and
+/// unboxed again, which is the thing columns exist to prevent.
 #[test]
-fn a_nobox_element_rejects_on_js_instead_of_boxing() {
-    let msg = emit_for(bone_semantic::hir::FnBackend::Js, "marked")
-        .expect_err("a `nobox` element must not silently take the boxed representation on JS");
+fn a_nobox_element_never_builds_an_element_object() {
+    let js = emit_js("marked").expect("[NV2] must emit columns on JS");
     assert!(
-        msg.contains("NV2") && msg.contains("nobox"),
-        "the rejection must name the element and the marker that forced columns: {msg}"
+        !js.contains("__ty: \"NV2\""),
+        "column push boxed the element; the element object must never exist:\n{js}"
+    );
+    assert!(js.contains("\"@vec\""), "expected the column header in the emitted JS:\n{js}");
+}
+
+/// Push then read back, under node. `marked` pushes two elements and reads a
+/// leaf from each plus `len`, so a desynced column or an off-by-one index shows
+/// up as a wrong number rather than a crash.
+#[test]
+fn a_nobox_element_round_trips_through_push_and_read() {
+    eval_int("marked", 30 * 100 + 2 * 10 + 2);
+}
+
+/// The literal path (`MakeVecColumns`) rather than the push path.
+#[test]
+fn a_column_vec_literal_round_trips() {
+    eval_int("literal", 8 * 10 + 2);
+}
+
+/// Leaf place-WRITE through an element index: `xs[0].x = 9.0` must reach one
+/// column and leave the sibling column alone.
+#[test]
+fn a_leaf_write_hits_one_column_and_spares_its_sibling() {
+    eval_int("written", 9 * 10 + 2);
+}
+
+/// The index is 0-based on JS and 1-based on Lua, because each follows its own
+/// `_data`. That difference lives in exactly one place; pin it there so a
+/// "parity" edit cannot quietly move it and shift every column read by one.
+#[test]
+fn the_checked_index_is_zero_based_on_js() {
+    assert!(
+        skull_codegen_js::JS_VEC_CHECK_SHIMS.contains("function __vec_checked_index"),
+        "the JS checked-index shim is missing; column reads would call an undefined global"
+    );
+    let js = emit_js("marked").expect("[NV2] must emit columns on JS");
+    assert!(
+        js.contains("__vec_checked_index("),
+        "column element access must go through the checked index:\n{js}"
     );
 }

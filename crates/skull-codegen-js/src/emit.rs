@@ -47,21 +47,6 @@ fn err(msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(Span::default(), msg.into())
 }
 
-/// The one rejection for every column-storage site, so the reason reads the same
-/// whichever one a program reaches first.
-///
-/// Only a `nobox` element gets here: an UNMARKED one keeps the boxed
-/// representation on this target (`skull_mir::lower::columns_available`), so
-/// reaching a column form means the program asked for the guarantee on a backend
-/// that cannot serve it. Naming the element and the marker is the difference
-/// between a diagnosis and a skip-histogram line.
-fn column_reject(elem: ustr::Ustr) -> String {
-    format!(
-        "JS subset: `[{elem}]` stores as columns because `{elem}` is `nobox`, and column \
-         storage has no JS emitter arm yet"
-    )
-}
-
 /// A `(message, site)` rejection from a MIR-level check, anchored at the
 /// offending instruction when the check could name one.
 fn sited_err((msg, site): (String, Option<Span>)) -> CompilerError {
@@ -1104,12 +1089,15 @@ impl Emitter<'_> {
                         // Column storage has no JS emitter arm yet -- reject so
                         // the case lands in the SKIP histogram (the emitter
                         // worklist) instead of emitting a wrong single-slot write.
+                        // One `value` operand cannot carry K leaves; lowering
+                        // splits an element write into per-column stores.
                         ContainerKind::VecValueColumns(elem) => {
-                            return Err(err(column_reject(*elem)));
+                            return Err(err(format!(
+                                "JS subset: whole-element store into column-stored `[{elem}]` \
+                                 reached emit -- lowering must split it per column"
+                            )));
                         }
-                        ContainerKind::VecColumn => {
-                            return Err(err("JS subset: column-stored [T] not supported"));
-                        }
+                        ContainerKind::VecColumn => format!("{b}[{i}] = {v};"),
                         ContainerKind::NativeBufferLeaf => {
                             return Err(err("JS subset: NativeBuffer leaf views not supported"));
                         }
@@ -1580,12 +1568,19 @@ impl Emitter<'_> {
                         self.nbv_copy_expr(&b, &i, *elem, 0, *elem)?
                     }
                     ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
+                    // A whole-element read has no single slot to name: column
+                    // storage has no element object. Lowering decomposes every
+                    // such read into per-column reads (`column_element_repr`),
+                    // so reaching emit means that decomposition was bypassed.
                     ContainerKind::VecValueColumns(elem) => {
-                        return Err(err(column_reject(*elem)));
+                        return Err(err(format!(
+                            "JS subset: whole-element read of column-stored `[{elem}]` reached \
+                             emit -- lowering must decompose it into per-column reads"
+                        )));
                     }
-                    ContainerKind::VecColumn => {
-                        return Err(err("JS subset: column-stored [T] not supported"));
-                    }
+                    // One leaf column: the index is already checked
+                    // (`VecCheckedIndex`) and already 0-based, so this is raw.
+                    ContainerKind::VecColumn => format!("{b}[{i}]"),
                     // Leaf addressing is Lua-side today (`ffi.cast` views). The
                     // JS analogue is a TypedArray per leaf C type over one
                     // ArrayBuffer -- see docs/native-buffer-leaf-addressing-plan.md
@@ -1665,7 +1660,40 @@ impl Emitter<'_> {
             Inst::FormatDyn { value, fmt } => {
                 format!("__rock_sprintf({}, {})", self.render_val(*fmt)?, self.render_val(*value)?)
             }
-            Inst::MakeVecColumns { elem, .. } => return Err(err(column_reject(*elem))),
+            // Column storage: one plain array per leaf, sharing the single
+            // `len`. Plain arrays rather than TypedArrays on purpose -- V8's
+            // packed-double arrays beat `Float64Array` for the strided reads
+            // this layout exists to make fast (`docs/js-vec-columns-plan.md`).
+            // A nested leaf path is dotted (`min.x`), so keys are quoted.
+            Inst::MakeVecColumns { elem, columns, len, capacity } => {
+                let mut s = format!(
+                    "{{{}: {{repr: {}, elem: {}, cap: {}}}",
+                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
+                    js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
+                    js_string_lit(elem.as_str())?,
+                    self.render_val(*capacity)?,
+                );
+                for (name, vs) in columns {
+                    let vals = vs
+                        .iter()
+                        .map(|v| self.render_val(*v))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    s.push_str(&format!(
+                        ", {}: [{}]",
+                        js_string_lit(name.as_str())?,
+                        vals.join(", ")
+                    ));
+                }
+                s.push_str(&format!(", len: {len}, __ty: \"Vec\"}}"));
+                s
+            }
+            // The element index is checked ONCE here; each per-leaf access then
+            // indexes its column raw.
+            Inst::VecCheckedIndex { vec, index } => format!(
+                "__vec_checked_index({}, {})",
+                self.render_val(*vec)?,
+                self.render_val(*index)?
+            ),
             other => {
                 return Err(err(format!(
                     "JS subset: cannot render {other:?} as a JS expression"

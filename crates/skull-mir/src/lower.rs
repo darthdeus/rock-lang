@@ -5977,14 +5977,14 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         let shape = value_shape(self.ws, elem)
             .ok_or_else(|| gap("column element is not a value struct"))?;
-        let one_based = self.checked_column_index(vec, index);
+        let slot = self.checked_column_index(vec, index);
         let leaves: Vec<Idx<Inst>> = value_leaf_paths(&shape)
             .into_iter()
             .map(|path| {
                 let col = self.emit_cur(Inst::Field { base: vec, field: path });
                 self.emit_cur(Inst::Index {
                     base: col,
-                    index: one_based,
+                    index: slot,
                     kind: ContainerKind::VecColumn,
                 })
             })
@@ -6298,6 +6298,12 @@ impl Builder<'_> {
         let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let next = self.emit_cur(Inst::IntAdd(len, one));
+        // A column indexes the way its backend's `_data` does -- 1-based on
+        // luajit, 0-based on JS -- so the appended slot is the NEW length on one
+        // and the OLD length on the other. The read side gets this from
+        // `__vec_checked_index`, whose two implementations differ by the same
+        // one; this is the write side of that single decision.
+        let slot = if self.column_base_is_one() { next } else { len };
         self.emit_cur(Inst::StoreField {
             base: vec,
             field: Ustr::from("len"),
@@ -6307,7 +6313,7 @@ impl Builder<'_> {
             let col = self.emit_cur(Inst::Field { base: vec, field: path });
             self.emit_cur(Inst::StoreIndex {
                 base: col,
-                index: next,
+                index: slot,
                 value: leaf,
                 kind: ContainerKind::VecColumn,
             });
@@ -6315,7 +6321,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `Some((vec, one_based_index, elem))` iff `e` is `xs[i]` over a
+    /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a
     /// column-stored Vec — the shape that has no element slot to serve as a
     /// place base.
     fn column_index_place(
@@ -6330,8 +6336,8 @@ impl Builder<'_> {
         };
         let vec = self.lower_expr(base)?;
         let i = self.lower_expr(index)?;
-        let one_based = self.checked_column_index(vec, i);
-        Ok(Some((vec, one_based, elem)))
+        let slot = self.checked_column_index(vec, i);
+        Ok(Some((vec, slot, elem)))
     }
 
     /// `xs[i].<field> = v` on a column-stored Vec: store into the column that
@@ -6341,7 +6347,7 @@ impl Builder<'_> {
     fn column_leaf_store(
         &mut self,
         vec: Idx<Inst>,
-        one_based: Idx<Inst>,
+        slot: Idx<Inst>,
         elem: Ustr,
         field: Ustr,
         value: Idx<Expr>,
@@ -6358,7 +6364,7 @@ impl Builder<'_> {
         let col = self.emit_cur(Inst::Field { base: vec, field });
         self.emit_cur(Inst::StoreIndex {
             base: col,
-            index: one_based,
+            index: slot,
             value: v,
             kind: ContainerKind::VecColumn,
         });
@@ -6386,12 +6392,12 @@ impl Builder<'_> {
                 paths.len()
             )));
         }
-        let one_based = self.checked_column_index(vec, index);
+        let slot = self.checked_column_index(vec, index);
         for (path, leaf) in paths.into_iter().zip(leaves) {
             let col = self.emit_cur(Inst::Field { base: vec, field: path });
             self.emit_cur(Inst::StoreIndex {
                 base: col,
-                index: one_based,
+                index: slot,
                 value: leaf,
                 kind: ContainerKind::VecColumn,
             });
@@ -6403,6 +6409,15 @@ impl Builder<'_> {
     /// against `vec.len`. One call per ELEMENT access, not per column.
     fn checked_column_index(&mut self, vec: Idx<Inst>, index: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::VecCheckedIndex { vec, index })
+    }
+
+    /// Whether a leaf column is 1-based on the target. It follows that backend's
+    /// `_data`: luajit's is 1-based, JS's is 0-based. JS cannot simply adopt the
+    /// 1-based form to share one rule -- leaving index 0 empty makes every column
+    /// a HOLEY array in V8, which forfeits the packed-double fast path the whole
+    /// layout is measured against (`docs/js-vec-columns-plan.md`).
+    fn column_base_is_one(&self) -> bool {
+        self.scx.target != bone_semantic::hir::FnBackend::Js
     }
 
     /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse

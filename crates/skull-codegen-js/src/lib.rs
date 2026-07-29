@@ -132,6 +132,15 @@ function __vec_checked_set(vec, i, v) {
   if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
   vec._data[i] = v;
 }
+// Column storage checks the element index ONCE, then every per-leaf read/write
+// indexes its column raw. Returns `i` where the luajit sibling returns `i + 1`
+// (`stdlib/unified.rock`): a column indexes the way `_data` does on its own
+// backend, and JS `_data` is 0-based. This is the only place that base
+// difference lives.
+function __vec_checked_index(vec, i) {
+  if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
+  return i;
+}
 // `Vec.sort(key_fn)`: the stdlib inline(lua) is `table.sort(_data, |a,b| key(a) <
 // key(b))`. Sort the logical `0..len` slice, then write back. `key_fn` is a fn
 // value invoked through `__rock_call`; keys compare with `<` (numbers/strings).
