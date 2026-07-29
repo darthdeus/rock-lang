@@ -1,23 +1,18 @@
 //! A specialized generic callee must be REACHED on JS.
 //!
 //! `compute_call_spec` decides specialization per target and says yes for a
-//! column-eligible element on JS (`spec_key_has_column_elem` -> true, verified
-//! by probe). The Lua emitter honours that decision in `callee_name`, which
-//! consults `MirFunc::spec_bindings` and falls back to the shared mangled name
-//! only when there is no key. The JS emitter has no such lookup, so it resolves
-//! EVERY callee to the shared name and no `_spec_` body is ever emitted.
+//! column-eligible element on JS. That decision is a CORRECTNESS one, not an
+//! optimization: for a column-stored element the shared generic body reads a
+//! `_data` the layout does not have. So the emitter must resolve such a call to
+//! the instantiation's own standalone copy (`spec_fn_name`) exactly as the
+//! luajit emitter's `callee_name` does, and a call whose specialization was not
+//! emitted must reject rather than fall back to the boxed shared body.
 //!
-//! For a column-stored element the shared body is not merely slower, it is
-//! wrong: it reads a `_data` the column layout does not have. `nobox` makes
-//! that a soundness hole -- the marker's whole promise is that a backend which
-//! cannot serve columns REJECTS rather than silently handing back the box.
-//! Lua rejects (`cannot sort a column-stored nobox value 'NV2'`); JS emits the
-//! boxed call and dies at runtime on `undefined._data`.
-//!
-//! SENTINEL (docs/test-sentinels.md): the assertions below match the CURRENT
-//! broken behaviour. When JS learns spec-aware callee resolution they go red --
-//! invert them to require the `_spec_` callee (or a loud reject, matching Lua)
-//! and delete this paragraph.
+//! `sort` is the case where the specialized lowering itself refuses -- the key
+//! function needs a whole element -- and JS now reports the same rejection
+//! luajit does instead of running the boxed body and dying on `undefined._data`.
+
+use std::process::Command;
 
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
@@ -34,8 +29,23 @@ fn sorted() -> float {
     return a[0].x
 }
 
-fn main() { let _ = sorted() }
+fn pick<T>(xs: [T], i: int, f: fn(T) -> float) -> float {
+    return f(xs[i])
+}
+
+fn specialized() -> int {
+    let a: [NV2] = [NV2 { x: 3.0, y: 1.0 }, NV2 { x: 1.0, y: 2.0 }]
+    let x = pick(a, 1, _.x)
+    let y = pick(a, 0, _.y)
+    return int(x) * 10 + int(y)
+}
+
+fn main() { let _ = specialized() }
 "#;
+
+fn node_available() -> bool {
+    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
 
 fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
@@ -56,29 +66,71 @@ fn emit_js(name: &str) -> Result<String, String> {
     .map_err(|e| e.message)
 }
 
-/// Control: the literal DOES take the column layout on JS, so the sentinel
-/// below is pinning the CALL and not column storage at large (stage A works).
+/// Control: the literal DOES take the column layout on JS, so the assertions
+/// below are pinning the CALL and not column storage at large (stage A works).
 #[test]
 fn a_nobox_literal_still_columns_on_js() {
-    let js = emit_js("sorted").expect("emit");
+    let js = emit_js("specialized").expect("emit");
     assert!(
         js.contains("\"@vec\"") && js.contains("columns"),
         "the Vec literal should emit column storage on JS:\n{js}"
     );
 }
 
-/// SENTINEL. The `sort` call resolves to the SHARED generic body -- no `_spec_`
-/// suffix anywhere -- even though `compute_call_spec` returned a key for this
-/// instantiation, and the shared body is the boxed `__vec_sort` over `_data`.
+/// The call resolves to the instantiation's own body, not the shared generic
+/// one. Without spec-aware resolution the emitted call names the boxed body,
+/// which reads a `_data` a column vec does not have.
 #[test]
-fn a_column_element_call_reaches_the_shared_body_sentinel() {
-    let js = emit_js("sorted").expect("emit");
+fn a_column_element_call_reaches_its_specialized_body() {
+    let js = emit_js("specialized").expect("emit");
     assert!(
-        !js.contains("_spec_"),
-        "JS emitted a specialized body -- the sentinel's bug is fixed, invert it:\n{js}"
+        js.contains("_spec_"),
+        "the column-element call must target a specialized body:\n{js}"
     );
     assert!(
-        js.contains("__vec_sort("),
-        "expected the boxed `__vec_sort` shared-body call:\n{js}"
+        js.contains("function pick_arr_T_int_fn_T_ret_float_ret_float_spec_"),
+        "expected a standalone specialized `pick` definition:\n{js}"
+    );
+}
+
+/// Emitted shape cannot tell a specialized body from a mis-lowered one, so RUN
+/// it: two calls at two sites, each reading a different leaf at a different
+/// index, so a column mixup or an off-by-one is a wrong number rather than a
+/// crash.
+#[test]
+fn a_specialized_column_call_round_trips_under_node() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let defs = emit_js("specialized").expect("emit");
+    let program = format!(
+        "{}{}{}{}{}\n{defs}\nconsole.log(specialized());",
+        skull_codegen_js::JS_NB_CHECK_SHIMS,
+        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        skull_codegen_js::JS_TABLE_PRIM,
+        skull_codegen_js::JS_CALL_HELPER,
+        skull_codegen_js::JS_STRUCTURAL_EQ,
+    );
+    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(s.trim(), "11", "wrong result\n{program}");
+}
+
+/// `sort` over a column element: the specialized lowering refuses (the key fn
+/// needs a whole element), so JS reports the SAME rejection luajit does. The
+/// alternative -- resolving to the shared body -- is the soundness hole `nobox`
+/// exists to prevent, and it died at runtime on `undefined._data`.
+#[test]
+fn an_unservable_column_sort_rejects_as_it_does_on_lua() {
+    let e = emit_js("sorted").expect_err("column-stored nobox sort must reject on JS");
+    assert!(
+        e.contains("column-stored nobox value `NV2`"),
+        "expected luajit's column-sort rejection, got: {e}"
     );
 }

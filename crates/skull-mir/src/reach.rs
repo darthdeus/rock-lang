@@ -31,8 +31,9 @@ use std::hash::Hash;
 /// bodies it accumulates -- `visit` reports only the successor edges, so a
 /// policy is free to record whatever else expanding a node produced.
 pub trait ReachPolicy {
-    /// A unit of work. `Copy + Eq + Hash` because the driver marks every node.
-    type Node: Copy + Eq + Hash;
+    /// A unit of work. `Clone + Eq + Hash` because the driver marks every node.
+    /// Not `Copy`: JS's specialized-callee node carries a `SpecKey`.
+    type Node: Clone + Eq + Hash;
 
     /// Where the search starts. Called once, before any expansion.
     fn roots(&mut self) -> Result<Vec<Self::Node>, CompilerError>;
@@ -89,7 +90,7 @@ pub fn walk<P: ReachPolicy>(policy: &mut P) -> Result<Vec<P::Node>, CompilerErro
                 if done.contains(&node) {
                     continue;
                 }
-                if policy.is_leaf(node)? {
+                if policy.is_leaf(node.clone())? {
                     done.insert(node);
                     continue;
                 }
@@ -97,14 +98,14 @@ pub fn walk<P: ReachPolicy>(policy: &mut P) -> Result<Vec<P::Node>, CompilerErro
                     policy.on_cycle(node)?;
                     continue;
                 }
-                in_progress.insert(node);
-                let succs = policy.visit(node)?;
+                in_progress.insert(node.clone());
+                let succs = policy.visit(node.clone())?;
                 stack.push(Frame::Exit(node));
                 stack.extend(succs.into_iter().rev().map(Frame::Enter));
             }
             Frame::Exit(node) => {
                 in_progress.remove(&node);
-                done.insert(node);
+                done.insert(node.clone());
                 order.push(node);
             }
         }
@@ -164,4 +165,32 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     let mut out = Vec::new();
     walk(mf, &mut out);
     out
+}
+
+/// Every `(callee, instantiation)` pair `mf` still asks for after inlining: the
+/// `spec_bindings` entries the inliner did not splice away. A residual one is a
+/// call the SHARED body cannot serve -- its value args are splatted to leaves,
+/// and a column-stored element's storage has no `_data` the shared body could
+/// read -- so each pair needs its own standalone emitted copy.
+///
+/// REACHABLE blocks only: a hoisted lambda body is a full arena clone of its
+/// parent that differs only in `entry`, so it carries the parent's unreachable
+/// blocks and their bindings. Judging those would specialize for a call the body
+/// does not contain.
+///
+/// Per BODY, not per tree -- the caller recurses into `nested_fns` itself. A
+/// nested `fn` and a `co fn`'s state machine are their own emitted callables, and
+/// leaving them unchecked makes a missing splice silent (the nested fn dies at
+/// runtime on a nil `_data`).
+pub fn spec_bound_calls(mf: &MirFunc, out: &mut Vec<(FuncRef, crate::lower::SpecKey)>) {
+    for bid in crate::cfg::reachable_blocks_from(mf, mf.entry) {
+        for &iid in &mf.blocks[bid].insts {
+            let Some(key) = mf.spec_bindings.get(&iid) else { continue };
+            let fref = match &mf.insts[iid] {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
+                _ => continue,
+            };
+            out.push((fref, key.clone()));
+        }
+    }
 }
