@@ -866,26 +866,6 @@ fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> 
     flat_enum_shape(ws, n).map(|s| s.value_shape())
 }
 
-/// [`Builder::nobox_shape_of_ty`] for a DECLARED (workspace-arena) type -- a
-/// top-level fn's param/return, which `static_ty` can see and the body-arena
-/// walker cannot.
-fn nobox_sig_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
-    match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
-            value_shape_of_nominal(ws, n)
-        }
-        TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
-                let mut shape = value_shape_of_nominal(ws, n)?;
-                shape.nullable = true;
-                Some(shape)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// The value shape of a `name` nominal (value struct or flat enum), or `None`.
 fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     value_shape(ws, name)
@@ -909,7 +889,10 @@ fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
 
 /// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
 /// is leaf 0), `None` for every other type. bone requires an explicit annotation
-/// on every global, so this is exact for a `GlobalDef`'s `ty`.
+/// on every global, so this is exact for a `GlobalDef`'s `ty`, and equally for a
+/// top-level fn's param/return -- both are workspace-arena types `static_ty` can
+/// see and the body-arena walker cannot. [`Builder::nobox_shape_of_ty`] is this
+/// same rule over the BODY arena; keep the two in step.
 fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     match static_ty(ws, ty)? {
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_nobox_nominal(ws, name) => {
@@ -11480,8 +11463,8 @@ impl Builder<'_> {
             // ABI at an indirect call unknowable.
             let carries_nobox = overloads.iter().any(|(mid, fid)| {
                 let f = &self.ws.module(*mid).functions[*fid];
-                f.param_decls.iter().any(|pd| nobox_sig_shape(self.ws, pd.ty).is_some())
-                    || f.return_ty.is_some_and(|t| nobox_sig_shape(self.ws, t).is_some())
+                f.param_decls.iter().any(|pd| nobox_declared_shape(self.ws, pd.ty).is_some())
+                    || f.return_ty.is_some_and(|t| nobox_declared_shape(self.ws, t).is_some())
             });
             if carries_nobox {
                 return Err(CompilerError::new_with_label(
