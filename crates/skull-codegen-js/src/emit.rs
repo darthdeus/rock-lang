@@ -53,6 +53,20 @@ fn sited_err((msg, site): (String, Option<Span>)) -> CompilerError {
     CompilerError::new_with_label(site.unwrap_or_default(), msg)
 }
 
+/// Every `nobox` materialization in one body, as one error carrying the rest as
+/// siblings. Mirrors the luajit path: a body with several sinks reports several
+/// findings, so neither backend's count of what is left is a floor.
+fn nobox_errs(
+    ws: &bone_semantic::inference::Workspace,
+    mf: &skull_mir::mir::MirFunc,
+) -> Result<(), CompilerError> {
+    let mut vs = skull_transform::nobox_materialization_violations(ws, mf).into_iter();
+    let Some(first) = vs.next() else { return Ok(()) };
+    let mut e = sited_err(first);
+    e.siblings = vs.map(sited_err).collect();
+    Err(e)
+}
+
 fn nobox_nominal_ty(ws: &Workspace, ty: TyId) -> Option<ustr::Ustr> {
     let te = match ty {
         TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
@@ -2857,12 +2871,10 @@ impl JsReach<'_> {
             }
         }
         skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf)?;
-        skull_transform::validate_no_implicit_nobox_materialization(self.ws, &mf)
-            .map_err(sited_err)?;
+        nobox_errs(self.ws, &mf)?;
         validate_js_nobox_return(self.ws, f, &mf)?;
         for nf in &mf.nested_fns {
-            skull_transform::validate_no_implicit_nobox_materialization(self.ws, nf)
-                .map_err(sited_err)?;
+            nobox_errs(self.ws, nf)?;
         }
         self.discover(&mf)?;
         self.st.lowered.push((fr, mf));
@@ -2884,11 +2896,9 @@ impl JsReach<'_> {
         for nf in &mut mf.nested_fns {
             skull_transform::recover_counted_loops(self.ws, nf);
         }
-        skull_transform::validate_no_implicit_nobox_materialization(self.ws, &mf)
-            .map_err(sited_err)?;
+        nobox_errs(self.ws, &mf)?;
         for nf in &mf.nested_fns {
-            skull_transform::validate_no_implicit_nobox_materialization(self.ws, nf)
-                .map_err(sited_err)?;
+            nobox_errs(self.ws, nf)?;
         }
         self.discover(&mf)?;
         let is_const = self.ws.module(site.module).globals[site.gid].is_const;

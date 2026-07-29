@@ -1286,11 +1286,16 @@ struct BodyRejection {
     /// whole-fn anchor cannot distinguish two violations in one body, which is
     /// how one `nobox` sink hid another inside `draw_fractures`.
     site: Option<bone_semantic::prelude::Span>,
+    /// Further INDEPENDENT findings from the SAME check in the same body, each
+    /// with its own site. A body can hold several sinks, and reporting one
+    /// leaves the rest invisible until it is fixed -- which turns any count of
+    /// remaining sinks into a floor.
+    siblings: Vec<(String, Option<bone_semantic::prelude::Span>)>,
 }
 
 impl BodyRejection {
     fn gap(message: String) -> Self {
-        Self { message, guarantee: false, site: None }
+        Self { message, guarantee: false, site: None, siblings: Vec::new() }
     }
 
     fn prefixed(self, what: &str) -> Self {
@@ -1301,11 +1306,29 @@ impl BodyRejection {
     /// (the enclosing definition), tagged so the stdlib leniency check can tell
     /// a guarantee from a gap without matching on the message text.
     fn into_error(self, span: bone_semantic::prelude::Span, what: &str) -> CompilerError {
-        let span = self.site.unwrap_or(span);
-        let mut e = CompilerError::new_with_label(span, format!("{what}{}", self.message));
-        if self.guarantee {
-            e.kind = skull_parser::CompilerErrorKind::NoboxGuaranteeViolated;
-        }
+        let kind = |e: &mut CompilerError| {
+            if self.guarantee {
+                e.kind = skull_parser::CompilerErrorKind::NoboxGuaranteeViolated;
+            }
+        };
+        let siblings: Vec<CompilerError> = self
+            .siblings
+            .iter()
+            .map(|(message, site)| {
+                let mut e = CompilerError::new_with_label(
+                    site.unwrap_or(span),
+                    format!("{what}{message}"),
+                );
+                kind(&mut e);
+                e
+            })
+            .collect();
+        let mut e = CompilerError::new_with_label(
+            self.site.unwrap_or(span),
+            format!("{what}{}", self.message),
+        );
+        kind(&mut e);
+        e.siblings = siblings;
         e
     }
 }
@@ -1325,12 +1348,17 @@ fn validate_emitted_body(
     // Name the function being emitted: the span often points into an INLINED
     // stdlib body (every `xs.push(..)` reports at the same `Vec<T>.push` line),
     // so without the caller the diagnostic cannot tell two sites apart.
-    skull_transform::validate_no_implicit_nobox_materialization(ws, mf)
-        .map_err(|(message, site)| BodyRejection {
+    let mut sinks = skull_transform::nobox_materialization_violations(ws, mf).into_iter();
+    if let Some((message, site)) = sinks.next() {
+        return Err(BodyRejection {
             message: format!("{message}, while emitting `{}`", mf.name),
             guarantee: true,
             site,
-        })?;
+            siblings: sinks
+                .map(|(m, s)| (format!("{m}, while emitting `{}`", mf.name), s))
+                .collect(),
+        });
+    }
     validate_nested_bodies(ws, &mf.nested_fns, specs)
 }
 

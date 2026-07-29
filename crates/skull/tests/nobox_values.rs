@@ -248,6 +248,53 @@ fn a_field_load_widens_to_nullable_without_materializing() {
     );
 }
 
+const NOBOX_TWO_SINKS_IN_ONE_BODY: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn mk(x: float, y: float) -> NV2 { return NV2 { x: x, y: y } }
+
+// Two INDEPENDENT sinks of the same class, on distinct lines, in one body.
+fn bad() -> int {
+    let xs = vec_new()
+    xs.push((mk(1.0, 2.0), 1.0))
+    let ys = vec_new()
+    ys.push((mk(3.0, 4.0), 2.0))
+    return xs.len + ys.len
+}
+
+fn main() {
+    print(bad())
+}
+"#;
+
+/// Two INDEPENDENT violations in one body are both reported. The verifier used
+/// to return on the first, so a body with two sinks looked like a body with
+/// one -- which is how `bitgun_queue_heat_shimmer`'s `pass_uniforms` gap stayed
+/// invisible behind an earlier rejection, and how any "N sinks left" count read
+/// as a total when it was a floor.
+#[test]
+fn every_nobox_violation_in_one_body_is_reported() {
+    let err = try_emit_module(NOBOX_TWO_SINKS_IN_ONE_BODY)
+        .expect_err("two nobox sinks must reject");
+    let all: Vec<&str> = std::iter::once(err.message.as_str())
+        .chain(err.siblings.iter().map(|s| s.message.as_str()))
+        .collect();
+    let sinks = all.iter().filter(|m| m.contains("survived lowering")).count();
+    assert!(
+        sinks >= 2,
+        "expected both sinks reported, got {sinks}: {all:#?}"
+    );
+    let lines: std::collections::HashSet<usize> = std::iter::once(&err)
+        .chain(err.siblings.iter())
+        .filter(|e| e.message.contains("survived lowering"))
+        .map(|e| e.location.line)
+        .collect();
+    assert!(
+        lines.len() >= 2,
+        "both sinks reported at the same line, so one span is standing in for two: {lines:?}"
+    );
+}
+
 const NOBOX_NESTED_FIELD_WIDEN: &str = r#"
 nobox value NV2 { x: float, y: float }
 nobox value Nest { a: NV2, s: float }

@@ -45,10 +45,17 @@ pub use inline::{
 
 pub const STATE: &str = "__state";
 
-pub fn validate_no_implicit_nobox_materialization(
+/// Every implicit `nobox` materialization in `func`, in block order -- EVERY
+/// one, not the first. A body with two sinks is two findings: reporting one
+/// makes the second invisible until the first is fixed, so any "N sinks left"
+/// count read off this check would be a floor rather than a total (the
+/// `pass_uniforms` gap hid behind an earlier rejection in the same body exactly
+/// this way).
+pub fn nobox_materialization_violations(
     ws: &Workspace,
     func: &MirFunc,
-) -> Result<(), (String, Option<bone_semantic::prelude::Span>)> {
+) -> Vec<(String, Option<bone_semantic::prelude::Span>)> {
+    let mut out = Vec::new();
     for (_, block) in func.blocks.iter() {
         for &iid in &block.insts {
             let Inst::MakeValueStruct { name, .. } = &func.insts[iid] else {
@@ -63,7 +70,7 @@ pub fn validate_no_implicit_nobox_materialization(
                 if skull_mir::lower::enum_value_shape(ws, *name).is_some() {
                     continue;
                 }
-                return Err((
+                out.push((
                     format!(
                         "`{name}` is constructed as a value struct here but is neither a struct \
                          nor a cdata enum in the workspace, so the `nobox` guarantee cannot be \
@@ -71,9 +78,10 @@ pub fn validate_no_implicit_nobox_materialization(
                     ),
                     func.inst_spans.get(iid).copied(),
                 ));
+                continue;
             };
             if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
-                return Err((
+                out.push((
                     format!(
                         "nobox value `{name}` survived lowering as an implicit materialization"
                     ),
@@ -82,7 +90,7 @@ pub fn validate_no_implicit_nobox_materialization(
             }
         }
     }
-    Ok(())
+    out
 }
 
 /// Dead-code elimination over a [`MirFunc`] (a CFG->CFG cleanup, run before emit).
@@ -615,7 +623,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
 
 /// [`cleanup`] plus nobox nested-ctor normalization and the DCE that clears the
 /// ctors it orphans. Every emit path that is followed by
-/// `validate_no_implicit_nobox_materialization` must use THIS, not `cleanup`:
+/// [`nobox_materialization_violations`] must use THIS, not `cleanup`:
 /// normalization has to run before the verifier, and after `cleanup`'s own final
 /// DCE (the verifier walks `block.insts`, so an orphaned inner ctor left in the
 /// list still rejects). Idempotent -- the rewritten form no longer matches the
