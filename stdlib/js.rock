@@ -1,0 +1,33 @@
+// JS-backend bodies for stdlib functions whose luajit body lives in another
+// stdlib file.
+//
+// They are HERE rather than beside their luajit sibling because an `inline(js)`
+// fn added to a lua-emitting file pushes every `__SITE__` below it down a line,
+// and `__SITE__` is "file:line" -- so co-locating one breaks Lua byte-identity
+// for every log site under it. A whole new FILE shifts nothing.
+//
+// They are here rather than in `stone/engine/web/js_ffi.rock` -- where the first
+// few of them lived -- because that file is the web ENGINE, staged only by
+// `rock web`. A stdlib function whose JS body ships with stone has no binding in
+// a JS program that does not use stone, which is every `--backend js` test.
+// Engine-owned fns keep their siblings in `js_ffi.rock`; only stdlib-owned ones
+// belong here.
+
+// docs/field-refs-plan.md 1. A field ref IS the key on both backends, so both
+// bodies are the same indexing operation spelled twice.
+@inline inline(js) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = "return o[f];"
+
+@inline inline(js) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = "o[f] = v;"
+
+// luajit narrows through the ffi; a JS number is already the value.
+@pure @inline inline(js) fn int(value: int) -> int = "return value;"
+
+// There is no FFI pointer on JS at all, so what luajit reconstructs from a
+// `char*` is already a string here; `len` has nothing to bound.
+inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
+  return typeof ptr === "string" ? ptr : String(ptr);
+"""
+
+// `unwrap()` on a null reaches this, so a JS program with no stone in it still
+// needs a traceback.
+@inline inline(js) fn __debug_traceback() -> string = "return new Error().stack || \"\";"
