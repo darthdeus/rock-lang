@@ -1,0 +1,24 @@
+// NEW FINDING, found by this harness (2026-07-29). A lambda RETURNING a `nobox`
+// value is recorded as CLEARED in `docs/nobox-nested-ctor-plan.md` on the
+// evidence of `arc` -- a lambda literal in a fn's RETURN position. It is not
+// closed: the same lambda in a `let` initializer (this file) or a struct-field
+// initializer rejects at its own ctor, so the discriminant is where the lambda
+// LITERAL sits, not the fn type and not the storage.
+//
+// Reported, not fixed. The three-way split is:
+//
+//   fn arc(r: float) -> (float) -> NV { t => NV { .. } }   emits   (control:
+//                                       fn_value_off_field_bound.rock)
+//   let f: (float) -> NV = t => NV { .. }                  REJECTS (here)
+//   Maker { mk: t => NV { .. } }                           REJECTS
+//
+// Corpus case: `lambda_returning_nobox_at_let`. Expected bucket: LOUD REJECT.
+
+nobox value NV { x: float, y: float }
+
+@test(output = "6 5")
+fn a_lambda_returning_a_nobox_value_bound_to_a_local() {
+    let f: (float) -> NV = t => NV { x: t * 2.0, y: t + 2.0 }
+    let p = f(3.0)
+    print("{p.x} {p.y}")
+}

@@ -1,0 +1,38 @@
+// SHAPE: `cast` x user shadowing -- one of the dangerous triples. A user fn
+// named `cast` returning a `nobox` value, called directly; plus the stdlib
+// `cast` on the same type, which must keep threading the argument's repr.
+//
+// skull's identity fast path used to dispatch on the callee SPELLING, so the
+// user call vanished and its int argument was threaded through as the result:
+// clean compile, valid Lua, runtime fault indexing a number. Fixed by keying on
+// the resolved callee (`b10cf9274`), so this is a REGRESSION test.
+//
+// Corpus case: `cast_name_hijack`. Expected bucket: CORRECT.
+
+nobox value NV { x: int, y: int }
+
+fn cast(n: int) -> NV {
+    return NV { x: n + 1, y: n + 2 }
+}
+
+@test(output = "11 12")
+fn a_user_cast_is_not_the_identity_intrinsic() {
+    let v = cast(10)
+    print("{v.x} {v.y}")
+}
+
+// The same hijack through UFCS spelling, which resolves to the same user fn.
+@test(output = "4 5")
+fn a_user_cast_called_ufcs_is_not_the_intrinsic() {
+    let v = 3.cast()
+    print("{v.x} {v.y}")
+}
+
+// The stdlib `cast` must still thread the repr -- this is the column read the
+// fast path exists for.
+@test(output = "7 8")
+fn the_stdlib_cast_still_threads_the_repr() {
+    let xs: [NV] = [NV { x: 7, y: 8 }]
+    let got = xs.get(0)
+    if got != null { print("{got.x} {got.y}") }
+}
