@@ -695,6 +695,37 @@ const SEEDS: &[SeedCase] = &[
         expect: Expect::Correct,
         gap: None,
     },
+    // M5 judged this a GAP and it had no seed case -- it was reachable only through
+    // the sweep, where a rejection is a row in a histogram rather than a pinned
+    // shape. Unmarked on purpose: it is shipped-language behaviour, not a marking
+    // cost. Both controls are separate FILES because a compile rejection aborts the
+    // whole file, so a control beside the probe never runs.
+    SeedCase {
+        name: "index_place_refinement",
+        file: "index_place_refinement.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::LoudReject {
+            names: "on non-struct type",
+        },
+        gap: Some("M5 GAP: refinement does not reach an index place (name-keyed paths)"),
+    },
+    SeedCase {
+        name: "index_place_refinement_field_control",
+        file: "index_place_refinement_field_control.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: None,
+    },
+    SeedCase {
+        name: "index_place_refinement_bound_control",
+        file: "index_place_refinement_bound_control.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: None,
+    },
 ];
 
 fn reconcile(expect: Expect, obs: &Observation) -> (Bucket, Option<String>) {
