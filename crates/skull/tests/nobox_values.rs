@@ -200,6 +200,96 @@ fn nullable_nobox_local_keeps_presence_in_leaf_cells() {
     );
 }
 
+const NOBOX_FIELD_WIDEN: &str = r#"
+nobox value NV2 { x: float, y: float }
+struct Player { pos: NV2, hp: int }
+
+fn absent(v: NV2? = null) -> bool { return v == null }
+fn sum(v: NV2? = null) -> float {
+    if v == null { return -1.0 }
+    let u = v.unwrap()
+    return u.x + u.y
+}
+
+// The shape: a value loaded from a struct FIELD, widened to `T?`. A LITERAL
+// ctor and a CALL RESULT at the same param already thread as leaves.
+fn from_field(p: Player) -> bool { return absent(p.pos) }
+fn sum_field(p: Player) -> float { return sum(p.pos) }
+
+// The same widening into a nullable LOCAL rather than a param.
+fn to_local(p: Player) -> float {
+    let q: NV2? = null
+    q = p.pos
+    if q == null { return -1.0 }
+    return q.unwrap().x
+}
+
+fn main() {
+    let p = Player { pos: NV2 { x: 1.0, y: 2.0 }, hp: 1 }
+    print(absent(p.pos))
+    print(sum_field(p))
+    print(to_local(p))
+}
+"#;
+
+#[test]
+fn a_field_load_widens_to_nullable_without_materializing() {
+    let lua = emit_module(NOBOX_FIELD_WIDEN);
+    for name in ["from_field", "sum_field", "to_local"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "a field load widened to `T?` materialized in `{name}`:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_field_widen"),
+        "false\n3\n1"
+    );
+}
+
+const NOBOX_NESTED_FIELD_WIDEN: &str = r#"
+nobox value NV2 { x: float, y: float }
+nobox value Nest { a: NV2, s: float }
+struct Deep { n: Nest }
+
+fn mk_nest() -> Nest { return Nest { a: NV2 { x: 4.0, y: 5.0 }, s: 6.0 } }
+fn nested_absent(v: Nest? = null) -> bool { return v == null }
+fn from_nested_field(d: Deep) -> bool { return nested_absent(d.n) }
+
+fn main() {
+    let n = mk_nest()
+    let d = Deep { n: n }
+    print(from_nested_field(d))
+}
+"#;
+
+/// SENTINEL, inverted. A whole read of an embed field whose `nobox` child holds
+/// a `nobox` field OF ITS OWN still materializes when widened to `T?`, where
+/// the one-level shape above no longer does. Correct behaviour is that this
+/// emits like `NOBOX_FIELD_WIDEN` and prints `false`.
+///
+/// Inverted because the fix is not the one-level widening: the rejection lands
+/// on the CTOR (`Deep { n: n }`) after `from_nested_field` inlines, and it
+/// reproduces identically before the widening change, so it is a distinct
+/// pre-existing shape and not a hole in it. Pinned rather than left in a doc:
+/// nothing in tree builds a two-level `nobox` nest today, so only a test finds
+/// it.
+///
+/// When this FAILS the fix landed: swap `try_emit_module` for `emit_module`,
+/// assert the three-fn no-materialization loop and a `false` run, and delete
+/// this comment.
+#[test]
+fn a_nested_nobox_child_still_materializes_when_widened_sentinel() {
+    let err = try_emit_module(NOBOX_NESTED_FIELD_WIDEN)
+        .expect_err("PINNED BEHAVIOR (BUG): a two-level nobox nest still rejects when widened");
+    assert!(
+        err.message.contains("survived lowering as an implicit materialization"),
+        "expected the nobox guarantee rejection, got: {}",
+        err.message
+    );
+}
+
 #[test]
 fn nobox_interpolation_does_not_materialize() {
     let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);

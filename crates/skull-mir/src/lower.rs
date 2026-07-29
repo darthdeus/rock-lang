@@ -6342,6 +6342,19 @@ impl Builder<'_> {
                 // (never bound, returned, captured or stored), so this is the
                 // consuming boundary, not a reintroduced box.
                 if let Some(cname) = self.embed_field_of(base, field) {
+                    // A `nobox` child stays in LEAF form instead. The transient
+                    // box is legal for an unmarked value -- it sinks -- but for
+                    // a marked one it is the guarantee's violation itself, so
+                    // the sink decides the representation. This is what lets a
+                    // field load widen to `T?`: a Group carries no presence, so
+                    // `repr_to_leaves` supplies it, exactly as it already does
+                    // for a literal ctor or a call result at the same param.
+                    if !self.embed_read_is_nullable(base, field) {
+                        if let Some(shape) = self.nobox_embed_group_shape(cname) {
+                            let parent = self.lower_expr(base)?;
+                            return Ok(self.embed_group(parent, field, &shape));
+                        }
+                    }
                     let parent = self.lower_expr(base)?;
                     let v = if self.embed_read_is_nullable(base, field) {
                         self.materialize_embed_nullable(parent, field, cname)
@@ -10080,6 +10093,52 @@ impl Builder<'_> {
         } else {
             self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
         }
+    }
+
+    /// The shape to read a `nobox` embed child back as, or `None` to fall
+    /// through to [`Builder::materialize_embed`] (and, for a marked child, to
+    /// the guarantee's rejection).
+    ///
+    /// `None` for an unmarked child -- its transient box is legal and sinks.
+    /// Also `None` when any field in the tree is a FLAT enum: those occupy
+    /// several parent slots under [`flat_slot_names`], which the shape carries
+    /// as one entry, so a Group built over them would hand the sink a leaf
+    /// sequence that lines up wrong. Rejecting loudly beats a silent
+    /// misalignment; the shape has no in-tree instance today.
+    fn nobox_embed_group_shape(&self, cname: Ustr) -> Option<ValueShape> {
+        if !is_nobox_nominal(self.ws, cname) || self.struct_has_flat_field(cname) {
+            return None;
+        }
+        value_shape_of_nominal(self.ws, cname)
+    }
+
+    /// Whether any field of `cname`, at any depth, flattens to several parent
+    /// slots rather than one.
+    fn struct_has_flat_field(&self, cname: Ustr) -> bool {
+        self.struct_field_names(cname).unwrap_or_default().iter().any(|&f| {
+            self.flat_field_of_struct(cname, f).is_some()
+                || self.embed_field_of_struct(cname, f).is_some_and(|inner| {
+                    inner != cname && self.struct_has_flat_field(inner)
+                })
+        })
+    }
+
+    /// A whole read of a `nobox` embed field, as an unboxed Group over the
+    /// parent's dotted leaves. Driven by the SHAPE rather than by the field
+    /// list, so the parts line up with [`Builder::repr_to_leaves`]' order by
+    /// construction instead of by two walks agreeing.
+    fn embed_group(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &ValueShape) -> ValueRepr {
+        let mut parts = Vec::new();
+        for (fname, fs) in &shape.fields {
+            let key = Ustr::from(&format!("{prefix}.{fname}"));
+            parts.push(match fs {
+                FieldShape::Prim => {
+                    ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field: key }))
+                }
+                FieldShape::Nested(sub) => self.embed_group(parent, key, sub),
+            });
+        }
+        ValueRepr::Group { name: shape.name, parts, present: None }
     }
 
     /// The `(physical key, value)` pairs for an embedded field's leaves, the one
