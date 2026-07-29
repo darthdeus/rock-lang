@@ -2514,6 +2514,7 @@ pub fn lower_function_spec(
         static_counters: HashMap::new(),
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
+        presence_only: None,
     };
     b.reject_nobox_fn_taken_by_value()?;
     b.lower_params();
@@ -2575,6 +2576,7 @@ pub fn lower_global(
         static_counters: HashMap::new(),
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
+        presence_only: None,
     };
     // A `nobox` global is category-2 storage: its layout comes from the declared
     // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
@@ -2639,6 +2641,7 @@ pub fn lower_decorator(
         static_counters: HashMap::new(),
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
+        presence_only: None,
     };
     // `target` is param 0, then the decorator's declared params.
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
@@ -2738,6 +2741,12 @@ struct Builder<'a> {
     /// Per nested-fn source-name counter (source order), the `static_counters`
     /// analogue for shadowing duplicates.
     nested_fn_counters: HashMap<Ustr, u32>,
+    /// The one expression currently being lowered for its PRESENCE only (`x ==
+    /// null`): a `V?` place read there skips its copy-out, because a nil test
+    /// answers the same question without a cdata
+    /// ([`Builder::nullable_place_value_of`]). Exact node, never a subtree -- a
+    /// nested read that feeds a real whole-value use still copies.
+    presence_only: Option<Idx<Expr>>,
 }
 
 impl Builder<'_> {
@@ -3242,6 +3251,7 @@ impl Builder<'_> {
             static_counters: HashMap::new(),
             nested_fn_globals: self.nested_fn_globals.clone(),
             nested_fn_counters: HashMap::new(),
+            presence_only: None,
         };
 
         for (i, pb) in params.into_iter().enumerate() {
@@ -3614,7 +3624,7 @@ impl Builder<'_> {
             // A global holding a value struct routes through the repr layer so a
             // whole-value read copies the box (a global is a mutable place).
             Expr::Global(name) => {
-                if self.value_struct_of(e).is_some() {
+                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e).is_some() {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
                 }
@@ -3720,7 +3730,7 @@ impl Builder<'_> {
                 // A whole-value read of a value-struct element COPIES (via the repr
                 // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
                 // than binding the interior array reference.
-                if self.value_struct_of(e).is_some() {
+                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e).is_some() {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
                 }
@@ -3976,7 +3986,28 @@ impl Builder<'_> {
                             let g = self.swizzle_from_packed(bv, &idxs);
                             self.pack(g)
                         }
-                        None => self.emit_cur(Inst::Field { base: bv, field }),
+                        // `o?.p` reads a value field whole out of a mutable place, so
+                        // it copies exactly as `o.p` does. The base is non-nil on
+                        // this arm; the FIELD may still be absent, so a nullable one
+                        // takes the presence-aware copy. An embed field has no box
+                        // here (its leaves live on the parent under a dotted key).
+                        None => {
+                            let fv = self.emit_cur(Inst::Field { base: bv, field });
+                            match self
+                                .value_struct_name_of(e)
+                                .filter(|_| self.is_mutable_place(base))
+                                .filter(|_| self.embed_field_of(base, field).is_none())
+                            {
+                                Some(name) if self.embed_read_is_nullable(base, field) => {
+                                    self.nullable_boxed_value_copy(fv, name)
+                                }
+                                Some(name) => {
+                                    let copy = self.boxed_value_copy_repr(fv, name);
+                                    self.pack(copy)
+                                }
+                                None => fv,
+                            }
+                        }
                     },
                 };
                 self.store_and_join(result, fv, join);
@@ -5691,6 +5722,33 @@ impl Builder<'_> {
         self.rebuild_from_leaves(&shape, &leaves, &mut idx)
     }
 
+    /// The `V?` twin of [`Self::boxed_value_copy_repr`]: an absent value has no
+    /// leaves to split, so the copy runs on the PRESENT arm only and `nil` threads
+    /// through untouched. The result is a single value (a fresh box or `nil`), not
+    /// a `Group` -- a Group carries no presence for `pack`, which would materialize
+    /// a box for an absent value and break `== null`.
+    fn nullable_boxed_value_copy(&mut self, boxed: Idx<Inst>, name: Ustr) -> Idx<Inst> {
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(boxed, nil));
+        let result = self.f.new_cell(None);
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let copy = self.boxed_value_copy_repr(boxed, name);
+        let packed = self.pack(copy);
+        self.store_and_join(result, packed, join);
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
+    }
+
     /// One element of an indexable collection, for the loop lowerings that bind a
     /// whole element per iteration (`for x in coll`, `for (i, x) in enumerate`).
     ///
@@ -6552,8 +6610,12 @@ impl Builder<'_> {
                 // read out of a mutable place, so it copies.
                 let basev = self.pack(br);
                 let fv = self.emit_cur(Inst::Field { base: basev, field });
-                match self.value_struct_of(e).filter(|_| self.is_mutable_place(base)) {
-                    Some(name) => Ok(self.boxed_value_copy_repr(fv, name)),
+                if let Some(name) = self.value_struct_of(e).filter(|_| self.is_mutable_place(base))
+                {
+                    return Ok(self.boxed_value_copy_repr(fv, name));
+                }
+                match self.nullable_place_value_of(e) {
+                    Some(name) => Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, name))),
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
             }
@@ -6569,6 +6631,12 @@ impl Builder<'_> {
                 let name = self.value_struct_of(e).unwrap();
                 let gv = self.emit_cur(Inst::Global(g));
                 Ok(self.boxed_value_copy_repr(gv, name))
+            }
+            // A `V?` global copies the same way, gated on presence.
+            Expr::Global(g) if self.nullable_place_value_of(e).is_some() => {
+                let name = self.nullable_place_value_of(e).unwrap();
+                let gv = self.emit_cur(Inst::Global(g));
+                Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name)))
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
@@ -6595,8 +6663,16 @@ impl Builder<'_> {
             // Group of leaf reads off the checked slot: a leaf projection reads the
             // part live, while `pack` (a whole-value use -- let-bind, arg, return,
             // store) rebuilds a fresh value instead of aliasing the array slot.
-            Expr::Index { base, index } if self.value_struct_of(e).is_some() => {
-                let name = self.value_struct_of(e).unwrap();
+            // A `V?` element takes the same shape, gated on presence at the copy.
+            Expr::Index { base, index }
+                if self.value_struct_of(e).is_some()
+                    || self.nullable_place_value_of(e).is_some() =>
+            {
+                let nullable = self.value_struct_of(e).is_none();
+                let name = self
+                    .value_struct_of(e)
+                    .or_else(|| self.nullable_place_value_of(e))
+                    .expect("guard matched");
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 // Column storage: there is no element slot to read leaves off --
@@ -6613,6 +6689,9 @@ impl Builder<'_> {
                     }
                 }
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
+                if nullable {
+                    return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(slot, name)));
+                }
                 Ok(self.boxed_value_copy_repr(slot, name))
             }
             Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs }
@@ -7745,6 +7824,24 @@ impl Builder<'_> {
                     None
                 };
                 if let Some(v) = null_side {
+                    // A `V?` place read here is read for its PRESENCE: the copy
+                    // such a read otherwise takes would allocate a cdata per nil
+                    // test (`mouse_screen`'s `sim_mouse_override`, every frame).
+                    if self.nobox_value_name(v).is_none()
+                        && !self.expr_is_flat_enum(v)
+                        && self.nullable_place_value_of(v).is_some()
+                    {
+                        let outer = self.presence_only.replace(v);
+                        let value = self.lower_expr(v);
+                        self.presence_only = outer;
+                        let value = value?;
+                        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                        return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                            Inst::Eq(value, nil)
+                        } else {
+                            Inst::NotEq(value, nil)
+                        }));
+                    }
                     if self.nobox_value_name(v).is_some() {
                         let repr = self.lower_expr_repr(v)?;
                         let present = match repr {
@@ -9707,16 +9804,52 @@ impl Builder<'_> {
     }
 
     /// The value-struct type of `e`, EITHER tier. `None` for a non-value type or
-    /// unsolved inference, and for a `V?` -- `expr_ty` PEELS `Nullable`, and
-    /// splitting a possibly-null value into leaves would index nil.
+    /// unsolved inference, and for a `V?` -- an ABSENT value has no leaves, so an
+    /// unconditional split would index nil. A nullable read that still needs the
+    /// copy takes the presence-aware path instead
+    /// ([`Self::nullable_place_value_of`]).
     fn value_struct_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         if self.expr_is_nullable(e) {
             return None;
         }
+        self.value_struct_name_of(e)
+    }
+
+    /// The value-struct type of `e` IGNORING nullability (`expr_ty` peels
+    /// `Nullable`, so a `V?` resolves to `V` here).
+    fn value_struct_name_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
             return None;
         };
         self.is_value_struct(name).then_some(name)
+    }
+
+    /// The value-struct type of a NULLABLE whole-value read out of a mutable place
+    /// -- a field, a global, a container element. The copy is required exactly as
+    /// it is for the non-nullable twin (`value_struct_of(e).filter(|_|
+    /// is_mutable_place(base))`); presence is the only difference, and it is
+    /// supplied by `nullable_boxed_value_copy`.
+    ///
+    /// A `nobox` global is excluded: its leaves ARE the storage, so the read is
+    /// already a snapshot and there is no box to copy out of. So is a read whose
+    /// only consumer is a nil test ([`Builder::presence_only`]).
+    fn nullable_place_value_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if self.presence_only == Some(e) {
+            return None;
+        }
+        if !self.expr_is_nullable(e) {
+            return None;
+        }
+        let is_place = match &self.body.expr_arena[e] {
+            Expr::Global(_) => self.nobox_global_place(e).is_none(),
+            Expr::Index { .. } => true,
+            Expr::FieldAccess { base, .. } => self.is_mutable_place(*base),
+            _ => false,
+        };
+        if !is_place {
+            return None;
+        }
+        self.value_struct_name_of(e)
     }
 
     /// The nominal type name of a non-nullable AGGREGATE expression -- a value
