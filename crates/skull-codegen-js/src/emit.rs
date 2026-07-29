@@ -47,6 +47,21 @@ fn err(msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(Span::default(), msg.into())
 }
 
+/// The one rejection for every column-storage site, so the reason reads the same
+/// whichever one a program reaches first.
+///
+/// Only a `nobox` element gets here: an UNMARKED one keeps the boxed
+/// representation on this target (`skull_mir::lower::columns_available`), so
+/// reaching a column form means the program asked for the guarantee on a backend
+/// that cannot serve it. Naming the element and the marker is the difference
+/// between a diagnosis and a skip-histogram line.
+fn column_reject(elem: ustr::Ustr) -> String {
+    format!(
+        "JS subset: `[{elem}]` stores as columns because `{elem}` is `nobox`, and column \
+         storage has no JS emitter arm yet"
+    )
+}
+
 /// A `(message, site)` rejection from a MIR-level check, anchored at the
 /// offending instruction when the check could name one.
 fn sited_err((msg, site): (String, Option<Span>)) -> CompilerError {
@@ -1089,7 +1104,10 @@ impl Emitter<'_> {
                         // Column storage has no JS emitter arm yet -- reject so
                         // the case lands in the SKIP histogram (the emitter
                         // worklist) instead of emitting a wrong single-slot write.
-                        ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
+                        ContainerKind::VecValueColumns(elem) => {
+                            return Err(err(column_reject(*elem)));
+                        }
+                        ContainerKind::VecColumn => {
                             return Err(err("JS subset: column-stored [T] not supported"));
                         }
                         ContainerKind::NativeBufferLeaf => {
@@ -1562,7 +1580,10 @@ impl Emitter<'_> {
                         self.nbv_copy_expr(&b, &i, *elem, 0, *elem)?
                     }
                     ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
-                    ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
+                    ContainerKind::VecValueColumns(elem) => {
+                        return Err(err(column_reject(*elem)));
+                    }
+                    ContainerKind::VecColumn => {
                         return Err(err("JS subset: column-stored [T] not supported"));
                     }
                     // Leaf addressing is Lua-side today (`ffi.cast` views). The
@@ -1644,6 +1665,7 @@ impl Emitter<'_> {
             Inst::FormatDyn { value, fmt } => {
                 format!("__rock_sprintf({}, {})", self.render_val(*fmt)?, self.render_val(*value)?)
             }
+            Inst::MakeVecColumns { elem, .. } => return Err(err(column_reject(*elem))),
             other => {
                 return Err(err(format!(
                     "JS subset: cannot render {other:?} as a JS expression"

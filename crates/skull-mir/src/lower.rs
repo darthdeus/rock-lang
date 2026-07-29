@@ -988,10 +988,35 @@ impl ReifiedType {
 /// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
 /// spec binding exactly when the element is column-stored, and the post-emit
 /// validator turns that into a rejection instead of a miscompile.
-fn spec_key_has_column_elem(ws: &Workspace, key: &SpecKey) -> bool {
-    key.iter()
-        .flatten()
-        .any(|ty| ty.any_nominal(&|name| vec_column_elem(ws, name).is_some()))
+/// Where the target does not store the element as columns ([`columns_available`])
+/// the boxed shared body IS correct, so the key carries no correctness
+/// requirement and specializing goes back to being opt-in.
+fn spec_key_has_column_elem(
+    ws: &Workspace,
+    key: &SpecKey,
+    target: bone_semantic::hir::FnBackend,
+) -> bool {
+    key.iter().flatten().any(|ty| {
+        ty.any_nominal(&|name| {
+            vec_column_elem(ws, name).is_some() && columns_available(ws, target, name)
+        })
+    })
+}
+
+/// Whether `[elem]` takes column storage when lowering for `target`.
+///
+/// For an UNMARKED element columns are a representation OPTIMIZATION, so a
+/// backend without the emitter arm keeps the boxed form -- same semantics,
+/// different bytes, which is this repo's cross-backend doctrine. A `nobox`
+/// element is a language-level GUARANTEE, so it columns on every target and a
+/// backend that cannot serve it rejects at emit rather than silently handing
+/// back the box the program was promised would not exist.
+fn columns_available(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    elem: Ustr,
+) -> bool {
+    target != bone_semantic::hir::FnBackend::Js || is_nobox_nominal(ws, elem)
 }
 
 /// A callee's per-generic instantiation at one call site, in declaration order.
@@ -1063,6 +1088,7 @@ fn compute_call_spec(
     e: Idx<Expr>,
     func: FuncRef,
     enclosing: &SpecSubst,
+    target: bone_semantic::hir::FnBackend,
 ) -> Option<(SpecKey, SpecSubst)> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
@@ -1081,7 +1107,7 @@ fn compute_call_spec(
     // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
     let opted_in =
         f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
-    if !opted_in && !spec_key_has_column_elem(ws, &key) {
+    if !opted_in && !spec_key_has_column_elem(ws, &key, target) {
         return None;
     }
     Some((key, subst))
@@ -5033,7 +5059,7 @@ impl Builder<'_> {
     /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
     /// splice always resolves; a residual case falls to the site-aware rejection.
     fn call_spec(&self, e: Idx<Expr>, func: FuncRef) -> Option<(SpecKey, SpecSubst)> {
-        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst)
+        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst, self.scx.target)
     }
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
@@ -5085,7 +5111,9 @@ impl Builder<'_> {
         // on the ABI without an inliner ever running.
         let spec = self
             .call_spec(e, func)
-            .filter(|(k, _)| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k));
+            .filter(|(k, _)| {
+                !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k, self.scx.target)
+            });
         let empty = SpecSubst::new();
         let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
         // The instantiation key is recorded on the emitted call inst whenever this
@@ -8140,7 +8168,10 @@ impl Builder<'_> {
         let spec = match &info.next {
             BoundNext::Concrete { func: (m, f), next_generics, .. } => self
                 .next_call_spec(FuncRef { module: *m, func: *f }, next_generics)
-                .filter(|k| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)),
+                .filter(|k| {
+                    !self.in_unspliced_ctx
+                        || spec_key_has_column_elem(self.ws, k, self.scx.target)
+                }),
             BoundNext::CallerGeneric(_) => None,
         };
         // A placeholder next is always `(bool, E)` with `E` opaque (bound
@@ -10894,7 +10925,7 @@ impl Builder<'_> {
             },
             _ => return None,
         };
-        vec_column_elem(self.ws, en)
+        vec_column_elem(self.ws, en).filter(|&en| columns_available(self.ws, self.scx.target, en))
     }
 
     /// The NativeBuffer container kind for base expr `e`: value-struct elements
@@ -12130,6 +12161,7 @@ fn native_buffer_alloc_elem_ctype_spec(
 /// specialize, or -- a library fn -- has no callers at all) is exempt: its
 /// standalone body's lowering-gap skip is then correct. Returns the first offender.
 pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
+    const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
     // 1. Direct intrinsic calls with a concrete unallocatable element.
@@ -12206,18 +12238,26 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             let resolves = owner_inlined
                 && match intr_ret {
                     // Direct: validate the intrinsic's element under this site's subst.
-                    Some(intr_ret) => compute_call_spec(ws, inf, c, fref, &SpecSubst::new())
-                        .is_some_and(|(_, subst)| {
-                            native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst)
+                    // `Lua` because column storage never changes whether a
+                    // `native_buffer_alloc<T>` site RESOLVES its ctype -- it is
+                    // the FFI-clean element that decides -- so this validator
+                    // stays backend-agnostic by asking the column-bearing target.
+                    Some(intr_ret) => {
+                        compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA)
+                            .is_some_and(|(_, subst)| {
+                                native_buffer_alloc_elem_ctype_spec(
+                                    ws, fref_inf, intr_ret, &subst,
+                                )
                                 .is_ok()
-                        }),
+                            })
+                    }
                     // Transitive (the intrinsic lives deeper in the chain): the
                     // site must specialize, and conservatively every reified
                     // leaf must be allocatable (a GC-value leaf reaching the
                     // intrinsic would fail cdef resolution inside the splice,
                     // which lowering swallows -- reject it loudly here).
-                    None => compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(
-                        |(key, _)| {
+                    None => compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA)
+                        .is_some_and(|(key, _)| {
                             key.iter().all(|l| match l {
                                 Some(ReifiedType::Prim(_)) => true,
                                 Some(ty) => {
@@ -12225,8 +12265,7 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
                                 }
                                 None => false,
                             })
-                        },
-                    ),
+                        }),
                 };
             if !resolves {
                 let fname = ws.module(fref.module).functions[fref.func].name;
