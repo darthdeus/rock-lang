@@ -805,12 +805,8 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_nullable_struct_field.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "`value_shape_rec` gains a `Nullable` arm building \
-                        `FieldShape::Nested(sub)` with `sub.nullable = true`",
-        },
-        gap: Some("A: nullable nobox field of a value struct (the primary site)"),
+        expect: Expect::Correct,
+        gap: Some("A FIXED: the struct-field context threads a nested presence tag"),
     },
     SeedCase {
         name: "nobox_nullable_struct_field_control",
@@ -854,24 +850,16 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_nested_nullable_leaf_paths.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "`leaf_paths_rec` (:170) names the nested presence leaf -- it \
-                        never consults `sub.nullable` today",
-        },
-        gap: Some("A consumer: `leaf_paths_rec`, Vec column naming"),
+        expect: Expect::Correct,
+        gap: Some("A consumer FIXED: `leaf_paths_rec` names the nested presence leaf"),
     },
     SeedCase {
         name: "nobox_nested_nullable_leaf_params",
         file: "nobox_nested_nullable_leaf_params.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "`leaf_param_names` (:1944) names the nested presence leaf -- it \
-                        never consults `sub.nullable` today",
-        },
-        gap: Some("A consumer: `leaf_param_names`, the scalar ABI"),
+        expect: Expect::Correct,
+        gap: Some("A: the scalar-ABI leaf COUNT carries the nested presence tag"),
     },
     SeedCase {
         name: "nobox_nested_nullable_embed_group",

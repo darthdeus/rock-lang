@@ -1,10 +1,12 @@
-// CONSUMER GUARD -- `leaf_param_names` (:1944). The scalar ABI names one Lua
-// param per leaf; the `Nested(sub)` arm recurses without consulting
-// `sub.nullable`, so a nested presence leaf would get no NAME while
-// `repr_to_leaves` still passes a value for it -- an off-by-one across the whole
-// boundary.
+// The scalar-ABI leaf COUNT across a call boundary for a nested-nullable shape:
+// `consume` must take one param per leaf INCLUDING the nested presence tag.
+// Verified by reading the emitted signature -- `consume_Outer_ret_int(c0,c1,c2,c3)`,
+// four leaves for `{ a: P?, b: int }`.
 //
-// Rejects TODAY upstream; the guard is for after the struct-field arm lands.
+// It does NOT cover `leaf_param_names`, despite the original intent: that names
+// `inline(lua)` params, and a `nobox` value cannot cross an opaque-body boundary,
+// so a nested-nullable shape cannot reach it. Ordinary scalar-ABI params are
+// positional cells. Recorded rather than left as a false claim of coverage.
 
 nobox value P { x: int, y: int }
 nobox value Outer { a: P?, b: int }

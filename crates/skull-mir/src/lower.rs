@@ -168,6 +168,20 @@ pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
 }
 
 fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
+    // A NULLABLE nested shape leads with its presence leaf, matching
+    // `repr_to_leaves` (which pushes presence before the fields) and `leaf_count`
+    // (which counts it). Its key is the field's own UNDOTTED name -- injective
+    // against its own children (`a` vs `a.x`, and `.` cannot appear in a Rock
+    // identifier), and the same convention embed storage already uses for a
+    // nullable child. Without this the column set is one short of `leaf_count`
+    // and a `[Outer]` literal fails with a column arity mismatch.
+    //
+    // Only the NESTED case: a top-level nullable shape has no field name to key
+    // on, and no column path reaches one today (a column element is
+    // non-nullable), so that case is deliberately left as it was.
+    if shape.nullable && !prefix.is_empty() {
+        out.push(Ustr::from(prefix.trim_end_matches('.')));
+    }
     for (fname, fs) in &shape.fields {
         match fs {
             FieldShape::Prim if prefix.is_empty() => out.push(*fname),
@@ -643,6 +657,26 @@ fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Opti
                     FieldShape::Nested(value_shape_rec(ws, n, visiting)?)
                 }
             }
+            // A NULLABLE `nobox` child threads its own presence tag as leaf 0 of
+            // its nested shape -- the same rule the signature/local/global
+            // contexts already apply at the outermost slot, reached through the
+            // one resolver rather than re-spelled here. Without this arm the
+            // field type fell to the catch-all and disqualified the WHOLE struct,
+            // which is mechanism A: the parent then had no shape, fell back to a
+            // box, and the materialization verifier refused it.
+            //
+            // Gated on `nobox` by the resolver: an UNMARKED nullable value field
+            // keeps its box + nil sentinel, which is legal today (a box is not a
+            // guarantee violation for an unmarked type), so this changes no
+            // existing emission.
+            TypeExpr::Nullable(_) => match nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
+            {
+                Some(sub) => FieldShape::Nested(sub),
+                None => {
+                    visiting.pop();
+                    return None;
+                }
+            },
             _ => {
                 visiting.pop();
                 return None;
@@ -703,7 +737,22 @@ fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> O
                     FieldShape::Prim
                 }
             }
-            // Builtin scalar, generic `T`, nullable, tuple -> one slot.
+            // A NULLABLE `nobox` child threads leaves + presence, exactly as in
+            // `value_shape_rec`. The two constructors are alternates for the SAME
+            // struct, so they must agree on leaf COUNT: giving the arm to one and
+            // not the other makes a producer and a consumer disagree, and
+            // `rebuild_from_leaves` indexes past the end. That is not theoretical
+            // -- it is what `a_nullable_nobox_field_round_trips_both_ways` (a
+            // GC-tier outer) caught when only `value_shape_rec` had it.
+            Some(TypeExpr::Nullable(_))
+                if nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t)).is_some() =>
+            {
+                FieldShape::Nested(
+                    nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
+                        .expect("guard matched"),
+                )
+            }
+            // Builtin scalar, generic `T`, non-nobox nullable, tuple -> one slot.
             _ => FieldShape::Prim,
         };
         fields.push((f.name, fs));
@@ -887,31 +936,46 @@ fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
-/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
-/// is leaf 0), `None` for every other type. bone requires an explicit annotation
-/// on every global, so this is exact for a `GlobalDef`'s `ty`, and equally for a
-/// top-level fn's param/return -- both are workspace-arena types `static_ty` can
-/// see and the body-arena walker cannot. [`Builder::nobox_shape_of_ty`] is this
-/// same rule over the BODY arena; keep the two in step.
-fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
-    match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_nobox_nominal(ws, name) => {
-            value_shape_of_nominal(ws, name)
-        }
+/// THE nullable-nominal shape rule, arena-independent: a `nobox` nominal resolves
+/// to its leaf shape, and a NULLABLE one to the same shape with `nullable = true`
+/// (presence is leaf 0). Everything else is `None`.
+///
+/// `resolve` is the caller's type-node lookup, which is the only thing that
+/// differed between the copies this replaces: the workspace arena reads through
+/// `static_ty`, a body arena through `resolve_tyid`/`ty_node`. Every context that
+/// needs the rule calls this -- `nobox_declared_shape` (globals + top-level
+/// signatures) and [`Builder::nobox_shape_of_ty`] (body-arena locals) -- so a new
+/// context joins by calling it rather than by copying fifteen lines.
+fn nullable_nominal_shape(
+    ws: &Workspace,
+    ty: TyId,
+    resolve: &dyn Fn(TyId) -> Option<TypeExpr>,
+) -> Option<ValueShape> {
+    let nobox_shape = |name: Ustr| {
+        is_nobox_nominal(ws, name).then(|| value_shape_of_nominal(ws, name)).flatten()
+    };
+    match resolve(ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => nobox_shape(name),
         TypeExpr::Nullable(inner) => {
-            let inner = static_ty(ws, ty.with_idx(inner))?;
-            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = inner else {
+            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = resolve(ty.with_idx(inner))?
+            else {
                 return None;
             };
-            if !is_nobox_nominal(ws, name) {
-                return None;
-            }
-            let mut shape = value_shape_of_nominal(ws, name)?;
+            let mut shape = nobox_shape(name)?;
             shape.nullable = true;
             Some(shape)
         }
         _ => None,
     }
+}
+
+/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
+/// is leaf 0), `None` for every other type. bone requires an explicit annotation
+/// on every global, so this is exact for a `GlobalDef`'s `ty`, and equally for a
+/// top-level fn's param/return -- both are workspace-arena types `static_ty` can
+/// see and the body-arena walker cannot.
+fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
 }
 
 /// The leaf globals a `nobox`-typed global is stored in, `None` for every other
@@ -1943,6 +2007,16 @@ pub fn scalar_abi_param_leaf_widths(
 /// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first
 /// (same traversal as `repr_to_leaves`/`cdata_leaves`).
 fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
+    // Twin of `leaf_paths_rec`: a nullable nested shape leads with its presence
+    // leaf, so it needs a NAME or the Lua-side params drift one short of what
+    // `repr_to_leaves` splats. Currently unreachable -- this names `inline(lua)`
+    // params, and a `nobox` value cannot cross that boundary (it rejects as an
+    // opaque-body crossing) -- but the two functions walk the same shape and a
+    // silent divergence between them is precisely the copy-drift this arc is
+    // about, so they stay in step.
+    if shape.nullable && !base.is_empty() {
+        out.push(base.to_string());
+    }
     for (fname, fs) in &shape.fields {
         match fs {
             FieldShape::Prim => out.push(format!("{base}__{fname}")),
@@ -5703,6 +5777,48 @@ impl Builder<'_> {
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             match fs {
                 FieldShape::Prim => out.push(fv),
+                // A NULLABLE nested child: the stored box may be absent, so split
+                // it presence-aware rather than field-reading straight off a
+                // possible nil. Mirrors `repr_to_leaves`' `Scalar(v) if
+                // shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0,
+                // then the child's own leaves, nils on the absent arm -- because
+                // the two must agree leaf-for-leaf or `rebuild_from_leaves`
+                // indexes past the end. This function had NO nullable handling:
+                // its one caller stripped `.nullable` first, which was safe only
+                // while no shape carried it below the outermost level.
+                FieldShape::Nested(sub) if sub.nullable => {
+                    let field_count = sub.leaf_count() - 1;
+                    let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                    let present = self.emit_cur(Inst::NotEq(fv, nil));
+                    let cells: Vec<Idx<Cell>> =
+                        (0..field_count).map(|_| self.f.new_cell(None)).collect();
+                    let nil_bb = self.f.new_block();
+                    let value_bb = self.f.new_block();
+                    let join = self.f.new_block();
+                    self.f.set_term(
+                        self.cur,
+                        Term::Branch { cond: present, then_bb: value_bb, else_bb: nil_bb },
+                    );
+                    self.cur = nil_bb;
+                    for c in &cells {
+                        let z = self.emit_cur(Inst::Const(Lit::Nil));
+                        self.emit_cur(Inst::Store { cell: *c, value: z });
+                    }
+                    self.f.set_term(self.cur, Term::Goto(join));
+                    self.cur = value_bb;
+                    let mut inner = sub.clone();
+                    inner.nullable = false;
+                    let leaves = self.cdata_leaves(fv, &inner);
+                    for (c, lv) in cells.iter().zip(leaves) {
+                        self.emit_cur(Inst::Store { cell: *c, value: lv });
+                    }
+                    self.f.set_term(self.cur, Term::Goto(join));
+                    self.cur = join;
+                    out.push(present);
+                    out.extend(
+                        cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect::<Vec<_>>(),
+                    );
+                }
                 FieldShape::Nested(sub) => out.extend(self.cdata_leaves(fv, sub)),
             }
         }
@@ -11564,30 +11680,17 @@ impl Builder<'_> {
     }
 
     fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
-        let ty = self.resolve_tyid(ty)?;
-        match self.ty_node(ty)? {
-            TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            } if self.is_nobox_struct(name) => value_shape_of_nominal(self.ws, name),
-            TypeExpr::Nullable(inner) => {
-                let inner = self.resolve_tyid(ty.with_idx(inner))?;
-                let TypeExpr::App {
-                    ctor: TypeCtor::Nominal(name),
-                    ..
-                } = self.ty_node(inner)?
-                else {
-                    return None;
-                };
-                if !self.is_nobox_struct(name) {
-                    return None;
-                }
-                let mut shape = value_shape_of_nominal(self.ws, name)?;
-                shape.nullable = true;
-                Some(shape)
-            }
-            _ => None,
+        // The BODY arena's spelling of [`nullable_nominal_shape`]: same rule, its
+        // own type-node lookup. `is_nobox_struct` (not `is_nobox_nominal`) is the
+        // one real difference -- it also honours `scx.values_first_class`, which
+        // the GLSL backend sets -- so the guard stays here and the core sees an
+        // already-filtered nominal.
+        if !self.scx.values_first_class {
+            return nullable_nominal_shape(self.ws, ty, &|t| {
+                self.ty_node(self.resolve_tyid(t)?)
+            });
         }
+        None
     }
 
     /// The leaf globals a place rooted at a `nobox` global denotes, plus the
