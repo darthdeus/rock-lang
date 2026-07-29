@@ -1637,11 +1637,11 @@ const KNOWN_REJECTIONS: &[&str] = &[
     // already-judged and the unclassified gate stops gating exactly where it
     // matters most. Found by mutation: renaming the "survived lowering" entry
     // left the sweep GREEN, with its 44 shapes silently reabsorbed under
-    // "nobox". Keep every entry specific to one diagnostic.
+    // "nobox". An `inspect` of a nobox value IS a real boxed boundary, so the
+    // specific rejection is what gets judged. Every entry names one diagnostic;
+    // `known_rejections_cannot_swallow_a_diagnostic_family` enforces it.
     "cannot cross boxed call boundary",
     "not a mutable place",
-    "requires a value struct",
-    "must be a `value` struct",
     "FlatVec",
     "NativeBuffer",
     "Map key",
@@ -1649,6 +1649,41 @@ const KNOWN_REJECTIONS: &[&str] = &[
     "GC-carrying",
     "does not exist",
 ];
+
+/// `KNOWN_REJECTIONS` classifies by SUBSTRING, so an entry broad enough to match a
+/// whole diagnostic FAMILY silently turns the unclassified-rejection gate off for
+/// that family -- and it turns off green, which is the one failure mode a textual
+/// merge preserves happily. Measured on this corpus: with a bare `"nobox"` present,
+/// renaming the `"survived lowering"` entry left the sweep PASSING with every nobox
+/// shape reabsorbed; removing it turned the same mutation red.
+///
+/// So the family PREFIXES are banned outright. This is a merge gate as much as a
+/// design one: two branches editing this array can union it back into a dead gate,
+/// and no sweep result would say so.
+#[test]
+fn known_rejections_cannot_swallow_a_diagnostic_family() {
+    // Each of these opens an entire class of diagnostics rather than naming one.
+    const FAMILY_PREFIXES: &[&str] = &["nobox", "value", "cannot", "field", "type", "error"];
+    for banned in FAMILY_PREFIXES {
+        assert!(
+            !KNOWN_REJECTIONS.contains(banned),
+            "`{banned}` matches the opening of a whole diagnostic family, so it \
+             classifies every member as already-judged and the unclassified-rejection \
+             gate stops gating. Record the specific boundary instead."
+        );
+    }
+    // A entry contained in another is either redundant or the broader one is
+    // swallowing the narrower one's family.
+    for (i, a) in KNOWN_REJECTIONS.iter().enumerate() {
+        for (j, b) in KNOWN_REJECTIONS.iter().enumerate() {
+            assert!(
+                i == j || !b.contains(*a),
+                "`{a}` is a substring of `{b}`: one of them is dead. Keep the \
+                 specific one."
+            );
+        }
+    }
+}
 
 fn sweep_shapes() -> Vec<Shape> {
     let mut shapes = pairwise_shapes();
