@@ -1611,6 +1611,26 @@ const KNOWN_MISCOMPILES: &[(&str, &str)] = &[];
 /// `"nobox"` entry matched every marked-tier message (they all open ``nobox value
 /// `P` ..``) and classified 44 shapes as already-judged. Mutation-test the GATE,
 /// not only the cases -- renaming a sibling entry must make the sweep red.
+///
+/// **Every entry here is load-bearing, measured against both corpora** -- which
+/// produce the same five diagnostic strings, so the verdict is corpus-independent.
+/// Nine entries were deleted, and they were dead in two different ways:
+///
+/// - EIGHT name real diagnostics (each still grep-able in `crates/*/src/`) that no
+///   generated shape reaches, because `render` SKIPS the shapes that would produce
+///   them -- nullable / GC-carrying `NativeBuffer` and `FlatVec` elements, a
+///   nullable nobox `ValueStructField`. Widening the generator is expected to bring
+///   some back, LOUDLY, as UNCLASSIFIED. Two of them (`"FlatVec"`,
+///   `"NativeBuffer"`) were bare one-word family prefixes -- the hazard above,
+///   invisible only because nothing reached them.
+/// - ONE, `"not a mutable place"`, matched no diagnostic anywhere in the tree: it
+///   was written from a guess at the wording, never observed. No generator widening
+///   revives it.
+///
+/// Deleting was the safe direction either way, and that is the asymmetry worth
+/// remembering: an ABSENT entry fails loudly (UNCLASSIFIED, red sweep), an
+/// OVER-BROAD one fails silently (dead gate, green tree). So for an entry nothing
+/// exercises, delete unless it earns its keep.
 const KNOWN_REJECTIONS: &[&str] = &[
     // Null refinement does not reach an INDEX place: `if xs[0] != null { xs[0].a }`
     // and the `Map` equivalent both reject, while the same shape through a FIELD
@@ -1622,10 +1642,6 @@ const KNOWN_REJECTIONS: &[&str] = &[
     // diagnostic spellings and a text-keyed reader would have judged them
     // separately.
     "type mismatch: expected `P`, found `P?`",
-    // Correct diagnostics on shapes the generator can spell but that are
-    // statically redundant once refinement has run.
-    "is not nullable",
-    "with null",
     // ONE entry for the value-local field write, not three. `"immutable local"`,
     // `"cannot assign"` and ``"`value` struct"`` all matched this same message, so
     // deleting any one of them left the gate green -- the milder form of the bare
@@ -1641,13 +1657,6 @@ const KNOWN_REJECTIONS: &[&str] = &[
     // specific rejection is what gets judged. Every entry names one diagnostic;
     // `known_rejections_cannot_swallow_a_diagnostic_family` enforces it.
     "cannot cross boxed call boundary",
-    "not a mutable place",
-    "FlatVec",
-    "NativeBuffer",
-    "Map key",
-    "Map value",
-    "GC-carrying",
-    "does not exist",
 ];
 
 /// `KNOWN_REJECTIONS` classifies by SUBSTRING, so an entry broad enough to match a
