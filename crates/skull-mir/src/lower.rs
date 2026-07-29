@@ -10545,35 +10545,66 @@ impl Builder<'_> {
     /// sinkable rather than becoming the storage the feature removed.
     fn materialize_embed(&mut self, parent: Idx<Inst>, prefix: Ustr, cname: Ustr) -> Idx<Inst> {
         let mut fields = Vec::new();
+        self.collect_embed_slots(parent, prefix, "", cname, &mut fields);
+        if self.is_value_struct(cname) {
+            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
+        } else {
+            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
+        }
+    }
+
+    /// The rebuilt child's slots: for each of `cname`'s fields, the key it holds
+    /// on the CHILD paired with the read of the key it lives at on `parent`.
+    /// `rel` is the child-relative prefix, so this is the exact inverse of the
+    /// store side's keying ([`Builder::embed_field_slots`]: relative leaves under
+    /// the field name, presence tag at the field name itself).
+    ///
+    /// An embed field stays FLAT here, for the reason the flat-enum arm already
+    /// gives: a `Mid` whose `inner` is embedded is canonically
+    /// `{["inner.v"]=3, inner=true, m=9}`, so re-boxing `inner` under its own name
+    /// hands consumers a shape they never read. Recursing into a nested box (which
+    /// is what this did) miscompiled BOTH directions across a call boundary -- an
+    /// absent inner came back non-nil because the box always had one, and a
+    /// PRESENT inner's leaf came back nil because the callee reads `["inner.v"]`
+    /// and the box stored a table at `inner`.
+    ///
+    /// The presence tag needs no branch: an absent field's leaves and tag are all
+    /// nil on the parent, and nil at those keys IS the canonical absent form (the
+    /// ctor emits `["inner.v"] = nil, inner = nil`), so an unconditional read
+    /// reproduces it.
+    fn collect_embed_slots(
+        &mut self,
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        rel: &str,
+        cname: Ustr,
+        out: &mut Vec<(Ustr, Idx<Inst>)>,
+    ) {
         for f in self.struct_field_names(cname).unwrap_or_default() {
             let key = Ustr::from(&format!("{prefix}.{f}"));
+            let relkey = format!("{rel}{f}");
             match self.embed_field_of_struct(cname, f) {
                 Some(inner) => {
-                    let v = self.materialize_embed(parent, key, inner);
-                    fields.push((f, v));
+                    if self.embed_field_is_nullable(cname, f) {
+                        let v = self.emit_cur(Inst::Field { base: parent, field: key });
+                        out.push((Ustr::from(relkey.as_str()), v));
+                    }
+                    self.collect_embed_slots(parent, key, &format!("{relkey}."), inner, out);
                 }
-                // A flat-enum field stays FLAT in the rebuilt child: consumers
-                // read it as `child["f.#"]`, so re-boxing it under `f` would
-                // hand them a shape they never look at.
                 None => match self.flat_field_of_struct(cname, f) {
                     Some(shape) => {
                         for slot in flat_slot_names(f, &shape) {
                             let src = Ustr::from(&format!("{prefix}.{slot}"));
                             let v = self.emit_cur(Inst::Field { base: parent, field: src });
-                            fields.push((slot, v));
+                            out.push((Ustr::from(&format!("{rel}{slot}")), v));
                         }
                     }
                     None => {
                         let v = self.emit_cur(Inst::Field { base: parent, field: key });
-                        fields.push((f, v));
+                        out.push((Ustr::from(relkey.as_str()), v));
                     }
                 },
             }
-        }
-        if self.is_value_struct(cname) {
-            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
-        } else {
-            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
         }
     }
 
