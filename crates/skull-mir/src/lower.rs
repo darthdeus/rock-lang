@@ -9809,6 +9809,13 @@ impl Builder<'_> {
         let mut tuples = Vec::with_capacity(fields.len());
         for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
             let payload = self.pack(parts[i].clone());
+            // The pairs enum is table-backed when any payload is non-scalar, so a
+            // `nobox` payload has nowhere to live but a box -- the same boundary
+            // `uniform(x: Vec2)` marks with an explicit `materialize`. Here the
+            // compiler mints the box itself and there is no source line to mark,
+            // so it mints the AUTHORIZED one rather than rejecting a program the
+            // hand-written overload accepts.
+            self.authorize_nobox_box(payload);
             let variant_v = self.make_single_payload_variant(enum_name, variant, payload)?;
             let key = self.emit_cur(Inst::Const(Lit::Str(*field)));
             let tup = self.emit_cur(Inst::MakeTuple(vec![key, variant_v]));
@@ -10903,14 +10910,24 @@ impl Builder<'_> {
             return;
         }
         for &a in args {
-            let Inst::MakeValueStruct { name, fields } = &self.f.insts[a] else { continue };
-            let Some(sid) = self.ws.struct_by_name.get(name) else { continue };
-            if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
-                continue;
-            }
-            let (name, fields) = (*name, fields.clone());
-            self.f.insts[a] = Inst::MaterializeValueStruct { name, fields };
+            self.authorize_nobox_box(a);
         }
+    }
+
+    /// Re-mark one implicit nobox box as AUTHORIZED, in place. The single
+    /// conversion point: every boundary the compiler MINTS a sanctioned box at
+    /// goes through here, so "which boxes are authorized" is one list of callers
+    /// rather than a repeated `MakeValueStruct` -> `MaterializeValueStruct`
+    /// rewrite. A no-op on anything that is not an implicit box of a `nobox`
+    /// struct.
+    fn authorize_nobox_box(&mut self, inst: Idx<Inst>) {
+        let Inst::MakeValueStruct { name, fields } = &self.f.insts[inst] else { return };
+        let Some(sid) = self.ws.struct_by_name.get(name) else { return };
+        if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+            return;
+        }
+        let (name, fields) = (*name, fields.clone());
+        self.f.insts[inst] = Inst::MaterializeValueStruct { name, fields };
     }
 
     fn reject_nobox_boxed_call_args(
