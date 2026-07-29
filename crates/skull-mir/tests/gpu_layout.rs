@@ -14,7 +14,9 @@
 use std::sync::LazyLock;
 use ustr::Ustr;
 
-use skull_mir::gpu_layout::{vertex_attrs, AttrKind, VertexAttrs};
+use skull_mir::gpu_layout::{
+    texture_slots, vertex_attrs, AttrKind, SamplerKind, TextureSlots, VertexAttrs,
+};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -117,4 +119,66 @@ fn non_value_struct_rejects() {
     let ws = ws_of("struct Boxed { pos: Vec2 }");
     let e = vertex_attrs(&ws, Ustr::from("Boxed")).expect_err("a boxed struct must reject");
     assert!(format!("{e:?}").contains("value"));
+}
+
+// --- texture slots (P2): field order is the texture unit --------------------
+// The `@textures` group exists so the unit is compiler-assigned. Hand-numbered
+// units are the silent-collision class: two `Pass.inputs` entries sharing a
+// number bind one texture and drop the other, with nothing to report.
+
+fn slots_of(src: &str, struct_name: &str) -> TextureSlots {
+    let ws = ws_of(src);
+    texture_slots(&ws, Ustr::from(struct_name)).expect("slots must compute")
+}
+
+/// bitgun grass's live set, in declaration order.
+#[test]
+fn grass_textures_take_slots_in_field_order() {
+    let t = slots_of(
+        "struct GrassTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }",
+        "GrassTex",
+    );
+    assert_eq!(t.slots.len(), 3);
+    for (i, want) in ["uTexture", "mask_tex", "shadowmap_tex"].iter().enumerate() {
+        assert_eq!(t.slots[i].name.as_str(), *want);
+        assert_eq!(t.slots[i].slot, i as u32, "slot is the field index");
+        assert_eq!(t.slots[i].kind, SamplerKind::Float);
+    }
+}
+
+/// Integer samplers are a distinct kind: an isampler2D read through a float
+/// sampler is undefined, and the id canvases (r32i) depend on the distinction.
+#[test]
+fn int_samplers_are_a_distinct_kind() {
+    let t = slots_of("struct Picker { color: Sampler2D, ids: ISampler2D }", "Picker");
+    assert_eq!(t.slots[0].kind, SamplerKind::Float);
+    assert_eq!(t.slots[1].kind, SamplerKind::Int);
+    assert_eq!(t.slots[1].slot, 1);
+}
+
+/// A non-sampler field in the group rejects: it would silently consume no unit
+/// and shift every following slot off by one.
+#[test]
+fn non_sampler_field_rejects() {
+    let ws = ws_of("struct Bad { tex: Sampler2D, scale: float }");
+    let e = texture_slots(&ws, Ustr::from("Bad")).expect_err("a float field must reject");
+    let msg = format!("{e:?}");
+    assert!(msg.contains("scale"), "the error must name the offending field: {msg}");
+}
+
+/// Samplers are opaque handles, not uploadable bytes, so the group is a plain
+/// struct. A `value` struct would claim a C layout that cannot exist.
+#[test]
+fn value_struct_rejects() {
+    let ws = ws_of("value Bad { tex: Sampler2D }");
+    let e = texture_slots(&ws, Ustr::from("Bad")).expect_err("a value struct must reject");
+    assert!(format!("{e:?}").contains("value"));
+}
+
+/// An empty group is a declaration with no effect -- reject rather than emit a
+/// zero-sampler binding group.
+#[test]
+fn empty_group_rejects() {
+    let ws = ws_of("struct Empty { }");
+    assert!(texture_slots(&ws, Ustr::from("Empty")).is_err());
 }

@@ -1,10 +1,13 @@
-//! The GPU attribute view of a value struct: what each field is as a vertex
-//! attribute, and which location it binds to.
+//! The GPU binding view of a struct: what each field binds as, and where.
+//!
+//! Two groups so far, both keyed on field ORDER -- vertex attributes and their
+//! locations ([`vertex_attrs`], P1), and `@textures` samplers and their units
+//! ([`texture_slots`], P2).
 //!
 //! Part of the target-neutral interface artifact
-//! (`docs/shader-binding-layout-plan.md` P1). [`AttrKind`] is a scalar kind +
-//! arity, never a GLSL type name (`GlslTy::name()` prints `vec4`), so a WGSL or
-//! Metal backend spells the same attribute its own way.
+//! (`docs/shader-binding-layout-plan.md`). [`AttrKind`] and [`SamplerKind`] are
+//! scalar kind + arity, never a GLSL type name (`GlslTy::name()` prints
+//! `vec4`), so a WGSL or Metal backend spells the same binding its own way.
 //!
 //! # This module does NOT own memory layout
 //!
@@ -100,6 +103,98 @@ impl VertexAttrs {
     pub fn attr_sizes(&self) -> Vec<u32> {
         self.attrs.iter().map(|a| a.kind.components()).collect()
     }
+}
+
+/// A sampler's scalar family. Distinct because reading an integer texture
+/// through a float sampler is undefined, not merely lossy -- the r32i id
+/// canvases depend on the difference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SamplerKind {
+    Float,
+    Int,
+}
+
+/// One texture binding: a field of the `@textures` group struct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TexSlot {
+    pub name: Ustr,
+    pub kind: SamplerKind,
+    /// Texture unit. Compiler-assigned from field order, which is the point of
+    /// the group: a hand-numbered unit can collide with another and silently
+    /// bind one texture over the other.
+    pub slot: u32,
+}
+
+/// The texture bindings of one `@textures` group, in slot order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextureSlots {
+    pub struct_name: Ustr,
+    pub slots: Vec<TexSlot>,
+}
+
+impl TextureSlots {
+    /// Sampler names in slot order -- what a GL backend needs to point each
+    /// sampler uniform at its unit once, at link time.
+    pub fn names(&self) -> Vec<Ustr> {
+        self.slots.iter().map(|s| s.name).collect()
+    }
+}
+
+fn sampler_kind(ws: &Workspace, ty: TyId) -> Option<SamplerKind> {
+    match ty_expr(ws, ty) {
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => match n.as_str() {
+            "Sampler2D" => Some(SamplerKind::Float),
+            "ISampler2D" => Some(SamplerKind::Int),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The texture slots of the `@textures` group struct named `struct_name`.
+///
+/// Field order is slot order, the same contract `@attr` uses for locations.
+pub fn texture_slots(ws: &Workspace, struct_name: Ustr) -> Result<TextureSlots, CompilerError> {
+    let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
+        return Err(CompilerError::new_no_location(format!(
+            "texture slots: no struct named `{struct_name}`"
+        )));
+    };
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+
+    if sd.is_value {
+        return Err(err(
+            sd.name_span,
+            format!(
+                "texture slots: `{struct_name}` must be a plain struct, not a `value` struct -- \
+                 samplers are opaque handles, not uploadable bytes, so the group has no C layout"
+            ),
+        ));
+    }
+    if sd.fields.is_empty() {
+        return Err(err(
+            sd.name_span,
+            format!("texture slots: `{struct_name}` has no fields -- an empty texture group binds nothing"),
+        ));
+    }
+
+    let mut slots = Vec::with_capacity(sd.fields.len());
+    for (i, fd) in sd.fields.iter().enumerate() {
+        let Some(kind) = sampler_kind(ws, fd.ty) else {
+            return Err(err(
+                fd.span,
+                format!(
+                    "texture slots: `{struct_name}` field `{}` is not a sampler (want \
+                     Sampler2D/ISampler2D) -- a non-sampler field consumes no unit and shifts \
+                     every slot after it",
+                    fd.name
+                ),
+            ));
+        };
+        slots.push(TexSlot { name: fd.name, kind, slot: i as u32 });
+    }
+
+    Ok(TextureSlots { struct_name, slots })
 }
 
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {

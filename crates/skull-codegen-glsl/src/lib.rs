@@ -26,7 +26,7 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
 use skull_mir::cfg::reverse_postorder;
-use skull_mir::gpu_layout::{AttrKind, vertex_attrs};
+use skull_mir::gpu_layout::{AttrKind, SamplerKind, texture_slots, vertex_attrs};
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
@@ -1625,6 +1625,9 @@ struct EntryShape {
     /// `void main()` mode: presence switches emission to `void main()` with a
     /// return-struct destructure (vertex varyings, or MRT fragment outputs).
     main_out: Option<MainOut>,
+    /// The `@textures` group's struct name for this stage, if any. Carried so
+    /// the emission API can hand the engine the slot order.
+    texture_group: Option<Ustr>,
 }
 
 /// The default fullscreen vertex stage -- identical to the hand-written
@@ -1658,7 +1661,19 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
     let mut uniform_fields: Vec<(Ustr, GlslTy)> = Vec::new();
     let mut samplers: Vec<(usize, Ustr, GlslTy)> = Vec::new();
     let mut tc = None;
+    let mut texture_params: Vec<usize> = Vec::new();
+    let mut texture_group: Option<Ustr> = None;
     for (i, pd) in f.param_decls.iter().enumerate() {
+        if has_anno(&pd.annotations, "textures") {
+            reject_conflicting_texture_role(&pd.annotations, pd.name, span, "entry")?;
+            if texture_group.is_some() {
+                return Err(err(span, "shader entry: at most one @textures group param is allowed -- one group is the binding set"));
+            }
+            texture_group = nominal_name(ws, pd.ty);
+            samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "entry")?);
+            texture_params.push(i);
+            continue;
+        }
         match glsl_ty(ws, pd.ty, span, "parameter") {
             Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
             Ok(GlslTy::Vec2) => {
@@ -1716,11 +1731,12 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
         }
     }
     Ok(EntryShape {
-        global_params: uniform_param.into_iter().collect(),
+        global_params: uniform_param.into_iter().chain(texture_params).collect(),
         uniform_fields,
         samplers,
         arrays: Vec::new(),
         main_out: None,
+        texture_group,
     })
 }
 
@@ -1739,6 +1755,14 @@ pub fn emit_shader_entry(
 pub struct ShaderEmission {
     pub source: String,
     pub dependencies: Vec<FuncRef>,
+    /// The program's `@textures` sampler names, in slot order -- slot N is
+    /// index N. Empty when the program declares no group.
+    ///
+    /// This is the whole compiler-to-engine channel for texture binding. GLES
+    /// 3.0 has no `layout(binding=)` (that is GL 4.2 / GLES 3.1), so the engine
+    /// still needs the NAME once, to point each sampler uniform at its unit at
+    /// link time; after that it binds by slot and never by name again.
+    pub texture_slots: Vec<Ustr>,
 }
 
 pub fn emit_shader_entry_with_dependencies(
@@ -1828,7 +1852,13 @@ pub fn emit_shader_entry_with_dependencies(
     );
     let mut dependencies = reach.order;
     dependencies.push(fref);
-    Ok(ShaderEmission { source, dependencies })
+    let texture_slots = program_texture_slots(
+        ws,
+        shape.texture_group,
+        has_bare_sampler(&shape.samplers, &shape.global_params),
+        f.name_span,
+    )?;
+    Ok(ShaderEmission { source, dependencies, texture_slots })
 }
 
 /// Emission profile (docs/shaders.md): the `#version` line and
@@ -1866,6 +1896,11 @@ struct VertexShape {
     attrs: Vec<(Ustr, GlslTy, u32)>,
     /// `@uniform` struct param indices (at most one).
     uniform_params: Vec<usize>,
+    /// `@textures` group param indices -- see the field of the same name on
+    /// `FragShape`. Vertex texture fetch is legal in GL 3.3 / GLES 3.0.
+    texture_params: Vec<usize>,
+    /// The `@textures` group's struct name, if the stage declares one.
+    texture_group: Option<Ustr>,
     /// Uniform fields, declaration order.
     uniforms: Vec<(Ustr, GlslTy)>,
     /// Sampler params (rare in vertex, but legal).
@@ -1887,6 +1922,12 @@ struct FragShape {
     /// The varyings-struct param index (always 0 -- the first param).
     varyings_param: usize,
     uniform_params: Vec<usize>,
+    /// `@textures` group param indices. Their fields are already expanded into
+    /// `samplers`; the params themselves render as bare globals like a uniform
+    /// struct, so they belong in `global_params`.
+    texture_params: Vec<usize>,
+    /// The `@textures` group's struct name, if the stage declares one.
+    texture_group: Option<Ustr>,
     uniforms: Vec<(Ustr, GlslTy)>,
     samplers: Vec<(usize, Ustr, GlslTy)>,
     /// `UniformArray<T>` params: (index, name, element type, @size capacity).
@@ -1965,6 +2006,79 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
     Ok(out)
 }
 
+/// The program's texture slot names, in slot order.
+///
+/// Two rules keep a slot number meaningful for the whole program, both
+/// rejections rather than silent numbering:
+///   - a group and a bare `Sampler2D` param cannot coexist, because the bare
+///     one keeps a CPU-assigned unit that can land on a compiler-assigned slot;
+///   - if both stages declare a group it must be the SAME struct, the rule the
+///     plan already sets for `@uniform`. Units are program-scoped in GL.
+fn program_texture_slots(
+    ws: &Workspace,
+    group: Option<Ustr>,
+    has_bare_sampler: bool,
+    span: Span,
+) -> Result<Vec<Ustr>, CompilerError> {
+    let Some(g) = group else { return Ok(Vec::new()) };
+    if has_bare_sampler {
+        return Err(err(span, format!(
+            "shader: `{g}` is a @textures group, so every sampler must join it -- a bare Sampler2D param keeps a CPU-assigned unit, which can collide with a compiler-assigned slot"
+        )));
+    }
+    Ok(texture_slots(ws, g).map_err(|e| err(span, e.message))?.names())
+}
+
+/// Samplers that are NOT part of a `@textures` group -- bare params, still
+/// bound by name and a hand-assigned unit on the CPU side.
+fn has_bare_sampler(samplers: &[(usize, Ustr, GlslTy)], texture_params: &[usize]) -> bool {
+    samplers.iter().any(|(i, _, _)| !texture_params.contains(i))
+}
+
+/// How this backend spells a `SamplerKind`.
+fn sampler_glsl_ty(k: SamplerKind) -> GlslTy {
+    match k {
+        SamplerKind::Float => GlslTy::Sampler2D,
+        SamplerKind::Int => GlslTy::ISampler2D,
+    }
+}
+
+/// A `@textures` group param expands to one sampler declaration per field, at
+/// the unit the artifact assigned from field order. Every entry carries the
+/// GROUP's param index: the param itself is dropped from the GLSL signature and
+/// its field reads render as bare globals, exactly like a `@uniform` struct.
+fn texture_group_samplers(
+    ws: &Workspace,
+    ty: TyId,
+    param_index: usize,
+    span: Span,
+    stage: &str,
+) -> Result<Vec<(usize, Ustr, GlslTy)>, CompilerError> {
+    let sname = nominal_name(ws, ty)
+        .ok_or_else(|| err(span, format!("shader {stage}: an @textures param must be a struct")))?;
+    let ts = texture_slots(ws, sname).map_err(|e| err(span, e.message))?;
+    Ok(ts.slots.iter().map(|s| (param_index, s.name, sampler_glsl_ty(s.kind))).collect())
+}
+
+/// `@textures` is exclusive with the other param roles -- a group is a binding
+/// set of its own, not attribute or uniform-block data.
+fn reject_conflicting_texture_role(
+    annos: &[bone_semantic::hir::Annotation],
+    name: Ustr,
+    span: Span,
+    stage: &str,
+) -> Result<(), CompilerError> {
+    for other in ["attr", "instance", "uniform"] {
+        if has_anno(annos, other) {
+            return Err(err(
+                span,
+                format!("shader {stage}: param `{name}` has conflicting role markers (@textures and @{other})"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// How this backend spells an `AttrKind`. The artifact stays target-neutral
 /// (kind + arity); GLSL names live here, and a WGSL or Metal emitter writes its
 /// own version of this one function.
@@ -1985,6 +2099,8 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let span = f.name_span;
     let (mut per_vertex, mut instanced, mut uniform_params, mut samplers, mut arrays) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut texture_params = Vec::new();
+    let mut texture_group: Option<Ustr> = None;
     for (i, pd) in f.param_decls.iter().enumerate() {
         if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
             let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
@@ -1992,6 +2108,16 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
                 pd.name
             )))?;
             arrays.push((i, pd.name, elem, n));
+            continue;
+        }
+        if has_anno(&pd.annotations, "textures") {
+            reject_conflicting_texture_role(&pd.annotations, pd.name, span, "vertex")?;
+            if texture_group.is_some() {
+                return Err(err(span, "shader vertex: at most one @textures group param is allowed -- one group is the binding set"));
+            }
+            texture_group = nominal_name(ws, pd.ty);
+            samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "vertex")?);
+            texture_params.push(i);
             continue;
         }
         match glsl_ty(ws, pd.ty, span, "parameter") {
@@ -2050,7 +2176,17 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let varyings_ty = f
         .return_ty
         .ok_or_else(|| err(span, "shader vertex: entry must return a varyings value struct"))?;
-    Ok(VertexShape { attr_params, attrs, uniform_params, uniforms, samplers, arrays, varyings_ty })
+    Ok(VertexShape {
+        attr_params,
+        attrs,
+        uniform_params,
+        texture_params,
+        texture_group,
+        uniforms,
+        samplers,
+        arrays,
+        varyings_ty,
+    })
 }
 
 /// Classify the varyings struct: a required `position: Vec4` field (-> gl_Position,
@@ -2108,6 +2244,8 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     }
     let (mut uniform_params, mut uniforms, mut samplers, mut arrays) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut texture_params = Vec::new();
+    let mut texture_group: Option<Ustr> = None;
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
         if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
             let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
@@ -2115,6 +2253,16 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
                 pd.name
             )))?;
             arrays.push((i, pd.name, elem, n));
+            continue;
+        }
+        if has_anno(&pd.annotations, "textures") {
+            reject_conflicting_texture_role(&pd.annotations, pd.name, span, "fragment")?;
+            if texture_group.is_some() {
+                return Err(err(span, "shader fragment: at most one @textures group param is allowed -- one group is the binding set"));
+            }
+            texture_group = nominal_name(ws, pd.ty);
+            samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "fragment")?);
+            texture_params.push(i);
             continue;
         }
         match glsl_ty(ws, pd.ty, span, "parameter") {
@@ -2163,7 +2311,17 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         }
         _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)")),
     };
-    Ok(FragShape { varyings_param: 0, uniform_params, uniforms, samplers, arrays, outputs, single_out })
+    Ok(FragShape {
+        varyings_param: 0,
+        uniform_params,
+        texture_params,
+        texture_group,
+        uniforms,
+        samplers,
+        arrays,
+        outputs,
+        single_out,
+    })
 }
 
 /// Reject GPU builtins reached from the wrong stage: frag_coord/fwidth/discard
@@ -2271,10 +2429,17 @@ fn emit_vertex_stage(
     varyings: &VaryingsShape,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let shape = EntryShape {
-        global_params: v.attr_params.iter().copied().chain(v.uniform_params.iter().copied()).collect(),
+        global_params: v
+            .attr_params
+            .iter()
+            .copied()
+            .chain(v.uniform_params.iter().copied())
+            .chain(v.texture_params.iter().copied())
+            .collect(),
         uniform_fields: v.attrs.iter().map(|&(n, t, _)| (n, t)).chain(v.uniforms.iter().copied()).collect(),
         samplers: v.samplers.clone(),
         arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
+        texture_group: v.texture_group,
         main_out: Some(MainOut {
             fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect(),
             position_is_gl: true,
@@ -2322,11 +2487,15 @@ fn emit_fragment_stage(
         position_is_gl: false,
     });
     let shape = EntryShape {
-        global_params: std::iter::once(fs.varyings_param).chain(fs.uniform_params.iter().copied()).collect(),
+        global_params: std::iter::once(fs.varyings_param)
+            .chain(fs.uniform_params.iter().copied())
+            .chain(fs.texture_params.iter().copied())
+            .collect(),
         uniform_fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).chain(fs.uniforms.iter().copied()).collect(),
         samplers: fs.samplers.clone(),
         arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
         main_out,
+        texture_group: fs.texture_group,
     };
     let (mf, helpers, dependencies) = lower_reach_helpers(ws, scx, fref, Stage::Fragment)?;
     reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
@@ -2457,7 +2626,18 @@ pub fn emit_shader_pipeline_with_dependencies(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    Ok(ShaderEmission { source, dependencies })
+    let group = match (vshape.texture_group, fshape.texture_group) {
+        (Some(v), Some(f)) if v != f => {
+            return Err(err(vf.name_span, format!(
+                "shader pipeline: the stages declare different @textures groups (`{v}` and `{f}`) -- texture units are program-scoped, so one program has one group"
+            )));
+        }
+        (v, f) => v.or(f),
+    };
+    let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
+        || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
+    let texture_slots = program_texture_slots(ws, group, bare, vf.name_span)?;
+    Ok(ShaderEmission { source, dependencies, texture_slots })
 }
 
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
