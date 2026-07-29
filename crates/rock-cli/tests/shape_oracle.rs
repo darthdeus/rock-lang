@@ -799,6 +799,92 @@ const SEEDS: &[SeedCase] = &[
         expect: Expect::Correct,
         gap: Some("H2 FIXED: a destructure binding rebuilds from the parent's leaves"),
     },
+    // --- mechanism A: premise-RED, the two broken CONTEXTS -----------------
+    SeedCase {
+        name: "nobox_nullable_struct_field",
+        file: "nobox_nullable_struct_field.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "`value_shape_rec` gains a `Nullable` arm building \
+                        `FieldShape::Nested(sub)` with `sub.nullable = true`",
+        },
+        gap: Some("A: nullable nobox field of a value struct (the primary site)"),
+    },
+    SeedCase {
+        name: "nobox_nullable_struct_field_control",
+        file: "nobox_nullable_struct_field_control.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: Some("A control: scopes it to the `?`, not to nesting"),
+    },
+    SeedCase {
+        name: "nobox_nullable_enum_payload",
+        file: "nobox_nullable_enum_payload.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "`scalar_c_type`/`enum_value_shape` gain the same arm -- a \
+                        SECOND constructor, so the struct-field fix alone leaves this",
+        },
+        gap: Some("A: nullable nobox enum payload"),
+    },
+    SeedCase {
+        name: "nobox_nullable_vec_element",
+        file: "nobox_nullable_vec_element.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "comes along with `value_shape_rec` -- this proves the claim \
+                        that the collection-element context has no constructor of its own",
+        },
+        gap: Some("A: nullable nobox Vec element"),
+    },
+    // --- mechanism A: CONSUMER guards between step and step ------------------
+    // Each rejects TODAY for the UPSTREAM reason (no shape exists at all). The
+    // moment the struct-field arm lands, a nested-nullable shape reaches these
+    // consumers for the first time in the compiler's history and the drift guard
+    // forces a verdict on each.
+    SeedCase {
+        name: "nobox_nested_nullable_leaf_paths",
+        file: "nobox_nested_nullable_leaf_paths.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "`leaf_paths_rec` (:170) names the nested presence leaf -- it \
+                        never consults `sub.nullable` today",
+        },
+        gap: Some("A consumer: `leaf_paths_rec`, Vec column naming"),
+    },
+    SeedCase {
+        name: "nobox_nested_nullable_leaf_params",
+        file: "nobox_nested_nullable_leaf_params.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "`leaf_param_names` (:1944) names the nested presence leaf -- it \
+                        never consults `sub.nullable` today",
+        },
+        gap: Some("A consumer: `leaf_param_names`, the scalar ABI"),
+    },
+    SeedCase {
+        name: "nobox_nested_nullable_embed_group",
+        file: "nobox_nested_nullable_embed_group.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "`embed_group` (:10484) emits a part for the nested presence \
+                        leaf -- a SEVENTH consumer the matrix's audit missed",
+        },
+        gap: Some("A consumer: `embed_group`, shared with the H1/H2 embed machinery"),
+    },
     SeedCase {
         name: "nobox_vec_combinator_element",
         file: "nobox_vec_combinator_element.rock",

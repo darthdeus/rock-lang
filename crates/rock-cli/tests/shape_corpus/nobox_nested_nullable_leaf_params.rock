@@ -1,0 +1,21 @@
+// CONSUMER GUARD -- `leaf_param_names` (:1944). The scalar ABI names one Lua
+// param per leaf; the `Nested(sub)` arm recurses without consulting
+// `sub.nullable`, so a nested presence leaf would get no NAME while
+// `repr_to_leaves` still passes a value for it -- an off-by-one across the whole
+// boundary.
+//
+// Rejects TODAY upstream; the guard is for after the struct-field arm lands.
+
+nobox value P { x: int, y: int }
+nobox value Outer { a: P?, b: int }
+
+fn seed(n: int) -> int { return n }
+
+fn consume(o: Outer) -> int { return (o.a?.x ?? -1) + o.b }
+
+@test(output = "4 8")
+fn probe_leaf_params_across_a_call_boundary() {
+    let present = Outer { a: P { x: seed(1), y: 2 }, b: 3 }
+    let absent = Outer { a: null, b: 9 }
+    print("{consume(present)} {consume(absent)}")
+}

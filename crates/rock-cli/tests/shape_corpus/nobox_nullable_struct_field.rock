@@ -1,0 +1,24 @@
+// Mechanism A, the PRIMARY defect site: a nullable `nobox` field of a value
+// struct. `value_shape_rec` (skull-mir/src/lower.rs:621) matches only
+// `Builtin(Int|Float|Bool)` and `App{Nominal}`; a `TypeExpr::Nullable` field type
+// falls to `_ => { visiting.pop(); return None; }`, which DISQUALIFIES the whole
+// struct from having a `ValueShape`. It then falls back to a box, which the
+// materialization verifier refuses.
+//
+// The gap is language-wide, not nobox-specific: the unmarked twin compiles and
+// emits a real `P_ct(..)` (box + nil sentinel is the only encoding for a nullable
+// value struct in a nested position). `nobox` only makes it loud. Control in
+// `nobox_nullable_struct_field_control.rock`.
+
+nobox value P { x: int, y: int }
+nobox value Outer { a: P?, b: int }
+
+fn seed(n: int) -> int { return n }
+
+// Today: REJECT. The ABSENT arm is fine (no ctor to materialize) and is pinned
+// in the control; it is the PRESENT payload that has nowhere to live.
+@test(output = "1 2 3")
+fn probe_nullable_nobox_field_present() {
+    let o = Outer { a: P { x: seed(1), y: 2 }, b: 3 }
+    print("{o.a?.x} {o.a?.y} {o.b}")
+}
