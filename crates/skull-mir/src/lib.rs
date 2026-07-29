@@ -18,3 +18,4 @@ pub mod mangle;
 pub mod mir;
 pub mod reach;
 pub mod verdict;
+pub mod vertex_plan;
