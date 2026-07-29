@@ -1407,6 +1407,17 @@ impl Emitter<'_> {
                 let (a, b) = (self.render_val(*a)?, self.render_val(*b)?);
                 format!("((({a} % {b}) + {b}) % {b})")
             }
+            // LuaJIT's `bit` library and JS bitwise operators agree exactly:
+            // both coerce to int32, mask the shift count to 5 bits, and return
+            // a SIGNED 32-bit result. `Shr` is the one that needs help --
+            // `bit.rshift` shifts in zeros but renormalizes to signed, so JS
+            // needs the logical `>>>` plus a `| 0` to come back signed.
+            Inst::BitAnd(a, b) => bin(a, "&", b, self)?,
+            Inst::BitOr(a, b) => bin(a, "|", b, self)?,
+            Inst::BitXor(a, b) => bin(a, "^", b, self)?,
+            Inst::Shl(a, b) => bin(a, "<<", b, self)?,
+            Inst::Shr(a, b) => format!("(({} >>> {}) | 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::BitNot(x) => format!("(~{})", self.render_val(*x)?),
             Inst::Call { func, args } => self.render_call(*func, args)?,
             // A capture-free hoisted closure: a bare reference to its top-level
             // fn (`convert_closures` emits `Inst::Global(<name>__lambda<k>)`).
