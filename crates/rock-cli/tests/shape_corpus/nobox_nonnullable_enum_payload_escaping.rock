@@ -1,0 +1,33 @@
+// CONTROL for `nobox_nullable_enum_payload`, and it FALSIFIES that case's filing.
+// The payload here is NON-nullable, and it rejects identically -- so the `?` is
+// not the discriminant and this is not mechanism A.
+//
+// Neither enum representation has a place for a multi-leaf value payload:
+// `enum_value_shape` wants ONE scalar C type per slot (`scalar_c_type` matches
+// only Int/Float/Bool) and `EnumFlatShape` wants ONE dynamically-typed slot per
+// position. A `nobox P` is two leaves. Giving `scalar_c_type` a `Nullable` arm
+// cannot fix that, so the original `flip_when` was unachievable as written.
+//
+// The enum must ESCAPE. With a local it is fully scalarized (`c0 = r1; c1 = 2`,
+// no enum box at all), so the payload machinery is never reached and the probe
+// reads green while testing nothing -- verified by reading the emitted Lua.
+
+nobox value P { x: int, y: int }
+enum E { Has(P), Nope }
+
+global G: E = E::Nope
+
+fn seed(n: int) -> int { return n }
+
+fn show(e: E) -> string {
+    match e {
+        E::Has(p) => return "{p.x} {p.y}",
+        E::Nope => return "nope",
+    }
+}
+
+@test(output = "1 2")
+fn probe_nonnullable_nobox_enum_payload_escaping() {
+    G = E::Has(P { x: seed(1), y: 2 })
+    print(show(G))
+}

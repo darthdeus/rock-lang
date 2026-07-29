@@ -823,10 +823,26 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::Vanilla,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
-            flip_when: "`scalar_c_type`/`enum_value_shape` gain the same arm -- a \
-                        SECOND constructor, so the struct-field fix alone leaves this",
+            flip_when: "an enum repr gains a place for a MULTI-LEAF value payload. \
+                        NOT mechanism A and not a `Nullable` arm: the non-nullable \
+                        control rejects identically, and neither repr can hold two \
+                        leaves in one slot",
         },
-        gap: Some("A: nullable nobox enum payload"),
+        gap: Some("nobox value as an enum payload -- unsupported, nullable or not"),
+    },
+    // The control that falsified the filing above. Same rejection without the `?`,
+    // so the discriminant is the multi-leaf payload, not the presence tag.
+    SeedCase {
+        name: "nobox_nonnullable_enum_payload_escaping",
+        file: "nobox_nonnullable_enum_payload_escaping.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "same as its nullable twin -- both flip together, which is \
+                        the point of keeping the pair",
+        },
+        gap: Some("control: proves the enum-payload gap is not nullability"),
     },
     SeedCase {
         name: "nobox_nullable_vec_element",
@@ -835,8 +851,11 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::Vanilla,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
-            flip_when: "comes along with `value_shape_rec` -- this proves the claim \
-                        that the collection-element context has no constructor of its own",
+            flip_when: "a column set can carry a TOP-LEVEL nullable element, i.e. a \
+                        presence column. `leaf_paths_rec` handles a nullable NESTED \
+                        shape only and says so outright; `vec_column_elem_of` bails \
+                        at `_ => None` on the `Nullable` element before any shape is \
+                        built. This one IS mechanism A, but it is a build, not an arm",
         },
         gap: Some("A: nullable nobox Vec element"),
     },
@@ -868,10 +887,26 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::Vanilla,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
-            flip_when: "`embed_group` (:10484) emits a part for the nested presence \
-                        leaf -- a SEVENTH consumer the matrix's audit missed",
+            flip_when: "`embed_leaf_values`' literal walk contributes a nested VALUE \
+                        field's own leaves instead of one boxed leaf. NOT \
+                        `embed_group` (it reads, and recurses correctly) and NOT \
+                        nullability -- the non-nullable control rejects identically",
         },
-        gap: Some("A consumer: `embed_group`, shared with the H1/H2 embed machinery"),
+        gap: Some("nested value field inside an embed field -- the splice, not the read"),
+    },
+    // The control that falsified the filing above. Two narrower controls place the
+    // boundary: the same nesting in a plain global works, and an embed of an
+    // all-primitive nobox works.
+    SeedCase {
+        name: "nobox_nonnullable_embed_nested_value",
+        file: "nobox_nonnullable_embed_nested_value.rock",
+        surface: Surface::Luajit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::SpuriousReject {
+            names: "survived lowering",
+            flip_when: "same as its nullable twin -- both flip together",
+        },
+        gap: Some("control: proves the embed-nesting gap is not nullability"),
     },
     SeedCase {
         name: "nobox_vec_combinator_element",
