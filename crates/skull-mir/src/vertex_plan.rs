@@ -105,6 +105,21 @@ impl VertexPlan {
             }
             want += s.kind.components() as usize * 4;
         }
+        // And the attributes must SPAN the stride. `validate_layout` checks
+        // `sum(sizes) == stride`, so trailing padding is as undescribable as a
+        // gap between attributes -- without this the view emits a stride the
+        // engine then rejects at mesh creation, turning a compile-time
+        // representability fact into a runtime failure.
+        if want != self.byte_stride {
+            return Err(format!(
+                "`{}` has a {}-byte stride but its attributes span {want} bytes -- the \
+                 float-unit view states only component counts and a stride, so it cannot \
+                 describe the {} trailing bytes",
+                self.struct_name,
+                self.byte_stride,
+                self.byte_stride.saturating_sub(want)
+            ));
+        }
         Ok(())
     }
 

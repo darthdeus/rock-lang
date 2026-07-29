@@ -187,3 +187,40 @@ fn a_slot_off_its_cumulative_position_rejects_the_float_unit_view() {
     assert!(real.float_unit_sizes().is_ok());
     assert!(real.float_unit_stride().is_ok());
 }
+
+/// TRAILING padding is the other half of the same representability hole. The
+/// float-unit view states component counts and a stride; `stone-rs`'s
+/// `validate_layout` then checks `sum(sizes) == stride`. So a struct whose
+/// stride exceeds its attributes' extent is not describable by the view either
+/// -- the per-slot start check above passes it, and the failure lands at mesh
+/// creation as a runtime reject rather than at compile time.
+///
+/// Hand-built for the same reason as the sibling: every admitted kind is
+/// 4-byte aligned, so no source struct has trailing padding today.
+#[test]
+fn trailing_padding_rejects_the_float_unit_view() {
+    let padded = VertexPlan {
+        struct_name: Ustr::from("Padded"),
+        slots: vec![AttrSlot {
+            name: Ustr::from("a"),
+            location: 0,
+            kind: AttrKind::F32,
+            byte_offset: 0,
+        }],
+        // One float of attributes, two floats of stride.
+        byte_stride: 8,
+    };
+
+    let err = padded
+        .float_unit_sizes()
+        .expect_err("attributes that do not span the stride must not yield a float-unit view");
+    assert!(err.contains("Padded"), "the rejection must name the struct, got: {err}");
+    assert!(
+        padded.float_unit_stride().is_err(),
+        "the stride half must reject too -- it is the half that would be believed"
+    );
+
+    // Positive control: a plan whose attributes exactly span its stride.
+    let ws = ws_of(SHAPES);
+    assert!(vertex_plan(&ws, Ustr::from("Grass")).expect("Grass").float_unit_sizes().is_ok());
+}
