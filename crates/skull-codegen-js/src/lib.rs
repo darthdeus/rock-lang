@@ -1454,10 +1454,6 @@ function stone_measure_text_js(fontId, text, scale) {
   if (lines > 1) h = (lines - 1) * f.em * Math.abs(scale) * 1.2 + f.maxH * Math.abs(scale);
   return [w * scale, h];
 }
-function stone_measure_text_for(fontId, text, scale, ow, oh) {
-  var r = stone_measure_text_js(fontId, text, scale);
-  ow[0] = r[0]; oh[0] = r[1];
-}
 // Baseline = max TOP-based bearing_y over the text's glyphs, * |scale|.
 function stone_get_text_baseline_for(fontId, text, scale) {
   var f = __sw_font(fontId);
