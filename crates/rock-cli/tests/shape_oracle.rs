@@ -617,9 +617,11 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_coalesce_at_ctor_field.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::LoudReject {
-            names: "survived lowering",
-        },
+        // Was an M5 GAP and is now CORRECT: `fold_never_nil_compares` made the
+        // coalesce's box eliminable, so the nobox value stops surviving lowering.
+        // This is the item-2 trace confirmed by a fix -- the mechanism was never the
+        // packing, it was whether SROA could forward the pack away.
+        expect: Expect::Correct,
         gap: Some("M3: `??` recovering a nullable nobox at a ctor field (LIVE)"),
     },
     SeedCase {
@@ -2125,14 +2127,15 @@ const EMIT_SEEDS: &[EmitSeed] = &[
         file: "emit_call_boundary.rock",
         boxes: 0,
     },
-    // The GC-carrying tier through a `Map<string, P?>` -- a real box is owed here
-    // (a Map value is a Lua table slot), but THREE is not one, and one of them is
-    // fed straight into a `== nil` test that cannot be false. This count is the
-    // finding, and the value oracle reads the same program as CORRECT.
+    // The GC-carrying tier through a `Map<string, P?>`. A real box IS owed here (a
+    // Map value is a Lua table slot); it used to cost three, one of them fed
+    // straight into a `== nil` test that could not be false. `fold_never_nil_compares`
+    // removed that one. The remaining two are the store and the read's
+    // re-materialization -- still one more than owed, and still a live lead.
     EmitSeed {
         name: "nullable_map_roundtrip",
         file: "emit_nullable_map_roundtrip.rock",
-        boxes: 3,
+        boxes: 2,
     },
 ];
 
@@ -2252,6 +2255,17 @@ fn the_emitted_shape_holds_the_materialization_invariants() {
     println!("{report}");
 
     assert!(complaints.is_empty(), "{report}\n{}", complaints.join("\n"));
+
+    // A materialization fed STRAIGHT into `== nil` is dead twice over: a freshly
+    // built cdata/table is never nil, so the box is wasted and the branch cannot be
+    // taken. The value oracle reads every one of these as CORRECT -- the answer IS
+    // right -- which is exactly the blind spot this rung exists to cover.
+    assert!(
+        dead_compares.is_empty(),
+        "{report}\n{} shape(s) box a value only to compare it against nil. The box \
+         and the branch are both dead; a fresh ctor is never nil.",
+        dead_compares.len()
+    );
 }
 
 // GLSL has NO generated rung, and that is a property of the target rather than a
