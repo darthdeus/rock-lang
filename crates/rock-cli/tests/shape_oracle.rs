@@ -403,6 +403,15 @@ enum Expect {
     LoudReject {
         names: &'static str,
     },
+    /// A rejection that is owed to NOTHING: the program is sound and the compiler
+    /// refuses it anyway. Observed as LOUD REJECT today, so it passes; `flip_when`
+    /// says what makes the diagnostic go away, and the case goes red then, forcing
+    /// the same-commit update. The `LoudReject`/`SilentReject` pair cannot express
+    /// this -- both assume the rejection is deserved.
+    SpuriousReject {
+        names: &'static str,
+        flip_when: &'static str,
+    },
 }
 
 struct SeedCase {
@@ -517,7 +526,7 @@ const SEEDS: &[SeedCase] = &[
         gap: Some("GLSL locals inherit nobox repr (fixed, `is_nobox_struct` gates on `values_first_class`)"),
     },
     SeedCase {
-        name: "shader_registration_unmarked",
+        name: "shader_registration_fn_body_unmarked",
         file: "shader_registration_fn_value.rock",
         surface: Surface::Emit,
         stdlib: StdlibVariant::Vanilla,
@@ -525,17 +534,39 @@ const SEEDS: &[SeedCase] = &[
         gap: None,
     },
     SeedCase {
-        name: "shader_registration_vec2_marked",
+        name: "shader_registration_fn_body_vec2_marked",
         file: "shader_registration_fn_value.rock",
         surface: Surface::Emit,
         stdlib: StdlibVariant::Vec2Nobox,
-        expect: Expect::LoudReject {
+        expect: Expect::SpuriousReject {
             names: "cannot be taken as a fn value",
+            flip_when: "`reject_nobox_fn_taken_by_value` stops matching a \
+                        compile-time expansion's argument position (`rock_shader` \
+                        lowers its arg to the entry NAME) -- expect Correct",
         },
         gap: Some(
-            "NEW: marking `Vec2` rejects every in-game `rock_shader(<entry>)` \
-             registration (lambda wrapper is the prescribed fix)",
+            "NEW: `rock_shader(<entry>)` in a FN BODY rejects under marking; the \
+             global-init form does not, and the fn is never taken by value",
         ),
+    },
+    SeedCase {
+        name: "shader_registration_global_init_unmarked",
+        file: "shader_registration_global_init.rock",
+        surface: Surface::Emit,
+        stdlib: StdlibVariant::Vanilla,
+        expect: Expect::Correct,
+        gap: None,
+    },
+    SeedCase {
+        // The control that makes the spelling the discriminant. Without it the
+        // fn-body rejection reads as "marking costs a lambda per registration",
+        // which is what it was first reported as and is wrong.
+        name: "shader_registration_global_init_vec2_marked",
+        file: "shader_registration_global_init.rock",
+        surface: Surface::Emit,
+        stdlib: StdlibVariant::Vec2Nobox,
+        expect: Expect::Correct,
+        gap: None,
     },
 ];
 
@@ -565,6 +596,24 @@ fn reconcile(expect: Expect, obs: &Observation) -> (Bucket, Option<String>) {
                 b,
                 Some(format!(
                     "expected MISCOMPILE, got {}: {}",
+                    b.label(),
+                    obs.detail
+                )),
+            ),
+        },
+        Expect::SpuriousReject { names, flip_when } => match obs.bucket {
+            Bucket::LoudReject if obs.detail.contains(names) => (Bucket::LoudReject, None),
+            Bucket::Correct => (
+                Bucket::Correct,
+                Some(format!(
+                    "the spurious rejection is GONE -- flip this case to Correct. \
+                     Trigger recorded as: {flip_when}"
+                )),
+            ),
+            b => (
+                b,
+                Some(format!(
+                    "expected the pinned spurious rejection (naming {names:?}), got {}: {}",
                     b.label(),
                     obs.detail
                 )),
@@ -638,7 +687,7 @@ fn the_seed_corpus_reproduces_every_known_gap() {
     for (bucket, _, case) in &results {
         *counts.entry(*bucket).or_insert(0) += 1;
         report.push_str(&format!(
-            "  {:<32} {:<14} {}\n",
+            "  {:<44} {:<14} {}\n",
             case.name,
             bucket.label(),
             case.gap.unwrap_or("(control)")
