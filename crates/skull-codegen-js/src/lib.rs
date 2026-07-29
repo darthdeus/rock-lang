@@ -320,10 +320,54 @@ function __rock_make_enum(variant, ty, kv) {
 /// only checks that inspect RUNS; the byte-checked cases are the brace-free
 /// scalars (`"str"`, numbers, bools). Compact/multiline threshold + key sort
 /// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
+///
+/// A struct renders through `__rock_inspect_ty[<__ty>]`, a per-type function
+/// `build_inspect_ty_defs` emits for every reachable struct: it supplies the
+/// DECLARED fields, because a null field is an absent key and a key walk alone
+/// therefore under-reports the shape, and an `embed` field is stored as flat
+/// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's
+/// `_G.__ROCK_TYPE_TABLE` lookup replaced by compile-time-emitted dispatch
+/// (`docs/runtime-globals-audit.md` S4.2b) -- no universal type table on JS.
 pub const JS_INSPECT_RUNTIME: &str = r#"
+var __rock_inspect_ty = {};
 function __rock_inspect_key_lt(a, b) {
   var sa = lua_tostring(a), sb = lua_tostring(b);
   return sa < sb ? -1 : (sa > sb ? 1 : 0);
+}
+// Reference-struct tier: declared fields (already sorted), plus any own key the
+// declaration does not name -- minus the compiler-minted PHYSICAL slots, which
+// are exactly the dotted keys (`embed` leaves, a flattened enum's `.#`/`.0`).
+function __rock_inspect_struct(header, t, declared, indent, path, visited, precision) {
+  var pairs = declared.slice();
+  var seen = {};
+  for (var i = 0; i < declared.length; i++) seen["$" + declared[i][0]] = true;
+  var extra = false;
+  for (var k in t) {
+    if (Object.prototype.hasOwnProperty.call(t, k) && k !== "__ty" && k !== "__variant" &&
+        seen["$" + k] !== true && k.indexOf(".") === -1) {
+      pairs.push([k, t[k]]);
+      extra = true;
+    }
+  }
+  if (extra) pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
+  if (pairs.length <= 2) {
+    var cparts = pairs.map(function(kv) {
+      return kv[0] + " = " + __rock_inspect_value(kv[1], indent, path + "." + kv[0], visited, precision);
+    });
+    return header + " { " + cparts.join(", ") + " }";
+  }
+  var lines = pairs.map(function(kv) {
+    return indent + "  " + kv[0] + " = " + __rock_inspect_value(kv[1], indent + "  ", path + "." + kv[0], visited, precision);
+  });
+  return header + " {\n" + lines.join(",\n") + "\n" + indent + "}";
+}
+// FFI-clean `value` struct tier: luajit renders those from `__ROCK_C_STRUCT`
+// (a cdata, not a table), which is a different renderer -- `: ` separators,
+// declaration order, always one line, children through the top-level `inspect`.
+function __rock_inspect_value_struct(header, pairs) {
+  if (pairs.length === 0) return header + " { }";
+  var parts = pairs.map(function(kv) { return kv[0] + ": " + inspect(kv[1]); });
+  return header + " { " + parts.join(", ") + " }";
 }
 function __rock_inspect_value(v, indent, path, visited, precision) {
   if (v === null || v === undefined) return "nil";
@@ -356,6 +400,12 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
     if (vparts.length === 0) return "Vec { }";
     return "Vec { " + vparts.join(", ") + " }";
   }
+  if (type_name !== undefined && t.__variant === undefined &&
+      __rock_inspect_ty[type_name] !== undefined) {
+    var sres = __rock_inspect_ty[type_name](t, indent, path, visited, precision);
+    if (visited) visited.delete(t);
+    return sres;
+  }
   if (Array.isArray(t)) {
     if (visited) visited.delete(t);
     if (t.length === 0) return "{}";
@@ -372,7 +422,7 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   } else {
     for (var k in t) {
       if (Object.prototype.hasOwnProperty.call(t, k) &&
-          k !== "__variant" && k !== "__ty") {
+          k !== "__variant" && k !== "__ty" && k.indexOf(".") === -1) {
         pairs.push([k, t[k]]);
       }
     }

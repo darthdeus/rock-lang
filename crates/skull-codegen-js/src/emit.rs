@@ -2232,6 +2232,7 @@ pub fn emit_with_closure(
     let mut out = String::new();
     out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
     out.push_str(&emit_vt_eq(ws, &bodies)?);
+    out.push_str(&emit_inspect_ty(ws, &bodies)?);
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
     // program path reorders these; per-test order is pinned by the JS suite.)
@@ -2419,6 +2420,9 @@ fn build_program_core(
     let vt_eq = emit_vt_eq(ws, &bodies)?;
     out.push_str(&vt_eq);
     stable.push_str(&vt_eq);
+    let inspect_ty = emit_inspect_ty(ws, &bodies)?;
+    out.push_str(&inspect_ty);
+    stable.push_str(&inspect_ty);
     // 1. deco def fns.
     for (name, mf) in &deco_bodies {
         let definition = emit_fn_with_callees(ws, mf, name, &st.names, &hoisted, &st.gctx)?;
@@ -3107,6 +3111,19 @@ fn emit_vt_eq(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerErr
     }
     close_gc_value_struct_fields(ws, &mut vt_names);
     build_vt_eq_defs(ws, &vt_names)
+}
+
+/// Per-type `__rock_inspect_ty` registry for every struct the program reaches:
+/// constructed anywhere, closed over struct-typed FIELDS (an `embed` child is
+/// never constructed on its own -- its leaves are written straight into the
+/// parent -- yet its logical view still has to render under its own name).
+fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
+    let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
+    for mf in bodies {
+        collect_struct_types(ws, mf, &mut names);
+    }
+    close_struct_field_types(ws, &mut names);
+    build_inspect_ty_defs(ws, &names)
 }
 
 /// The `__deco_<name>` JS identity for a decorator (matches skull's Lua
@@ -3827,6 +3844,173 @@ fn value_struct_field_name(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> 
         }
         _ => None,
     }
+}
+
+/// Every nominal struct a body CONSTRUCTS, in either repr.
+fn collect_struct_types(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ustr::Ustr>) {
+    for inst in mf.insts.values() {
+        let name = match inst {
+            Inst::MakeStruct { ty: Some(name), .. } => *name,
+            Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => *name,
+            _ => continue,
+        };
+        if ws.struct_by_name.contains_key(&name) {
+            out.insert(name);
+        }
+    }
+    for nf in &mf.nested_fns {
+        collect_struct_types(ws, nf, out);
+    }
+}
+
+/// Close the set over struct-typed fields, so a type only ever reached as a
+/// field (an `embed` child, a nested `value` struct) still gets an entry.
+fn close_struct_field_types(ws: &Workspace, names: &mut BTreeSet<ustr::Ustr>) {
+    let mut queue: Vec<ustr::Ustr> = names.iter().copied().collect();
+    while let Some(name) = queue.pop() {
+        let Some(sid) = ws.struct_by_name.get(&name) else { continue };
+        let s = &ws.module(sid.module).structs[sid.def];
+        for f in &s.fields {
+            if let Some(child) = nominal_struct_name(ws, f.ty) {
+                if names.insert(child) {
+                    queue.push(child);
+                }
+            }
+        }
+    }
+}
+
+/// The nominal name `ty` denotes when it resolves to a struct, peeling
+/// `Nullable` (an `embed f: Foo?` still rebuilds from `Foo`'s fields).
+fn nominal_struct_name(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<ustr::Ustr> {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    let resolve = |t: bone_semantic::prelude::TyId| -> Option<TypeExpr> {
+        match t {
+            bone_semantic::prelude::TyId::Static(mid, idx) => Some(ws.modules.get(mid.index())?.ty_arena[idx]),
+            bone_semantic::prelude::TyId::Local(_) => None,
+        }
+    };
+    let mut te = resolve(ty)?;
+    if let TypeExpr::Nullable(inner) = te {
+        te = resolve(ty.with_idx(inner))?;
+    }
+    match te {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if ws.struct_by_name.contains_key(&name) => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// True when `ty` is a nullable type (an `embed f: Foo?` keeps its presence
+/// flag at the declared name, and reads as null when absent).
+fn ty_is_nullable(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
+    use bone_semantic::hir::TypeExpr;
+    match ty {
+        bone_semantic::prelude::TyId::Static(mid, idx) => {
+            matches!(ws.modules.get(mid.index()).map(|m| m.ty_arena[idx]), Some(TypeExpr::Nullable(_)))
+        }
+        bone_semantic::prelude::TyId::Local(_) => false,
+    }
+}
+
+/// A JS expression rebuilding an `embed` field's LOGICAL value from the
+/// parent's physical leaves (the port of `__rock_embed_view`): the child has no
+/// box of its own, its leaves live at `<prefix>.<subfield>` recursively, and a
+/// nullable embed keeps presence at `<prefix>` so an absent one reads as null.
+fn embed_view_expr(
+    ws: &Workspace,
+    prefix: &str,
+    ty_name: ustr::Ustr,
+    nullable: bool,
+) -> Result<String, CompilerError> {
+    let Some(sid) = ws.struct_by_name.get(&ty_name) else { return Ok("null".to_string()) };
+    let s = &ws.module(sid.module).structs[sid.def];
+    let mut parts = vec![format!("__ty: {}", js_string_lit(ty_name.as_str())?)];
+    for f in &s.fields {
+        let key = format!("{prefix}.{}", f.name);
+        let val = match (f.is_embed, nominal_struct_name(ws, f.ty)) {
+            (true, Some(child)) => embed_view_expr(ws, &key, child, ty_is_nullable(ws, f.ty))?,
+            _ => format!("t[{}]", js_string_lit(&key)?),
+        };
+        parts.push(format!("{}: {val}", js_string_lit(f.name.as_str())?));
+    }
+    let built = format!("{{{}}}", parts.join(", "));
+    if !nullable {
+        return Ok(built);
+    }
+    let p = js_string_lit(prefix)?;
+    Ok(format!("((t[{p}] === null || t[{p}] === undefined) ? null : {built})"))
+}
+
+/// Emit the `__rock_inspect_ty["<N>"] = function(t, ..) {...}` entries: the
+/// per-type half of `inspect` that luajit reads out of `_G.__ROCK_TYPE_TABLE`
+/// (the declared field list) and `_G.__ROCK_C_STRUCT` (the value-struct
+/// renderer). Two tiers, exactly as luajit splits them: an FFI-clean `value`
+/// struct is a cdata there, rendered `N { f: v, .. }` in declaration order;
+/// everything else (reference structs, GC-carrying `value` structs, which are
+/// plain tables on luajit too) renders `N { f = v, .. }` with sorted keys and
+/// the compact/multiline threshold.
+fn build_inspect_ty_defs(
+    ws: &Workspace,
+    names: &BTreeSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
+    // Self-declaring: `JS_INSPECT_RUNTIME` also declares the table, but a caller
+    // that assembles a program without it (the emitter's own unit tests, which
+    // pull only the consts their assertion needs) would otherwise get defs
+    // assigning into an undeclared name. `|| {}` keeps the runtime's table when
+    // the prelude did supply one -- it always precedes the emitted program.
+    let mut out = String::new();
+    for name in names {
+        let Some(sid) = ws.struct_by_name.get(name) else { continue };
+        let s = &ws.module(sid.module).structs[sid.def];
+        if out.is_empty() {
+            out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
+        }
+        let header = js_string_lit(name.as_str())?;
+        if s.is_value && !skull_mir::lower::value_struct_is_gc(ws, *name) {
+            let pairs: Vec<String> = s
+                .fields
+                .iter()
+                .map(|f| {
+                    let n = js_string_lit(f.name.as_str())?;
+                    Ok(format!("[{n}, t[{n}]]"))
+                })
+                .collect::<Result<_, CompilerError>>()?;
+            out.push_str(&format!(
+                "__rock_inspect_ty[{header}] = function(t, indent, path, visited, precision) {{ \
+                 return __rock_inspect_value_struct({header}, [{}]); }};\n",
+                pairs.join(", ")
+            ));
+            continue;
+        }
+        let mut fields: Vec<&bone_semantic::hir::StructFieldDef> = s.fields.iter().collect();
+        fields.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+        let pairs: Vec<String> = fields
+            .iter()
+            .map(|f| {
+                let n = js_string_lit(f.name.as_str())?;
+                let val = match (f.is_embed, nominal_struct_name(ws, f.ty)) {
+                    // A TABLE at the declared name means `t` is already a rebuilt
+                    // logical view (the parent's nested-embed reconstruction), whose
+                    // child sits under the name directly -- there are no leaves to
+                    // read. Same discriminant luajit's walker uses.
+                    (true, Some(child)) => format!(
+                        "((t[{n}] !== null && typeof t[{n}] === \"object\") ? t[{n}] : {})",
+                        embed_view_expr(ws, f.name.as_str(), child, ty_is_nullable(ws, f.ty))?
+                    ),
+                    _ => format!("t[{n}]"),
+                };
+                Ok(format!("[{n}, {val}]"))
+            })
+            .collect::<Result<_, CompilerError>>()?;
+        out.push_str(&format!(
+            "__rock_inspect_ty[{header}] = function(t, indent, path, visited, precision) {{ \
+             return __rock_inspect_struct({header}, t, [{}], indent, path, visited, precision); }};\n",
+            pairs.join(", ")
+        ));
+    }
+    Ok(out)
 }
 
 /// Emit the `__rock_vt_eq["<N>"] = function(a, b) {...}` entries mirroring the
