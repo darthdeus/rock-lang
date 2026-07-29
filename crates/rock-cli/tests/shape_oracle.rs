@@ -665,12 +665,7 @@ const SEEDS: &[SeedCase] = &[
         file: "shader_registration_fn_value.rock",
         surface: Surface::Emit,
         stdlib: StdlibVariant::Vec2Nobox,
-        expect: Expect::SpuriousReject {
-            names: "cannot be taken as a fn value",
-            flip_when: "`reject_nobox_fn_taken_by_value` stops matching a \
-                        compile-time expansion's argument position (`rock_shader` \
-                        lowers its arg to the entry NAME) -- expect Correct",
-        },
+        expect: Expect::Correct,
         gap: Some(
             "NEW: `rock_shader(<entry>)` in a FN BODY rejects under marking; the \
              global-init form does not, and the fn is never taken by value",

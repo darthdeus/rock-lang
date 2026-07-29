@@ -11439,12 +11439,36 @@ impl Builder<'_> {
     /// one with a `nobox` signature by value -- pinned in
     /// `tests/errors/nobox_toplevel_fn_by_value.rock.err`, which is where the
     /// fix goes if that changes.
+    /// Argument positions of a compile-time EXPANSION call, where a bare fn name is
+    /// consumed by the compiler and never becomes a runtime fn value:
+    /// `rock_shader(frag)` lowers its argument to the entry's NAME as a string
+    /// literal, so the ABI-disagreement hazard [`Self::reject_nobox_fn_taken_by_value`]
+    /// guards against cannot arise there. Without this the check fires on the name
+    /// alone, which rejected every fullscreen `rock_shader` registration written in
+    /// a fn body once `Vec2` was marked -- a diagnostic owed to nothing.
+    fn expansion_arg_exprs(&self) -> HashSet<Idx<Expr>> {
+        let mut out = HashSet::new();
+        for (e, expr) in self.body.expr_arena.iter() {
+            let Expr::Call { callee, args } = expr else { continue };
+            let Callee::Unresolved { name, .. } = callee else { continue };
+            let Ok(func) = self.resolve_funcref(e, *name) else { continue };
+            if self.fn_expand_kind(func).is_some() {
+                out.extend(args.clone().into_iter());
+            }
+        }
+        out
+    }
+
     fn reject_nobox_fn_taken_by_value(&self) -> Result<(), CompilerError> {
         if self.scx.values_first_class {
             return Ok(());
         }
+        let expansion_args = self.expansion_arg_exprs();
         for (e, expr) in self.body.expr_arena.iter() {
             let Expr::Global(name) = expr else { continue };
+            if expansion_args.contains(&e) {
+                continue;
+            }
             let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
             // ANY overload of the name: the value reference names the whole
             // overload set, so one nobox-bearing member is enough to make the
