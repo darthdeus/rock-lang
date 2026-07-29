@@ -457,8 +457,8 @@ fn backend_name(b: FnBackend) -> Option<&'static str> {
 ///
 /// A name declared on two concrete backends is a *sibling set*: shared code
 /// calls it and each backend emits its own body, so the decls have to agree.
-/// They drift silently -- the split of `field_get` onto `KeyPath<T, V>` left the
-/// `inline(js)` sibling on `FieldOf`, which nothing caught until a luajit build
+/// They drift silently -- the split of `field_get` onto `ReadFieldRef<T, V>` left the
+/// `inline(js)` sibling on `FieldRef`, which nothing caught until a luajit build
 /// resolved to the js-only decl and emit rejected it. skull's emit check sees
 /// only the backend being built and only reached calls, so the OTHER backend's
 /// half stays broken until someone builds for it.
@@ -745,7 +745,7 @@ fn collect_bound_tree(tree: &BoundTree, out: &mut Vec<(ModuleId, Idx<Function>)>
 }
 
 fn collect_bound_next(bn: &BoundNext, out: &mut Vec<(ModuleId, Idx<Function>)>) {
-    if let BoundNext::Concrete { func, sub } = bn {
+    if let BoundNext::Concrete { func, sub, .. } = bn {
         out.push(*func);
         collect_bound_tree(sub, out);
     }

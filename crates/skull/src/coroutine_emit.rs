@@ -100,7 +100,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     let mut nested_luas = String::new();
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
     for nf in hoisted[pre_nested..].iter_mut() {
-        skull_transform::cleanup(nf);
+        skull_transform::cleanup_with_nobox(ws, nf);
         nested_luas.push_str(&skull_codegen_lua::emit_named(ws, ctx, nf.name.as_str(), nf));
     }
     lowered.step.nested_fns = hoisted;

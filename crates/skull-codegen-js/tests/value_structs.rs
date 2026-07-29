@@ -109,3 +109,15 @@ fn gc_carrying_value_struct_eq() {
     );
     eval_int(&js, "root", 1);
 }
+
+#[test]
+fn nobox_value_rejects_when_js_would_materialize_it() {
+    let src = "nobox value V { x: int, y: int }\n\
+               fn root() -> V {\n\
+                   V { x: 1, y: 2 }\n\
+               }";
+    let ws = ws_with(src);
+    let err = emit_closure(&ws, "root")
+        .expect_err("the JS backend must not silently materialize a nobox value");
+    assert!(err.contains("nobox") && err.contains("V"), "{err}");
+}

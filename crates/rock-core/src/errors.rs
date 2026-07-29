@@ -94,6 +94,12 @@ pub enum CompilerErrorKind {
         message: String,
     },
 
+    /// A `nobox` value materialized implicitly. Distinct from a plain codegen
+    /// rejection because it is a LANGUAGE GUARANTEE: the stdlib emit path may
+    /// downgrade a codegen parity gap to a silent `skipped`, and must never
+    /// downgrade this (a dropped body is a nil global at runtime).
+    NoboxGuaranteeViolated,
+
     // Control flow error kinds
     ControlFlowInSubexpression,
     MissingElseBranch,
@@ -111,6 +117,13 @@ pub struct CompilerError {
     /// Extra marked ranges, rendered in the order they were added.
     pub labels: Vec<CompilerLabel>,
     pub level: CompilerErrorLevel,
+    /// Further INDEPENDENT errors found in the same pass, carried along so a
+    /// caller that can only return one error still reports all of them. Bodies
+    /// are emitted in parallel and every rejection is computed before any is
+    /// returned; without this the caller sees one and reads the program as
+    /// having one problem. Renderers must emit these after the primary.
+    /// Never nested -- a sibling carries none of its own.
+    pub siblings: Vec<CompilerError>,
 }
 
 impl CompilerError {
@@ -135,7 +148,20 @@ impl CompilerError {
             level: CompilerErrorLevel::Error,
             labels: Vec::new(),
             kind: CompilerErrorKind::Generic,
+            siblings: Vec::new(),
         }
+    }
+
+    /// Attach further independent errors from the same pass. Flattens, so the
+    /// invariant that a sibling carries no siblings of its own holds however
+    /// the inputs were built.
+    pub fn with_siblings(mut self, others: impl IntoIterator<Item = CompilerError>) -> Self {
+        for mut o in others {
+            let nested = std::mem::take(&mut o.siblings);
+            self.siblings.push(o);
+            self.siblings.extend(nested);
+        }
+        self
     }
 
     pub fn panic(self) -> CompilerError {

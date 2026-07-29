@@ -132,3 +132,34 @@ fn build() -> int { return bad(S { x: 1.0 }) }
 "#;
     assert!(try_emit_module(src).is_err(), "non-pairs return must reject");
 }
+
+const NOBOX_PAYLOAD: &str = r#"
+nobox value NV2 { x: float, y: float }
+enum U { F(float), Vv(NV2) }
+value AU { t: float, pos: NV2 }
+
+@struct_expand inline(lua) fn upairs<T>(u: T) -> [(string, U)] = """
+    error("upairs phantom body must never run")
+"""
+
+fn build(t: float, c: NV2) -> int {
+    let ps = upairs(AU { t: t, pos: c })
+    return ps.len()
+}
+"#;
+
+/// A `nobox` payload at the expansion is the SAME boundary the `uniform(x: Vec2)`
+/// overload marks with an explicit `materialize`: the enum is table-backed, so
+/// the payload has nowhere to live but a box. The expansion mints that box
+/// itself, so it must mint the AUTHORIZED one -- there is no source line for the
+/// author to mark, and an implicit box here rejects a legitimate program
+/// (`bitgun_queue_heat_shimmer`'s `pass_uniforms`).
+#[test]
+fn a_nobox_payload_is_authorized_at_the_expansion() {
+    let lua = emit_module(NOBOX_PAYLOAD);
+    let body = function_body(&lua, "build");
+    assert!(
+        body.contains("NV2_ct("),
+        "the payload box must still be emitted, just authorized:\n{body}"
+    );
+}

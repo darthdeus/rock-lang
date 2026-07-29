@@ -136,12 +136,358 @@ pub fn is_ffi_clean_value_struct(ws: &Workspace, name: Ustr) -> bool {
     value_shape_rec(ws, name, &mut Vec::new()).is_some()
 }
 
+/// Max leaf count that stores as columns. Above it, columns fall off a measured
+/// write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86; 17.1x / 11.7x on
+/// arm64) and strided AoS wins -- so a wider type keeps today's representation
+/// rather than silently taking the slow layout. Every collection site in the
+/// tree is K <= 4. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
+const MAX_COLUMN_LEAVES: usize = 4;
+
+/// The element name of `[E]` eligible for flat column storage: `E` is an
+/// all-scalar `value` struct of at most [`MAX_COLUMN_LEAVES`] leaves.
+///
+/// `len` is excluded as a top-level leaf name because the columns share the
+/// container table with the Vec's own `len` key, and a leaf column would
+/// clobber the length. Only a TOP-LEVEL leaf can collide -- a nested leaf path
+/// contains a `.`, which no identifier can. An excluded type is not an error:
+/// it simply keeps the boxed representation.
+pub fn vec_column_elem(ws: &Workspace, name: Ustr) -> Option<Ustr> {
+    let shape = value_shape_rec(ws, name, &mut Vec::new())?;
+    let paths = value_leaf_paths(&shape);
+    (paths.len() <= MAX_COLUMN_LEAVES && !paths.iter().any(|p| p.as_str() == "len")).then_some(name)
+}
+
+/// Every leaf path of value shape `shape`, declaration order, dotted for nested
+/// value fields (`min.x`). These ARE the column keys. Dotted for the same
+/// reason `embed` storage is: `.` cannot appear in a Rock identifier, so the
+/// encoding is injective and can never collide with a sibling leaf.
+pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
+    let mut out = Vec::new();
+    leaf_paths_rec(shape, "", &mut out);
+    out
+}
+
+fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
+    for (fname, fs) in &shape.fields {
+        match fs {
+            FieldShape::Prim if prefix.is_empty() => out.push(*fname),
+            FieldShape::Prim => out.push(Ustr::from(&format!("{prefix}{fname}"))),
+            FieldShape::Nested(sub) => leaf_paths_rec(sub, &format!("{prefix}{fname}."), out),
+        }
+    }
+}
+
+/// Every leaf VIEW the compiler mints: `(leaf C type, buffer field, cast type)`.
+///
+/// THE single source of truth. [`leaf_view_field`] selects from it,
+/// [`is_leaf_view_field`] tests it, and the runtime `__ROCK_LEAF_VIEWS` table is
+/// GENERATED from it (`skull::prelude`) so the Rock-side consumers -- view
+/// refresh, serialization, inspect -- cannot drift from the emitter. Adding a
+/// leaf type here reaches all of them; a hand-written list in any of them is the
+/// bug this replaces.
+pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
+    ("float", "__vf", "float*"),
+    ("int", "__vi", "int*"),
+    ("bool", "__vb", "bool*"),
+];
+
+/// The buffer-table field holding the typed leaf VIEW for primitive C type
+/// `cty`. One field per distinct leaf type, made once at construction
+/// ([`Inst::FfiViewCast`]) and read per element access, never per leaf.
+pub fn leaf_view_field(cty: &str) -> Ustr {
+    match LEAF_VIEWS.iter().find(|(t, ..)| *t == cty) {
+        Some((_, field, _)) => Ustr::from(field),
+        None => unreachable!("no leaf view for non-primitive C type `{cty}`"),
+    }
+}
+
+/// Whether `field` is one of the leaf-view keys [`leaf_view_field`] mints.
+pub fn is_leaf_view_field(field: &str) -> bool {
+    LEAF_VIEWS.iter().any(|(_, f, _)| *f == field)
+}
+
+/// The `__ROCK_LEAF_VIEWS` prelude table: leaf-view field -> `ffi.cast` type.
+/// Rock-side consumers key off it instead of spelling `__vf`/`__vi`/`__vb`.
+pub fn leaf_views_lua_table() -> String {
+    let entries: Vec<String> = LEAF_VIEWS
+        .iter()
+        .map(|(_, field, cast)| format!("{field} = \"{cast}\""))
+        .collect();
+    format!("{{ {} }}", entries.join(", "))
+}
+
+/// Where one leaf lives, in units of ITS OWN view's element size: the buffer
+/// field holding that view, the per-element stride, and the leaf's offset within
+/// an element. Both numbers are compile-time constants, so a leaf access is
+/// `view[i * stride + offset]` -- pure arithmetic, no allocation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeafAddr {
+    pub path: Ustr,
+    pub view_field: Ustr,
+    pub stride: i64,
+    pub offset: i64,
+}
+
+/// The leaf addressing plan for FFI-clean value struct `elem`: one [`LeafAddr`]
+/// per leaf, in [`value_leaf_paths`] order (the order reprs are flattened in).
+///
+/// The unit conversions are exact by construction: `sizeof(elem)` is a multiple
+/// of `elem`'s alignment, which is the max leaf size, and every leaf size is a
+/// power of two no larger than that; a leaf's own byte offset is a multiple of
+/// its size because C aligns each member. Both divisions are checked anyway --
+/// an inexact one would silently address the wrong element.
+pub fn leaf_addr_plan(ws: &Workspace, elem: Ustr) -> Result<Vec<LeafAddr>, String> {
+    let (leaves, size, _align) = value_leaf_layout_checked(ws, elem)?;
+    leaves
+        .into_iter()
+        .map(|l| {
+            let (sz, _) = c_prim_size_align(l.cty)
+                .ok_or_else(|| format!("leaf `{}` of `{elem}` is not primitive", l.path))?;
+            if size % sz != 0 || l.byte_off % sz != 0 {
+                return Err(format!(
+                    "leaf `{}` of `{elem}` ({} bytes) does not divide its {sz}-byte view: \
+                     stride {size}, offset {}",
+                    l.path, sz, l.byte_off
+                ));
+            }
+            Ok(LeafAddr {
+                path: l.path,
+                view_field: leaf_view_field(l.cty),
+                stride: (size / sz) as i64,
+                offset: (l.byte_off / sz) as i64,
+            })
+        })
+        .collect()
+}
+
+/// The distinct leaf view C types of `elem`, in first-use order -- the views a
+/// buffer of `elem` must carry.
+pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, String> {
+    let (leaves, _, _) = value_leaf_layout_checked(ws, elem)?;
+    let mut out: Vec<&'static str> = Vec::new();
+    for l in leaves {
+        if !out.contains(&l.cty) {
+            out.push(l.cty);
+        }
+    }
+    Ok(out)
+}
+
+/// [`value_leaf_paths`] by type name -- the `ValueShape`-side leaf order, for
+/// callers outside this module that need to compare it against a layout walk
+/// (`value_shape` itself is internal).
+pub fn value_leaf_paths_of(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
+    Some(value_leaf_paths(&value_shape(ws, name)?))
+}
+
+/// One primitive leaf of an FFI-clean value struct's C layout: its dotted path
+/// (the same key [`value_leaf_paths`] produces), its C type, and its BYTE offset
+/// from the start of the struct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeafSlot {
+    pub path: Ustr,
+    pub cty: &'static str,
+    pub byte_off: usize,
+    /// The same offset expressed as a LuaJIT `ffi.offsetof` composition along
+    /// this leaf's field chain (`ffi.offsetof("Vert","pos")+ffi.offsetof("V2","x")`).
+    /// Emitted as a start-up assertion against `byte_off`: the Rust layout model
+    /// and LuaJIT's must agree, and a divergence corrupts memory silently rather
+    /// than failing, so it is checked rather than trusted.
+    pub offsetof_expr: String,
+}
+
+/// Size and alignment of a primitive C type as LuaJIT lays it out. The only
+/// types [`value_field_c_type`] admits as leaves.
+fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
+    match cty {
+        "int" | "float" => Some((4, 4)),
+        "bool" => Some((1, 1)),
+        _ => None,
+    }
+}
+
+/// The C layout of FFI-clean value struct `name`: every primitive leaf with its
+/// byte offset, plus the struct's own `(size, align)`.
+///
+/// Standard C rules, matching what LuaJIT computes for the emitted typedef: each
+/// member is padded up to its own alignment, the struct's alignment is the max
+/// of its members', and its size is rounded up to that. The agreement is NOT
+/// taken on trust -- `value_leaf_layout_matches_luajit` cross-checks every
+/// offset against `ffi.offsetof` at run time, because a divergence here is
+/// silent memory corruption rather than a failure.
+///
+/// PRIVATE on purpose: the raw walker is the bypass this module exists to
+/// prevent. Its traversal mirrors [`value_shape_rec`] arm for arm so the leaf
+/// ORDER matches [`value_leaf_paths`], but that is two separate walkers staying
+/// in step, NOT something this function enforces. Leaves are matched to offsets
+/// POSITIONALLY, so if they drift, every runtime `ffi.offsetof` assertion still
+/// passes (each path/offset pair is self-consistent) while repr leaves are
+/// written to the wrong addresses.
+///
+/// [`value_leaf_layout_checked`] is the only way out of this module, and it
+/// REJECTS on drift. Keep it that way -- a `pub` raw walker is an offset source
+/// a future lowering can reach for without the invariant.
+fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
+    let mut out = Vec::new();
+    let (size, align) = layout_rec(ws, name, "", 0, "", &mut out, &mut Vec::new())?;
+    Some((out, size, align))
+}
+
+/// [`value_leaf_layout`] with the two-walker agreement enforced: the layout's
+/// leaf path sequence must equal [`value_leaf_paths`] over the same type, which
+/// is the invariant that lets leaves be matched to offsets positionally.
+///
+/// `Err` on either a missing layout or a disagreement. Both are invariant
+/// failures for a type that reached an offset-consuming site, not conditions to
+/// skip past -- skipping would let leaf addressing run on unvalidated offsets,
+/// which is silent memory corruption rather than a failure.
+pub fn value_leaf_layout_checked(
+    ws: &Workspace,
+    name: Ustr,
+) -> Result<(Vec<LeafSlot>, usize, usize), String> {
+    let Some((leaves, size, align)) = value_leaf_layout(ws, name) else {
+        return Err(format!("`{name}` has no C leaf layout"));
+    };
+    let Some(shape) = value_shape(ws, name) else {
+        return Err(format!("`{name}` has a C leaf layout but no value shape"));
+    };
+    let want = value_leaf_paths(&shape);
+    let got: Vec<Ustr> = leaves.iter().map(|l| l.path).collect();
+    if want != got {
+        return Err(format!(
+            "leaf walkers disagree for `{name}`: value_leaf_paths {want:?} vs \
+             value_leaf_layout {got:?} -- leaves are matched to offsets by \
+             position, so this would write every leaf to the wrong address"
+        ));
+    }
+    Ok((leaves, size, align))
+}
+
+/// Append `name`'s leaves at `base` (a byte offset), returning its `(size, align)`.
+/// `ofs` is the `ffi.offsetof` composition accumulated down to `name`'s start.
+fn layout_rec(
+    ws: &Workspace,
+    name: Ustr,
+    prefix: &str,
+    base: usize,
+    ofs: &str,
+    out: &mut Vec<LeafSlot>,
+    visiting: &mut Vec<Ustr>,
+) -> Option<(usize, usize)> {
+    // A cdata-eligible enum is a struct in its own right (`{ int __tag; <prim>
+    // _0; .. }`), not a value struct -- `value_shape_rec` nests it, so this
+    // must nest it identically.
+    if let Some(es) = enum_value_shape(ws, name) {
+        let mut off = base;
+        let mut align = 4; // the `int __tag`
+        let mut push = |nm: &str, cty: &'static str, off: &mut usize, align: &mut usize| {
+            let (sz, al) = c_prim_size_align(cty)?;
+            *off = round_up(*off, al);
+            out.push(LeafSlot {
+                path: leaf_path(prefix, nm),
+                cty,
+                byte_off: *off,
+                offsetof_expr: join_offsetof(ofs, name, nm),
+            });
+            *off += sz;
+            *align = (*align).max(al);
+            Some(())
+        };
+        push("__tag", "int", &mut off, &mut align)?;
+        for (nm, cty) in &es.slots {
+            push(nm.as_str(), cty, &mut off, &mut align)?;
+        }
+        return Some((round_up(off - base, align), align));
+    }
+
+    let sid = *ws.struct_by_name.get(&name)?;
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if !sd.is_value || visiting.contains(&name) {
+        return None;
+    }
+    visiting.push(name);
+    let mut off = base;
+    let mut align = 1usize;
+    for f in &sd.fields {
+        let cty = value_field_c_type(ws, f.ty)?;
+        match c_prim_size_align(&cty) {
+            Some((sz, al)) => {
+                // Leak-free: the only strings reaching here are the three
+                // literals `value_field_c_type` returns for primitives.
+                let cty: &'static str = match cty.as_str() {
+                    "int" => "int",
+                    "float" => "float",
+                    "bool" => "bool",
+                    _ => return None,
+                };
+                off = round_up(off, al);
+                out.push(LeafSlot {
+                    path: leaf_path(prefix, f.name.as_str()),
+                    cty,
+                    byte_off: off,
+                    offsetof_expr: join_offsetof(ofs, name, f.name.as_str()),
+                });
+                off += sz;
+                align = align.max(al);
+            }
+            // A nested value struct or a cdata enum: recurse under the dotted
+            // prefix, aligning to the nested aggregate's own alignment.
+            None => {
+                let nested = Ustr::from(cty.as_str());
+                let probe_at = round_up(off, nested_align(ws, nested, visiting)?);
+                let (sz, al) = layout_rec(
+                    ws,
+                    nested,
+                    &format!("{prefix}{}.", f.name),
+                    probe_at,
+                    &join_offsetof(ofs, name, f.name.as_str()),
+                    out,
+                    visiting,
+                )?;
+                off = probe_at + sz;
+                align = align.max(al);
+            }
+        }
+    }
+    visiting.pop();
+    Some((round_up(off - base, align), align))
+}
+
+/// The alignment of a nested aggregate, computed without emitting its leaves.
+fn nested_align(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<usize> {
+    let mut scratch = Vec::new();
+    Some(layout_rec(ws, name, "", 0, "", &mut scratch, visiting)?.1)
+}
+
+/// Extend an `ffi.offsetof` composition by one field hop.
+fn join_offsetof(prefix: &str, owner: Ustr, field: &str) -> String {
+    let hop = format!("ffi.offsetof(\"{owner}\", \"{field}\")");
+    if prefix.is_empty() {
+        hop
+    } else {
+        format!("{prefix} + {hop}")
+    }
+}
+
+fn leaf_path(prefix: &str, name: &str) -> Ustr {
+    if prefix.is_empty() {
+        Ustr::from(name)
+    } else {
+        Ustr::from(&format!("{prefix}{name}"))
+    }
+}
+
+fn round_up(n: usize, align: usize) -> usize {
+    n.div_ceil(align) * align
+}
+
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
 #[derive(Clone, Debug)]
 pub struct ValueShape {
     name: Ustr,
     fields: Vec<(Ustr, FieldShape)>,
+    nullable: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -159,7 +505,8 @@ impl ValueShape {
                 FieldShape::Prim => 1,
                 FieldShape::Nested(s) => s.leaf_count(),
             })
-            .sum()
+            .sum::<usize>()
+            + usize::from(self.nullable)
     }
 }
 
@@ -194,7 +541,23 @@ fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) -> Option<i64
 #[derive(Clone)]
 enum ValueRepr {
     Scalar(Idx<Inst>),
-    Group { name: Ustr, parts: Vec<ValueRepr> },
+    Group {
+        name: Ustr,
+        parts: Vec<ValueRepr>,
+        present: Option<Idx<Inst>>,
+    },
+    /// A tuple whose elements are still reprs -- produced only by a tuple return
+    /// that splats (`TupleRetShape::splats`), so an element that arrived as
+    /// leaves can reach a destructure without being packed. Packing one emits
+    /// the ordinary `MakeTuple` of packed parts, which is how a whole-tuple use
+    /// of a `nobox` element still reaches the guarantee's rejection.
+    Tuple(Vec<ValueRepr>),
+}
+
+#[derive(Clone, Copy)]
+enum SpreadDest {
+    Container(ContainerKind),
+    Columns(Ustr),
 }
 
 /// The result repr of a swizzle: one selected component is the bare scalar;
@@ -208,7 +571,11 @@ fn swizzle_group(parts: Vec<ValueRepr>) -> ValueRepr {
             3 => "Vec3",
             _ => "Vec4",
         };
-        ValueRepr::Group { name: Ustr::from(name), parts }
+        ValueRepr::Group {
+            name: Ustr::from(name),
+            parts,
+            present: None,
+        }
     }
 }
 
@@ -284,7 +651,11 @@ fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Opti
         fields.push((f.name, fs));
     }
     visiting.pop();
-    Some(ValueShape { name, fields })
+    Some(ValueShape {
+        name,
+        fields,
+        nullable: false,
+    })
 }
 
 /// The scalar-ABI shape of a GC-CARRYING value struct (`value_struct_is_gc`):
@@ -338,7 +709,11 @@ fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> O
         fields.push((f.name, fs));
     }
     visiting.pop();
-    Some(ValueShape { name, fields })
+    Some(ValueShape {
+        name,
+        fields,
+        nullable: false,
+    })
 }
 
 /// Declared field names of struct `name`, in declaration order (the positional
@@ -457,12 +832,53 @@ fn struct_expand_variants(
 /// the single-cdata ABI (cdata has no spare field for a nil discriminator).
 fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => value_shape(ws, n)
-            .or_else(|| value_shape_gc(ws, n))
-            .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape())),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(ws, n),
         TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                flat_enum_shape(ws, n).map(|s| s.value_shape())
+                sig_shape_of_nullable_nominal(ws, n)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The shape policy behind [`sig_value_shape`]'s non-nullable arm, shared with the
+/// body-local walker ([`Builder::body_sig_value_shape`]) so the two arenas can
+/// never disagree about what threads as leaves.
+fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
+    value_shape(ws, n)
+        .or_else(|| value_shape_gc(ws, n))
+        .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape()))
+}
+
+/// [`sig_shape_of_nominal`] for a NULLABLE nominal.
+fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
+    if ws
+        .struct_by_name
+        .get(&n)
+        .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+    {
+        let mut shape = value_shape(ws, n).or_else(|| value_shape_gc(ws, n))?;
+        shape.nullable = true;
+        return Some(shape);
+    }
+    flat_enum_shape(ws, n).map(|s| s.value_shape())
+}
+
+/// [`Builder::nobox_shape_of_ty`] for a DECLARED (workspace-arena) type -- a
+/// top-level fn's param/return, which `static_ty` can see and the body-arena
+/// walker cannot.
+fn nobox_sig_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    match static_ty(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
+            value_shape_of_nominal(ws, n)
+        }
+        TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
+                let mut shape = value_shape_of_nominal(ws, n)?;
+                shape.nullable = true;
+                Some(shape)
             }
             _ => None,
         },
@@ -477,53 +893,159 @@ fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
         .or_else(|| flat_enum_shape(ws, name).map(|s| s.value_shape()))
 }
 
-/// An arena-free concrete binding for a generic param at a specialized call site:
-/// a nominal type with no params (a value struct / enum) or a scalar primitive
-/// (carried as its C type name). A binding that reifies to one of these
-/// specializes; a nested generic, a `string`, or an unresolved var does not (v0
-/// leaf-only scope). Arena-free so it keys the cross-body snapshot cache and
-/// threads into the callee lowering without a caller-arena `TyId`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum ReifiedLeaf {
-    Nominal(Ustr),
-    Prim(&'static str),
+/// The Lua global holding leaf `leaf` of the `nobox` global `base`. A global is
+/// category-2 storage -- its layout is derived from the stored type -- so a
+/// `nobox` global is K scalar globals, never one boxed cdata.
+pub fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
+    Ustr::from(&format!("__nbg_{base}_{leaf}"))
 }
 
-/// A callee's per-generic instantiation at one call site, in declaration order.
-/// `None` = that generic did not reify to a leaf (no specialization for it).
-/// The snapshot cache key alongside the `FuncRef`.
-pub type SpecKey = Vec<Option<ReifiedLeaf>>;
+/// Whether `name` is a `nobox` value struct.
+fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
+    ws.struct_by_name
+        .get(&name)
+        .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+}
 
-/// Callee generic `VarId` -> its concrete leaf, for the specialized lowering.
-/// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
-pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, ReifiedLeaf>;
-
-/// The synthesized `TypeExpr` a substituted generic resolves to. A `Nominal`
-/// leaf carries an EMPTY param range (v0 leaf-only scope), so no consumer indexes
-/// into it; a `Prim` maps to its builtin.
-fn reified_leaf_node(leaf: ReifiedLeaf) -> TypeExpr {
-    match leaf {
-        ReifiedLeaf::Nominal(n) => TypeExpr::App {
-            ctor: TypeCtor::Nominal(n),
-            params: IdxRange::new_empty(),
-        },
-        ReifiedLeaf::Prim("int") => TypeExpr::Builtin(BuiltinTy::Int),
-        ReifiedLeaf::Prim("float") => TypeExpr::Builtin(BuiltinTy::Float),
-        ReifiedLeaf::Prim("bool") => TypeExpr::Builtin(BuiltinTy::Bool),
-        ReifiedLeaf::Prim(_) => TypeExpr::Builtin(BuiltinTy::Error),
+/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
+/// is leaf 0), `None` for every other type. bone requires an explicit annotation
+/// on every global, so this is exact for a `GlobalDef`'s `ty`.
+fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    match static_ty(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_nobox_nominal(ws, name) => {
+            value_shape_of_nominal(ws, name)
+        }
+        TypeExpr::Nullable(inner) => {
+            let inner = static_ty(ws, ty.with_idx(inner))?;
+            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = inner else {
+                return None;
+            };
+            if !is_nobox_nominal(ws, name) {
+                return None;
+            }
+            let mut shape = value_shape_of_nominal(ws, name)?;
+            shape.nullable = true;
+            Some(shape)
+        }
+        _ => None,
     }
 }
 
-/// Reify a `call_generic_bindings` `TyId` (caller-arena, possibly an unbound var)
-/// to an arena-free leaf, or `None` if it is not a v0-specializable leaf.
-fn reify_leaf(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<ReifiedLeaf> {
+/// The leaf globals a `nobox`-typed global is stored in, `None` for every other
+/// global. THE single source for the emitted binding, the reads and writes, and
+/// the reflection registry -- so `--dump-state` and snapshot restore address the
+/// storage the program actually uses instead of a base name holding nil.
+pub fn nobox_global_leaves(ws: &Workspace, name: Ustr, ty: TyId) -> Option<Vec<Ustr>> {
+    let shape = nobox_declared_shape(ws, ty)?;
+    Some((0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ReifiedCtor {
+    Array,
+    Map,
+    Nominal(Ustr),
+}
+
+/// An arena-free concrete type binding for a generic param at a specialized
+/// call site. It keys cross-body snapshots without retaining caller-arena
+/// `TyId`s, and preserves nested arguments such as `VecIter<Vec2>`.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ReifiedType {
+    Prim(&'static str),
+    App {
+        ctor: ReifiedCtor,
+        params: Vec<ReifiedType>,
+    },
+}
+
+impl ReifiedType {
+    fn nominal(&self) -> Option<Ustr> {
+        match self {
+            Self::App { ctor: ReifiedCtor::Nominal(name), .. } => Some(*name),
+            _ => None,
+        }
+    }
+
+    fn any_nominal(&self, pred: &impl Fn(Ustr) -> bool) -> bool {
+        match self {
+            Self::Prim(_) => false,
+            Self::App { ctor, params } => {
+                matches!(ctor, ReifiedCtor::Nominal(name) if pred(*name))
+                    || params.iter().any(|param| param.any_nominal(pred))
+            }
+        }
+    }
+}
+
+/// Whether any generic in `key` binds a column-eligible element type -- i.e.
+/// whether specializing is a CORRECTNESS requirement rather than an optimization.
+///
+/// In a context the inliner never enters, an ordinary call simply forgoes the
+/// scalar ABI (`in_unspliced_ctx`) because the shared generic body still serves a
+/// boxed value correctly. The `for`-protocol `next` can only do the same for an
+/// element the boxed representation still stores: under column storage the shared
+/// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
+/// spec binding exactly when the element is column-stored, and the post-emit
+/// validator turns that into a rejection instead of a miscompile.
+fn spec_key_has_column_elem(ws: &Workspace, key: &SpecKey) -> bool {
+    key.iter()
+        .flatten()
+        .any(|ty| ty.any_nominal(&|name| vec_column_elem(ws, name).is_some()))
+}
+
+/// A callee's per-generic instantiation at one call site, in declaration order.
+/// `None` = that generic did not reify (no specialization for it).
+/// The snapshot cache key alongside the `FuncRef`.
+pub type SpecKey = Vec<Option<ReifiedType>>;
+
+/// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
+/// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
+pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, ReifiedType>;
+
+/// The root `TypeExpr` a substituted generic resolves to. Nested arguments stay
+/// in [`SpecSubst`] for recursive call specialization; the synthesized root has
+/// no arena range of its own.
+fn reified_type_node(ty: &ReifiedType) -> TypeExpr {
+    match ty {
+        ReifiedType::App { ctor, .. } => TypeExpr::App {
+            ctor: match ctor {
+                ReifiedCtor::Array => TypeCtor::Array,
+                ReifiedCtor::Map => TypeCtor::Map,
+                ReifiedCtor::Nominal(name) => TypeCtor::Nominal(*name),
+            },
+            params: IdxRange::new_empty(),
+        },
+        ReifiedType::Prim("int") => TypeExpr::Builtin(BuiltinTy::Int),
+        ReifiedType::Prim("float") => TypeExpr::Builtin(BuiltinTy::Float),
+        ReifiedType::Prim("bool") => TypeExpr::Builtin(BuiltinTy::Bool),
+        ReifiedType::Prim(_) => TypeExpr::Builtin(BuiltinTy::Error),
+    }
+}
+
+fn reify_type(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ty: TyId,
+    enclosing: &SpecSubst,
+) -> Option<ReifiedType> {
     let ty = resolve_tyid(ws, inf, ty)?;
     match ty_node(ws, inf, ty)? {
-        TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedLeaf::Prim("int")),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedLeaf::Prim("float")),
-        TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedLeaf::Prim("bool")),
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), params } if params.into_iter().next().is_none() => {
-            Some(ReifiedLeaf::Nominal(n))
+        TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedType::Prim("int")),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedType::Prim("float")),
+        TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedType::Prim("bool")),
+        TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
+        TypeExpr::App { ctor, params } => {
+            let ctor = match ctor {
+                TypeCtor::Array => ReifiedCtor::Array,
+                TypeCtor::Map => ReifiedCtor::Map,
+                TypeCtor::Nominal(name) => ReifiedCtor::Nominal(name),
+            };
+            let params = params
+                .into_iter()
+                .map(|param| reify_type(ws, inf, ty.with_idx(param), enclosing))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ReifiedType::App { ctor, params })
         }
         _ => None,
     }
@@ -546,10 +1068,39 @@ fn compute_call_spec(
     if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
-    if !f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure")) {
+    let bindings = inf.call_generic_bindings.get(&e)?;
+    let (key, subst) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?;
+    // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
+    // whether it happens is the author's call.
+    //
+    // A column-eligible element is not an optimization. The shared body reads a
+    // `_data` that this instantiation's storage does not have, so it is WRONG, not
+    // slow -- the same asymmetry that decides whether an unspliceable call may
+    // fall back to the shared body. Specializing is the only correct lowering, so
+    // it does not wait for an annotation. This is what makes the plain-generic
+    // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
+    let opted_in =
+        f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
+    if !opted_in && !spec_key_has_column_elem(ws, &key) {
         return None;
     }
-    let bindings = inf.call_generic_bindings.get(&e)?;
+    Some((key, subst))
+}
+
+/// [`compute_call_spec`] against an explicit binding list instead of a call
+/// expr. The for-protocol `next` call is SYNTHESIZED and has no expr to key
+/// `call_generic_bindings` by, so it supplies its bindings from
+/// `BoundNext::Concrete::next_generics` (which bone records at resolution).
+/// Shared body so an iterator call and a direct call can never disagree on
+/// which instantiations specialize.
+fn compute_spec_from_bindings(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    bindings: &[TyId],
+    enclosing: &SpecSubst,
+) -> Option<(SpecKey, SpecSubst)> {
+    let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
         return None;
     }
@@ -561,20 +1112,11 @@ fn compute_call_spec(
             key.push(None);
             continue;
         };
-        // Reify the binding; if it is itself one of the ENCLOSING body's generics
-        // (a nested call `push -> grow` inside an already-specialized `push`),
-        // resolve it through the enclosing substitution.
-        let leaf = reify_leaf(ws, inf, *b).or_else(|| match resolve_tyid(ws, inf, *b).and_then(|t| ty_node(ws, inf, t)) {
-            Some(TypeExpr::Generic(ev, _)) => enclosing.get(&ev).copied(),
-            _ => None,
-        });
-        match leaf {
-            Some(leaf) => {
-                if matches!(leaf, ReifiedLeaf::Nominal(n) if map_is_value_struct(ws, n)) {
-                    any_value = true;
-                }
-                subst.insert(var, leaf);
-                key.push(Some(leaf));
+        match reify_type(ws, inf, *b, enclosing) {
+            Some(ty) => {
+                any_value |= ty.any_nominal(&|name| map_is_value_struct(ws, name));
+                subst.insert(var, ty.clone());
+                key.push(Some(ty));
             }
             None => key.push(None),
         }
@@ -582,17 +1124,36 @@ fn compute_call_spec(
     any_value.then_some((key, subst))
 }
 
-/// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete leaf) for `fref`
-/// from a [`SpecKey`] (leaves in declaration order). The inliner holds only the
+pub fn spec_key_from_next_generics(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+    enclosing: &SpecSubst,
+) -> Option<SpecKey> {
+    let f = &ws.module(func.module).functions[func.func];
+    let bindings: Vec<TyId> = f
+        .generics
+        .iter()
+        .map(|generic| match ty_node(ws, inf, *generic) {
+            Some(TypeExpr::Generic(var, _)) => next_generics.get(&var).copied(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    compute_spec_from_bindings(ws, inf, func, &bindings, enclosing).map(|(key, _)| key)
+}
+
+/// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
+/// from a [`SpecKey`] (trees in declaration order). The inliner holds only the
 /// arena-free key in its cache; this re-pairs it with the callee's generic
 /// `VarId`s to drive [`lower_function_spec`]. An empty / all-`None` key yields an
 /// empty subst (the shared snapshot).
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::new();
-    for (g, leaf) in f.generics.iter().zip(key) {
-        if let (Some(TypeExpr::Generic(var, _)), Some(l)) = (static_ty(ws, *g), leaf) {
-            subst.insert(var, *l);
+    for (g, ty) in f.generics.iter().zip(key) {
+        if let (Some(TypeExpr::Generic(var, _)), Some(reified)) = (static_ty(ws, *g), ty) {
+            subst.insert(var, reified.clone());
         }
     }
     subst
@@ -600,29 +1161,142 @@ pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> Spec
 
 /// [`sig_value_shape`] under a specialization substitution: a param/return type
 /// that is a generic bound to a value-struct leaf resolves to that leaf's shape.
-/// Every non-generic type falls through to the plain [`sig_value_shape`].
+/// A `T?` resolves the same way through the NULLABLE policy, so a generic
+/// nullable inherits the same asymmetry a spelled-out one has
+/// ([`sig_shape_of_nullable_nominal`]) instead of falling through to
+/// [`sig_value_shape`], whose `Nullable` arm matches no nominal for a generic
+/// inner. Every non-generic type falls through to the plain [`sig_value_shape`].
 fn sig_value_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
     if let TyId::Static(m, idx) = ty {
-        if let TypeExpr::Generic(var, _) = ws.module(m).ty_arena[idx] {
-            return match subst.get(&var) {
-                Some(ReifiedLeaf::Nominal(n)) => value_shape_of_nominal(ws, *n),
-                _ => None,
-            };
+        match ws.module(m).ty_arena[idx] {
+            TypeExpr::Generic(var, _) => {
+                return spec_nominal(subst, var).and_then(|n| value_shape_of_nominal(ws, n));
+            }
+            TypeExpr::Nullable(inner) => {
+                if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
+                    return spec_nominal(subst, var)
+                        .and_then(|n| sig_shape_of_nullable_nominal(ws, n));
+                }
+            }
+            _ => {}
         }
     }
     sig_value_shape(ws, ty)
 }
 
-/// Arity of a tuple RETURN type -- `Some(n)` iff `ty` is a (non-nullable) tuple
-/// `(A, B, ...)`. Drives the multi-return ABI: a tuple-returning fn returns its N
-/// elements as N Lua values instead of one heap table (slice 1,
-/// `docs/iterator-implementation-plan.md`). A `Nullable(Tuple)` return stays boxed
-/// (no room for the null discriminant across a multi-value boundary).
-fn tuple_arity(ws: &Workspace, ty: TyId) -> Option<usize> {
-    match static_ty(ws, ty)? {
-        TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
-        _ => None,
+/// The nominal `var` is bound to under `subst`, or `None` when it is unbound or
+/// bound to a non-nominal (a tuple, a fn type, a primitive).
+fn spec_nominal(subst: &SpecSubst, var: bone_semantic::hir::VarId) -> Option<Ustr> {
+    subst.get(&var)?.nominal()
+}
+
+/// The wire shape of ONE element of a tuple return.
+#[derive(Clone, Debug)]
+enum RetSlot {
+    /// One opaque value -- today's ABI, and what every element that is not a
+    /// `nobox` value keeps.
+    Opaque,
+    /// A `nobox` value: its leaves ride the return directly, so the element
+    /// never needs a box to cross the boundary.
+    Leaves(ValueShape),
+    /// A nested tuple that itself carries a `nobox` element somewhere inside.
+    Nested(TupleRetShape),
+}
+
+impl RetSlot {
+    fn slot_count(&self) -> usize {
+        match self {
+            RetSlot::Opaque => 1,
+            RetSlot::Leaves(shape) => shape.leaf_count(),
+            RetSlot::Nested(inner) => inner.slot_count(),
+        }
     }
+
+    fn splats(&self) -> bool {
+        !matches!(self, RetSlot::Opaque)
+    }
+}
+
+/// Per-element wire shape of a tuple RETURN under the multi-return ABI.
+///
+/// Only a `nobox` element splats. An unmarked value struct keeps its single
+/// boxed slot: marking a type is the one thing that re-shapes a return, which
+/// is what lets an `@scalar_abi inline(lua)` body hand-write a `(bool, Vec2)`
+/// return without the compiler moving the wire underneath it.
+///
+/// The shape is derived from the return TYPE alone -- no callee identity -- so a
+/// direct call, an indirect call through a fn value and the definition all
+/// agree by construction, exactly as the plain multi-return arity does.
+#[derive(Clone, Debug)]
+struct TupleRetShape {
+    slots: Vec<RetSlot>,
+}
+
+impl TupleRetShape {
+    /// Total returned values.
+    fn slot_count(&self) -> usize {
+        self.slots.iter().map(RetSlot::slot_count).sum()
+    }
+
+    /// Whether any element carries leaves -- `false` means this is byte-for-byte
+    /// the pre-existing ABI and every splat-aware path stays off.
+    fn splats(&self) -> bool {
+        self.slots.iter().any(RetSlot::splats)
+    }
+}
+
+/// The multi-return ABI of a tuple RETURN type: `Some` iff `ty` is a
+/// (non-nullable) tuple `(A, B, ...)`, which returns its slots as separate
+/// values instead of one heap table (slice 1,
+/// `docs/iterator-implementation-plan.md`). `None` for a non-tuple -- a
+/// `Nullable(Tuple)` included, since a multi-value boundary has no room for the
+/// null discriminant.
+fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleRetShape> {
+    let TypeExpr::Tuple { elements } = static_ty(ws, ty)? else {
+        return None;
+    };
+    let slots = elements
+        .into_iter()
+        .map(|el| ret_slot(ws, subst, ty.with_idx(el)))
+        .collect();
+    Some(TupleRetShape { slots })
+}
+
+fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    if let Some(shape) = nobox_sig_shape_spec(ws, subst, ty) {
+        return RetSlot::Leaves(shape);
+    }
+    match tuple_ret_shape(ws, subst, ty) {
+        Some(inner) if inner.splats() => RetSlot::Nested(inner),
+        _ => RetSlot::Opaque,
+    }
+}
+
+/// [`sig_value_shape_spec`] narrowed to `nobox` nominals -- the splat gate. A
+/// generic resolves through the substitution, so a `VecIter<NV2>.next` reaches
+/// the same answer a spelled-out `-> (bool, NV2)` does.
+fn nobox_sig_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
+    let nominal = match static_ty(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+        TypeExpr::Generic(var, _) => spec_nominal(subst, var)?,
+        TypeExpr::Nullable(inner) => {
+            let inner = ty.with_idx(inner);
+            let n = match static_ty(ws, inner)? {
+                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+                TypeExpr::Generic(var, _) => spec_nominal(subst, var)?,
+                _ => return None,
+            };
+            if !is_nobox_nominal(ws, n) {
+                return None;
+            }
+            return sig_shape_of_nullable_nominal(ws, n);
+        }
+        _ => return None,
+    };
+    if !is_nobox_nominal(ws, nominal) {
+        return None;
+    }
+    sig_shape_of_nominal(ws, nominal)
 }
 
 /// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE
@@ -666,6 +1340,7 @@ impl EnumCdataShape {
         ValueShape {
             name: self.name,
             fields: self.field_names().into_iter().map(|n| (n, FieldShape::Prim)).collect(),
+            nullable: false,
         }
     }
 }
@@ -862,7 +1537,11 @@ impl EnumFlatShape {
         for rf in &self.record_fields {
             fields.push((*rf, FieldShape::Prim));
         }
-        ValueShape { name: self.name, fields }
+        ValueShape {
+            name: self.name,
+            fields,
+            nullable: false,
+        }
     }
 }
 
@@ -935,22 +1614,62 @@ pub fn yield_slot(i: usize) -> Ustr {
     Ustr::from(format!("__y{i}").as_str())
 }
 
+// A flattened child field's physical slots are DOTTED parent keys, the same
+// encoding `embed` uses (`docs/scalarization-and-boxing-design.md` S 6). `.` is
+// not an identifier character, so a slot key can never equal a legal user field
+// name -- which the `__`-based encoding this replaced could: an enum field `sig`
+// and a user field `sig__tag` both wrote `sig__tag`, so the table ctor emitted
+// the key twice and Lua's last-write-wins clobbered the discriminant, silently
+// breaking every match on that enum.
+//
+// The three forms are disjoint by their suffix: `#` for the discriminant (not an
+// identifier character and not a digit), all-digits for a positional payload (an
+// identifier cannot start with a digit), an identifier for a named payload. They
+// cannot collide with an `embed` leaf key either, because both are prefixed by
+// the owning parent FIELD name and a field name denotes exactly one field.
+
+/// Re-key relative embed leaf paths under an owning field: `[("x", v)]` under
+/// `p` becomes `[("p.x", v)]`. Relative paths let a leaf list be computed once
+/// and attached wherever the child is spliced.
+fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>)> {
+    leaves
+        .into_iter()
+        .map(|(k, v)| (Ustr::from(&format!("{field}.{k}")), v))
+        .collect()
+}
+
 /// The parent-table slot holding a flattened enum field's discriminant (variant
-/// name string), e.g. field `sig` -> `sig__tag`.
+/// name string), e.g. field `sig` -> `sig.#`.
 fn flat_tag_slot(field: Ustr) -> Ustr {
-    Ustr::from(format!("{field}__tag").as_str())
+    Ustr::from(format!("{field}.#").as_str())
 }
 
 /// The parent-table slot holding a flattened enum field's `i`th positional payload,
-/// e.g. field `sig` payload 0 -> `sig__0`.
+/// e.g. field `sig` payload 0 -> `sig.0`.
 fn flat_payload_slot(field: Ustr, i: usize) -> Ustr {
-    Ustr::from(format!("{field}__{i}").as_str())
+    Ustr::from(format!("{field}.{i}").as_str())
 }
 
 /// The parent-table slot holding a flattened enum field's named (record) payload,
-/// e.g. field `shape` record field `r` -> `shape__r`.
+/// e.g. field `shape` record field `r` -> `shape.r`.
 fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
-    Ustr::from(format!("{field}__{rec_field}").as_str())
+    Ustr::from(format!("{field}.{rec_field}").as_str())
+}
+
+/// Every relative slot a flattened enum field occupies: discriminant, positional
+/// payloads, named payloads. A flat-enum field is MULTI-SLOT, so any site walking
+/// a struct's physical leaves must expand it -- treating the field name as one
+/// leaf silently splits the field across two encodings (the store writes
+/// `f.#`/`f.0`, the walker touches `f`).
+fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
+    let mut out = vec![flat_tag_slot(field)];
+    for i in 0..shape.tuple_width {
+        out.push(flat_payload_slot(field, i));
+    }
+    for rf in &shape.record_fields {
+        out.push(flat_named_slot(field, *rf));
+    }
+    out
 }
 
 /// A flattened enum value's runtime cells: the discriminant + every union slot
@@ -1158,6 +1877,26 @@ fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst
     }
     f.param_decls.iter().any(|pd| sig_value_shape_spec(ws, subst, pd.ty).is_some())
         || f.return_ty.is_some_and(|t| sig_value_shape_spec(ws, subst, t).is_some())
+}
+
+/// A hoisted nested `fn`: the private top-level name it resolves to, and the
+/// value ABI its definition and every call site both read (so the two can never
+/// drift, the same single-gate discipline as [`fn_uses_scalar_abi`]).
+#[derive(Clone)]
+struct NestedFn {
+    hoisted: Ustr,
+    /// Declared param names, so a call site can place named args into slots
+    /// (`slotted_call_args`) exactly as a top-level callee's would be.
+    param_names: Vec<Ustr>,
+    /// Per-param value shape; all-`None` when the fn keeps the boxed ABI.
+    param_shapes: Vec<Option<ValueShape>>,
+    ret_shape: Option<ValueShape>,
+}
+
+impl NestedFn {
+    fn uses_scalar_abi(&self) -> bool {
+        self.ret_shape.is_some() || self.param_shapes.iter().any(|s| s.is_some())
+    }
 }
 
 /// The Lua parameter-name list for a scalar-ABI `inline(lua)` fn (`@scalar_abi`):
@@ -1743,9 +2482,10 @@ pub fn lower_function_spec(
         in_unspliced_ctx: func.is_coroutine,
         param_shapes,
         ret_shape,
-        ret_tuple: func.return_ty.and_then(|t| tuple_arity(ws, t)),
+        ret_tuple: func.return_ty.and_then(|t| tuple_ret_shape(ws, subst, t)),
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
+        cur_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
@@ -1764,6 +2504,7 @@ pub fn lower_function_spec(
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
     };
+    b.reject_nobox_fn_taken_by_value()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -1816,6 +2557,7 @@ pub fn lower_global(
         ret_tuple: None,
         ret_ty: None,
         fn_name_span: None,
+        cur_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -1823,6 +2565,11 @@ pub fn lower_global(
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
     };
+    // A `nobox` global is category-2 storage: its layout comes from the declared
+    // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
+    // per leaf. Without this the body packs a box the verifier then rejects.
+    let g = &module.globals[gid];
+    b.ret_shape = nobox_declared_shape(ws, g.ty);
     b.lower_root()?;
     Ok(Some(b.f))
 }
@@ -1874,6 +2621,7 @@ pub fn lower_decorator(
         ret_tuple: None,
         ret_ty: None,
         fn_name_span: None,
+        cur_span: None,
         group_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
@@ -1885,6 +2633,7 @@ pub fn lower_decorator(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
+    b.reject_nobox_fn_taken_by_value()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -1896,7 +2645,7 @@ struct Builder<'a> {
     scx: &'a ScalarCtx,
     /// Per-instantiation generic substitution (`docs/flatvec-plan.md` call-site
     /// specialization). Empty for the shared generic / non-generic snapshot; a
-    /// value-instantiated splice carries `callee generic VarId -> concrete leaf`
+    /// value-instantiated splice carries `callee generic VarId -> concrete type`
     /// so type resolution (`type_of`/`native_buffer_alloc_ctype`/param shapes)
     /// sees the concrete type and the body scalarizes.
     spec_subst: &'a SpecSubst,
@@ -1924,9 +2673,9 @@ struct Builder<'a> {
     /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
     /// the next `resume(arg)`). `None` outside a coroutine.
     resume_arg: Option<Idx<Cell>>,
-    /// True while lowering a body the MIR inliner will NOT splice into: a closure
-    /// sub-CFG (upvalue cap), a hoisted nested fn, a coroutine, a global init, or
-    /// a decorator (none run `inline_functions`). A call here must NOT take the
+    /// True while lowering a body whose calls this pass cannot give the
+    /// specialized scalar ABI: a closure sub-CFG, a hoisted nested fn, a
+    /// coroutine, a global init, or a decorator. A call here must NOT take the
     /// SPECIALIZED scalar ABI (splatting a value arg to leaves), which is only
     /// sound when the inliner replaces the call with the matching specialized
     /// body -- an unspliced residual would call the SHARED generic body (`T` = one
@@ -1939,16 +2688,21 @@ struct Builder<'a> {
     param_shapes: Vec<Option<ValueShape>>,
     /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
     ret_shape: Option<ValueShape>,
-    /// `Some(n)` when the fn's return type is a tuple of arity `n` -- it returns
-    /// N Lua values (multi-return ABI), not one heap table. Set for named fns;
-    /// lambdas decide per-body at their own return site.
-    ret_tuple: Option<usize>,
+    /// `Some` when the fn's return type is a tuple -- it returns its slots as
+    /// separate values (multi-return ABI), not one heap table. Set for named
+    /// fns; lambdas decide per-body at their own return site.
+    ret_tuple: Option<TupleRetShape>,
     /// The fn's declared return type -- the expected type at a scalar `return`
     /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
     ret_ty: Option<TyId>,
     /// The fn's name span, for spanned emit-time rejections that have no better
     /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
     fn_name_span: Option<Span>,
+    /// The source span currently being lowered, maintained by [`Builder::lower_expr`].
+    /// Instructions a post-transform check can reject stamp it into
+    /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
+    /// than at the enclosing fn.
+    cur_span: Option<Span>,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1966,17 +2720,35 @@ struct Builder<'a> {
     /// distinct cells and adding an unrelated static never renames siblings.
     static_counters: HashMap<Ustr, u32>,
     /// Nested `fn` names: raw binding idx -> the hoisted `__local_*` global a
-    /// call / value-ref of the binding resolves to. Inherited (cloned) by a
-    /// nested fn's own builder so it can reference itself + prior siblings.
-    nested_fn_globals: HashMap<u32, Ustr>,
+    /// call / value-ref of the binding resolves to, plus its value ABI.
+    /// Inherited (cloned) by a nested fn's own builder so it can reference
+    /// itself + prior siblings.
+    nested_fn_globals: HashMap<u32, NestedFn>,
     /// Per nested-fn source-name counter (source order), the `static_counters`
     /// analogue for shadowing duplicates.
     nested_fn_counters: HashMap<Ustr, u32>,
 }
 
 impl Builder<'_> {
+    /// [`gap`] anchored at the construct currently being lowered. Use wherever a
+    /// gap names a user-visible type or expression -- an unspanned one leaves the
+    /// reader with a whole project to search.
+    fn gap_here(&self, msg: impl std::fmt::Display) -> CompilerError {
+        match self.cur_span {
+            Some(span) => CompilerError::new_with_label(
+                span,
+                format!("skull-mir: lowering gap: {msg}"),
+            ),
+            None => gap(msg),
+        }
+    }
+
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
-        self.f.emit(self.cur, inst)
+        let id = self.f.emit(self.cur, inst);
+        if let Some(span) = self.cur_span {
+            self.f.inst_spans.insert(id, span);
+        }
+        id
     }
 
     /// Whether the current block is still open (no terminator set yet). A
@@ -2148,9 +2920,13 @@ impl Builder<'_> {
             let r = self.lower_expr_repr(e)?;
             return Ok(self.repr_to_leaves(&r, &shape));
         }
-        if let Some(n) = self.ret_tuple {
+        if let Some(shape) = self.ret_tuple.clone() {
+            if shape.splats() {
+                let r = self.lower_expr_repr(e)?;
+                return Ok(self.tuple_repr_to_slots(r, &shape));
+            }
             let v = self.lower_expr(e)?;
-            return Ok(self.tuple_return_operands(v, n));
+            return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
         let v = self.lower_expr(e)?;
         let v = match self.ret_ty {
@@ -2174,6 +2950,77 @@ impl Builder<'_> {
         (0..n)
             .map(|i| self.emit_cur(Inst::TupleIndex { base: v, index: i }))
             .collect()
+    }
+
+    /// Flatten a tuple repr to the slot values `shape` describes -- the tuple
+    /// analogue of [`Self::repr_to_leaves`]. A `Tuple` repr (a splatting call
+    /// forwarded straight out, or a tuple literal) yields its parts; anything
+    /// else is a packed tuple, so each element is read back with `TupleIndex`
+    /// and a `Leaves` slot is field-read off the box.
+    fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        let parts: Vec<ValueRepr> = match r {
+            ValueRepr::Tuple(parts) if parts.len() == shape.slots.len() => parts,
+            other => {
+                let base = self.pack(other);
+                (0..shape.slots.len())
+                    .map(|index| ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
+                    .collect()
+            }
+        };
+        let mut out = Vec::with_capacity(shape.slot_count());
+        for (slot, part) in shape.slots.iter().zip(parts) {
+            match slot {
+                RetSlot::Opaque => out.push(self.pack(part)),
+                // A BOXED source at a non-nullable splatting slot is the iterator
+                // protocol's "no element" placeholder (`return (false,
+                // phantom())`), which is nil -- field-reading it would fault, and
+                // the slot is dead anyway because the tuple's own flag guards it.
+                // The nullable spread already branches on nil, so borrow it and
+                // drop the presence leaf.
+                RetSlot::Leaves(vs)
+                    if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) =>
+                {
+                    let mut nullable = vs.clone();
+                    nullable.nullable = true;
+                    let leaves = self.repr_to_leaves(&part, &nullable);
+                    out.extend(leaves.into_iter().skip(1));
+                }
+                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves(&part, vs)),
+                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)),
+            }
+        }
+        out
+    }
+
+    /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
+    /// inverse of [`Self::tuple_repr_to_slots`], used at a call site to hand a
+    /// destructure its elements without ever boxing a `nobox` one.
+    fn tuple_from_slots(
+        &mut self,
+        shape: &TupleRetShape,
+        slots: &[Idx<Inst>],
+        idx: &mut usize,
+    ) -> ValueRepr {
+        let parts = shape
+            .slots
+            .clone()
+            .iter()
+            .map(|slot| self.slot_repr(slot, slots, idx))
+            .collect();
+        ValueRepr::Tuple(parts)
+    }
+
+    /// One element of [`Self::tuple_from_slots`], consuming its slots from `*idx`.
+    fn slot_repr(&mut self, slot: &RetSlot, slots: &[Idx<Inst>], idx: &mut usize) -> ValueRepr {
+        match slot {
+            RetSlot::Opaque => {
+                let v = slots[*idx];
+                *idx += 1;
+                ValueRepr::Scalar(v)
+            }
+            RetSlot::Leaves(vs) => self.rebuild_from_leaves(vs, slots, idx),
+            RetSlot::Nested(inner) => self.tuple_from_slots(inner, slots, idx),
+        }
     }
 
     /// Lower a statement sequence into the current block. Returns `true` if a
@@ -2230,6 +3077,101 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// The value ABI of a nested `fn`, read by both its definition and its call
+    /// sites. Same rule as [`fn_uses_scalar_abi`] for a top-level fn, minus the
+    /// annotation gates a nested fn cannot carry: it splats iff it has a
+    /// scalarizable value param/return AND is never referenced as a fn VALUE (an
+    /// indirect callee can't splat). The enclosing function is ONE body arena, so
+    /// scanning it for `Expr::Var(name)` also covers sibling nested fns and
+    /// lambdas -- a `Callee::Local` callee is not an `Expr::Var`, so a plain call
+    /// never counts as taking the fn by value.
+    fn nested_fn_abi(
+        &self,
+        name: Idx<BindingInfo>,
+        params: IdxRange<BindingInfo>,
+        ret_ty: Option<TyId>,
+        hoisted: Ustr,
+    ) -> NestedFn {
+        let param_names: Vec<Ustr> =
+            params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
+        let boxed =
+            NestedFn { hoisted, param_names: param_names.clone(), param_shapes: Vec::new(), ret_shape: None };
+        let taken_by_value = self
+            .body
+            .expr_arena
+            .iter()
+            .any(|(_, e)| matches!(e, Expr::Var(b) if *b == name));
+        if self.scx.values_first_class {
+            return boxed;
+        }
+        // TAKEN BY VALUE: the ABI narrows to what an indirect call site can
+        // compute from the fn TYPE alone ([`Self::fn_value_abi`]), which is
+        // `nobox` values only. Both ends must run the SAME predicate -- using
+        // the wider `body_sig_value_shape` here would scalarize an ordinary
+        // value param that an opaque call site still boxes, and the two would
+        // disagree exactly where neither can see the other. Dropping to the
+        // boxed ABI entirely, which is what this used to do, is the same
+        // disagreement in the other direction: it is what made a `nobox` param
+        // reject once the fn was taken by value.
+        let shape_of = |s: &Self, t: TyId| {
+            if taken_by_value {
+                s.nobox_shape_of_ty(t)
+            } else {
+                s.body_sig_value_shape(t)
+            }
+        };
+        let abi = NestedFn {
+            hoisted,
+            param_names,
+            param_shapes: params
+                .into_iter()
+                .map(|pb| self.binding_ty(pb).and_then(|t| shape_of(self, t)))
+                .collect(),
+            ret_shape: self
+                .nested_fn_ret_ty(name, ret_ty)
+                .and_then(|t| shape_of(self, t)),
+        };
+        if abi.uses_scalar_abi() { abi } else { boxed }
+    }
+
+    /// A nested `fn`'s return type. An ANNOTATION is authoritative when present;
+    /// without one the type is inferred, and it must be read off the binding's own
+    /// `fn(..) -> R` type rather than defaulted away -- an inferred value return is
+    /// as much a part of the signature as a written one, and treating it as absent
+    /// silently drops the callee back to the boxed ABI.
+    fn nested_fn_ret_ty(&self, name: Idx<BindingInfo>, ret_ty: Option<TyId>) -> Option<TyId> {
+        if ret_ty.is_some() {
+            return ret_ty;
+        }
+        let fty = self.resolve_tyid(self.binding_ty(name)?)?;
+        match self.ty_node(fty)? {
+            TypeExpr::Function { ret, .. } => Some(fty.with_idx(ret)),
+            _ => None,
+        }
+    }
+
+    /// [`sig_value_shape`] for a type that may live in the BODY's inference arena
+    /// rather than the workspace one -- a nested `fn`'s params are declared inside
+    /// the enclosing body, so `static_ty` cannot see them. Same shape policy
+    /// (`sig_shape_of_nominal`), reached through `ty_node`, which also applies the
+    /// enclosing specialization substitution.
+    fn body_sig_value_shape(&self, ty: TyId) -> Option<ValueShape> {
+        let ty = self.resolve_tyid(ty)?;
+        match self.ty_node(ty)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(self.ws, n),
+            TypeExpr::Nullable(inner) => {
+                let inner = self.resolve_tyid(ty.with_idx(inner))?;
+                match self.ty_node(inner)? {
+                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                        sig_shape_of_nullable_nominal(self.ws, n)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
     /// <name>_<ctr>`. The name is registered in `nested_fn_globals` BEFORE the
     /// body is lowered so self-recursion resolves; the child inherits the
@@ -2238,6 +3180,7 @@ impl Builder<'_> {
         &mut self,
         name: Idx<BindingInfo>,
         params: IdxRange<BindingInfo>,
+        ret_ty: Option<TyId>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let sname = self.body.binding_arena[name].name;
@@ -2248,7 +3191,8 @@ impl Builder<'_> {
             v
         };
         let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
-        self.nested_fn_globals.insert(raw(name), hoisted);
+        let abi = self.nested_fn_abi(name, params, ret_ty, hoisted);
+        self.nested_fn_globals.insert(raw(name), abi.clone());
 
         let mf = MirFunc::new(hoisted);
         let entry = mf.entry();
@@ -2269,14 +3213,15 @@ impl Builder<'_> {
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
             in_unspliced_ctx: true,
-            param_shapes: Vec::new(),
-            ret_shape: None,
+            param_shapes: abi.param_shapes.clone(),
+            ret_shape: abi.ret_shape.clone(),
             ret_tuple: None,
             // A nested fn is emitted as a sibling top-level Lua fn and is never a
             // GLSL callee (referenced indirectly), so a return coercion here is
             // Lua-identity only; leaving it off matches today's emitted text.
             ret_ty: None,
             fn_name_span: None,
+            cur_span: None,
             group_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
@@ -2288,10 +3233,22 @@ impl Builder<'_> {
             nested_fn_counters: HashMap::new(),
         };
 
-        for pb in params {
-            let cell = child.f.new_cell(Some(child.body.binding_arena[pb].name));
-            child.f.params.push(cell);
-            child.binds.insert(raw(pb), cell);
+        for (i, pb) in params.into_iter().enumerate() {
+            let pname = child.body.binding_arena[pb].name;
+            match child.param_shapes.get(i).and_then(|s| s.clone()) {
+                Some(shape) => {
+                    let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
+                        .map(|li| child.f.new_cell(Some(Ustr::from(format!("{pname}__{li}").as_str()))))
+                        .collect();
+                    child.f.params.extend(cells.iter().copied());
+                    child.group_binds.insert(raw(pb), (cells, shape));
+                }
+                None => {
+                    let cell = child.f.new_cell(Some(pname));
+                    child.f.params.push(cell);
+                    child.binds.insert(raw(pb), cell);
+                }
+            }
         }
 
         child.defers.push(Vec::new());
@@ -2314,14 +3271,19 @@ impl Builder<'_> {
 
     fn lower_stmts(&mut self, stmts: IdxRange<Statement>) -> Result<bool, CompilerError> {
         for sidx in stmts {
+            // Coarse anchor for anything lowered outside an expression (a `for`
+            // desugaring's element bind, a scope-exit splice). `lower_expr`
+            // narrows it wherever a real expression is in hand.
+            self.cur_span = self.body.statement_spans.get(sidx).copied();
             match self.body.statement_arena[sidx].clone() {
                 Statement::Let { name, value } => {
-                    // A flat-enum local threads as leaf cells (like a scalarized
-                    // param), so a later `match x` reads the cells with no box and a
-                    // whole-value use rebuilds the box on demand. A NULLABLE flat-enum
-                    // local threads too -- `tag = nil` is the null sentinel, handled by
-                    // the nil-safe spread / `== null` tag test / conditional materialize.
-                    if let Some(shape) = self.flat_enum_value_shape_of(value) {
+                    // Flat enums and guaranteed no-box values live in leaf cells,
+                    // matching the scalar ABI instead of relying on later SROA.
+                    let threaded_shape = self
+                        .flat_enum_value_shape_of(value)
+                        .or_else(|| self.nobox_binding_shape(name))
+                        .or_else(|| self.nobox_value_shape_of(value));
+                    if let Some(shape) = threaded_shape {
                         let r = self.lower_expr_repr(value)?;
                         let leaves = self.repr_to_leaves(&r, &shape);
                         let bname = self.body.binding_arena[name].name;
@@ -2379,8 +3341,16 @@ impl Builder<'_> {
                 // `let (a, b) = e` — destructure via TupleIndex into a cell per
                 // leaf (the same machinery `for (k,v)` uses).
                 Statement::LetTuple { vars, value } => {
-                    let v = self.lower_expr(value)?;
-                    self.bind_for_pattern(&vars, v);
+                    match self.expr_tuple_shape(value).filter(TupleRetShape::splats) {
+                        Some(shape) => {
+                            let r = self.lower_expr_repr(value)?;
+                            self.bind_tuple_repr(&vars, &shape, r);
+                        }
+                        None => {
+                            let v = self.lower_expr(value)?;
+                            self.bind_for_pattern(&vars, v);
+                        }
+                    }
                 }
                 // `let Wrapper(x) = e` — a transparent newtype's runtime value IS
                 // the inner, so `x` binds directly to the value.
@@ -2393,8 +3363,8 @@ impl Builder<'_> {
                 Statement::Static { name, value } => {
                     self.lower_static(name, value)?;
                 }
-                Statement::Fn { name, params, ret_ty: _, body } => {
-                    self.lower_nested_fn(name, params, body)?;
+                Statement::Fn { name, params, ret_ty, body } => {
+                    self.lower_nested_fn(name, params, ret_ty, body)?;
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {
@@ -2562,7 +3532,13 @@ impl Builder<'_> {
     }
 
     fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let v = self.lower_expr_inner(e)?;
+        // Source cursor for instruction-level diagnostics: whatever is lowered
+        // from here down came from `e` unless a nested `lower_expr` narrows it,
+        // and the restore puts the enclosing expression back on the way out.
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let v = self.lower_expr_inner(e);
+        self.cur_span = outer;
+        let v = v?;
         // Implicit iterable->iterator coercion at a bounded call arg: bone
         // recorded the resolved `iter` fn; wrap the arg value in that call
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
@@ -2583,7 +3559,7 @@ impl Builder<'_> {
             Expr::Bool(x) => Ok(self.emit_cur(Inst::Const(Lit::Bool(x)))),
             Expr::String(s) => Ok(self.emit_cur(Inst::Const(Lit::Str(s)))),
 
-            // A field-ref key path (`.field` resolved against `FieldOf<T, V>`)
+            // A field-ref key path (`.field` resolved against `FieldRef<T, V>`)
             // lowers to its interned field name. skull emits named struct keys,
             // so `obj[name]` is identical to `obj.field`.
             Expr::SiblingRef(name) => Ok(self.emit_cur(Inst::Const(Lit::Str(name)))),
@@ -2600,7 +3576,7 @@ impl Builder<'_> {
             // A nested fn used as a value: reference the hoisted top-level fn by
             // name (a plain global read -- zero closure alloc).
             Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
-                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)])))
+                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)].hoisted)))
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -2624,7 +3600,15 @@ impl Builder<'_> {
                 let sym = self.fn_value_symbol(e, name)?;
                 Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
             }
-            Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            // A global holding a value struct routes through the repr layer so a
+            // whole-value read copies the box (a global is a mutable place).
+            Expr::Global(name) => {
+                if self.value_struct_of(e).is_some() {
+                    let r = self.lower_expr_repr(e)?;
+                    return Ok(self.pack(r));
+                }
+                Ok(self.emit_cur(Inst::Global(name)))
+            }
 
             // A reached `?` hole is a not-yet-filled marker: raise a readable
             // runtime error (naming the hole) rather than silently evaluating to
@@ -2720,12 +3704,12 @@ impl Builder<'_> {
                 let vs = self.lower_exprs(elems)?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
-            Expr::Array(elems) => self.lower_array_literal(elems),
+            Expr::Array(elems) => self.lower_array_literal(e, elems),
             Expr::Index { base, index } => {
                 // A whole-value read of a value-struct element COPIES (via the repr
                 // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
                 // than binding the interior array reference.
-                if self.ffi_clean_value_elem(e).is_some() {
+                if self.value_struct_of(e).is_some() {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
                 }
@@ -2762,7 +3746,7 @@ impl Builder<'_> {
                 Ok(self.pack(r))
             }
             Expr::StructLiteral { name, fields, bases } => {
-                self.lower_struct_literal(name, fields, bases)
+                self.lower_struct_literal(e, name, fields, bases)
             }
             Expr::EnumVariant {
                 enum_name,
@@ -2823,14 +3807,43 @@ impl Builder<'_> {
             // Captured outer vars are the enclosing cells (Lua upvalues); the
             // closure's params are fresh cells (its Lua arg list).
             Expr::Lambda { params, body } => {
-                let param_cells: Vec<Idx<Cell>> = params
+                // A `nobox` param arrives as leaves, so the lambda binds a Group
+                // over N cells instead of one -- the same shape a scalar-ABI fn
+                // gives its params. Decided by the lambda's own fn TYPE, which is
+                // what the call site reads too (`fn_value_abi`), so the two ends
+                // agree without either seeing the other.
+                let lam_abi = self.expr_fn_value_abi(e);
+                // Param shapes come from the param BINDINGS, which is where a
+                // lambda's param types actually land -- its own `fn(..) -> ..`
+                // node can still hold unresolved vars at this point, while the
+                // bindings carry what inference unified them WITH, i.e. the same
+                // types the call site reads off the fn type.
+                let param_shapes: Vec<Option<ValueShape>> = params
                     .into_iter()
-                    .map(|pb| {
-                        let cell = self.f.new_cell(Some(self.body.binding_arena[pb].name));
-                        self.binds.insert(raw(pb), cell);
-                        cell
-                    })
+                    .map(|pb| self.binding_ty(pb).and_then(|t| self.nobox_shape_of_ty(t)))
                     .collect();
+                let mut param_cells: Vec<Idx<Cell>> = Vec::new();
+                for (i, pb) in params.into_iter().enumerate() {
+                    let pname = self.body.binding_arena[pb].name;
+                    match param_shapes.get(i).and_then(|s| s.clone()) {
+                        Some(shape) => {
+                            let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
+                                .map(|li| {
+                                    self.f.new_cell(Some(Ustr::from(
+                                        format!("{pname}__{li}").as_str(),
+                                    )))
+                                })
+                                .collect();
+                            param_cells.extend(cells.iter().copied());
+                            self.group_binds.insert(raw(pb), (cells, shape));
+                        }
+                        None => {
+                            let cell = self.f.new_cell(Some(pname));
+                            self.binds.insert(raw(pb), cell);
+                            param_cells.push(cell);
+                        }
+                    }
+                }
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;
@@ -2841,7 +3854,7 @@ impl Builder<'_> {
                 // so an indirect call site can capture them (multi-return ABI); the
                 // enclosing value-struct `ret_shape` never applies (a lambda is
                 // called through a boxed fn-value). Save/restore around the body.
-                let saved_ret_tuple = self.ret_tuple;
+                let saved_ret_tuple = self.ret_tuple.take();
                 let saved_ret_shape = self.ret_shape.take();
                 // Isolate the defer state, like `lower_nested_fn`. A lambda body
                 // is its OWN fn scope: bone desugars `() => e` to a block with
@@ -2857,17 +3870,49 @@ impl Builder<'_> {
                 // the reset unmasks no diagnostic -- it just makes the flag honest).
                 let saved_defers = std::mem::take(&mut self.defers);
                 let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
-                // A lambda body is a sub-CFG the inliner refuses (upvalue cap), so
-                // its calls are never spliced -- box value args (see field docs).
+                // Box value args (see field docs). A lambda body IS spliced into
+                // now -- `convert_closures` splits it out and the inliner runs
+                // over the standalone body -- but that happens after lowering, so
+                // this decision cannot see the specialized callee it would need.
                 let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
-                self.ret_tuple = self.lambda_ret_tuple_arity(e);
-                let v = self.lower_expr(body)?;
-                if self.is_open() {
-                    let leaves = match self.ret_tuple {
-                        Some(n) => self.tuple_return_operands(v, n),
-                        None => vec![v],
-                    };
-                    self.f.set_term(self.cur, Term::Return(leaves));
+                self.ret_tuple = self.lambda_ret_tuple_shape(e);
+                // A `nobox` return leaves as leaves, same multi-return wire the
+                // tuple ABI uses and the same fn-TYPE key.
+                self.ret_shape = lam_abi.as_ref().and_then(|(_, rs)| rs.clone());
+                if let Some(shape) = self.ret_shape.clone() {
+                    let r = self.lower_expr_repr(body)?;
+                    if self.is_open() {
+                        let leaves = self.repr_to_leaves(&r, &shape);
+                        self.f.set_term(self.cur, Term::Return(leaves));
+                    }
+                    self.defers = saved_defers;
+                    self.in_defer_body = saved_in_defer;
+                    self.in_unspliced_ctx = saved_unspliced;
+                    self.ret_tuple = saved_ret_tuple;
+                    self.ret_shape = saved_ret_shape;
+                    self.cur = saved;
+                    return Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }));
+                }
+                match self.ret_tuple.clone() {
+                    // A splatting tuple return needs the body as a repr, so a
+                    // `nobox` element reaches the wire as leaves.
+                    Some(shape) if shape.splats() => {
+                        let r = self.lower_expr_repr(body)?;
+                        if self.is_open() {
+                            let leaves = self.tuple_repr_to_slots(r, &shape);
+                            self.f.set_term(self.cur, Term::Return(leaves));
+                        }
+                    }
+                    other => {
+                        let v = self.lower_expr(body)?;
+                        if self.is_open() {
+                            let leaves = match other {
+                                Some(shape) => self.tuple_return_operands(v, shape.slots.len()),
+                                None => vec![v],
+                            };
+                            self.f.set_term(self.cur, Term::Return(leaves));
+                        }
+                    }
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
@@ -2974,6 +4019,68 @@ impl Builder<'_> {
 
     /// `target = value` -> a `Store`/`StoreField`/`StoreIndex`/`StoreGlobal`
     /// (the effect; no value). The expression form wraps this with a unit value.
+    /// The BASE of an assignment target, lowered as a PLACE: the slot itself,
+    /// never a packed copy of it. `lower_expr` on a value-struct element/field is
+    /// an RVALUE read and rebuilds a fresh box (the whole-value copy rule), so
+    /// using it here would land the store on a temporary. The syntactic position
+    /// ("I am an assignment target's base") is known here, so nothing needs to be
+    /// plumbed down from bone. Recurses the whole chain: `a.b[i].c.x = 5` must not
+    /// pack at any level.
+    fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        match self.body.expr_arena[e].clone() {
+            Expr::Index { base, index } => {
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                Ok(self.emit_cur(Inst::Index { base: b, index: i, kind }))
+            }
+            // A `nobox` global has no single slot -- `Inst::Global(name)` would
+            // read a nil global and the write would land on nothing. Every
+            // reachable place form (whole group, leaf field) is handled before
+            // this; reject rather than emit that silent nil.
+            Expr::Global(name) if self.nobox_global_place(e).is_some() => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    format!(
+                        "`{name}` is a `nobox` global, which is stored as leaves and has no \
+                         slot this assignment target can write through"
+                    ),
+                ))
+            }
+            Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            // A swizzle and a flattened-enum field are not places (both
+            // materialize a fresh value); leave them to the rvalue path, which
+            // rejects or copies as it does today.
+            Expr::FieldAccess { base, field }
+                if self.swizzle_of(base, field).is_none()
+                    && self.flat_field_of(base, field).is_none() =>
+            {
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                Ok(self.emit_cur(Inst::Field { base: b, field: key }))
+            }
+            // A call returning a VALUE is not storage: the rvalue lowering packs a
+            // fresh box, so the store lands on a temporary and emits
+            // `(Pt_ct(a, b)).x = v` -- not valid Lua, so the whole chunk fails to
+            // parse at load. bone rejects the reachable form (`1dd209b65`), so
+            // this is unreachable by construction; it rejects rather than falls
+            // back so a future admission change surfaces here instead of as an
+            // unparseable chunk.
+            //
+            // A call returning a REFERENCE struct IS storage -- it hands back the
+            // shared table, so the write is real. `o.next.unwrap().value = v` is
+            // the live shape (`tests/lambda_stress_tests.rock`).
+            Expr::Call { .. } | Expr::SafeNavCall { .. } if self.expr_is_value_struct(e) => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "assignment target's base is a `value` call result, which is not storage: \
+                     the write would land on a temporary and be discarded"
+                        .to_string(),
+                ))
+            }
+            _ => self.lower_expr(e),
+        }
+    }
+
     fn lower_assign_effect(
         &mut self,
         target: Idx<Expr>,
@@ -3004,25 +4111,69 @@ impl Builder<'_> {
                 let v = self.coerced_to_binding(v, value, b);
                 self.emit_cur(Inst::Store { cell, value: v });
             }
+            // A leaf of a `nobox` global (`SPOT.x = v`, `SPOT.a.b = v`): the
+            // group has no slot to take a place base of, so the write lands in
+            // the leaf global itself.
+            Expr::FieldAccess { .. } if self.nobox_global_place(target).is_some() => {
+                let (leaves, shape) =
+                    self.nobox_global_place(target).expect("guard matched");
+                self.nobox_global_store(&leaves, shape, value)?;
+            }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_expr(base)?;
+                // `xs[i].x = v` on a column-stored Vec: there is no element slot
+                // to take a place base of, so the write lands directly in the
+                // leaf's own column.
+                if let Some((vec, idx, elem)) = self.column_index_place(base)? {
+                    return self.column_leaf_store(vec, idx, elem, field, value);
+                }
+                // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
+                // leaf-addressed NativeBuffer: there is no element slot to take a
+                // place base of, so the write lands in the leaves under this
+                // field's path. A whole nested field spans several leaves; a
+                // primitive field is exactly one.
+                if let Some((buf, idx, elem, path)) = self.nb_leaf_field_place(base, field)? {
+                    return self.nb_leaf_field_store(buf, idx, elem, &path, value);
+                }
+                // A whole embedded field (`p.f = Foo { .. }`): the child has no
+                // slot of its own, so write its leaves. Composition happens
+                // BEFORE this, so `p.f` here is the child, not a physical key.
+                if let Some(cname) = self.embed_field_of(base, field) {
+                    let b = self.lower_place_base(base)?;
+                    self.store_embed(b, base, field, cname, value)?;
+                    return Ok(());
+                }
+                // An embed LEAF write composes to one dotted key on the parent
+                // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
                 // A flattened enum field: write the discriminant + payload slots
                 // directly on the parent table (no nested box).
                 if let Some(shape) = self.flat_field_of(base, field) {
                     let cells = self.lower_flat_value(&shape, value)?;
-                    self.store_flat_cells(b, field, cells);
+                    self.store_flat_cells(b, key, cells);
                     return Ok(());
                 }
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
-                    field,
+                    field: key,
                     value: v,
                 });
             }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
+                // Column storage has no element slot: the write goes leaf-wise
+                // into K columns, so the value is consumed as a repr and never
+                // boxed. Mirrors `column_element_repr` on the read side.
+                if let ContainerKind::VecValueColumns(elem) = kind {
+                    return self.column_element_store(b, i, value, elem);
+                }
+                if let ContainerKind::NativeBufferValue(elem) = kind {
+                    if self.is_leaf_addressed(elem) {
+                        return self.nb_leaf_element_store(b, i, value, elem);
+                    }
+                }
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreIndex {
                     base: b,
@@ -3030,6 +4181,11 @@ impl Builder<'_> {
                     value: v,
                     kind,
                 });
+            }
+            Expr::Global(_) if self.nobox_global_place(target).is_some() => {
+                let (leaves, shape) =
+                    self.nobox_global_place(target).expect("guard matched");
+                self.nobox_global_store(&leaves, shape, value)?;
             }
             Expr::Global(name) => {
                 let v = self.lower_expr(value)?;
@@ -3040,7 +4196,7 @@ impl Builder<'_> {
             // non-null path. Deep `a?.b?.c = v` works: `base` (`a?.b`) is itself
             // a SafeNav that lowers to nil if any inner link is null.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_expr(base)?;
+                let recv = self.lower_place_base(base)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
@@ -3099,6 +4255,16 @@ impl Builder<'_> {
                 let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
                 self.emit_cur(Inst::Store { cell, value: new_v });
             }
+            // A `nobox` global is stored as leaves, so neither the whole-group
+            // nor the leaf form has a slot the arms below can read-modify-write
+            // through. bone desugars `t <op>= v` to `t = t <op> v` before skull
+            // sees it, so this is unreachable by construction (proved by
+            // `error`-ing the arm over the full surface: zero fires). It rejects
+            // rather than falling through so a future routing change surfaces
+            // here instead of as a silent read of a nil global.
+            _ if self.nobox_global_place(target).is_some() => {
+                return Err(gap("compound assignment reached a `nobox` global place"))
+            }
             Expr::Global(name) => {
                 let cur = self.emit_cur(Inst::Global(name));
                 let rv = self.lower_expr(value)?;
@@ -3106,11 +4272,12 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_expr(base)?;
-                let cur = self.emit_cur(Inst::Field { base: b, field });
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                let cur = self.emit_cur(Inst::Field { base: b, field: key });
                 let rv = self.lower_expr(value)?;
                 let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
-                self.emit_cur(Inst::StoreField { base: b, field, value: new_v });
+                self.emit_cur(Inst::StoreField { base: b, field: key, value: new_v });
             }
             Expr::Index { base, index } => {
                 let (b, kind) = self.lower_index_base(base)?;
@@ -3123,7 +4290,7 @@ impl Builder<'_> {
             // `base?.field <op>= value` — skip silently if any `?.` link is null.
             // The read-modify-write and `value` run only on the non-null path.
             Expr::SafeNav { base, field } => {
-                let recv = self.lower_expr(base)?;
+                let recv = self.lower_place_base(base)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(recv, nil));
                 let store_bb = self.f.new_block();
@@ -3211,6 +4378,17 @@ impl Builder<'_> {
                 self.emit_cur(Inst::Store { cell, value: new });
                 Ok(if postfix { old } else { new })
             }
+            // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
+            // `arith_ty` already restricted the target to int/float, so a whole
+            // group can never reach here.
+            _ if matches!(self.nobox_global_place(target), Some((_, None))) => {
+                let (leaves, _) = self.nobox_global_place(target).expect("guard matched");
+                let name = leaves[0];
+                let old = self.emit_cur(Inst::Global(name));
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreGlobal { name, value: new });
+                Ok(if postfix { old } else { new })
+            }
             Expr::Global(name) => {
                 let old = self.emit_cur(Inst::Global(name));
                 let new = bump(self, old);
@@ -3218,10 +4396,11 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
-                let b = self.lower_expr(base)?;
-                let old = self.emit_cur(Inst::Field { base: b, field });
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                let old = self.emit_cur(Inst::Field { base: b, field: key });
                 let new = bump(self, old);
-                self.emit_cur(Inst::StoreField { base: b, field, value: new });
+                self.emit_cur(Inst::StoreField { base: b, field: key, value: new });
                 Ok(if postfix { old } else { new })
             }
             Expr::Index { base, index } => {
@@ -3268,8 +4447,8 @@ impl Builder<'_> {
             for a in args {
                 argv.push(self.lower_expr(a)?);
             }
-            let arity = self.peeled_tuple_arity(e);
-            self.emit_call_value_n(arity, fieldv, argv)
+            let shape = self.peeled_tuple_shape(e);
+            self.emit_call_value_n(shape, fieldv, argv)
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             let func = self.resolve_funcref(e, method)?;
@@ -3286,9 +4465,9 @@ impl Builder<'_> {
                 // A tuple-returning method splats N values; capture + pack into
                 // the single (boxed, nullable) safe-nav result.
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
-                match ret_ty.and_then(|t| tuple_arity(self.ws, t)) {
-                    Some(n) => {
-                        let r = self.emit_tuple_call(func, argv, n);
+                match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
+                    Some(shape) => {
+                        let r = self.emit_tuple_call(func, argv, &shape);
                         self.pack(r)
                     }
                     None => self.emit_cur(Inst::Call { func, args: argv }),
@@ -3333,23 +4512,77 @@ impl Builder<'_> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    /// `[..]`, with spread support. No spread -> a single `MakeVec`. With a
-    /// `..x` element, build the empty Vec then push each element / splice each
-    /// spread (`ArrayPush`), so spreads of tuples/structs/arrays splice
-    /// element-wise.
-    fn lower_array_literal(&mut self, elems: IdxRange<Expr>) -> Result<Idx<Inst>, CompilerError> {
+    /// A `[T]` literal whose element stores as columns lowers every element to
+    /// its leaves, including elements supplied through a spread.
+    fn column_vec_literal(
+        &mut self,
+        elems: &[Idx<Expr>],
+        elem: Ustr,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let paths = value_leaf_paths(&shape);
+        let mut columns: Vec<(Ustr, Vec<Idx<Inst>>)> =
+            paths.iter().map(|p| (*p, Vec::with_capacity(elems.len()))).collect();
+        for &e in elems {
+            let repr = self.lower_expr_repr(e)?;
+            let leaves = self.repr_to_leaves(&repr, &shape);
+            if leaves.len() != paths.len() {
+                return Err(gap(format!(
+                    "column literal arity mismatch for [{elem}]: {} leaves vs {} columns",
+                    leaves.len(),
+                    paths.len()
+                )));
+            }
+            for (col, leaf) in columns.iter_mut().zip(leaves) {
+                col.1.push(leaf);
+            }
+        }
+        let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
+        Ok(self.emit_cur(Inst::MakeVecColumns {
+            elem,
+            columns,
+            len: elems.len(),
+            capacity,
+        }))
+    }
+
+    fn lower_array_literal(
+        &mut self,
+        lit: Idx<Expr>,
+        elems: IdxRange<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         let idxs: Vec<Idx<Expr>> = elems.into_iter().collect();
         let has_spread = idxs
             .iter()
             .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
         if !has_spread {
+            // Column storage: transpose the literal's elements into one array
+            // per leaf. Each element lowers as a repr, so no element box is
+            // built even for a literal with entries.
+            if let Some(elem) = self.vec_column_elem_of(lit) {
+                return self.column_vec_literal(&idxs, elem);
+            }
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
+        }
+        if let Some(elem) = self.vec_column_elem_of(lit) {
+            let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+            let arr = self.empty_column_vec(elem, capacity)?;
+            for &e in &idxs {
+                if let Expr::Spread(inner) = self.body.expr_arena[e] {
+                    self.spread_into(arr, inner, SpreadDest::Columns(elem))?;
+                } else {
+                    let repr = self.lower_expr_repr(e)?;
+                    self.column_append_repr(arr, &repr, elem)?;
+                }
+            }
+            return Ok(arr);
         }
         let arr = self.emit_cur(Inst::MakeVec(vec![]));
         for &e in &idxs {
             if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                self.spread_into(arr, inner, ContainerKind::Vec)?;
+                self.spread_into(arr, inner, SpreadDest::Container(ContainerKind::Vec))?;
             } else {
                 let v = self.lower_expr(e)?;
                 self.emit_cur(Inst::ArrayPush { arr, value: v, kind: ContainerKind::Vec });
@@ -3358,35 +4591,59 @@ impl Builder<'_> {
         Ok(arr)
     }
 
-    /// Splice `inner` into the array `arr` (representation `kind`): a tuple by its
-    /// static arity, a struct by its declared fields in order, an array/Vec via a
-    /// runtime copy loop. Other shapes gap.
+    fn append_spread_repr(
+        &mut self,
+        arr: Idx<Inst>,
+        repr: ValueRepr,
+        dest: SpreadDest,
+    ) -> Result<(), CompilerError> {
+        match dest {
+            SpreadDest::Container(kind) => {
+                let value = self.pack(repr);
+                self.emit_cur(Inst::ArrayPush { arr, value, kind });
+                Ok(())
+            }
+            SpreadDest::Columns(elem) => self.column_append_repr(arr, &repr, elem),
+        }
+    }
+
+    /// Splice `inner` into `arr`: a tuple by static arity, a struct by declared
+    /// fields, or an array/Vec through one runtime loop. Only the destination
+    /// append differs between ordinary and column storage.
     fn spread_into(
         &mut self,
         arr: Idx<Inst>,
         inner: Idx<Expr>,
-        kind: ContainerKind,
+        dest: SpreadDest,
     ) -> Result<(), CompilerError> {
+        if let (SpreadDest::Columns(elem), Expr::Tuple(elements)) =
+            (dest, self.body.expr_arena[inner])
+        {
+            for element in elements {
+                let repr = self.lower_expr_repr(element)?;
+                self.column_append_repr(arr, &repr, elem)?;
+            }
+            return Ok(());
+        }
         let v = self.lower_expr(inner)?;
         match self.expr_ty(inner) {
             Some(TypeExpr::Tuple { elements }) => {
                 for i in 0..elements.into_iter().count() {
-                    let comp = self.emit_cur(Inst::TupleIndex { base: v, index: i });
-                    self.emit_cur(Inst::ArrayPush { arr, value: comp, kind });
+                    let value = self.emit_cur(Inst::TupleIndex { base: v, index: i });
+                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
                 }
                 Ok(())
             }
             Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                self.spread_array_loop(arr, inner, v, kind);
-                Ok(())
+                self.spread_array_loop(arr, inner, v, dest)
             }
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
                 let fields = self
                     .struct_field_names(name)
                     .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
                 for field in fields {
-                    let comp = self.emit_cur(Inst::Field { base: v, field });
-                    self.emit_cur(Inst::ArrayPush { arr, value: comp, kind });
+                    let value = self.emit_cur(Inst::Field { base: v, field });
+                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
                 }
                 Ok(())
             }
@@ -3395,14 +4652,14 @@ impl Builder<'_> {
     }
 
     /// Runtime copy of every element of `src` (read per its `coll_kind`) into
-    /// `arr` (appended per `dest_kind`).
+    /// `arr` through the destination's append operation.
     fn spread_array_loop(
         &mut self,
         arr: Idx<Inst>,
         src_expr: Idx<Expr>,
         src: Idx<Inst>,
-        dest_kind: ContainerKind,
-    ) {
+        dest: SpreadDest,
+    ) -> Result<(), CompilerError> {
         let src_kind = self.coll_kind(src_expr);
         let n = self.emit_cur(Inst::Len { base: src, kind: src_kind });
         let i_cell = self.f.new_cell(None);
@@ -3421,8 +4678,8 @@ impl Builder<'_> {
 
         self.cur = body;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.emit_cur(Inst::Index { base: src, index: i_now, kind: src_kind });
-        self.emit_cur(Inst::ArrayPush { arr, value: elem, kind: dest_kind });
+        let repr = self.loop_element_repr_at(src, i_now, src_kind)?;
+        self.append_spread_repr(arr, repr, dest)?;
         let i2 = self.emit_cur(Inst::Load(i_cell));
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let inc = self.emit_cur(Inst::IntAdd(i2, one));
@@ -3430,6 +4687,7 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = exit;
+        Ok(())
     }
 
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is
@@ -3454,6 +4712,23 @@ impl Builder<'_> {
         args: IdxRange<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+        if let Callee::Unresolved { name, .. } = callee {
+            if matches!(name.as_str(), "inspect" | "inspect_formatted") {
+                if let Some(&arg) = arg_idxs.first() {
+                    if let Some(elem) = self.vec_column_elem_of(arg) {
+                        if self.is_nobox_struct(elem) {
+                            return Err(CompilerError::new_with_label(
+                                self.body.expr_spans[e],
+                                format!(
+                                    "cannot inspect a column-stored nobox value `{elem}`: \
+                                     inspection requires implicit element materialization"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         // Scalar arithmetic: rock desugars `+ - * / %` to `__op_*` calls; turn
         // them back into native typed ops when both operands are scalars.
         // (Non-scalar `__op_*` falls through to a real overload Call below.)
@@ -3484,11 +4759,70 @@ impl Builder<'_> {
                 let ctype = self.native_buffer_alloc_ctype(e, span)?;
                 let count = self.lower_expr(n_arg)?;
                 let ptr = self.emit_cur(Inst::FfiNewArray { ctype, count });
+                let mut fields =
+                    vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
+                fields.extend(self.leaf_view_fields(ctype, ptr));
                 let nb = self.emit_cur(Inst::MakeStruct {
                     ty: Some(Ustr::from("NativeBuffer")),
-                    fields: vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)],
+                    fields,
                 });
                 return Ok(ValueRepr::Scalar(nb));
+            }
+        }
+        // `xs.push(v)` / `vec_push(xs, v)` onto a COLUMN-stored Vec. The stdlib
+        // push bodies write one element into a single `_data` backing, which
+        // column storage does not have -- so the call is replaced here, where
+        // the receiver's element type is concrete. (Inside `Vec<T>.push` itself
+        // the element is an opaque `T`, so the kind is undecidable there.)
+        if let Callee::Unresolved { name, .. } = callee {
+            if matches!(name.as_str(), "push" | "vec_push") {
+                if let [recv, item] = arg_idxs[..] {
+                    if let Some(elem) = self.vec_column_elem_of(recv) {
+                        return self.column_push(recv, item, elem);
+                    }
+                }
+            }
+            // The three raw-backing primitives ARE the representation boundary.
+            // Nearly every stdlib Vec helper -- `get`, `set`, `pop`, `clear`,
+            // `insert_at`, `remove_at`, `swap_remove` -- reaches storage only
+            // through these, so making them column-aware here converts that whole
+            // surface at once instead of intercepting each helper by name.
+            //
+            // This works inside a GENERIC body because `vec_column_elem_of`
+            // resolves through the active `SpecSubst`: in the shared snapshot of
+            // `Vec<T>.clear` the element is an opaque `T` and the boxed `_data`
+            // body stands, while the snapshot specialized at `T = Vec2` sees the
+            // concrete element and lowers to column operations. Static, per
+            // instantiation -- never a runtime test for whether `_data` exists.
+            if let Some(r) = self.column_data_primitive(name.as_str(), &arg_idxs)? {
+                return Ok(r);
+            }
+            // `vec_new()` is the fourth boundary primitive, and the odd one out:
+            // its element type comes from the CALL's own type, not a receiver, so
+            // it cannot be read off an argument. It is also `inline(lua)`, so it
+            // never specializes (`compute_call_spec` bails on an inline body) --
+            // the opaque body would hand back a `_data` table that every later
+            // column access then indexes as nil.
+            if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
+                if let Some(elem) = self.vec_column_elem_of(e) {
+                    let capacity = self.lower_expr(arg_idxs[0])?;
+                    return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
+                }
+            }
+            if name.as_str() == "vec_new" && arg_idxs.is_empty() {
+                if let Some(elem) = self.vec_column_elem_of(e) {
+                    let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+                    return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
+                }
+            }
+            if name.as_str() == "__rock_vec_from_lua_array" {
+                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)) {
+                    let raw = self.lower_expr(*raw)?;
+                    let len = self.lower_expr(*len)?;
+                    return Ok(ValueRepr::Scalar(
+                        self.column_vec_from_raw_array(raw, len, elem)?,
+                    ));
+                }
             }
         }
         // `on_killed(f)` / `on_resume(f)` inside a `co fn` register a lifecycle
@@ -3601,6 +4935,9 @@ impl Builder<'_> {
                 Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::StructPairs)) => {
                     self.expand_struct_pairs(e, func, &arg_idxs)
                 }
+                Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::Materialize)) => {
+                    self.expand_materialize(&arg_idxs)
+                }
                 Ok(func)
                     if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) =>
                 {
@@ -3630,22 +4967,36 @@ impl Builder<'_> {
                     Err(gap_err)
                 }
             },
-            // A fn-typed local: load the cell and call through the value. An
-            // indirect call can't splat — args are boxed.
+            // A fn-typed local: load the cell and call through the value.
             Callee::Local(b) => {
                 // A nested fn: call the hoisted top-level fn by name (no closure).
-                if let Some(&hoisted) = self.nested_fn_globals.get(&raw(b)) {
-                    let g = self.emit_cur(Inst::Global(hoisted));
-                    let arg_vals: Vec<Idx<Inst>> =
-                        arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                    let v = self.emit_call_value(e, g, arg_vals);
-                    return Ok(ValueRepr::Scalar(v));
+                // Under its scalar ABI (`nested_fn_abi`) value args splat to leaves
+                // and a value return arrives as leaves via `CallValueMulti`.
+                if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
+                    let g = self.emit_cur(Inst::Global(abi.hoisted));
+                    let arg_vals =
+                        self.slotted_call_args(&abi.param_names, &abi.param_shapes, &arg_idxs)?;
+                    let Some(shape) = abi.ret_shape else {
+                        let v = self.emit_call_value(e, g, arg_vals);
+                        return Ok(ValueRepr::Scalar(v));
+                    };
+                    let dests: Vec<Idx<Cell>> =
+                        (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
+                    self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee: g, args: arg_vals });
+                    let leaves: Vec<Idx<Inst>> =
+                        dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                    let mut idx = 0;
+                    return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx));
                 }
                 let cell = *self
                     .binds
                     .get(&raw(b))
                     .ok_or_else(|| gap("call to an unbound fn-typed local"))?;
                 let callee_v = self.emit_cur(Inst::Load(cell));
+                if let Some(abi) = self.binding_ty(b).and_then(|t| self.fn_value_abi(t)) {
+                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                }
+                // Nothing `nobox` in the signature -- args are boxed.
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals);
@@ -3653,7 +5004,11 @@ impl Builder<'_> {
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
+                let abi = self.expr_fn_value_abi(ve);
                 let callee_v = self.lower_expr(ve)?;
+                if let Some(abi) = abi {
+                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                }
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals);
@@ -3679,6 +5034,18 @@ impl Builder<'_> {
     /// splice always resolves; a residual case falls to the site-aware rejection.
     fn call_spec(&self, e: Idx<Expr>, func: FuncRef) -> Option<(SpecKey, SpecSubst)> {
         compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst)
+    }
+
+    /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
+    /// come from bone's `next_generics` rather than a call expr. Ordered into
+    /// the callee's generic declaration order, which is what [`SpecKey`] is.
+    fn next_call_spec(
+        &self,
+        func: FuncRef,
+        next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+    ) -> Option<SpecKey> {
+        let inf = self.inf?;
+        spec_key_from_next_generics(self.ws, inf, func, next_generics, self.spec_subst)
     }
 
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar
@@ -3707,7 +5074,18 @@ impl Builder<'_> {
         // `subst` = the shared (unspecialized) path, byte-identical. In an unspliced
         // context the splice never fires, so the splatted call would reach the
         // SHARED generic body and drop leaves -- keep the shared boxed ABI there.
-        let spec = if self.in_unspliced_ctx { None } else { self.call_spec(e, func) };
+        // In an unspliced context an ABI-only specialization is dropped: no splice
+        // will fire, and the splatted call would reach the SHARED generic body and
+        // drop every leaf but the first, so the boxed ABI is kept to match it.
+        //
+        // A column-eligible instantiation is NOT dropped, because the shared body
+        // is wrong rather than merely unspecialized, and because a splice is no
+        // longer the only thing that can serve it: the call targets a standalone
+        // specialized copy, lowered under this same substitution, so the two agree
+        // on the ABI without an inliner ever running.
+        let spec = self
+            .call_spec(e, func)
+            .filter(|(k, _)| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k));
         let empty = SpecSubst::new();
         let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
         // The instantiation key is recorded on the emitted call inst whenever this
@@ -3717,8 +5095,13 @@ impl Builder<'_> {
         let key = spec.as_ref().map(|(k, _)| k.clone());
         let ret_tuple = self.ws.module(func.module).functions[func.func]
             .return_ty
-            .and_then(|t| tuple_arity(self.ws, t));
-        if !fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst) {
+            .and_then(|t| tuple_ret_shape(self.ws, subst, t));
+        if let Some(shape) = &ret_tuple {
+            self.reject_nobox_opaque_tuple_return(e, func, shape)?;
+        }
+        let uses_scalar_abi = fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst);
+        if !uses_scalar_abi {
+            self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
@@ -3734,12 +5117,16 @@ impl Builder<'_> {
                     })
                     .collect::<Result<_, CompilerError>>()?
             };
-            if let Some(n) = ret_tuple {
+            // Above the tuple early return: the exemption is a property of the
+            // CALLEE, so making it arity-dependent would be a guarantee hole the
+            // day a `@gpu_only` intrinsic returns a tuple.
+            self.authorize_gpu_boundary_boxes(&func, &args);
+            if let Some(shape) = &ret_tuple {
                 // A specialized generic returning a tuple is out of v0 scope: the
                 // call inst is buried inside the MakeTuple, so no key is attached
                 // and it falls back to the shared snapshot (still correct, just not
                 // specialized). `key` is intentionally unused here.
-                return Ok(self.emit_tuple_call_tree(func, args, n, tree));
+                return Ok(self.emit_tuple_call_tree(func, args, shape, tree));
             }
             let call = self.emit_cur(Inst::Call { func, args });
             if let Some(t) = tree {
@@ -3771,8 +5158,8 @@ impl Builder<'_> {
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
-            None => match ret_tuple {
-                Some(n) => Ok(self.emit_tuple_call_tree(func, args, n, tree)),
+            None => match &ret_tuple {
+                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, tree)),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
                     if let Some(t) = tree {
@@ -3788,11 +5175,14 @@ impl Builder<'_> {
     }
 
     /// A direct call to a tuple-returning fn under the multi-return ABI: the
-    /// callee returns N values, captured into N dest cells via [`Inst::CallMulti`].
-    /// The result value is `MakeTuple(loads)` -- a boxed use materializes the
-    /// table (same as the old ABI), a destructure elides it (`bind_for_pattern`).
-    fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, n: usize) -> ValueRepr {
-        self.emit_tuple_call_tree(func, args, n, None)
+    /// callee returns its slots, captured into that many dest cells via
+    /// [`Inst::CallMulti`]. The result value is `MakeTuple(loads)` -- a boxed use
+    /// materializes the table (same as the old ABI), a destructure elides it
+    /// (`bind_for_pattern`). When the shape splats, the result is instead a
+    /// `Tuple` repr whose splatting elements are Groups rebuilt from their
+    /// leaves, so a `nobox` element never becomes a box on the way to a bind.
+    fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, shape: &TupleRetShape) -> ValueRepr {
+        self.emit_tuple_call_tree(func, args, shape, None)
     }
 
     /// [`Self::emit_tuple_call`] recording an `Iterator`-bound resolution tree
@@ -3802,16 +5192,61 @@ impl Builder<'_> {
         &mut self,
         func: FuncRef,
         args: Vec<Idx<Inst>>,
-        n: usize,
+        shape: &TupleRetShape,
         tree: Option<bone_semantic::prelude::BoundTree>,
     ) -> ValueRepr {
-        let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+        let dests: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
         if let Some(t) = tree {
             self.f.bound_trees.insert(call, t);
         }
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-        ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads)))
+        self.tuple_result(shape, &loads)
+    }
+
+    /// The call-site result for a captured tuple return: the plain
+    /// `MakeTuple(slots)` when nothing splats, else the `Tuple` repr rebuilt
+    /// from the slots.
+    fn tuple_result(&mut self, shape: &TupleRetShape, slots: &[Idx<Inst>]) -> ValueRepr {
+        if !shape.splats() {
+            return ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(slots.to_vec())));
+        }
+        let mut idx = 0;
+        self.tuple_from_slots(shape, slots, &mut idx)
+    }
+
+    /// An indirect call whose fn TYPE carries `nobox` values: value args splat to
+    /// their leaves and a value return arrives as leaves through
+    /// `CallValueMulti`, matching what the lambda/nested fn on the other end
+    /// emitted from the SAME type. The callee is opaque here by construction --
+    /// that is the whole point of keying on the type ([`Self::fn_value_abi`]).
+    fn indirect_call_by_abi(
+        &mut self,
+        (param_shapes, ret_shape): (Vec<Option<ValueShape>>, Option<ValueShape>),
+        callee: Idx<Inst>,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let mut argv = Vec::new();
+        for (i, &a) in arg_idxs.iter().enumerate() {
+            match param_shapes.get(i).and_then(|s| s.clone()) {
+                Some(shape) => {
+                    let r = self.lower_expr_repr(a)?;
+                    argv.extend(self.repr_to_leaves(&r, &shape));
+                }
+                None => argv.push(self.lower_expr(a)?),
+            }
+        }
+        let Some(shape) = ret_shape else {
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
+        };
+        let dests: Vec<Idx<Cell>> =
+            (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
+        self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+        let leaves: Vec<Idx<Inst>> =
+            dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
     }
 
     /// An indirect call `callee(args)`. If the call's result type is a tuple, the
@@ -3823,19 +5258,26 @@ impl Builder<'_> {
     /// call's STATIC type, so direct and indirect callees of the same fn-type
     /// agree with no callee-identity analysis.
     fn emit_call_value(&mut self, e: Idx<Expr>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
-        self.emit_call_value_n(self.expr_tuple_arity(e), callee, args)
+        self.emit_call_value_n(self.expr_tuple_shape(e), callee, args)
     }
 
-    /// [`Self::emit_call_value`] with an explicit tuple arity (the safe-nav call
-    /// paths pass the nil-peeled arity, since their expr type is `(..)?`).
-    fn emit_call_value_n(&mut self, arity: Option<usize>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
-        match arity {
-            Some(n) => {
-                let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
+    /// [`Self::emit_call_value`] with an explicit tuple shape (the safe-nav call
+    /// paths pass the nil-peeled shape, since their expr type is `(..)?`).
+    fn emit_call_value_n(
+        &mut self,
+        shape: Option<TupleRetShape>,
+        callee: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+    ) -> Idx<Inst> {
+        match shape {
+            Some(shape) => {
+                let dests: Vec<Idx<Cell>> =
+                    (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
                 self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args });
                 let loads: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-                self.emit_cur(Inst::MakeTuple(loads))
+                let r = self.tuple_result(&shape, &loads);
+                self.pack(r)
             }
             None => self.emit_cur(Inst::CallValue { callee, args }),
         }
@@ -3917,13 +5359,27 @@ impl Builder<'_> {
             }
             return Ok(out);
         }
-        // Named/gap path: lower each arg into its param SLOT (source order), then
-        // splat/nil-fill per slot. Mirrors `reorder_named_args` + splatting.
         let param_names: Vec<Ustr> = self.ws.module(func.module).functions[func.func]
             .param_decls
             .iter()
             .map(|pd| pd.name)
             .collect();
+        self.slotted_call_args(&param_names, &param_shapes, arg_idxs)
+    }
+
+    /// Build a call's argument list by placing each argument into its PARAM SLOT
+    /// (source order) and then splatting/nil-filling per slot: a named arg lands
+    /// in the slot of that name, a struct spread `..op` by field name, everything
+    /// else positionally. This is the one slot-placement rule, shared by every
+    /// calling convention that has param names -- a convention with its own
+    /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
+    /// `param_shapes` shorter than `param_names` (or all-`None`) is the boxed ABI.
+    fn slotted_call_args(
+        &mut self,
+        param_names: &[Ustr],
+        param_shapes: &[Option<ValueShape>],
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
         for &a in arg_idxs {
@@ -3974,9 +5430,15 @@ impl Builder<'_> {
     fn pack(&mut self, r: ValueRepr) -> Idx<Inst> {
         match r {
             ValueRepr::Scalar(v) => v,
+            // A splatting tuple's box. Its `nobox` elements pack too, which is
+            // exactly how a whole-tuple use reaches the guarantee's rejection.
+            ValueRepr::Tuple(parts) => {
+                let vs = parts.into_iter().map(|p| self.pack(p)).collect();
+                self.emit_cur(Inst::MakeTuple(vs))
+            }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
             // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
-            ValueRepr::Group { name, parts } if flat_enum_shape(self.ws, name).is_some() => {
+            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
                 let shape = flat_enum_shape(self.ws, name).unwrap();
                 let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
                 let tag = packed[0];
@@ -4017,7 +5479,11 @@ impl Builder<'_> {
                 self.cur = join;
                 self.emit_cur(Inst::Load(result))
             }
-            ValueRepr::Group { name, parts } => {
+            ValueRepr::Group {
+                name,
+                parts,
+                present: _,
+            } => {
                 // The Group's parts are in declared field order (the positional
                 // `<name>_ct` ABI requires it), so they line up with the declared
                 // names. The names let MIR passes forward a `Field` read to its
@@ -4042,14 +5508,83 @@ impl Builder<'_> {
     /// ABI). A boxed `Scalar` (e.g. a global cdata / if-join) is field-read.
     fn repr_to_leaves(&mut self, r: &ValueRepr, shape: &ValueShape) -> Vec<Idx<Inst>> {
         match r {
-            ValueRepr::Group { parts, .. } => {
+            // A tuple at a value-shaped sink is a boxed source: pack and
+            // field-read, the `Scalar` treatment.
+            ValueRepr::Tuple(_) => {
+                let v = self.pack(r.clone());
+                self.repr_to_leaves(&ValueRepr::Scalar(v), shape)
+            }
+            ValueRepr::Group {
+                parts, present, ..
+            } => {
                 let mut out = Vec::new();
+                if shape.nullable {
+                    out.push(match present {
+                        Some(value) => *value,
+                        None => self.emit_cur(Inst::Const(Lit::Bool(true))),
+                    });
+                }
                 for ((_, fs), part) in shape.fields.iter().zip(parts) {
                     match fs {
                         FieldShape::Prim => out.push(self.pack(part.clone())),
                         FieldShape::Nested(sub) => out.extend(self.repr_to_leaves(part, sub)),
                     }
                 }
+                out
+            }
+            ValueRepr::Scalar(v) if shape.nullable => {
+                let field_count = shape.leaf_count() - 1;
+                if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
+                    let mut out = Vec::with_capacity(1 + field_count);
+                    out.push(self.emit_cur(Inst::Const(Lit::Bool(false))));
+                    for _ in 0..field_count {
+                        out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+                    }
+                    return out;
+                }
+
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let present = self.emit_cur(Inst::NotEq(*v, nil));
+                let cells: Vec<Idx<Cell>> =
+                    (0..field_count).map(|_| self.f.new_cell(None)).collect();
+                let nil_bb = self.f.new_block();
+                let value_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.f.set_term(
+                    self.cur,
+                    Term::Branch {
+                        cond: present,
+                        then_bb: value_bb,
+                        else_bb: nil_bb,
+                    },
+                );
+
+                self.cur = nil_bb;
+                for cell in &cells {
+                    let value = self.emit_cur(Inst::Const(Lit::Nil));
+                    self.emit_cur(Inst::Store {
+                        cell: *cell,
+                        value,
+                    });
+                }
+                self.f.set_term(self.cur, Term::Goto(join));
+
+                self.cur = value_bb;
+                let mut inner = shape.clone();
+                inner.nullable = false;
+                let leaves = self.cdata_leaves(*v, &inner);
+                for (cell, value) in cells.iter().zip(leaves) {
+                    self.emit_cur(Inst::Store {
+                        cell: *cell,
+                        value,
+                    });
+                }
+                self.f.set_term(self.cur, Term::Goto(join));
+
+                self.cur = join;
+                let mut out = Vec::with_capacity(1 + field_count);
+                out.push(present);
+                out.extend(cells.iter().map(|cell| self.emit_cur(Inst::Load(*cell))));
                 out
             }
             ValueRepr::Scalar(v) => self.cdata_leaves(*v, shape),
@@ -4103,6 +5638,745 @@ impl Builder<'_> {
         out
     }
 
+    /// A whole-value read of value struct `name` out of a BOXED place (struct
+    /// field, global, container element): split the box into leaves and rebuild a
+    /// fresh `Group`, so `pack` materializes a COPY instead of aliasing the stored
+    /// box. This is the same split-and-repack that already makes fn round-trips
+    /// copy (params/returns ride the scalar ABI).
+    ///
+    /// Nested value fields recurse, so the snapshot survives a later place write
+    /// through the owner -- a shallow expansion would snapshot the nested box's
+    /// POINTER. A GC leaf is one slot, so its pointee stays shared by design. A
+    /// leaf projection off the `Group` still reads its own slot at its own read
+    /// point, and the unread leaves die in DCE.
+    fn boxed_value_copy_repr(&mut self, boxed: Idx<Inst>, name: Ustr) -> ValueRepr {
+        let Some(shape) = value_shape(self.ws, name).or_else(|| value_shape_gc(self.ws, name))
+        else {
+            return ValueRepr::Scalar(boxed);
+        };
+        let leaves = self.cdata_leaves(boxed, &shape);
+        let mut idx = 0;
+        self.rebuild_from_leaves(&shape, &leaves, &mut idx)
+    }
+
+    /// One element of an indexable collection, for the loop lowerings that bind a
+    /// whole element per iteration (`for x in coll`, `for (i, x) in enumerate`).
+    ///
+    /// Column storage has no element slot to index, so the read decomposes into K
+    /// leaf reads and packs -- the same shape `let v = xs[i]` takes, which means
+    /// SROA peels the pack wherever the binding is only projected from. Emitting a
+    /// whole-element `Index` here instead is what made bitgun stop compiling: it
+    /// reaches the emitter with no slot to name.
+    fn loop_element_repr_at(
+        &mut self,
+        arr: Idx<Inst>,
+        index: Idx<Inst>,
+        kind: ContainerKind,
+    ) -> Result<ValueRepr, CompilerError> {
+        match kind {
+            ContainerKind::VecValueColumns(elem) => self.column_element_repr(arr, index, elem),
+            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem) => {
+                self.nb_leaf_element_repr(arr, index, elem)
+            }
+            _ => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Index {
+                base: arr,
+                index,
+                kind,
+            }))),
+        }
+    }
+
+    fn loop_element_at(
+        &mut self,
+        arr: Idx<Inst>,
+        index: Idx<Inst>,
+        kind: ContainerKind,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let repr = self.loop_element_repr_at(arr, index, kind)?;
+        Ok(self.pack(repr))
+    }
+
+    /// A column-stored element (`xs[i]` where `xs: [E]` stores flat columns) as
+    /// an unboxed `Group`: bounds-check `i` once, then read leaf `k` from column
+    /// `k`. No element table is touched because none exists.
+    ///
+    /// `value_leaf_paths` and `rebuild_from_leaves` both walk fields in
+    /// declaration order depth-first, so the flat read order lines up with the
+    /// nested shape without a second traversal.
+    /// `Some((buf, checked_index, elem, dotted_path))` iff `<base>.<field>` is a
+    /// field path rooted at `buf[i]` over a leaf-addressed NativeBuffer.
+    ///
+    /// Peels the FieldAccess chain to build the dotted path the leaf plan is
+    /// keyed by (`buf[i].lo.n` -> `"lo.n"`), so a write at ANY depth lands on
+    /// the right leaves. The bounds check is emitted once, here.
+    fn nb_leaf_field_place(
+        &mut self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, String)>, CompilerError> {
+        // Walk down through nested field accesses to the `buf[i]` root.
+        let mut segs = vec![field];
+        let mut cur = base;
+        loop {
+            match self.body.expr_arena[cur] {
+                Expr::FieldAccess { base: b, field: f } => {
+                    segs.push(f);
+                    cur = b;
+                }
+                Expr::Index { base: ib, index } => {
+                    let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib) else {
+                        return Ok(None);
+                    };
+                    if !self.is_leaf_addressed(elem) {
+                        return Ok(None);
+                    }
+                    let (b, _) = self.lower_index_base(ib)?;
+                    let i = self.lower_expr(index)?;
+                    let checked = self.nb_checked_index(b, i)?;
+                    segs.reverse();
+                    let path =
+                        segs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+                    return Ok(Some((b, checked, elem, path)));
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// Write `buf[i].<path> = value` leaf-wise. `path` names either one
+    /// primitive leaf or a nested value field spanning several; both are just a
+    /// prefix match over the element's leaf plan, so depth costs nothing.
+    fn nb_leaf_field_store(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        elem: Ustr,
+        path: &str,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let dot = format!("{path}.");
+        let hit: Vec<LeafAddr> = plan
+            .into_iter()
+            .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
+            .collect();
+        if hit.is_empty() {
+            return Err(gap(format!("`{path}` is not a leaf of NativeBuffer<{elem}>")));
+        }
+        // An exact primitive leaf is the one hit whose path IS `path`. A NESTED
+        // field spanning a single leaf also yields one hit, but its path is
+        // `<path>.<leaf>` -- so discriminating on hit COUNT lowers that field's
+        // aggregate RHS as a scalar and writes the whole cdata through a
+        // primitive view. Everything that is not an exact leaf is an aggregate.
+        let leaves = if hit.len() == 1 && hit[0].path.as_str() == path {
+            vec![self.lower_expr(value)?]
+        } else {
+            let sub = self
+                .value_aggregate_of(value)
+                .and_then(|n| value_shape(self.ws, n))
+                .ok_or_else(|| {
+                    gap(format!(
+                        "whole write to `{path}` needs a value-struct or cdata-enum RHS"
+                    ))
+                })?;
+            let repr = self.lower_expr_repr(value)?;
+            self.repr_to_leaves(&repr, &sub)
+        };
+        if leaves.len() != hit.len() {
+            return Err(gap(format!(
+                "leaf store arity mismatch for `{elem}.{path}`: {} leaves vs {} slots",
+                leaves.len(),
+                hit.len()
+            )));
+        }
+        let mut views = HashMap::new();
+        for (a, leaf) in hit.iter().zip(leaves) {
+            let at = self.leaf_index(checked, a);
+            let view = self.leaf_view(buf, a.view_field, &mut views);
+            self.emit_cur(Inst::StoreIndex {
+                base: view,
+                index: at,
+                value: leaf,
+                kind: ContainerKind::NativeBufferLeaf,
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether `elem` is leaf-addressable: it has a validated C leaf layout
+    /// whose every leaf divides its view cleanly. `false` keeps the buffer on
+    /// the existing slot-reference path, which is CORRECT, just boxier --
+    /// leaf addressing does not change storage, so the two address the same
+    /// bytes and a program may mix them freely.
+    fn is_leaf_addressed(&self, elem: Ustr) -> bool {
+        // LuaJIT only. Leaf addressing IS `ffi.cast` views over the element
+        // storage; JS backs a NativeBuffer with a TypedArray and lowers element
+        // access through its own flat-slot arithmetic, which already allocates
+        // nothing. Emitting the leaf shape there would only push every buffer
+        // test into the skip histogram. The JS analogue (a TypedArray per leaf C
+        // type over one ArrayBuffer) is S6 in
+        // docs/native-buffer-leaf-addressing-plan.md.
+        if self.scx.target == bone_semantic::hir::FnBackend::Js {
+            return false;
+        }
+        leaf_addr_plan(self.ws, elem).is_ok()
+    }
+
+    /// `buf[i]` on a leaf-addressed NativeBuffer: bounds-check the ELEMENT once,
+    /// then read each leaf from its own view. No slot reference is taken, so the
+    /// read allocates nothing; the element is rebuilt as a `Group`, exactly the
+    /// shape `let v = buf[i]` takes, so SROA peels it wherever the binding is
+    /// only projected from.
+    fn nb_leaf_element_repr(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let checked = self.nb_checked_index(buf, index)?;
+        let mut views = HashMap::new();
+        let leaves: Vec<Idx<Inst>> = plan
+            .iter()
+            .map(|a| {
+                let at = self.leaf_index(checked, a);
+                let view = self.leaf_view(buf, a.view_field, &mut views);
+                self.emit_cur(Inst::Index {
+                    base: view,
+                    index: at,
+                    kind: ContainerKind::NativeBufferLeaf,
+                })
+            })
+            .collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+    }
+
+    /// `buf[i] = v` into a leaf-addressed NativeBuffer: bounds-check once, then
+    /// store leaf `k` through its view. The element never materializes, which is
+    /// what lets a `nobox` type live in one.
+    fn nb_leaf_element_store(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        if leaves.len() != plan.len() {
+            return Err(gap(format!(
+                "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
+                leaves.len(),
+                plan.len()
+            )));
+        }
+        // The check precedes every leaf write: checking after would let the
+        // out-of-bounds writes happen first.
+        let checked = self.nb_checked_index(buf, index)?;
+        let mut views = HashMap::new();
+        for (a, leaf) in plan.iter().zip(leaves) {
+            let at = self.leaf_index(checked, a);
+            let view = self.leaf_view(buf, a.view_field, &mut views);
+            self.emit_cur(Inst::StoreIndex {
+                base: view,
+                index: at,
+                value: leaf,
+                kind: ContainerKind::NativeBufferLeaf,
+            });
+        }
+        Ok(())
+    }
+
+    /// The view projection for `field`, read ONCE per element access and reused
+    /// across that element's leaves -- a table read per leaf is pure waste when
+    /// every leaf of one type shares a view.
+    fn leaf_view(
+        &mut self,
+        buf: Idx<Inst>,
+        field: Ustr,
+        cache: &mut HashMap<Ustr, Idx<Inst>>,
+    ) -> Idx<Inst> {
+        if let Some(v) = cache.get(&field) {
+            return *v;
+        }
+        let v = self.emit_cur(Inst::Field { base: buf, field });
+        cache.insert(field, v);
+        v
+    }
+
+    /// `i * stride + offset` in the leaf's own view units. Both constants; the
+    /// `+ 0` and `* 1` cases fold so a flat all-one-type element reads as
+    /// plainly as it did before.
+    fn leaf_index(&mut self, checked: Idx<Inst>, a: &LeafAddr) -> Idx<Inst> {
+        let mut at = checked;
+        if a.stride != 1 {
+            let s = self.emit_cur(Inst::Const(Lit::Int(a.stride)));
+            at = self.emit_cur(Inst::IntMul(at, s));
+        }
+        if a.offset != 0 {
+            let o = self.emit_cur(Inst::Const(Lit::Int(a.offset)));
+            at = self.emit_cur(Inst::IntAdd(at, o));
+        }
+        at
+    }
+
+    /// `__nb_checked_index(buf, i)` -- bounds-check the element access WITHOUT
+    /// taking a slot reference, returning the index. One call per element
+    /// access, never per leaf.
+    fn nb_checked_index(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let f = self.stdlib_funcref("__nb_checked_index")?;
+        Ok(self.emit_cur(Inst::Call {
+            func: f,
+            args: vec![buf, index],
+        }))
+    }
+
+    fn column_element_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let one_based = self.checked_column_index(vec, index);
+        let leaves: Vec<Idx<Inst>> = value_leaf_paths(&shape)
+            .into_iter()
+            .map(|path| {
+                let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                self.emit_cur(Inst::Index {
+                    base: col,
+                    index: one_based,
+                    kind: ContainerKind::VecColumn,
+                })
+            })
+            .collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+    }
+
+    /// The unique stdlib function `name`, for a lowering that SYNTHESIZES a call
+    /// (the cold column ops, which have no call expr of their own to resolve
+    /// through). Rejects rather than falling back: a missing or ambiguous name
+    /// means the stdlib and this lowering have drifted apart.
+    fn stdlib_funcref(&self, name: &str) -> Result<FuncRef, CompilerError> {
+        match self.ws.functions_by_name.get(&Ustr::from(name)).map(|l| l.as_slice()) {
+            Some([(module, func)]) => Ok(FuncRef { module: *module, func: *func }),
+            Some(_) => Err(gap(format!("stdlib `{name}` is ambiguous"))),
+            None => Err(gap(format!("stdlib `{name}` not found"))),
+        }
+    }
+
+    /// Column-aware lowering of `__vec_data_get/_set/_unset` when the receiver's
+    /// element type is concretely column-stored. `Ok(None)` = not one of these, or
+    /// a boxed element, in which case the stdlib `inline(lua)` body stands.
+    ///
+    /// `unset` is deliberately a NO-OP. On the boxed backing it exists to drop the
+    /// reference so the element can be collected; a column holds scalars, so there
+    /// is nothing to release, and nothing reads past `len` (every column access
+    /// goes through `__vec_checked_index`, which bounds-checks against it). Writing
+    /// nil into the columns would also be actively harmful: it punches holes in
+    /// dense numeric arrays and can push them from array to hash part, which is the
+    /// representation's whole advantage.
+    fn column_data_primitive(
+        &mut self,
+        name: &str,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        match (name, arg_idxs) {
+            ("__vec_data_get", [recv, index]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                Ok(Some(self.column_element_repr(vec, i, elem)?))
+            }
+            ("__vec_data_set", [recv, index, value]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                self.column_element_store(vec, i, *value, elem)?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            ("__vec_data_unset", [recv, _index]) => {
+                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            ("__vec_data_capacity", [recv]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape = value_shape(self.ws, elem)
+                    .ok_or_else(|| gap("column element is not a value struct"))?;
+                let vec = self.lower_expr(*recv)?;
+                let header = self.column_header(vec);
+                let reserved = self.emit_cur(Inst::Field {
+                    base: header,
+                    field: Ustr::from("cap"),
+                });
+                let physical = match value_leaf_paths(&shape).first() {
+                    Some(path) => {
+                        let col = self.emit_cur(Inst::Field {
+                            base: vec,
+                            field: *path,
+                        });
+                        let f = self.stdlib_funcref("table_len")?;
+                        self.emit_cur(Inst::Call {
+                            func: f,
+                            args: vec![col],
+                        })
+                    }
+                    None => self.emit_cur(Inst::Field {
+                        base: vec,
+                        field: Ustr::from("len"),
+                    }),
+                };
+                let f = self.stdlib_funcref("__rock_col_capacity")?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
+                    func: f,
+                    args: vec![reserved, physical],
+                }))))
+            }
+            // Shift every column at the same slot, so they stay in lockstep. The
+            // element is consumed as LEAVES, so the inserted value never boxes.
+            ("__vec_data_insert", [recv, index, value]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape =
+                    value_shape(self.ws, elem).ok_or_else(|| gap("column element is not a value"))?;
+                let paths = value_leaf_paths(&shape);
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                let repr = self.lower_expr_repr(*value)?;
+                let leaves = self.repr_to_leaves(&repr, &shape);
+                if leaves.len() != paths.len() {
+                    return Err(gap(format!("column insert arity mismatch for [{elem}]")));
+                }
+                let f = self.stdlib_funcref("__rock_col_insert")?;
+                for (path, leaf) in paths.into_iter().zip(leaves) {
+                    let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, leaf] });
+                }
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            // A fresh column table whose columns are copies -- the clone must not
+            // share a column with the original, or a later push would be seen by
+            // both.
+            ("__vec_data_clone", [recv]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape = value_shape(self.ws, elem)
+                    .ok_or_else(|| gap("column element is not a value struct"))?;
+                let paths = value_leaf_paths(&shape);
+                let vec = self.lower_expr(*recv)?;
+                let f = self.stdlib_funcref("__rock_col_copy")?;
+                // Built as a `Vec`-tagged struct: `write_table_key` brackets a
+                // dotted leaf path, so the emitted table is the same shape
+                // `MakeVecColumns` writes for a literal.
+                let mut fields = Vec::with_capacity(paths.len() + 2);
+                for path in paths {
+                    let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                    fields.push((path, self.emit_cur(Inst::Call { func: f, args: vec![col] })));
+                }
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+                fields.push((Ustr::from("len"), len));
+                let old_header = self.column_header(vec);
+                let capacity = self.emit_cur(Inst::Field {
+                    base: old_header,
+                    field: Ustr::from("cap"),
+                });
+                let header = self.make_column_header(elem, capacity);
+                fields.push((Ustr::from(VEC_COLUMN_HEADER_FIELD), header));
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+                    ty: Some(Ustr::from("Vec")),
+                    fields,
+                }))))
+            }
+            // The two ops that need the LOGICAL elements, not the physical
+            // columns: a sort key is a function of the whole element, and
+            // `to_lua_array`'s whole contract is handing a Lua array of elements
+            // to a foreign API. Both redirect to the one materializing helper --
+            // the storage contract's third category (erased/external boundaries
+            // materialize explicitly), and the only place a column Vec builds
+            // element tables.
+            ("__vec_data_sort", [recv, key_fn]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                if self.is_nobox_struct(elem) {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[*recv],
+                        format!(
+                            "cannot sort a column-stored nobox value `{elem}`: \
+                             the key function requires implicit element materialization"
+                        ),
+                    ));
+                }
+                let vec = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key_fn)?;
+                let f = self.stdlib_funcref("__rock_col_sort")?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
+                )))
+            }
+            ("__rock_vec_to_lua_array", [recv]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                if self.is_nobox_struct(elem) {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[*recv],
+                        format!(
+                            "cannot convert column-stored nobox value `{elem}` to a Lua array: \
+                             the bridge requires implicit element materialization"
+                        ),
+                    ));
+                }
+                let vec = self.lower_expr(*recv)?;
+                let f = self.stdlib_funcref("__rock_vec_column_elements")?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Call { func: f, args: vec![vec] }),
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn make_column_header(&mut self, elem: Ustr, capacity: Idx<Inst>) -> Idx<Inst> {
+        let repr = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(VEC_COLUMN_REPR))));
+        let elem = self.emit_cur(Inst::Const(Lit::Str(elem)));
+        self.emit_cur(Inst::MakeStruct {
+            ty: None,
+            fields: vec![
+                (Ustr::from("repr"), repr),
+                (Ustr::from("elem"), elem),
+                (Ustr::from("cap"), capacity),
+            ],
+        })
+    }
+
+    fn column_header(&mut self, vec: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from(VEC_COLUMN_HEADER_FIELD),
+        })
+    }
+
+    fn empty_column_vec(
+        &mut self,
+        elem: Ustr,
+        capacity: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let columns = value_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
+        Ok(self.emit_cur(Inst::MakeVecColumns {
+            elem,
+            columns,
+            len: 0,
+            capacity,
+        }))
+    }
+
+    fn column_vec_from_raw_array(
+        &mut self,
+        raw: Idx<Inst>,
+        len: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let vec = self.empty_column_vec(elem, len)?;
+        let i_cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
+
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = header;
+        let i = self.emit_cur(Inst::Load(i_cell));
+        let cmp = self.emit_cur(Inst::IntLt(i, len));
+        self.f.set_term(self.cur, Term::Branch { cond: cmp, then_bb: body, else_bb: exit });
+
+        self.cur = body;
+        let i_now = self.emit_cur(Inst::Load(i_cell));
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let one_based = self.emit_cur(Inst::IntAdd(i_now, one));
+        let value = self.emit_cur(Inst::Index {
+            base: raw,
+            index: one_based,
+            kind: ContainerKind::VecColumn,
+        });
+        self.column_append_repr(vec, &ValueRepr::Scalar(value), elem)?;
+        let next = self.emit_cur(Inst::IntAdd(i_now, one));
+        self.emit_cur(Inst::Store {
+            cell: i_cell,
+            value: next,
+        });
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = exit;
+        Ok(vec)
+    }
+
+    /// `xs.push(v)` onto a column-stored Vec: bump the shared `len` once, then
+    /// store leaf `k` into column `k` at the new slot. The element is consumed
+    /// as leaves (`repr_to_leaves`), so a literal argument never builds a box.
+    fn column_push(
+        &mut self,
+        recv: Idx<Expr>,
+        item: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let vec = self.lower_expr(recv)?;
+        let repr = self.lower_expr_repr(item)?;
+        self.column_append_repr_with_shape(vec, &repr, elem, &shape)?;
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    fn column_append_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        self.column_append_repr_with_shape(vec, repr, elem, &shape)
+    }
+
+    fn column_append_repr_with_shape(
+        &mut self,
+        vec: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: Ustr,
+        shape: &ValueShape,
+    ) -> Result<(), CompilerError> {
+        let leaves = self.repr_to_leaves(repr, shape);
+        let paths = value_leaf_paths(&shape);
+        if leaves.len() != paths.len() {
+            return Err(gap(format!(
+                "column push arity mismatch for [{elem}]: {} leaves vs {} columns",
+                leaves.len(),
+                paths.len()
+            )));
+        }
+        // `len` is shared by every column, so it advances ONCE. Bumping per
+        // column would desync them.
+        let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let next = self.emit_cur(Inst::IntAdd(len, one));
+        self.emit_cur(Inst::StoreField {
+            base: vec,
+            field: Ustr::from("len"),
+            value: next,
+        });
+        for (path, leaf) in paths.into_iter().zip(leaves) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col,
+                index: next,
+                value: leaf,
+                kind: ContainerKind::VecColumn,
+            });
+        }
+        Ok(())
+    }
+
+    /// `Some((vec, one_based_index, elem))` iff `e` is `xs[i]` over a
+    /// column-stored Vec — the shape that has no element slot to serve as a
+    /// place base.
+    fn column_index_place(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr)>, CompilerError> {
+        let Expr::Index { base, index } = self.body.expr_arena[e] else {
+            return Ok(None);
+        };
+        let Some(elem) = self.vec_column_elem_of(base) else {
+            return Ok(None);
+        };
+        let vec = self.lower_expr(base)?;
+        let i = self.lower_expr(index)?;
+        let one_based = self.checked_column_index(vec, i);
+        Ok(Some((vec, one_based, elem)))
+    }
+
+    /// `xs[i].<field> = v` on a column-stored Vec: store into the column that
+    /// holds that leaf. `field` must name a PRIMITIVE leaf — a nested value
+    /// field (`xs[i].inner = ..`, `xs[i].inner.a = ..`) spans several columns
+    /// and is rejected rather than silently writing one.
+    fn column_leaf_store(
+        &mut self,
+        vec: Idx<Inst>,
+        one_based: Idx<Inst>,
+        elem: Ustr,
+        field: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        if !value_leaf_paths(&shape).iter().any(|p| *p == field) {
+            return Err(gap(format!(
+                "`{field}` is not a scalar leaf of column-stored `[{elem}]`; a \
+                 nested value field spans several columns and needs a whole-element store"
+            )));
+        }
+        let v = self.lower_expr(value)?;
+        let col = self.emit_cur(Inst::Field { base: vec, field });
+        self.emit_cur(Inst::StoreIndex {
+            base: col,
+            index: one_based,
+            value: v,
+            kind: ContainerKind::VecColumn,
+        });
+        Ok(())
+    }
+
+    /// `xs[i] = v` into a column-stored Vec: bounds-check once, then store leaf
+    /// `k` into column `k`. The element never materializes.
+    fn column_element_store(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        let paths = value_leaf_paths(&shape);
+        if leaves.len() != paths.len() {
+            return Err(gap(format!(
+                "column store arity mismatch for [{elem}]: {} leaves vs {} columns",
+                leaves.len(),
+                paths.len()
+            )));
+        }
+        let one_based = self.checked_column_index(vec, index);
+        for (path, leaf) in paths.into_iter().zip(leaves) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col,
+                index: one_based,
+                value: leaf,
+                kind: ContainerKind::VecColumn,
+            });
+        }
+        Ok(())
+    }
+
+    /// `__vec_checked_index(vec, i)` — the 1-based backing index, bounds-checked
+    /// against `vec.len`. One call per ELEMENT access, not per column.
+    fn checked_column_index(&mut self, vec: Idx<Inst>, index: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::VecCheckedIndex { vec, index })
+    }
+
     /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse
     /// of `repr_to_leaves`), consuming leaves depth-first from `*idx`.
     fn rebuild_from_leaves(
@@ -4115,6 +6389,11 @@ impl Builder<'_> {
         // shapes first to avoid holding the borrow across `&mut self` calls.
         let fields: Vec<FieldShape> = shape.fields.iter().map(|(_, fs)| fs.clone()).collect();
         let name = shape.name;
+        let present = shape.nullable.then(|| {
+            let value = leaves[*idx];
+            *idx += 1;
+            value
+        });
         let mut parts = Vec::with_capacity(fields.len());
         for fs in &fields {
             let part = match fs {
@@ -4127,7 +6406,11 @@ impl Builder<'_> {
             };
             parts.push(part);
         }
-        ValueRepr::Group { name, parts }
+        ValueRepr::Group {
+            name,
+            parts,
+            present,
+        }
     }
 
     /// Index of `field` in value struct `name`'s declared field order.
@@ -4141,6 +6424,16 @@ impl Builder<'_> {
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         match self.body.expr_arena[e].clone() {
+            // A tuple literal whose type splats stays a `Tuple` repr, so a
+            // `nobox` element reaches the return boundary as leaves instead of
+            // being packed into the table first.
+            Expr::Tuple(elems) if self.expr_tuple_shape(e).is_some_and(|s| s.splats()) => {
+                let parts = elems
+                    .into_iter()
+                    .map(|el| self.lower_expr_repr(el))
+                    .collect::<Result<_, CompilerError>>()?;
+                Ok(ValueRepr::Tuple(parts))
+            }
             // A scalarized value param: rebuild the unboxed Group from leaf cells.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
@@ -4170,17 +6463,80 @@ impl Builder<'_> {
                     let parent = self.lower_expr(base)?;
                     return Ok(ValueRepr::Scalar(self.materialize_flat(parent, field, &shape)));
                 }
+                // An embedded field read as a WHOLE value re-materializes from
+                // its leaves. Projection-only keeps every such read transient
+                // (never bound, returned, captured or stored), so this is the
+                // consuming boundary, not a reintroduced box.
+                if let Some(cname) = self.embed_field_of(base, field) {
+                    // A `nobox` child stays in LEAF form instead. The transient
+                    // box is legal for an unmarked value -- it sinks -- but for
+                    // a marked one it is the guarantee's violation itself, so
+                    // the sink decides the representation. This is what lets a
+                    // field load widen to `T?`: a Group carries no presence, so
+                    // `repr_to_leaves` supplies it, exactly as it already does
+                    // for a literal ctor or a call result at the same param.
+                    if let Some(shape) = self.nobox_embed_group_shape(cname) {
+                        let parent = self.lower_expr(base)?;
+                        let mut g = self.embed_group(parent, field, &shape);
+                        // A NULLABLE child carries presence in the field's own
+                        // (undotted) key, so the Group takes it as its presence
+                        // rather than gating the read: an absent child's leaves
+                        // are nil, and every consumer branches on presence
+                        // before touching them.
+                        if self.embed_read_is_nullable(base, field) {
+                            let present = self.emit_cur(Inst::Field { base: parent, field });
+                            if let ValueRepr::Group { present: p, .. } = &mut g {
+                                *p = Some(present);
+                            }
+                        }
+                        return Ok(g);
+                    }
+                    let parent = self.lower_expr(base)?;
+                    let v = if self.embed_read_is_nullable(base, field) {
+                        self.materialize_embed_nullable(parent, field, cname)
+                    } else {
+                        self.materialize_embed(parent, field, cname)
+                    };
+                    return Ok(ValueRepr::Scalar(v));
+                }
+                // An embed LEAF read composes to one dotted key on the parent
+                // that holds it; no intermediate projection exists.
+                let (pbase, key) = self.physical_field(base, field);
+                if key != field {
+                    let parent = self.lower_expr(pbase)?;
+                    return Ok(ValueRepr::Scalar(
+                        self.emit_cur(Inst::Field { base: parent, field: key }),
+                    ));
+                }
                 let br = self.lower_expr_repr(base)?;
-                if let ValueRepr::Group { name, parts } = &br {
+                if let ValueRepr::Group { name, parts, .. } = &br {
                     if let Some(i) = self.field_index(*name, field) {
                         return Ok(parts[i].clone());
                     }
                 }
-                // A boxed value struct: read the field directly. A payload-free
-                // enum field is a plain `int` (the enum value IS the int), so no
-                // conversion -- same as any primitive field.
+                // A boxed base: read the field directly. A payload-free enum field
+                // is a plain `int` (the enum value IS the int), so no conversion --
+                // same as any primitive field. A VALUE-struct field is a whole-value
+                // read out of a mutable place, so it copies.
                 let basev = self.pack(br);
-                Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field { base: basev, field })))
+                let fv = self.emit_cur(Inst::Field { base: basev, field });
+                match self.value_struct_of(e).filter(|_| self.is_mutable_place(base)) {
+                    Some(name) => Ok(self.boxed_value_copy_repr(fv, name)),
+                    None => Ok(ValueRepr::Scalar(fv)),
+                }
+            }
+            // A `nobox` global lives in K scalar globals, so the read IS the leaf
+            // snapshot -- no box to copy out of.
+            Expr::Global(_) if self.nobox_global_place(e).is_some() => {
+                let (leaves, shape) = self.nobox_global_place(e).expect("guard matched");
+                Ok(self.nobox_global_load(&leaves, shape))
+            }
+            // A global holding a value struct is a mutable place: a whole-value read
+            // copies (the leaves are snapshotted at the read point).
+            Expr::Global(g) if self.value_struct_of(e).is_some() => {
+                let name = self.value_struct_of(e).unwrap();
+                let gv = self.emit_cur(Inst::Global(g));
+                Ok(self.boxed_value_copy_repr(gv, name))
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
@@ -4203,25 +6559,93 @@ impl Builder<'_> {
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
             Expr::Call { callee, args } => self.lower_call_repr(e, callee, args),
-            // A value-struct ELEMENT read (`buf[i]`/`fv[i]`) as an unboxed Group of
-            // per-field reads off the checked slot: a leaf projection reads the part
-            // live, while `pack` (a whole-value use -- let-bind, arg, return, store)
-            // rebuilds a fresh cdata instead of aliasing the interior array slot.
-            Expr::Index { base, index } if self.ffi_clean_value_elem(e).is_some() => {
-                let name = self.ffi_clean_value_elem(e).unwrap();
+            // A value-struct ELEMENT read (`buf[i]`/`fv[i]`/`v[i]`) as an unboxed
+            // Group of leaf reads off the checked slot: a leaf projection reads the
+            // part live, while `pack` (a whole-value use -- let-bind, arg, return,
+            // store) rebuilds a fresh value instead of aliasing the array slot.
+            Expr::Index { base, index } if self.value_struct_of(e).is_some() => {
+                let name = self.value_struct_of(e).unwrap();
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
+                // Column storage: there is no element slot to read leaves off --
+                // each leaf lives in its own array, so the Group is built from K
+                // direct column reads. Bounds are checked ONCE for the element.
+                if let ContainerKind::VecValueColumns(elem) = kind {
+                    return self.column_element_repr(b, i, elem);
+                }
+                // Leaf addressing: no slot reference, no nested ctor -- each
+                // leaf comes straight from its typed view.
+                if let ContainerKind::NativeBufferValue(elem) = kind {
+                    if self.is_leaf_addressed(elem) {
+                        return self.nb_leaf_element_repr(b, i, elem);
+                    }
+                }
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
-                let parts = self
-                    .struct_field_names(name)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|f| ValueRepr::Scalar(self.emit_cur(Inst::Field { base: slot, field: f })))
-                    .collect();
-                Ok(ValueRepr::Group { name, parts })
+                Ok(self.boxed_value_copy_repr(slot, name))
+            }
+            Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs }
+                if self.nobox_value_name(e).is_some() =>
+            {
+                self.nullcoalesce_repr(e, lhs, rhs)
             }
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
         }
+    }
+
+    /// `a ?? b` whose RESULT is a `nobox` value: both arms thread leaves and join
+    /// through cells, so the coalesce never packs a cdata just to choose between
+    /// them. The lhs leaves are read before the branch (their block dominates
+    /// both arms) and its presence leaf IS the condition -- no nil compare.
+    fn nullcoalesce_repr(
+        &mut self,
+        e: Idx<Expr>,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let name = self.nobox_value_name(e).expect("caller checked");
+        let shape = value_shape_of_nominal(self.ws, name)
+            .ok_or_else(|| gap(format!("nobox value `{name}` has no scalar shape")))?;
+        let mut lhs_shape = shape.clone();
+        lhs_shape.nullable = true;
+
+        let lhs_repr = self.lower_expr_repr(lhs)?;
+        let lhs_leaves = self.repr_to_leaves(&lhs_repr, &lhs_shape);
+        let (present, lhs_values) = lhs_leaves
+            .split_first()
+            .expect("a nullable shape carries its presence leaf first");
+        let (present, lhs_values) = (*present, lhs_values.to_vec());
+
+        let cells: Vec<Idx<Cell>> = lhs_values.iter().map(|_| self.f.new_cell(None)).collect();
+        let lhs_bb = self.f.new_block();
+        let rhs_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: lhs_bb, else_bb: rhs_bb },
+        );
+
+        self.cur = rhs_bb;
+        let rhs_repr = self.lower_expr_repr(rhs)?;
+        let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
+        for (&c, &value) in cells.iter().zip(&rhs_leaves) {
+            self.emit_cur(Inst::Store { cell: c, value });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = lhs_bb;
+        for (&c, &value) in cells.iter().zip(&lhs_values) {
+            self.emit_cur(Inst::Store { cell: c, value });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = join;
+        let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
     }
 
     /// A value-struct literal as an unboxed `Group` (declared field order, defaults
@@ -4268,7 +6692,7 @@ impl Builder<'_> {
                     match litmap.iter().find(|(n, _)| *n == fname) {
                         Some((_, r)) => fs.push(r.clone()),
                         None => match (&base_repr, base_boxed) {
-                            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+                            (Some(ValueRepr::Group { name: bn, parts, .. }), _) => {
                                 let i = self
                                     .field_index(*bn, fname)
                                     .expect("functional-update base covers every field");
@@ -4290,7 +6714,11 @@ impl Builder<'_> {
             }
             None => litmap.into_iter().map(|(_, r)| r).collect(),
         };
-        Ok(ValueRepr::Group { name, parts })
+        Ok(ValueRepr::Group {
+            name,
+            parts,
+            present: None,
+        })
     }
 
     /// Reorder a call's arguments (some written `name = value`) into the callee's
@@ -4716,10 +7144,18 @@ impl Builder<'_> {
             let s = match self.body.interp_part_arena[p].clone() {
                 InterpPart::Literal(lit) => self.emit_cur(Inst::Const(Lit::Str(lit))),
                 InterpPart::Value { expr, spec } => {
-                    let v = self.lower_expr(expr)?;
                     match spec {
-                        None => self.stringify(expr, v)?,
-                        Some(spec) => self.lower_format(expr, v, &spec)?,
+                        None if self.nobox_value_name(expr).is_some() => {
+                            self.stringify_nobox_expr(expr)?
+                        }
+                        None => {
+                            let v = self.lower_expr(expr)?;
+                            self.stringify(expr, v)?
+                        }
+                        Some(spec) => {
+                            let v = self.lower_expr(expr)?;
+                            self.lower_format(expr, v, &spec)?
+                        }
                     }
                 }
             };
@@ -4731,6 +7167,177 @@ impl Builder<'_> {
         Ok(acc.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Str(Ustr::from(""))))))
     }
 
+    fn stringify_nobox_expr(&mut self, expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        let name = self
+            .nobox_value_name(expr)
+            .ok_or_else(|| self.gap_here("nobox interpolation type"))?;
+        let repr = self.lower_expr_repr(expr)?;
+        self.stringify_nobox_repr(name, repr)
+    }
+
+    fn stringify_nobox_repr(
+        &mut self,
+        name: Ustr,
+        repr: ValueRepr,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let ValueRepr::Group {
+            parts, present, ..
+        } = repr
+        else {
+            return Err(self.gap_here(format!(
+                "nobox value `{name}` reached interpolation boxed"
+            )));
+        };
+        if let Some(present) = present {
+            let result = self.f.new_cell(None);
+            let value_bb = self.f.new_block();
+            let nil_bb = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: present,
+                    then_bb: value_bb,
+                    else_bb: nil_bb,
+                },
+            );
+
+            self.cur = nil_bb;
+            let nil = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("nil"))));
+            self.store_and_join(result, nil, join);
+
+            self.cur = value_bb;
+            let rendered = self.stringify_nobox_repr(
+                name,
+                ValueRepr::Group {
+                    name,
+                    parts,
+                    present: None,
+                },
+            )?;
+            self.store_and_join(result, rendered, join);
+
+            self.cur = join;
+            return Ok(self.emit_cur(Inst::Load(result)));
+        }
+        let sid = *self
+            .ws
+            .struct_by_name
+            .get(&name)
+            .ok_or_else(|| gap(format!("nobox value `{name}` has no definition")))?;
+        let fields = self.ws.modules[sid.module.index()].structs[sid.def]
+            .fields
+            .clone();
+        if fields.len() != parts.len() {
+            return Err(gap(format!(
+                "nobox value `{name}` interpolation shape mismatch"
+            )));
+        }
+
+        let mut out = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+            format!("{name} {{ ").as_str(),
+        ))));
+        for (i, (field, part)) in fields.into_iter().zip(parts).enumerate() {
+            if i > 0 {
+                let comma = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(", "))));
+                out = self.emit_cur(Inst::StringConcat(out, comma));
+            }
+            let label = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                format!("{} = ", field.name).as_str(),
+            ))));
+            out = self.emit_cur(Inst::StringConcat(out, label));
+            let rendered = match part {
+                ValueRepr::Group {
+                    name: child_name,
+                    parts,
+                    ..
+                } => self.stringify_nobox_repr(
+                    child_name,
+                    ValueRepr::Group {
+                        name: child_name,
+                        parts,
+                        present: None,
+                    },
+                )?,
+                ValueRepr::Scalar(value) => self.stringify_struct_leaf(field.ty, value)?,
+                part @ ValueRepr::Tuple(_) => {
+                    let value = self.pack(part);
+                    self.stringify_struct_leaf(field.ty, value)?
+                }
+            };
+            out = self.emit_cur(Inst::StringConcat(out, rendered));
+        }
+        let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(" }"))));
+        Ok(self.emit_cur(Inst::StringConcat(out, close)))
+    }
+
+    fn stringify_struct_leaf(
+        &mut self,
+        ty: TyId,
+        value: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let ty = self
+            .resolve_tyid(ty)
+            .ok_or_else(|| gap("nobox interpolation field type"))?;
+        if matches!(self.ty_node(ty), Some(TypeExpr::Nullable(_))) {
+            let inspect = self.resolve_global_fn("inspect")?;
+            return Ok(self.emit_cur(Inst::Call {
+                func: inspect,
+                args: vec![value],
+            }));
+        }
+        match self.resolve_ty(ty) {
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool)) => {
+                Ok(self.emit_cur(Inst::ToString(value)))
+            }
+            Some(TypeExpr::Builtin(BuiltinTy::String)) => {
+                let quote = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("\""))));
+                let open = self.emit_cur(Inst::StringConcat(quote, value));
+                Ok(self.emit_cur(Inst::StringConcat(open, quote)))
+            }
+            Some(TypeExpr::Builtin(BuiltinTy::Float)) => {
+                let format = self.resolve_global_fn("__rock_format_float")?;
+                Ok(self.emit_cur(Inst::Call {
+                    func: format,
+                    args: vec![value],
+                }))
+            }
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if self.ws.newtypes_by_name.contains_key(&name) => {
+                let open = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                    format!("{name}(").as_str(),
+                ))));
+                let inner = self.emit_cur(Inst::ToString(value));
+                let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(")"))));
+                let out = self.emit_cur(Inst::StringConcat(open, inner));
+                Ok(self.emit_cur(Inst::StringConcat(out, close)))
+            }
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if payload_free_enum_variants(self.ws, name).is_some() => {
+                let names = self.emit_cur(Inst::Global(Ustr::from(
+                    format!("__rock_enum_{name}_names").as_str(),
+                )));
+                Ok(self.emit_cur(Inst::Index {
+                    base: names,
+                    index: value,
+                    kind: ContainerKind::Map,
+                }))
+            }
+            Some(_) => {
+                let inspect = self.resolve_global_fn("inspect")?;
+                Ok(self.emit_cur(Inst::Call {
+                    func: inspect,
+                    args: vec![value],
+                }))
+            }
+            None => Err(gap("nobox interpolation field type")),
+        }
+    }
+
     /// Default `{x}` stringify for value `v` of expression `expr`, dispatched on
     /// `expr`'s static type (mirrors rock-codegen's interp dispatch).
     fn stringify(&mut self, expr: Idx<Expr>, v: Idx<Inst>) -> Result<Idx<Inst>, CompilerError> {
@@ -4738,6 +7345,52 @@ impl Builder<'_> {
         if matches!(self.body.expr_arena[expr], Expr::Null) {
             return Ok(self.emit_cur(Inst::ToString(v)));
         }
+        // `expr_ty` PEELS `Nullable`, so every arm below is picked from the
+        // NON-NULL shape while the value can still arrive nil. Guard once here
+        // instead of per arm: the float and payload-free-enum renderings fault on
+        // nil and a newtype renders `Id(nil)`, and the arms that already render
+        // "nil" are unaffected by the branch.
+        if self.expr_is_nullable(expr) {
+            return self.nil_guarded_render(v, |s| s.stringify_non_null(expr, v));
+        }
+        self.stringify_non_null(expr, v)
+    }
+
+    /// `if v == nil then "nil" else <render(v)>` -- the guard every interpolation
+    /// path needs on a nullable hole, since `expr_ty` peels `Nullable` and the
+    /// renderer is chosen from the non-null shape.
+    fn nil_guarded_render(
+        &mut self,
+        v: Idx<Inst>,
+        render: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell(None);
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(v, nil));
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("nil"))));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let rendered = render(self)?;
+        self.store_and_join(result, rendered, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// `stringify` for a value known to be present. Split out so the nullable
+    /// guard above can reuse every arm on its non-null path.
+    fn stringify_non_null(
+        &mut self,
+        expr: Idx<Expr>,
+        v: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         match self.expr_ty(expr) {
             Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool | BuiltinTy::String)) => {
                 Ok(self.emit_cur(Inst::ToString(v)))
@@ -4802,6 +7455,23 @@ impl Builder<'_> {
         v: Idx<Inst>,
         spec: &bone_semantic::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
+        // Same `Nullable`-peel guard as `stringify`: a null with a spec would reach
+        // `string.format("%.2f", nil)`. A null has nothing to pad or round, so it
+        // renders bare "nil" whatever the spec asks for.
+        if self.expr_is_nullable(expr) {
+            let spec = spec.clone();
+            return self.nil_guarded_render(v, move |s| s.lower_format_non_null(expr, v, &spec));
+        }
+        self.lower_format_non_null(expr, v, spec)
+    }
+
+    /// `lower_format` for a value known to be present.
+    fn lower_format_non_null(
+        &mut self,
+        expr: Idx<Expr>,
+        v: Idx<Inst>,
+        spec: &bone_semantic::hir::InterpSpec,
+    ) -> Result<Idx<Inst>, CompilerError> {
         // Effective conversion letter when the spec omits one (`{x:5}`).
         let inferred = match self.expr_ty(expr) {
             Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some('d'),
@@ -4809,19 +7479,28 @@ impl Builder<'_> {
             Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
             _ => None,
         };
-        // A composite with `.N` precision and no explicit type is a recursive
-        // precision-aware stringify -> `inspect_formatted`.
+        // A composite has no printf conversion: render it structurally (at
+        // `.N` precision when asked, via `inspect_formatted`) and then run the
+        // same pad path a conversion would. The numeric-presentation flags
+        // below have no meaning on a structural rendering, so a spec carrying
+        // one is left to gap rather than silently ignored.
         let has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
-        let plain_spec = spec.format_type.is_none()
+        if spec.format_type.is_none()
+            && inferred.is_none()
             && spec.grouping.is_none()
-            && spec.fill.is_none()
-            && spec.width.is_none()
-            && spec.width_expr.is_none()
-            && spec.alignment.is_none();
-        if has_precision && plain_spec && inferred.is_none() && self.is_composite_expr(expr) {
-            let prec = self.lower_precision(spec)?;
-            let func = self.resolve_global_fn("inspect_formatted")?;
-            return Ok(self.emit_cur(Inst::Call { func, args: vec![v, prec] }));
+            && spec.sign.is_none()
+            && !spec.alternate
+            && !spec.zero_pad
+            && self.is_composite_expr(expr)
+        {
+            let rendered = if has_precision {
+                let prec = self.lower_precision(spec)?;
+                let func = self.resolve_global_fn("inspect_formatted")?;
+                self.emit_cur(Inst::Call { func, args: vec![v, prec] })
+            } else {
+                self.stringify_non_null(expr, v)?
+            };
+            return self.pad_to_width(rendered, spec);
         }
 
         let grouping = spec.grouping;
@@ -4868,20 +7547,31 @@ impl Builder<'_> {
             out = self.emit_cur(Inst::Call { func, args: vec![out, sep_v, grp_v] });
         }
         if needs_pad {
-            // Pad to the field width AFTER grouping (separators count toward it).
-            let w = match (spec.width, spec.width_expr) {
-                (Some(w), _) => self.emit_cur(Inst::Const(Lit::Int(w as i64))),
-                (None, Some(we)) => self.lower_expr(we)?,
-                (None, None) => self.emit_cur(Inst::Const(Lit::Int(0))),
-            };
-            let align = spec.alignment.map(|c| c.to_string()).unwrap_or_else(|| ">".to_string());
-            let align_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(align.as_str()))));
-            let fill = spec.fill.unwrap_or(' ').to_string();
-            let fill_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(fill.as_str()))));
-            let func = self.resolve_global_fn("__rock_fmt_pad")?;
-            out = self.emit_cur(Inst::Call { func, args: vec![out, w, align_v, fill_v] });
+            // Pad AFTER grouping (separators count toward the field width).
+            out = self.pad_to_width(out, spec)?;
         }
         Ok(out)
+    }
+
+    /// Pad an already-rendered string to the spec's field width. A width of 0
+    /// (no width in the spec) leaves the string untouched, so this is safe to
+    /// call unconditionally.
+    fn pad_to_width(
+        &mut self,
+        out: Idx<Inst>,
+        spec: &bone_semantic::hir::InterpSpec,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let w = match (spec.width, spec.width_expr) {
+            (Some(w), _) => self.emit_cur(Inst::Const(Lit::Int(w as i64))),
+            (None, Some(we)) => self.lower_expr(we)?,
+            (None, None) => self.emit_cur(Inst::Const(Lit::Int(0))),
+        };
+        let align = spec.alignment.map(|c| c.to_string()).unwrap_or_else(|| ">".to_string());
+        let align_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(align.as_str()))));
+        let fill = spec.fill.unwrap_or(' ').to_string();
+        let fill_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(fill.as_str()))));
+        let func = self.resolve_global_fn("__rock_fmt_pad")?;
+        Ok(self.emit_cur(Inst::Call { func, args: vec![out, w, align_v, fill_v] }))
     }
 
     /// A spec's precision as a value: static `Int`, dynamic `{.{p}}` expression,
@@ -5008,13 +7698,35 @@ impl Builder<'_> {
                     None
                 };
                 if let Some(v) = null_side {
+                    if self.nobox_value_name(v).is_some() {
+                        let repr = self.lower_expr_repr(v)?;
+                        let present = match repr {
+                            ValueRepr::Group {
+                                present: Some(value),
+                                ..
+                            } => value,
+                            ValueRepr::Group { present: None, .. } => {
+                                self.emit_cur(Inst::Const(Lit::Bool(true)))
+                            }
+                            other => {
+                                let value = self.pack(other);
+                                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                                self.emit_cur(Inst::NotEq(value, nil))
+                            }
+                        };
+                        return Ok(if matches!(op, BinOp::Eq) {
+                            self.emit_cur(Inst::Not(present))
+                        } else {
+                            present
+                        });
+                    }
                     if self.expr_is_flat_enum(v) {
                         let tag = match self.lower_expr_repr(v)? {
                             ValueRepr::Group { parts, .. } => {
                                 self.pack(parts.into_iter().next().expect("flat enum group has a tag leaf"))
                             }
                             // a boxed flat enum: nil-or-table, compare directly.
-                            ValueRepr::Scalar(s) => s,
+                            other => self.pack(other),
                         };
                         let nil = self.emit_cur(Inst::Const(Lit::Nil));
                         return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
@@ -5022,6 +7734,26 @@ impl Builder<'_> {
                         } else {
                             Inst::NotEq(tag, nil)
                         }));
+                    }
+                }
+                if let (Some(ln), Some(rn)) =
+                    (self.nobox_value_name(lhs), self.nobox_value_name(rhs))
+                {
+                    if ln == rn {
+                        let mut shape = value_shape_of_nominal(self.ws, ln)
+                            .ok_or_else(|| gap(format!("nobox value `{ln}` has no scalar shape")))?;
+                        shape.nullable =
+                            self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);
+                        let lhs_repr = self.lower_expr_repr(lhs)?;
+                        let lhs_leaves = self.repr_to_leaves(&lhs_repr, &shape);
+                        let rhs_repr = self.lower_expr_repr(rhs)?;
+                        let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
+                        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
+                        return Ok(if matches!(op, BinOp::Eq) {
+                            equal
+                        } else {
+                            self.emit_cur(Inst::Not(equal))
+                        });
                     }
                 }
                 let scalar = self.eq_is_scalar(lhs)
@@ -5351,13 +8083,21 @@ impl Builder<'_> {
             // (bone routes Array to the stdlib VecIter protocol); reaching the
             // dispatch means bone and skull disagree -- reject, don't emit a
             // second lowering. `enumerate(vec)` keeps its own path above.
-            ContainerKind::Vec => Err(gap(
+            // Either Vec flavor: columns change storage, not the iteration
+            // protocol -- `VecIter.next` reads `it.vec[it.i]`, which is an
+            // `Index` and picks up the column kind on its own.
+            ContainerKind::Vec | ContainerKind::VecValueColumns(_) => Err(gap(
                 "for over [T] must route through the iterator protocol (for_iter_protocol missing)",
             )),
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 self.lower_for_array(vars, iter, body)
             }
             ContainerKind::Map => self.lower_for_map(&vars, iter, body),
+            // Synthetic: a leaf column and a leaf VIEW are both minted during
+            // element lowering and are never user types, so neither can be a
+            // `for` head.
+            ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),
+            ContainerKind::NativeBufferLeaf => Err(gap("for over a synthetic NativeBuffer leaf view")),
         }
     }
 
@@ -5392,22 +8132,40 @@ impl Builder<'_> {
         let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
         self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
 
-        // next returns `(bool, E)` / `(bool, A, B, ...)`: arity = 1 + element
-        // leaves. A placeholder next is always arity 2 (bound conformance
-        // requires exactly `(bool, E)`).
-        let n = match &info.next {
-            BoundNext::Concrete { func: (m, f), .. } => self
-                .ws
-                .module(*m)
-                .functions[*f]
-                .return_ty
-                .and_then(|t| tuple_arity(self.ws, t))
-                .ok_or_else(|| gap("for-iter `next` must return a tuple"))?,
-            BoundNext::CallerGeneric(_) => 2,
+        // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
+        // the SPECIALIZATION the emitted call will carry, not the caller's own:
+        // when the spec is dropped the call reaches the shared generic body,
+        // whose `E` is unbound and therefore never splats -- so the two sides
+        // agree about how many values come back.
+        let spec = match &info.next {
+            BoundNext::Concrete { func: (m, f), next_generics, .. } => self
+                .next_call_spec(FuncRef { module: *m, func: *f }, next_generics)
+                .filter(|k| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)),
+            BoundNext::CallerGeneric(_) => None,
         };
-        if n < 2 {
+        // A placeholder next is always `(bool, E)` with `E` opaque (bound
+        // conformance requires exactly that shape, and the placeholder body is
+        // substituted later).
+        let ret_shape = match &info.next {
+            BoundNext::Concrete { func: (m, f), .. } => {
+                let func = FuncRef { module: *m, func: *f };
+                let subst = spec
+                    .as_ref()
+                    .map(|k| spec_subst_from_key(self.ws, func, k))
+                    .unwrap_or_default();
+                self.ws.module(*m).functions[*f]
+                    .return_ty
+                    .and_then(|t| tuple_ret_shape(self.ws, &subst, t))
+                    .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
+            }
+            BoundNext::CallerGeneric(_) => TupleRetShape {
+                slots: vec![RetSlot::Opaque, RetSlot::Opaque],
+            },
+        };
+        if ret_shape.slots.len() < 2 {
             return Err(gap("for-iter `next` must return `(bool, E)`"));
         }
+        let n = ret_shape.slot_count();
 
         let header = self.f.new_block();
         let body_bb = self.f.new_block();
@@ -5420,8 +8178,14 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub } => {
+            BoundNext::Concrete { func: (m, f), sub, .. } => {
                 let func = FuncRef { module: *m, func: *f };
+                // The synthesized `next` call has no expr to key
+                // `call_generic_bindings` by, so its instantiation comes from
+                // bone's recorded `next_generics`. Without this the inliner
+                // splices the SHARED generic snapshot, whose element access was
+                // lowered against the boxed representation -- which reads a
+                // `_data` that column storage does not have.
                 let call = self.emit_cur(Inst::CallMulti {
                     dests: dests.clone(),
                     func,
@@ -5429,6 +8193,9 @@ impl Builder<'_> {
                 });
                 if !sub.is_empty() {
                     self.f.bound_trees.insert(call, sub.clone());
+                }
+                if let Some(key) = spec {
+                    self.f.spec_bindings.insert(call, key);
                 }
             }
             BoundNext::CallerGeneric(gidx) => {
@@ -5442,18 +8209,19 @@ impl Builder<'_> {
         let ok = self.emit_cur(Inst::Load(dests[0]));
         self.f.set_term(self.cur, Term::Branch { cond: ok, then_bb: body_bb, else_bb: exit });
 
-        // body: bind the pattern to the element leaves. A single element binds
-        // directly; multiple (`next -> (bool, A, B)`) pack into a MakeTuple that
-        // `bind_for_pattern` elides against a matching tuple pattern (no alloc).
+        // body: bind the pattern to the element slots. One element binds
+        // directly (its leaves, if it splats); multiple (`next -> (bool, A, B)`)
+        // are a tuple `bind_pattern_slot` destructures against a matching tuple
+        // pattern (no alloc).
         self.cur = body_bb;
-        let elem_val = if n == 2 {
-            self.emit_cur(Inst::Load(dests[1]))
-        } else {
-            let loads: Vec<Idx<Inst>> =
-                dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-            self.emit_cur(Inst::MakeTuple(loads))
+        let loads: Vec<Idx<Inst>> =
+            dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let elem_slot = match &ret_shape.slots[1..] {
+            [one] => one.clone(),
+            rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec() }),
         };
-        self.bind_for_pattern(vars, elem_val);
+        let mut idx = 0;
+        self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx);
         self.loop_targets.push((header, exit));
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
@@ -5840,11 +8608,7 @@ impl Builder<'_> {
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.emit_cur(Inst::Index {
-            base: arr_v,
-            index: i_now,
-            kind,
-        });
+        let elem = self.loop_element_at(arr_v, i_now, kind)?;
         match &split {
             // split: index already bound to i_cell; bind the element pattern.
             Some((_, xpat)) => self.bind_for_pattern(xpat, elem),
@@ -5926,11 +8690,7 @@ impl Builder<'_> {
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.emit_cur(Inst::Index {
-            base: arr_v,
-            index: i_now,
-            kind,
-        });
+        let elem = self.loop_element_at(arr_v, i_now, kind)?;
         self.bind_for_pattern(&vars, elem);
         self.loop_targets.push((latch, exit));
         self.lower_stmt_expr(body)?;
@@ -5983,6 +8743,78 @@ impl Builder<'_> {
                     let elem = self.emit_cur(Inst::TupleIndex { base: value, index: i });
                     self.bind_for_pattern(sub, elem);
                 }
+            }
+        }
+    }
+
+    /// [`Self::bind_for_pattern`] against a SPLATTING tuple's flat slot values.
+    /// A `Leaves` slot binds its leaves into `group_binds` cells -- the same form
+    /// a scalarized value param takes -- so reading the binding never rebuilds a
+    /// box. Any pattern/slot pairing that does not line up (a single binding for
+    /// a whole nested tuple, say) rebuilds and falls back to the boxed bind,
+    /// which is where a whole-value use of a `nobox` element meets the
+    /// guarantee's rejection.
+    fn bind_pattern_slot(
+        &mut self,
+        vars: &BindingPattern,
+        slot: &RetSlot,
+        values: &[Idx<Inst>],
+        idx: &mut usize,
+    ) {
+        match (vars, slot) {
+            (BindingPattern::Leaf(b), RetSlot::Leaves(shape)) => {
+                let n = shape.leaf_count();
+                let leaves = values[*idx..*idx + n].to_vec();
+                *idx += n;
+                self.bind_leaves(*b, &leaves, shape.clone());
+            }
+            (BindingPattern::Tuple(subs), RetSlot::Nested(inner))
+                if subs.len() == inner.slots.len() =>
+            {
+                for (sub, s) in subs.iter().zip(inner.slots.clone()) {
+                    self.bind_pattern_slot(sub, &s, values, idx);
+                }
+            }
+            (vars, slot) => {
+                let r = self.slot_repr(slot, values, idx);
+                let v = self.pack(r);
+                self.bind_for_pattern(vars, v);
+            }
+        }
+    }
+
+    /// Bind `b` to a value's LEAVES: one cell per leaf, registered in
+    /// `group_binds`. The single form for "this binding is a scalarized value",
+    /// shared by `if let` and the splatting tuple destructures.
+    fn bind_leaves(&mut self, b: Idx<BindingInfo>, leaves: &[Idx<Inst>], shape: ValueShape) {
+        let bname = self.body.binding_arena[b].name;
+        let cells: Vec<Idx<Cell>> = leaves
+            .iter()
+            .enumerate()
+            .map(|(li, &value)| {
+                let c = self.f.new_cell(Some(Ustr::from(format!("{bname}__{li}").as_str())));
+                self.emit_cur(Inst::Store { cell: c, value });
+                c
+            })
+            .collect();
+        self.group_binds.insert(raw(b), (cells, shape));
+    }
+
+    /// Destructure a splatting tuple into `vars`. The elements arrive as flat
+    /// slots, so an element that is a `nobox` value binds its leaves directly.
+    fn bind_tuple_repr(&mut self, vars: &BindingPattern, shape: &TupleRetShape, r: ValueRepr) {
+        let values = self.tuple_repr_to_slots(r, shape);
+        let mut idx = 0;
+        match vars {
+            BindingPattern::Tuple(subs) if subs.len() == shape.slots.len() => {
+                for (sub, slot) in subs.iter().zip(shape.slots.clone()) {
+                    self.bind_pattern_slot(sub, &slot, &values, &mut idx);
+                }
+            }
+            _ => {
+                let r = self.tuple_from_slots(shape, &values, &mut idx);
+                let v = self.pack(r);
+                self.bind_for_pattern(vars, v);
             }
         }
     }
@@ -6417,6 +9249,11 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
+            if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
+                return self.lower_if_let_nobox(b, value, then_branch, else_branch);
+            }
+        }
         let result = self.f.new_cell(None);
         let scrut = self.lower_scrut(value)?;
         let else_bb = self.f.new_block();
@@ -6437,6 +9274,51 @@ impl Builder<'_> {
         let variants = self.scrut_variants(value);
         let scrut_enum = self.scrut_enum_name(value);
         self.match_pattern(&scrut, pattern, else_bb, &variants, true, scrut_enum)?;
+        let tv = self.lower_expr(then_branch)?;
+        self.store_and_join(result, tv, join);
+
+        self.cur = else_bb;
+        let ev = match else_branch {
+            Some(eb) => self.lower_expr(eb)?,
+            None => self.emit_cur(Inst::Const(Lit::Nil)),
+        };
+        self.store_and_join(result, ev, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// `if let q = p` binding a nullable `nobox` value: the scrutinee's presence
+    /// leaf IS the branch condition and `q` binds the remaining leaves as cells,
+    /// so nothing is packed to be tested and immediately unpacked again. Only a
+    /// plain `Bind` takes this path -- a destructuring pattern still matches
+    /// against the boxed scrutinee.
+    fn lower_if_let_nobox(
+        &mut self,
+        b: Idx<BindingInfo>,
+        value: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = self.nobox_binding_shape(b).expect("caller checked");
+        let mut scrut_shape = shape.clone();
+        scrut_shape.nullable = true;
+
+        let result = self.f.new_cell(None);
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves(&repr, &scrut_shape);
+        let (present, values) = leaves
+            .split_first()
+            .expect("a nullable shape carries its presence leaf first");
+        let (present, values) = (*present, values.to_vec());
+
+        let then_bb = self.f.new_block();
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
+
+        self.cur = then_bb;
+        self.bind_leaves(b, &values, shape);
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 
@@ -6572,6 +9454,7 @@ impl Builder<'_> {
     /// step. Emitting an incomplete struct would be a silent miscompile.
     fn lower_struct_literal(
         &mut self,
+        e: Idx<Expr>,
         name: Ustr,
         fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
         bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
@@ -6590,8 +9473,11 @@ impl Builder<'_> {
         // instead of one boxed value (`docs/enum-allocation-report.md`).
         let mut lit_box: Vec<(Ustr, Idx<Inst>)> = Vec::new();
         let mut lit_flat: Vec<(Ustr, FlatCells)> = Vec::new();
+        let mut lit_embed: Vec<(Ustr, Vec<(Ustr, Idx<Inst>)>)> = Vec::new();
         let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
         let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::new();
+        let mut embed_by_value: HashMap<u32, (Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>)> =
+            HashMap::new();
         for fidx in fields {
             let lf = self.body.struct_lit_field_arena[fidx];
             let key: u32 = lf.value.into_raw().into();
@@ -6605,6 +9491,20 @@ impl Builder<'_> {
                     }
                 };
                 lit_flat.push((lf.name, cells));
+            } else if let Some(cname) = self.embed_field_of_struct(name, lf.name) {
+                // An embedded field's leaves ARE this parent's keys, so its
+                // value is spliced rather than lowered to a child box. Keyed by
+                // the value expr so a field GROUP still evaluates once.
+                let nullable = self.embed_field_is_nullable(name, lf.name);
+                let leaves = match embed_by_value.get(&key) {
+                    Some(l) => l.clone(),
+                    None => {
+                        let l = self.embed_value_leaves(nullable, cname, lf.value)?;
+                        embed_by_value.insert(key, l.clone());
+                        l
+                    }
+                };
+                lit_embed.push((lf.name, Self::embed_field_slots(lf.name, leaves)));
             } else {
                 let v = match by_value.get(&key) {
                     Some(&v) => v,
@@ -6623,8 +9523,32 @@ impl Builder<'_> {
                 for fname in decl {
                     if let Some((_, cells)) = lit_flat.iter().find(|(n, _)| *n == fname) {
                         fs.extend(self.flat_literal_slots(fname, cells.clone()));
+                    } else if let Some((_, slots)) = lit_embed.iter().find(|(n, _)| *n == fname) {
+                        fs.extend(slots.clone());
                     } else if let Some(&(_, v)) = lit_box.iter().find(|(n, _)| *n == fname) {
                         fs.push((fname, v));
+                    } else if let Some(cname) = self.embed_field_of_struct(name, fname) {
+                        // Unwritten embed field: copy the base's leaves through
+                        // (including its presence slot), else the struct default.
+                        let nullable = self.embed_field_is_nullable(name, fname);
+                        match base_inst {
+                            Some(bi) => {
+                                for k in self.embed_leaf_paths(cname) {
+                                    let key = Ustr::from(&format!("{fname}.{k}"));
+                                    let v = self.emit_cur(Inst::Field { base: bi, field: key });
+                                    fs.push((key, v));
+                                }
+                                if nullable {
+                                    let p = self.emit_cur(Inst::Field { base: bi, field: fname });
+                                    fs.push((fname, p));
+                                }
+                            }
+                            None => {
+                                let dv = self.lower_struct_default(name, fname)?;
+                                let leaves = self.embed_leaf_reads(cname, dv);
+                                fs.extend(Self::embed_field_slots(fname, (None, leaves)));
+                            }
+                        }
                     } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
                         // Unwritten flat field: from the base if present, else the
                         // struct default; spread the box into slots either way.
@@ -6646,6 +9570,13 @@ impl Builder<'_> {
             }
             None => lit_box, // unknown nominal (foreign module): emit as-given
         };
+        // A hand-built `NativeBuffer { ptr: .., len: .. }` must carry the same
+        // leaf views the `native_buffer_alloc` intrinsic attaches -- element
+        // access decides on the TYPE, so a buffer of a leaf-addressed element
+        // would otherwise index a nil view. (Loud, not silent: leaf addressing
+        // never changes storage, so the only failure available is a missing
+        // view, and that errors on first access.)
+        let out = self.with_leaf_views(e, name, out);
         // Non-value structs only — a `value` literal is built via the repr layer
         // (`value_literal_repr` -> `pack`, the single value-cdata source), so it
         // never reaches here.
@@ -6655,6 +9586,31 @@ impl Builder<'_> {
         }))
     }
 
+    /// Append the leaf-view fields to a hand-written `NativeBuffer` literal's
+    /// fields, keyed off its declared element type. A no-op for any other
+    /// struct, for a primitive element, and for one already carrying views.
+    fn with_leaf_views(
+        &mut self,
+        e: Idx<Expr>,
+        name: Ustr,
+        mut fields: Vec<(Ustr, Idx<Inst>)>,
+    ) -> Vec<(Ustr, Idx<Inst>)> {
+        if name.as_str() != "NativeBuffer" {
+            return fields;
+        }
+        // The element comes from the literal's own inferred type, the same
+        // oracle element ACCESS consults -- so construction and access can never
+        // disagree about whether a buffer is leaf-addressed.
+        let Some(elem) = self.nb_value_elem(e) else {
+            return fields;
+        };
+        let Some(&(_, ptr)) = fields.iter().find(|(f, _)| f.as_str() == "ptr") else {
+            return fields;
+        };
+        fields.extend(self.leaf_view_fields(elem, ptr));
+        fields
+    }
+
     fn struct_field_names(&self, name: Ustr) -> Option<Vec<Ustr>> {
         let sid = *self.ws.struct_by_name.get(&name)?;
         let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
@@ -6662,6 +9618,15 @@ impl Builder<'_> {
     }
 
     /// Whether nominal `name` is a `value` struct (C-layout cdata).
+    /// Whether `e`'s type is a `value` struct -- the shape whose rvalue lowering
+    /// packs a fresh cdata rather than handing back shared storage.
+    fn expr_is_value_struct(&self, e: Idx<Expr>) -> bool {
+        match self.expr_ty(e) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self.is_value_struct(name),
+            _ => false,
+        }
+    }
+
     fn is_value_struct(&self, name: Ustr) -> bool {
         self.ws
             .struct_by_name
@@ -6670,18 +9635,56 @@ impl Builder<'_> {
             .unwrap_or(false)
     }
 
-    /// `Some(name)` iff `e`'s inferred type is an FFI-clean (cdata) `value` struct.
-    /// A whole-value read of such an ELEMENT (`buf[i]`/`fv[i]`) lives inline in the
-    /// NativeBuffer/FlatVec cdata array; binding the raw checked read aliases that
-    /// interior storage, so the read must COPY (docs/value-semantics-axes.md
-    /// finding #3, Sequencing #1). GC-carrying value structs (table repr) are
-    /// excluded -- they can't live in a NativeBuffer and copy semantics for their
-    /// shared inner refs are a later arc.
-    fn ffi_clean_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
+    /// Whether `e` denotes a mutable PLACE -- storage a later write can reach
+    /// through, so a whole-value read out of it must copy. A value local/param is
+    /// NOT one (bone rejects leaf writes there), nor is a call result; without
+    /// that exclusion every uniform-struct field read would rebuild its value.
+    ///
+    /// Sibling, NOT a duplicate: bone's `value_field_write_is_place`
+    /// (`bone-inference/src/fields.rs`) decides whether a write TARGET is legal
+    /// storage. This decides whether a later write can reach a value being READ,
+    /// so it stops at the first container/global (`vlocal.buf[i]` is shared
+    /// storage even though the chain starts at a value binding) where bone walks
+    /// to the root. They must AGREE that a temporary is neither.
+    fn is_mutable_place(&self, e: Idx<Expr>) -> bool {
+        match &self.body.expr_arena[e] {
+            Expr::Global(_) | Expr::Index { .. } => true,
+            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
+                self.is_mutable_place(*base)
+            }
+            // A reference-struct binding aliases shared storage; a value binding
+            // is a copy of its own.
+            Expr::Var(b) => !self.binding_is_nonnull_value_struct(*b),
+            _ => false,
+        }
+    }
+
+    /// The value-struct type of `e`, EITHER tier. `None` for a non-value type or
+    /// unsolved inference, and for a `V?` -- `expr_ty` PEELS `Nullable`, and
+    /// splitting a possibly-null value into leaves would index nil.
+    fn value_struct_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if self.expr_is_nullable(e) {
+            return None;
+        }
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
             return None;
         };
-        (self.is_value_struct(name) && !value_struct_is_gc(self.ws, name)).then_some(name)
+        self.is_value_struct(name).then_some(name)
+    }
+
+    /// The nominal type name of a non-nullable AGGREGATE expression -- a value
+    /// struct or a cdata-payload enum. [`Self::value_struct_of`] gates on
+    /// `is_value_struct`, which excludes enums; `value_shape` accepts both (it
+    /// falls back to `enum_value_shape`), so resolving the name is enough and
+    /// the shape lookup stays the thing that fails closed on a non-aggregate.
+    fn value_aggregate_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if self.expr_is_nullable(e) {
+            return None;
+        }
+        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
+            return None;
+        };
+        Some(name)
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
@@ -6820,7 +9823,11 @@ impl Builder<'_> {
             };
             parts.push(ValueRepr::Scalar(v));
         }
-        Ok(ValueRepr::Group { name: shape.name, parts })
+        Ok(ValueRepr::Group {
+            name: shape.name,
+            parts,
+            present: None,
+        })
     }
 
     /// The compile-time expansion kind for `func`, routed through the intrinsic
@@ -6828,6 +9835,39 @@ impl Builder<'_> {
     /// there is no second bespoke annotation check.
     fn fn_expand_kind(&self, func: FuncRef) -> Option<ExpandKind> {
         crate::intrinsics::expand_kind(&self.ws.module(func.module).functions[func.func])
+    }
+
+    fn expand_materialize(
+        &mut self,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let [arg] = arg_idxs else {
+            return Err(gap("materialize expects one argument"));
+        };
+        let repr = self.lower_expr_repr(*arg)?;
+        Ok(ValueRepr::Scalar(self.materialize_repr(repr)))
+    }
+
+    fn materialize_repr(&mut self, repr: ValueRepr) -> Idx<Inst> {
+        match repr {
+            ValueRepr::Scalar(value) => value,
+            ValueRepr::Tuple(parts) => {
+                let vs = parts.into_iter().map(|p| self.materialize_repr(p)).collect();
+                self.emit_cur(Inst::MakeTuple(vs))
+            }
+            ValueRepr::Group { name, parts, .. } => {
+                let names = struct_field_names(self.ws, name);
+                let fields = parts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, part)| {
+                        let field = names.get(i).copied().unwrap_or(name);
+                        (field, self.materialize_repr(part))
+                    })
+                    .collect();
+                self.emit_cur(Inst::MaterializeValueStruct { name, fields })
+            }
+        }
     }
 
     /// Expand a `@struct_expand fn f<T>(u: T) -> [(string, E)]` call into its
@@ -6870,7 +9910,12 @@ impl Builder<'_> {
         // The argument must be a value struct: its Group's parts are the field
         // values in declaration order, each lowered exactly once.
         let repr = self.lower_expr_repr(arg)?;
-        let ValueRepr::Group { name: struct_name, parts } = repr else {
+        let ValueRepr::Group {
+            name: struct_name,
+            parts,
+            ..
+        } = repr
+        else {
             return Err(reject(
                 arg_span,
                 format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
@@ -6890,6 +9935,13 @@ impl Builder<'_> {
         let mut tuples = Vec::with_capacity(fields.len());
         for (i, ((field, _), variant)) in fields.iter().zip(variants).enumerate() {
             let payload = self.pack(parts[i].clone());
+            // The pairs enum is table-backed when any payload is non-scalar, so a
+            // `nobox` payload has nowhere to live but a box -- the same boundary
+            // `uniform(x: Vec2)` marks with an explicit `materialize`. Here the
+            // compiler mints the box itself and there is no source line to mark,
+            // so it mints the AUTHORIZED one rather than rejecting a program the
+            // hand-written overload accepts.
+            self.authorize_nobox_box(payload);
             let variant_v = self.make_single_payload_variant(enum_name, variant, payload)?;
             let key = self.emit_cur(Inst::Const(Lit::Str(*field)));
             let tup = self.emit_cur(Inst::MakeTuple(vec![key, variant_v]));
@@ -6943,7 +9995,11 @@ impl Builder<'_> {
                 };
                 parts.push(ValueRepr::Scalar(v));
             }
-            return Ok(self.pack(ValueRepr::Group { name: enum_name, parts }));
+            return Ok(self.pack(ValueRepr::Group {
+                name: enum_name,
+                parts,
+                present: None,
+            }));
         }
         Ok(self.emit_cur(Inst::MakeEnum {
             tag: variant,
@@ -7062,6 +10118,471 @@ impl Builder<'_> {
         flat_enum_shape(self.ws, ename)
     }
 
+    // --- `embed` storage: a child's leaves ARE the parent's physical keys ---
+    //
+    // Key encoding is the dotted path shared with flattened enum fields (see
+    // `flat_tag_slot`): `embed a: X` with leaf `b` lives at `parent["a.b"]`,
+    // recursively. `.` is not an identifier character, so the encoding cannot
+    // collide with a user field or a control key, and it is injective over
+    // paths. Enforcement of the source-level rules (projection-only, site
+    // legality) is bone's half; this is storage only.
+
+    /// The embedded child's struct name for `sname.field`, when `field` is
+    /// declared `embed` on a REFERENCE parent. A `value` parent is already
+    /// contiguous cdata, so `embed` there is a no-op GUARANTEE (it asserts the
+    /// layout) and must not re-encode anything.
+    fn embed_field_of_struct(&self, sname: Ustr, field: Ustr) -> Option<Ustr> {
+        // This runs on EVERY field access, so bail in O(1) when the workspace
+        // declares no embed field at all. The flag is set while registering
+        // fields and never cleared: a stale `true` costs one bool check, a
+        // stale `false` would silently skip the flattening.
+        if !(self.ws.has_embed_fields || self.ws.has_nobox_types) || self.is_value_struct(sname) {
+            return None;
+        }
+        let sid = *self.ws.struct_by_name.get(&sname)?;
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let fdef = sd.fields.iter().find(|f| f.name == field)?;
+        // `resolve_ty` peels `Nullable`, which is what a nullable embed needs:
+        // presence is a separate leaf, the child's own leaves are unchanged.
+        let TypeExpr::App { ctor: TypeCtor::Nominal(cname), .. } = self.resolve_ty(fdef.ty)? else {
+            return None;
+        };
+        let child = self
+            .ws
+            .struct_by_name
+            .get(&cname)
+            .map(|sid| &self.ws.modules[sid.module.index()].structs[sid.def]);
+        if !fdef.is_embed && !child.is_some_and(|s| s.is_nobox) {
+            return None;
+        }
+        Some(cname)
+    }
+
+    /// Whether an embed field is declared nullable. Presence is its own LEAF --
+    /// it lives at the field's own declared name, which flattening leaves free
+    /// (every physical key is dotted), so no extra encoding is needed.
+    fn embed_field_is_nullable(&self, sname: Ustr, field: Ustr) -> bool {
+        let Some(sid) = self.ws.struct_by_name.get(&sname) else { return false };
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        sd.fields
+            .iter()
+            .find(|f| f.name == field)
+            .is_some_and(|f| matches!(self.ty_node(f.ty), Some(TypeExpr::Nullable(_))))
+    }
+
+    fn embed_field_of(&self, base: Idx<Expr>, field: Ustr) -> Option<Ustr> {
+        let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
+            return None;
+        };
+        self.embed_field_of_struct(sname, field)
+    }
+
+    /// Physical key for `base.field`, composing an `embed` chain into one dotted
+    /// path and returning the expression that actually HOLDS it. `t.a.b.c` with
+    /// `a` and `b` embedded is the single key `"a.b.c"` on `t` -- no intermediate
+    /// projection exists at any level, because no intermediate box does.
+    fn physical_field(&self, base: Idx<Expr>, field: Ustr) -> (Idx<Expr>, Ustr) {
+        let mut parts = vec![field];
+        let mut cur = base;
+        while let Expr::FieldAccess { base: b2, field: f2 } = self.body.expr_arena[cur] {
+            if self.embed_field_of(b2, f2).is_none() {
+                break;
+            }
+            parts.push(f2);
+            cur = b2;
+        }
+        if parts.len() == 1 {
+            return (cur, field);
+        }
+        parts.reverse();
+        let key: Vec<&str> = parts.iter().map(|p| p.as_str()).collect();
+        (cur, Ustr::from(&key.join(".")))
+    }
+
+    /// Re-materialize an embedded field `parent.{prefix}` from its physical
+    /// leaves, at a whole-value-read boundary (a scalar-ABI call argument, `==`,
+    /// interpolation). Projection-only guarantees the result is a TRANSIENT --
+    /// it can never be bound, returned, captured or stored -- so it stays
+    /// sinkable rather than becoming the storage the feature removed.
+    fn materialize_embed(&mut self, parent: Idx<Inst>, prefix: Ustr, cname: Ustr) -> Idx<Inst> {
+        let mut fields = Vec::new();
+        for f in self.struct_field_names(cname).unwrap_or_default() {
+            let key = Ustr::from(&format!("{prefix}.{f}"));
+            match self.embed_field_of_struct(cname, f) {
+                Some(inner) => {
+                    let v = self.materialize_embed(parent, key, inner);
+                    fields.push((f, v));
+                }
+                // A flat-enum field stays FLAT in the rebuilt child: consumers
+                // read it as `child["f.#"]`, so re-boxing it under `f` would
+                // hand them a shape they never look at.
+                None => match self.flat_field_of_struct(cname, f) {
+                    Some(shape) => {
+                        for slot in flat_slot_names(f, &shape) {
+                            let src = Ustr::from(&format!("{prefix}.{slot}"));
+                            let v = self.emit_cur(Inst::Field { base: parent, field: src });
+                            fields.push((slot, v));
+                        }
+                    }
+                    None => {
+                        let v = self.emit_cur(Inst::Field { base: parent, field: key });
+                        fields.push((f, v));
+                    }
+                },
+            }
+        }
+        if self.is_value_struct(cname) {
+            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
+        } else {
+            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
+        }
+    }
+
+    /// The shape to read a `nobox` embed child back as, or `None` to fall
+    /// through to [`Builder::materialize_embed`] (and, for a marked child, to
+    /// the guarantee's rejection).
+    ///
+    /// `None` for an unmarked child -- its transient box is legal and sinks.
+    /// Also `None` when any field in the tree is a FLAT enum: those occupy
+    /// several parent slots under [`flat_slot_names`], which the shape carries
+    /// as one entry, so a Group built over them would hand the sink a leaf
+    /// sequence that lines up wrong. Rejecting loudly beats a silent
+    /// misalignment; the shape has no in-tree instance today.
+    fn nobox_embed_group_shape(&self, cname: Ustr) -> Option<ValueShape> {
+        if !is_nobox_nominal(self.ws, cname) || self.struct_has_flat_field(cname) {
+            return None;
+        }
+        value_shape_of_nominal(self.ws, cname)
+    }
+
+    /// Whether any field of `cname`, at any depth, flattens to several parent
+    /// slots rather than one.
+    fn struct_has_flat_field(&self, cname: Ustr) -> bool {
+        self.struct_field_names(cname).unwrap_or_default().iter().any(|&f| {
+            self.flat_field_of_struct(cname, f).is_some()
+                || self.embed_field_of_struct(cname, f).is_some_and(|inner| {
+                    inner != cname && self.struct_has_flat_field(inner)
+                })
+        })
+    }
+
+    /// A whole read of a `nobox` embed field, as an unboxed Group over the
+    /// parent's dotted leaves. Driven by the SHAPE rather than by the field
+    /// list, so the parts line up with [`Builder::repr_to_leaves`]' order by
+    /// construction instead of by two walks agreeing.
+    fn embed_group(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &ValueShape) -> ValueRepr {
+        let mut parts = Vec::new();
+        for (fname, fs) in &shape.fields {
+            let key = Ustr::from(&format!("{prefix}.{fname}"));
+            parts.push(match fs {
+                FieldShape::Prim => {
+                    ValueRepr::Scalar(self.emit_cur(Inst::Field { base: parent, field: key }))
+                }
+                FieldShape::Nested(sub) => self.embed_group(parent, key, sub),
+            });
+        }
+        ValueRepr::Group { name: shape.name, parts, present: None }
+    }
+
+    /// The `(physical key, value)` pairs for an embedded field's leaves, the one
+    /// source for both a parent literal's splice and a whole-field write.
+    ///
+    /// A DIRECT child literal FUSES: its field expressions lower straight into
+    /// the parent's leaf slots, so the child box is never built at all. Any
+    /// other expression is lowered once and read leaf-wise -- correct, and a
+    /// transient the later passes can still sink. Mirrors `lower_flat_value`,
+    /// which fuses a direct `E::V(..)` ctor the same way.
+    ///
+    /// All leaves are evaluated BEFORE any caller stores them, so a whole-field
+    /// write is not observable half-applied.
+    fn embed_leaf_values(
+        &mut self,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        if let Expr::StructLiteral { name, fields, bases } = self.body.expr_arena[value].clone() {
+            // A functional-update base reads unwritten fields off another
+            // instance; leave that to the general path rather than duplicating
+            // the base-copy rule here.
+            if name == cname && bases.into_iter().next().is_none() {
+                // A field GROUP (`Ty { a + b: expr }`) shares ONE value expr
+                // across several fields: lower each distinct one once, so the
+                // evaluation count is right and grouped leaves share it.
+                let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
+                let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::new();
+                let mut written: Vec<(Ustr, Idx<Expr>)> = Vec::new();
+                for fidx in fields {
+                    let lf = self.body.struct_lit_field_arena[fidx];
+                    written.push((lf.name, lf.value));
+                }
+                let mut out = Vec::new();
+                for f in self.struct_field_names(cname).unwrap_or_default() {
+                    let inner = self.embed_field_of_struct(cname, f);
+                    // A flat-enum field contributes its sub-slots, never one
+                    // boxed leaf -- same expansion the non-embed struct literal
+                    // does via `flat_literal_slots`.
+                    let flat = if inner.is_none() { self.flat_field_of_struct(cname, f) } else { None };
+                    match written.iter().find(|(n, _)| *n == f).map(|(_, v)| *v) {
+                        Some(ve) => match (inner, flat) {
+                            // Through the nullable-aware pair, not `embed_leaf_values`
+                            // directly: a nullable inner embed owns a presence slot,
+                            // and `= null` must not be read leaf-wise off nil.
+                            (Some(ic), _) => {
+                                let n = self.embed_field_is_nullable(cname, f);
+                                let leaves = self.embed_value_leaves(n, ic, ve)?;
+                                out.extend(Self::embed_field_slots(f, leaves));
+                            }
+                            (None, Some(shape)) => {
+                                let k: u32 = ve.into_raw().into();
+                                let cells = match flat_by_value.get(&k) {
+                                    Some(c) => c.clone(),
+                                    None => {
+                                        let c = self.lower_flat_value(&shape, ve)?;
+                                        flat_by_value.insert(k, c.clone());
+                                        c
+                                    }
+                                };
+                                out.extend(self.flat_literal_slots(f, cells));
+                            }
+                            (None, None) => {
+                                let k: u32 = ve.into_raw().into();
+                                let v = match by_value.get(&k) {
+                                    Some(&v) => v,
+                                    None => {
+                                        let v = self.lower_expr(ve)?;
+                                        by_value.insert(k, v);
+                                        v
+                                    }
+                                };
+                                out.push((f, v));
+                            }
+                        },
+                        // Unwritten: the child's own field default.
+                        None => {
+                            let d = self.lower_struct_default(cname, f)?;
+                            match (inner, flat) {
+                                (Some(ic), _) => out.extend(prefixed(f, self.embed_leaf_reads(ic, d))),
+                                (None, Some(shape)) => {
+                                    let cells = self.spread_box_to_cells(d, &shape);
+                                    out.extend(self.flat_literal_slots(f, cells));
+                                }
+                                (None, None) => out.push((f, d)),
+                            }
+                        }
+                    }
+                }
+                return Ok(out);
+            }
+        }
+        let v = self.lower_expr(value)?;
+        Ok(self.embed_leaf_reads(cname, v))
+    }
+
+    /// Every relative leaf path of embedded child `cname`, declaration order.
+    fn embed_leaf_paths(&self, cname: Ustr) -> Vec<Ustr> {
+        let mut out = Vec::new();
+        for f in self.struct_field_names(cname).unwrap_or_default() {
+            match self.embed_field_of_struct(cname, f) {
+                Some(inner) => out.extend(
+                    self.embed_leaf_paths(inner)
+                        .into_iter()
+                        .map(|k| Ustr::from(&format!("{f}.{k}"))),
+                ),
+                None => match self.flat_field_of_struct(cname, f) {
+                    Some(shape) => out.extend(flat_slot_names(f, &shape)),
+                    None => out.push(f),
+                },
+            }
+        }
+        out
+    }
+
+    /// `(presence, leaves)` for a NULLABLE embed field. Callers publish presence
+    /// LAST, so an error or yield mid-assignment leaves the field ABSENT rather
+    /// than present-and-half-built.
+    ///
+    /// A statically-known null or a direct child literal needs no branch; any
+    /// other expression is tested once at runtime, because reading leaves off an
+    /// absent child would index nil.
+    fn embed_nullable_leaf_values(
+        &mut self,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(Idx<Inst>, Vec<(Ustr, Idx<Inst>)>), CompilerError> {
+        let paths = self.embed_leaf_paths(cname);
+        // `= null`: clear presence AND every leaf. Scalar staleness is
+        // unobservable under presence gating, but a stale REFERENCE leaf keeps
+        // its pointee alive -- a leak, not a cosmetic -- so clear uniformly.
+        if matches!(self.body.expr_arena[value], Expr::Null) {
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            return Ok((nil, paths.into_iter().map(|k| (k, nil)).collect()));
+        }
+        if matches!(self.body.expr_arena[value], Expr::StructLiteral { name, .. } if name == cname) {
+            let leaves = self.embed_leaf_values(cname, value)?;
+            let present = self.emit_cur(Inst::Const(Lit::Bool(true)));
+            return Ok((present, leaves));
+        }
+        // A `nobox` child already threads as presence-plus-leaves, so take the
+        // repr rather than a boxed value: no box to test, and no branch either,
+        // because the repr carries its own presence and its leaves are nil on
+        // the absent path by construction.
+        if let Some(mut shape) = self.nobox_embed_group_shape(cname) {
+            shape.nullable = true;
+            let r = self.lower_expr_repr(value)?;
+            let leaves = self.repr_to_leaves(&r, &shape);
+            let (present, rest) = leaves.split_first().expect("a nullable shape leads with presence");
+            debug_assert_eq!(paths.len(), rest.len(), "leaf path/value counts must agree");
+            return Ok((*present, paths.into_iter().zip(rest.iter().copied()).collect()));
+        }
+        // Dynamic `Child?`: one presence test, leaves read only on the present
+        // arm and joined through cells.
+        let v = self.lower_expr(value)?;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(v, nil));
+        let cells: Vec<Idx<Cell>> = paths.iter().map(|_| self.f.new_cell(None)).collect();
+        let absent_bb = self.f.new_block();
+        let present_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: absent_bb, else_bb: present_bb });
+
+        self.cur = absent_bb;
+        for &c in &cells {
+            let n = self.emit_cur(Inst::Const(Lit::Nil));
+            self.emit_cur(Inst::Store { cell: c, value: n });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = present_bb;
+        for (&c, (_, lv)) in cells.iter().zip(self.embed_leaf_reads(cname, v)) {
+            self.emit_cur(Inst::Store { cell: c, value: lv });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = join;
+        let leaves = paths
+            .into_iter()
+            .zip(cells)
+            .map(|(k, c)| (k, self.emit_cur(Inst::Load(c))))
+            .collect();
+        let present = self.emit_cur(Inst::Not(is_nil));
+        Ok((present, leaves))
+    }
+
+    /// The same relative-path pairs read off an already-boxed child.
+    fn embed_leaf_reads(&mut self, cname: Ustr, value: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
+        let mut out = Vec::new();
+        for f in self.struct_field_names(cname).unwrap_or_default() {
+            // A flat-enum field is read out sub-slot-wise; emitting the whole
+            // field read first would be a dead load of a key nothing writes.
+            if self.embed_field_of_struct(cname, f).is_none() {
+                if let Some(shape) = self.flat_field_of_struct(cname, f) {
+                    for slot in flat_slot_names(f, &shape) {
+                        let v = self.emit_cur(Inst::Field { base: value, field: slot });
+                        out.push((slot, v));
+                    }
+                    continue;
+                }
+            }
+            let part = self.emit_cur(Inst::Field { base: value, field: f });
+            match self.embed_field_of_struct(cname, f) {
+                Some(inner) => out.extend(prefixed(f, self.embed_leaf_reads(inner, part))),
+                None => out.push((f, part)),
+            }
+        }
+        out
+    }
+
+    /// Whether the embed field `base.field` is declared nullable.
+    fn embed_read_is_nullable(&self, base: Idx<Expr>, field: Ustr) -> bool {
+        match self.expr_ty(base) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) => {
+                self.embed_field_is_nullable(sname, field)
+            }
+            _ => false,
+        }
+    }
+
+    /// `(presence, relative leaves)` for setting an embed field to `value`.
+    /// Relative so one lowering can be attached under several field names (a
+    /// field group shares one value expr); [`embed_field_slots`] re-keys it.
+    fn embed_value_leaves(
+        &mut self,
+        nullable: bool,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>), CompilerError> {
+        if nullable {
+            let (present, leaves) = self.embed_nullable_leaf_values(cname, value)?;
+            return Ok((Some(present), leaves));
+        }
+        Ok((None, self.embed_leaf_values(cname, value)?))
+    }
+
+    /// Absolute `(physical key, value)` pairs for embed field `field`: the
+    /// child's leaves under the dotted path, plus the presence slot LAST when
+    /// the field is nullable. The one source for a parent literal's splice and
+    /// for a whole-field write, so the two cannot drift.
+    fn embed_field_slots(
+        field: Ustr,
+        (present, leaves): (Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>),
+    ) -> Vec<(Ustr, Idx<Inst>)> {
+        let mut out = prefixed(field, leaves);
+        if let Some(p) = present {
+            out.push((field, p));
+        }
+        out
+    }
+
+    /// Write a whole embedded field `parent.{field} = value` leaf-wise.
+    fn store_embed(
+        &mut self,
+        parent: Idx<Inst>,
+        base: Idx<Expr>,
+        field: Ustr,
+        cname: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let nullable = self.embed_read_is_nullable(base, field);
+        let leaves = self.embed_value_leaves(nullable, cname, value)?;
+        for (key, v) in Self::embed_field_slots(field, leaves) {
+            self.emit_cur(Inst::StoreField { base: parent, field: key, value: v });
+        }
+        Ok(())
+    }
+
+    /// A whole read of a NULLABLE embed field: presence-gated, so an absent
+    /// field reads as null and never materializes a box from stale leaves.
+    fn materialize_embed_nullable(
+        &mut self,
+        parent: Idx<Inst>,
+        field: Ustr,
+        cname: Ustr,
+    ) -> Idx<Inst> {
+        let present = self.emit_cur(Inst::Field { base: parent, field });
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(present, nil));
+        let result = self.f.new_cell(None);
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let boxed = self.materialize_embed(parent, field, cname);
+        self.store_and_join(result, boxed, join);
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
+    }
+
     /// Lower an enum-typed value into its flattened cells: the discriminant
     /// (variant-name string) plus ALL union slots (every positional + every record
     /// field), nil where the live variant doesn't fill them so stale slots from a
@@ -7114,7 +10635,7 @@ impl Builder<'_> {
         // spread back out.
         let r = self.lower_expr_repr(value)?;
         match r {
-            ValueRepr::Group { name, parts } if flat_enum_shape(self.ws, name).is_some() => {
+            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
                 Ok(self.repr_group_to_cells(shape, parts))
             }
             other => {
@@ -7233,7 +10754,11 @@ impl Builder<'_> {
         parts.push(ValueRepr::Scalar(cells.tag));
         parts.extend(cells.positional.into_iter().map(ValueRepr::Scalar));
         parts.extend(cells.named.into_iter().map(|(_, c)| ValueRepr::Scalar(c)));
-        ValueRepr::Group { name: shape.name, parts }
+        ValueRepr::Group {
+            name: shape.name,
+            parts,
+            present: None,
+        }
     }
 
     /// Read a boxed enum's keys back out into flattened cells (`__variant` -> tag,
@@ -7314,10 +10839,62 @@ impl Builder<'_> {
         }
         let p = params.into_iter().next()?;
         let elem = self.resolve_tyid(ty.with_idx(p))?;
-        let TypeExpr::App { ctor: TypeCtor::Nominal(en), .. } = self.ty_node(elem)? else {
-            return None;
+        let en = match self.ty_node(elem)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+            // Resolve through the active specialization, exactly as
+            // `vec_column_elem_of` does. Inside a SPECIALIZED body (the `@inline`
+            // FlatVec surface at a concrete site) the element is the real struct
+            // rather than an opaque `T`; without this the stdlib bodies keep the
+            // boxed path, which for a `nobox` element is not merely slower but a
+            // guarantee violation. An UNSUBSTITUTED generic stays boxed on
+            // purpose -- the shared snapshot must keep the representation every
+            // instantiation can read.
+            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+                Some(ty) => ty.nominal()?,
+                _ => return None,
+            },
+            _ => return None,
         };
         is_ffi_clean_value_struct(self.ws, en).then_some(en)
+    }
+
+    /// The Vec container kind for base expr `e`: an all-scalar value-struct
+    /// element stores as flat columns, everything else keeps the single `_data`
+    /// backing. An unresolved / generic element is NOT eligible -- the columns
+    /// need a concrete value-struct leaf list, and an opaque `T` has none.
+    fn vec_kind(&self, e: Idx<Expr>) -> ContainerKind {
+        match self.vec_column_elem_of(e) {
+            Some(elem) => ContainerKind::VecValueColumns(elem),
+            None => ContainerKind::Vec,
+        }
+    }
+
+    /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
+    ///
+    /// Resolves through the active [`SpecSubst`], so inside a SPECIALIZED body
+    /// (`VecIter<Vec2>.next`, `fn f<T>(xs: [T])` at a `[Vec2]` site) the element
+    /// is the concrete struct rather than an opaque `T`. Without this the
+    /// stdlib iterator lowers `it.vec[it.i]` against the boxed representation
+    /// and reads a `_data` that column storage does not have.
+    fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Array, params } = self.ty_node(ty)? else {
+            return None;
+        };
+        let p = params.into_iter().next()?;
+        let elem = self.resolve_tyid(ty.with_idx(p))?;
+        let en = match self.ty_node(elem)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+            // An UNSUBSTITUTED generic element stays boxed: the shared
+            // (non-specialized) snapshot of a generic body must keep the
+            // representation that every instantiation can read.
+            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+                Some(ty) => ty.nominal()?,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        vec_column_elem(self.ws, en)
     }
 
     /// The NativeBuffer container kind for base expr `e`: value-struct elements
@@ -7359,7 +10936,7 @@ impl Builder<'_> {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Array,
                 ..
-            }) => ContainerKind::Vec,
+            }) => self.vec_kind(base),
             Some(TypeExpr::App {
                 ctor: TypeCtor::Map,
                 ..
@@ -7438,6 +11015,138 @@ impl Builder<'_> {
             .map(|pd| pd.ty)
     }
 
+    /// The caller gates this on `!fn_uses_scalar_abi`, which reads as "this callee
+    /// takes a real boxed value" only where the scalar ABI is the alternative.
+    /// Under `values_first_class` that flag is forced false for EVERY fn because a
+    /// `value` struct is already a first-class `vecN` -- there is no box on that
+    /// target, and no collection to put one in, so the proxy inverts and every
+    /// shader call would reject a nobox arg.
+    /// Re-mark a nobox box packed for a `@gpu_only` callee as an EXPLICIT one.
+    ///
+    /// Emission is identical (both render `<name>_ct`), the verifier ignores
+    /// `MaterializeValueStruct`, and the flatten pass already treats it as
+    /// sanctioned -- so this authorizes exactly the box the GPU boundary needs
+    /// through the channel that already exists for authorized boxes, instead of
+    /// switching the guarantee off for the calling body.
+    ///
+    /// Args are lowered per call site, so each box here is this call's own.
+    fn authorize_gpu_boundary_boxes(&mut self, func: &FuncRef, args: &[Idx<Inst>]) {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        if !crate::intrinsics::is_gpu_only(callee) {
+            return;
+        }
+        for &a in args {
+            self.authorize_nobox_box(a);
+        }
+    }
+
+    /// Re-mark one implicit nobox box as AUTHORIZED, in place. The single
+    /// conversion point: every boundary the compiler MINTS a sanctioned box at
+    /// goes through here, so "which boxes are authorized" is one list of callers
+    /// rather than a repeated `MakeValueStruct` -> `MaterializeValueStruct`
+    /// rewrite. A no-op on anything that is not an implicit box of a `nobox`
+    /// struct.
+    fn authorize_nobox_box(&mut self, inst: Idx<Inst>) {
+        let Inst::MakeValueStruct { name, fields } = &self.f.insts[inst] else { return };
+        let Some(sid) = self.ws.struct_by_name.get(name) else { return };
+        if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+            return;
+        }
+        let (name, fields) = (*name, fields.clone());
+        self.f.insts[inst] = Inst::MaterializeValueStruct { name, fields };
+    }
+
+    fn reject_nobox_boxed_call_args(
+        &self,
+        func: FuncRef,
+        args: &[Idx<Expr>],
+    ) -> Result<(), CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(());
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        // A `@gpu_only` intrinsic's boxed param is not a real boundary: on the
+        // GPU the arg is a native `vec2`/`vec4` and no box exists, and the Lua
+        // body only `error(...)`s. Rather than exempting the CALLER's whole
+        // body, the box is AUTHORIZED at this one boundary
+        // ([`Self::authorize_gpu_boundary_boxes`]) -- the guarantee keeps
+        // applying to everything else the caller does.
+        // Rationale for shader work: docs/shaders.md, "nobox values and shaders".
+        if crate::intrinsics::is_gpu_only(callee) {
+            return Ok(());
+        }
+        for &arg in args {
+            if self.is_explicit_materialize_call(arg) {
+                continue;
+            }
+            let Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) = self.expr_ty(arg)
+            else {
+                continue;
+            };
+            let Some(sid) = self.ws.struct_by_name.get(&name) else {
+                continue;
+            };
+            if self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[arg],
+                    format!(
+                        "nobox value `{name}` cannot cross boxed call boundary `{}`",
+                        callee.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The return-position companion of [`Self::reject_nobox_boxed_call_args`]:
+    /// a `nobox` element only rides a tuple return as leaves if skull emits the
+    /// callee's body. An `extern`, or an `inline(lua)` body that has not opted
+    /// in with `@scalar_abi`, writes its own `return` -- so the call site would
+    /// read leaves the body never produced. That is a boxed boundary; reject it
+    /// where an argument would be rejected.
+    fn reject_nobox_opaque_tuple_return(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        shape: &TupleRetShape,
+    ) -> Result<(), CompilerError> {
+        if self.scx.values_first_class || !shape.splats() {
+            return Ok(());
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        let opaque = callee.is_extern
+            || (callee.inline_body.is_some()
+                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        if !opaque {
+            return Ok(());
+        }
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "nobox value cannot cross the boxed tuple return of `{}` \
+                 (an `inline(lua)` body must opt in with `@scalar_abi` and return the leaves)",
+                callee.name
+            ),
+        ))
+    }
+
+    fn is_explicit_materialize_call(&self, expr: Idx<Expr>) -> bool {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            ..
+        } = self.body.expr_arena[expr]
+        else {
+            return false;
+        };
+        self.resolve_funcref(expr, name)
+            .ok()
+            .is_some_and(|func| matches!(self.fn_expand_kind(func), Some(ExpandKind::Materialize)))
+    }
+
     /// A (value) struct field's declared type, for the value-struct-literal
     /// construction sink (`Vec2 { x: 0 }` -> the `x` field coerces int->float).
     fn struct_field_ty(&self, name: Ustr, field: Ustr) -> Option<TyId> {
@@ -7486,6 +11195,256 @@ impl Builder<'_> {
                 BuiltinTy::Int | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
             ))
         ) || self.is_payloadless_enum(e)
+    }
+
+    fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } = self.expr_ty(e)?
+        else {
+            return None;
+        };
+        self.is_nobox_struct(name).then_some(name)
+    }
+
+    fn is_nobox_struct(&self, name: Ustr) -> bool {
+        self.ws
+            .struct_by_name
+            .get(&name)
+            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+    }
+
+    fn nobox_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
+        let mut shape = value_shape_of_nominal(self.ws, self.nobox_value_name(e)?)?;
+        shape.nullable = self.expr_is_nullable(e);
+        Some(shape)
+    }
+
+    fn nobox_binding_shape(&self, binding: Idx<BindingInfo>) -> Option<ValueShape> {
+        self.nobox_shape_of_ty(self.binding_ty(binding)?)
+    }
+
+    /// The leaf shape of a `nobox`-typed `ty` (nullable included: presence is
+    /// leaf 0), `None` for every other type.
+    /// Reject taking a TOP-LEVEL fn with a `nobox` value in its signature as a
+    /// fn VALUE.
+    ///
+    /// This is what makes [`Self::fn_value_abi`] sound. A top-level fn's ABI is
+    /// decided by a WHOLE-PROGRAM property (`ScalarCtx::taken_by_ref` drops it
+    /// to boxed), while the fn TYPE at an indirect call site says nothing about
+    /// that -- so the call site would splat leaves into a callee compiled to
+    /// take one box. That is a silent miscompile, not a rejection: it emits, and
+    /// dies at runtime indexing a number.
+    ///
+    /// Lambdas and nested fns are exempt because they now keep the leaf ABI when
+    /// taken by value, derived from the same type the call site reads. Only a
+    /// top-level fn has the whole-program dependency, and nothing in tree takes
+    /// one with a `nobox` signature by value -- pinned in
+    /// `tests/errors/nobox_toplevel_fn_by_value.rock.err`, which is where the
+    /// fix goes if that changes.
+    fn reject_nobox_fn_taken_by_value(&self) -> Result<(), CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(());
+        }
+        for (e, expr) in self.body.expr_arena.iter() {
+            let Expr::Global(name) = expr else { continue };
+            let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
+            // ANY overload of the name: the value reference names the whole
+            // overload set, so one nobox-bearing member is enough to make the
+            // ABI at an indirect call unknowable.
+            let carries_nobox = overloads.iter().any(|(mid, fid)| {
+                let f = &self.ws.module(*mid).functions[*fid];
+                f.param_decls.iter().any(|pd| nobox_sig_shape(self.ws, pd.ty).is_some())
+                    || f.return_ty.is_some_and(|t| nobox_sig_shape(self.ws, t).is_some())
+            });
+            if carries_nobox {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    format!(
+                        "`{name}` has a `nobox` value in its signature and cannot be taken as a \
+                         fn value: a top-level fn's ABI depends on whether the program takes it \
+                         by value, so an indirect call could not agree with it. Wrap it in a \
+                         lambda, which keeps the leaf ABI."
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The leaf ABI of a FN TYPE, or `None` when nothing in the signature is a
+    /// `nobox` value and the boxed fn-value ABI stands unchanged.
+    ///
+    /// Keyed on the TYPE and nothing else. An indirect call site cannot see its
+    /// callee, so the definition, a direct call and a call through a fn value
+    /// can only agree by all three reading the same signature -- the rule the
+    /// tuple-return ABI already follows (`lambda_ret_tuple_shape` next to
+    /// `expr_tuple_shape`). Any callee-identity test here would make the two
+    /// ends disagree exactly where the callee is opaque, which is the case that
+    /// matters.
+    ///
+    /// Narrowed to `nobox` types on purpose: an ordinary value struct has no
+    /// guarantee to keep, so widening this to every FFI-clean value would
+    /// re-ABI every lambda in the tree for no correctness gain. Both ends
+    /// compute the same predicate from the same type, so they still agree.
+    fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<Option<ValueShape>>, Option<ValueShape>)> {
+        let ty = self.resolve_tyid(ty)?;
+        let TypeExpr::Function { params, ret } = self.ty_node(ty)? else { return None };
+        let ps: Vec<Option<ValueShape>> =
+            params.into_iter().map(|p| self.nobox_shape_of_ty(ty.with_idx(p))).collect();
+        let rs = self.nobox_shape_of_ty(ty.with_idx(ret));
+        if rs.is_none() && ps.iter().all(Option::is_none) {
+            return None;
+        }
+        Some((ps, rs))
+    }
+
+    /// [`Self::fn_value_abi`] for the fn VALUE an expression denotes.
+    fn expr_fn_value_abi(
+        &self,
+        e: Idx<Expr>,
+    ) -> Option<(Vec<Option<ValueShape>>, Option<ValueShape>)> {
+        self.fn_value_abi(*self.inf?.expr_types.get(e)?)
+    }
+
+    fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
+        let ty = self.resolve_tyid(ty)?;
+        match self.ty_node(ty)? {
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } if self.is_nobox_struct(name) => value_shape_of_nominal(self.ws, name),
+            TypeExpr::Nullable(inner) => {
+                let inner = self.resolve_tyid(ty.with_idx(inner))?;
+                let TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                } = self.ty_node(inner)?
+                else {
+                    return None;
+                };
+                if !self.is_nobox_struct(name) {
+                    return None;
+                }
+                let mut shape = value_shape_of_nominal(self.ws, name)?;
+                shape.nullable = true;
+                Some(shape)
+            }
+            _ => None,
+        }
+    }
+
+    /// The leaf globals a place rooted at a `nobox` global denotes, plus the
+    /// shape of the projected part (`None` = one primitive leaf). `SPOT` is the
+    /// whole group, `SPOT.x` / `SPOT.a.b` a contiguous sub-range of it -- the
+    /// leaf order is `repr_to_leaves`', so a projection is a slice, never a
+    /// scatter. `None` when the place is not rooted at a `nobox` global.
+    fn nobox_global_place(&self, e: Idx<Expr>) -> Option<(Vec<Ustr>, Option<ValueShape>)> {
+        match self.body.expr_arena[e].clone() {
+            // The DECLARED type, never `e`'s: a refined read of a `global X: NV2?`
+            // has expr type `NV2`, whose 2-leaf shape would address the presence
+            // leaf as `x`. Storage layout is a property of the global, not of the
+            // read site.
+            Expr::Global(name) => {
+                let shape = nobox_declared_shape(self.ws, *self.ws.globals_by_name.get(&name)?)?;
+                let leaves =
+                    (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect();
+                Some((leaves, Some(shape)))
+            }
+            Expr::FieldAccess { base, field } => {
+                let (leaves, Some(shape)) = self.nobox_global_place(base)? else {
+                    return None;
+                };
+                let mut off = usize::from(shape.nullable);
+                for (fname, fs) in &shape.fields {
+                    let (n, sub) = match fs {
+                        FieldShape::Prim => (1, None),
+                        FieldShape::Nested(s) => (s.leaf_count(), Some(s.clone())),
+                    };
+                    if *fname == field {
+                        return Some((leaves[off..off + n].to_vec(), sub));
+                    }
+                    off += n;
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Read a `nobox` global place back as an unboxed repr.
+    fn nobox_global_load(
+        &mut self,
+        leaves: &[Ustr],
+        shape: Option<ValueShape>,
+    ) -> ValueRepr {
+        let vals: Vec<Idx<Inst>> =
+            leaves.iter().map(|g| self.emit_cur(Inst::Global(*g))).collect();
+        match shape {
+            Some(shape) => {
+                let mut idx = 0;
+                self.rebuild_from_leaves(&shape, &vals, &mut idx)
+            }
+            None => ValueRepr::Scalar(vals[0]),
+        }
+    }
+
+    /// Write `value` into a `nobox` global place, leaf by leaf.
+    fn nobox_global_store(
+        &mut self,
+        leaves: &[Ustr],
+        shape: Option<ValueShape>,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let vals = match shape {
+            Some(shape) => {
+                let r = self.lower_expr_repr(value)?;
+                self.repr_to_leaves(&r, &shape)
+            }
+            None => vec![self.lower_expr(value)?],
+        };
+        for (g, v) in leaves.iter().zip(vals) {
+            self.emit_cur(Inst::StoreGlobal { name: *g, value: v });
+        }
+        Ok(())
+    }
+
+    fn emit_all_equal(&mut self, lhs: &[Idx<Inst>], rhs: &[Idx<Inst>]) -> Idx<Inst> {
+        debug_assert_eq!(lhs.len(), rhs.len());
+        let result = self.f.new_cell(None);
+        let fail = self.f.new_block();
+        let join = self.f.new_block();
+        for (&a, &b) in lhs.iter().zip(rhs) {
+            let equal = self.emit_cur(Inst::Eq(a, b));
+            let next = self.f.new_block();
+            self.f.set_term(
+                self.cur,
+                Term::Branch {
+                    cond: equal,
+                    then_bb: next,
+                    else_bb: fail,
+                },
+            );
+            self.cur = next;
+        }
+        let yes = self.emit_cur(Inst::Const(Lit::Bool(true)));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: yes,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = fail;
+        let no = self.emit_cur(Inst::Const(Lit::Bool(false)));
+        self.emit_cur(Inst::Store {
+            cell: result,
+            value: no,
+        });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
     }
 
     /// Whether `e`'s static type is an enum ALL of whose variants are unit (no
@@ -7662,7 +11621,7 @@ impl Builder<'_> {
         fname: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
         Ok(match (base_repr, base_boxed) {
-            (Some(ValueRepr::Group { name: bn, parts }), _) => {
+            (Some(ValueRepr::Group { name: bn, parts, .. }), _) => {
                 let i = self.field_index(*bn, fname).ok_or_else(|| gap("spread field"))?;
                 parts[i].clone()
             }
@@ -7680,28 +11639,67 @@ impl Builder<'_> {
         self.resolve_ty(ty)
     }
 
-    /// `Some(n)` iff `e`'s inferred type is a (non-nullable) tuple of arity `n`.
-    /// Used to route a tuple result across a call boundary (the call expr's own
-    /// type IS the callee's return type, so direct and INDIRECT calls agree).
+    /// `Some` iff `e`'s inferred type is a (non-nullable) tuple. Used to route a
+    /// tuple result across a call boundary (the call expr's own type IS the
+    /// callee's return type, so direct and INDIRECT calls agree).
     /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
     /// bare tuple and get mis-splatted.
-    fn expr_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
-        self.tyid_tuple_arity(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
+    fn expr_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
     }
 
-    /// `Some(n)` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple of
-    /// arity `n` -- the lambda body then splats N values so an indirect call site
-    /// captures them (multi-return ABI). Read off the lambda's inferred `fn(..) ->
-    /// (..)` type so it agrees with the call site's `expr_tuple_arity`.
-    fn lambda_ret_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+    /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
+    /// the lambda body then splats its slots so an indirect call site captures
+    /// them (multi-return ABI). Read off the lambda's inferred `fn(..) -> (..)`
+    /// type so it agrees with the call site's `expr_tuple_shape`.
+    fn lambda_ret_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let TypeExpr::Function { ret, .. } = self.ty_node(ty)? else { return None };
-        self.tyid_tuple_arity(self.resolve_tyid(ty.with_idx(ret))?)
+        self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(ret))?)
     }
 
-    fn tyid_tuple_arity(&self, ty: TyId) -> Option<usize> {
+    /// [`tuple_ret_shape`] for a type that may live in the BODY's inference arena
+    /// (a call expression's own type, a lambda's return) rather than the
+    /// workspace one. `ty_node` applies the enclosing specialization
+    /// substitution, so a generic element resolves to the same slot the
+    /// signature-side walker sees.
+    fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
+        let ty = self.resolve_tyid(ty)?;
+        let TypeExpr::Tuple { elements } = self.ty_node(ty)? else { return None };
+        let slots = elements
+            .into_iter()
+            .map(|el| self.body_ret_slot(ty.with_idx(el)))
+            .collect();
+        Some(TupleRetShape { slots })
+    }
+
+    fn body_ret_slot(&self, ty: TyId) -> RetSlot {
+        if let Some(shape) = self.body_nobox_shape(ty) {
+            return RetSlot::Leaves(shape);
+        }
+        match self.tyid_tuple_ret_shape(ty) {
+            Some(inner) if inner.splats() => RetSlot::Nested(inner),
+            _ => RetSlot::Opaque,
+        }
+    }
+
+    /// [`Self::body_sig_value_shape`] narrowed to `nobox` nominals -- the splat
+    /// gate, mirroring [`nobox_sig_shape_spec`] on the body arena.
+    fn body_nobox_shape(&self, ty: TyId) -> Option<ValueShape> {
+        let ty = self.resolve_tyid(ty)?;
         match self.ty_node(ty)? {
-            TypeExpr::Tuple { elements } => Some(elements.into_iter().count()),
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.is_nobox_struct(n) => {
+                sig_shape_of_nominal(self.ws, n)
+            }
+            TypeExpr::Nullable(inner) => {
+                let inner = self.resolve_tyid(ty.with_idx(inner))?;
+                match self.ty_node(inner)? {
+                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.is_nobox_struct(n) => {
+                        sig_shape_of_nullable_nominal(self.ws, n)
+                    }
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -7712,6 +11710,26 @@ impl Builder<'_> {
     /// generic `T`), or any other element rejects with a spanned emit-time error:
     /// the intrinsic can only emit `ffi.new("<ctype>[?]")` when the concrete
     /// element type is known here. `span` labels the call expression.
+    /// The `(field, view)` pairs a `NativeBuffer` of element `ctype` carries --
+    /// one typed leaf view per distinct primitive C type among its leaves.
+    /// Empty for a primitive or non-leaf-addressable element, which keeps those
+    /// buffers exactly as they are today.
+    ///
+    /// Attached at CONSTRUCTION so the cast happens once per buffer. Casting per
+    /// access would allocate a pointer cdata each time, which is the allocation
+    /// leaf addressing exists to remove.
+    fn leaf_view_fields(&mut self, ctype: Ustr, ptr: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
+        let Ok(ctys) = leaf_view_ctys(self.ws, ctype) else {
+            return Vec::new();
+        };
+        ctys.into_iter()
+            .map(|cty| {
+                let view = self.emit_cur(Inst::FfiViewCast { cty: Ustr::from(cty), ptr });
+                (leaf_view_field(cty), view)
+            })
+            .collect()
+    }
+
     fn native_buffer_alloc_ctype(&self, e: Idx<Expr>, span: Span) -> Result<Ustr, CompilerError> {
         let inf = self.inf.ok_or_else(|| {
             CompilerError::new_with_label(span, "`native_buffer_alloc` needs inference".into())
@@ -7720,7 +11738,7 @@ impl Builder<'_> {
             CompilerError::new_with_label(span, "`native_buffer_alloc` call is untyped".into())
         })?;
         // In a specialized splice the `NativeBuffer<T>` element resolves through
-        // `spec_subst` to a concrete leaf, so the intrinsic can name the ctype the
+        // `spec_subst` to a concrete type, so the intrinsic can name the ctype the
         // shared generic body could not. An empty subst is exactly the shared path.
         let r = if self.spec_subst.is_empty() {
             native_buffer_alloc_elem_ctype(self.ws, inf, ret)
@@ -7730,16 +11748,16 @@ impl Builder<'_> {
         r.map_err(|msg| CompilerError::new_with_label(span, msg))
     }
 
-    /// `Some(n)` iff `e`'s type is a tuple OR a `(tuple)?` of arity `n` -- the
-    /// nil-peeled form for safe-nav calls, whose result type is nullable but whose
-    /// callee still splats the inner tuple.
-    fn peeled_tuple_arity(&self, e: Idx<Expr>) -> Option<usize> {
+    /// `Some` iff `e`'s type is a tuple OR a `(tuple)?` -- the nil-peeled form
+    /// for safe-nav calls, whose result type is nullable but whose callee still
+    /// splats the inner tuple.
+    fn peeled_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let inner = match self.ty_node(ty)? {
             TypeExpr::Nullable(i) => self.resolve_tyid(ty.with_idx(i))?,
             _ => ty,
         };
-        self.tyid_tuple_arity(inner)
+        self.tyid_tuple_ret_shape(inner)
     }
 
     fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
@@ -7765,8 +11783,8 @@ impl Builder<'_> {
         // App params -- v0 specializes leaf types only -- so no consumer indexes
         // into `new_empty()`.
         if let TypeExpr::Generic(var, _) = node {
-            if let Some(leaf) = self.spec_subst.get(&var) {
-                return Some(reified_leaf_node(*leaf));
+            if let Some(ty) = self.spec_subst.get(&var) {
+                return Some(reified_type_node(ty));
             }
         }
         Some(node)
@@ -8033,7 +12051,8 @@ fn fn_opaque_intrinsic_transitive(
     for (c, resolved) in inf.resolved_overload_calls.iter() {
         let callee = FuncRef { module: resolved.0, func: resolved.1 };
         let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
-        if bindings.iter().all(|&b| reify_leaf(ws, inf, b).is_some()) {
+        let empty = SpecSubst::new();
+        if bindings.iter().all(|&b| reify_type(ws, inf, b, &empty).is_some()) {
             continue;
         }
         if fn_opaque_intrinsic_transitive(ws, callee, seen) {
@@ -8045,8 +12064,8 @@ fn fn_opaque_intrinsic_transitive(
 
 /// [`native_buffer_alloc_elem_ctype`] under a specialization `subst`: a
 /// `NativeBuffer<T>` element that is a generic bound in `subst` resolves to its
-/// concrete leaf's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
-/// if that concrete leaf still is not allocatable (a GC-carrying value struct).
+/// concrete type's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
+/// if that type still is not allocatable (a GC-carrying value struct).
 /// A non-substituted element defers to the concrete [`native_buffer_alloc_elem_ctype`].
 fn native_buffer_alloc_elem_ctype_spec(
     ws: &Workspace,
@@ -8064,15 +12083,16 @@ fn native_buffer_alloc_elem_ctype_spec(
                 .next()
                 .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
                 .and_then(|e| match ty_node(ws, inf, e) {
-                    Some(TypeExpr::Generic(var, _)) => subst.get(&var).copied(),
+                    Some(TypeExpr::Generic(var, _)) => subst.get(&var).cloned(),
                     _ => None,
                 })
         }
         _ => None,
     };
     match leaf {
-        Some(ReifiedLeaf::Prim(p)) => Ok(Ustr::from(p)),
-        Some(ReifiedLeaf::Nominal(n)) => {
+        Some(ReifiedType::Prim(p)) => Ok(Ustr::from(p)),
+        Some(ty) if ty.nominal().is_some() => {
+            let n = ty.nominal().unwrap();
             if !map_is_value_struct(ws, n) {
                 Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
             } else if value_struct_is_gc(ws, n) {
@@ -8084,6 +12104,10 @@ fn native_buffer_alloc_elem_ctype_spec(
                 Ok(n)
             }
         }
+        Some(_) => Err(
+            "`native_buffer_alloc<T>` requires a primitive or FFI-clean value-struct element"
+                .to_string(),
+        ),
         None => native_buffer_alloc_elem_ctype(ws, inf, ret),
     }
 }
@@ -8195,8 +12219,10 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
                     None => compute_call_spec(ws, inf, c, fref, &SpecSubst::new()).is_some_and(
                         |(key, _)| {
                             key.iter().all(|l| match l {
-                                Some(ReifiedLeaf::Prim(_)) => true,
-                                Some(ReifiedLeaf::Nominal(n)) => !nominal_is_gc_value(ws, *n),
+                                Some(ReifiedType::Prim(_)) => true,
+                                Some(ty) => {
+                                    !ty.any_nominal(&|name| nominal_is_gc_value(ws, name))
+                                }
                                 None => false,
                             })
                         },
@@ -8711,14 +12737,43 @@ mod tests {
         );
         assert!(!dump.contains("V2_ct"), "value return must scalarize (no cdata ctor), got:\n{dump}");
         assert!(!dump.contains("make_struct") && !dump.contains("__ty"), "value struct must not be a table:\n{dump}");
-        // But an ESCAPING value literal (into a `[V2]` element) materializes the
-        // `<name>_ct(...)` cdata via `pack` — value semantics for the collection.
-        let esc = mir_std(
+        // A literal escaping into a COLUMN-ELIGIBLE `[V2]` builds no element at
+        // all: the leaves land straight in the per-leaf columns. Value semantics
+        // still hold -- storing the scalar leaves IS the copy.
+        let col = mir_std(
             "value V2 { x: int, y: int }\n fn g() -> [V2] { [V2 { y: 7, x: 3 }] }",
             "g",
         );
-        // Display carries declared field names (for SROA): `V2_ct(x: v.., y: v..)`.
-        assert!(esc.contains("V2_ct(x:"), "an escaping value literal must build a cdata ctor, got:\n{esc}");
+        assert!(
+            col.contains("vec.columns") && !col.contains("V2_ct"),
+            "a column-eligible element must store leaves, not a cdata ctor, got:\n{col}"
+        );
+        // An INELIGIBLE element keeps the boxed representation, so the escaping
+        // literal still materializes `<name>_ct(...)` via `pack`. `Wide` exceeds
+        // MAX_COLUMN_LEAVES; this is the other side of the eligibility boundary.
+        // Display carries declared field names (for SROA): `Wide_ct(a: v.., ..)`.
+        let esc = mir_std(
+            "value Wide { a: int, b: int, c: int, d: int, e: int }\n \
+             fn g() -> [Wide] { [Wide { a: 1, b: 2, c: 3, d: 4, e: 5 }] }",
+            "g",
+        );
+        assert!(
+            esc.contains("Wide_ct(a:"),
+            "an escaping ineligible value literal must build a cdata ctor, got:\n{esc}"
+        );
+    }
+
+    #[test]
+    fn dynamic_column_spread_keeps_element_repr_unboxed() {
+        let dump = mir_std(
+            "value V2 { x: int, y: int }\n\
+             fn copy(xs: [V2]) -> [V2] { [...xs] }",
+            "copy",
+        );
+        assert!(
+            !dump.contains("V2_ct"),
+            "dynamic column spread must carry leaves into the destination, got:\n{dump}"
+        );
     }
 
     #[test]

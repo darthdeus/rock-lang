@@ -419,10 +419,14 @@ pub fn lower_type_expr_in(
             )
         }
 
-        // `FieldOf<T, V>` (writable field ref) and `KeyPath<T, V>` (read-only field
-        // ref -- `field_get`, allows value structs) are name-recognized magic
-        // formers, not declared types; both lower to a 2-param Nominal.
-        TypeExprKind::App { ctor, args } if ctor.name == "FieldOf" || ctor.name == "KeyPath" => {
+        // `FieldRef<T, V>` (full field ref: read + write), `ReadFieldRef<T, V>`
+        // (read-only -- `field_get`, allows value structs) and `WriteFieldRef<T, V>`
+        // (write-only -- `field_set`, the selector an embedded field can satisfy)
+        // are name-recognized magic formers, not declared types; all lower to a
+        // 2-param Nominal.
+        TypeExprKind::App { ctor, args }
+            if matches!(ctor.name.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") =>
+        {
             if args.len() != 2 {
                 comp_error!(
                     te.span,
@@ -2185,6 +2189,7 @@ pub fn lower_struct_def(
             span: field.name.span,
             has_default: field.default.is_some(),
             annotations: field_annotations,
+            is_embed: field.is_embed,
         });
 
         if let Some(default) = default {
@@ -2236,12 +2241,20 @@ pub fn lower_enum_def(
                     .map(|f| {
                         let annos = lower_annotations(a, &f.annotations);
                         validate_annotations(AnnoPos::EnumVariantField, &annos, &ctx.workspace.decorator_names)?;
+                        if f.is_embed {
+                            comp_error!(
+                                f.name.span,
+                                "`embed` is not allowed on an enum variant field `{}`; embed inlines leaves into a struct owner",
+                                f.name.name
+                            );
+                        }
                         Ok(hir::StructFieldDef {
                             name: f.name.name,
                             ty: lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?,
                             span: f.name.span,
                             has_default: false,
                             annotations: annos,
+                            is_embed: false,
                         })
                     })
                     .try_vec()?;

@@ -14,6 +14,7 @@ pub mod sexp;
 pub use ast::*;
 pub use parser::Parser;
 
+pub use rock_core::errors::CompilerErrorKind;
 pub use rock_core::{CompilerError, SourceFiles, Span, source_file_from_path_and_contents};
 pub use ordered_float::OrderedFloat;
 pub use rock_tokenizer::TokenKind;
@@ -262,6 +263,27 @@ mod tests {
         assert_eq!(anns.len(), 2, "two field annotations");
         assert_eq!(anns[0].name.name, "flat");
         assert_eq!(anns[1].name.name, "w");
+    }
+
+    #[test]
+    fn nobox_value_marks_the_value_type() {
+        let src = "nobox value V { x: int }";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let s = first_struct(&ast);
+        assert!(s.is_value);
+        assert!(s.is_nobox);
+    }
+
+    #[test]
+    fn nobox_rejects_a_reference_struct() {
+        let ast = parse_module("nobox struct S { x: int }", Ustr::from("test.rock"))
+            .expect("parser recovers the invalid item");
+        assert!(
+            ast.recovery_errors.iter().any(|err| err.message.contains("`nobox` requires `value`")),
+            "{:?}",
+            ast.recovery_errors
+        );
     }
 
     #[test]

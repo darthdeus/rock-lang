@@ -13,9 +13,32 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
+/// The stdlib with `Vec2` marked `nobox`. `nobox` is a whole-language guarantee,
+/// and a tier-0 `vecN` is the type anyone would mark first, so the GLSL surface
+/// has to carry one. Built here rather than in `stdlib/vec.rock` so the fixture
+/// does not depend on whether the real stdlib has opted in yet.
+static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| {
+            let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
+            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module(&src, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
 /// Emit GLSL for `roots` from `src` (the `<test>` module).
 fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
-    let mut modules = STDLIB.clone();
+    emit_with(&STDLIB, src, roots)
+}
+
+fn emit_with(
+    stdlib: &[skull_parser::Ast],
+    src: &str,
+    roots: &[&str],
+) -> Result<String, String> {
+    let mut modules = stdlib.to_vec();
     modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
@@ -812,4 +835,58 @@ fn mat4_native_multiply() {
     assert!(glsl.contains("return (m * p);"), "got:\n{glsl}");
     assert!(glsl.contains("mat4 compose_Mat4_Mat4_ret_Mat4(mat4 a, mat4 b) {"), "got:\n{glsl}");
     assert!(glsl.contains("return (a * b);"), "got:\n{glsl}");
+}
+
+/// A `nobox` value crossing a call on the GLSL path must NOT be rejected as a
+/// boxed boundary. GLSL has no collections and no boxes: a `value` struct is a
+/// first-class `vecN`, which is exactly what `ScalarCtx::values_first_class`
+/// says. The nobox sink classifier used `!fn_uses_scalar_abi` as its proxy for
+/// "this callee takes a real boxed value", and that flag INVERTS under
+/// values-first-class -- so every shader call rejected.
+#[test]
+fn nobox_value_crosses_a_glsl_call_without_materializing() {
+    let src = r#"
+        @pure fn len2(v: Vec2) -> float { return v.x * v.x + v.y * v.y }
+        @pure fn shade(p: Vec2) -> float { return len2(p) }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"]).expect("nobox Vec2 must emit GLSL");
+    assert!(
+        glsl.contains("vec2 v") || glsl.contains("(vec2 "),
+        "nobox Vec2 must lower to a first-class vec2 parameter:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("materialize"),
+        "GLSL emission must not route a nobox value through materialization:\n{glsl}"
+    );
+}
+
+/// The `@gpu_only` intrinsic boundary is the ONE place a nobox value is
+/// authorized to box (`authorize_gpu_boundary_boxes`), and it authorizes by
+/// re-marking the packed arg `MaterializeValueStruct`. So on the GLSL side that
+/// variant is the shape a mapped intrinsic's argument arrives in, and every
+/// ctor arm has to render it exactly like `MakeValueStruct` -- a plain `vecN`.
+///
+/// Distinct from `nobox_value_crosses_a_glsl_call_without_materializing`, which
+/// pins the opposite property one layer out: an ORDINARY call is first-class and
+/// mints no Materialize at all. Here the boundary is `@gpu_only`, the MIR does
+/// carry a Materialize, and the requirement is that GLSL renders it as a ctor
+/// rather than dropping it. Neither test may be "fixed" against the other.
+///
+/// The argument must be a literal ctor AT the call. `authorize_gpu_boundary_boxes`
+/// re-marks only a `MakeValueStruct` operand, so passing a `Vec2` param whole --
+/// or building it through the stdlib `v(..)` helper -- mints nothing to authorize
+/// and leaves all four arms unexercised.
+#[test]
+fn a_materialized_nobox_value_at_a_gpu_intrinsic_lowers_to_a_vec_ctor() {
+    let src = r#"
+        fn shade(s: Sampler2D, u: float, v_: float) -> Vec4 {
+            return texture(s, Vec2 { x: u, y: v_ })
+        }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"])
+        .expect("a nobox Vec2 at a @gpu_only boundary must emit GLSL");
+    assert!(
+        glsl.contains("texture(s, vec2(u, v_))"),
+        "the authorized box must render as a plain vec2 ctor argument:\n{glsl}"
+    );
 }

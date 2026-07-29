@@ -325,13 +325,13 @@ fn metric_recent(m: Metric, i: int) -> float {
 // The ffi.cdef for every `value` struct is emitted automatically, so
 // `ffi.new("Vec2[?]", n)` is a valid LuaJIT allocation. `native_buffer_alloc<T>`
 // (above) is the generic-body-legal allocator: skull resolves the concrete
-// element cdef name at each call site, so `NativeBuffer { ptr:
-// native_buffer_alloc(n), len: n }` works for any FFI-clean value struct with no
-// per-type boilerplate. At runtime elements are stored contiguously as `T` cdata
-// (AoS); a whole-value `buf[i]` read copies the element out, `buf[i].x` reads the
-// slot live, and `buf[i] = v` copies the struct field-wise. See
-// tests/native_buffer_value.rock, tests/value_element_read_copy.rock and
-// FlatVec<T> below.
+// element cdef name at each call site, so `native_buffer_alloc(n)` works for any
+// FFI-clean value struct with no per-type boilerplate. At runtime elements are
+// stored contiguously as `T` cdata (AoS); a whole-value `buf[i]` read copies the
+// element out, `buf[i].x` reads the slot live, `buf[i].x = v` writes through it,
+// and `buf[i] = v` copies the struct field-wise. See
+// tests/native_buffer_value.rock, tests/value_element_read_copy.rock,
+// tests/value_place_leaf_write.rock and FlatVec<T> below.
 
 // ============================================================================
 // FlatVec<T> — growable flat storage for FFI-clean value structs
@@ -516,6 +516,38 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
               " is outside [0, " .. tostring(buf.len) .. ")")
     end
     return buf.ptr[i]
+"""
+
+// Refresh a NativeBuffer's leaf VIEWS after its `ptr` has been reseated.
+//
+// The views (`__vf`/`__vi`/`__vb`) are `ffi.cast` pointers over the element
+// storage, made once at construction. `ffi.cast` does NOT anchor its target, so
+// any code that reassigns `buf.ptr` -- a hand-written `inline(lua)` grow/realloc
+// -- leaves every view pointing at the OLD array, which is then collected: the
+// views dangle and reads return garbage from reused memory.
+//
+// The compiler cannot see into an `inline(lua)` body, so this is an UNCHECKED
+// CONTRACT of the same family as `@nomangle`: reseat `buf.ptr` by hand and you
+// must call this. A regular Rock reallocation (`native_buffer_alloc`) builds a
+// fresh buffer with fresh views and needs nothing.
+@nomangle inline(lua) fn __nb_refresh_views(buf: any) = """
+    for field, cast_ty in pairs(_G.__ROCK_LEAF_VIEWS) do
+        if buf[field] ~= nil then buf[field] = ffi.cast(cast_ty, buf.ptr) end
+    end
+"""
+
+// Bounds-check WITHOUT taking a slot reference: returns the index unchanged.
+// Leaf addressing turns one element access into K leaf accesses, and the check
+// belongs to the ELEMENT -- checking each leaf would pay K times for one access,
+// and checking after would let the out-of-bounds access happen first. So the
+// check runs once, up front, and the leaves then index their views raw.
+// (Sibling of `__vec_checked_index` for column storage.)
+@nomangle inline(lua) fn __nb_checked_index(buf: any, i: int) -> int = """
+    if i < 0 or i >= buf.len then
+        error("NativeBuffer index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(buf.len) .. ")")
+    end
+    return i
 """
 
 @nomangle inline(lua) fn __nb_checked_set(buf: any, i: int, v: any) = """
@@ -1050,6 +1082,18 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     return vec._data[i + 1]
 """
 
+// Bounds-check once, return the 1-based backing index. Column-storage Vecs
+// (`ContainerKind::VecValueColumns`) read K leaf arrays per element; checking
+// here keeps the debug bounds contract at ONE call per access regardless of K,
+// instead of one per column.
+@nomangle inline(lua) fn __vec_checked_index(vec: any, i: int) -> int = """
+    if i < 0 or i >= vec.len then
+        error("Vec index out of bounds: index " .. tostring(i) ..
+              " is outside [0, " .. tostring(vec.len) .. ")")
+    end
+    return i + 1
+"""
+
 @nomangle inline(lua) fn __vec_checked_set(vec: any, i: int, v: any) = """
     if i < 0 or i >= vec.len then
         error("Vec index out of bounds: index " .. tostring(i) ..
@@ -1226,7 +1270,7 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
 @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
 
-@nomangle @inline fn unwrap<T>(value: T?) -> T {
+@inline fn unwrap<T>(value: T?) -> T {
     if value != null { return value }
     error("unwrap() called on null value\n" + __debug_traceback())
     return phantom()
@@ -1336,6 +1380,10 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
 @nomangle inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(obj, {})
 """
+
+@materialize @intrinsic @pure fn materialize<T>(value: T) -> T {
+    return value
+}
 
 // Both cast<T> and transmute<A,B> are no-ops at runtime — they just reshape
 // the Rock type, no Lua work needed. `@expand("$1")` substitutes the arg
@@ -1508,16 +1556,22 @@ inline(lua) fn table_new() -> any = """return {}"""
     tbl[index] = value
 """
 
-// Field references (key paths). The `.field` literal is the interned field name
-// at runtime; `o[f]` == `o.field` since skull emits named struct keys. `field_get`
-// takes the read-only `KeyPath<T, V>` (allows a `value`-struct T -- reading a
-// value field is fine); `field_set` takes the writable `FieldOf<T, V>`, which
-// refuses a `value`-struct T (immutable). Split per docs/field-refs-plan.md 1.
-@inline inline(lua) fn field_get<T, V>(o: T, f: KeyPath<T, V>) -> V = """
+// Field references. The `.field` literal is the interned field name at runtime;
+// `o[f]` == `o.field` since skull emits named struct keys. `FieldRef<T, V>` is
+// the TOP of the lattice -- it carries both capabilities and coerces down to the
+// single-capability selectors. `ReadFieldRef<T, V>` is read-only (`field_get`)
+// and allows a `value`-struct T, since reading a value field is fine; the
+// writable side refuses a `value`-struct T (immutable). Split per
+// docs/field-refs-plan.md 1.
+// `field_set` takes the write-only `WriteFieldRef<T, V>` -- the selector an
+// EMBEDDED field can satisfy, being the one that grants no whole-value read
+// (docs/scalarization-and-boxing-design.md S 6). A `FieldRef` coerces down to
+// it, so call sites are unchanged.
+@inline inline(lua) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = """
     return o[f]
 """
 
-@inline inline(lua) fn field_set<T, V>(o: T, f: FieldOf<T, V>, v: V) = """
+@inline inline(lua) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = """
     o[f] = v
 """
 
@@ -1533,6 +1587,137 @@ inline(lua) fn table_new() -> any = """return {}"""
 @nomangle @inline inline(lua) fn __vec_data_get(vec: any, index: int) -> any = "return vec._data[index + 1]"
 @nomangle @inline inline(lua) fn __vec_data_set(vec: any, index: int, value: any) = "vec._data[index + 1] = value"
 @nomangle @inline inline(lua) fn __vec_data_unset(vec: any, index: int) = "vec._data[index + 1] = nil"
+
+// The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
+// reaches storage one element at a time; these are the ops that touch the
+// backing AS A WHOLE (allocate it, measure it, copy it, shift it, reorder it),
+// which a per-element accessor cannot express. Same contract: the body below is
+// the boxed lowering, and a column-stored receiver is intercepted at lowering,
+// statically per instantiation -- never a runtime `_data` test.
+//
+// Not `@inline`: these are cold (construction, clone, sort), so a call frame is
+// the right trade and splicing them into every caller is not.
+@nomangle inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
+    local tbl = {}
+    for i = 1, capacity do tbl[i] = false end
+    return { _data = tbl, len = 0, __ty = "Vec" }
+"""
+
+@nomangle inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
+
+@nomangle inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+    table.insert(vec._data, lua_index, value)
+"""
+
+@nomangle inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
+    local copy = {}
+    for i = 1, #vec._data do copy[i] = vec._data[i] end
+    return { _data = copy, len = vec.len, __ty = "Vec" }
+"""
+
+@nomangle inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+    table.sort(vec._data, function(a, b)
+        return key_fn(a) < key_fn(b)
+    end)
+"""
+
+// Column-storage counterparts, called by the lowering with ONE column table at
+// a time -- so the leaf count stays a compile-time fact and no runtime key walk
+// is needed.
+@nomangle inline(lua) fn __rock_col_insert(col: any, lua_index: int, value: any) = """
+    table.insert(col, lua_index, value)
+"""
+
+@nomangle inline(lua) fn __rock_col_copy(col: any) -> any = """
+    local copy = {}
+    for i = 1, #col do copy[i] = col[i] end
+    return copy
+"""
+
+@nomangle inline(lua) fn __rock_col_capacity(reserved: int, physical: int) -> int = """
+    if reserved > physical then return reserved end
+    return physical
+"""
+
+// Whether `v` is a column-stored Vec.
+@nomangle inline(lua) fn __rock_is_column_vec(v: any) -> bool = """
+    if type(v) ~= "table" or v.__ty ~= "Vec" then return false end
+    local h = rawget(v, "@vec")
+    return type(h) == "table" and h.repr == "columns"
+"""
+
+// The sorted leaf paths of a column Vec -- the shared key discovery, so zip and
+// sort can never disagree about column order.
+@nomangle inline(lua) fn __rock_col_paths(vec: any) -> any = """
+    local names = {}
+    for k, v in pairs(vec) do
+        if k ~= "len" and k ~= "__ty" and k ~= "@vec" and type(v) == "table" then
+            names[#names + 1] = k
+        end
+    end
+    table.sort(names)
+    return names
+"""
+
+@nomangle inline(lua) fn __rock_materialize_column_type(
+    vec: any,
+    index: int,
+    type_name: string,
+    prefix: string
+) -> any = """
+    local decl = _G.__ROCK_TYPE_TABLE[type_name]
+    local ctor = _G[type_name .. "_ct"]
+    if not decl or (decl.kind ~= "c_struct" and decl.kind ~= "c_enum") or not ctor then
+        error("invalid column element type: " .. tostring(type_name))
+    end
+    local args = {}
+    for i = 1, #decl.fields do
+        local field = decl.fields[i]
+        local path = prefix == "" and field.name or (prefix .. "." .. field.name)
+        local child = _G.__ROCK_TYPE_TABLE[field.type]
+        if child and (child.kind == "c_struct" or child.kind == "c_enum") then
+            args[i] = __rock_materialize_column_type(vec, index, field.type, path)
+        else
+            args[i] = vec[path][index]
+        end
+    end
+    return ctor(unpack(args))
+"""
+
+@nomangle inline(lua) fn __rock_materialize_column_element(vec: any, index: int) -> any = """
+    local h = rawget(vec, "@vec")
+    if type(h) ~= "table" or h.repr ~= "columns" then
+        error("expected column Vec")
+    end
+    return __rock_materialize_column_type(vec, index, h.elem, "")
+"""
+
+@nomangle inline(lua) fn __rock_vec_column_elements(vec: any) -> any = """
+    local out = {}
+    for i = 1, vec.len or 0 do
+        out[i] = __rock_materialize_column_element(vec, i)
+    end
+    return out
+"""
+
+@nomangle inline(lua) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+    local n = vec.len or 0
+    local order = {}
+    local elements = {}
+    for i = 1, n do
+        order[i] = i
+        elements[i] = __rock_materialize_column_element(vec, i)
+    end
+    table.sort(order, function(a, b)
+        return key_fn(elements[a]) < key_fn(elements[b])
+    end)
+    for _, path in ipairs(__rock_col_paths(vec)) do
+        local col = vec[path]
+        local tmp = {}
+        for i = 1, n do tmp[i] = col[order[i]] end
+        for i = 1, n do col[i] = tmp[i] end
+    end
+"""
 
 inline(lua) fn table_clear(tbl: any) = """
     for k in pairs(tbl) do
@@ -1611,10 +1796,18 @@ global PI: float = 3.141592653589793
     local type_name = __rock_get_type(t)
 
     -- Vec type
-    if type_name == "Vec" and t._data and t.len then
+    -- The explicit column marker wins even when the element itself has an
+    -- `_data` leaf column.
+    if type_name == "Vec" and t.len and (t._data or __rock_is_column_vec(t)) then
+        local elems
+        if __rock_is_column_vec(t) then
+            elems = __rock_vec_column_elements(t)
+        else
+            elems = t._data
+        end
         local parts = {}
         for i = 1, t.len do
-            parts[i] = __rock_inspect_value(t._data[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
+            parts[i] = __rock_inspect_value(elems[i], indent, path .. "[" .. (i-1) .. "]", visited, precision)
         end
         if visited then visited[t] = nil end
         if #parts == 0 then return "Vec { }" end
@@ -1649,9 +1842,41 @@ global PI: float = 3.141592653589793
     else
         -- Collect and sort keys, skipping metadata
         local keys = {}
+        local seen = {}
         for k, _ in pairs(t) do
-            if k ~= "__variant" and k ~= "__ty" then
+            -- A dotted key is a compiler-minted PHYSICAL slot (an `embed` leaf,
+            -- a flattened enum's discriminant/payload). It has no source-level
+            -- name, so it is never shown; the declared field it belongs to is
+            -- rendered from the leaves instead. A leaf VIEW is likewise derived
+            -- -- an ffi.cast pointer over the buffer's own storage -- and would
+            -- render as a run-varying address, so it is skipped for the same
+            -- reason serialization skips it (`__ROCK_LEAF_VIEWS`).
+            if k ~= "__variant" and k ~= "__ty"
+               and not _G.__ROCK_LEAF_VIEWS[k]
+               and not (type(k) == "string" and string.find(k, ".", 1, true)) then
                 keys[#keys + 1] = k
+                seen[k] = true
+            end
+        end
+        -- A null field is an ABSENT key, so `pairs` alone under-reports a
+        -- struct's shape. Declared fields come from the type table instead.
+        local decl = type_name and _G.__ROCK_TYPE_TABLE[type_name]
+        local embed_vals = nil
+        if decl and not t.__variant then
+            for i = 1, #decl.fields do
+                local f = decl.fields[i]
+                if not seen[f.name] then
+                    keys[#keys + 1] = f.name
+                    seen[f.name] = true
+                end
+                -- An embedded field's declared name holds either nothing or a
+                -- presence flag, so rebuild its logical value from the leaves.
+                -- A TABLE there means this is already a rebuilt logical view
+                -- (nested embed), whose child sits under the name directly.
+                if f.embed and type(t[f.name]) ~= "table" then
+                    embed_vals = embed_vals or {}
+                    embed_vals[f.name] = __rock_embed_view(t, f.name, f.type, f.nullable)
+                end
             end
         end
         table.sort(keys, __rock_inspect_key_lt)
@@ -1679,7 +1904,9 @@ global PI: float = 3.141592653589793
             local parts = {}
             for i, k in ipairs(keys) do
                 local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
-                parts[i] = key_str .. " = " .. __rock_inspect_value(t[k], indent, path .. "." .. tostring(k), visited, precision)
+                local v = t[k]
+                if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
+                parts[i] = key_str .. " = " .. __rock_inspect_value(v, indent, path .. "." .. tostring(k), visited, precision)
             end
             if header ~= "" then
                 result = header .. " { " .. table.concat(parts, ", ") .. " }"
@@ -1691,7 +1918,9 @@ global PI: float = 3.141592653589793
             local lines = {}
             for _, k in ipairs(keys) do
                 local key_str = type(k) == "string" and k or ("[" .. tostring(k) .. "]")
-                lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(t[k], indent .. "  ", path .. "." .. tostring(k), visited, precision)
+                local v = t[k]
+                if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
+                lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(v, indent .. "  ", path .. "." .. tostring(k), visited, precision)
             end
             local body = table.concat(lines, ",\n")
             if header ~= "" then
@@ -1704,6 +1933,28 @@ global PI: float = 3.141592653589793
 
     if visited then visited[t] = nil end
     return result
+"""
+
+// Rebuild an `embed` field's LOGICAL value from the parent's physical leaves.
+// The child has no box of its own: its leaves live at `<prefix>.<subfield>` on
+// the parent, recursively, and a nullable embed keeps presence at `<prefix>`.
+// Returns nil when absent, so an absent field reads as null rather than as a
+// struct assembled from stale leaves.
+@nomangle inline(lua) fn __rock_embed_view(t: any, prefix: string, ty: string, nullable: bool) -> any = """
+    if nullable and t[prefix] == nil then return nil end
+    local decl = _G.__ROCK_TYPE_TABLE[ty]
+    if not decl then return nil end
+    local o = { __ty = ty }
+    for i = 1, #decl.fields do
+        local f = decl.fields[i]
+        local key = prefix .. "." .. f.name
+        if f.embed then
+            o[f.name] = __rock_embed_view(t, key, f.type, f.nullable)
+        else
+            o[f.name] = t[key]
+        end
+    end
+    return o
 """
 
 // Hoisted sort comparator — module-level so `table.sort` doesn't allocate
@@ -2487,29 +2738,27 @@ fn RingIter<T>.next(it) -> (bool, T) {
 // deleted: `v.iter().<combinators>().<terminal>()` is the one mechanism.
 
 fn vec_new_with_capacity<T>(capacity: int) -> [T] {
-    return Vec { _data: table_new_with_size(capacity), len: 0 }
+    return __vec_data_alloc(capacity)
 }
 
-fn Vec<T>.capacity(vec) -> int { return table_len(vec._data) }
+fn Vec<T>.capacity(vec) -> int { return __vec_data_capacity(vec) }
 
 fn Vec<T>.insert_at(vec, index: int, value: T) {
     if index < 0 || index > vec.len { error("Error: Index out of bounds") }
 
     // Convert 0-based to 1-based for Lua
     let lua_index = index + 1
-    table_insert_at(vec._data, lua_index, value)
+    __vec_data_insert(vec, lua_index, value)
     vec.len += 1
 }
 
 fn Vec<T>.clone(vec) -> [T] {
-    return Vec { _data: table_copy_array(vec._data), len: vec.len }
+    return __vec_data_clone(vec)
 }
 
-inline(lua) fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) = """
-    table.sort(vec._data, function(a, b)
-        return key_fn(a) < key_fn(b)
-    end)
-"""
+fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) {
+    __vec_data_sort(vec, key_fn)
+}
 
 fn Vec<T>.sample(vec) -> T? {
     let len = vec_len(vec)
@@ -2896,4 +3145,3 @@ struct FunctionCallInfo {
     name: string,
     stage: int,
 }
-

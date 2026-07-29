@@ -19,6 +19,15 @@ fn check_rock(_path: &Utf8Path, contents: String) -> datatest_stable::Result<()>
                     panic!("section `{name}` was marked @fail but passed")
                 }
                 (Err(e), false) => panic!("section `{name}` failed:\n{e}"),
+                // `check_types` reports a section with no `//^` marker as an
+                // error, which an `@fail` section would otherwise absorb as its
+                // expected failure -- so a rule that stopped being enforced
+                // reads as pinned. Only a real type error counts as the fail.
+                (Err(e), true) if e == "no //^ annotations in source" => panic!(
+                    "section `{name}` is marked @fail but produced no type error \
+                     (it only failed on the missing `//^` marker) -- the rule it \
+                     claims to pin is not enforced"
+                ),
                 _ => {}
             }
         }

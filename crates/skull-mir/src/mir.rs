@@ -27,6 +27,9 @@ use bone_semantic::hir::TyId;
 use comfy_la_arena::{Arena, Idx};
 use ustr::Ustr;
 
+pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
+pub const VEC_COLUMN_REPR: &str = "columns";
+
 /// A resolved call target: which function in which module. Mangling (rock's
 /// overload scheme) is deferred to codegen, which also reads `is_extern` /
 /// `lua_body` off this ref to pick the emission shape. (bone-mir-design line
@@ -64,6 +67,28 @@ pub enum ContainerKind {
     /// the single `Float32Array(n * k)` backing (Arc-2 P3 representation), which
     /// has no per-element cdata view.
     NativeBufferValue(Ustr),
+    /// `[E]` where `E` is an all-scalar `value` struct (`elem` = its name):
+    /// element storage is FLAT — one ordinary 1-indexed Lua array per leaf,
+    /// `{ <leaf0> = {..}, .., len = n }` — so no per-element table exists.
+    /// Replaces the single `_data` backing of [`ContainerKind::Vec`].
+    /// Eligibility + layout rationale: `docs/vec-value-columns-plan.md`.
+    VecValueColumns(Ustr),
+    /// One leaf column OF a [`ContainerKind::VecValueColumns`] Vec — a bare
+    /// 1-indexed Lua array. The index is ALREADY 1-based and already
+    /// bounds-checked (`__vec_checked_index` against the owning Vec's `len`),
+    /// so this indexes raw: no `+1`, no check. Never a user-facing type.
+    VecColumn,
+    /// One typed LEAF VIEW over a `NativeBuffer`'s storage — a raw C pointer of
+    /// a primitive type ([`Inst::FfiViewCast`]), indexed in units of that type.
+    /// The index is absolute (`i * stride + leaf_off`, both compile-time
+    /// constants from the element's C layout) and already bounds-checked once
+    /// per ELEMENT access, so this indexes raw: no `+1`, no check.
+    ///
+    /// This is what makes an element access allocate nothing: indexing a
+    /// primitive pointer yields a number, where indexing a struct-typed pointer
+    /// yields a reference cdata. Never a user-facing type.
+    /// See `docs/native-buffer-leaf-addressing-plan.md`.
+    NativeBufferLeaf,
     /// `Map<K,V>` — keyed directly by K, no `+1`.
     Map,
 }
@@ -72,6 +97,11 @@ impl ContainerKind {
     /// Either NativeBuffer flavor — the `{ ptr, len }` C-array shape.
     pub fn is_native_buffer(self) -> bool {
         matches!(self, ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_))
+    }
+
+    /// Either Vec flavor — the `{ .., len }` growable shape, 1-indexed.
+    pub fn is_vec(self) -> bool {
+        matches!(self, ContainerKind::Vec | ContainerKind::VecValueColumns(_))
     }
 }
 
@@ -246,6 +276,15 @@ pub enum Inst {
     MakeTuple(Vec<Idx<Inst>>),
     /// A `Vec`/`[T]` literal -> `{ data = {v0, ...}, len = N }` (the stdlib rep).
     MakeVec(Vec<Idx<Inst>>),
+    /// A `[T]` literal in COLUMN storage — `{ <leaf0> = {..}, .., len = N }`.
+    /// `columns` is one (leaf path, per-element values) pair per leaf, all of
+    /// length `len`, in the element's declaration order.
+    MakeVecColumns {
+        elem: Ustr,
+        columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
+        len: usize,
+        capacity: Idx<Inst>,
+    },
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field
     /// (`None` for an unknown/foreign nominal).
     MakeStruct {
@@ -263,7 +302,28 @@ pub enum Inst {
         /// `(declared field name, value)` in declared field order (the `<name>_ct`
         /// ctor is positional, so order is load-bearing; the names let MIR passes
         /// forward a `Field` read to its operand -- SROA). Nested value-struct
-        /// fields hold the nested `MakeValueStruct`, not its flattened leaves.
+        /// fields normally hold the nested `MakeValueStruct`, not its flattened
+        /// leaves.
+        ///
+        /// ONE EXCEPTION, the LEAF FORM: names may instead be DOTTED paths
+        /// naming every primitive leaf (`("pos.x", ..), ("pos.y", ..)`), which is
+        /// what keeps a `nobox` field from materializing when its parent boxes
+        /// (`flatten_nobox_nested_ctors`, `docs/nobox-nested-ctor-plan.md`). It
+        /// exists only between the end of `cleanup` and emit, so no MIR pass sees
+        /// it; luajit emits a generated `<name>_lct` and JS rebuilds the nested
+        /// objects. Partial flattening is invalid: when any name is dotted the
+        /// sequence must equal `value_leaf_paths_of` exactly, which the Lua
+        /// emitter asserts.
+        fields: Vec<(Ustr, Idx<Inst>)>,
+    },
+    /// A value-struct box that is AUTHORIZED rather than implicit: requested by
+    /// `materialize(value)`, or minted by the compiler at a `@gpu_only` call
+    /// boundary (`authorize_gpu_boundary_boxes`), where the callee's boxed param
+    /// is a Lua-side artifact of an arg that is a native `vec2`/`vec4` on the
+    /// GPU. Emission is identical to `MakeValueStruct`; the difference is that
+    /// the `nobox` verifier ignores this variant.
+    MaterializeValueStruct {
+        name: Ustr,
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// An enum-variant value as a tagged table `{ __variant, __ty, <payload> }`.
@@ -314,6 +374,17 @@ pub enum Inst {
     /// which resolves `ctype` from the concrete element type at the call site.
     FfiNewArray { ctype: Ustr, count: Idx<Inst> },
 
+    /// `ffi.cast("<cty>*", <ptr>)` -- a typed LEAF VIEW over a NativeBuffer's
+    /// storage, one per distinct primitive C type among the element's leaves.
+    /// Made ONCE per buffer at construction and stored on the buffer table, not
+    /// per access: the cast itself allocates a pointer cdata, so doing it per
+    /// access would reintroduce exactly the allocation leaf addressing removes.
+    ///
+    /// `cty` is a primitive C type (`int` / `float` / `bool`). The view aliases
+    /// the SAME bytes as `.ptr`, so leaf-addressed and slot-addressed accesses
+    /// to one buffer stay coherent -- which is what lets the two coexist.
+    FfiViewCast { cty: Ustr, ptr: Idx<Inst> },
+
     // --- projections ---
     /// `base.field` (struct field, or an enum record-payload field).
     Field { base: Idx<Inst>, field: Ustr },
@@ -328,6 +399,12 @@ pub enum Inst {
         index: Idx<Inst>,
         kind: ContainerKind,
     },
+    /// `__vec_checked_index(vec, index)` — bounds-check `index` against
+    /// `vec.len` and yield the 1-based backing index. Emitted only for
+    /// [`ContainerKind::VecValueColumns`] access, where the K column reads that
+    /// follow share ONE check; each then indexes raw via
+    /// [`ContainerKind::VecColumn`].
+    VecCheckedIndex { vec: Idx<Inst>, index: Idx<Inst> },
     /// Element count: `Vec` -> `base.len`, `NativeBuffer` -> `base.len`.
     Len {
         base: Idx<Inst>,
@@ -564,6 +641,14 @@ pub struct MirFunc {
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
     pub nested_fns: Vec<MirFunc>,
+    /// Per-instruction source span: what an emit-time rejection points AT, rather
+    /// than at the enclosing definition. Stamped for every instruction lowering
+    /// emits, because a transform may REWRITE an instruction in place into the
+    /// offending one (SROA turns an escaping `Load` into a `MakeValueStruct`) --
+    /// stamping only the constructions lowering itself emits would miss exactly
+    /// those. Keys are remapped on splice, like [`Self::spec_bindings`];
+    /// transform-synthesized instructions simply have no entry.
+    pub inst_spans: bone_semantic::prelude::ArenaMap<Idx<Inst>, bone_semantic::prelude::Span>,
 }
 
 impl MirFunc {
@@ -585,6 +670,7 @@ impl MirFunc {
             bound_trees: Default::default(),
             spec_bindings: Default::default(),
             nested_fns: Vec::new(),
+            inst_spans: Default::default(),
         }
     }
 

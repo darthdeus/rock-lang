@@ -23,6 +23,7 @@ pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
             generics: graft_generics(src, dst, &s.generics),
             fields: s.fields.iter().map(|fl| graft_field(src, dst, fl)).collect(),
             is_value: s.is_value,
+            is_nobox: s.is_nobox,
         }),
         ItemKind::Enum(e) => ItemKind::Enum(EnumDef {
             span: e.span,
@@ -108,6 +109,7 @@ fn graft_field(src: &Ast, dst: &mut Ast, fl: &Field) -> Field {
         ty: graft_type(src, dst, fl.ty),
         default: fl.default.map(|e| graft_expr(src, dst, e)),
         annotations: fl.annotations.clone(),
+        is_embed: fl.is_embed,
     }
 }
 

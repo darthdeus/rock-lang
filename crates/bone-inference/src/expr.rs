@@ -1122,7 +1122,7 @@ pub fn infer_expr_used(
                 .sibling_fields
                 .last()
                 .and_then(|m| m.get(&name))
-                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldOf<T, V>` / `KeyPath<T, V>` or in a struct-field default")))?
+                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T, V>` / `WriteFieldRef<T, V>` or in a struct-field default")))?
         }
 
         Expr::SafeNav { base, field } => {
@@ -1643,17 +1643,18 @@ pub(crate) fn check_expr(
             params,
         } = *gamma.get(exp_r)
         {
-            if former.as_str() == "FieldOf" || former.as_str() == "KeyPath" {
+            if matches!(former.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
                 let mut it = params.into_iter();
                 let t = exp_r.with_idx(it.next().unwrap());
                 let v = exp_r.with_idx(it.next().unwrap());
 
                 let t_r = resolve(gamma, t, span);
-                // `FieldOf` is the WRITABLE ref (`field_set`, `poll_co_field`): it
-                // cannot resolve against a `value` struct, whose fields are
-                // immutable. `KeyPath` (read-only, `field_get`) allows it -- reading
-                // a value-struct field is fine. Split per docs/field-refs-plan.md 1.
-                if former.as_str() == "FieldOf" {
+                // `FieldRef` and `WriteFieldRef` carry the WRITE capability
+                // (`field_set`, `poll_co_field`), so neither can resolve against a
+                // `value` struct, whose fields are immutable. `ReadFieldRef`
+                // (read-only, `field_get`) allows it -- reading a value-struct
+                // field is fine. Lattice per docs/field-refs-plan.md.
+                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_value = resolve_struct(gamma, tn)
                             .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value);
@@ -1667,7 +1668,58 @@ pub(crate) fn check_expr(
                         }
                     }
                 }
+                // ADMISSION: every field ref satisfies `WriteFieldRef`; only a
+                // NON-embed field also satisfies the readable formers. An
+                // embedded field has no whole value to hand out, and `FieldRef`
+                // coerces onward to `ReadFieldRef`, so it re-opens the same
+                // extraction (docs/scalarization-and-boxing-design.md S 6).
+                if matches!(former.as_str(), "FieldRef" | "ReadFieldRef") {
+                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                        let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
+                            gamma.workspace.module(sid.module).structs[sid.def]
+                                .fields
+                                .iter()
+                                .any(|f| f.name == field && f.is_embed)
+                        });
+                        if is_embed {
+                            comp_error!(
+                                span,
+                                "`{}` is an `embed` field of `{}`, so it admits only the write-only `WriteFieldRef<{}, _>`; a readable selector would hand out the whole value",
+                                field,
+                                tn,
+                                tn
+                            );
+                        }
+                    }
+                }
+
                 let fty = struct_field_ty(gamma, t_r, field, span)?;
+
+                // The write capability is INVARIANT in V, and `unify` alone does
+                // not deliver that: its `(_, Nullable)` arm widens on the right,
+                // so `unify(int, int?)` succeeds and a non-null field would hand
+                // out a `FieldRef<T, int?>` that `field_set(o, f, null)` writes
+                // nil through. A read-only `ReadFieldRef` keeps the widening --
+                // reading an `int` as `int?` is sound.
+                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                    let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
+                    let unbound_v = matches!(
+                        gamma.get(v_r),
+                        TypeExpr::Infer(..) | TypeExpr::Generic(..)
+                    );
+                    if !unbound_v
+                        && matches!(gamma.get(v_r), TypeExpr::Nullable(_))
+                        && !matches!(gamma.get(fty_r), TypeExpr::Nullable(_))
+                    {
+                        comp_error!(
+                            span,
+                            "type mismatch: expected `{}`, found `{}` -- a writable field reference is invariant, so `.{}` cannot widen to a nullable selector",
+                            gamma.render(v_r),
+                            gamma.render(fty_r),
+                            field
+                        );
+                    }
+                }
 
                 unify(gamma, fty, v, span)?;
 

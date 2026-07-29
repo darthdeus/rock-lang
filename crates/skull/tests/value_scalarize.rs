@@ -128,13 +128,17 @@ fn value_struct_field_reads_dont_materialize_cdata() {
     );
 }
 
-/// Storing a value-struct literal into a `NativeBuffer<value>` element must
-/// write the slot's fields in place (`slot = buf[i]; slot.f = ..`), NOT build
-/// the whole nested cdata and copy it (`__nb_checked_set(i, Vertex_ct(..))`).
-/// The packed form allocates ~5 cdata per element that can't sink across the
-/// store (the mag HUD/text glyph-quad path). The scalarized form uses the
-/// bounds-checked slot READ (`__nb_checked_get`) + per-field writes; rock writes
-/// 0 bytes/element this way.
+/// Storing a value-struct literal into a `NativeBuffer<value>` element writes
+/// the element's LEAVES through typed views -- no whole cdata copy
+/// (`__nb_checked_set(i, Vertex_ct(..))`), and no slot reference either.
+///
+/// This supersedes the slot-write form (`slot = buf[i]; slot.f = ..`) that a
+/// previous arc landed. That form sank to 0 B/element ON TRACE, but paid a
+/// 24 B slot reference plus a nested cdata per nested field everywhere sinking
+/// does not happen; leaf addressing is 0 on both. Measured on this repo's own
+/// benchmarks: `nativebuffer_value_store` 72.9 -> 0.9 B/vertex under
+/// `jit.off()`, unchanged at 0 with the JIT on.
+/// See docs/native-buffer-leaf-addressing-plan.md.
 const NATIVE_BUFFER_VALUE_STORE: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, w: float }
@@ -157,28 +161,28 @@ fn main() {
 "#;
 
 #[test]
-fn native_buffer_value_store_writes_slot_in_place() {
+fn native_buffer_value_store_writes_leaves_through_views() {
     let lua = emit_module(NATIVE_BUFFER_VALUE_STORE);
     let body = function_body(&lua, "fill");
-    // Slot-write form: bounds-checked READ of the slot, then field writes.
+    // Leaf form: the element is bounds-checked ONCE by index, then each leaf is
+    // written through its own view -- no slot reference is taken at all.
     assert!(
-        body.contains("__nb_checked_get("),
-        "NativeBuffer<value> store should read the slot in place:\n{body}"
+        body.contains("__nb_checked_index("),
+        "NativeBuffer<value> store should bounds-check the index:\n{body}"
+    );
+    assert!(
+        !body.contains("__nb_checked_get("),
+        "leaf addressing must not take a slot reference:\n{body}"
     );
     // NOT the packed form (build the whole cdata and copy it in).
     assert!(
         !body.contains("__nb_checked_set("),
         "NativeBuffer<value> store should not build+copy a whole cdata:\n{body}"
     );
-    // The slot + its field writes form a `do … end` cluster with a BLOCK-scoped
-    // local (`__nbslot<N>`), not a reused function register -- a function register
-    // gets a loop-carried PHI on the `buf.ptr[i]` pointer cdata that LuaJIT can't
-    // sink (24 B/elem); the block local is dead at the loop header, so it sinks to
-    // 0 (rock parity). Bench: nativebuffer_value_store.rock 24 -> 0 bytes/vertex.
-    assert!(
-        body.contains("local __nbslot"),
-        "NativeBuffer<value> slot must be a block-scoped local, not a function register:\n{body}"
-    );
+    // No ctor survives -- neither the element's nor a nested field's.
+    for ct in ["Vert_ct(", "V2_ct("] {
+        assert!(!body.contains(ct), "`{ct}` must not survive the store:\n{body}");
+    }
 }
 
 const NATIVE_BUFFER_SINGLE_FIELD: &str = r#"
@@ -200,17 +204,20 @@ fn main() {
 "#;
 
 #[test]
-fn native_buffer_single_field_store_is_block_scoped() {
-    // Even a SINGLE field store keeps the slot pointer cdata live across the
-    // iteration in a function register -> loop-carried PHI -> 24 B/iter. The
-    // block-scope cluster must fire for any store count >= 1, not just >= 2
-    // (the original guard skipped this, leaking 24 B -- bench
-    // phi-scope/slot_write_single_field.rock).
+fn native_buffer_single_field_store_takes_no_slot() {
+    // A single-leaf element is the leakiest case for the slot form: the slot
+    // pointer cdata stays live across the iteration in a function register
+    // (loop-carried PHI, 24 B/iter). Leaf addressing takes no slot at all --
+    // bench phi-scope/slot_write_single_field.rock is 0 B/iter, JIT on AND off.
     let lua = emit_module(NATIVE_BUFFER_SINGLE_FIELD);
     let body = function_body(&lua, "fill");
     assert!(
-        body.contains("local __nbslot"),
-        "single-field NativeBuffer store must also be block-scoped:\n{body}"
+        !body.contains("__nb_checked_get("),
+        "single-field NativeBuffer store should take no slot reference:\n{body}"
+    );
+    assert!(
+        body.contains("__nb_checked_index("),
+        "the element access must still be bounds-checked:\n{body}"
     );
 }
 

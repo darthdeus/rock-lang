@@ -49,7 +49,7 @@ pub fn definition_at(
 
             hir::Expr::Global(name) => def_of_name(ws, *name),
 
-            // A `.field` ref: in a `FieldOf<Struct, V>` slot it resolves to the
+            // A `.field` ref: in a `FieldRef<Struct, V>` slot it resolves to the
             // struct's field decl (like `recv.field` access); otherwise it's a
             // sibling/global name.
             hir::Expr::SiblingRef(name) => inf
@@ -389,9 +389,9 @@ pub fn hover_at(
                                     }
                                 }
                             }
-                            // A `.field` ref in a `FieldOf<Struct, V>` slot ->
+                            // A `.field` ref in a `FieldRef<Struct, V>` slot ->
                             // the referenced field (`f: V (field of Struct)`),
-                            // not the raw FieldOf wrapper type.
+                            // not the raw FieldRef wrapper type.
                             hir::Expr::SiblingRef(name) => {
                                 if let Some(sname) =
                                     field_ref_struct(ws, bi, *bi.expr_types.get(e)?)
@@ -1538,7 +1538,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         }
                     }
                     // `.field` sibling ref: a default body of THIS struct
-                    // (`boosted: int = .power`), or a `FieldOf<sname, V>`-typed
+                    // (`boosted: int = .power`), or a `FieldRef<sname, V>`-typed
                     // key-path arg. Span ends at the name (leading dot stays).
                     hir::Expr::SiblingRef(n) if *n == field => {
                         let of_struct = match owner {
@@ -1551,7 +1551,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                     .copied()
                                     .and_then(|t| struct_app_args(ws, bi, t))
                                     .and_then(|(ctor, args)| {
-                                        matches!(ctor.as_str(), "FieldOf" | "KeyPath")
+                                        matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef")
                                             .then(|| args.into_iter().next())
                                             .flatten()
                                     })
@@ -2866,12 +2866,12 @@ pub(crate) fn receiver_vec_elem(
 
 /// `(struct name, inferred type args)` if `ty` is a nominal-struct `App`
 /// (peeling a `Nullable`). Args are `TyId`s in the same arena as `ty`.
-/// If `ty` is `FieldOf<Struct, V>`, the `Struct` name -- the struct a `.field`
+/// If `ty` is `FieldRef<Struct, V>`, the `Struct` name -- the struct a `.field`
 /// ref in that slot indexes. `None` for any other type (a plain sibling ref, or
-/// a `FieldOf` whose first arg isn't a nominal struct).
+/// a `FieldRef` whose first arg isn't a nominal struct).
 fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
     let (ctor, args) = struct_app_args(ws, bi, ty)?;
-    if !matches!(ctor.as_str(), "FieldOf" | "KeyPath") {
+    if !matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
         return None;
     }
     let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;
@@ -2896,8 +2896,8 @@ fn struct_app_args(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<(Ustr
 /// The struct name of a single-type-argument nominal's SOLE argument
 /// (`Entity<Glyph>` -> "Glyph"), peeling a `Nullable`. `None` for a non-nominal,
 /// a multi-arg nominal, or an argument that isn't a nominal struct. Feeds
-/// FieldOf method completion on wrapper-receiver overloads (`e.run_into(.co)`),
-/// where the FieldOf owner `T` binds through the receiver's `Entity<T>`.
+/// FieldRef method completion on wrapper-receiver overloads (`e.run_into(.co)`),
+/// where the FieldRef owner `T` binds through the receiver's `Entity<T>`.
 fn sole_type_arg_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
     match deref_ty(ws, bi, ty)? {
         hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(_), params } if params.len() == 1 => {

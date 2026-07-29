@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
@@ -44,6 +45,66 @@ pub struct GlobalCtx {
 
 fn err(msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(Span::default(), msg.into())
+}
+
+/// A `(message, site)` rejection from a MIR-level check, anchored at the
+/// offending instruction when the check could name one.
+fn sited_err((msg, site): (String, Option<Span>)) -> CompilerError {
+    CompilerError::new_with_label(site.unwrap_or_default(), msg)
+}
+
+/// Every `nobox` materialization in one body, as one error carrying the rest as
+/// siblings. Mirrors the luajit path: a body with several sinks reports several
+/// findings, so neither backend's count of what is left is a floor.
+fn nobox_errs(
+    ws: &bone_semantic::inference::Workspace,
+    mf: &skull_mir::mir::MirFunc,
+) -> Result<(), CompilerError> {
+    let mut vs = skull_transform::nobox_materialization_violations(ws, mf).into_iter();
+    let Some(first) = vs.next() else { return Ok(()) };
+    let mut e = sited_err(first);
+    e.siblings = vs.map(sited_err).collect();
+    Err(e)
+}
+
+fn nobox_nominal_ty(ws: &Workspace, ty: TyId) -> Option<ustr::Ustr> {
+    let te = match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        TyId::Local(_) => return None,
+    };
+    match te {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => {
+            let sid = ws.struct_by_name.get(&name)?;
+            ws.modules[sid.module.index()].structs[sid.def]
+                .is_nobox
+                .then_some(name)
+        }
+        TypeExpr::Nullable(inner) => nobox_nominal_ty(ws, ty.with_idx(inner)),
+        _ => None,
+    }
+}
+
+fn validate_js_nobox_return(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+    mf: &MirFunc,
+) -> Result<(), CompilerError> {
+    let Some(name) = f.return_ty.and_then(|ty| nobox_nominal_ty(ws, ty)) else {
+        return Ok(());
+    };
+    let packs_return = mf
+        .blocks
+        .iter()
+        .any(|(_, block)| matches!(&block.term, Term::Return(values) if values.len() > 1));
+    if packs_return {
+        return Err(err(format!(
+            "JS subset: nobox value `{name}` return requires an implicit array materialization"
+        )));
+    }
+    Ok(())
 }
 
 /// A cell's JS identifier (`c<raw>`). Params and locals share the scheme; params
@@ -88,6 +149,32 @@ fn js_string_lit(s: &str) -> Result<String, CompilerError> {
     }
     o.push('"');
     Ok(o)
+}
+
+/// A field name that is not a bare JS identifier -- flattened enum/embed slots
+/// are dotted physical keys (`active.#`, `active.0`) -- must be quoted in an
+/// object literal and bracketed in a member access.
+fn is_js_ident(s: &str) -> bool {
+    let mut cs = s.chars();
+    match cs.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    cs.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// `f` as an object-literal key: bare when it is an identifier, quoted otherwise.
+fn js_key(f: &str) -> Result<String, CompilerError> {
+    if is_js_ident(f) { Ok(f.to_string()) } else { js_string_lit(f) }
+}
+
+/// `base.f` / `base["f"]` -- property access that survives a non-identifier key.
+fn js_member(base: &str, f: &str) -> Result<String, CompilerError> {
+    if is_js_ident(f) {
+        Ok(format!("{base}.{f}"))
+    } else {
+        Ok(format!("{base}[{}]", js_string_lit(f)?))
+    }
 }
 
 /// Emit `mf` as `function <js_name>(...) { ... }`. `js_name` is the caller's
@@ -999,6 +1086,15 @@ impl Emitter<'_> {
                     );
                     let line = match kind {
                         ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
+                        // Column storage has no JS emitter arm yet -- reject so
+                        // the case lands in the SKIP histogram (the emitter
+                        // worklist) instead of emitting a wrong single-slot write.
+                        ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
+                            return Err(err("JS subset: column-stored [T] not supported"));
+                        }
+                        ContainerKind::NativeBufferLeaf => {
+                            return Err(err("JS subset: NativeBuffer leaf views not supported"));
+                        }
                         // Whole value-struct element write: per-leaf stores into
                         // the flat backing from the value object (a MakeValueStruct
                         // renders as an object literal; a copy read is an object).
@@ -1051,8 +1147,8 @@ impl Emitter<'_> {
                         continue;
                     }
                     let line = format!(
-                        "{}.{field} = {};",
-                        self.render_val(*base)?,
+                        "{} = {};",
+                        js_member(&self.render_val(*base)?, field)?,
                         self.render_val(*value)?
                     );
                     self.push(&line);
@@ -1114,6 +1210,13 @@ impl Emitter<'_> {
                 Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. }
                     if self.nbv_bypass.contains(&raw(iid)) => {}
                 Inst::Field { .. } if self.nbv_bypass.contains(&raw(iid)) => {}
+                // A leaf VIEW is a luajit-representation artifact: an `ffi.cast`
+                // pointer over the element storage, consumed only by the buffer
+                // literal's view fields, which JS drops (it backs a NativeBuffer
+                // with a TypedArray and has no pointer views). Nothing on JS can
+                // read one -- a path that needed leaf views hits the
+                // `NativeBufferLeaf` reject -- so it emits no statement.
+                Inst::FfiViewCast { .. } => {}
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
@@ -1357,7 +1460,16 @@ impl Emitter<'_> {
                     parts.push(format!("__ty: {}", js_string_lit(&name)?));
                 }
                 for (f, v) in fields {
-                    parts.push(format!("{f}: {}", self.render_val(*v)?));
+                    // Leaf VIEWS are a luajit-representation detail (`ffi.cast`
+                    // pointers over the element storage). JS backs a NativeBuffer
+                    // with a TypedArray and lowers element access through its own
+                    // flat-slot arithmetic, so a pointer view has no meaning here
+                    // and no JS path reads these keys -- one that needed them
+                    // would hit the `NativeBufferLeaf` reject instead.
+                    if skull_mir::lower::is_leaf_view_field(f.as_str()) {
+                        continue;
+                    }
+                    parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
             }
@@ -1370,10 +1482,39 @@ impl Emitter<'_> {
             // registry (`build_vt_eq_defs`) supplies that split and `__op_eq`
             // consults it before the generic walk -- mirroring luajit's `_vt.__eq`
             // metatable-authority rule. Construction is identical for both tiers.
-            Inst::MakeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields }
+            | Inst::MaterializeValueStruct { name, fields } => {
+                // Dotted keys are the post-normalization LEAF form (a nested
+                // nobox field flattened into its parent so it never boxes). JS
+                // has no cdata layout to write leaves into -- a value struct is
+                // a plain object -- so rebuild the nested objects the declared
+                // shape expects. luajit instead calls the generated `_lct`.
+                if fields.iter().any(|(f, _)| f.contains('.')) {
+                    // Same strictness as the Lua emitter: a PARTIAL flattening
+                    // must reject, not silently emit a half-shaped object.
+                    let canonical =
+                        skull_mir::lower::value_leaf_paths_of(self.ws, *name).unwrap_or_default();
+                    let got: Vec<ustr::Ustr> = fields.iter().map(|(f, _)| *f).collect();
+                    if got != canonical {
+                        return Err(CompilerError::new_no_location(format!(
+                            "`{name}` ctor carries dotted field names that are not its canonical \
+                             leaf sequence: {got:?} vs {canonical:?}"
+                        )));
+                    }
+                    return self.render_leaf_form_value_struct(*name, fields);
+                }
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
-                    parts.push(format!("{f}: {}", self.render_val(*v)?));
+                    // Leaf VIEWS are a luajit-representation detail (`ffi.cast`
+                    // pointers over the element storage). JS backs a NativeBuffer
+                    // with a TypedArray and lowers element access through its own
+                    // flat-slot arithmetic, so a pointer view has no meaning here
+                    // and no JS path reads these keys -- one that needed them
+                    // would hit the `NativeBufferLeaf` reject instead.
+                    if skull_mir::lower::is_leaf_view_field(f.as_str()) {
+                        continue;
+                    }
+                    parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
             }
@@ -1421,6 +1562,16 @@ impl Emitter<'_> {
                         self.nbv_copy_expr(&b, &i, *elem, 0, *elem)?
                     }
                     ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
+                    ContainerKind::VecValueColumns(_) | ContainerKind::VecColumn => {
+                        return Err(err("JS subset: column-stored [T] not supported"));
+                    }
+                    // Leaf addressing is Lua-side today (`ffi.cast` views). The
+                    // JS analogue is a TypedArray per leaf C type over one
+                    // ArrayBuffer -- see docs/native-buffer-leaf-addressing-plan.md
+                    // S6. Until that lands, skip rather than emit a wrong shape.
+                    ContainerKind::NativeBufferLeaf => {
+                        return Err(err("JS subset: NativeBuffer leaf views not supported"));
+                    }
                     // Map miss returns nil (raw VM op in Lua); JS Map.get returns
                     // undefined on miss, which `== null` treats as nil.
                     ContainerKind::Map => format!("{b}.get({i})"),
@@ -1429,8 +1580,13 @@ impl Emitter<'_> {
             Inst::Len { base, kind } => match kind {
                 ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferValue(_)
-                | ContainerKind::Vec => {
+                | ContainerKind::Vec
+                | ContainerKind::VecValueColumns(_) => {
                     format!("{}.len", self.render_val(*base)?)
+                }
+                ContainerKind::VecColumn => format!("{}.length", self.render_val(*base)?),
+                ContainerKind::NativeBufferLeaf => {
+                    return Err(err("JS subset: NativeBuffer leaf views not supported"));
                 }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
             },
@@ -1476,7 +1632,7 @@ impl Emitter<'_> {
                         Some(n) => self.nbv_copy_expr(&b, &i, root, off + f.offset, n)?,
                     });
                 }
-                format!("{}.{field}", self.render_val(*base)?)
+                js_member(&self.render_val(*base)?, field)?
             }
             // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
             // value (Lua path). `__rock_sprintf` is the single-value C printf port
@@ -1511,6 +1667,89 @@ impl Emitter<'_> {
     /// `tag_expr` is a rendered JS expression (a string literal for `MakeEnum`, the
     /// dynamic tag operand for `MakeEnumDyn`). The ctor drops nil `kv` slots so a
     /// union-wide rebox owns exactly the active variant's keys.
+    /// Rebuild the declared nested-object shape from a flattened leaf field list
+    /// (`("pos.x", ..), ("pos.y", ..)` -> `{pos: {__ty:"NV2", x:.., y:..}}`).
+    /// The leaf form exists only between the end of `cleanup` and emit; luajit
+    /// consumes it via a generated leaf ctor, JS has to reassemble.
+    /// The struct type of `name`'s field `head`, when that field is itself a
+    /// value struct -- so a rebuilt sub-object carries the `__ty` the non-leaf
+    /// path would give it, and the inspect renderer can recurse into a
+    /// flattened group. Fails closed: a non-struct field yields `None`.
+    fn nested_field_struct_name(&self, name: ustr::Ustr, head: &str) -> Option<ustr::Ustr> {
+        let sid = self.ws.struct_by_name.get(&name)?;
+        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+        let f = sd.fields.iter().find(|f| f.name.as_str() == head)?;
+        let rendered = self.ws.render(None, f.ty);
+        let n = ustr::Ustr::from(rendered.trim_end_matches('?'));
+        self.ws.struct_by_name.contains_key(&n).then_some(n)
+    }
+
+    /// Split a possibly-FLATTENED field list into exact fields and per-head
+    /// groups of dotted leaves. Shared by the leaf-form object renderer and the
+    /// inspect renderer so the two read the same shape the same way.
+    fn split_leaf_fields(
+        fields: &[(ustr::Ustr, Idx<Inst>)],
+    ) -> (
+        HashMap<ustr::Ustr, Idx<Inst>>,
+        Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)>,
+    ) {
+        let mut exact: HashMap<ustr::Ustr, Idx<Inst>> = HashMap::new();
+        let mut groups: Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
+        for (f, v) in fields {
+            match f.as_str().split_once('.') {
+                None => {
+                    exact.insert(*f, *v);
+                }
+                Some((head, rest)) => {
+                    let rest = ustr::Ustr::from(rest);
+                    match groups.iter_mut().find(|(h, _)| h == head) {
+                        Some((_, sub)) => sub.push((rest, *v)),
+                        None => groups.push((head.to_string(), vec![(rest, *v)])),
+                    }
+                }
+            }
+        }
+        (exact, groups)
+    }
+
+    fn render_leaf_form_value_struct(
+        &self,
+        name: ustr::Ustr,
+        fields: &[(ustr::Ustr, Idx<Inst>)],
+    ) -> Result<String, CompilerError> {
+        // Nested groups in first-seen order, so the emitted object matches the
+        // declared field order the non-leaf path produces.
+        let mut top: Vec<(ustr::Ustr, String)> = Vec::new();
+        let mut groups: Vec<(String, Vec<(ustr::Ustr, Idx<Inst>)>)> = Vec::new();
+        for (f, v) in fields {
+            match f.as_str().split_once('.') {
+                None => top.push((*f, self.render_val(*v)?)),
+                Some((head, rest)) => {
+                    let rest = ustr::Ustr::from(rest);
+                    match groups.iter_mut().find(|(h, _)| h == head) {
+                        Some((_, sub)) => sub.push((rest, *v)),
+                        None => groups.push((head.to_string(), vec![(rest, *v)])),
+                    }
+                }
+            }
+        }
+        let field_ty = |head: &str| self.nested_field_struct_name(name, head);
+        let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
+        for (f, rendered) in &top {
+            parts.push(format!("{}: {rendered}", js_key(f)?));
+        }
+        for (head, sub) in &groups {
+            let sub_name = field_ty(head).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "leaf-form ctor for `{name}`: field `{head}` is not a value struct"
+                ))
+            })?;
+            let inner = self.render_leaf_form_value_struct(sub_name, sub)?;
+            parts.push(format!("{}: {inner}", js_key(&ustr::Ustr::from(head))?));
+        }
+        Ok(format!("({{{}}})", parts.join(", ")))
+    }
+
     fn render_make_enum(
         &self,
         tag_expr: &str,
@@ -1597,7 +1836,7 @@ impl Emitter<'_> {
                 Some(n) => self.nbv_obj_literal(n, base + f.offset)?,
                 None => format!("__b.ptr[__o + {}]", base + f.offset),
             };
-            parts.push(format!("{}: {part}", f.name));
+            parts.push(format!("{}: {part}", js_key(&f.name)?));
         }
         Ok(format!("{{{}}}", parts.join(", ")))
     }
@@ -1668,25 +1907,57 @@ impl Emitter<'_> {
         cyc: &str,
         prec: &str,
     ) -> Result<String, CompilerError> {
-        if let Inst::MakeValueStruct { name, fields } = &self.mf.insts[id] {
-            if let Some(order) = skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name) {
-                let fmap: HashMap<ustr::Ustr, Idx<Inst>> = fields.iter().copied().collect();
-                let mut expr = js_string_lit(&format!("{name} {{ "))?;
-                for (i, fname) in order.iter().enumerate() {
-                    let vid = *fmap.get(fname).ok_or_else(|| {
-                        err(format!("value struct `{name}` field `{fname}` absent at inspect boundary"))
-                    })?;
-                    if i > 0 {
-                        expr.push_str(&format!(" + {}", js_string_lit(", ")?));
-                    }
-                    expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
-                    expr.push_str(&format!(" + {}", self.render_value_struct_inspect(vid, cyc, prec)?));
-                }
-                expr.push_str(&format!(" + {}", js_string_lit(" }")?));
-                return Ok(format!("({expr})"));
+        // `MaterializeValueStruct` is the same box, explicitly authorized -- it
+        // inspects identically.
+        if let Inst::MakeValueStruct { name, fields }
+        | Inst::MaterializeValueStruct { name, fields } = &self.mf.insts[id]
+        {
+            if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some() {
+                return self.render_value_struct_inspect_fields(*name, fields, cyc, prec);
             }
         }
         Ok(format!("inspect({}, {cyc}, {prec})", self.render_val(id)?))
+    }
+
+    /// `Name { f: v, .. }` in DECLARED field order, from a field list that may be
+    /// the flattened leaf form. A nested `nobox` field arrives as dotted leaves
+    /// (`pos.x`, `pos.y`) with no `pos` entry, so a lookup by declared name alone
+    /// misses it -- and a missed lookup here is an emit REJECTION, which turns
+    /// every print of such a struct into a skip rather than a diagnosis.
+    fn render_value_struct_inspect_fields(
+        &self,
+        name: ustr::Ustr,
+        fields: &[(ustr::Ustr, Idx<Inst>)],
+        cyc: &str,
+        prec: &str,
+    ) -> Result<String, CompilerError> {
+        let order = skull_mir::lower::gc_free_value_struct_field_order(self.ws, name)
+            .ok_or_else(|| err(format!("`{name}` is not a GC-free value struct")))?;
+        let (exact, groups) = Self::split_leaf_fields(fields);
+        let mut expr = js_string_lit(&format!("{name} {{ "))?;
+        for (i, fname) in order.iter().enumerate() {
+            if i > 0 {
+                expr.push_str(&format!(" + {}", js_string_lit(", ")?));
+            }
+            expr.push_str(&format!(" + {}", js_string_lit(&format!("{fname}: "))?));
+            let rendered = if let Some(vid) = exact.get(fname) {
+                self.render_value_struct_inspect(*vid, cyc, prec)?
+            } else if let Some((_, sub)) = groups.iter().find(|(h, _)| h == fname.as_str()) {
+                let sub_name = self.nested_field_struct_name(name, fname).ok_or_else(|| {
+                    err(format!(
+                        "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
+                    ))
+                })?;
+                self.render_value_struct_inspect_fields(sub_name, sub, cyc, prec)?
+            } else {
+                return Err(err(format!(
+                    "value struct `{name}` field `{fname}` absent at inspect boundary"
+                )));
+            };
+            expr.push_str(&format!(" + {rendered}"));
+        }
+        expr.push_str(&format!(" + {}", js_string_lit(" }")?));
+        Ok(format!("({expr})"))
     }
 
     fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
@@ -2054,7 +2325,7 @@ fn build_program_core(
                 skull_mir::lower::lower_decorator(ws, scx, module.id, did, ustr::Ustr::from(deco_name.as_str()))?;
             let self_ref = safe_self_ref(ws, &mf);
             skull_transform::inline_functions(ws, scx, self_ref, &mut mf, &mut st.cache)?;
-            skull_transform::cleanup(&mut mf);
+            skull_transform::cleanup_with_nobox(ws, &mut mf);
             skull_transform::convert_closures(&mut mf, &deco_name);
             skull_transform::recover_counted_loops(ws, &mut mf);
             for nf in &mut mf.nested_fns {
@@ -2542,68 +2813,150 @@ fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
     }
 }
 
+/// A unit of JS reachability work. The search walks TWO node kinds -- a
+/// plain-Rock fn to lower, and a module global whose initializer must be emitted
+/// -- and either can discover the other, which is why the shared driver is
+/// generic over its node type instead of walking bare `FuncRef`s.
+///
+/// A ginit is keyed by NAME only: `state_index` is the single map from a global's
+/// name to its definition site, so the site is derivable and the name is what
+/// `ginit_seen` already dedupes on.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum JsNode {
+    Fn(FuncRef),
+    Ginit(ustr::Ustr),
+}
+
+/// The JS half of [`skull_mir::reach`]: roots and successors, with cycles
+/// allowed (mutual recursion is ordinary Rock) and no leaf class.
+///
+/// JS has no leaves at the node level because it filters them one step earlier,
+/// at EDGE discovery: `discover_callees` must classify an intrinsic / host-mapped
+/// / `inline(js)` callee anyway in order to REGISTER it (a bare name, a verbatim
+/// co-emission), so a non-expandable callee never becomes a node in the first
+/// place. GLSL, which registers nothing, filters at the node instead. The trait
+/// serves both; `is_leaf` is the hook for the latter shape.
+struct JsReach<'a> {
+    ws: &'a Workspace,
+    scx: &'a skull_mir::lower::ScalarCtx,
+    st: &'a mut WorklistState,
+}
+
+impl JsReach<'_> {
+    /// Everything `discover_*`/the root seeding has queued since the last drain,
+    /// as nodes. Both queues are emptied: the driver owns the traversal from here.
+    fn take_pending(&mut self) -> Vec<JsNode> {
+        let mut out: Vec<JsNode> = std::mem::take(&mut self.st.queue).into_iter().map(JsNode::Fn).collect();
+        out.extend(
+            std::mem::take(&mut self.st.ginit_queue).into_iter().map(|(gname, _)| JsNode::Ginit(gname)),
+        );
+        out
+    }
+
+    /// Lower + transform one fn through the same per-body pipeline the luajit
+    /// path runs (lower -> inline -> cleanup -> closures -> FORL -> residual-
+    /// bound-call validation; coroutines skip inline/FORL), then record it.
+    fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
+        let f = &self.ws.module(fr.module).functions[fr.func];
+        let mut mf = skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func)?;
+        if mf.is_coroutine {
+            skull_transform::cleanup_with_nobox(self.ws, &mut mf);
+        } else {
+            skull_transform::inline_functions(self.ws, self.scx, fr, &mut mf, &mut self.st.cache)?;
+            skull_transform::cleanup_with_nobox(self.ws, &mut mf);
+            skull_transform::convert_closures(&mut mf, &self.st.names[&fr]);
+            skull_transform::recover_counted_loops(self.ws, &mut mf);
+            for nf in &mut mf.nested_fns {
+                skull_transform::recover_counted_loops(self.ws, nf);
+            }
+        }
+        skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf)?;
+        nobox_errs(self.ws, &mf)?;
+        validate_js_nobox_return(self.ws, f, &mf)?;
+        for nf in &mf.nested_fns {
+            nobox_errs(self.ws, nf)?;
+        }
+        self.discover(&mf)?;
+        self.st.lowered.push((fr, mf));
+        Ok(())
+    }
+
+    /// Lower one module global's initializer (never inlined, mirroring the luajit
+    /// global path). A global with no initializer contributes no node body.
+    fn visit_ginit(&mut self, gname: ustr::Ustr) -> Result<(), CompilerError> {
+        let site = self.st.state_index[&gname];
+        let init_name = global_init_js_name(gname);
+        let lowered = skull_mir::lower::lower_global(
+            self.ws, self.scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()),
+        )?;
+        let Some(mut mf) = lowered else { return Ok(()) };
+        skull_transform::cleanup_with_nobox(self.ws, &mut mf);
+        skull_transform::convert_closures(&mut mf, &init_name);
+        skull_transform::recover_counted_loops(self.ws, &mut mf);
+        for nf in &mut mf.nested_fns {
+            skull_transform::recover_counted_loops(self.ws, nf);
+        }
+        nobox_errs(self.ws, &mf)?;
+        for nf in &mf.nested_fns {
+            nobox_errs(self.ws, nf)?;
+        }
+        self.discover(&mf)?;
+        let is_const = self.ws.module(site.module).globals[site.gid].is_const;
+        self.st.ginits.push(GlobalInit {
+            name: gname,
+            init_name,
+            mf,
+            is_const,
+            order: (site.module.index(), u32::from(site.gid.into_raw())),
+        });
+        Ok(())
+    }
+
+    fn discover(&mut self, mf: &MirFunc) -> Result<(), CompilerError> {
+        let st = &mut *self.st;
+        register_statics(mf, &mut st.gctx);
+        discover_callees(self.ws, mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
+        discover_globals(
+            self.ws, mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
+            &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
+            &mut st.inline_js,
+        )
+    }
+}
+
+impl skull_mir::reach::ReachPolicy for JsReach<'_> {
+    type Node = JsNode;
+
+    fn roots(&mut self) -> Result<Vec<JsNode>, CompilerError> {
+        Ok(self.take_pending())
+    }
+
+    fn is_leaf(&mut self, _node: JsNode) -> Result<bool, CompilerError> {
+        Ok(false)
+    }
+
+    fn on_cycle(&mut self, _node: JsNode) -> Result<(), CompilerError> {
+        Ok(())
+    }
+
+    fn visit(&mut self, node: JsNode) -> Result<Vec<JsNode>, CompilerError> {
+        match node {
+            JsNode::Fn(fr) => self.visit_fn(fr)?,
+            JsNode::Ginit(gname) => self.visit_ginit(gname)?,
+        }
+        Ok(self.take_pending())
+    }
+}
+
+/// Expand the reachable program from whatever the root seeding left on the
+/// worklists. Emission order is canonicalized afterwards, so the driver's
+/// post-order does not reach the output.
 fn drain_worklists(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     st: &mut WorklistState,
 ) -> Result<(), CompilerError> {
-    loop {
-        if let Some(fr) = st.queue.pop() {
-            let f = &ws.module(fr.module).functions[fr.func];
-            let mut mf = skull_mir::lower::lower_function(ws, scx, fr.module, fr.func)?;
-            if mf.is_coroutine {
-                skull_transform::cleanup(&mut mf);
-            } else {
-                skull_transform::inline_functions(ws, scx, fr, &mut mf, &mut st.cache)?;
-                skull_transform::cleanup(&mut mf);
-                skull_transform::convert_closures(&mut mf, &st.names[&fr]);
-                skull_transform::recover_counted_loops(ws, &mut mf);
-                for nf in &mut mf.nested_fns {
-                    skull_transform::recover_counted_loops(ws, nf);
-                }
-            }
-            skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
-            register_statics(&mf, &mut st.gctx);
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
-            discover_globals(
-                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
-                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
-                &mut st.inline_js,
-            )?;
-            st.lowered.push((fr, mf));
-            continue;
-        }
-        if let Some((gname, site)) = st.ginit_queue.pop() {
-            let init_name = global_init_js_name(gname);
-            let mut mf = match skull_mir::lower::lower_global(ws, scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()))? {
-                Some(mf) => mf,
-                None => continue,
-            };
-            skull_transform::cleanup(&mut mf);
-            skull_transform::convert_closures(&mut mf, &init_name);
-            skull_transform::recover_counted_loops(ws, &mut mf);
-            for nf in &mut mf.nested_fns {
-                skull_transform::recover_counted_loops(ws, nf);
-            }
-            register_statics(&mf, &mut st.gctx);
-            discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js)?;
-            discover_globals(
-                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
-                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
-                &mut st.inline_js,
-            )?;
-            let is_const = ws.module(site.module).globals[site.gid].is_const;
-            st.ginits.push(GlobalInit {
-                name: gname,
-                init_name,
-                mf,
-                is_const,
-                order: (site.module.index(), u32::from(site.gid.into_raw())),
-            });
-            continue;
-        }
-        break;
-    }
+    skull_mir::reach::walk(&mut JsReach { ws, scx, st })?;
     Ok(())
 }
 
@@ -2748,7 +3101,7 @@ fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> O
 /// inlined. Deco bodies never call a decorated user fn, but computing the actual
 /// call set makes the choice provably safe regardless.
 fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
-    let targets: HashSet<FuncRef> = call_targets(mf).into_iter().collect();
+    let targets: HashSet<FuncRef> = skull_mir::reach::call_targets(mf).into_iter().collect();
     ws.modules
         .iter()
         .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
@@ -2921,7 +3274,7 @@ fn discover_callees(
     seen: &mut HashSet<FuncRef>,
     inline_js: &mut Vec<FuncRef>,
 ) -> Result<(), CompilerError> {
-    for callee in call_targets(mf) {
+    for callee in skull_mir::reach::call_targets(mf) {
         let cf = &ws.module(callee.module).functions[callee.func];
         // Only the BUILTIN Map renders inline (skip its co-emission); NativeBuffer
         // via the intrinsic table; Vec and user-struct `get` co-emit (fall through).
@@ -3521,7 +3874,7 @@ fn emit_coroutine_js(
     // are already `e.c<S>.c<slot>` MIR) -- the normal structured path.
     let mut nested = std::mem::take(&mut lowered.step.nested_fns);
     for nf in nested.iter_mut() {
-        skull_transform::cleanup(nf);
+        skull_transform::cleanup_with_nobox(ws, nf);
         skull_transform::recover_counted_loops(ws, nf);
         out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, globals)?);
     }
@@ -3653,29 +4006,6 @@ fn emit_js_constructor(
         paramlist = param_fields.join(", "),
         fields = init.join(", "),
     ))
-}
-
-/// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
-/// the raw arena) so a spliced-away call's stale arena inst is not re-discovered
-/// -- only the calls that survive inlining co-emit. Hoisted closure bodies are
-/// separate `nested_fns` after `convert_closures`, so their calls are walked too.
-fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
-    fn walk(mf: &MirFunc, out: &mut Vec<FuncRef>) {
-        for (_, block) in mf.blocks.iter() {
-            for &iid in &block.insts {
-                match &mf.insts[iid] {
-                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
-                    _ => {}
-                }
-            }
-        }
-        for nf in &mf.nested_fns {
-            walk(nf, out);
-        }
-    }
-    let mut out = Vec::new();
-    walk(mf, &mut out);
-    out
 }
 
 /// Every `Inst::Global` read + `Inst::StoreGlobal` write name in `mf` (main body
@@ -3834,6 +4164,16 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("__vec_data_get", 2) => Some("$1._data[$2]"),
         ("__vec_data_set", 3) => Some("$1._data[$2] = $3"),
         ("__vec_data_unset", 2) => Some("$1._data[$2] = undefined"),
+        // The COLD half of the same boundary (allocate / measure / shift / copy
+        // / reorder the backing as a whole). JS has no column storage -- columns
+        // go to the SKIP histogram -- so each is just the boxed form, but they
+        // must be mapped or the ops routed through them stop emitting.
+        // `lua_index` arrives 1-based from the shared Rock body; JS is 0-based.
+        ("__vec_data_alloc", 1) => Some("({_data: new Array($1).fill(false), len: 0, __ty: \"Vec\"})"),
+        ("__vec_data_capacity", 1) => Some("$1._data.length"),
+        ("__vec_data_insert", 3) => Some("$1._data.splice($2 - 1, 0, $3)"),
+        ("__vec_data_clone", 1) => Some("({_data: $1._data.slice(), len: $1.len, __ty: \"Vec\"})"),
+        ("__vec_data_sort", 2) => Some("__vec_sort($1, $2)"),
         ("table_new", 0) => Some("({})"),
         // Vec: `{_data, len, __ty}` 0-based. `vec_new` builds it; `vec_push`
         // writes `_data[len]` (the new tail slot) THEN increments `len` -- the
@@ -3888,10 +4228,6 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // to `undefined` above and defaulted inside the runtime.
         ("inspect", 3) => Some("inspect($1, $2, $3)"),
         ("inspect_formatted", 2) => Some("inspect_formatted($1, $2)"),
-        // `Vec.sort(key_fn)`: sort the 0-based `_data[0..len)` slice in place
-        // through the `__vec_sort` runtime (the pure-Rock FlatVec.sort co-emits
-        // instead).
-        ("sort", 2) => Some("__vec_sort($1, $2)"),
         // The `{x:spec}` interpolation format helpers -> their JS runtime ports.
         ("__rock_fmt_pad", 4) => Some("__rock_fmt_pad($1, $2, $3, $4)"),
         ("__rock_fmt_grouping", 3) => Some("__rock_fmt_grouping($1, $2, $3)"),
@@ -4001,6 +4337,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
     let mut mark = |ids: &[Idx<Inst>]| ids.iter().for_each(|&i| f(i));
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. } => {}
+        Inst::FfiViewCast { ptr, .. } => mark(&[*ptr]),
         Inst::IntAdd(a, b)
         | Inst::IntSub(a, b)
         | Inst::IntMul(a, b)
@@ -4043,7 +4380,16 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             mark(args);
         }
         Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems),
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => {
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            mark(&[*capacity]);
+            columns.iter().for_each(|(_, vs)| mark(vs));
+        }
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => {
             for (_, v) in fields {
                 f(*v);
             }
@@ -4063,6 +4409,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         }
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => mark(&[*base]),
         Inst::Index { base, index, .. } => mark(&[*base, *index]),
+        Inst::VecCheckedIndex { vec, index } => mark(&[*vec, *index]),
         Inst::Len { base, .. } => mark(&[*base]),
         Inst::FfiNewArray { count, .. } => mark(&[*count]),
         Inst::Store { value, .. } => mark(&[*value]),

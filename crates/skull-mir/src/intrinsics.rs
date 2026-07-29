@@ -39,6 +39,9 @@ pub enum Emission {
 /// A compile-time expansion kind -- the emission of an expansion intrinsic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpandKind {
+    /// `materialize<T>(value: T) -> T` makes a value aggregate's runtime box
+    /// explicit at this source position.
+    Materialize,
     /// `@struct_expand fn f<T>(u: T) -> [(string, E)]` -> the literal pairs list
     /// (docs/shaders.md, Layer 2).
     StructPairs,
@@ -60,6 +63,9 @@ pub fn is_intrinsic(f: &Function) -> bool {
 /// intrinsic. THE ONE recognizer -- `lower_call_repr` routes through it instead
 /// of a bespoke annotation check, so there is no second ad-hoc registry.
 pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
+    if has_anno(f, "materialize") {
+        return Some(ExpandKind::Materialize);
+    }
     if has_anno(f, "struct_expand") {
         return Some(ExpandKind::StructPairs);
     }

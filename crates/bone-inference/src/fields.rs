@@ -248,17 +248,41 @@ fn value_field_write_is_place(
             Expr::FieldAccess { base: parent, .. } => {
                 let pty = infer_expr(c, gamma, parent)?;
                 let pty = resolve(gamma, pty, span);
-                // A value field of a MUTABLE (non-value) struct/table lives in that
-                // struct's storage -> a place. If the parent is ITSELF a value, keep
-                // descending: it is a place only if some ancestor is mutable storage.
+                // A value field of a MUTABLE (non-value) struct lives in that
+                // struct's storage -- but only if the struct ITSELF is reachable
+                // storage. `mk().p.x = 5` writes through a temporary that no one
+                // else can observe, and sharing (a hoisted constant, a returned
+                // interior box) makes that write land on storage the caller never
+                // named. Keep descending either way; the chain bottoms out at a
+                // Var / Global / Index.
                 if ty_is_value_struct(gamma, pty).is_none() {
-                    return Ok(true);
+                    return Ok(expr_is_reachable_storage(c, parent));
                 }
                 cur = parent;
             }
             // A bare value local, a call result, a literal: an immutable copy.
             _ => return Ok(false),
         }
+    }
+}
+
+/// Whether `e` names storage a second reference could reach -- a variable or a
+/// global, or a projection/element of one. A call result, a literal, or any other
+/// temporary is reachable only through the expression that made it, so a write
+/// into it is unobservable and rejects.
+///
+/// skull's `is_mutable_place` (`skull-mir/src/lower.rs`) is the read-side
+/// sibling: same temporary/place verdict, but it stops at the first
+/// container/global instead of walking to the root. Keep the temporary verdict
+/// in sync -- a write bone accepts that skull thinks cannot be reached is an
+/// aliasing bug.
+fn expr_is_reachable_storage(c: BodyCtx, e: Idx<Expr>) -> bool {
+    match c.body.expr_arena[e] {
+        Expr::Var(_) | Expr::Global(_) => true,
+        Expr::FieldAccess { base, .. } | Expr::Index { base, .. } | Expr::SafeNav { base, .. } => {
+            expr_is_reachable_storage(c, base)
+        }
+        _ => false,
     }
 }
 

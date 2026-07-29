@@ -264,7 +264,10 @@ pub(crate) fn resolve_for_iter_protocol(
 
     gamma.out.for_iter_protocol.insert(
         iter_expr,
-        ForIterInfo { iter_fn, next: BoundNext::Concrete { func: next_fn, sub } },
+        ForIterInfo {
+            iter_fn,
+            next: BoundNext::Concrete { func: next_fn, sub, next_generics: next_subs },
+        },
     );
     Ok(elem)
 }
@@ -366,7 +369,10 @@ pub(crate) fn check_iterator_bounds(
                         true, depth + 1, span,
                     )?;
                 }
-                tree.next.insert(idx, BoundNext::Concrete { func: next_fn, sub });
+                tree.next.insert(
+                    idx,
+                    BoundNext::Concrete { func: next_fn, sub, next_generics: next_subs },
+                );
                 done.insert(idx);
             }
         }

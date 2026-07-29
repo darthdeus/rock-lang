@@ -451,7 +451,7 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
 /// (docs/completion-v2-design.md M2b). Field order below is the dispatch
 /// precedence. Classification is SYNTACTIC; handlers may still fall through
 /// at runtime (an `X {` head that isn't a struct, a call slot that isn't
-/// FieldOf), which is why the dispatcher keeps an ordered attempt chain
+/// FieldRef), which is why the dispatcher keeps an ordered attempt chain
 /// rather than a single-winner match.
 pub(crate) struct CompletionCx {
     /// The recovered-AST classifier over the munge ladder; None only on the

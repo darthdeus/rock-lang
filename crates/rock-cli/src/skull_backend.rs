@@ -1175,7 +1175,9 @@ fn skull_emit_project(dir: &str) -> String {
         std::process::exit(1);
     }
 
-    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir(&ws, user_mid) {
+    // Project build: modules outside `dir` (the `stone` dependency, stdlib) are
+    // libraries and prune to what the project reaches.
+    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir_in(&ws, user_mid, Some(dir)) {
         Ok(e) => (e.lua, e.skipped),
         Err(e) => {
             eprintln!("{}", render_project_err(&sources, &e));
@@ -1249,7 +1251,13 @@ fn build_rock_globals_registry(
         let Some(pkg) = matched else { continue };
         let entry = by_package.entry(pkg.to_string()).or_default();
         for (_gid, g) in m.globals.iter() {
-            entry.push(g.name.as_str().to_string());
+            // A `nobox` global has no slot under its own name -- it IS its leaf
+            // globals, so that is what reflection reads and restores. Listing the
+            // base name would dump nil and restore nothing.
+            match skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+                Some(leaves) => entry.extend(leaves.iter().map(|l| l.to_string())),
+                None => entry.push(g.name.as_str().to_string()),
+            }
         }
     }
     by_package.retain(|_, names| !names.is_empty());
@@ -1638,17 +1646,33 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
 enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
     Output(String),
-    /// Runtime error, lua load failure, spawn failure, or timeout.
-    Errored,
+    /// Runtime error, lua load failure, spawn failure, or timeout -- carrying
+    /// the diagnostic. A test that pins a SPECIFIC failure has to be able to
+    /// tell it from an unrelated load error or a timeout; discarding the message
+    /// made every `Errored` arm accept any failure as proof.
+    Errored(String),
+}
+
+#[cfg(test)]
+impl ExecOutcome {
+    /// The failure diagnostic, or a panic naming `ctx` if the run succeeded.
+    fn expect_errored(self, ctx: &str) -> String {
+        match self {
+            ExecOutcome::Errored(d) => d,
+            ExecOutcome::Output(o) => {
+                panic!("{ctx}: expected a failure, got clean output:\n{}", normalize_stdout(&o))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 fn exec_lua(program: &str) -> ExecOutcome {
     let timeout = Some(Duration::from_secs(15));
     match rock_host::lua_runner::run_lua_code_with_timeout(program, timeout) {
-        Ok(out) if out.contains("STDERR:") => ExecOutcome::Errored,
+        Ok(out) if out.contains("STDERR:") => ExecOutcome::Errored(out),
         Ok(out) => ExecOutcome::Output(out),
-        Err(_) => ExecOutcome::Errored,
+        Err(e) => ExecOutcome::Errored(format!("lua runner failed: {e}")),
     }
 }
 
@@ -2040,13 +2064,13 @@ mod overlay_runtime_tests {
                      --- composed ---\n{nc}\n--- fresh ---\n{nf}"
                 );
             }
-            (ExecOutcome::Errored, ExecOutcome::Errored) => {
+            (ExecOutcome::Errored(_), ExecOutcome::Errored(_)) => {
                 panic!("{ctx}: BOTH sides errored -- harness bug (bad source or missing stub)");
             }
-            (ExecOutcome::Output(_), ExecOutcome::Errored) => {
+            (ExecOutcome::Output(_), ExecOutcome::Errored(_)) => {
                 panic!("{ctx}: composed (baseline+overlay) runs but fresh full build errors")
             }
-            (ExecOutcome::Errored, ExecOutcome::Output(_)) => {
+            (ExecOutcome::Errored(_), ExecOutcome::Output(_)) => {
                 panic!("{ctx}: fresh full build runs but composed (baseline+overlay) errors")
             }
         }
@@ -2254,7 +2278,7 @@ mod overlay_runtime_tests {
                 "5\n10",
                 "warm baseline prints 5; after the overlay reload the static re-inits to 10",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
         }
     }
 
@@ -2288,7 +2312,7 @@ mod overlay_runtime_tests {
                 "5\n10",
                 "nested-fn static must re-init on initializer edit through the overlay",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
         }
     }
 
@@ -2336,7 +2360,7 @@ mod overlay_runtime_tests {
                 "1\n2\n101\n102\n103\n104",
                 "reload1 re-inits to 100; reload2 (unrelated) must preserve, not re-reset",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlays run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlays run errored"),
         }
     }
 
@@ -2379,7 +2403,7 @@ mod overlay_runtime_tests {
                 "99\n99",
                 "unrelated edit must not reset the static: warmed 99 survives the reload",
             ),
-            ExecOutcome::Errored => panic!("composed baseline+overlay run errored"),
+            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
         }
     }
 
@@ -2682,12 +2706,12 @@ mod overlay_runtime_tests {
                     }
                 }
                 // Both error: out of scope (skull may not run this test standalone).
-                (ExecOutcome::Errored, ExecOutcome::Errored) => {}
-                (ExecOutcome::Output(_), ExecOutcome::Errored) => {
+                (ExecOutcome::Errored(_), ExecOutcome::Errored(_)) => {}
+                (ExecOutcome::Output(_), ExecOutcome::Errored(_)) => {
                     r.compared += 1;
                     r.divergences.push((file.to_string(), t.name.clone(), "composed runs, full errors".into()));
                 }
-                (ExecOutcome::Errored, ExecOutcome::Output(_)) => {
+                (ExecOutcome::Errored(_), ExecOutcome::Output(_)) => {
                     r.compared += 1;
                     r.divergences.push((file.to_string(), t.name.clone(), "overlay BREAKS a test the full build runs".into()));
                 }
@@ -2816,7 +2840,7 @@ mod overlay_runtime_tests {
         // Baseline: the registry runs the v0 body.
         match run_parts(&[&full0.lua, SIM_DRIVER]) {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1", "baseline frame should run the v0 system body"),
-            ExecOutcome::Errored => panic!("baseline fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("baseline fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
@@ -2873,7 +2897,7 @@ mod overlay_runtime_tests {
                 "1",
                 "without the rebind the registry must run the STALE body (this is the bug the rebind fixes)"
             ),
-            ExecOutcome::Errored => panic!("fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("fixture failed to run"),
         }
     }
 
@@ -2895,7 +2919,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1 2", "baseline co fn body"),
-            ExecOutcome::Errored => panic!("baseline coroutine fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("baseline coroutine fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", v1).expect("update v1");
@@ -2954,7 +2978,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1 3", "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)"),
-            ExecOutcome::Errored => panic!("baseline flat-enum coroutine fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("baseline flat-enum coroutine fixture failed to run"),
         }
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
@@ -3038,7 +3062,7 @@ mod overlay_runtime_tests {
                 "1\n30\n100\n-1",
                 "live coroutine: v0 first yield (Tick=1), then v1 body across the reload (Pair=30, Done=100, done)"
             ),
-            ExecOutcome::Errored => panic!("live flat-enum coroutine reload fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("live flat-enum coroutine reload fixture failed to run"),
         }
     }
 
@@ -3103,7 +3127,7 @@ mod overlay_runtime_tests {
                 "7\n-1\n-1\n-1",
                 "a cell-shifting overlay must stamp-kill the live coroutine, not corrupt it"
             ),
-            ExecOutcome::Errored => panic!("cell-shift + live resume crashed -- the layout stamp regressed"),
+            ExecOutcome::Errored(_) => panic!("cell-shift + live resume crashed -- the layout stamp regressed"),
         }
     }
 
@@ -3155,7 +3179,7 @@ mod overlay_runtime_tests {
                 "1\n-1\n-1\n-1",
                 "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point"
             ),
-            ExecOutcome::Errored => panic!("yield-renumber + live resume errored (expected the clean kill output)"),
+            ExecOutcome::Errored(_) => panic!("yield-renumber + live resume errored (expected the clean kill output)"),
         }
     }
 
@@ -3205,7 +3229,7 @@ mod overlay_runtime_tests {
                 "1\n20\n-1",
                 "a live await chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)"
             ),
-            ExecOutcome::Errored => panic!("live await delegation reload fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("live await delegation reload fixture failed to run"),
         }
     }
 
@@ -3256,7 +3280,7 @@ mod overlay_runtime_tests {
                 "1\n-1\n1",
                 "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)"
             ),
-            ExecOutcome::Errored => panic!("stamp-kill inner-chain fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("stamp-kill inner-chain fixture failed to run"),
         }
     }
 
@@ -3305,7 +3329,7 @@ mod overlay_runtime_tests {
                 "7\n-1\nbusy:0",
                 "a stamp-killed coroutine must run its creation-time defers (invariant released, no soft-lock)"
             ),
-            ExecOutcome::Errored => panic!("stamp-kill defer fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("stamp-kill defer fixture failed to run"),
         }
     }
 
@@ -3434,7 +3458,7 @@ mod overlay_runtime_tests {
                 "7\ntrue",
                 "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)"
             ),
-            ExecOutcome::Errored => panic!("full-reload survival fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("full-reload survival fixture failed to run"),
         }
 
         // Resuming the survivor: the v1 step's layout stamp (yield channel
@@ -3458,7 +3482,7 @@ mod overlay_runtime_tests {
                 "7\ntrue\n-1",
                 "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it"
             ),
-            ExecOutcome::Errored => panic!("full-reload survivor resume crashed -- the layout stamp regressed"),
+            ExecOutcome::Errored(_) => panic!("full-reload survivor resume crashed -- the layout stamp regressed"),
         }
     }
 
@@ -3524,7 +3548,7 @@ mod overlay_runtime_tests {
                 "10\ntrue",
                 "a live struct instance must survive the full re-dofile WITHOUT the added field"
             ),
-            ExecOutcome::Errored => panic!("struct-shape survival fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("struct-shape survival fixture failed to run"),
         }
 
         // Corruption: the v1 reader assumes `armor: int` on an instance that
@@ -3538,13 +3562,15 @@ mod overlay_runtime_tests {
             &full1.lua,
             "describe()",
         ]);
-        match composed {
-            ExecOutcome::Errored => {} // the pinned corruption
-            ExecOutcome::Output(o) => panic!(
-                "expected the recompiled reader to die on the nil-valued added field, got output:\n{}",
-                normalize_stdout(&o)
-            ),
-        }
+        // Assert the SPECIFIC failure: any-error-is-success would also pass on a
+        // timeout or an unrelated load error, which is how a pin like this rots
+        // into proving nothing.
+        let diag = composed
+            .expect_errored("expected the recompiled reader to die on the nil-valued added field");
+        assert!(
+            diag.contains("arithmetic on") && diag.contains("nil"),
+            "expected nil-arithmetic on the field the live instance never had, got:\n{diag}"
+        );
     }
 
     /// PREMISE pin for the schema-drift restart policy, value-struct class
@@ -3557,7 +3583,7 @@ mod overlay_runtime_tests {
     /// value. Not even a fresh post-reload construction is safe -- this is the
     /// class where no in-process response exists, the core restart argument.
     #[test]
-    fn value_struct_reorder_full_reload_misassigns_positional_ctor() {
+    fn value_struct_reorder_full_reload_is_caught_by_the_layout_check() {
         let v0 = "value P { x: int, y: int }\n\
                   global CUR: P = P { x: 0, y: 0 }\n\
                   @nomangle\n\
@@ -3593,14 +3619,23 @@ mod overlay_runtime_tests {
         let fresh = run_parts(&[&full0.lua, stub_for(&full0.lua), "store_p()", "show()"]);
         match fresh {
             ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1,2"),
-            ExecOutcome::Errored => panic!("value-struct v0 fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("value-struct v0 fixture failed to run"),
         }
 
-        // Composed: the v1 chunk re-cdefs P (silent no-op), then a FRESH
-        // post-reload `set()` constructs `P { x: 1, y: 2 }` through the v1
-        // positional order (y first) against the frozen v0 ctype (x first):
-        // x=2, y=1. The pinned output is the SWAP -- silently wrong values,
-        // no error anywhere.
+        // Composed: the v1 chunk re-cdefs P (silent no-op), so LuaJIT keeps the
+        // v0 layout. Left alone this misassigns silently -- the v1 positional
+        // ctor (y first) feeds the frozen v0 ctype (x first) and `show()` prints
+        // the SWAP, `2,1`, with no error anywhere.
+        //
+        // It no longer gets that far. The emitted leaf-layout check
+        // (`value_leaf_layout_checks`) compares skull's computed offsets against
+        // `ffi.offsetof` at chunk load, sees v1's `y@0` against the frozen
+        // `y@4`, and aborts. The restart policy is still the PRIMARY response --
+        // `struct_shape_hash` hashes fields in order, so the real driver drifts
+        // and respawns cold long before a chunk like this loads (this fixture
+        // composes the two chunks by hand, bypassing that gate). The check is
+        // the loud backstop for anything that ever slips past it, which is what
+        // makes this class detectable rather than silent.
         let composed = run_parts(&[
             &full0.lua,
             stub_for(&full0.lua),
@@ -3611,17 +3646,17 @@ mod overlay_runtime_tests {
             "store_p()",
             "show()",
         ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1,2\n2,1",
-                "expected the frozen-ctype positional misassignment (the pinned corruption)"
-            ),
-            ExecOutcome::Errored => panic!(
-                "value-struct reorder fixture errored -- if ffi.cdef redefinition \
-                 started FAILING loudly, the premise (and the plan doc) needs updating"
-            ),
-        }
+        // Assert the SPECIFIC diagnostic: any-error-is-success would also pass on
+        // an unrelated load failure or a timeout, which is how a test like this
+        // rots into proving nothing.
+        let diag = composed.expect_errored(
+            "a reordered value struct reloaded into a frozen ctype must be caught by \
+             the leaf-layout check, not silently misassigned",
+        );
+        assert!(
+            diag.contains("skull layout drift") && diag.contains("P.y"),
+            "expected the leaf-layout drift diagnostic naming the moved field, got:\n{diag}"
+        );
     }
 
     /// A flat enum's DEFINITION change (here: a payload widening that adds a frame
@@ -3711,7 +3746,7 @@ mod overlay_runtime_tests {
                 "2",
                 "the @on_reload callback must fire on BOTH incremental reloads"
             ),
-            ExecOutcome::Errored => panic!("on_reload overlay fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("on_reload overlay fixture failed to run"),
         }
     }
 
@@ -3761,7 +3796,7 @@ mod overlay_runtime_tests {
                 "2",
                 "fire must run the EDITED @on_reload body (name-lookup), not the stale original"
             ),
-            ExecOutcome::Errored => panic!("on_reload body-edit fixture failed to run"),
+            ExecOutcome::Errored(_) => panic!("on_reload body-edit fixture failed to run"),
         }
     }
 
@@ -3906,7 +3941,7 @@ mod overlay_runtime_tests {
                 "12\n-1",
                 "a coroutine created after the reload runs the new hoisted lambda body (4*3=12)"
             ),
-            ExecOutcome::Errored => panic!("post-reload coroutine with hoisted lambda failed to run"),
+            ExecOutcome::Errored(_) => panic!("post-reload coroutine with hoisted lambda failed to run"),
         }
     }
 
@@ -3964,7 +3999,7 @@ mod overlay_runtime_tests {
                 "8\n8\n15\n-1",
                 "a pre-reload record is a stale fn snapshot (8), a post-reload record is fresh (15)"
             ),
-            ExecOutcome::Errored => panic!("live coroutine with stale lambda record failed to run"),
+            ExecOutcome::Errored(_) => panic!("live coroutine with stale lambda record failed to run"),
         }
     }
 
@@ -4032,7 +4067,7 @@ mod overlay_runtime_tests {
                 "7\n11\n-1",
                 "a layout-stable lambda-local edit keeps the live coroutine running (7 then 11)"
             ),
-            ExecOutcome::Errored => panic!("lambda-local edit scenario crashed instead of surviving"),
+            ExecOutcome::Errored(_) => panic!("lambda-local edit scenario crashed instead of surviving"),
         }
     }
 
@@ -4088,7 +4123,7 @@ mod overlay_runtime_tests {
                 "7\n-1\n-1",
                 "a co-fn-level local shift must stamp-kill the live coroutine cleanly"
             ),
-            ExecOutcome::Errored => panic!("co-fn local shift + live resume crashed instead of clean kill"),
+            ExecOutcome::Errored(_) => panic!("co-fn local shift + live resume crashed instead of clean kill"),
         }
     }
 }
@@ -4206,7 +4241,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
         let mid = skull::user_module_id(ws)
             .map_err(no_user_module)?;
         let t_full = Instant::now();
-        let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+        let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(path))
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         (emit.lua, c, ms(t_full))
     };
@@ -4375,7 +4410,7 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let ws = session.workspace();
         let mid = skull::user_module_id(ws)
             .map_err(no_user_module)?;
-        let (_emit, c) = skull::mir_emit::emit_full(ws, mid)
+        let (_emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(path))
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         c
     };
@@ -4655,7 +4690,7 @@ impl SkullStone {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+            let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(dir))
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
             let spec = crate::unified_compile::SourceSpec::Directory(
@@ -4737,7 +4772,7 @@ impl SkullStone {
                 let ws = self.project.workspace();
                 let mid = skull::user_module_id(ws)
                     .map_err(no_user_module)?;
-                let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+                let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(self.project.dir()))
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?;
                 self.cache = c; // resets changed_since_full
                 // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`):
@@ -4788,7 +4823,7 @@ impl SkullStone {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full(ws, mid)
+            let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(self.project.dir()))
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             self.cache = c; // resets changed_since_full -- the overlay is now folded in
             // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
@@ -4875,6 +4910,27 @@ mod shape_drift_tests {
         assert!(
             matches!(again, SkullReload::NoChange),
             "the shape delta must be consumed by the restart, got {again:?}"
+        );
+    }
+
+    /// Marking a `value` type `nobox` moves every global of that type from one
+    /// boxed slot to K leaf globals, while the rendered type stays `"NV2"`. The
+    /// emitted per-global preservation guard compares only that rendered type, so
+    /// it would preserve across the move and leave the new leaves nil -- this
+    /// restart is what stops the reload reaching it. `struct_shape_hash` hashing
+    /// `is_nobox` is the one line that makes it fire.
+    #[test]
+    fn marking_a_type_nobox_requests_restart() {
+        let v0 = "value NV2 { x: float, y: float }\n\
+                  global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
+        let v1 = "nobox value NV2 { x: float, y: float }\n\
+                  global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        std::fs::write(&rock, v1).unwrap();
+        let reload = stone.recompile(&[rock], &main_lua, &inc_lua).expect("recompile v1");
+        assert!(
+            matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "NV2")),
+            "a nobox flip relocates live global storage -- must restart, got {reload:?}"
         );
     }
 
@@ -4967,8 +5023,11 @@ mod force_full_tests {
         let inc_lua = src("incremental.lua");
         let rock = src("main.rock");
 
-        let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\n";
-        let v2 = "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }\n";
+        // Needs a `main`: emission is reachability-driven, so a fixture with no
+        // entry point at all emits no user code and the two builds would compare
+        // equal for a reason that has nothing to do with the fold.
+        let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\nfn main() { print(\"{use_it()}\") }\n";
+        let v2 = "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }\nfn main() { print(\"{use_it()}\") }\n";
 
         // init at v1: writes main.lua(v1), wipes any overlay.
         std::fs::write(&rock, v1).unwrap();
@@ -5012,6 +5071,61 @@ mod force_full_tests {
             main_forced, main_fresh,
             "force_full main.lua must be byte-identical to a fresh full build of the edited source"
         );
+    }
+
+    /// Global DCE prunes a fn no root reaches, so main.lua does NOT define it.
+    /// A later BODY edit that adds the first call to that fn must still leave it
+    /// defined somewhere: the overlay redefines only CHANGED fns, so without the
+    /// newly-reachable backfill (`newly_reachable`) the composed program calls a
+    /// global that exists in neither file and dies on load.
+    #[test]
+    fn overlay_backfills_a_fn_the_edit_makes_reachable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_str = dir.path().to_str().unwrap().to_string();
+        let src = |p: &str| dir.path().join(p);
+
+        let main_lua = src("main.lua");
+        let inc_lua = src("incremental.lua");
+        let rock = src("main.rock");
+
+        // A LIBRARY fn, since the project's own modules are always roots. `split`
+        // is not inlined and pulls `find`/`substring`/`len` with it, so this also
+        // covers the multi-hop case rather than just the first edge.
+        let v1 = "fn main() { print(\"start\") }\n";
+        let v2 = "fn main() { print(\"{split(\\\"a,b\\\", \\\",\\\").len}\") }\n";
+        // Only `split` itself: its own callees are inlined into it, so they are
+        // legitimately absent from the composed program. The transitive case is
+        // covered by the driver's own tests (crates/skull-mir/tests/reach_driver.rs).
+        let needed = ["function split_string_string_ret_arr_string("];
+
+        std::fs::write(&rock, v1).unwrap();
+        let mut skull = SkullStone::init(&dir_str, &main_lua, &inc_lua).expect("init v1");
+        let main_v1 = std::fs::read_to_string(&main_lua).expect("main.lua after init");
+        for n in needed {
+            assert!(
+                !main_v1.contains(n),
+                "`{n}` must be pruned at v1 -- otherwise this test proves nothing"
+            );
+        }
+
+        // Body edit: main now calls `split`, which routes to the overlay.
+        std::fs::write(&rock, v2).unwrap();
+        let reload = skull.recompile(&[rock.clone()], &main_lua, &inc_lua).expect("recompile v2");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "a body edit should route to the overlay (Incremental tier)"
+        );
+        let main_after = std::fs::read_to_string(&main_lua).expect("main.lua after edit");
+        let overlay = std::fs::read_to_string(&inc_lua).expect("overlay after edit");
+        for n in needed {
+            assert!(
+                main_after.contains(n) || overlay.contains(n),
+                "the edit made `{n}` reachable, so the composed program must define it \
+                 somewhere (main.lua: {}, overlay: {})",
+                main_after.contains(n),
+                overlay.contains(n),
+            );
+        }
     }
 
     /// A project with a type error (a call to a non-existent function) must make

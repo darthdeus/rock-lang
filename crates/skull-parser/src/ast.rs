@@ -585,6 +585,7 @@ pub struct StructDef {
     pub generics: Vec<Generic>,
     pub fields: Vec<Field>,
     pub is_value: bool,
+    pub is_nobox: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -596,6 +597,10 @@ pub struct Field {
     /// Leading `@name` / `@name(args)` on the field. Preserved for the
     /// bone-side registry pass; no skull consumer reads it yet.
     pub annotations: Vec<Annotation>,
+    /// `embed f: Foo` -- the field's leaves live in the parent and the field
+    /// has no independently storable aggregate (projection-only).
+    /// `embed` is CONTEXTUAL: `embed: int` is still a field named `embed`.
+    pub is_embed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

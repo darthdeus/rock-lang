@@ -56,10 +56,12 @@ pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 /// (field name, field type) pairs for structs (+ the value/cdata flag),
 /// ordered (variant name, payload shape) for enums, the wrapped type for
 /// newtypes. Bodies, spans, defaults, and comments do not participate, so a
-/// hot body edit or a doc tweak never restarts. Transitive drift needs no
-/// transitive hash: a nested type's OWN entry changes. Known over-trigger
-/// (accepted, uniform-predictable): reordering a boxed enum's variants
-/// restarts even though its live tags are name strings.
+/// hot body edit or a doc tweak never restarts. A BOXED field needs no
+/// transitive hash: the parent holds a pointer either way, so a nested type's
+/// OWN entry changing is the whole signal. An `embed` field is the exception --
+/// see [`struct_shape_hash`]. Known over-trigger (accepted,
+/// uniform-predictable): reordering a boxed enum's variants restarts even
+/// though its live tags are name strings.
 pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
     use bone_semantic::hir::VariantPayload;
     use std::hash::{Hash, Hasher};
@@ -67,14 +69,7 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
     let mut out = ShapeHashes::default();
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            let mut h = rustc_hash::FxHasher::default();
-            "struct".hash(&mut h);
-            s.is_value.hash(&mut h);
-            for f in s.fields.iter() {
-                f.name.as_str().hash(&mut h);
-                ws.render(None, f.ty).hash(&mut h);
-            }
-            out.insert(s.name, h.finish());
+            out.insert(s.name, struct_shape_hash(ws, s, &mut Vec::new()));
         }
         for (_, e) in module.enums.iter() {
             let mut h = rustc_hash::FxHasher::default();
@@ -108,6 +103,58 @@ pub fn type_shape_hashes(ws: &Workspace) -> ShapeHashes {
         }
     }
     out
+}
+
+/// One struct's layout hash. An `embed` field contributes the embedded type's
+/// SHAPE HASH, not just its rendered name: the child has no box of its own, so
+/// its leaves ARE this struct's physical keys and widening the child relayouts
+/// the PARENT.
+///
+/// That extra contribution also covers the flag flip, since an embed field
+/// hashes strictly more than a boxed one: flipping `f: Task?` to
+/// `embed f: Task?` leaves every rendered field type identical and touches no
+/// other type, so before this the whole workspace hashed clean and NO restart
+/// fired. `is_embed` is hashed explicitly anyway -- the flag is part of the
+/// layout in its own right, and that should not depend on how the child
+/// happens to contribute.
+///
+/// `visiting` breaks a cycle with a stable sentinel. bone rejects a cyclic
+/// embed graph (`check_embed_site_legality`), so this is unreachable by
+/// construction; it exists so a malformed workspace reaching codegen produces a
+/// wrong-but-finite hash instead of hanging the compiler.
+fn struct_shape_hash(
+    ws: &Workspace,
+    s: &bone_semantic::hir::StructDef,
+    visiting: &mut Vec<ustr::Ustr>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut h = rustc_hash::FxHasher::default();
+    "struct".hash(&mut h);
+    s.is_value.hash(&mut h);
+    s.is_nobox.hash(&mut h);
+    for f in s.fields.iter() {
+        f.name.as_str().hash(&mut h);
+        f.is_embed.hash(&mut h);
+        ws.render(None, f.ty).hash(&mut h);
+        let child = nominal_field_type(ws, f.ty)
+            .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
+        let flattened = f.is_embed
+            || child.is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox);
+        if !flattened {
+            continue;
+        }
+        match child {
+            Some(sid) if !visiting.contains(&s.name) => {
+                let child = &ws.modules[sid.module.index()].structs[sid.def];
+                visiting.push(s.name);
+                struct_shape_hash(ws, child, visiting).hash(&mut h);
+                visiting.pop();
+            }
+            _ => "<embed-unresolved>".hash(&mut h),
+        }
+    }
+    h.finish()
 }
 
 /// The type names whose shape hash differs between two compiles: changed,
@@ -378,7 +425,20 @@ fn runtime_prelude() -> &'static str {
     // codegen test harness) -- the record metatable is where the emitter's
     // `setmetatable({..}, __rock_fn_mt)` output lands.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        PRELUDE_TEMPLATE.replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+        let out = PRELUDE_TEMPLATE
+            .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table());
+        // `str::replace` on a placeholder that drifted out of the template is a
+        // NO-OP, and the survivor is valid Lua: `= {LEAF_VIEWS}` reads an unset
+        // global, so the table is EMPTY rather than a syntax error. `pairs({})`
+        // then makes `__nb_refresh_views` do nothing and every view dangles
+        // after a grow -- silently, which is the class that killed mag's
+        // spell_damages once already. Fail loudly at build time instead.
+        assert!(
+            !out.contains('{') || !out.contains("{LEAF_VIEWS}"),
+            "prelude template still contains an unsubstituted {{LEAF_VIEWS}} placeholder"
+        );
+        out
     });
     &PRELUDE
 }
@@ -388,6 +448,13 @@ const PRELUDE_TEMPLATE: &str =
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
 if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
+-- Compiler-minted NativeBuffer leaf views: field -> ffi.cast type. Generated
+-- from skull_mir::lower::LEAF_VIEWS. Views are DERIVED (pointers over the
+-- buffer's own `ptr`), so refresh reseats them and serialize/inspect skip them.
+_G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
+-- Never legitimately empty: an empty table means the generator emitted nothing,
+-- which would make view refresh a silent no-op and leave every view dangling.
+assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refresh would silently do nothing")
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
 -- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
@@ -447,6 +514,58 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
         .collect();
     v.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
     v
+}
+
+
+/// `<Name>_lct(<one param per primitive leaf, in `value_leaf_paths` order>)`:
+/// allocate the cdata and write each leaf through a hoisted nested reference.
+/// The call site stays a single expression, so const-hoisting and the
+/// read-only-use analysis are untouched.
+fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
+    // Names are POSITIONAL indices, never derived from the path. A
+    // dot->underscore mapping is not injective: sibling fields `pos` (holding
+    // `inner`) and `pos_inner` both render `l_pos_inner`, and Lua silently lets
+    // the later duplicate shadow the earlier, writing one leaf's value into the
+    // other. Dotted keys are injective precisely because `.` cannot appear in an
+    // identifier; deriving identifiers back from them throws that away.
+    let params: Vec<String> = (0..paths.len()).map(|i| format!("l{i}")).collect();
+    let mut body = String::new();
+    let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  local t = {name}_ct()\n"));
+    // One local per distinct nested prefix (EVERY ancestor, shortest first, so
+    // `b` is bound before `b.lo`), so a leaf write never re-indexes an aggregate
+    // field -- each such index allocates a reference cdata.
+    let mut refs: Vec<String> = Vec::new();
+    for p in paths {
+        let comps: Vec<&str> = p.as_str().split('.').collect();
+        for n in 1..comps.len() {
+            let prefix = comps[..n].join(".");
+            if !refs.iter().any(|r| *r == prefix) {
+                refs.push(prefix);
+            }
+        }
+    }
+    refs.sort_by_key(|r| r.matches('.').count());
+    let ref_local = |r: &str| -> String {
+        format!("r{}", refs.iter().position(|x| x == r).expect("prefix registered"))
+    };
+    for r in &refs {
+        let base = match r.rsplit_once('.') {
+            Some((pre, last)) => format!("{}.{last}", ref_local(pre)),
+            None => format!("t.{r}"),
+        };
+        let _ = std::fmt::Write::write_fmt(
+            &mut body,
+            format_args!("  local {} = {base}\n", ref_local(r)),
+        );
+    }
+    for (i, p) in paths.iter().enumerate() {
+        let target = match p.as_str().rsplit_once('.') {
+            Some((prefix, last)) => format!("{}.{last}", ref_local(prefix)),
+            None => format!("t.{p}"),
+        };
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("  {target} = {}\n", params[i]));
+    }
+    format!("{name}_lct = function({})\n{body}  return t\nend\n", params.join(", "))
 }
 
 /// Emit the `ffi.cdef` typedefs + `<Name>_ct = ffi.typeof(...)` constructors for
@@ -517,6 +636,16 @@ fn value_struct_defs(
             } else {
                 typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, s.name));
                 ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = s.name));
+                // Leaf-taking ctor: LuaJIT has no brace elision, so a nested
+                // field cannot be passed as loose scalars to `_ct`. Allocate and
+                // write leaves instead, hoisting each nested reference once.
+                // Used by the normalization that keeps a `nobox` field from
+                // materializing when its parent boxes.
+                if let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, s.name) {
+                    if paths.iter().any(|p| p.contains('.')) {
+                        ctors.push_str(&leaf_ctor_def(s.name, &paths));
+                    }
+                }
                 emitted.insert(s.name);
                 progress = true;
             }
@@ -538,7 +667,58 @@ fn value_struct_defs(
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    Ok((format!("ffi.cdef[[\n{}]]\n{}", typedefs, ctors), emitted, gc))
+    let checks = value_leaf_layout_checks(ws, &emitted)?;
+    Ok((format!("ffi.cdef[[\n{}]]\n{}{}", typedefs, ctors, checks), emitted, gc))
+}
+
+/// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
+/// for every leaf of every FFI-clean value struct.
+///
+/// Leaf addressing (`docs/native-buffer-leaf-addressing-plan.md`) indexes typed
+/// views with COMPILER-COMPUTED byte offsets — a literal constant per leaf, which
+/// is the whole point, since a runtime offset lookup would cost what the boxing
+/// cost. If that model ever disagreed with LuaJIT's, every element access would
+/// read and write the wrong address: silent memory corruption, not a failure.
+/// So the two are cross-checked against `ffi.offsetof` composed along each leaf's
+/// field chain, and a mismatch aborts loudly at load.
+///
+/// Every name here is already in the FFI-clean emitted set, so a missing layout
+/// (or a disagreement between the two leaf walkers) is an INVARIANT FAILURE, not
+/// an optional check to skip: skipping would emit a type whose offsets nothing
+/// validated, and leaf addressing would then read and write unvalidated
+/// addresses. Rejected with the type named.
+fn value_leaf_layout_checks(
+    ws: &Workspace,
+    emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
+    use std::fmt::Write as _;
+    let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
+    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let mut out = String::new();
+    for name in names {
+        let (leaves, size, _align) = skull_mir::lower::value_leaf_layout_checked(ws, name)
+            .map_err(|e| {
+                CompilerError::new_no_location(format!(
+                    "skull: cannot validate the C layout of FFI-clean value struct `{name}`: {e}"
+                ))
+            })?;
+        let _ = writeln!(
+            out,
+            "if ffi.sizeof(\"{name}\") ~= {size} then error(\"skull layout drift: \
+             sizeof({name}) = \" .. ffi.sizeof(\"{name}\") .. \", expected {size}\", 0) end"
+        );
+        for l in leaves {
+            let _ = writeln!(
+                out,
+                "if ({expr}) ~= {off} then error(\"skull layout drift: {name}.{path} at \" \
+                 .. ({expr}) .. \", expected {off}\", 0) end",
+                expr = l.offsetof_expr,
+                off = l.byte_off,
+                path = l.path,
+            );
+        }
+    }
+    Ok(out)
 }
 
 /// Emit the table-repr materialization defs for every GC-carrying value struct:
@@ -801,9 +981,10 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     let mut out = String::new();
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
-            // A cdata-eligible enum is a value cdata `{__tag, _0}` (no singleton, no
-            // names table -- reflection is sacrificed); its defs come from
-            // `enum_cdata_defs`.
+            // A cdata-eligible enum is a value cdata `{__tag, _0}` with no
+            // singleton or names table; its ctype defs come from
+            // `enum_cdata_defs`, while `type_table_defs` records its physical
+            // slots and logical variants for typed runtime consumers.
             if skull_mir::lower::enum_value_shape(ws, e.name).is_some() {
                 continue;
             }
@@ -908,6 +1089,33 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     }
 }
 
+/// The nominal name a field's type denotes, peeling `Nullable`. An `embed`
+/// field needs this even when nullable: reflection rebuilds its logical value
+/// from that type's field list, and [`reflect_field_type`] renders any nullable
+/// as `any`, which would lose the name.
+fn nominal_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    let resolve = |t: bone_semantic::prelude::TyId| -> Option<(TypeExpr, bone_semantic::prelude::TyId)> {
+        match t {
+            bone_semantic::prelude::TyId::Static(mid, idx) => {
+                ws.modules.get(mid.index()).map(|m| (m.ty_arena[idx], t))
+            }
+            bone_semantic::prelude::TyId::Local(_) => None,
+        }
+    };
+    let (mut te, mut cur) = resolve(ty)?;
+    if let TypeExpr::Nullable(inner) = te {
+        let (t2, c2) = resolve(cur.with_idx(inner))?;
+        te = t2;
+        cur = c2;
+    }
+    let _ = cur;
+    match te {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => Some(name.as_str().to_string()),
+        _ => None,
+    }
+}
+
 /// Register every struct + newtype into `_G.__ROCK_TYPE_TABLE`, so the stdlib
 /// reflection fns (`get_type_info`, `type_info_of`, `type_name`) can recover a
 /// value's metadata from its `__ty` tag. Mirrors
@@ -933,9 +1141,25 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
                 .iter()
                 .map(|f| {
                     let (tystr, nullable) = reflect_field_type(ws, f.ty);
+                    let child = nominal_field_type(ws, f.ty)
+                        .and_then(|n| ws.struct_by_name.get(&ustr::Ustr::from(&n)).copied());
+                    let flattened = f.is_embed
+                        || child.is_some_and(|sid| {
+                            ws.modules[sid.module.index()].structs[sid.def].is_nobox
+                        });
+                    // `embed` marks a field whose leaves are THIS struct's
+                    // physical keys (`f.x`), so reflection has to rebuild the
+                    // logical child from them -- the declared name indexes
+                    // nothing (a presence slot when nullable). The child's name
+                    // must survive nullability for that rebuild to be possible.
+                    let tystr = match flattened.then(|| nominal_field_type(ws, f.ty)).flatten() {
+                        Some(n) => n,
+                        None => tystr,
+                    };
+                    let embed = if flattened { ", embed = true" } else { "" };
                     format!(
-                        "{{ name = \"{}\", type = \"{}\", nullable = {} }}",
-                        f.name, tystr, nullable
+                        "{{ name = \"{}\", type = \"{}\", nullable = {}{} }}",
+                        f.name, tystr, nullable, embed
                     )
                 })
                 .collect();
@@ -953,6 +1177,70 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
                 "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"newtype\", type_id = {id}, fields = {{ }} }}\n",
                 n = nt.name,
                 id = type_id
+            ));
+            type_id += 1;
+        }
+    }
+    for module in ws.modules.iter() {
+        for (_, e) in module.enums.iter() {
+            use bone_semantic::hir::VariantPayload;
+
+            let Some(shape) = skull_mir::lower::enum_value_shape(ws, e.name) else {
+                continue;
+            };
+            let mut fields = vec![
+                "{ name = \"__tag\", type = \"int\", nullable = false }".to_string(),
+            ];
+            fields.extend(shape.slots.iter().map(|(name, c_type)| {
+                let field_type = if *c_type == "double" { "float" } else { c_type };
+                format!(
+                    "{{ name = \"{name}\", type = \"{field_type}\", nullable = false }}"
+                )
+            }));
+            let variants: Vec<String> = e
+                .variants
+                .iter()
+                .enumerate()
+                .map(|(tag, variant)| {
+                    let payload: Vec<String> = match &variant.payload {
+                        VariantPayload::Unit => Vec::new(),
+                        VariantPayload::Tuple(types) => types
+                            .iter()
+                            .enumerate()
+                            .map(|(index, ty)| {
+                                let (field_type, _) = reflect_field_type(ws, *ty);
+                                format!(
+                                    "{{ name = \"{}\", slot = \"_{}\", type = \"{}\" }}",
+                                    index + 1,
+                                    index,
+                                    field_type
+                                )
+                            })
+                            .collect(),
+                        VariantPayload::Record(fields) => fields
+                            .iter()
+                            .map(|field| {
+                                let (field_type, _) = reflect_field_type(ws, field.ty);
+                                format!(
+                                    "{{ name = \"{0}\", slot = \"_{0}\", type = \"{1}\" }}",
+                                    field.name, field_type
+                                )
+                            })
+                            .collect(),
+                    };
+                    format!(
+                        "[{tag}] = {{ name = \"{}\", fields = {{ {} }} }}",
+                        variant.name,
+                        payload.join(", ")
+                    )
+                })
+                .collect();
+            out.push_str(&format!(
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"c_enum\", type_id = {id}, fields = {{ {f} }}, variants = {{ {v} }} }}\n",
+                n = e.name,
+                id = type_id,
+                f = fields.join(", "),
+                v = variants.join(", ")
             ));
             type_id += 1;
         }
@@ -1045,6 +1333,80 @@ mod tests {
 
         let removed = base.replace("newtype Gold(int)\n", "");
         assert_eq!(super::shape_diff(&h0, &hashes(&removed)), vec!["Gold"], "a removed type counts as drifted");
+    }
+
+    /// `embed` moves the PARENT's layout: the child's leaves become the parent's
+    /// physical keys, so the parent's hash must react both to the flag itself and
+    /// to the child's shape. The non-transitivity that is correct for a boxed
+    /// field (a pointer either way) is wrong here, and only here.
+    #[test]
+    fn embed_drifts_the_parent_shape() {
+        let hashes = |src: &str| {
+            let module = skull_parser::parse_module(src, ustr::Ustr::from("<skull>"))
+                .unwrap_or_else(|e| panic!("parse failed: {}", e.message));
+            let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module])
+                .unwrap_or_else(|e| panic!("semantic_pass failed: {}", e.message));
+            super::type_shape_hashes(&ws)
+        };
+
+        // (a) The flag alone relayouts the parent, while every rendered field
+        // type stays identical -- so nothing else in the workspace drifts and
+        // the parent's own entry is the only possible signal.
+        let boxed = "struct Pt { x: int }\nstruct Holder { p: Pt, tag: int }\n";
+        let embedded = "struct Pt { x: int }\nstruct Holder { embed p: Pt, tag: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(boxed), &hashes(embedded)),
+            vec!["Holder"],
+            "flipping a field to `embed` relayouts the parent"
+        );
+
+        // (b) The child's fields ARE the parent's keys, so widening the child
+        // widens the parent.
+        let embedded_wide = "struct Pt { x: int, y: int }\nstruct Holder { embed p: Pt, tag: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(embedded), &hashes(embedded_wide)),
+            vec!["Holder", "Pt"],
+            "a field added to an EMBEDDED child also relayouts the parent"
+        );
+
+        // (c) CONTROL, the property that must not regress: a BOXED child is a
+        // pointer either way, so widening it leaves the parent's layout alone.
+        // If this ever reports `Holder` too, the hash went transitive in general
+        // and every nested edit now over-triggers a restart.
+        let boxed_wide = "struct Pt { x: int, y: int }\nstruct Holder { p: Pt, tag: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(boxed), &hashes(boxed_wide)),
+            vec!["Pt"],
+            "a field added to a BOXED child must NOT drift the parent"
+        );
+
+        // (d) Transitive through a chain: the deepest leaf is a key on the
+        // outermost parent, so every level drifts.
+        let chain = "struct Inner { c: int }\n\
+                     struct Mid { embed b: Inner, m: int }\n\
+                     struct Outer { embed a: Mid, o: int }\n";
+        let chain_wide = "struct Inner { c: int, d: int }\n\
+                          struct Mid { embed b: Inner, m: int }\n\
+                          struct Outer { embed a: Mid, o: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(chain), &hashes(chain_wide)),
+            vec!["Inner", "Mid", "Outer"],
+            "an embed chain propagates the child's shape to every enclosing parent"
+        );
+
+        // A boxed link BREAKS the chain: `Mid` holds `Inner` by pointer, so
+        // widening `Inner` stops there even though `Outer` embeds `Mid`.
+        let broken = "struct Inner { c: int }\n\
+                      struct Mid { b: Inner, m: int }\n\
+                      struct Outer { embed a: Mid, o: int }\n";
+        let broken_wide = "struct Inner { c: int, d: int }\n\
+                           struct Mid { b: Inner, m: int }\n\
+                           struct Outer { embed a: Mid, o: int }\n";
+        assert_eq!(
+            super::shape_diff(&hashes(broken), &hashes(broken_wide)),
+            vec!["Inner"],
+            "a boxed link stops transitive propagation"
+        );
     }
 
     #[test]

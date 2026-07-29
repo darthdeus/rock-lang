@@ -821,6 +821,7 @@ pub struct StructDef {
     pub name: Ustr,
     pub name_span: Span,
     pub is_value: bool,
+    pub is_nobox: bool,
     pub span: Span,
     pub generics: Vec<TyId>,
     pub fields: Vec<StructFieldDef>,
@@ -833,6 +834,11 @@ pub struct StructFieldDef {
     pub span: Span,
     pub has_default: bool,
     pub annotations: Vec<Annotation>,
+    /// `embed f: Foo` -- the field's leaves live in the parent, so it has no
+    /// independently storable aggregate: PROJECTION-ONLY at every use site
+    /// (docs/scalarization-and-boxing-design.md S 6). Enum record variants
+    /// cannot carry it -- always false there.
+    pub is_embed: bool,
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -1332,6 +1332,15 @@ fn value_annotation_on_struct_rejected() {
 }
 
 #[test]
+fn nobox_marker_reaches_typed_struct() {
+    let ws = check("nobox value V { x: int }").expect("nobox value type checks");
+    let module = ws.modules.iter().find(|m| m.id != ModuleId::builtin()).unwrap();
+    let struct_idx = module.struct_by_name[&Ustr::from("V")];
+    assert!(module.structs[struct_idx].is_value);
+    assert!(module.structs[struct_idx].is_nobox);
+}
+
+#[test]
 fn null_to_bare_any_rejected() {
     // Bare `any` excludes null; the null literal needs `any?`. A nullable VALUE
     // (concrete inner) is still allowed -- only the literal is rejected (rock

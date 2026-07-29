@@ -24,6 +24,68 @@ use skull_parser::CompilerError;
 /// The mangle separator. A single `_`; see the module docs for why.
 const SEP: &str = "_";
 
+/// The emitted name for the copy of `f` specialized at `key` -- the instantiation
+/// the call site already lowered its arguments for.
+///
+/// Derived from [`mangle_fn`] plus the reified type trees in declaration order, so the
+/// definition and every call site agree without a side table, exactly as the base
+/// mangle does. `None` for an all-`None` key: that is the shared snapshot, which
+/// keeps the base name.
+///
+/// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
+/// Its bare name belongs to the ONE body the author owns; a specialized copy is a
+/// different function and must not claim it.
+pub fn spec_fn_name(
+    ws: &Workspace,
+    f: &Function,
+    key: &[Option<crate::lower::ReifiedType>],
+) -> Option<String> {
+    if key.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut out = mangle_fn(ws, f);
+    out.push_str(SEP);
+    out.push_str("spec");
+    for leaf in key {
+        out.push_str(SEP);
+        match leaf {
+            Some(ty) => encode_reified_type(ty, &mut out),
+            None => out.push_str("any"),
+        }
+    }
+    Some(out)
+}
+
+fn encode_reified_type(ty: &crate::lower::ReifiedType, out: &mut String) {
+    use crate::lower::{ReifiedCtor, ReifiedType};
+    match ty {
+        ReifiedType::Prim(name) => {
+            out.push_str("p_");
+            out.push_str(name);
+        }
+        ReifiedType::App { ctor, params } => {
+            out.push_str("a_");
+            match ctor {
+                ReifiedCtor::Array => out.push('v'),
+                ReifiedCtor::Map => out.push('m'),
+                ReifiedCtor::Nominal(name) => {
+                    out.push('n');
+                    out.push_str(&name.len().to_string());
+                    out.push('_');
+                    out.push_str(name.as_str());
+                }
+            }
+            out.push('_');
+            out.push_str(&params.len().to_string());
+            for param in params {
+                out.push('_');
+                encode_reified_type(param, out);
+            }
+            out.push_str("_z");
+        }
+    }
+}
+
 /// True if `f` keeps its bare surface name (never mangled).
 pub fn is_exempt(f: &Function) -> bool {
     let name = f.name.as_str();
@@ -286,4 +348,31 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
 
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_reified_type;
+    use crate::lower::{ReifiedCtor, ReifiedType};
+    use ustr::Ustr;
+
+    fn nominal(name: &str, params: Vec<ReifiedType>) -> ReifiedType {
+        ReifiedType::App {
+            ctor: ReifiedCtor::Nominal(Ustr::from(name)),
+            params,
+        }
+    }
+
+    #[test]
+    fn reified_type_encoding_preserves_tree_boundaries() {
+        let nested = nominal("VecIter", vec![nominal("V2", vec![])]);
+        let flat = nominal("VecIter_1_a_n2_V2_0_z", vec![]);
+        let mut nested_name = String::new();
+        let mut flat_name = String::new();
+        encode_reified_type(&nested, &mut nested_name);
+        encode_reified_type(&flat, &mut flat_name);
+
+        assert_eq!(nested_name, "a_n7_VecIter_1_a_n2_V2_0_z_z");
+        assert_ne!(nested_name, flat_name);
+    }
 }

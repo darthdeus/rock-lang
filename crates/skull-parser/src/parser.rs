@@ -556,12 +556,24 @@ impl<'a> Parser<'a> {
                     _ => self.parse_fn(false, None, backend),
                 }
             }
-            TokenKind::Struct => self.parse_struct(false),
+            TokenKind::Struct => self.parse_struct(false, false),
             // `value Name { .. }` — contextual keyword (only before a type name).
             TokenKind::Ident(n)
                 if n.as_str() == "value" && matches!(self.peek_kind(), TokenKind::Ident(_)) =>
             {
-                self.parse_struct(true)
+                self.parse_struct(true, false)
+            }
+            TokenKind::Ident(n)
+                if n.as_str() == "nobox"
+                    && matches!(self.peek_kind(), TokenKind::Ident(v) if v.as_str() == "value") =>
+            {
+                self.parse_struct(true, true)
+            }
+            TokenKind::Ident(n)
+                if n.as_str() == "nobox"
+                    && !matches!(self.peek_kind(), TokenKind::OpenParen | TokenKind::Bang) =>
+            {
+                Err(self.err("`nobox` requires `value`"))
             }
             TokenKind::Enum => self.parse_enum(),
             TokenKind::Newtype => self.parse_newtype(),
@@ -1218,13 +1230,17 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
-    /// `struct Name<gen> { field: T [= default], ... }` (also `value struct`,
-    /// entered with `value` already consumed and `is_value = true`).
-    fn parse_struct(&mut self, is_value: bool) -> PResult<Item> {
+    /// `struct Name<gen> { field: T [= default], ... }` or `value Name`.
+    fn parse_struct(&mut self, is_value: bool, is_nobox: bool) -> PResult<Item> {
         let start = self.span();
-        // `value Name { .. }` (contextual keyword, no `struct`) vs `struct Name`.
-        if is_value {
-            self.advance(); // `value`
+        if is_nobox {
+            self.advance();
+            match self.kind() {
+                TokenKind::Ident(n) if n.as_str() == "value" => self.advance(),
+                _ => return Err(self.err("`nobox` requires `value`")),
+            }
+        } else if is_value {
+            self.advance();
         } else {
             self.expect(TokenKind::Struct)?;
         }
@@ -1232,7 +1248,19 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics();
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Struct(StructDef { span, keyword_span: Some(start), name, generics, fields, is_value }) })
+        Ok(Item {
+            annotations: Vec::new(),
+            span,
+            kind: ItemKind::Struct(StructDef {
+                span,
+                keyword_span: Some(start),
+                name,
+                generics,
+                fields,
+                is_value,
+                is_nobox,
+            }),
+        })
     }
 
     /// `{ field: T [= default], ... }` — struct body / enum record variant.
@@ -1246,6 +1274,13 @@ impl<'a> Parser<'a> {
                 break;
             }
             let annotations = self.parse_item_annotations()?;
+            // `embed` is contextual: it is the modifier only when a field name
+            // follows it, so `embed: int` stays a field named `embed`.
+            let is_embed = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "embed")
+                && matches!(self.peek_kind(), TokenKind::Ident(_));
+            if is_embed {
+                self.advance();
+            }
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_type()?;
@@ -1255,7 +1290,7 @@ impl<'a> Parser<'a> {
                 None
             };
             let span = self.span_from(name.span);
-            fields.push(Field { span, name, ty, default, annotations });
+            fields.push(Field { span, name, ty, default, annotations, is_embed });
             self.skip_comments();
             // Item separator: comma or newline (both allowed).
             self.eat(TokenKind::Comma);
