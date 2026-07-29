@@ -240,7 +240,6 @@ pub fn emit_fn_with_callees(
         shared_tail_reject: false,
         pack_multi_return: false,
         hoisted_temps: HashSet::new(),
-        nbv_bypass: compute_nbv_bypass(mf, &reachable_blocks(mf)),
         out: String::new(),
         indent: 1,
     };
@@ -331,7 +330,6 @@ pub fn emit_fn_trampoline(
         shared_tail_reject: false,
         pack_multi_return,
         hoisted_temps,
-        nbv_bypass: compute_nbv_bypass(mf, &region),
         out: String::new(),
         indent: 1,
     };
@@ -492,7 +490,6 @@ struct Emitter<'a> {
     /// the ref's own operands, so the ref itself emits no statement (its Lua
     /// analogue is a cdata slot local; on JS there is no per-element view to
     /// bind). A ref with any OTHER use materializes as a whole-element COPY.
-    nbv_bypass: HashSet<u32>,
     out: String,
     indent: usize,
 }
@@ -553,9 +550,6 @@ impl Emitter<'_> {
     /// Inlinable and dead-pure insts emit nothing.
     fn inst_emits(&self, iid: Idx<Inst>) -> bool {
         let inst = &self.mf.insts[iid];
-        if self.nbv_bypass.contains(&raw(iid)) {
-            return false;
-        }
         if matches!(inst, Inst::Store { .. } | Inst::StoreIndex { .. }) {
             return true;
         }
@@ -1127,14 +1121,18 @@ impl Emitter<'_> {
                             )));
                         }
                         ContainerKind::VecColumn => format!("{b}[{i}] = {v};"),
-                        ContainerKind::NativeBufferLeaf => {
-                            return Err(err("JS subset: NativeBuffer leaf views not supported"));
-                        }
-                        // Whole value-struct element write: per-leaf stores into
-                        // the flat backing from the value object (a MakeValueStruct
-                        // renders as an object literal; a copy read is an object).
+                        // Raw: the element index was bounds-checked once ahead of
+                        // every leaf write. A JS boolean into a Uint8Array stores
+                        // 1/0 already, so the write side needs no coercion.
+                        ContainerKind::NativeBufferLeaf => format!("{b}[{i}] = {v};"),
+                        // Lowering decomposes every whole-element write into
+                        // per-leaf stores (`nb_leaf_element_store`), so reaching
+                        // emit means the element has no C leaf layout to address.
                         ContainerKind::NativeBufferValue(elem) => {
-                            self.nbv_write_stmt(&b, &i, &v, *elem, 0, *elem)?
+                            return Err(err(format!(
+                                "JS subset: whole-element store into `NativeBuffer<{elem}>` \
+                                 reached emit -- `{elem}` has no C leaf layout"
+                            )));
                         }
                         ContainerKind::Vec => format!("__vec_checked_set({b}, {i}, {v});"),
                         ContainerKind::Map => format!("{b}.set({i}, {v});"),
@@ -1155,32 +1153,10 @@ impl Emitter<'_> {
                     self.push(&format!("{k} = __map_next({t}, {k});"));
                     self.push(&format!("{v} = ({k} === null ? null : {t}.get({k}));"));
                 }
-                // `base.field = value` (struct field / cursor mutation). A base
-                // that projects a value-element NativeBuffer slot (the scalarized
-                // element-store shape) writes the flat backing instead: a float
-                // leaf via `__nbv_set`, a nested value-struct field via the
-                // per-leaf write IIFE (matching Lua's whole-cdata field assign).
+                // `base.field = value` (struct field / cursor mutation). A write
+                // THROUGH a NativeBuffer element never reaches here: lowering
+                // decomposes it into leaf stores against the element's typed views.
                 Inst::StoreField { base, field, value } => {
-                    if let Some((b_iid, i_iid, root, off, cur)) = self.nbv_proj(*base)? {
-                        let (k, fields) = self.nbv_layout(cur)?;
-                        let _ = k;
-                        let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
-                            err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
-                        })?;
-                        let (root_k, _) = self.nbv_layout(root)?;
-                        let b = self.render_val(b_iid)?;
-                        let i = self.render_val(i_iid)?;
-                        let v = self.render_val(*value)?;
-                        let line = match f.nested {
-                            None => format!(
-                                "__nbv_set({b}, {i}, {root_k}, {}, {v});",
-                                off + f.offset
-                            ),
-                            Some(n) => self.nbv_write_stmt(&b, &i, &v, root, off + f.offset, n)?,
-                        };
-                        self.push(&line);
-                        continue;
-                    }
                     let line = format!(
                         "{} = {};",
                         js_member(&self.render_val(*base)?, field)?,
@@ -1239,19 +1215,6 @@ impl Emitter<'_> {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
-                // A value-element slot ref consumed entirely by Field/StoreField
-                // renders through its consumers -- no statement here (the copy
-                // materialize would be dead work per scalarized element store).
-                Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. }
-                    if self.nbv_bypass.contains(&raw(iid)) => {}
-                Inst::Field { .. } if self.nbv_bypass.contains(&raw(iid)) => {}
-                // A leaf VIEW is a luajit-representation artifact: an `ffi.cast`
-                // pointer over the element storage, consumed only by the buffer
-                // literal's view fields, which JS drops (it backs a NativeBuffer
-                // with a TypedArray and has no pointer views). Nothing on JS can
-                // read one -- a path that needed leaf views hits the
-                // `NativeBufferLeaf` reject -- so it emits no statement.
-                Inst::FfiViewCast { .. } => {}
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
@@ -1506,15 +1469,6 @@ impl Emitter<'_> {
                     parts.push(format!("__ty: {}", js_string_lit(&name)?));
                 }
                 for (f, v) in fields {
-                    // Leaf VIEWS are a luajit-representation detail (`ffi.cast`
-                    // pointers over the element storage). JS backs a NativeBuffer
-                    // with a TypedArray and lowers element access through its own
-                    // flat-slot arithmetic, so a pointer view has no meaning here
-                    // and no JS path reads these keys -- one that needed them
-                    // would hit the `NativeBufferLeaf` reject instead.
-                    if skull_mir::lower::is_leaf_view_field(f.as_str()) {
-                        continue;
-                    }
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
@@ -1551,15 +1505,6 @@ impl Emitter<'_> {
                 }
                 let mut parts = vec![format!("__ty: {}", js_string_lit(&name.to_string())?)];
                 for (f, v) in fields {
-                    // Leaf VIEWS are a luajit-representation detail (`ffi.cast`
-                    // pointers over the element storage). JS backs a NativeBuffer
-                    // with a TypedArray and lowers element access through its own
-                    // flat-slot arithmetic, so a pointer view has no meaning here
-                    // and no JS path reads these keys -- one that needed them
-                    // would hit the `NativeBufferLeaf` reject instead.
-                    if skull_mir::lower::is_leaf_view_field(f.as_str()) {
-                        continue;
-                    }
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
@@ -1600,12 +1545,14 @@ impl Emitter<'_> {
                 let (b, i) = (self.render_val(*base)?, self.render_val(*index)?);
                 match kind {
                     ContainerKind::NativeBuffer => format!("__nb_checked_get({b}, {i})"),
-                    // A whole value-struct element read materializes a COPY object
-                    // from the flat slots (immutable in Rock, so indistinguishable
-                    // from Lua's cdata ref). Field/StoreField consumers never see
-                    // this render -- they lower flat access from the operands.
+                    // Lowering decomposes every whole-element read into per-leaf
+                    // reads (`nb_leaf_element_repr`), so reaching emit means the
+                    // element has no C leaf layout to address.
                     ContainerKind::NativeBufferValue(elem) => {
-                        self.nbv_copy_expr(&b, &i, *elem, 0, *elem)?
+                        return Err(err(format!(
+                            "JS subset: whole-element read of `NativeBuffer<{elem}>` reached \
+                             emit -- lowering must decompose it into leaf reads"
+                        )));
                     }
                     ContainerKind::Vec => format!("__vec_checked_get({b}, {i})"),
                     // A whole-element read has no single slot to name: column
@@ -1621,12 +1568,16 @@ impl Emitter<'_> {
                     // One leaf column: the index is already checked
                     // (`VecCheckedIndex`) and already 0-based, so this is raw.
                     ContainerKind::VecColumn => format!("{b}[{i}]"),
-                    // Leaf addressing is Lua-side today (`ffi.cast` views). The
-                    // JS analogue is a TypedArray per leaf C type over one
-                    // ArrayBuffer -- see docs/native-buffer-leaf-addressing-plan.md
-                    // S6. Until that lands, skip rather than emit a wrong shape.
+                    // One typed leaf view. The index is absolute and already
+                    // bounds-checked once per ELEMENT, so this indexes raw. A
+                    // `bool` view is a Uint8Array holding 0/1, which the language
+                    // wants back as a boolean.
                     ContainerKind::NativeBufferLeaf => {
-                        return Err(err("JS subset: NativeBuffer leaf views not supported"));
+                        if self.leaf_view_is_bool(*base) {
+                            format!("({b}[{i}] !== 0)")
+                        } else {
+                            format!("{b}[{i}]")
+                        }
                     }
                     // Map miss returns nil (raw VM op in Lua); JS Map.get returns
                     // undefined on miss, which `== null` treats as nil.
@@ -1641,8 +1592,11 @@ impl Emitter<'_> {
                     format!("{}.len", self.render_val(*base)?)
                 }
                 ContainerKind::VecColumn => format!("{}.length", self.render_val(*base)?),
+                // A view has no length of its own: it spans the whole buffer, and
+                // only the owning NativeBuffer knows the element count. Reaching
+                // here means a `len` was taken on the wrong base.
                 ContainerKind::NativeBufferLeaf => {
-                    return Err(err("JS subset: NativeBuffer leaf views not supported"));
+                    return Err(err("JS subset: `len` of a NativeBuffer leaf view"));
                 }
                 ContainerKind::Map => format!("{}.size", self.render_val(*base)?),
             },
@@ -1653,43 +1607,55 @@ impl Emitter<'_> {
             Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
-                // An all-float value struct (e.g. the vertex pool) has no per-struct
-                // ctype on JS: back it onto one flat Float32Array of `n * k` floats
-                // (k = flattened float leaf count). The `.ptr` is that array; the
-                // hot path reads it through a cached `Ptr<float>` view (a js sibling
-                // of `__vbo_as_float_ptr` returns `.ptr` itself). A value struct with
-                // any non-float leaf still rejects.
-                other => match skull_mir::lower::value_struct_all_float_leaf_count(self.ws, *ctype) {
-                    Some(k) => format!("new Float32Array(({}) * {k})", self.render_val(*count)?),
-                    None => {
+                // A value struct has no per-struct ctype on JS: back it onto one
+                // flat `Float32Array(n * size/4)` laid out in the SAME C bytes
+                // luajit uses, which the per-leaf views (`FfiViewCast`) then alias
+                // through `.buffer`. For an all-float element `size/4` IS the float
+                // leaf count, so the vertex pool's storage and its `.ptr` going to
+                // WebGL are unchanged -- pinned by `nb_leaf_layout_premise`.
+                other => {
+                    let size = skull_mir::lower::value_leaf_size(self.ws, *ctype).map_err(|e| {
+                        err(format!(
+                            "JS subset: native_buffer_alloc element ctype `{other}` has no C \
+                             leaf layout to back a TypedArray with ({e})"
+                        ))
+                    })?;
+                    // A 4-byte-backed array needs a 4-byte multiple. C gives that
+                    // whenever any leaf is 4-wide; an all-`bool` element would not,
+                    // and rejects rather than silently reinterpreting its bytes.
+                    if size % 4 != 0 {
                         return Err(err(format!(
-                            "JS subset: native_buffer_alloc element ctype `{other}` has no \
-                             TypedArray (only int, float, and all-float value structs map)"
+                            "JS subset: native_buffer_alloc element ctype `{other}` is {size} \
+                             bytes, not a multiple of 4 -- no aligned TypedArray backing"
+                        )));
+                    }
+                    format!("new Float32Array(({}) * {})", self.render_val(*count)?, size / 4)
+                }
+            },
+            // One typed view over the buffer's storage. luajit casts the pointer;
+            // JS makes a TypedArray over the same `ArrayBuffer`, so the views and
+            // `.ptr` alias the same bytes -- which is what lets leaf-addressed and
+            // whole-`.ptr` (WebGL upload) access to one buffer stay coherent.
+            Inst::FfiViewCast { cty, ptr } => {
+                let p = self.render_val(*ptr)?;
+                let array = match cty.as_str() {
+                    "float" => "Float32Array",
+                    "int" => "Int32Array",
+                    // C `bool` is one byte. Reads coerce back to a JS boolean at
+                    // the leaf `Index` (`!== 0`); writes coerce implicitly.
+                    "bool" => "Uint8Array",
+                    other => {
+                        return Err(err(format!(
+                            "JS subset: no TypedArray for leaf view C type `{other}`"
                         )))
                     }
-                },
-            },
-            // A general field read is JS property access. NativeBuffer `.ptr`/
-            // `.len` and Vec `._data`/`.len` are the same shape. A base that
-            // projects a value-element NativeBuffer slot lowers to flat-slot
-            // access instead: a float leaf reads `__nbv_get`, a nested value
-            // struct materializes its sub-object copy.
-            Inst::Field { base, field } => {
-                if let Some((b_iid, i_iid, root, off, cur)) = self.nbv_proj(*base)? {
-                    let (_, fields) = self.nbv_layout(cur)?;
-                    let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
-                        err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
-                    })?;
-                    let (root_k, _) = self.nbv_layout(root)?;
-                    let b = self.render_val(b_iid)?;
-                    let i = self.render_val(i_iid)?;
-                    return Ok(match f.nested {
-                        None => format!("__nbv_get({b}, {i}, {root_k}, {})", off + f.offset),
-                        Some(n) => self.nbv_copy_expr(&b, &i, root, off + f.offset, n)?,
-                    });
-                }
-                js_member(&self.render_val(*base)?, field)?
+                };
+                format!("new {array}({p}.buffer, {p}.byteOffset)")
             }
+            // A general field read is JS property access. NativeBuffer `.ptr`/
+            // `.len`, a leaf VIEW field and Vec `._data`/`.len` are all the same
+            // shape; a read THROUGH a buffer element is decomposed by lowering.
+            Inst::Field { base, field } => js_member(&self.render_val(*base)?, field)?,
             // `{x:spec}` interpolation: `string.format(fmt, value)` for a single
             // value (Lua path). `__rock_sprintf` is the single-value C printf port
             // (d/i/u/x/X/o/f/F/e/E/g/G/s/c, flags, width, precision; half-even
@@ -1863,129 +1829,17 @@ impl Emitter<'_> {
         ))
     }
 
-    /// Flat-slot layout of value-element `elem`: `(stride k, immediate fields)`.
-    /// Errs (fail-closed) when `elem` has a non-float leaf -- such a buffer cannot
-    /// be allocated on JS (`FfiNewArray` rejects), so access to one is a backend
-    /// gap, never a silent scalar read.
-    fn nbv_layout(
-        &self,
-        elem: ustr::Ustr,
-    ) -> Result<(usize, Vec<skull_mir::lower::ValueSlotField>), CompilerError> {
-        let k = skull_mir::lower::value_struct_all_float_leaf_count(self.ws, elem);
-        let fields = skull_mir::lower::value_struct_slot_fields(self.ws, elem);
-        match (k, fields) {
-            (Some(k), Some(fields)) => Ok((k, fields)),
-            _ => Err(err(format!(
-                "JS subset: NativeBuffer element `{elem}` is not an all-float value \
-                 struct -- no flat Float32Array layout to index"
-            ))),
-        }
-    }
-
-    /// Resolve `iid` as a value-element NativeBuffer projection: the root
-    /// `Index{NativeBufferValue}` or a nested-struct `Field` chain off one.
-    /// `Ok(None)` = not NBV-related; `Err` = NBV but unlowerable (fail-closed).
-    /// Returns `(buf inst, index inst, root elem, cumulative offset, cur struct)`.
-    fn nbv_proj(
-        &self,
-        iid: Idx<Inst>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ustr::Ustr, usize, ustr::Ustr)>, CompilerError> {
-        match &self.mf.insts[iid] {
-            Inst::Index { base, index, kind: ContainerKind::NativeBufferValue(e) } => {
-                self.nbv_layout(*e)?;
-                Ok(Some((*base, *index, *e, 0, *e)))
+    /// Whether `base` is the `bool` leaf view (`buf.__vb`) -- a `Uint8Array`
+    /// holding 0/1 where the language wants a boolean. The view field name is the
+    /// discriminant because `LEAF_VIEWS` is the single source that mints it.
+    fn leaf_view_is_bool(&self, base: Idx<Inst>) -> bool {
+        match &self.mf.insts[base] {
+            Inst::Field { field, .. } => {
+                skull_mir::lower::leaf_view_cty(field.as_str()) == Some("bool")
             }
-            Inst::Field { base, field } => {
-                let Some((b, i, root, off, cur)) = self.nbv_proj(*base)? else {
-                    return Ok(None);
-                };
-                let (_, fields) = self.nbv_layout(cur)?;
-                let f = fields.iter().find(|f| f.name == *field).ok_or_else(|| {
-                    err(format!("JS subset: value struct `{cur}` has no field `{field}`"))
-                })?;
-                match f.nested {
-                    Some(n) => Ok(Some((b, i, root, off + f.offset, n))),
-                    // A float leaf terminates the projection chain -- the Field
-                    // render handles it directly; it is never itself a base.
-                    None => Ok(None),
-                }
-            }
-            _ => Ok(None),
+            Inst::FfiViewCast { cty, .. } => cty.as_str() == "bool",
+            _ => false,
         }
-    }
-
-    /// `{__ty: "S", f: __b.ptr[__o + N], nested: {...}}` -- the object literal
-    /// reading struct `cur`'s leaves from the flat backing, relative to the free
-    /// vars `__b` (buffer) and `__o` (element base slot). `base` is the cumulative
-    /// float offset of `cur` within the root element.
-    fn nbv_obj_literal(&self, cur: ustr::Ustr, base: usize) -> Result<String, CompilerError> {
-        let (_, fields) = self.nbv_layout(cur)?;
-        let mut parts = vec![format!("__ty: {}", js_string_lit(cur.as_str())?)];
-        for f in &fields {
-            let part = match f.nested {
-                Some(n) => self.nbv_obj_literal(n, base + f.offset)?,
-                None => format!("__b.ptr[__o + {}]", base + f.offset),
-            };
-            parts.push(format!("{}: {part}", js_key(&f.name)?));
-        }
-        Ok(format!("{{{}}}", parts.join(", ")))
-    }
-
-    /// Whole-element (or nested sub-struct) COPY read: a bounds-checked IIFE
-    /// materializing the value-struct object from the flat slots. Value structs
-    /// are immutable in Rock, so a copy is indistinguishable from Lua's cdata ref.
-    fn nbv_copy_expr(
-        &self,
-        b: &str,
-        i: &str,
-        root: ustr::Ustr,
-        off: usize,
-        cur: ustr::Ustr,
-    ) -> Result<String, CompilerError> {
-        let (k, _) = self.nbv_layout(root)?;
-        let obj = self.nbv_obj_literal(cur, off)?;
-        Ok(format!(
-            "(function(__b, __i) {{ __nbv_check(__b, __i); var __o = __i * {k}; return {obj}; }})({b}, {i})"
-        ))
-    }
-
-    /// Leaf-store lines writing struct `cur` (at cumulative offset `base`) from
-    /// the object expression `__v{path}` -- used by the whole-element write IIFE.
-    fn nbv_store_lines(
-        &self,
-        cur: ustr::Ustr,
-        base: usize,
-        path: &str,
-        out: &mut Vec<String>,
-    ) -> Result<(), CompilerError> {
-        let (_, fields) = self.nbv_layout(cur)?;
-        for f in &fields {
-            match f.nested {
-                Some(n) => self.nbv_store_lines(n, base + f.offset, &format!("{path}.{}", f.name), out)?,
-                None => out.push(format!("__b.ptr[__o + {}] = __v{path}.{};", base + f.offset, f.name)),
-            }
-        }
-        Ok(())
-    }
-
-    /// Whole-element (or nested sub-struct) write: bounds-checked IIFE storing
-    /// every leaf of `cur` (at offset `off` within root) from the value object.
-    fn nbv_write_stmt(
-        &self,
-        b: &str,
-        i: &str,
-        v: &str,
-        root: ustr::Ustr,
-        off: usize,
-        cur: ustr::Ustr,
-    ) -> Result<String, CompilerError> {
-        let (k, _) = self.nbv_layout(root)?;
-        let mut lines = Vec::new();
-        self.nbv_store_lines(cur, off, "", &mut lines)?;
-        Ok(format!(
-            "(function(__b, __i, __v) {{ __nbv_check(__b, __i); var __o = __i * {k}; {} }})({b}, {i}, {v});",
-            lines.join(" ")
-        ))
     }
 
     /// Colon-format render of a GC-free value struct `inspect` arg, matching the
@@ -3316,7 +3170,7 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
 /// reads `_G.__ROCK_TYPE_TABLE` for the field walk. JS has no type table and is
 /// not getting one (`docs/runtime-globals-audit.md` S4.2b wants luajit's DELETED),
 /// and the element type is a compile-time fact at every column site anyway --
-/// that is exactly why `spec_key_has_column_elem` forces specialization for one.
+/// that is exactly why `spec_key_has_target_storage` forces specialization for one.
 fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
     let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
     for mf in bodies {
@@ -4975,65 +4829,6 @@ fn for_each_term_operand(term: &Term, f: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
-/// Value-element NativeBuffer refs to suppress: an `Index{NativeBufferValue}`
-/// (or a nested-struct `Field` chained off one) whose every use is a `Field`/
-/// `StoreField` BASE. Those consumers render flat-slot access from the chain's
-/// own operands, so the ref emits nothing; any other use (a `Store` into a cell,
-/// a call arg, a `StoreIndex` value) forces the whole-element COPY materialize.
-fn compute_nbv_bypass(mf: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<u32> {
-    let mut cand: HashSet<u32> = HashSet::new();
-    for &b in blocks {
-        for &id in &mf.blocks[b].insts {
-            match &mf.insts[id] {
-                Inst::Index { kind: ContainerKind::NativeBufferValue(_), .. } => {
-                    cand.insert(raw(id));
-                }
-                // A Field chained off a candidate (nested value-struct descent).
-                // Blocks are in traversal order and a Field always follows its
-                // base textually, so a single pass suffices for chains.
-                Inst::Field { base, .. } if cand.contains(&raw(*base)) => {
-                    cand.insert(raw(id));
-                }
-                _ => {}
-            }
-        }
-    }
-    if cand.is_empty() {
-        return cand;
-    }
-    let mut other_use: HashSet<u32> = HashSet::new();
-    let mut used: HashSet<u32> = HashSet::new();
-    for &b in blocks {
-        for &id in &mf.blocks[b].insts {
-            match &mf.insts[id] {
-                Inst::Field { base, .. } => {
-                    used.insert(raw(*base));
-                }
-                Inst::StoreField { base, value, .. } => {
-                    used.insert(raw(*base));
-                    used.insert(raw(*value));
-                    if cand.contains(&raw(*value)) {
-                        other_use.insert(raw(*value));
-                    }
-                }
-                other => for_each_operand(other, &mut |u| {
-                    used.insert(raw(u));
-                    if cand.contains(&raw(u)) {
-                        other_use.insert(raw(u));
-                    }
-                }),
-            }
-        }
-        for_each_term_operand(&mf.blocks[b].term, &mut |u| {
-            used.insert(raw(u));
-            if cand.contains(&raw(u)) {
-                other_use.insert(raw(u));
-            }
-        });
-    }
-    cand.retain(|id| used.contains(id) && !other_use.contains(id));
-    cand
-}
 
 /// A pure, position-independent value inst that folds into its single use site.
 /// EXCLUDES `Load`/`Call`/`Index`/`Field`/`Len` (impure or cell-order-sensitive)

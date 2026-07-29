@@ -260,6 +260,20 @@ pub fn leaf_addr_plan(ws: &Workspace, elem: Ustr) -> Result<Vec<LeafAddr>, Strin
         .collect()
 }
 
+/// `sizeof(elem)` as LuaJIT lays it out -- the per-element byte stride every
+/// leaf view is strided against. The JS backend sizes its ArrayBuffer with it,
+/// so the two backends' storage is the same bytes in the same places.
+pub fn value_leaf_size(ws: &Workspace, elem: Ustr) -> Result<usize, String> {
+    value_leaf_layout_checked(ws, elem).map(|(_, size, _)| size)
+}
+
+/// The C type a leaf VIEW field carries -- the inverse of [`leaf_view_field`].
+/// The JS emitter needs it to pick the TypedArray and to know a `bool` view
+/// stores 0/1 where the language wants `true`/`false`.
+pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
+    LEAF_VIEWS.iter().find(|(_, f, _)| *f == field).map(|(t, ..)| *t)
+}
+
 /// The distinct leaf view C types of `elem`, in first-use order -- the views a
 /// buffer of `elem` must carry.
 pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, String> {
@@ -978,8 +992,9 @@ impl ReifiedType {
     }
 }
 
-/// Whether any generic in `key` binds a column-eligible element type -- i.e.
-/// whether specializing is a CORRECTNESS requirement rather than an optimization.
+/// Whether any generic in `key` binds a type whose STORAGE the shared generic
+/// body cannot serve -- i.e. whether specializing is a CORRECTNESS requirement
+/// rather than an optimization.
 ///
 /// In a context the inliner never enters, an ordinary call simply forgoes the
 /// scalar ABI (`in_unspliced_ctx`) because the shared generic body still serves a
@@ -988,17 +1003,27 @@ impl ReifiedType {
 /// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
 /// spec binding exactly when the element is column-stored, and the post-emit
 /// validator turns that into a rejection instead of a miscompile.
-/// Where the target does not store the element as columns ([`columns_available`])
-/// the boxed shared body IS correct, so the key carries no correctness
-/// requirement and specializing goes back to being opt-in.
-fn spec_key_has_column_elem(
+///
+/// Two storage forms qualify, and the key cannot tell which position the type is
+/// used in -- so it over-approximates, which costs an extra specialized copy and
+/// can never cost correctness:
+///
+/// - a column-stored `Vec` element, where the shared body reads a missing `_data`
+/// - on JS ONLY, a leaf-addressed `NativeBuffer` element. luajit's `.ptr` is a
+///   `T*`, so `p[i]` yields an element reference and the shared body is right;
+///   JS backs the buffer with a TypedArray, so `ptr[i]` is a NUMBER and a whole
+///   element read from an opaque `T` silently returns a leaf. That is a
+///   miscompile, not a slowdown, so it does not wait for an annotation.
+fn spec_key_has_target_storage(
     ws: &Workspace,
     key: &SpecKey,
     target: bone_semantic::hir::FnBackend,
 ) -> bool {
+    let js = target == bone_semantic::hir::FnBackend::Js;
     key.iter().flatten().any(|ty| {
         ty.any_nominal(&|name| {
-            vec_column_elem(ws, name).is_some() && columns_available(ws, target, name)
+            (vec_column_elem(ws, name).is_some() && columns_available(ws, target, name))
+                || (js && leaf_addr_plan(ws, name).is_ok())
         })
     })
 }
@@ -1006,7 +1031,7 @@ fn spec_key_has_column_elem(
 /// Whether `[elem]` takes column storage when lowering for `target`.
 ///
 /// Every target now serves columns, so this is unconditional. It survives as a
-/// named predicate because [`spec_key_has_column_elem`] asks the question for a
+/// named predicate because [`spec_key_has_target_storage`] asks the question for a
 /// DIFFERENT reason -- whether specializing a generic callee is a correctness
 /// requirement -- and that reasoning is only sound while the two agree.
 fn columns_available(
@@ -1105,7 +1130,7 @@ fn compute_call_spec(
     // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
     let opted_in =
         f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
-    if !opted_in && !spec_key_has_column_elem(ws, &key, target) {
+    if !opted_in && !spec_key_has_target_storage(ws, &key, target) {
         return None;
     }
     Some((key, subst))
@@ -4296,6 +4321,13 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let cur = self.nb_leaf_load(buf, checked, &addr);
+                    let rv = self.lower_expr(value)?;
+                    let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                    self.nb_leaf_store(buf, checked, &addr, new_v);
+                    return Ok(());
+                }
                 let (pbase, key) = self.physical_field(base, field);
                 let b = self.lower_place_base(pbase)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field: key });
@@ -4420,6 +4452,12 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let old = self.nb_leaf_load(buf, checked, &addr);
+                    let new = bump(self, old);
+                    self.nb_leaf_store(buf, checked, &addr, new);
+                    return Ok(if postfix { old } else { new });
+                }
                 let (pbase, key) = self.physical_field(base, field);
                 let b = self.lower_place_base(pbase)?;
                 let old = self.emit_cur(Inst::Field { base: b, field: key });
@@ -5110,7 +5148,7 @@ impl Builder<'_> {
         let spec = self
             .call_spec(e, func)
             .filter(|(k, _)| {
-                !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k, self.scx.target)
+                !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
             });
         let empty = SpecSubst::new();
         let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
@@ -5834,18 +5872,68 @@ impl Builder<'_> {
     /// the existing slot-reference path, which is CORRECT, just boxier --
     /// leaf addressing does not change storage, so the two address the same
     /// bytes and a program may mix them freely.
+    /// Both targets. The views are `ffi.cast` pointers on luajit and TypedArrays
+    /// over one ArrayBuffer on JS, but the ADDRESSING is the same C layout either
+    /// way -- `leaf_addr_plan`'s stride and offset are already in units of each
+    /// view's own element type, so one lowering serves both.
     fn is_leaf_addressed(&self, elem: Ustr) -> bool {
-        // LuaJIT only. Leaf addressing IS `ffi.cast` views over the element
-        // storage; JS backs a NativeBuffer with a TypedArray and lowers element
-        // access through its own flat-slot arithmetic, which already allocates
-        // nothing. Emitting the leaf shape there would only push every buffer
-        // test into the skip histogram. The JS analogue (a TypedArray per leaf C
-        // type over one ArrayBuffer) is S6 in
-        // docs/native-buffer-leaf-addressing-plan.md.
-        if self.scx.target == bone_semantic::hir::FnBackend::Js {
-            return false;
-        }
         leaf_addr_plan(self.ws, elem).is_ok()
+    }
+
+    /// Read `buf[i].<path>`'s single primitive leaf, for a read-modify-write
+    /// (`buf[i].pos.x++`, `buf[i].w += 1`). `None` when `target` is not such a
+    /// place, or when the path is not exactly ONE leaf -- a `+=` over an
+    /// aggregate has no scalar to combine.
+    ///
+    /// JS ONLY, deliberately. Every other read/write shape is leaf-addressed on
+    /// both targets, but a read-modify-write reads a PLACE: luajit's `.ptr[i]`
+    /// is a struct reference, so `buf[i].pos.x` is a real assignable lvalue and
+    /// the ordinary field path is both correct and tighter. JS has no such
+    /// reference -- `ptr[i]` is a number -- so without this the whole element is
+    /// materialized and the write lands on a copy.
+    fn nb_leaf_rmw_place(
+        &mut self,
+        target: Idx<Expr>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, LeafAddr)>, CompilerError> {
+        if self.scx.target != bone_semantic::hir::FnBackend::Js {
+            return Ok(None);
+        }
+        let Expr::FieldAccess { base, field } = self.body.expr_arena[target] else {
+            return Ok(None);
+        };
+        let Some((buf, checked, elem, path)) = self.nb_leaf_field_place(base, field)? else {
+            return Ok(None);
+        };
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let Some(addr) = plan.into_iter().find(|a| a.path.as_str() == path) else {
+            return Ok(None);
+        };
+        Ok(Some((buf, checked, elem, addr)))
+    }
+
+    /// The load half of [`Self::nb_leaf_rmw_place`].
+    fn nb_leaf_load(&mut self, buf: Idx<Inst>, checked: Idx<Inst>, addr: &LeafAddr) -> Idx<Inst> {
+        let at = self.leaf_index(checked, addr);
+        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
+        self.emit_cur(Inst::Index { base: view, index: at, kind: ContainerKind::NativeBufferLeaf })
+    }
+
+    /// The store half of [`Self::nb_leaf_rmw_place`].
+    fn nb_leaf_store(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        addr: &LeafAddr,
+        value: Idx<Inst>,
+    ) {
+        let at = self.leaf_index(checked, addr);
+        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
+        self.emit_cur(Inst::StoreIndex {
+            base: view,
+            index: at,
+            value,
+            kind: ContainerKind::NativeBufferLeaf,
+        });
     }
 
     /// `buf[i]` on a leaf-addressed NativeBuffer: bounds-check the ELEMENT once,
@@ -8200,7 +8288,7 @@ impl Builder<'_> {
                 .next_call_spec(FuncRef { module: *m, func: *f }, next_generics)
                 .filter(|k| {
                     !self.in_unspliced_ctx
-                        || spec_key_has_column_elem(self.ws, k, self.scx.target)
+                        || spec_key_has_target_storage(self.ws, k, self.scx.target)
                 }),
             BoundNext::CallerGeneric(_) => None,
         };

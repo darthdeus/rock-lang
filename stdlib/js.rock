@@ -125,3 +125,27 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
     for (var i = 0; i < n; i++) col[i] = tmp[i];
   }
 """
+
+// One bounds check per ELEMENT access, ahead of the leaf reads/writes that
+// follow (`docs/native-buffer-leaf-addressing-plan.md` S5). The luajit sibling
+// is in `unified.rock`; the message shape follows it.
+@nomangle inline(js) fn __nb_checked_index(buf: any, i: int) -> int = """
+  if (i < 0 || i >= buf.len) {
+    throw new Error("NativeBuffer index out of bounds: index " + i +
+                    " is outside [0, " + buf.len + ")");
+  }
+  return i;
+"""
+
+// Reseating `.ptr` by hand leaves every typed leaf view over the OLD storage.
+// The luajit sibling re-casts from `__ROCK_LEAF_VIEWS`; a JS view already knows
+// its own type, so re-making it through its constructor cannot drift from the
+// emitter's choice. Same UNCHECKED contract as luajit: reseat by hand, call this.
+@nomangle inline(js) fn __nb_refresh_views(buf: any) = """
+  for (var k in buf) {
+    if (Object.prototype.hasOwnProperty.call(buf, k) && k !== "ptr" &&
+        ArrayBuffer.isView(buf[k])) {
+      buf[k] = new buf[k].constructor(buf.ptr.buffer, buf.ptr.byteOffset);
+    }
+  }
+"""
