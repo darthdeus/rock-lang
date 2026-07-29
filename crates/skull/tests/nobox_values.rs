@@ -405,17 +405,22 @@ fn nobox_interpolation_does_not_materialize() {
     assert!(!body.contains("NV2_ct("), "nobox interpolation materialized its operand:\n{body}");
 }
 
+// A shape that still materializes, so the gate below stays a gate. It used to
+// be an indirect `sink(v)` call; that now threads leaves (`fn_value_abi`), which
+// would have left this test asserting a rejection nothing produces. A tuple
+// pushed into a collection is an open class per
+// docs/nobox-nested-ctor-plan.md, "Sink state".
 const NOBOX_INDIRECT_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
 
-fn consume(v: NV2) {}
-
-fn bad(v: NV2, sink: fn(NV2)) {
-    sink(v)
+fn bad(v: NV2) -> int {
+    let xs = vec_new()
+    xs.push((v, 1.0))
+    return xs.len
 }
 
 fn main() {
-    bad(NV2 { x: 1.0, y: 2.0 }, consume)
+    print(bad(NV2 { x: 1.0, y: 2.0 }))
 }
 "#;
 
@@ -694,17 +699,19 @@ fn nobox_global_reads_and_writes_leaves_at_runtime() {
     assert_eq!(out, "3\n12\n300");
 }
 
+// Re-pointed for the same reason as `NOBOX_INDIRECT_SINK`: the indirect sink it
+// used to violate through now emits.
 const NOBOX_STDLIB_SINK_LIB: &str = r#"
 nobox value SV2 { x: float, y: float }
 
-fn consume(v: SV2) {}
-
-fn stdlib_bad(v: SV2, sink: fn(SV2)) {
-    sink(v)
+fn stdlib_bad(v: SV2) -> int {
+    let xs = vec_new()
+    xs.push((v, 1.0))
+    return xs.len
 }
 
 fn stdlib_entry() {
-    stdlib_bad(SV2 { x: 1.0, y: 2.0 }, consume)
+    print(stdlib_bad(SV2 { x: 1.0, y: 2.0 }))
 }
 "#;
 
@@ -910,14 +917,79 @@ fn outer(p: NV2) -> float {
     return apply(sum, p)
 }
 
-fn main() {}
+// The RETURN half of the same ABI: a lambda handing back a nobox value.
+fn arc(r: float) -> (float) -> NV2 {
+    t => NV2 { x: t * r, y: t * 2.0 }
+}
+
+fn main() {
+    print(outer(NV2 { x: 1.0, y: 2.0 }))
+    let stroke = arc(2.0)
+    let q = stroke(3.0)
+    print(q.x + q.y)
+}
 "#;
 
+const NOBOX_FN_TYPE_AGREES: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+fn indirect(f: (NV2) -> float, v: NV2) -> float { return f(v) }
+
+fn both_ways(p: NV2) -> float {
+    fn sum(v: NV2) -> float { return v.x + v.y }
+    // The SAME fn, called directly and through the fn value, in one body.
+    return sum(p) + indirect(sum, p)
+}
+
+fn main() {
+    print(both_ways(NV2 { x: 1.0, y: 2.0 }))
+    print(indirect(w => w.x + w.y, NV2 { x: 1.0, y: 2.0 }))
+}
+"#;
+
+/// The load-bearing invariant of the fn-value ABI: a DIRECT call, a call through
+/// the fn VALUE, and the definition all pass the same arity, because all three
+/// read the leaf count off the same fn type. `direct` is called both ways in one
+/// program, so a disagreement is a wrong-arity call rather than a subtle
+/// mis-shape -- and passing the SAME fn both ways is the case a callee-identity
+/// ABI cannot get right.
 #[test]
-fn a_nested_fn_taken_by_value_rejects_a_nobox_param() {
-    let err = try_emit_module(NOBOX_NESTED_FN_BY_VALUE)
-        .expect_err("an indirectly-reachable nested fn must not implicitly box a nobox param");
-    assert!(err.message.contains("nobox"), "{err:?}");
+fn direct_and_indirect_calls_of_one_fn_agree_on_arity() {
+    let lua = emit_module(NOBOX_FN_TYPE_AGREES);
+    let body = function_body(&lua, "indirect");
+    assert!(
+        body.contains("r0(r1, r2)"),
+        "the indirect call must pass two leaves, not one box:\n{body}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_fn_type_agrees"),
+        "6\n3"
+    );
+}
+
+/// A `nobox` value crosses an INDIRECT call as leaves, both directions: a nested
+/// fn taken by value receives them, and a lambda returns them through the
+/// multi-return wire.
+///
+/// The ABI is read off the fn TYPE at both ends and nowhere else -- an indirect
+/// call site cannot see its callee, so definition and call site agree only by
+/// reading the same signature. `nested_fn_abi` used to drop a fn to the boxed
+/// ABI the moment it was taken by value, which is precisely when the two ends
+/// have to agree without seeing each other.
+#[test]
+fn a_nobox_value_crosses_a_fn_value_call_as_leaves() {
+    let lua = emit_module(NOBOX_NESTED_FN_BY_VALUE);
+    for name in ["apply", "outer", "arc"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "a fn-value boundary materialized in `{name}`:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_fn_value"),
+        "3\n12"
+    );
 }
 
 const NOBOX_GLOBAL_PLACES: &str = r#"

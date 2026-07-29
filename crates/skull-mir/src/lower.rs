@@ -866,6 +866,26 @@ fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> 
     flat_enum_shape(ws, n).map(|s| s.value_shape())
 }
 
+/// [`Builder::nobox_shape_of_ty`] for a DECLARED (workspace-arena) type -- a
+/// top-level fn's param/return, which `static_ty` can see and the body-arena
+/// walker cannot.
+fn nobox_sig_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    match static_ty(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
+            value_shape_of_nominal(ws, n)
+        }
+        TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
+                let mut shape = value_shape_of_nominal(ws, n)?;
+                shape.nullable = true;
+                Some(shape)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The value shape of a `name` nominal (value struct or flat enum), or `None`.
 fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     value_shape(ws, name)
@@ -2484,6 +2504,7 @@ pub fn lower_function_spec(
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
     };
+    b.reject_nobox_fn_taken_by_value()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -2612,6 +2633,7 @@ pub fn lower_decorator(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
+    b.reject_nobox_fn_taken_by_value()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -3079,17 +3101,35 @@ impl Builder<'_> {
             .expr_arena
             .iter()
             .any(|(_, e)| matches!(e, Expr::Var(b) if *b == name));
-        if taken_by_value || self.scx.values_first_class {
+        if self.scx.values_first_class {
             return boxed;
         }
+        // TAKEN BY VALUE: the ABI narrows to what an indirect call site can
+        // compute from the fn TYPE alone ([`Self::fn_value_abi`]), which is
+        // `nobox` values only. Both ends must run the SAME predicate -- using
+        // the wider `body_sig_value_shape` here would scalarize an ordinary
+        // value param that an opaque call site still boxes, and the two would
+        // disagree exactly where neither can see the other. Dropping to the
+        // boxed ABI entirely, which is what this used to do, is the same
+        // disagreement in the other direction: it is what made a `nobox` param
+        // reject once the fn was taken by value.
+        let shape_of = |s: &Self, t: TyId| {
+            if taken_by_value {
+                s.nobox_shape_of_ty(t)
+            } else {
+                s.body_sig_value_shape(t)
+            }
+        };
         let abi = NestedFn {
             hoisted,
             param_names,
             param_shapes: params
                 .into_iter()
-                .map(|pb| self.binding_ty(pb).and_then(|t| self.body_sig_value_shape(t)))
+                .map(|pb| self.binding_ty(pb).and_then(|t| shape_of(self, t)))
                 .collect(),
-            ret_shape: self.nested_fn_ret_ty(name, ret_ty).and_then(|t| self.body_sig_value_shape(t)),
+            ret_shape: self
+                .nested_fn_ret_ty(name, ret_ty)
+                .and_then(|t| shape_of(self, t)),
         };
         if abi.uses_scalar_abi() { abi } else { boxed }
     }
@@ -3767,14 +3807,43 @@ impl Builder<'_> {
             // Captured outer vars are the enclosing cells (Lua upvalues); the
             // closure's params are fresh cells (its Lua arg list).
             Expr::Lambda { params, body } => {
-                let param_cells: Vec<Idx<Cell>> = params
+                // A `nobox` param arrives as leaves, so the lambda binds a Group
+                // over N cells instead of one -- the same shape a scalar-ABI fn
+                // gives its params. Decided by the lambda's own fn TYPE, which is
+                // what the call site reads too (`fn_value_abi`), so the two ends
+                // agree without either seeing the other.
+                let lam_abi = self.expr_fn_value_abi(e);
+                // Param shapes come from the param BINDINGS, which is where a
+                // lambda's param types actually land -- its own `fn(..) -> ..`
+                // node can still hold unresolved vars at this point, while the
+                // bindings carry what inference unified them WITH, i.e. the same
+                // types the call site reads off the fn type.
+                let param_shapes: Vec<Option<ValueShape>> = params
                     .into_iter()
-                    .map(|pb| {
-                        let cell = self.f.new_cell(Some(self.body.binding_arena[pb].name));
-                        self.binds.insert(raw(pb), cell);
-                        cell
-                    })
+                    .map(|pb| self.binding_ty(pb).and_then(|t| self.nobox_shape_of_ty(t)))
                     .collect();
+                let mut param_cells: Vec<Idx<Cell>> = Vec::new();
+                for (i, pb) in params.into_iter().enumerate() {
+                    let pname = self.body.binding_arena[pb].name;
+                    match param_shapes.get(i).and_then(|s| s.clone()) {
+                        Some(shape) => {
+                            let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
+                                .map(|li| {
+                                    self.f.new_cell(Some(Ustr::from(
+                                        format!("{pname}__{li}").as_str(),
+                                    )))
+                                })
+                                .collect();
+                            param_cells.extend(cells.iter().copied());
+                            self.group_binds.insert(raw(pb), (cells, shape));
+                        }
+                        None => {
+                            let cell = self.f.new_cell(Some(pname));
+                            self.binds.insert(raw(pb), cell);
+                            param_cells.push(cell);
+                        }
+                    }
+                }
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;
@@ -3807,6 +3876,23 @@ impl Builder<'_> {
                 // this decision cannot see the specialized callee it would need.
                 let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
                 self.ret_tuple = self.lambda_ret_tuple_shape(e);
+                // A `nobox` return leaves as leaves, same multi-return wire the
+                // tuple ABI uses and the same fn-TYPE key.
+                self.ret_shape = lam_abi.as_ref().and_then(|(_, rs)| rs.clone());
+                if let Some(shape) = self.ret_shape.clone() {
+                    let r = self.lower_expr_repr(body)?;
+                    if self.is_open() {
+                        let leaves = self.repr_to_leaves(&r, &shape);
+                        self.f.set_term(self.cur, Term::Return(leaves));
+                    }
+                    self.defers = saved_defers;
+                    self.in_defer_body = saved_in_defer;
+                    self.in_unspliced_ctx = saved_unspliced;
+                    self.ret_tuple = saved_ret_tuple;
+                    self.ret_shape = saved_ret_shape;
+                    self.cur = saved;
+                    return Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }));
+                }
                 match self.ret_tuple.clone() {
                     // A splatting tuple return needs the body as a repr, so a
                     // `nobox` element reaches the wire as leaves.
@@ -4902,12 +4988,15 @@ impl Builder<'_> {
                     let mut idx = 0;
                     return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx));
                 }
-                // An indirect call can't splat -- args are boxed.
                 let cell = *self
                     .binds
                     .get(&raw(b))
                     .ok_or_else(|| gap("call to an unbound fn-typed local"))?;
                 let callee_v = self.emit_cur(Inst::Load(cell));
+                if let Some(abi) = self.binding_ty(b).and_then(|t| self.fn_value_abi(t)) {
+                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                }
+                // Nothing `nobox` in the signature -- args are boxed.
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals);
@@ -4915,7 +5004,11 @@ impl Builder<'_> {
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
+                let abi = self.expr_fn_value_abi(ve);
                 let callee_v = self.lower_expr(ve)?;
+                if let Some(abi) = abi {
+                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                }
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
                 let v = self.emit_call_value(e, callee_v, arg_vals);
@@ -5121,6 +5214,39 @@ impl Builder<'_> {
         }
         let mut idx = 0;
         self.tuple_from_slots(shape, slots, &mut idx)
+    }
+
+    /// An indirect call whose fn TYPE carries `nobox` values: value args splat to
+    /// their leaves and a value return arrives as leaves through
+    /// `CallValueMulti`, matching what the lambda/nested fn on the other end
+    /// emitted from the SAME type. The callee is opaque here by construction --
+    /// that is the whole point of keying on the type ([`Self::fn_value_abi`]).
+    fn indirect_call_by_abi(
+        &mut self,
+        (param_shapes, ret_shape): (Vec<Option<ValueShape>>, Option<ValueShape>),
+        callee: Idx<Inst>,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let mut argv = Vec::new();
+        for (i, &a) in arg_idxs.iter().enumerate() {
+            match param_shapes.get(i).and_then(|s| s.clone()) {
+                Some(shape) => {
+                    let r = self.lower_expr_repr(a)?;
+                    argv.extend(self.repr_to_leaves(&r, &shape));
+                }
+                None => argv.push(self.lower_expr(a)?),
+            }
+        }
+        let Some(shape) = ret_shape else {
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
+        };
+        let dests: Vec<Idx<Cell>> =
+            (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
+        self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+        let leaves: Vec<Idx<Inst>> =
+            dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
     }
 
     /// An indirect call `callee(args)`. If the call's result type is a tuple, the
@@ -11101,6 +11227,87 @@ impl Builder<'_> {
 
     /// The leaf shape of a `nobox`-typed `ty` (nullable included: presence is
     /// leaf 0), `None` for every other type.
+    /// Reject taking a TOP-LEVEL fn with a `nobox` value in its signature as a
+    /// fn VALUE.
+    ///
+    /// This is what makes [`Self::fn_value_abi`] sound. A top-level fn's ABI is
+    /// decided by a WHOLE-PROGRAM property (`ScalarCtx::taken_by_ref` drops it
+    /// to boxed), while the fn TYPE at an indirect call site says nothing about
+    /// that -- so the call site would splat leaves into a callee compiled to
+    /// take one box. That is a silent miscompile, not a rejection: it emits, and
+    /// dies at runtime indexing a number.
+    ///
+    /// Lambdas and nested fns are exempt because they now keep the leaf ABI when
+    /// taken by value, derived from the same type the call site reads. Only a
+    /// top-level fn has the whole-program dependency, and nothing in tree takes
+    /// one with a `nobox` signature by value -- pinned in
+    /// `tests/errors/nobox_toplevel_fn_by_value.rock.err`, which is where the
+    /// fix goes if that changes.
+    fn reject_nobox_fn_taken_by_value(&self) -> Result<(), CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(());
+        }
+        for (e, expr) in self.body.expr_arena.iter() {
+            let Expr::Global(name) = expr else { continue };
+            let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
+            // ANY overload of the name: the value reference names the whole
+            // overload set, so one nobox-bearing member is enough to make the
+            // ABI at an indirect call unknowable.
+            let carries_nobox = overloads.iter().any(|(mid, fid)| {
+                let f = &self.ws.module(*mid).functions[*fid];
+                f.param_decls.iter().any(|pd| nobox_sig_shape(self.ws, pd.ty).is_some())
+                    || f.return_ty.is_some_and(|t| nobox_sig_shape(self.ws, t).is_some())
+            });
+            if carries_nobox {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    format!(
+                        "`{name}` has a `nobox` value in its signature and cannot be taken as a \
+                         fn value: a top-level fn's ABI depends on whether the program takes it \
+                         by value, so an indirect call could not agree with it. Wrap it in a \
+                         lambda, which keeps the leaf ABI."
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The leaf ABI of a FN TYPE, or `None` when nothing in the signature is a
+    /// `nobox` value and the boxed fn-value ABI stands unchanged.
+    ///
+    /// Keyed on the TYPE and nothing else. An indirect call site cannot see its
+    /// callee, so the definition, a direct call and a call through a fn value
+    /// can only agree by all three reading the same signature -- the rule the
+    /// tuple-return ABI already follows (`lambda_ret_tuple_shape` next to
+    /// `expr_tuple_shape`). Any callee-identity test here would make the two
+    /// ends disagree exactly where the callee is opaque, which is the case that
+    /// matters.
+    ///
+    /// Narrowed to `nobox` types on purpose: an ordinary value struct has no
+    /// guarantee to keep, so widening this to every FFI-clean value would
+    /// re-ABI every lambda in the tree for no correctness gain. Both ends
+    /// compute the same predicate from the same type, so they still agree.
+    fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<Option<ValueShape>>, Option<ValueShape>)> {
+        let ty = self.resolve_tyid(ty)?;
+        let TypeExpr::Function { params, ret } = self.ty_node(ty)? else { return None };
+        let ps: Vec<Option<ValueShape>> =
+            params.into_iter().map(|p| self.nobox_shape_of_ty(ty.with_idx(p))).collect();
+        let rs = self.nobox_shape_of_ty(ty.with_idx(ret));
+        if rs.is_none() && ps.iter().all(Option::is_none) {
+            return None;
+        }
+        Some((ps, rs))
+    }
+
+    /// [`Self::fn_value_abi`] for the fn VALUE an expression denotes.
+    fn expr_fn_value_abi(
+        &self,
+        e: Idx<Expr>,
+    ) -> Option<(Vec<Option<ValueShape>>, Option<ValueShape>)> {
+        self.fn_value_abi(*self.inf?.expr_types.get(e)?)
+    }
+
     fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
         let ty = self.resolve_tyid(ty)?;
         match self.ty_node(ty)? {
