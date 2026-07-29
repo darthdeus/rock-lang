@@ -12,7 +12,7 @@
 //! - the SEED corpus (`tests/shape_corpus/*.rock`), hand-written, one file per
 //!   known gap plus its controls. Runs in the default nextest profile. Its gate
 //!   is rediscovering the six gaps the plan's table lists.
-//! - the pairwise SWEEP, generated here, behind `ROCK_SHAPE_SWEEP=1`. Samples
+//! - the pairwise SWEEP, generated here, `#[ignore]`d (`just shape-sweep`). Samples
 //!   storage x production x consumption x nullability x representation so every
 //!   PAIR of axis values appears in at least one program.
 //! - the MARKED sweep, the same shapes with the repr forced to `Nobox`. The
@@ -155,11 +155,9 @@ fn run_rock(args: &[&str], stdlib: StdlibVariant) -> (String, bool) {
     (text, out.status.success())
 }
 
-/// `rock test` reports a failing `@test` on stdout and STILL EXITS 0 on the
-/// skull backend (`SkullOutcome::TestFail` never increments `failed`), so the
-/// classifier reads the report, not the status. The JS backend exits 1 for the
-/// same input; the divergence is recorded in
-/// `docs/adversarial-shape-testing-plan.md` S "Findings from M1".
+/// Classification reads the REPORT, not the exit status: both backends now exit
+/// nonzero on a failing `@test`, but the status alone cannot tell a miscompile
+/// from a loud rejection, and the buckets need that distinction.
 fn classify_test_run(text: &str, ok: bool) -> Observation {
     // The COUNT is the oracle, not a catalogue of failure spellings: an assertion
     // mismatch, a Lua runtime fault and a JS exception all land in `(N failed)`,
@@ -1420,17 +1418,6 @@ fn marked_sweep_shapes() -> Vec<Shape> {
     shapes
 }
 
-fn gated_off() -> bool {
-    if std::env::var("ROCK_SHAPE_SWEEP").is_err() {
-        println!(
-            "SKIPPED: the pairwise sweep spawns one rock process per shape. \
-             Run with ROCK_SHAPE_SWEEP=1."
-        );
-        return true;
-    }
-    false
-}
-
 /// Collapse a diagnostic to the KNOWN_REJECTIONS key it matched, so the by-shape
 /// listing groups by the judged class rather than by incidental wording.
 fn reason_class(detail: &str) -> String {
@@ -1579,11 +1566,11 @@ fn assert_sweep(run: &SweepRun, gate_rejections: bool) {
     }
 }
 
+/// `#[ignore]` and not an env-var early `return`: the early return reported PASS
+/// in 0.003s, indistinguishable in nextest's summary from a sweep that ran.
 #[test]
+#[ignore = "opt-in: spawns one rock process per shape (`just shape-sweep`)"]
 fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
-    if gated_off() {
-        return;
-    }
     let run = run_sweep(
         "pairwise sweep",
         &sweep_shapes(),
@@ -1599,10 +1586,8 @@ fn the_pairwise_sweep_finds_no_unexpected_miscompile() {
 /// now, so a rejection here is a CEILING on the shape rather than the first
 /// sibling of an unknown set.
 #[test]
+#[ignore = "opt-in: spawns one rock process per shape (`just shape-sweep`)"]
 fn the_marked_sweep_finds_no_unexpected_miscompile() {
-    if gated_off() {
-        return;
-    }
     let run = run_sweep(
         "marked sweep (every shape forced to `nobox`)",
         &marked_sweep_shapes(),
@@ -1629,10 +1614,8 @@ fn the_marked_sweep_finds_no_unexpected_miscompile() {
 /// one thing that means the same on every backend: a program that compiles, runs
 /// and answers wrong.
 #[test]
+#[ignore = "opt-in: spawns one rock process per shape (`just shape-sweep`)"]
 fn the_pairwise_sweep_on_js_finds_no_unexpected_miscompile() {
-    if gated_off() {
-        return;
-    }
     let shapes = sweep_shapes();
     let dir = std::env::temp_dir().join("rock_shape_oracle_sweep_js");
     let _ = std::fs::remove_dir_all(&dir);

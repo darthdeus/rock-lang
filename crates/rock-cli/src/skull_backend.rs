@@ -1573,7 +1573,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         for (file, rendered) in &details {
             println!("\n--- {} ---\n{}", file, rendered);
         }
-    } else if failed > 0 {
+    } else if failed > 0 || emit_ok > exec_pass {
         println!(
             "\n{}",
             "(re-run with ROCK_TEST_VERBOSE=1 for full per-file errors)".dimmed()
@@ -1633,7 +1633,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         err_failed += f;
     }
 
-    if failed > 0 || lsp_failed > 0 || err_failed > 0 {
+    if tests_failed > 0 || test_fails > 0 || failed > 0 || lsp_failed > 0 || err_failed > 0 {
         std::process::exit(1);
     }
     Ok(())
