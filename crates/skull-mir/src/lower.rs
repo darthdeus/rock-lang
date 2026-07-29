@@ -11388,7 +11388,23 @@ impl Builder<'_> {
         self.is_nobox_struct(name).then_some(name)
     }
 
+    /// Under `values_first_class` NOTHING is nobox: the flag says the target has no
+    /// boxed representation to avoid, so a `value` struct is already a first-class
+    /// `vecN` and there is no leaf form to prefer. Answering `true` here would put
+    /// a local into leaf cells named `<name>__<i>`, which is both a duplicated
+    /// initializer and a RESERVED GLSL identifier (spec 3.7).
+    ///
+    /// The gate lives on the predicate rather than on each shape helper because
+    /// every representation decision reaches nobox-ness through here -- binding
+    /// shapes, expression shapes, signature splat gates and the column-storage
+    /// rejections alike. Gating one consumer leaves the others to remember it, and
+    /// they did not: `Statement::Let` falls through `nobox_binding_shape` to
+    /// `nobox_value_shape_of`, so gating the binding shape alone still emitted
+    /// `shift__0`.
     fn is_nobox_struct(&self, name: Ustr) -> bool {
+        if self.scx.values_first_class {
+            return false;
+        }
         self.ws
             .struct_by_name
             .get(&name)

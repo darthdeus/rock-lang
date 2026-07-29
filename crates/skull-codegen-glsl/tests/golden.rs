@@ -890,3 +890,29 @@ fn a_materialized_nobox_value_at_a_gpu_intrinsic_lowers_to_a_vec_ctor() {
         "the authorized box must render as a plain vec2 ctor argument:\n{glsl}"
     );
 }
+
+/// A `let` of a `nobox` value inside a shader body stays a single `vecN` local.
+/// GLSL has no boxed representation to avoid, so the leaf-cell form buys nothing
+/// and costs correctness twice: `<name>__<i>` is a RESERVED identifier (GLSL spec
+/// 3.7), and each leaf re-evaluates the whole initializer.
+///
+/// The two nobox tests above pin call BOUNDARIES; this one pins a body-internal
+/// storage decision, which `fn_uses_scalar_abi` never sees.
+#[test]
+fn a_nobox_value_local_stays_a_single_glsl_vec() {
+    let src = r#"
+        @pure fn shade(tc: Vec2) -> Vec4 {
+            let shift = v(tc.x * 0.5, tc.y * 0.5)
+            return Vec4 { x: shift.x, y: shift.y, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"]).expect("nobox Vec2 must emit GLSL");
+    assert!(
+        glsl.contains("vec2 shift;"),
+        "the local must be one vec2, not scalarized leaves:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("shift__"),
+        "a double underscore is a reserved GLSL identifier:\n{glsl}"
+    );
+}

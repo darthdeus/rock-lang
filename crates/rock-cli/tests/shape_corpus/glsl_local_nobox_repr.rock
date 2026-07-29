@@ -1,21 +1,20 @@
 // SHAPE: shader-local consumption x nobox representation x GLSL backend. A `let`
 // of a `Vec2` inside a `@shader` body, both GLSL profiles.
 //
-// LIVE BUG, and it is why `shader-validate` falls 53/53 -> 41/53 with `Vec2`
-// marked. GLSL has no boxed representation, so `values_first_class` turns the
-// scalar ABI OFF for it -- but the `Let` arm threads `nobox_binding_shape`
-// without that check while five sibling consumers gate on it. The local
-// scalarizes into `shift__0` / `shift__1`, and an identifier containing a double
-// underscore is RESERVED in GLSL (spec 3.7) -- so this emits illegal GLSL with no
-// diagnostic. It also duplicates the initializer per leaf.
+// The marked and unmarked runs must emit BYTE-IDENTICAL GLSL: `values_first_class`
+// says the target has no boxed representation, so `is_nobox_struct` answers false
+// and nothing scalarizes. A regression re-scalarizes the local into `shift__0` /
+// `shift__1` -- a double underscore is a RESERVED identifier (GLSL spec 3.7), so
+// the emission is illegal source with no diagnostic, and each leaf re-evaluates
+// the whole initializer.
 //
-// The harness runs this file twice: against the vanilla stdlib (`Vec2` unmarked,
-// CORRECT) and against a marked copy via `ROCK_STDLIB_DIR` (MISCOMPILE). The
-// marked run is the only rung in this corpus that needs the second stdlib.
+// The harness runs this file twice: against the vanilla stdlib and against a
+// `Vec2`-marked copy via `ROCK_STDLIB_DIR`. The marked run is the only rung in
+// this corpus that needs the second stdlib.
 //
-// Corpus cases: `glsl_local_unmarked` (CORRECT), `glsl_local_vec2_marked`
-// (MISCOMPILE). Fix at the choke point INSIDE `nobox_binding_shape`, so the
-// other consumers inherit the gate.
+// Corpus cases: `glsl_local_unmarked`, `glsl_local_vec2_marked`. The same
+// property with no stdlib copy:
+// `skull-codegen-glsl/tests/golden.rs::a_nobox_value_local_stays_a_single_glsl_vec`.
 
 @shader(fragment)
 fn shape_probe_frag(tc: Vec2) -> Vec4 {
