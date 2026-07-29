@@ -3969,17 +3969,42 @@ impl Builder<'_> {
                             let g = self.swizzle_from_packed(bv, &idxs);
                             self.pack(g)
                         }
+                        // An embed/nobox field has NO slot under its own name --
+                        // its leaves live on the parent under dotted keys -- so
+                        // the read rebuilds from them, exactly as the non-safe-nav
+                        // paths do (`physical_field` at the place-base read,
+                        // `embed_field_of` at the repr read). Deciding storage
+                        // BEFORE emitting is the whole point: an `Inst::Field` here
+                        // reads a key that does not exist, and for a NULLABLE child
+                        // reads its presence tag, which the next link then indexes.
+                        None if self.embed_field_of(base, field).is_some() => {
+                            let cname =
+                                self.embed_field_of(base, field).expect("guard matched");
+                            // Compose through `physical_field`, exactly as the
+                            // place-base read does -- NOT off `bv`. When the base
+                            // is itself an embed read, `bv` is a re-materialized
+                            // box whose fields are ordinary keys, so reading the
+                            // dotted leaves off it finds nothing; composing walks
+                            // up to the real physical parent instead
+                            // (`T.child?.inner` -> `T["child.inner"]`).
+                            let (pbase, key) = self.physical_field(base, field);
+                            let parent =
+                                if pbase == base { bv } else { self.lower_expr(pbase)? };
+                            if self.embed_read_is_nullable(base, field) {
+                                self.materialize_embed_nullable(parent, key, cname)
+                            } else {
+                                self.materialize_embed(parent, key, cname)
+                            }
+                        }
                         // `o?.p` reads a value field whole out of a mutable place, so
                         // it copies exactly as `o.p` does. The base is non-nil on
                         // this arm; the FIELD may still be absent, so a nullable one
-                        // takes the presence-aware copy. An embed field has no box
-                        // here (its leaves live on the parent under a dotted key).
+                        // takes the presence-aware copy.
                         None => {
                             let fv = self.emit_cur(Inst::Field { base: bv, field });
                             match self
                                 .value_struct_name_of(e)
                                 .filter(|_| self.is_mutable_place(base))
-                                .filter(|_| self.embed_field_of(base, field).is_none())
                             {
                                 Some(name) if self.embed_read_is_nullable(base, field) => {
                                     self.nullable_boxed_value_copy(fv, name)
@@ -9125,7 +9150,29 @@ impl Builder<'_> {
                 let cdata = name.is_some() && en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
-                    let fv = self.scrut_named(scrut, rpf.name, cdata);
+                    // An embed/nobox field has NO slot under its own name, so a
+                    // BINDING for it rebuilds from the parent's dotted leaves --
+                    // the same rule the field-read paths follow. `scrut_named`
+                    // would emit `Inst::Field` against a key that does not exist.
+                    // `embed_field_of_struct` fails closed on anything that is not
+                    // a plain struct (an enum variant name is not in
+                    // `struct_by_name`), so a variant record falls through.
+                    let embedded = name
+                        .and_then(|sname| {
+                            self.embed_field_of_struct(sname, rpf.name).map(|cn| (sname, cn))
+                        })
+                        .filter(|_| matches!(scrut, Scrut::Val(_)));
+                    let fv = match (embedded, scrut) {
+                        (Some((sname, cname)), Scrut::Val(v)) => {
+                            let parent = *v;
+                            if self.embed_field_is_nullable(sname, rpf.name) {
+                                self.materialize_embed_nullable(parent, rpf.name, cname)
+                            } else {
+                                self.materialize_embed(parent, rpf.name, cname)
+                            }
+                        }
+                        _ => self.scrut_named(scrut, rpf.name, cdata),
+                    };
                     self.match_pattern(&Scrut::Val(fv), rpf.pat, fail, variants, false, None)?;
                 }
                 Ok(())

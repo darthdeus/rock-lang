@@ -771,11 +771,9 @@ const SEEDS: &[SeedCase] = &[
         file: "embed_safenav_leaf_projection.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::Miscompile {
-            flip_when: "`Expr::SafeNav` (lower.rs:3995) consults `embed_field_of` \
-                        BEFORE emitting the field read, as every other field path does",
-        },
-        gap: Some("H1: safe-nav leaf projection through an embed/nobox field (LIVE, shipped)"),
+        expect: Expect::Correct,
+        gap: Some("H1 FIXED: safe-nav composes through `physical_field` instead of \
+                   emitting a bare-key read"),
     },
     SeedCase {
         name: "embed_safenav_leaf_projection_control",
@@ -790,22 +788,16 @@ const SEEDS: &[SeedCase] = &[
         file: "embed_safenav_nullable_field.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::Miscompile {
-            flip_when: "same as H1 -- a nullable embed field keeps its presence tag at \
-                        the bare key, so the premature read yields a boolean",
-        },
-        gap: Some("H1 nullable: reads the presence TAG and indexes it (LIVE, shipped)"),
+        expect: Expect::Correct,
+        gap: Some("H1 FIXED: a nullable embed field no longer yields its presence tag"),
     },
     SeedCase {
         name: "embed_match_destructure",
         file: "embed_match_destructure.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::Miscompile {
-            flip_when: "a match pattern that BINDS a flattened field reads its leaves \
-                        instead of emitting `r1 = r0.p`",
-        },
-        gap: Some("H2: match-destructure binding of a flattened field (LIVE, shipped)"),
+        expect: Expect::Correct,
+        gap: Some("H2 FIXED: a destructure binding rebuilds from the parent's leaves"),
     },
     SeedCase {
         name: "nobox_vec_combinator_element",
