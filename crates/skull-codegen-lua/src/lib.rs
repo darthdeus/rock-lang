@@ -132,10 +132,11 @@ pub struct CodegenCtx {
     /// through [`mint_synthetic`] that lands here would clobber the user's def
     /// last-write-wins, so it is rejected (span points at the user's def).
     reserved: HashMap<String, Span>,
-    /// Collisions recorded during (parallel) emit; drained by [`take_collision`]
-    /// at each public emit boundary. `Mutex` because `&CodegenCtx` is shared
-    /// across rayon workers; contention is nil (a few mints per fn).
-    collisions: Mutex<Vec<(String, CompilerError)>>,
+    /// Rejections recorded during (parallel) emit -- name collisions and broken
+    /// codegen invariants alike; drained by [`take_rejection`] at each public
+    /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
+    /// workers; contention is nil (a few per fn).
+    rejections: Mutex<Vec<(String, CompilerError)>>,
 }
 
 /// True if `name` is an identifier skull emits as a bare LOCAL inside function
@@ -198,7 +199,7 @@ impl CodegenCtx {
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors(ws));
-        CodegenCtx { reserved, collisions: Mutex::new(collisions) }
+        CodegenCtx { reserved, rejections: Mutex::new(collisions) }
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -206,7 +207,7 @@ impl CodegenCtx {
     /// `__advance`/`__defer<k>`/`__on_killed`/`__on_resume`/`__on_hot_reload`).
     /// Returns `name` unchanged. If it collides with a REAL top-level name (a
     /// user fn's Lua name or a global), records a spanned rejection pointing at
-    /// that user definition -- drained after emit by [`take_collision`]. This is
+    /// that user definition -- drained after emit by [`take_rejection`]. This is
     /// reject-not-panic: a collision is illegal user code, not a compiler bug, so
     /// it surfaces as a diagnostic and keeps `rock stone` / `lsp serve` alive.
     /// THE single choke point for every synthetic top-level name across skull.
@@ -218,20 +219,24 @@ impl CodegenCtx {
                  `__advance`, `__defer<k>`, and `__on_killed`/`__on_resume`/`__on_hot_reload` \
                  forms are reserved)"
             );
-            self.collisions
-                .lock()
-                .expect("collision sink")
-                .push((name.clone(), CompilerError::new_with_label(span, msg)));
+            self.reject(name.clone(), CompilerError::new_with_label(span, msg));
         }
         name
     }
 
-    /// Drain the recorded synthetic-name collisions and return the first (by
-    /// synthetic name, for determinism across rayon scheduling), or `None`.
-    /// Called at each public emit boundary; draining clears the sink so a later
-    /// emit on the same (cached) ctx starts fresh.
-    pub fn take_collision(&self) -> Option<CompilerError> {
-        let mut sink = self.collisions.lock().expect("collision sink");
+    /// Record a rejection found mid-emit, keyed by `key` for deterministic
+    /// ordering across rayon scheduling. THE sink for anything the render path
+    /// cannot return a `Result` from.
+    pub fn reject(&self, key: String, err: CompilerError) {
+        self.rejections.lock().expect("rejection sink").push((key, err));
+    }
+
+    /// Drain the recorded rejections and return the first (by key, for
+    /// determinism across rayon scheduling), or `None`. Called at each public
+    /// emit boundary; draining clears the sink so a later emit on the same
+    /// (cached) ctx starts fresh.
+    pub fn take_rejection(&self) -> Option<CompilerError> {
+        let mut sink = self.rejections.lock().expect("rejection sink");
         sink.sort_by(|a, b| a.0.cmp(&b.0));
         sink.drain(..).next().map(|(_, e)| e)
     }
@@ -372,6 +377,7 @@ pub fn emit_named_framed(
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
+    record_leaf_form_violations(ws, ctx, func);
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out =
@@ -444,18 +450,52 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 /// wrongly flattened field list would emit silently against the wrong
 /// signature; requiring the canonical sequence turns that into a loud panic at
 /// emit instead -- the same fail-closed move `value_leaf_layout_checked` makes.
-fn is_leaf_form(ws: &Workspace, name: ustr::Ustr, fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
-    if !fields.iter().any(|(n, _)| n.contains('.')) {
-        return false;
-    }
+fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
+    fields.iter().any(|(n, _)| n.contains('.'))
+}
+
+/// `Some(err)` if a flattened (dotted-field) ctor for `name` does not carry
+/// EXACTLY its canonical leaf sequence. The `_lct` ctor is positional, so a
+/// partial or reordered flattening would write one leaf's value into another
+/// with no diagnostic.
+///
+/// A violation is a compiler-invariant break rather than illegal user code, but
+/// it still REJECTS instead of panicking: this runs on every emit, and a panic
+/// takes `rock lsp serve` and `rock stone`'s watch loop down with a backtrace
+/// and no diagnostic. Twin of the JS emitter's check.
+pub fn leaf_form_violation(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    got: &[ustr::Ustr],
+) -> Option<CompilerError> {
     let canonical = skull_mir::lower::value_leaf_paths_of(ws, name).unwrap_or_default();
-    let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
-    assert_eq!(
-        got, canonical,
+    if got == canonical {
+        return None;
+    }
+    Some(CompilerError::new_no_location(format!(
         "`{name}` ctor carries dotted field names that are not its canonical leaf \
-         sequence -- the positional ctor would be called with the wrong shape"
-    );
-    true
+         sequence: {got:?} vs {canonical:?}"
+    )))
+}
+
+/// Every flattened value-struct ctor in `func`, checked against its canonical
+/// leaf sequence. Run once per emitted function, before rendering: the render
+/// path picks `_lct` off the dotted names alone and cannot itself reject.
+fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc) {
+    for (_, inst) in func.insts.iter() {
+        let (Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields }) =
+            inst
+        else {
+            continue;
+        };
+        if !is_leaf_form(fields) {
+            continue;
+        }
+        let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
+        if let Some(err) = leaf_form_violation(ws, *name, &got) {
+            ctx.reject(name.to_string(), err);
+        }
+    }
 }
 
 /// Group every all-constant `MakeValueStruct` (every field operand a `Const`) by
@@ -514,7 +554,7 @@ fn collect_const_hoists(
         if !const_hoist_uses_are_read_only(ws, func, id) {
             continue;
         }
-        let leaf_form = is_leaf_form(ws, *name, fields);
+        let leaf_form = is_leaf_form(fields);
         let g = match groups.iter().position(|(n, l, lf)| *n == *name && *l == lits && *lf == leaf_form) {
             Some(p) => p as u32,
             None => {
@@ -1653,7 +1693,7 @@ impl Emitter<'_> {
                 // passes only (SROA), not the wire shape. The ctor NAME is chosen
                 // by tier from the ONE classification: `_vt` (table) for a
                 // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
-                let suffix = if is_leaf_form(self.ws, *name, fields) {
+                let suffix = if is_leaf_form(fields) {
                     "_lct"
                 } else if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
                     "_vt"

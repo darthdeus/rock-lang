@@ -1483,7 +1483,8 @@ impl Emitter<'_> {
                     let got: Vec<ustr::Ustr> = fields.iter().map(|(f, _)| *f).collect();
                     if got != canonical {
                         return Err(CompilerError::new_no_location(format!(
-                            "`{name}` ctor carries dotted field names that are not its canonical                              leaf sequence: {got:?} vs {canonical:?}"
+                            "`{name}` ctor carries dotted field names that are not its canonical \
+                             leaf sequence: {got:?} vs {canonical:?}"
                         )));
                     }
                     return self.render_leaf_form_value_struct(*name, fields);

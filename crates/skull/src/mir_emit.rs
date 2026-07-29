@@ -1892,7 +1892,7 @@ fn assemble(
     // rather than emit two clobbering top-level defs. Covers `emit_full` +
     // `emit_incremental` (both funnel through here); the overlay fast path drains
     // in `emit_overlay` (can't return Err, so it warns).
-    if let Some(err) = cg.take_collision() {
+    if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
     Ok((MirEmit { lua: out, skipped, phases }, reachable))
@@ -2561,7 +2561,7 @@ pub fn emit_overlay(
     // fast-path callers), but a body edit that mints a newly-colliding synthetic
     // name must not be swallowed. Warn (never-swallow); the next full/incremental
     // rebuild rejects it authoritatively through `assemble`.
-    if let Some(err) = cache.cg.take_collision() {
+    if let Some(err) = cache.cg.take_rejection() {
         eprintln!("skull overlay emit: reserved-name collision -- {}", err.message);
     }
     emit.phases = vec![

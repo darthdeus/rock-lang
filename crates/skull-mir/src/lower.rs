@@ -5024,6 +5024,10 @@ impl Builder<'_> {
                     })
                     .collect::<Result<_, CompilerError>>()?
             };
+            // Above the tuple early return: the exemption is a property of the
+            // CALLEE, so making it arity-dependent would be a guarantee hole the
+            // day a `@gpu_only` intrinsic returns a tuple.
+            self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
                 // A specialized generic returning a tuple is out of v0 scope: the
                 // call inst is buried inside the MakeTuple, so no key is attached
@@ -5031,7 +5035,6 @@ impl Builder<'_> {
                 // specialized). `key` is intentionally unused here.
                 return Ok(self.emit_tuple_call_tree(func, args, shape, tree));
             }
-            self.authorize_gpu_boundary_boxes(&func, &args);
             let call = self.emit_cur(Inst::Call { func, args });
             if let Some(t) = tree {
                 self.f.bound_trees.insert(call, t);
