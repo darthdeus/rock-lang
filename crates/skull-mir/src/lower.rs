@@ -3167,6 +3167,17 @@ impl Builder<'_> {
         Ok(vec![v])
     }
 
+    fn absent_tuple_slots(&mut self, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        let mut out = Vec::with_capacity(shape.slot_count());
+        if shape.nullable {
+            out.push(self.emit_cur(Inst::Const(Lit::Bool(false))));
+        }
+        while out.len() < shape.slot_count() {
+            out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+        }
+        out
+    }
+
     /// The `present, <slots...>` wire for a `-> (..)?` return, the tuple analogue
     /// of the nullable arms in [`Self::repr_to_leaves`]: a literal `null` folds to
     /// `false, nil, ...` and a tuple value leads with `true`.
@@ -3180,7 +3191,6 @@ impl Builder<'_> {
         e: Idx<Expr>,
         shape: &TupleRetShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let slot_n = shape.slot_count() - 1;
         let r = self.lower_expr_repr(e)?;
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
@@ -3189,12 +3199,7 @@ impl Builder<'_> {
                      (return the tuple literal or `null` directly)",
                 ));
             }
-            let mut out = Vec::with_capacity(1 + slot_n);
-            out.push(self.emit_cur(Inst::Const(Lit::Bool(false))));
-            for _ in 0..slot_n {
-                out.push(self.emit_cur(Inst::Const(Lit::Nil)));
-            }
-            return Ok(out);
+            return Ok(self.absent_tuple_slots(shape));
         }
         let mut out = vec![self.emit_cur(Inst::Const(Lit::Bool(true)))];
         out.extend(self.tuple_repr_to_slots(r, shape));
@@ -3223,6 +3228,12 @@ impl Builder<'_> {
     /// else is a packed tuple, so each element is read back with `TupleIndex`
     /// and a `Leaves` slot is field-read off the box.
     fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        // A phantom tuple has no aggregate to project; every wire slot is absent.
+        if let ValueRepr::Scalar(v) = &r {
+            if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
+                return self.absent_tuple_slots(shape);
+            }
+        }
         let parts: Vec<ValueRepr> = match r {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
@@ -5461,6 +5472,13 @@ impl Builder<'_> {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
             self.reject_nobox_opaque_value_return(e, func)?;
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        // Resolve phantom before tuple flattening can project from its nil placeholder.
+        if arg_idxs.is_empty()
+            && callee.inline_body.is_some_and(|(_, body)| body.trim() == "return nil")
+        {
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
