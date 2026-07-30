@@ -2206,73 +2206,96 @@ pub fn scalar_abi_param_leaf_widths(
     )
 }
 
-/// The scalar-ABI leaf-param encoding joins nested field names with `__`, and
-/// `__` is legal in a Rock field name -- so `value Bad { tl__x: float, tl: V2 }`
-/// flattens BOTH `tl__x` and `tl.x` to the leaf name `tl__x`. The join cannot be
-/// made injective, and a hand-written `@scalar_abi` body naming its own leaves
-/// then addresses whichever Lua bound last. Reject instead of emitting duplicate
-/// params -- same discipline as [`crate::mangle::collision_errors`].
+/// THE invariant: a function's emitted Lua parameter list must be INJECTIVE.
 ///
-/// Keyed on the TYPE, not on a call site: every route that flattens the shape
-/// (a direct call reading the callee's `@scalar_abi`, an indirect one deriving
-/// the ABI from the fn TYPE) shares the declaration, so one check closes all of
-/// them. Both leaf tiers are scanned -- the all-scalar shape and the GC-carrying
-/// per-field one, since `fn_scalar_abi` can pick either.
+/// The scalar-ABI leaf encoding joins nested field names with `__`, and `__` is
+/// legal in a Rock identifier, so the join cannot be made injective on its own.
+/// Two distinct sources can land on one emitted name:
+///   - two leaves of the same value param (`value Bad { tl__x: float, tl: V2 }`
+///     flattens both `tl__x` and `tl.x` to `r__tl__x`), or
+///   - a leaf and a SIBLING param (`fn f(r: V2, r__x: float)` emits
+///     `f(r__x, r__y, r__x)`).
+/// Either way Lua binds the later one and the body silently reads the wrong
+/// value. Reject rather than emit the duplicate -- same discipline as
+/// [`crate::mangle::collision_errors`].
 ///
-/// The leaf list comes from [`leaf_names`] -- the SAME walk the emitter's
-/// [`leaf_param_names`] uses, run a second time with `.` to recover the readable
-/// source path for the diagnostic. Positions correspond because it is one
-/// traversal, so the checker cannot go blind to a leaf the emitter still emits.
-pub fn value_leaf_name_collisions(ws: &Workspace) -> Vec<(String, CompilerError)> {
-    let mut out: Vec<(String, CompilerError)> = Vec::new();
-    for m in ws.modules.iter() {
-        for (_, sd) in m.structs.iter() {
-            if !sd.is_value {
-                continue;
+/// Keyed on the SIGNATURE, at the point leaves actually become parameter names --
+/// not on the value declaration. A declaration key is both unsound and
+/// over-broad: it misses the sibling-param collision entirely (the struct is
+/// clean there), and it rejects a program whose ambiguous shape never reaches a
+/// param list at all, which is legal and observably correct today.
+///
+/// The names come from [`scalar_abi_lua_param_names`] -- the very list the
+/// emitter writes -- so the checker cannot disagree with what is emitted.
+///
+/// Scoped to `inline(lua)` bodies because that is the ONLY emission that names
+/// leaves: an ordinary Rock fn's params are emitted as `c<N>` cells, positional
+/// and injective by construction, so an ambiguous shape flowing through one is
+/// harmless and must keep compiling.
+pub fn scalar_abi_param_collisions(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+) -> Vec<(String, CompilerError)> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.inline_body.is_none() {
+        return Vec::new();
+    }
+    let Some(names) = scalar_abi_lua_param_names(ws, scx, fref) else {
+        return Vec::new();
+    };
+    let origins = scalar_abi_param_origins(ws, scx, fref);
+    debug_assert_eq!(names.len(), origins.len(), "one derivation, two spellings");
+
+    let mut out = Vec::new();
+    let mut seen: HashMap<&str, &str> = HashMap::new();
+    let mut reported: HashSet<&str> = HashSet::new();
+    for (name, origin) in names.iter().zip(origins.iter()) {
+        match seen.get(name.as_str()) {
+            Some(prev) if !reported.contains(name.as_str()) => {
+                reported.insert(name.as_str());
+                let fname = f.name;
+                let msg = format!(
+                    "`{fname}` would emit the Lua parameter `{name}` twice: it is both {prev} and \
+                     {origin}. The scalar ABI joins nested value fields with `__`, which is legal \
+                     in an identifier too, so the two are indistinguishable and the body would \
+                     read whichever Lua bound last -- rename one of them"
+                );
+                out.push((
+                    format!("{fname}.{name}"),
+                    CompilerError::new_with_label(f.name_span, msg),
+                ));
             }
-            let shapes = [value_shape(ws, sd.name), value_shape_gc(ws, sd.name)];
-            let mut reported: HashSet<String> = HashSet::new();
-            for shape in shapes.iter().flatten() {
-                let names = leaf_names(shape, "", LEAF_PARAM_SEP);
-                let paths = leaf_names(shape, "", ".");
-                debug_assert_eq!(names.len(), paths.len(), "one walk, two spellings");
-                let mut seen: HashMap<&str, &str> = HashMap::new();
-                for (leaf, path) in names.iter().zip(paths.iter()) {
-                    match seen.get(leaf.as_str()) {
-                        Some(prev) if !reported.contains(leaf) => {
-                            reported.insert(leaf.clone());
-                            let sname = sd.name;
-                            // The path's first segment is the top-level field that
-                            // owns the leaf -- point the span at the later of the
-                            // two, which is the one a reader has to rename.
-                            let owner = path.split('.').next().unwrap_or(path.as_str());
-                            let span = sd
-                                .fields
-                                .iter()
-                                .find(|f| f.name.as_str() == owner)
-                                .map_or(sd.name_span, |f| f.span);
-                            let msg = format!(
-                                "value struct `{sname}` flattens `{prev}` and `{path}` to the same \
-                                 scalar-ABI leaf parameter name `{leaf}`; `__` is legal in a field \
-                                 name, so the leaf encoding cannot tell the two apart and the \
-                                 emitted body would read whichever Lua bound last -- rename one of \
-                                 them"
-                            );
-                            out.push((
-                                format!("{sname}.{leaf}"),
-                                CompilerError::new_with_label(span, msg),
-                            ));
-                        }
-                        Some(_) => {}
-                        None => {
-                            seen.insert(leaf.as_str(), path.as_str());
-                        }
-                    }
-                }
+            Some(_) => {}
+            None => {
+                seen.insert(name.as_str(), origin.as_str());
             }
         }
     }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// A human description per emitted parameter, positionally parallel to
+/// [`scalar_abi_lua_param_names`]: either the declared param itself, or which
+/// leaf of which value param it flattens from (dotted, so it is readable and
+/// unambiguous). Built by the same walk under the `.` separator.
+fn scalar_abi_param_origins(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Vec<String> {
+    let Some(abi) = fn_scalar_abi(ws, scx, fref) else {
+        return Vec::new();
+    };
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mut out = Vec::new();
+    for (pd, shape) in f.param_decls.iter().zip(abi.param_shapes) {
+        let pname = pd.name;
+        match shape {
+            Some(shape) => out.extend(
+                leaf_names(&shape, pname.as_str(), ".")
+                    .into_iter()
+                    .map(|p| format!("the leaf `{p}` of value param `{pname}`")),
+            ),
+            None => out.push(format!("the declared param `{pname}`")),
+        }
+    }
     out
 }
 

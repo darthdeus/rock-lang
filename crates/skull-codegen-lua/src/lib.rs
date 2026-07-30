@@ -199,10 +199,6 @@ impl CodegenCtx {
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors(ws));
-        // Same discipline one level down: a `value` struct whose scalar-ABI leaf
-        // names are ambiguous (a `__`-containing field colliding with a nested
-        // path) cannot be given distinct Lua params at all.
-        collisions.extend(skull_mir::lower::value_leaf_name_collisions(ws));
         CodegenCtx { reserved, rejections: Mutex::new(collisions) }
     }
 

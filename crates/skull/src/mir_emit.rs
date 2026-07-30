@@ -2104,6 +2104,18 @@ pub fn emit_full_in(
     // rescanning the workspace.
     let scx = skull_mir::lower::ScalarCtx::new(ws);
 
+    // The emitted param list must be injective. Checked per SIGNATURE, over every
+    // function rather than just the emitted set: a duplicate Lua param is illegal
+    // regardless of which filter would have reached the body.
+    for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (fid, _) in m.functions.iter() {
+            let fref = FuncRef { module: m.id, func: fid };
+            for (key, err) in skull_mir::lower::scalar_abi_param_collisions(ws, &scx, fref) {
+                cg.reject(key, err);
+            }
+        }
+    }
+
     let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
         .modules
         .iter()
