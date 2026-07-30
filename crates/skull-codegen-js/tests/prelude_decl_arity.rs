@@ -172,3 +172,46 @@ fn scan_covers_the_remaining_extern_surface() {
          progress, lower this floor; if the scan broke, fix the scan"
     );
 }
+
+/// A hand-written `inline(js)` body must not implement the multi-value return
+/// ABI itself. Nine imgui stubs did -- `return [false, value];` -- which was
+/// correct under the old transport-array ABI and silently wrong under the
+/// scratch-slot one: the caller reads leaf 0 (getting the whole array) and then
+/// `__rock_ret1` (getting `undefined`). No shape assertion catches it, because
+/// the body is an opaque string to the compiler.
+///
+/// Scans every Rock source that can carry a JS body, not just js_ffi.rock.
+#[test]
+fn no_inline_js_body_hand_writes_the_array_return_abi() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut offenders = Vec::new();
+    let mut scanned = 0usize;
+    let mut stack = vec![root.join("stone"), root.join("stdlib")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("rock") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else { continue };
+            scanned += 1;
+            for (i, line) in src.lines().enumerate() {
+                if line.contains("inline(js)") && line.contains("return [") {
+                    offenders.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(scanned > 20, "scanned only {scanned} .rock files -- the walk is broken");
+    assert!(
+        offenders.is_empty(),
+        "these inline(js) bodies return an array instead of using the scratch ABI \
+         (__rock_ret1 = ..; return leaf0;):\n  {}",
+        offenders.join("\n  ")
+    );
+}

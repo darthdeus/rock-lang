@@ -11,7 +11,6 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
@@ -99,7 +98,6 @@ fn collect<T>(findings: &mut Vec<CompilerError>, r: Result<T, CompilerError>) {
 /// first definition hid the others rather than preventing them -- and the
 /// `--backend js` skip histogram IS the emitter worklist, so a first-only report
 /// makes that worklist a floor. Nothing is downgraded: a rejected definition
-/// contributes no JS and a non-empty set fails the whole emission.
 fn combine_rejections(mut rejections: Vec<(String, CompilerError)>) -> Result<(), CompilerError> {
     rejections.sort_by(|(a, _), (b, _)| a.cmp(b));
     match merge_findings(rejections.into_iter().map(|(_, e)| e).collect()) {
@@ -108,50 +106,55 @@ fn combine_rejections(mut rejections: Vec<(String, CompilerError)>) -> Result<()
     }
 }
 
-fn nobox_nominal_ty(ws: &Workspace, ty: TyId) -> Option<ustr::Ustr> {
-    let te = match ty {
-        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
-        TyId::Local(_) => return None,
-    };
-    match te {
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } => {
-            let sid = ws.struct_by_name.get(&name)?;
-            ws.modules[sid.module.index()].structs[sid.def]
-                .is_nobox
-                .then_some(name)
-        }
-        TypeExpr::Nullable(inner) => nobox_nominal_ty(ws, ty.with_idx(inner)),
-        _ => None,
-    }
-}
-
-fn validate_js_nobox_return(
-    ws: &Workspace,
-    f: &bone_semantic::hir::Function,
-    mf: &MirFunc,
-) -> Result<(), CompilerError> {
-    let Some(name) = f.return_ty.and_then(|ty| nobox_nominal_ty(ws, ty)) else {
-        return Ok(());
-    };
-    let packs_return = mf
-        .blocks
-        .iter()
-        .any(|(_, block)| matches!(&block.term, Term::Return(values) if values.len() > 1));
-    if packs_return {
-        return Err(err(format!(
-            "JS subset: nobox value `{name}` return requires an implicit array materialization"
-        )));
-    }
-    Ok(())
-}
-
 /// A cell's JS identifier (`c<raw>`). Params and locals share the scheme; params
 /// materialize in the fn arg list, other stored cells as hoisted `let`s.
 fn cell_name<T>(cell: Idx<T>) -> String {
     format!("c{}", raw(cell))
+}
+
+/// Secondary return register `i` (1-based; leaf 0 rides the ordinary JS return
+/// value). Module scope, not body-local, so it is outside the reserved
+/// `r<N>`/`v<N>`/`c<N>` body namespace and cannot shadow a user global -- the
+/// `__rock_` prefix is the shared compiler/stdlib global space.
+fn ret_slot(i: usize) -> String {
+    format!("__rock_ret{i}")
+}
+
+/// `var __rock_ret1, ..;` for a program whose widest multi-value wire is `n`
+/// leaves. Self-declaring per the runtime-globals doctrine: a caller assembling
+/// a partial program without the prelude must not hit a ReferenceError.
+fn ret_slot_decls(n: usize) -> String {
+    if n < 2 {
+        return String::new();
+    }
+    let names: Vec<String> = (1..n).map(ret_slot).collect();
+    format!("var {};\n", names.join(", "))
+}
+
+/// The widest multi-value wire in `bodies`: the max leaf count over every
+/// multi-value `Term::Return` and every multi-value call's dests, nested fns
+/// included. Sizes the scratch bank EXACTLY -- scanned from the same insts and
+/// terms the emitter walks, so a slot can never be written without a
+/// declaration.
+fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
+    fn of(mf: &MirFunc) -> usize {
+        let mut n = 0usize;
+        for (_, block) in mf.blocks.iter() {
+            if let Term::Return(vs) = &block.term {
+                n = n.max(vs.len());
+            }
+        }
+        for (_, inst) in mf.insts.iter() {
+            match inst {
+                Inst::CallMulti { dests, .. }
+                | Inst::CallValueMulti { dests, .. }
+                | Inst::CallBoundMulti { dests, .. } => n = n.max(dests.len()),
+                _ => {}
+            }
+        }
+        n.max(mf.nested_fns.iter().map(of).max().unwrap_or(0))
+    }
+    bodies.iter().map(|mf| of(mf)).max().unwrap_or(0)
 }
 
 /// A finite-float JS numeric literal, or a reject for inf/NaN (outside the
@@ -1120,15 +1123,26 @@ impl Emitter<'_> {
         }
     }
 
-    /// A multi-value assignment `[d0, d1, ...] = <call>;` (a single dest is a
-    /// plain `d0 = <call>;` -- the scalar ABI returns one leaf as a scalar, not a
-    /// one-element array, matching [`Self::emit_return`]).
+    /// A multi-value capture: `d0 = <call>; d1 = __rock_ret1; ...` -- leaf 0 from
+    /// the call's own return value, leaves 1..N from the scratch bank
+    /// ([`Self::emit_return`] is the publishing half). A single dest is a plain
+    /// `d0 = <call>;`; the ABI returns one leaf as a bare scalar.
+    ///
+    /// The bank is caller-saved-by-immediacy: this emits the call and EVERY slot
+    /// read as one indivisible run of statements, so nothing can execute between
+    /// publish and capture. That is the whole safety argument, and it holds only
+    /// while this stays a single unit -- never split the reads out, and never let
+    /// a multi-value call render as an inlined subexpression (it cannot today:
+    /// `CallMulti`/`CallValueMulti` have dests and always emit as statements).
     fn multi_assign(&self, dests: &[Idx<Cell>], call: &str) -> String {
         match dests {
             [d] => format!("{} = {call};", cell_name(*d)),
             _ => {
-                let names: Vec<String> = dests.iter().map(|&d| cell_name(d)).collect();
-                format!("[{}] = {call};", names.join(", "))
+                let mut s = format!("{} = {call};", cell_name(dests[0]));
+                for (i, d) in dests.iter().enumerate().skip(1) {
+                    s.push_str(&format!(" {} = {};", cell_name(*d), ret_slot(i)));
+                }
+                s
             }
         }
     }
@@ -1219,7 +1233,8 @@ impl Emitter<'_> {
                 // read back via `Load` of each dest.
                 Inst::CallMulti { dests, func, args } => {
                     let call = self.render_call(iid, *func, args)?;
-                    self.push(&self.multi_assign(dests, &call));
+                    let line = self.multi_assign(dests, &call);
+                    self.push(&line);
                 }
                 Inst::CallValueMulti { dests, callee, args } => {
                     let mut rendered = vec![self.render_val(*callee)?];
@@ -1227,7 +1242,8 @@ impl Emitter<'_> {
                         rendered.push(self.render_val(*a)?);
                     }
                     let call = format!("__rock_call({})", rendered.join(", "));
-                    self.push(&self.multi_assign(dests, &call));
+                    let line = self.multi_assign(dests, &call);
+                    self.push(&line);
                 }
                 // Module-level `let`/`global` state write: `__G.<name> = value;`
                 // (scoped so no body local can collide). The name must be in the
@@ -1296,12 +1312,24 @@ impl Emitter<'_> {
                 self.push(&format!("return {s};"));
             }
             // The scalar ABI returns a scalarized value struct / tuple as N leaf
-            // values; JS has no multi-return, so pack them into an array the
-            // `CallMulti` caller destructures.
+            // values. JS has no multi-return, so leaf 0 rides the ordinary return
+            // value and leaves 1..N ride module-scope scratch slots -- emulated
+            // secondary return registers. An array would allocate, which a
+            // `nobox` value forbids outright and every other value pays for
+            // nothing (measured: `docs/js-nobox-return-abi-plan.md`).
+            //
+            // Publishing before the `return` reorders the leaves' evaluation,
+            // which is sound ONLY because a leaf is a temp or an
+            // `always_inlinable` pure expression -- that set excludes every Call,
+            // so no leaf can run user code or clobber the bank.
             _ => {
                 let parts: Result<Vec<String>, CompilerError> =
                     vs.iter().map(|&v| self.render_val(v)).collect();
-                self.push(&format!("return [{}];", parts?.join(", ")));
+                let parts = parts?;
+                for (i, p) in parts.iter().enumerate().skip(1) {
+                    self.push(&format!("{} = {p};", ret_slot(i)));
+                }
+                self.push(&format!("return {};", parts[0]));
             }
         }
         Ok(())
@@ -1343,15 +1371,21 @@ impl Emitter<'_> {
                     let s = self.render_val(*v)?;
                     self.push(&format!("return {s};"));
                 }
-                // Scalarized value-struct / tuple return: pack the leaves into an
-                // array the `CallMulti` caller destructures, mirroring the
-                // structured `emit_return`. Only the ordinary-body fallback opts
-                // in; a coroutine step's return channels through the step
-                // protocol, so it keeps the reject.
+                // Scalarized value-struct / tuple return: leaf 0 in the return
+                // value, leaves 1..N in the scratch bank, mirroring the
+                // structured `emit_return` -- the two printers MUST agree, or a
+                // body that falls back to the trampoline silently changes
+                // calling convention. Only the ordinary-body fallback opts in; a
+                // coroutine step's return channels through the step protocol, so
+                // it keeps the reject.
                 _ if self.pack_multi_return => {
                     let parts: Result<Vec<String>, CompilerError> =
                         vs.iter().map(|&v| self.render_val(v)).collect();
-                    self.push(&format!("return [{}];", parts?.join(", ")));
+                    let parts = parts?;
+                    for (i, p) in parts.iter().enumerate().skip(1) {
+                        self.push(&format!("{} = {p};", ret_slot(i)));
+                    }
+                    self.push(&format!("return {};", parts[0]));
                 }
                 _ => return Err(err("JS subset: multi-value coroutine return")),
             },
@@ -2190,6 +2224,7 @@ pub fn emit_with_closure(
     out.push_str(&emit_vt_eq(ws, &bodies)?);
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
     out.push_str(&emit_col_mat(ws, &bodies)?);
+    out.push_str(&ret_slot_decls(max_multi_wire(&bodies)));
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
     // program path reorders these; per-test order is pinned by the JS suite.)
@@ -2402,7 +2437,7 @@ fn build_program_core(
                 discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
             );
             discover_globals(
-                ws, &mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
+                ws, &mf, &st.state_index, &st.nobox_leaf_globals, &st.deco_globals, &st.enum_defs, &mut st.gctx,
                 &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
                 &mut st.inline_js,
             )?;
@@ -2436,6 +2471,9 @@ fn build_program_core(
     let col_mat = emit_col_mat(ws, &bodies)?;
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
+    let ret_slots = ret_slot_decls(max_multi_wire(&bodies));
+    out.push_str(&ret_slots);
+    stable.push_str(&ret_slots);
     // 1. deco def fns.
     for (name, mf) in &deco_bodies {
         match emit_body_with_nested(ws, mf, name, &st.names, &hoisted, &st.gctx) {
@@ -2805,6 +2843,7 @@ struct WorklistState {
     /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
     inline_js: Vec<FuncRef>,
     state_index: HashMap<ustr::Ustr, GlobalSite>,
+    nobox_leaf_globals: HashMap<ustr::Ustr, ustr::Ustr>,
     /// Empty in program mode (applications ARE emitted, so a registry read is
     /// legitimate); the per-test reject set otherwise.
     deco_globals: HashSet<ustr::Ustr>,
@@ -2831,6 +2870,7 @@ impl WorklistState {
             spec_queue: Vec::new(),
             inline_js: Vec::new(),
             state_index: build_state_index(ws),
+            nobox_leaf_globals: build_nobox_leaf_globals(ws),
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
             gctx: GlobalCtx::default(),
@@ -3019,7 +3059,6 @@ impl JsReach<'_> {
         let mut findings: Vec<CompilerError> = Vec::new();
         collect(&mut findings, skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf));
         collect(&mut findings, nobox_errs(self.ws, &mf));
-        collect(&mut findings, validate_js_nobox_return(self.ws, f, &mf));
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
@@ -3141,7 +3180,7 @@ impl JsReach<'_> {
             discover_callees(self.ws, mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
         );
         discover_globals(
-            self.ws, mf, &st.state_index, &st.deco_globals, &st.enum_defs, &mut st.gctx,
+            self.ws, mf, &st.state_index, &st.nobox_leaf_globals, &st.deco_globals, &st.enum_defs, &mut st.gctx,
             &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
             &mut st.inline_js,
         )?;
@@ -3670,6 +3709,29 @@ fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
     m
 }
 
+/// `__nbg_<base>_<i>` -> `<base>`, for every global whose STORAGE is leaves.
+/// A `nobox` global is not one name holding a box; lowering reads and writes the
+/// leaves directly, and those names are synthesized, so they never appear in
+/// `global_by_name`. They are state all the same.
+///
+/// Kept separate from [`build_state_index`] because the two answer different
+/// questions: a leaf is state (a write to it is legal) but owns no INITIALIZER --
+/// the base global's ginit assigns every leaf, so keying a ginit on a leaf would
+/// emit that initializer once per leaf.
+fn build_nobox_leaf_globals(ws: &Workspace) -> HashMap<ustr::Ustr, ustr::Ustr> {
+    let mut m = HashMap::new();
+    for module in &ws.modules {
+        for (_gid, g) in module.globals.iter() {
+            if let Some(leaves) = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+                for leaf in leaves {
+                    m.insert(leaf, g.name);
+                }
+            }
+        }
+    }
+    m
+}
+
 /// Discover the plain-Rock callees `mf` calls directly (post-inline residual
 /// calls), queueing each for co-emission under [`callee_js_name`]. Mirrors
 /// `render_call`'s dispatch so both agree on what NOT to reject.
@@ -3804,6 +3866,7 @@ fn discover_globals(
     ws: &Workspace,
     mf: &MirFunc,
     state_index: &HashMap<ustr::Ustr, GlobalSite>,
+    nobox_leaf_globals: &HashMap<ustr::Ustr, ustr::Ustr>,
     deco_globals: &HashSet<ustr::Ustr>,
     enum_defs: &HashMap<ustr::Ustr, String>,
     gctx: &mut GlobalCtx,
@@ -3819,6 +3882,15 @@ fn discover_globals(
             continue;
         } else if enum_defs.contains_key(&name) {
             gctx.enum_globals.insert(name);
+        } else if let Some(&base) = nobox_leaf_globals.get(&name) {
+            // A `nobox` global's leaf: state, but the INITIALIZER belongs to the
+            // base global, whose ginit assigns every leaf at once.
+            gctx.state.insert(name);
+            if let Some(&site) = state_index.get(&base) {
+                if ginit_seen.insert(base) {
+                    ginit_queue.push((base, site));
+                }
+            }
         } else if let Some(&site) = state_index.get(&name) {
             if deco_globals.contains(&name) {
                 return Err(err(format!(

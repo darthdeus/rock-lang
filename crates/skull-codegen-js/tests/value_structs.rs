@@ -110,14 +110,24 @@ fn gc_carrying_value_struct_eq() {
     eval_int(&js, "root", 1);
 }
 
+/// A `nobox` return crosses the JS call boundary as LEAVES, not as anything the
+/// guarantee forbids. This replaced a blanket rejection, so it asserts the
+/// property that rejection was protecting rather than the rejection itself: the
+/// value must not materialize as an object OR as a transport array (which is an
+/// allocation just the same, and does not vanish under V8's escape analysis --
+/// measured in docs/js-nobox-return-abi-plan.md).
 #[test]
-fn nobox_value_rejects_when_js_would_materialize_it() {
+fn nobox_value_return_crosses_as_leaves_not_a_box() {
     let src = "nobox value V { x: int, y: int }\n\
-               fn root() -> V {\n\
-                   V { x: 1, y: 2 }\n\
+               fn mk() -> V { V { x: 1, y: 2 } }\n\
+               fn root() -> int {\n\
+                   let v = mk()\n\
+                   return v.x * 10 + v.y\n\
                }";
     let ws = ws_with(src);
-    let err = emit_closure(&ws, "root")
-        .expect_err("the JS backend must not silently materialize a nobox value");
-    assert!(err.contains("nobox") && err.contains("V"), "{err}");
+    let js = emit_closure(&ws, "root").expect("a nobox return emits under the scratch ABI");
+    assert!(!js.contains("\"V\""), "nobox value materialized an object:\n{js}");
+    assert!(!js.contains("return ["), "nobox return allocated a transport array:\n{js}");
+    assert!(js.contains("__rock_ret1 = "), "leaf 1 must ride the scratch bank:\n{js}");
+    eval_int(&js, "root", 12);
 }
