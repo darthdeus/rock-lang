@@ -2756,28 +2756,36 @@ fn count<I: Iterator<T>, T>(it: I) -> int {
 }
 
 @inline
+// `have` rather than `best == null`: at `T = E?` the sentinel is also a legal
+// element (`T?` collapses to one nullable), so an absent element read as
+// "nothing seen yet" and every later element overwrote it.
 fn min_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
     let best: T? = null
+    let have = false
     let best_k = 0.0
     for x in it {
         let k = key(x)
-        if best == null || k < best_k {
+        if !have || k < best_k {
             best = x
             best_k = k
+            have = true
         }
     }
     return best
 }
 
 @inline
+// Same sentinel collision as `min_by` above.
 fn max_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
     let best: T? = null
+    let have = false
     let best_k = 0.0
     for x in it {
         let k = key(x)
-        if best == null || k > best_k {
+        if !have || k > best_k {
             best = x
             best_k = k
+            have = true
         }
     }
     return best
