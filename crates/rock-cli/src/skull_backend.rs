@@ -558,11 +558,13 @@ fn run_emitted_tests(
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
     let program = format!("{lua}{}", build_test_harness(tests));
-    // NOTE: a non-zero status is NOT decided here. A `@test` that fails an
-    // assertion legitimately dies non-zero, and the markers below distinguish an
-    // individual test failing from the module never loading.
-    let stdout = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
-        Ok(run) => run.combined(),
+    // The harness `pcall`s each test, so an ordinary assertion failure becomes a
+    // FAIL marker and the process still exits 0. A non-zero status therefore
+    // means the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
+    // after that point never ran. Keep the output either way: a truncated run
+    // still has to say what it managed to report.
+    let (stdout, died) = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
+        Ok(run) => (run.combined(), !run.success),
         Err(e) => {
             return Err(SkullFailure {
                 reason: "test run errored (skull bug)".to_string(),
@@ -600,6 +602,28 @@ fn run_emitted_tests(
             Ok(()) => passed += 1,
             Err(detail) => fails.push(format!("{name}: {detail}")),
         }
+    }
+
+    // Every declared test owes exactly one marker. Counting only the markers
+    // that ARRIVED makes a truncated run self-consistent -- three tests, one
+    // marker, `1/1 passed` -- so the tests that never ran leave the total
+    // instead of failing it. This is the only signal for a premature
+    // `os.exit(0)`, which exits success and emits no marker at all.
+    // A PASS marker carries no test name, so this counts rather than names them.
+    let reported = passed + fails.len();
+    if reported < tests.len() {
+        fails.push(format!(
+            "the run stopped early: {} of {} @tests never reported{}",
+            tests.len() - reported,
+            tests.len(),
+            if died { "; the process died" } else { "; the process exited 0" }
+        ));
+    } else if died {
+        fails.push(
+            "every @test reported, but the harness process exited non-zero -- \
+             something after the tests failed"
+                .to_string(),
+        );
     }
 
     if fails.is_empty() {

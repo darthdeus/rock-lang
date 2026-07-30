@@ -89,15 +89,16 @@ pub fn run_lua_code_with_timeout(
     // recorded in `stone_test_decorator_cleanup.rs`.
     let mut stdout_pipe = child.stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    // The read result is PROPAGATED, not dropped. Discarding it turned a failed
+    // drain into empty output, which reads downstream as "the program printed
+    // nothing" -- a harness failure wearing a successful program's clothes.
     let stdout_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stdout_pipe, &mut buf);
-        buf
+        std::io::Read::read_to_end(&mut stdout_pipe, &mut buf).map(|_| buf)
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stderr_pipe, &mut buf);
-        buf
+        std::io::Read::read_to_end(&mut stderr_pipe, &mut buf).map(|_| buf)
     });
 
     // The status MUST come from whichever call reaped the child. `wait_timeout`
@@ -130,8 +131,22 @@ pub fn run_lua_code_with_timeout(
 
     unregister_child_process(pid);
 
-    let stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
+    // A panicked reader thread or a failed read is a HARNESS failure and is
+    // reported as one. `unwrap_or_default()` here would hand back empty output
+    // and let the caller judge the program on it.
+    let drained = |joined: std::thread::Result<std::io::Result<Vec<u8>>>, which: &str| {
+        match joined {
+            Ok(Ok(buf)) => Ok(buf),
+            Ok(Err(e)) => Err(CompilerError::new_no_location(format!(
+                "failed to read the luajit process's {which}: {e}"
+            ))),
+            Err(_) => Err(CompilerError::new_no_location(format!(
+                "the thread draining the luajit process's {which} panicked"
+            ))),
+        }
+    };
+    let stdout = drained(stdout_thread.join(), "stdout")?;
+    let stderr = drained(stderr_thread.join(), "stderr")?;
 
     Ok(LuaRun {
         stdout: String::from_utf8_lossy(&stdout).to_string(),
