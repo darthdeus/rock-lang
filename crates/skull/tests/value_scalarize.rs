@@ -292,81 +292,121 @@ fn nested_scalar_abi_leaf_params_are_injective() {
     );
 }
 
-const UNDERSCORE_FIELD_SCALAR_ABI: &str = r#"
-value V2 { x: float, y: float }
-value Bad { tl__x: float, tl: V2 }
+const UNDERSCORE_FIELD_NO_COLLISION: &str = r#"
+nobox value V2 { x: float, y: float }
+nobox value Ok { tl__z: float, tl: V2 }
 
-@scalar_abi inline(lua) fn ambiguous(r: Bad) -> float = """
-    return r__tl__x
+@scalar_abi inline(lua) fn fine(r: Ok) -> float = """
+    return r__tl__z + r__tl__x * 10.0 + r__tl__y * 100.0
 """
 
-fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
+fn apply(f: (Ok) -> float, r: Ok) -> float { return f(r) }
+
+@nomangle inline(lua) fn __out(x: float) = "io.write(tostring(x))"
+fn main() {
+    let r = Ok { tl__z: 7.0, tl: V2 { x: 1.0, y: 2.0 } }
+    __out(apply(fine, r))
+}
 "#;
 
-const UNDERSCORE_FIELD_VIA_FN_VALUE: &str = r#"
-nobox value P { x: float, y: float }
-nobox value Bad { tl: P, tl__x: float }
+const UNMARKED_VALUE_VIA_FN_VALUE: &str = r#"
+value V2 { x: float, y: float }
+value Box2 { tl: V2, w: float }
 
-@scalar_abi inline(lua) fn probe(r: Bad) -> float = """
-    return r__tl__x * 1.0 + r__tl__y * 10.0
+@scalar_abi inline(lua) fn probe(r: Box2) -> float = """
+    return r__tl__x + r__tl__y * 10.0 + r__w * 100.0
 """
 
-fn apply(f: (Bad) -> float, r: Bad) -> float { return f(r) }
+fn apply(f: (Box2) -> float, r: Box2) -> float { return f(r) }
 
 fn main() {
-    let r = Bad { tl: P { x: 1.0, y: 2.0 }, tl__x: 900.0 }
+    let r = Box2 { tl: V2 { x: 1.0, y: 2.0 }, w: 3.0 }
     print("{apply(probe, r)}")
 }
 "#;
 
-/// SENTINEL -- pins a residual non-injectivity that
-/// `nested_scalar_abi_leaf_params_are_injective`'s fix does NOT close. A field
-/// literally named `tl__x` joins to the same Lua param as nested `tl.x`, so the
-/// namer emits `f(r__tl__x, r__tl__x, r__tl__y)` and Lua's later binding wins --
-/// the same silent wrong-field read, reached by a different route. `__` is legal
-/// in a Rock identifier, so the encoding cannot be made injective by joining
-/// alone; the fix is a spanned emit rejection through the `collision_errors`
-/// sink (`skull-codegen-lua/src/lib.rs`), fail-closed on the ambiguity.
+/// SENTINEL -- an UNMARKED `value` struct reaching a `@scalar_abi` fn through a
+/// FN VALUE miscompiles: it compiles clean and dies at runtime.
 ///
-/// The reach is wider than a direct call: the same collision travels through a
-/// FN VALUE (`underscore_field_collision_through_a_fn_value_sentinel` below), so
-/// the rejection has to sit at the namer, not at a call site.
+/// THE BUG: the two ends disagree on the ABI. The definition honours the callee's
+/// own `@scalar_abi` and scalarizes to three leaf params
+/// (`probe(r__tl__x, r__tl__y, r__w)`), but an indirect call site can only derive
+/// the ABI from the fn TYPE, and for an unmarked (non-`nobox`) value that
+/// derivation says "box it" -- so `apply` re-packs its leaves into a single
+/// `Box2_ct(...)` cdata and calls the fn value with ONE argument. `r__tl__x` gets
+/// the whole cdata and the remaining leaves are nil. `nested_fn_abi`'s own comment
+/// says both ends must run the SAME predicate precisely so this cannot happen, and
+/// the arity guard in `lower.rs` (`fn_scalar_abi(..) != expected`) does not catch
+/// it. Marking both structs `nobox` makes it correct, which is what the sibling
+/// positive control uses -- so this is silently waiting for anyone who passes an
+/// unmarked value through a fn value.
 ///
-/// PINNED BEHAVIOR (BUG): duplicate params are emitted, no diagnostic.
-/// When the rejection lands this goes RED -- delete this test and assert the
-/// rejection instead (a `.rock.err` case is the right home).
+/// CORRECT behavior is 321 (1 + 2*10 + 3*100), or a compile-time rejection if the
+/// narrowing genuinely cannot be reconciled.
+///
+/// INVERTED: these assertions encode the MISCOMPILE, so they pass today BECAUSE
+/// the bug exists. Diagnosing the narrowing is its own task; this only makes the
+/// bug impossible to lose.
+///
+/// WHEN THIS FAILS the bug was fixed (or turned into a rejection): delete the
+/// packed-call-site and runtime-failure assertions, assert the emit either
+/// rejects or produces 321 via `common::run_luajit`, and update this comment.
 #[test]
-fn underscore_field_name_collides_with_nested_path_sentinel() {
-    let lua = emit_module(UNDERSCORE_FIELD_SCALAR_ABI);
-    let f = function_body(&lua, "ambiguous");
+fn unmarked_value_through_fn_value_miscompiles_sentinel() {
+    let lua = common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
+        .expect("PINNED BEHAVIOR (BUG): the ABI disagreement is not rejected at compile time");
+
+    // The DEFINITION scalarized: three leaf params.
+    let def = function_body(&lua, "probe");
     assert!(
-        f.contains("r__tl__x, r__tl__x"),
-        "PINNED BEHAVIOR (BUG): a `__`-containing field name should collide with \
-         the nested path and emit duplicate params until the reject lands:\n{f}"
+        def.contains("r__tl__x, r__tl__y, r__w"),
+        "PINNED BEHAVIOR (BUG): the definition honours @scalar_abi and takes leaf params:\n{def}"
+    );
+    // The indirect CALL SITE disagrees -- it packs one cdata instead of splatting
+    // the three leaves. This single line IS the miscompile.
+    let apply = function_body(&lua, "apply");
+    assert!(
+        apply.contains("Box2_ct("),
+        "PINNED BEHAVIOR (BUG): the fn-value call site re-packs a cdata rather than \
+         splatting leaves, so the callee's leaf params go nil:\n{apply}"
+    );
+
+    // And it dies at runtime rather than printing 321.
+    let path = std::env::temp_dir().join(format!("skull_unmarked_fnvalue_{}.lua", std::process::id()));
+    std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
+    let out = std::process::Command::new("luajit").arg(&path).output().expect("spawn luajit");
+    let _ = std::fs::remove_file(&path);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("a nil value"),
+        "PINNED BEHAVIOR (BUG): expected a nil-leaf runtime death, got status {:?}\nstdout: {}\nstderr: {stderr}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 
-/// SENTINEL -- the same `tl__x`-vs-`tl.x` collision reached through a FN VALUE,
-/// which the sibling sentinel above pins only at a direct call. It matters
-/// because the two routes derive the leaf list from different ends: the direct
-/// call reads the callee's own `@scalar_abi`, the indirect one derives the ABI
-/// from the fn TYPE. Both land on the same non-injective namer, so a fix keyed
-/// on the call site would close one and leave this one open.
+/// POSITIVE CONTROL for the `value_leaf_name_collisions` rejection: a `__`-bearing
+/// field name only collides when it JOINS to an existing nested path, so `tl__z`
+/// beside a nested `tl: V2 { x, y }` is unambiguous and must still emit -- and the
+/// leaf params must stay distinct. Both routes are exercised (the fn is reached
+/// through a fn value, which narrows the ABI to what the fn TYPE alone yields), and
+/// the result is checked under luajit so a mis-ordered leaf splat is caught too.
 ///
-/// This one produces a WRONG ANSWER rather than only a suspicious signature:
-/// `tl__x` (900) binds over nested `tl.x` (1), so the body computes 920 where
-/// the fields say 21.
-///
-/// PINNED BEHAVIOR (BUG): runs, returns 920. When the namer's rejection lands
-/// this goes RED -- delete it and assert the rejection alongside its sibling.
+/// The REJECTION cases live in `tests/errors/value_leaf_name_collision.rock.err`.
 #[test]
-fn underscore_field_collision_through_a_fn_value_sentinel() {
-    let lua = common::try_emit_module(UNDERSCORE_FIELD_VIA_FN_VALUE)
-        .expect("PINNED BEHAVIOR (BUG): the collision is not rejected today");
+fn non_colliding_underscore_field_still_scalarizes() {
+    let lua = emit_module(UNDERSCORE_FIELD_NO_COLLISION);
+    let f = function_body(&lua, "fine");
+    for leaf in ["r__tl__z", "r__tl__x", "r__tl__y"] {
+        assert!(f.contains(leaf), "leaf param `{leaf}` must be emitted:\n{f}");
+    }
+    assert!(
+        !f.contains("r__tl__z, r__tl__z"),
+        "the non-colliding leaves must stay distinct:\n{f}"
+    );
     assert_eq!(
-        common::run_luajit(&format!("{lua}\nmain()\n"), "underscore_fnvalue"),
-        "920",
-        "PINNED BEHAVIOR (BUG): `tl__x` binds over nested `tl.x` through a fn \
-         value, so the body reads the wrong field (21 is the correct answer)"
+        common::run_luajit(&format!("{lua}\nmain()\n"), "underscore_no_collision"),
+        "217",
+        "7 + 1*10 + 2*100 -- a wrong leaf order or a duplicate param would shift this"
     );
 }

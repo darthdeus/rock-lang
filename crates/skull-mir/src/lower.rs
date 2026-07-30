@@ -162,31 +162,49 @@ pub fn vec_column_elem(ws: &Workspace, name: Ustr) -> Option<Ustr> {
 /// reason `embed` storage is: `.` cannot appear in a Rock identifier, so the
 /// encoding is injective and can never collide with a sibling leaf.
 pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
+    leaf_names(shape, "", ".").into_iter().map(|s| Ustr::from(&s)).collect()
+}
+
+/// THE leaf traversal: every primitive leaf of `shape` in declaration order,
+/// each named by joining its ancestor field names with `sep` under `prefix`.
+/// `sep = "."` yields the column keys / dotted source paths, `sep = "__"` the
+/// Lua leaf-param names -- one walk so the two encodings can never disagree on
+/// WHICH leaves exist or in what order (`repr_to_leaves`/`leaf_count` are the
+/// third and fourth consumers of that order). A leaf's identity is its position;
+/// only the spelling is per-caller.
+fn leaf_names(shape: &ValueShape, prefix: &str, sep: &str) -> Vec<String> {
     let mut out = Vec::new();
-    leaf_paths_rec(shape, "", &mut out);
+    leaf_names_rec(shape, prefix, sep, &mut out);
     out
 }
 
-fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
+fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &mut Vec<String>) {
     // A NULLABLE nested shape leads with its presence leaf, matching
     // `repr_to_leaves` (which pushes presence before the fields) and `leaf_count`
-    // (which counts it). Its key is the field's own UNDOTTED name -- injective
-    // against its own children (`a` vs `a.x`, and `.` cannot appear in a Rock
-    // identifier), and the same convention embed storage already uses for a
-    // nullable child. Without this the column set is one short of `leaf_count`
-    // and a `[Outer]` literal fails with a column arity mismatch.
+    // (which counts it). Its key is the field's own name with no child appended
+    // -- injective against its own children under `.` (`a` vs `a.x`), which is
+    // the convention embed storage already uses for a nullable child. Without it
+    // the column set is one short of `leaf_count` and a `[Outer]` literal fails
+    // with a column arity mismatch, and the Lua params drift one short of what
+    // `repr_to_leaves` splats.
     //
     // Only the NESTED case: a top-level nullable shape has no field name to key
     // on, and no column path reaches one today (a column element is
     // non-nullable), so that case is deliberately left as it was.
     if shape.nullable && !prefix.is_empty() {
-        out.push(Ustr::from(prefix.trim_end_matches('.')));
+        out.push(prefix.to_string());
     }
     for (fname, fs) in &shape.fields {
+        // The field name must JOIN its ancestors. Recursing with the prefix
+        // unchanged made the Lua namer non-injective -- `Rect { tl: V2, br: V2 }`
+        // emitted `f(r__x, r__y, r__x, r__y)`, and Lua binds the later pair over
+        // the earlier, so a hand-written body silently read `br` where it wrote
+        // `tl`.
+        let joined =
+            if prefix.is_empty() { fname.to_string() } else { format!("{prefix}{sep}{fname}") };
         match fs {
-            FieldShape::Prim if prefix.is_empty() => out.push(*fname),
-            FieldShape::Prim => out.push(Ustr::from(&format!("{prefix}{fname}"))),
-            FieldShape::Nested(sub) => leaf_paths_rec(sub, &format!("{prefix}{fname}."), out),
+            FieldShape::Prim => out.push(joined),
+            FieldShape::Nested(sub) => leaf_names_rec(sub, &joined, sep, out),
         }
     }
 }
@@ -2143,28 +2161,87 @@ pub fn scalar_abi_param_leaf_widths(
     )
 }
 
-/// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first
-/// (same traversal as `repr_to_leaves`/`cdata_leaves`).
-fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
-    // Twin of `leaf_paths_rec`: a nullable nested shape leads with its presence
-    // leaf, so it needs a NAME or the Lua-side params drift one short of what
-    // `repr_to_leaves` splats.
-    if shape.nullable && !base.is_empty() {
-        out.push(base.to_string());
-    }
-    for (fname, fs) in &shape.fields {
-        match fs {
-            FieldShape::Prim => out.push(format!("{base}__{fname}")),
-            // The field name must JOIN the base, exactly as `leaf_paths_rec`
-            // dots its column keys. Recursing with `base` unchanged made the
-            // namer non-injective -- `Rect { tl: V2, br: V2 }` emitted
-            // `f(r__x, r__y, r__x, r__y)`, and Lua binds the later pair over the
-            // earlier, so a hand-written body silently read `br` where it wrote
-            // `tl`. `__` rather than `.` because these are Lua identifiers.
-            FieldShape::Nested(sub) => leaf_param_names(&format!("{base}__{fname}"), sub, out),
+/// The scalar-ABI leaf-param encoding joins nested field names with `__`, and
+/// `__` is legal in a Rock field name -- so `value Bad { tl__x: float, tl: V2 }`
+/// flattens BOTH `tl__x` and `tl.x` to the leaf name `tl__x`. The join cannot be
+/// made injective, and a hand-written `@scalar_abi` body naming its own leaves
+/// then addresses whichever Lua bound last. Reject instead of emitting duplicate
+/// params -- same discipline as [`crate::mangle::collision_errors`].
+///
+/// Keyed on the TYPE, not on a call site: every route that flattens the shape
+/// (a direct call reading the callee's `@scalar_abi`, an indirect one deriving
+/// the ABI from the fn TYPE) shares the declaration, so one check closes all of
+/// them. Both leaf tiers are scanned -- the all-scalar shape and the GC-carrying
+/// per-field one, since `fn_scalar_abi` can pick either.
+///
+/// The leaf list comes from [`leaf_names`] -- the SAME walk the emitter's
+/// [`leaf_param_names`] uses, run a second time with `.` to recover the readable
+/// source path for the diagnostic. Positions correspond because it is one
+/// traversal, so the checker cannot go blind to a leaf the emitter still emits.
+pub fn value_leaf_name_collisions(ws: &Workspace) -> Vec<(String, CompilerError)> {
+    let mut out: Vec<(String, CompilerError)> = Vec::new();
+    for m in ws.modules.iter() {
+        for (_, sd) in m.structs.iter() {
+            if !sd.is_value {
+                continue;
+            }
+            let shapes = [value_shape(ws, sd.name), value_shape_gc(ws, sd.name)];
+            let mut reported: HashSet<String> = HashSet::new();
+            for shape in shapes.iter().flatten() {
+                let names = leaf_names(shape, "", LEAF_PARAM_SEP);
+                let paths = leaf_names(shape, "", ".");
+                debug_assert_eq!(names.len(), paths.len(), "one walk, two spellings");
+                let mut seen: HashMap<&str, &str> = HashMap::new();
+                for (leaf, path) in names.iter().zip(paths.iter()) {
+                    match seen.get(leaf.as_str()) {
+                        Some(prev) if !reported.contains(leaf) => {
+                            reported.insert(leaf.clone());
+                            let sname = sd.name;
+                            // The path's first segment is the top-level field that
+                            // owns the leaf -- point the span at the later of the
+                            // two, which is the one a reader has to rename.
+                            let owner = path.split('.').next().unwrap_or(path.as_str());
+                            let span = sd
+                                .fields
+                                .iter()
+                                .find(|f| f.name.as_str() == owner)
+                                .map_or(sd.name_span, |f| f.span);
+                            let msg = format!(
+                                "value struct `{sname}` flattens `{prev}` and `{path}` to the same \
+                                 scalar-ABI leaf parameter name `{leaf}`; `__` is legal in a field \
+                                 name, so the leaf encoding cannot tell the two apart and the \
+                                 emitted body would read whichever Lua bound last -- rename one of \
+                                 them"
+                            );
+                            out.push((
+                                format!("{sname}.{leaf}"),
+                                CompilerError::new_with_label(span, msg),
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            seen.insert(leaf.as_str(), path.as_str());
+                        }
+                    }
+                }
+            }
         }
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
+
+/// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first.
+/// `__` rather than `.` because these are Lua identifiers -- which is exactly
+/// what makes the encoding non-injective and needs
+/// [`value_leaf_name_collisions`] to guard it.
+fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
+    out.extend(leaf_names(shape, base, LEAF_PARAM_SEP));
+}
+
+/// The Lua leaf-param separator, and the reason a `__`-bearing field name can
+/// collide with a nested path.
+const LEAF_PARAM_SEP: &str = "__";
 
 /// A chunk of a `string.format` conversion string: a static literal, or a
 /// runtime int expression (dynamic width/precision) stringified into the format.
