@@ -513,32 +513,6 @@ fn post_transform_gate_rejects_an_implicit_nobox_box() {
     assert!(err.message.contains("nobox") && err.message.contains("NV2"), "{err:?}");
 }
 
-const NOBOX_COLUMN_SORT: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn bad() {
-    let xs: [NV2] = [
-        NV2 { x: 2.0, y: 0.0 },
-        NV2 { x: 1.0, y: 0.0 },
-    ]
-    xs.sort(v => v.x)
-}
-
-fn main() {
-    bad()
-}
-"#;
-
-#[test]
-fn column_sort_rejects_implicit_nobox_element_materialization() {
-    let err = try_emit_module(NOBOX_COLUMN_SORT)
-        .expect_err("column sort must not materialize nobox elements for its key function");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("sort"),
-        "{err:?}"
-    );
-}
-
 const NOBOX_COLUMN_INSPECT: &str = r#"
 nobox value NV2 { x: float, y: float }
 

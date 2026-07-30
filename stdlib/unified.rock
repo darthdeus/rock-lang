@@ -1700,6 +1700,33 @@ inline(lua) fn table_new() -> any = """return {}"""
     return out
 """
 
+// The `nobox` counterpart. A fn value taking a `nobox` element takes its LEAVES,
+// which are exactly the columns, so the key is applied without an element ever
+// existing. `paths` is the ABI leaf order handed down from the lowering -- the
+// key fn binds positionally, so a runtime key walk (`__rock_col_paths`, which is
+// alphabetical) would silently transpose the arguments.
+@nomangle inline(lua) fn __rock_col_sort_leaves(vec: any, key_fn: any, paths: any) = """
+    local n = vec.len or 0
+    local width = #paths
+    local cols = {}
+    for j = 1, width do cols[j] = vec[paths[j]] end
+    local order, leaves = {}, {}
+    for i = 1, n do order[i] = i end
+    -- The key is applied per COMPARISON, as both other sorts do; a decorate-sort
+    -- would be fewer calls but a different observable for a key fn with effects.
+    local function key_at(i)
+        for j = 1, width do leaves[j] = cols[j][i] end
+        return key_fn(unpack(leaves, 1, width))
+    end
+    table.sort(order, function(a, b) return key_at(a) < key_at(b) end)
+    for j = 1, width do
+        local col = cols[j]
+        local tmp = {}
+        for i = 1, n do tmp[i] = col[order[i]] end
+        for i = 1, n do col[i] = tmp[i] end
+    end
+"""
+
 @nomangle inline(lua) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     local n = vec.len or 0
     local order = {}

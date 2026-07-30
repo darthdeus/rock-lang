@@ -6518,27 +6518,38 @@ impl Builder<'_> {
             // The two ops that need the LOGICAL elements, not the physical
             // columns: a sort key is a function of the whole element, and
             // `to_lua_array`'s whole contract is handing a Lua array of elements
-            // to a foreign API. Both redirect to the one materializing helper --
-            // the storage contract's third category (erased/external boundaries
-            // materialize explicitly), and the only place a column Vec builds
-            // element tables.
+            // to a foreign API. `to_lua_array` redirects to the materializing
+            // helper -- the storage contract's third category (erased/external
+            // boundaries materialize explicitly), and the only place a column Vec
+            // builds element tables.
+            //
+            // `sort` needs the element only to APPLY THE KEY, and the key is
+            // reached through a fn value, whose ABI is derived from the fn type.
+            // At a `nobox` element that ABI is the leaves, which are the columns,
+            // so the key applies with no element at all and the two forms split
+            // here rather than at a box the mark would forbid.
             ("__vec_data_sort", [recv, key_fn]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
-                if self.is_nobox_struct(elem) {
-                    return Err(CompilerError::new_with_label(
-                        self.body.expr_spans[*recv],
-                        format!(
-                            "cannot sort a column-stored nobox value `{elem}`: \
-                             the key function requires implicit element materialization"
-                        ),
-                    ));
-                }
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
-                let f = self.stdlib_funcref("__rock_col_sort")?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
-                )))
+                if !self.is_nobox_struct(elem) {
+                    let f = self.stdlib_funcref("__rock_col_sort")?;
+                    return Ok(Some(ValueRepr::Scalar(
+                        self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
+                    )));
+                }
+                let shape = value_shape(self.ws, elem)
+                    .ok_or_else(|| gap("column element is not a value struct"))?;
+                let paths: Vec<_> = value_leaf_paths(&shape)
+                    .into_iter()
+                    .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
+                    .collect();
+                let paths = self.emit_cur(Inst::MakeTuple(paths));
+                let f = self.stdlib_funcref("__rock_col_sort_leaves")?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
+                    func: f,
+                    args: vec![vec, k, paths],
+                }))))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
