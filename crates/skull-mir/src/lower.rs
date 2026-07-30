@@ -4813,15 +4813,30 @@ impl Builder<'_> {
                 for a in arg_idxs {
                     argv.push(self.lower_expr(a)?);
                 }
+                // The instantiation key travels through `?.` like it does through a
+                // plain call: a column-stored element cannot be served by the shared
+                // generic body, which reads a `_data` this storage does not have.
+                let key = self
+                    .call_spec(e, func)
+                    .filter(|(k, _)| {
+                        !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)
+                    })
+                    .map(|(k, _)| k);
                 // A tuple-returning method splats N values; capture + pack into
                 // the single (boxed, nullable) safe-nav result.
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
                 match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
                     Some(shape) => {
-                        let r = self.emit_tuple_call(func, argv, &shape);
+                        let r = self.emit_tuple_call_tree(func, argv, &shape, None, key);
                         self.pack(r)
                     }
-                    None => self.emit_cur(Inst::Call { func, args: argv }),
+                    None => {
+                        let call = self.emit_cur(Inst::Call { func, args: argv });
+                        if let Some(k) = key {
+                            self.f.spec_bindings.insert(call, k);
+                        }
+                        call
+                    }
                 }
             }
         };
@@ -5503,11 +5518,7 @@ impl Builder<'_> {
             // day a `@gpu_only` intrinsic returns a tuple.
             self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
-                // A specialized generic returning a tuple is out of v0 scope: the
-                // call inst is buried inside the MakeTuple, so no key is attached
-                // and it falls back to the shared snapshot (still correct, just not
-                // specialized). `key` is intentionally unused here.
-                return Ok(self.emit_tuple_call_tree(func, args, shape, tree));
+                return Ok(self.emit_tuple_call_tree(func, args, shape, tree, key));
             }
             let call = self.emit_cur(Inst::Call { func, args });
             if let Some(t) = tree {
@@ -5543,7 +5554,7 @@ impl Builder<'_> {
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
             None => match &ret_tuple {
-                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, tree)),
+                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, tree, key)),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
                     if let Some(t) = tree {
@@ -5565,25 +5576,30 @@ impl Builder<'_> {
     /// (`bind_for_pattern`). When the shape splats, the result is instead a
     /// `Tuple` repr whose splatting elements are Groups rebuilt from their
     /// leaves, so a `nobox` element never becomes a box on the way to a bind.
-    fn emit_tuple_call(&mut self, func: FuncRef, args: Vec<Idx<Inst>>, shape: &TupleRetShape) -> ValueRepr {
-        self.emit_tuple_call_tree(func, args, shape, None)
-    }
-
-    /// [`Self::emit_tuple_call`] recording an `Iterator`-bound resolution tree
-    /// against the emitted call inst (chain roots like a directly-called
-    /// bounded `next`).
+    ///
+    /// `tree` records an `Iterator`-bound resolution against the emitted call
+    /// inst (chain roots like a directly-called bounded `next`).
+    ///
+    /// A tuple return does not exempt the call from its instantiation `key`:
+    /// under column storage the shared generic body reads a `_data` the
+    /// instantiation does not have, so the specialized copy is the only correct
+    /// target.
     fn emit_tuple_call_tree(
         &mut self,
         func: FuncRef,
         args: Vec<Idx<Inst>>,
         shape: &TupleRetShape,
         tree: Option<bone_semantic::prelude::BoundTree>,
+        key: Option<SpecKey>,
     ) -> ValueRepr {
         let dests: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
         if let Some(t) = tree {
             self.f.bound_trees.insert(call, t);
+        }
+        if let Some(k) = key {
+            self.f.spec_bindings.insert(call, k);
         }
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         self.tuple_result(shape, &loads)

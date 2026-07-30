@@ -1,23 +1,17 @@
-//! SENTINEL -- `Arena<P>.random()` at a `nobox` P compiles clean and CRASHES.
+//! `Arena<P>.random()` at a `nobox` P, and the same op at an unmarked
+//! column-stored element as its control.
 //!
-//! Every other arena op works at a marked element (insert / get / contains /
-//! remove / len / clear / pairs / values / keys / enumerate), and the bookkeeping
-//! SoA is what made them reachable at all -- `Arena<P>` did not compile before
-//! `8a6008e11`. So this is a newly REACHABLE hole rather than a regression of
-//! something that used to work, and it is invisible to the suite because every
-//! `arena_random_*` test uses `Arena<int>` / `Arena<string>`, which are boxed.
+//! `random` returns a TUPLE (`(Entity<T>, T)?`), and a tuple-returning call used
+//! to drop its instantiation key, so it fell through to the shared generic body
+//! and read `arena.data[i]` through the boxed accessor (`__vec_checked_get`) on
+//! column storage that has no `_data` field. The key is now attached on the tuple
+//! path too, so the call targets the specialized copy that reads the columns.
 //!
-//! The defect: `random` reads `arena.data[i]` through the BOXED accessor
-//! (`__vec_checked_get`) on a COLUMN-stored `data`, which has no `_data` field --
-//! `attempt to index field '_data' (a nil value)`. It is specific to the MARK:
-//! the same op over an unmarked-but-column-stored element
-//! (`value CV { x: float, y: float }`) returns correctly, which is the control
-//! below and is what scopes this to the nobox lowering rather than to the SoA
-//! layout or to `random` itself.
-//!
-//! PINNED BEHAVIOR (BUG): the marked program is asserted to FAIL at runtime.
-//! When the fix lands this test goes RED. Flip it -- assert success and the
-//! right value, exactly as the control does -- and delete this paragraph.
+//! `a.random() != null` is the only shape a marked element can be consumed in
+//! today -- binding or projecting the `T` half materializes and is rejected -- so
+//! the load-bearing assertion here is that the program RUNS. Its `true` does not
+//! prove the presence slot: that comparison folds to a constant, which is pinned
+//! separately in `nobox_tuple_option_presence_sentinel.rs`.
 
 mod common;
 
@@ -60,21 +54,23 @@ fn main() {
 "#;
 
 #[test]
-fn arena_random_at_a_nobox_element_crashes_sentinel() {
-    let lua = common::try_emit_module(MARKED)
-        .expect("PINNED BEHAVIOR (BUG): this compiles clean -- the failure is at RUNTIME");
+fn arena_random_at_a_nobox_element_works() {
+    let lua = common::try_emit_module(MARKED).expect("marked column element must emit");
     let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), "arena_random_marked");
+    assert!(ok, "`Arena<NP>.random()` must work for a marked element:\n{out}");
+    assert_eq!(out.trim(), "true", "expected a live entry to be selected:\n{out}");
+}
+
+/// The call must reach the SPECIALIZED copy: reading the columns is the whole
+/// fix, and asserting only on the run would stay green if a future change served
+/// this from the shared generic body again.
+#[test]
+fn arena_random_at_a_nobox_element_targets_the_specialized_copy() {
+    let lua = common::try_emit_module(MARKED).expect("marked column element must emit");
     assert!(
-        !ok,
-        "PINNED BEHAVIOR (BUG): `Arena<P>.random()` at a marked element is \
-         expected to die reading `_data` off a column Vec. It SUCCEEDED, so the \
-         fix landed -- flip this to assert success and `true`, matching the \
-         control below.\n{out}"
-    );
-    assert!(
-        out.contains("_data"),
-        "expected the column/boxed-accessor mismatch (`_data` nil), got a \
-         different failure -- diagnose before flipping:\n{out}"
+        lua.contains("random_Arena_T_ret_tuple2_Entity_T_T_opt_spec_"),
+        "the tuple-returning `random` call must carry its instantiation key and \
+         target the specialized copy:\n{lua}"
     );
 }
 
