@@ -2077,18 +2077,20 @@ pub fn scalar_abi_param_leaf_widths(
 fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
     // Twin of `leaf_paths_rec`: a nullable nested shape leads with its presence
     // leaf, so it needs a NAME or the Lua-side params drift one short of what
-    // `repr_to_leaves` splats. Currently unreachable -- this names `inline(lua)`
-    // params, and a `nobox` value cannot cross that boundary (it rejects as an
-    // opaque-body crossing) -- but the two functions walk the same shape and a
-    // silent divergence between them is precisely the copy-drift this arc is
-    // about, so they stay in step.
+    // `repr_to_leaves` splats.
     if shape.nullable && !base.is_empty() {
         out.push(base.to_string());
     }
     for (fname, fs) in &shape.fields {
         match fs {
             FieldShape::Prim => out.push(format!("{base}__{fname}")),
-            FieldShape::Nested(sub) => leaf_param_names(base, sub, out),
+            // The field name must JOIN the base, exactly as `leaf_paths_rec`
+            // dots its column keys. Recursing with `base` unchanged made the
+            // namer non-injective -- `Rect { tl: V2, br: V2 }` emitted
+            // `f(r__x, r__y, r__x, r__y)`, and Lua binds the later pair over the
+            // earlier, so a hand-written body silently read `br` where it wrote
+            // `tl`. `__` rather than `.` because these are Lua identifiers.
+            FieldShape::Nested(sub) => leaf_param_names(&format!("{base}__{fname}"), sub, out),
         }
     }
 }

@@ -252,3 +252,76 @@ fn generic_value_struct_rides_scalar_abi() {
         "a non-escaping generic value chain must not materialize a table:\n{drive}"
     );
 }
+
+const NESTED_SCALAR_ABI: &str = r#"
+value V2 { x: float, y: float }
+value Rect { tl: V2, br: V2 }
+
+@scalar_abi inline(lua) fn nested_leaves(r: Rect) -> float = """
+    return r__tl__x + r__br__y
+"""
+
+fn main() { let _ = nested_leaves(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 4.0, y: 8.0 } }) }
+"#;
+
+/// The `@scalar_abi` leaf-param namer must be INJECTIVE. `leaf_param_names`
+/// recursed into a nested value field with the base unchanged, so `Rect { tl, br }`
+/// emitted `function f(r__x, r__y, r__x, r__y)` -- Lua binds the later pair over
+/// the earlier, and a body naming its own leaves silently read `br` where it
+/// wrote `tl`. `leaf_paths_rec` (the column-key twin) had already solved this
+/// with dotted paths; the param namer never got the fix, and the comment there
+/// calling the case unreachable was scoped to `nobox` crossings -- an ordinary
+/// unmarked nested value reaches it today.
+#[test]
+fn nested_scalar_abi_leaf_params_are_injective() {
+    let lua = emit_module(NESTED_SCALAR_ABI);
+    let f = function_body(&lua, "nested_leaves");
+    let params = f
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_else(|| panic!("no param list in:\n{f}"));
+    let names: Vec<&str> = params.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let mut uniq = names.clone();
+    uniq.sort_unstable();
+    uniq.dedup();
+    assert_eq!(
+        uniq.len(),
+        names.len(),
+        "nested value leaf params must be distinct, got {names:?} in:\n{f}"
+    );
+}
+
+const UNDERSCORE_FIELD_SCALAR_ABI: &str = r#"
+value V2 { x: float, y: float }
+value Bad { tl__x: float, tl: V2 }
+
+@scalar_abi inline(lua) fn ambiguous(r: Bad) -> float = """
+    return r__tl__x
+"""
+
+fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
+"#;
+
+/// SENTINEL -- pins a residual non-injectivity that
+/// `nested_scalar_abi_leaf_params_are_injective`'s fix does NOT close. A field
+/// literally named `tl__x` joins to the same Lua param as nested `tl.x`, so the
+/// namer emits `f(r__tl__x, r__tl__x, r__tl__y)` and Lua's later binding wins --
+/// the same silent wrong-field read, reached by a different route. `__` is legal
+/// in a Rock identifier, so the encoding cannot be made injective by joining
+/// alone; the fix is a spanned emit rejection through the `collision_errors`
+/// sink (`skull-codegen-lua/src/lib.rs`), fail-closed on the ambiguity.
+///
+/// PINNED BEHAVIOR (BUG): duplicate params are emitted, no diagnostic.
+/// When the rejection lands this goes RED -- delete this test and assert the
+/// rejection instead (a `.rock.err` case is the right home).
+#[test]
+fn underscore_field_name_collides_with_nested_path_sentinel() {
+    let lua = emit_module(UNDERSCORE_FIELD_SCALAR_ABI);
+    let f = function_body(&lua, "ambiguous");
+    assert!(
+        f.contains("r__tl__x, r__tl__x"),
+        "PINNED BEHAVIOR (BUG): a `__`-containing field name should collide with \
+         the nested path and emit duplicate params until the reject lands:\n{f}"
+    );
+}
