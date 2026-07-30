@@ -1128,15 +1128,24 @@ fn collect_residual_spec_bindings(
 /// that no shared body ever mentions (`Vec<Vec2>.remove_at` calling
 /// `__vec_data_set` at `T = Vec2`). `done` keys on the full `(FuncRef, SpecKey)`
 /// so each is defined exactly once no matter how many bodies requested it.
+///
+/// A failing specialization does NOT stop the worklist: each instantiation is an
+/// independent definition, and bailing at the first one made every census of
+/// remaining nobox rejections a floor -- the three members of the column-read
+/// class were each found one behind another. The rejections are returned (sorted
+/// by specialized name, since the worklist order is a pop order and two
+/// instantiations of one generic share its span) and the caller fails the build
+/// on all of them; a rejected specialization contributes NO Lua.
 fn emit_specialized_callees(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     pending: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
     out: &mut String,
-) -> Result<(), CompilerError> {
+) -> Vec<CompilerError> {
     let mut done: FxHashSet<(FuncRef, skull_mir::lower::SpecKey)> = FxHashSet::default();
     let mut cache = skull_transform::InlineCache::default();
+    let mut errs: Vec<(String, CompilerError)> = Vec::new();
     while let Some((fref, key)) = pending.pop() {
         if !done.insert((fref, key.clone())) {
             continue;
@@ -1145,61 +1154,72 @@ fn emit_specialized_callees(
         let Some(name) = skull_mir::mangle::spec_fn_name(ws, f, &key) else {
             continue; // all-`None` key: the shared body already serves it
         };
+        let mut reject = |e: CompilerError| errs.push((name.clone(), e));
         let subst = skull_mir::lower::spec_subst_from_key(ws, fref, &key);
-        let mut mf = skull_mir::lower::lower_function_spec(ws, scx, fref.module, fref.func, &subst)
-            .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
-        let (_, _) = skull_transform::inline_functions_with_subst(
-            ws,
-            scx,
-            fref,
-            &mut mf,
-            &mut cache,
-            &subst,
-        )
-            .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+        let lowered =
+            skull_mir::lower::lower_function_spec(ws, scx, fref.module, fref.func, &subst);
+        let mut mf = match lowered {
+            Ok(mf) => mf,
+            Err(e) => {
+                reject(CompilerError::new_with_label(f.name_span, e.message));
+                continue;
+            }
+        };
+        if let Err(e) =
+            skull_transform::inline_functions_with_subst(ws, scx, fref, &mut mf, &mut cache, &subst)
+        {
+            reject(CompilerError::new_with_label(f.name_span, e.message));
+            continue;
+        }
         skull_transform::cleanup_with_nobox(ws, &mut mf);
         skull_transform::convert_closures(&mut mf, &name);
         skull_transform::recover_counted_loops(ws, &mut mf);
-        validate_emitted_body(ws, &mf, pending)
-            .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
+        if let Err(r) = validate_emitted_body(ws, &mf, pending) {
+            reject(r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")));
+            continue;
+        }
         out.push_str(&emit_named(ws, cg, &name, &mf));
         let mut nested = std::mem::take(&mut mf.nested_fns);
         emit_pass_nested_fns(ws, cg, &mut nested, out);
     }
-    Ok(())
+    errs.sort_by(|(a, _), (b, _)| a.cmp(b));
+    errs.into_iter().map(|(_, e)| e).collect()
 }
 
-/// Every OTHER chunk rejection that would also have aborted the build, so one
-/// run reports the whole site list instead of its first entry. Bodies lower in
-/// parallel and every rejection is already computed when the first is pulled --
-/// the abort was hiding them, not preventing them.
+/// Every rejection one assembly found, across all four kinds of emitted
+/// definition (decorator body, global initializer, function chunk, specialized
+/// instantiation). Filled in a fixed order -- source order within each kind, the
+/// kinds in the order `assemble` visits them -- so the reported list never
+/// depends on thread scheduling or hash-map iteration.
 ///
-/// Applies the same stdlib-gap filter as the pull site: a non-guarantee
-/// rejection in a stdlib body is a known parity gap that downgrades to
-/// `skipped`, so surfacing it here would report a non-error. Ordered by span so
-/// the list is stable across runs (chunks are a hash map, filled in parallel).
-fn other_chunk_rejections(
-    ws: &Workspace,
-    cache: &SkullEmitCache,
-    primary: FuncRef,
-) -> Vec<CompilerError> {
-    let mut out: Vec<(bone_semantic::prelude::Span, CompilerError)> = cache
-        .chunks
-        .iter()
-        .filter(|(fref, _)| **fref != primary)
-        .filter_map(|(fref, chunk)| {
-            let err = chunk.as_ref().err()?;
-            let module = ws.module(fref.module);
-            if is_stdlib_module_file(module.file.as_str())
-                && err.kind != skull_parser::CompilerErrorKind::NoboxGuaranteeViolated
-            {
-                return None;
-            }
-            Some((module.functions[fref.func].name_span, err.clone()))
-        })
-        .collect();
-    out.sort_by_key(|(span, _)| (span.file, span.offset_range));
-    out.into_iter().map(|(_, e)| e).collect()
+/// The accumulation boundary is the DEFINITION: each one either emits or does
+/// not, and rejections within one body are already collected by
+/// [`BodyRejection`]. Aborting at the first definition is what made every count
+/// of remaining rejections a floor -- every rejection here is fully computed
+/// before any is reported, so the abort hid them rather than preventing them.
+/// Accumulating does not soften anything: a non-empty set fails the build, and
+/// the emitted Lua is discarded with the `Err`.
+#[derive(Default)]
+struct Rejections(Vec<CompilerError>);
+
+impl Rejections {
+    fn push(&mut self, e: CompilerError) {
+        self.0.push(e);
+    }
+
+    fn extend(&mut self, es: impl IntoIterator<Item = CompilerError>) {
+        self.0.extend(es);
+    }
+
+    /// The first rejection, carrying the rest as siblings (the shared sink every
+    /// renderer expands). `Ok` only when nothing was rejected.
+    fn into_result(self) -> Result<(), CompilerError> {
+        let mut it = self.0.into_iter();
+        match it.next() {
+            Some(primary) => Err(primary.with_siblings(it)),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Run the inliner over a hoisted-body tree (named nested `fn`s and the lambda
@@ -1266,70 +1286,83 @@ fn validate_nested_bodies(
     nested: &[MirFunc],
     specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
 ) -> Result<(), BodyRejection> {
+    let mut acc = BodyRejection::default();
     for nf in nested {
-        validate_emitted_body(ws, nf, specs)
-            .map_err(|r| r.prefixed(&format!("in nested body `{}`", nf.name)))?;
+        if let Err(r) = validate_emitted_body(ws, nf, specs) {
+            acc.absorb(r.prefixed(&format!("in nested body `{}`", nf.name)));
+        }
     }
-    Ok(())
+    acc.into_result()
 }
 
-/// Why an about-to-be-emitted body was rejected. `guarantee` separates a
-/// LANGUAGE GUARANTEE (today: `nobox`) from a codegen parity gap: the stdlib
-/// emit path downgrades a gap to a silent `skipped` -- its known-gap list -- and
-/// must never downgrade a guarantee, since dropping the body turns the promise
-/// into a nil global at runtime.
+/// Why an about-to-be-emitted body was rejected: every INDEPENDENT finding in
+/// it, first reported as the primary and the rest as siblings. A body holds
+/// several sinks often enough that reporting one turns any count of remaining
+/// sinks into a floor, and it can hold several KINDS of finding at once (a
+/// column-access gap and a `nobox` sink), which reporting only the first check
+/// to fire also hides.
+#[derive(Default)]
 struct BodyRejection {
+    findings: Vec<Finding>,
+}
+
+/// One rejection site. `guarantee` separates a LANGUAGE GUARANTEE (today:
+/// `nobox`) from a codegen parity gap: the stdlib emit path downgrades a gap to
+/// a silent `skipped` -- its known-gap list -- and must never downgrade a
+/// guarantee, since dropping the body turns the promise into a nil global at
+/// runtime. `site` is the offending instruction's own span when the check could
+/// name one; it outranks the enclosing fn's span at [`BodyRejection::into_error`]
+/// -- a whole-fn anchor cannot distinguish two violations in one body, which is
+/// how one `nobox` sink hid another inside `draw_fractures`.
+struct Finding {
     message: String,
     guarantee: bool,
-    /// The offending instruction's own source span, when the check could name
-    /// one. Outranks the enclosing fn's span at [`Self::into_error`] -- a
-    /// whole-fn anchor cannot distinguish two violations in one body, which is
-    /// how one `nobox` sink hid another inside `draw_fractures`.
     site: Option<bone_semantic::prelude::Span>,
-    /// Further INDEPENDENT findings from the SAME check in the same body, each
-    /// with its own site. A body can hold several sinks, and reporting one
-    /// leaves the rest invisible until it is fixed -- which turns any count of
-    /// remaining sinks into a floor.
-    siblings: Vec<(String, Option<bone_semantic::prelude::Span>)>,
 }
 
 impl BodyRejection {
     fn gap(message: String) -> Self {
-        Self { message, guarantee: false, site: None, siblings: Vec::new() }
+        Self { findings: vec![Finding { message, guarantee: false, site: None }] }
     }
 
-    fn prefixed(self, what: &str) -> Self {
-        Self { message: format!("{what}: {}", self.message), ..self }
+    /// A guarantee violation anywhere in the body makes the whole rejection a
+    /// guarantee: the stdlib path may drop a body with only gaps in it, and a
+    /// body holding both must not be dropped on the strength of the gap.
+    fn guarantee(&self) -> bool {
+        self.findings.iter().any(|f| f.guarantee)
+    }
+
+    fn absorb(&mut self, other: BodyRejection) {
+        self.findings.extend(other.findings);
+    }
+
+    fn into_result(self) -> Result<(), BodyRejection> {
+        if self.findings.is_empty() { Ok(()) } else { Err(self) }
+    }
+
+    fn prefixed(mut self, what: &str) -> Self {
+        for f in &mut self.findings {
+            f.message = format!("{what}: {}", f.message);
+        }
+        self
     }
 
     /// Spanned rejection at the offending instruction, falling back to `span`
     /// (the enclosing definition), tagged so the stdlib leniency check can tell
     /// a guarantee from a gap without matching on the message text.
     fn into_error(self, span: bone_semantic::prelude::Span, what: &str) -> CompilerError {
-        let kind = |e: &mut CompilerError| {
-            if self.guarantee {
+        let mut errs = self.findings.into_iter().map(|f| {
+            let mut e = CompilerError::new_with_label(
+                f.site.unwrap_or(span),
+                format!("{what}{}", f.message),
+            );
+            if f.guarantee {
                 e.kind = skull_parser::CompilerErrorKind::NoboxGuaranteeViolated;
             }
-        };
-        let siblings: Vec<CompilerError> = self
-            .siblings
-            .iter()
-            .map(|(message, site)| {
-                let mut e = CompilerError::new_with_label(
-                    site.unwrap_or(span),
-                    format!("{what}{message}"),
-                );
-                kind(&mut e);
-                e
-            })
-            .collect();
-        let mut e = CompilerError::new_with_label(
-            self.site.unwrap_or(span),
-            format!("{what}{}", self.message),
-        );
-        kind(&mut e);
-        e.siblings = siblings;
-        e
+            e
+        });
+        let primary = errs.next().expect("a rejection holds at least one finding");
+        primary.with_siblings(errs)
     }
 }
 
@@ -1344,22 +1377,26 @@ fn validate_emitted_body(
     specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
 ) -> Result<(), BodyRejection> {
     collect_residual_spec_bindings(mf, specs);
-    validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap)?;
+    let mut acc = BodyRejection::default();
+    if let Err(r) = validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap) {
+        acc.absorb(r);
+    }
     // Name the function being emitted: the span often points into an INLINED
     // stdlib body (every `xs.push(..)` reports at the same `Vec<T>.push` line),
     // so without the caller the diagnostic cannot tell two sites apart.
-    let mut sinks = skull_transform::nobox_materialization_violations(ws, mf).into_iter();
-    if let Some((message, site)) = sinks.next() {
-        return Err(BodyRejection {
-            message: format!("{message}, while emitting `{}`", mf.name),
-            guarantee: true,
-            site,
-            siblings: sinks
-                .map(|(m, s)| (format!("{m}, while emitting `{}`", mf.name), s))
-                .collect(),
-        });
+    acc.findings.extend(
+        skull_transform::nobox_materialization_violations(ws, mf).into_iter().map(
+            |(message, site)| Finding {
+                message: format!("{message}, while emitting `{}`", mf.name),
+                guarantee: true,
+                site,
+            },
+        ),
+    );
+    if let Err(r) = validate_nested_bodies(ws, &mf.nested_fns, specs) {
+        acc.absorb(r);
     }
-    validate_nested_bodies(ws, &mf.nested_fns, specs)
+    acc.into_result()
 }
 
 /// The spec-binding check for a decorator / global-init unit, whose body and
@@ -1379,18 +1416,16 @@ fn check_unit_spec_bindings(
     out_specs.extend(specs);
     match r {
         Ok(()) => Ok(()),
-        Err(r) if !r.guarantee && is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
+        Err(r) if !r.guarantee() && is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
         Err(r) => Err(r.into_error(span, &format!("cannot emit `{name}`: "))),
     }
 }
 
-/// Surface the first [`UnitOut::hard_error`] in a parallel batch, in source order
-/// so the reported rejection does not depend on thread scheduling.
-fn first_unit_error(units: &[UnitOut]) -> Result<(), CompilerError> {
-    match units.iter().find_map(|u| u.hard_error.clone()) {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+/// EVERY [`UnitOut::hard_error`] in a parallel batch, in source order so the
+/// reported list does not depend on thread scheduling. Each unit is an
+/// independent definition, so a batch of them holds a site table, not one bug.
+fn unit_errors(units: &[UnitOut]) -> Vec<CompilerError> {
+    units.iter().filter_map(|u| u.hard_error.clone()).collect()
 }
 
 /// Assemble the full Lua program: prelude + decorator defs + the function section
@@ -1625,6 +1660,7 @@ fn assemble(
     let mut times = PhaseTimes::default();
     let mut t_scaffold = Duration::ZERO;
     let mut needed_specs: Vec<(FuncRef, skull_mir::lower::SpecKey)> = Vec::new();
+    let mut rejections = Rejections::default();
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut direct_globals: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
@@ -1652,7 +1688,7 @@ fn assemble(
     let deco_results = par_map(deco_items, |(mid, did)| {
         emit_decorator_unit(ws, scx, cg, mid, did)
     });
-    first_unit_error(&deco_results)?;
+    rejections.extend(unit_errors(&deco_results));
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
@@ -1681,7 +1717,7 @@ fn assemble(
     let global_results = par_map(global_items, |(mid, gid)| {
         emit_global_unit(ws, scx, cg, mid, gid)
     });
-    first_unit_error(&global_results)?;
+    rejections.extend(unit_errors(&global_results));
     needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut globals_lua = String::new();
     // Held back and appended after the fn-def skips so the reported order is
@@ -1801,16 +1837,14 @@ fn assemble(
                     {
                         skipped.push((mangle_fn(ws, f), err.message.clone()));
                     } else {
-                        return Err(err
-                            .clone()
-                            .with_siblings(other_chunk_rejections(ws, cache, self_ref)));
+                        rejections.push(err.clone());
                     }
                 }
                 None => {
                     if is_stdlib_module_file(module.file.as_str()) {
                         skipped.push((mangle_fn(ws, f), "not emitted (no cached chunk)".to_string()));
                     } else {
-                        return Err(CompilerError::new_with_label(
+                        rejections.push(CompilerError::new_with_label(
                             f.name_span,
                             format!("internal: `{}` has no emitted chunk", f.name),
                         ));
@@ -1820,7 +1854,13 @@ fn assemble(
         }
     }
 
-    emit_specialized_callees(ws, scx, cg, &mut needed_specs, &mut out)?;
+    rejections.extend(emit_specialized_callees(ws, scx, cg, &mut needed_specs, &mut out));
+
+    // Every emitted definition has now been visited, so this is the earliest
+    // point where the whole rejection list exists. Anything past here is
+    // scaffolding (init ordering, deco application) whose own errors are
+    // unrelated to a body that cannot emit.
+    rejections.into_result()?;
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in

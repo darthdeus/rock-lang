@@ -1251,13 +1251,14 @@ fn build_rock_globals_registry(
         let Some(pkg) = matched else { continue };
         let entry = by_package.entry(pkg.to_string()).or_default();
         for (_gid, g) in m.globals.iter() {
-            // A `nobox` global has no slot under its own name -- it IS its leaf
-            // globals, so that is what reflection reads and restores. Listing the
-            // base name would dump nil and restore nothing.
-            match skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
-                Some(leaves) => entry.extend(leaves.iter().map(|l| l.to_string())),
-                None => entry.push(g.name.as_str().to_string()),
-            }
+            // Every global is published under its LOGICAL name, `nobox` or not.
+            // A `nobox` global has no slot under that name -- its storage IS its
+            // leaves -- so the name alone would dump nil and restore nothing;
+            // `__ROCK_NOBOX_GLOBALS` carries the rebuild/take-apart pair, and the
+            // consumers go through `__rock_global_get`/`_set` rather than `_G[name]`.
+            // Publishing leaves here instead (which is what this did) put physical
+            // names in the dump, in save files and in replay keyframes.
+            entry.push(g.name.as_str().to_string());
         }
     }
     by_package.retain(|_, names| !names.is_empty());
@@ -1279,7 +1280,96 @@ fn build_rock_globals_registry(
         out.push_str("},");
     }
     out.push_str("}\n");
+    // The accessor table rides WITH the registry, never appended separately: four
+    // emit paths append this block, and a registry whose consumers had no
+    // accessors would read nil for every `nobox` global.
+    out.push_str(&build_nobox_global_accessors(ws));
     out
+}
+
+/// Build `_G.__ROCK_NOBOX_GLOBALS`, the rebuild/take-apart pair per `nobox`
+/// global. A `nobox` global's storage is its leaf globals, so reflection cannot
+/// reach it by name; these two closures are what `__rock_global_get`/`_set` call
+/// so every consumer addresses the LOGICAL value under the LOGICAL name.
+///
+/// Both directions come off one canonical leaf-path sequence
+/// (`nobox_global_shape_paths`), so they cannot drift from each other or from the
+/// storage: `get` is the positional leaf ctor over the leaves in that order, and
+/// `set` assigns `v.<path>` per leaf in the same order. The ctor suffix follows
+/// the same three-way rule as every other pack site (`skull-codegen-lua`'s
+/// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
+/// otherwise the GC tier's table ctor or the cdata one.
+///
+/// Position past the global defs is irrelevant -- the closures only read the leaf
+/// globals when called (same argument as the registry block it rides with).
+fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> String {
+    use bone_semantic::prelude::ModuleId;
+
+    let mut rows: Vec<String> = Vec::new();
+    for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (_gid, g) in m.globals.iter() {
+            let Some((ty_name, paths)) = skull_mir::lower::nobox_global_shape_paths(ws, g.ty)
+            else {
+                continue;
+            };
+            let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
+                .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
+            if leaves.len() != paths.len() {
+                log::error!(
+                    target: "SKULL",
+                    "nobox global `{}`: {} leaves but {} leaf paths -- the ctor is \
+                     positional over the paths, so an accessor built from a \
+                     mismatched pair would write one leaf's value into another",
+                    g.name, leaves.len(), paths.len()
+                );
+                std::process::exit(1);
+            }
+            // A path that is a proper PREFIX of another is a nullable nested
+            // field's presence leaf, not a readable field: `v.<path>` would hand
+            // the write side the nested value where the ctor wants the tag. No
+            // in-tree shape reaches this, and guessing is how a leak becomes a
+            // miscompile -- so reject instead of emitting a wrong accessor.
+            if let Some(p) = paths
+                .iter()
+                .find(|p| paths.iter().any(|q| q.as_str().starts_with(&format!("{p}."))))
+            {
+                log::error!(
+                    target: "SKULL",
+                    "nobox global `{}` of type `{ty_name}` has a presence leaf \
+                     (`{p}`), which reflection cannot yet rebuild: its logical \
+                     value is not addressable as `v.{p}`. Mechanism J of \
+                     docs/nobox-case-matrix.md covers the readable shapes only.",
+                    g.name
+                );
+                std::process::exit(1);
+            }
+            let suffix = if paths.iter().any(|p| p.contains('.')) {
+                "_lct"
+            } else if skull_mir::lower::value_struct_is_gc(ws, ty_name) {
+                "_vt"
+            } else {
+                "_ct"
+            };
+            let args = leaves.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
+            let writes = leaves
+                .iter()
+                .zip(&paths)
+                .map(|(l, p)| format!("{l} = v.{p}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            rows.push(format!(
+                "[{:?}]={{get=function() return {ty_name}{suffix}({args}) end,\
+                 set=function(v) {writes} end}},",
+                g.name.as_str()
+            ));
+        }
+    }
+    // Assigned even when EMPTY. A full reload re-executes the chunk in the live
+    // process, so what the new chunk omits it inherits: emitting nothing here
+    // would leave the previous build's accessors installed, and changing the last
+    // `nobox` global to an ordinary one would keep reflection reading leaf globals
+    // that no longer back it.
+    format!("\n_G.__ROCK_NOBOX_GLOBALS = {{{}}}\n", rows.concat())
 }
 
 /// Collect `@sim` info from the bone workspace -- the skull analog of rock's
@@ -1573,7 +1663,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         for (file, rendered) in &details {
             println!("\n--- {} ---\n{}", file, rendered);
         }
-    } else if failed > 0 {
+    } else if failed > 0 || emit_ok > exec_pass {
         println!(
             "\n{}",
             "(re-run with ROCK_TEST_VERBOSE=1 for full per-file errors)".dimmed()
@@ -1633,7 +1723,7 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         err_failed += f;
     }
 
-    if failed > 0 || lsp_failed > 0 || err_failed > 0 {
+    if tests_failed > 0 || test_fails > 0 || failed > 0 || lsp_failed > 0 || err_failed > 0 {
         std::process::exit(1);
     }
     Ok(())

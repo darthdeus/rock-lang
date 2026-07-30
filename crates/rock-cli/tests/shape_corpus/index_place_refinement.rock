@@ -1,0 +1,29 @@
+// SHAPE: null refinement reaching an INDEX place. Not a `nobox` shape at all --
+// it fires on an unmarked value too, so this is shipped-language behaviour rather
+// than a cost of marking, and it is the reason the class is judged a GAP.
+//
+// The discriminant is that refinements are keyed on NAME PATHS
+// (`path_refinements: FxHashSet<Vec<Ustr>>`, `docs/nullable-refinement.md`) and an
+// index place has no name segment to key on. Two controls bound it, both in their
+// own files because a compile rejection aborts the whole file: a FIELD place
+// refines (`index_place_refinement_field_control.rock`) and binding the element to
+// a local first refines (`index_place_refinement_bound_control.rock`).
+//
+// ONE cause, THREE spellings -- and two of them name nothing about refinement:
+//   - field access on the element: "cannot access field `a` on non-struct type `P?`"
+//   - direct-call argument:        "No overload for `take` with argument types (P?)"
+//   - indirect-call argument:      "type mismatch: expected `P`, found `P?`"
+// The middle one sends a reader hunting for a missing overload. Naming the real
+// cause is reachable without touching inference; refining the place itself is not.
+//
+// Judgement + sizing: `docs/nobox-nested-ctor-plan.md` S "M5".
+
+struct P { a: int }
+
+@test(output = "7")
+fn refinement_does_not_reach_an_index_place() {
+    let xs: [P?] = [P { a: 7 }]
+    if xs[0] != null {
+        print("{xs[0].a}")
+    }
+}

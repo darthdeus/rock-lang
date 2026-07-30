@@ -1,0 +1,40 @@
+// LIVE BUG, shipped language -- no `nobox` anywhere. A second, independent
+// syntax path onto the same wrong storage: a match pattern that BINDS a
+// flattened field emits `r1 = r0.p` against a table holding `p.x` / `p.y`.
+//
+// Distinct from the safe-nav arm (`embed_safenav_leaf_projection.rock`): no
+// nullability and no `?.` are involved, so a fix to safe-nav alone leaves this
+// standing. Its own file because the fault aborts the chunk.
+//
+// Scoped by the controls below: match GUARDS and a whole-struct bind are both
+// correct, so the trigger is the destructure BINDING specifically. They sit
+// here rather than in a sibling file on purpose -- they run before the probe.
+
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn mk(n: int) -> Holder { return Holder { p: Pt { x: n, y: n + 1 }, tag: 9 } }
+
+// A guard reads the leaf by the ordinary field path. Correct today.
+@test(output = "guarded")
+fn control_match_guard_reads_leaf() {
+    let h = mk(5)
+    match h {
+        _ if h.p.x == 5 => print("guarded"),
+        _ => print("no"),
+    }
+}
+
+// Binding the whole struct and projecting afterwards is correct today.
+@test(output = "5 6")
+fn control_match_whole_bind() {
+    let h = mk(5)
+    match h { g => print("{g.p.x} {g.p.y}") }
+}
+
+// The shape. Today: `attempt to index local 'r1' (a nil value)`.
+@test(output = "5 6 9")
+fn probe_match_destructure_binds_flattened_field() {
+    let h = mk(5)
+    match h { Holder { p: pp, tag: t } => print("{pp.x} {pp.y} {t}") }
+}

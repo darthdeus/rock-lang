@@ -456,6 +456,20 @@ _G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
 -- which would make view refresh a silent no-op and leave every view dangling.
 assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refresh would silently do nothing")
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
+-- THE way to read/write a global found by name in `__ROCK_GLOBALS`. A `nobox`
+-- global has no slot under its own name -- its storage is its leaf globals -- so
+-- a bare `_G[name]` would read nil and write a slot nothing else reads. The
+-- rebuild/take-apart pair lives in `__ROCK_NOBOX_GLOBALS` (emitted per nobox
+-- global); every other global falls through to `_G` unchanged.
+_G.__rock_global_get = function(name)
+  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
+  if a then return a.get() end
+  return _G[name]
+end
+_G.__rock_global_set = function(name, v)
+  local a = _G.__ROCK_NOBOX_GLOBALS and _G.__ROCK_NOBOX_GLOBALS[name]
+  if a then a.set(v) else _G[name] = v end
+end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
 -- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.

@@ -1,0 +1,32 @@
+// EMITTED-SHAPE seed, and a FINDING: a GC-carrying value struct making one round
+// trip through a `Map<string, P?>` materializes THREE times.
+//
+// One box is owed -- a Map value is a Lua table slot, so something has to be
+// stored. The other two are not:
+//
+//   1. the store side emits `if ((P_vt(a, b, tag)) == (nil))`, testing a box it
+//      just built against nil. A freshly built table is never nil, so both the box
+//      and the branch are dead.
+//   2. the taken arm then builds the SAME box a second time to store it.
+//
+// The read side is the third, and that one is a real re-materialization of the
+// widened `P?` read.
+//
+// The value oracle reads this program as CORRECT: the answer is right, and the
+// waste is invisible to it. That blindness is why the emitted-shape rung exists.
+// Flip the pinned count when the presence-aware store stops boxing to test presence.
+
+value P { a: int, b: int, tag: string }
+
+fn seed(n: int) -> int { return n }
+
+struct Holder { p: P? }
+
+@test(output = "7 11")
+fn nullable_map_roundtrip() {
+    let h = Holder { p: P { a: seed(7), b: 11, tag: "t" } }
+    let m: Map<string, P?> = map_new()
+    m["k"] = h.p
+    let v = m["k"]
+    if v != null { print("{v.a} {v.b}") }
+}

@@ -398,6 +398,88 @@ fn a_nested_nobox_child_still_materializes_when_widened_sentinel() {
     );
 }
 
+const NOBOX_COLUMN_WIDEN: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+// CONTROL: a whole element read out of a COLUMN, not widened. Emits as leaf
+// reads, and must keep doing so.
+fn ctrl(xs: [NV2]) -> NV2 { return xs[0] }
+
+// The shape: the same column read, widened to `T?`. The first two inline their
+// stdlib body into this one; the rest mint the value inside their own
+// specialization, where the call site is not in view.
+fn via_get(xs: [NV2]) -> NV2? { return xs.get(0) }
+fn via_vec_get(xs: [NV2]) -> NV2? { return vec_get(xs, 1) }
+fn via_pop(xs: [NV2]) -> NV2? { return xs.pop() }
+fn via_swap_remove(xs: [NV2]) -> NV2? { return xs.swap_remove(0) }
+fn via_remove_at(xs: [NV2]) -> NV2? { return xs.remove_at(0) }
+fn via_sample(xs: [NV2]) -> NV2? { return xs.sample() }
+
+fn show(v: NV2?) -> float {
+    if v == null { return -1.0 }
+    let u = v.unwrap()
+    return u.x * 10.0 + u.y
+}
+
+fn main() {
+    let xs = [NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }, NV2 { x: 5.0, y: 6.0 }]
+    print(ctrl(xs).x)
+    print(show(via_get(xs)))
+    print(show(via_vec_get(xs)))
+    print(show(xs.get(9)))
+    print(show(via_pop(xs)))
+    print(show(via_swap_remove(xs)))
+    print(show(via_remove_at(xs)))
+    print(show(via_pop(xs)))
+    print(show(via_sample(xs)))
+    print(show(via_sample([NV2 { x: 7.0, y: 8.0 }])))
+}
+"#;
+
+/// Shape (a) with a COLUMN source instead of a field source: a whole element
+/// read out of a `[T]` column, widened to `T?`, is a Group over the element's
+/// leaf columns plus presence -- never a box. Six stdlib entry points share it
+/// (`vec_get`, `Vec.get`, `pop`, `remove_at`, `swap_remove`, `sample`), and the
+/// last four are not `@inline`, so the box was minted inside their own
+/// specialization.
+#[test]
+fn a_column_read_widens_to_nullable_without_materializing() {
+    let lua = emit_module(NOBOX_COLUMN_WIDEN);
+    for name in [
+        "ctrl",
+        "via_get",
+        "via_vec_get",
+        "via_pop",
+        "via_swap_remove",
+        "via_remove_at",
+        "via_sample",
+    ] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "a column read widened to `T?` materialized in `{name}`:\n{body}"
+        );
+    }
+    // The four non-`@inline` entry points mint the value inside their own
+    // specialized copy, which carries the `_spec_<key>` suffix.
+    for needle in [
+        "pop_arr_T_ret_T_opt_spec",
+        "swap_remove_arr_T_int_ret_T_opt_spec",
+        "remove_at_arr_T_int_ret_T_opt_spec",
+        "sample_arr_T_ret_T_opt_spec",
+    ] {
+        let body = body_of_synthetic(&lua, needle);
+        assert!(
+            !body.contains("NV2_ct("),
+            "the `{needle}` specialization materialized the element it returns:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_column_widen"),
+        "1\n12\n34\n-1\n56\n12\n34\n-1\n-1\n78"
+    );
+}
+
 #[test]
 fn nobox_interpolation_does_not_materialize() {
     let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);

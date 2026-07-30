@@ -168,6 +168,20 @@ pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
 }
 
 fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
+    // A NULLABLE nested shape leads with its presence leaf, matching
+    // `repr_to_leaves` (which pushes presence before the fields) and `leaf_count`
+    // (which counts it). Its key is the field's own UNDOTTED name -- injective
+    // against its own children (`a` vs `a.x`, and `.` cannot appear in a Rock
+    // identifier), and the same convention embed storage already uses for a
+    // nullable child. Without this the column set is one short of `leaf_count`
+    // and a `[Outer]` literal fails with a column arity mismatch.
+    //
+    // Only the NESTED case: a top-level nullable shape has no field name to key
+    // on, and no column path reaches one today (a column element is
+    // non-nullable), so that case is deliberately left as it was.
+    if shape.nullable && !prefix.is_empty() {
+        out.push(Ustr::from(prefix.trim_end_matches('.')));
+    }
     for (fname, fs) in &shape.fields {
         match fs {
             FieldShape::Prim if prefix.is_empty() => out.push(*fname),
@@ -643,6 +657,26 @@ fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Opti
                     FieldShape::Nested(value_shape_rec(ws, n, visiting)?)
                 }
             }
+            // A NULLABLE `nobox` child threads its own presence tag as leaf 0 of
+            // its nested shape -- the same rule the signature/local/global
+            // contexts already apply at the outermost slot, reached through the
+            // one resolver rather than re-spelled here. Without this arm the
+            // field type fell to the catch-all and disqualified the WHOLE struct,
+            // which is mechanism A: the parent then had no shape, fell back to a
+            // box, and the materialization verifier refused it.
+            //
+            // Gated on `nobox` by the resolver: an UNMARKED nullable value field
+            // keeps its box + nil sentinel, which is legal today (a box is not a
+            // guarantee violation for an unmarked type), so this changes no
+            // existing emission.
+            TypeExpr::Nullable(_) => match nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
+            {
+                Some(sub) => FieldShape::Nested(sub),
+                None => {
+                    visiting.pop();
+                    return None;
+                }
+            },
             _ => {
                 visiting.pop();
                 return None;
@@ -703,7 +737,22 @@ fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> O
                     FieldShape::Prim
                 }
             }
-            // Builtin scalar, generic `T`, nullable, tuple -> one slot.
+            // A NULLABLE `nobox` child threads leaves + presence, exactly as in
+            // `value_shape_rec`. The two constructors are alternates for the SAME
+            // struct, so they must agree on leaf COUNT: giving the arm to one and
+            // not the other makes a producer and a consumer disagree, and
+            // `rebuild_from_leaves` indexes past the end. That is not theoretical
+            // -- it is what `a_nullable_nobox_field_round_trips_both_ways` (a
+            // GC-tier outer) caught when only `value_shape_rec` had it.
+            Some(TypeExpr::Nullable(_))
+                if nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t)).is_some() =>
+            {
+                FieldShape::Nested(
+                    nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
+                        .expect("guard matched"),
+                )
+            }
+            // Builtin scalar, generic `T`, non-nobox nullable, tuple -> one slot.
             _ => FieldShape::Prim,
         };
         fields.push((f.name, fs));
@@ -981,26 +1030,6 @@ fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> 
     flat_enum_shape(ws, n).map(|s| s.value_shape())
 }
 
-/// [`Builder::nobox_shape_of_ty`] for a DECLARED (workspace-arena) type -- a
-/// top-level fn's param/return, which `static_ty` can see and the body-arena
-/// walker cannot.
-fn nobox_sig_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
-    match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
-            value_shape_of_nominal(ws, n)
-        }
-        TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_nobox_nominal(ws, n) => {
-                let mut shape = value_shape_of_nominal(ws, n)?;
-                shape.nullable = true;
-                Some(shape)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// The value shape of a `name` nominal (value struct or flat enum), or `None`.
 fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     value_shape(ws, name)
@@ -1022,28 +1051,46 @@ fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
-/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
-/// is leaf 0), `None` for every other type. bone requires an explicit annotation
-/// on every global, so this is exact for a `GlobalDef`'s `ty`.
-fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
-    match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_nobox_nominal(ws, name) => {
-            value_shape_of_nominal(ws, name)
-        }
+/// THE nullable-nominal shape rule, arena-independent: a `nobox` nominal resolves
+/// to its leaf shape, and a NULLABLE one to the same shape with `nullable = true`
+/// (presence is leaf 0). Everything else is `None`.
+///
+/// `resolve` is the caller's type-node lookup, which is the only thing that
+/// differed between the copies this replaces: the workspace arena reads through
+/// `static_ty`, a body arena through `resolve_tyid`/`ty_node`. Every context that
+/// needs the rule calls this -- `nobox_declared_shape` (globals + top-level
+/// signatures) and [`Builder::nobox_shape_of_ty`] (body-arena locals) -- so a new
+/// context joins by calling it rather than by copying fifteen lines.
+fn nullable_nominal_shape(
+    ws: &Workspace,
+    ty: TyId,
+    resolve: &dyn Fn(TyId) -> Option<TypeExpr>,
+) -> Option<ValueShape> {
+    let nobox_shape = |name: Ustr| {
+        is_nobox_nominal(ws, name).then(|| value_shape_of_nominal(ws, name)).flatten()
+    };
+    match resolve(ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => nobox_shape(name),
         TypeExpr::Nullable(inner) => {
-            let inner = static_ty(ws, ty.with_idx(inner))?;
-            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = inner else {
+            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = resolve(ty.with_idx(inner))?
+            else {
                 return None;
             };
-            if !is_nobox_nominal(ws, name) {
-                return None;
-            }
-            let mut shape = value_shape_of_nominal(ws, name)?;
+            let mut shape = nobox_shape(name)?;
             shape.nullable = true;
             Some(shape)
         }
         _ => None,
     }
+}
+
+/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
+/// is leaf 0), `None` for every other type. bone requires an explicit annotation
+/// on every global, so this is exact for a `GlobalDef`'s `ty`, and equally for a
+/// top-level fn's param/return -- both are workspace-arena types `static_ty` can
+/// see and the body-arena walker cannot.
+fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
 }
 
 /// The leaf globals a `nobox`-typed global is stored in, `None` for every other
@@ -1053,6 +1100,19 @@ fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
 pub fn nobox_global_leaves(ws: &Workspace, name: Ustr, ty: TyId) -> Option<Vec<Ustr>> {
     let shape = nobox_declared_shape(ws, ty)?;
     Some((0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect())
+}
+
+/// The value-struct type a `nobox` global's logical value has, plus its leaf
+/// PATHS in ctor order -- what reflection needs to rebuild the logical value from
+/// the leaf globals and to take it apart again. `None` for every other global,
+/// on the same gate as [`nobox_global_leaves`], so accessors exist for exactly
+/// the globals whose storage IS leaves.
+///
+/// Paths, not just an arity, because both directions address by path: the ctor is
+/// positional over this sequence, and the write side assigns `v.<path>` per leaf.
+pub fn nobox_global_shape_paths(ws: &Workspace, ty: TyId) -> Option<(Ustr, Vec<Ustr>)> {
+    let shape = nobox_declared_shape(ws, ty)?;
+    Some((shape.name, value_leaf_paths(&shape)))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -1960,7 +2020,8 @@ impl ScalarCtx {
 /// `inline(lua)` engine fns like `append_vertex`), or (b) it's an ordinary rock
 /// body that is NOT called by a fixed name from outside skull's view
 /// (`@nomangle` / `@test` / `main`) and NOT taken by reference (an indirect callee
-/// can't splat). A non-scalar callee receives/returns a single cdata.
+/// can't splat). A non-scalar callee receives/returns a single cdata. The
+/// `@nomangle` half of that is snapshot-scoped -- see [`fn_uses_scalar_abi_spec`].
 fn fn_uses_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> bool {
     fn_uses_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
 }
@@ -1982,10 +2043,20 @@ fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst
     if !has_scalar_abi {
         // Implicit scalarization is limited to ordinary rock-bodied fns reachable
         // only by direct call. `@scalar_abi` overrides all of these gates.
+        // `@nomangle` gates the SHARED snapshot only. It reserves the bare name
+        // for callers outside skull's view (codegen text, `inline(lua)` bodies),
+        // and those callers spell the bare name -- which `spec_fn_name` never
+        // hands to a specialized copy. A specialized instantiation is therefore
+        // reachable only by direct call, the condition this gate encodes.
+        let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
+            "nomangle" => subst.is_empty(),
+            "test" => true,
+            _ => false,
+        });
         if f.inline_body.is_some()
             || f.name.as_str() == "main"
             || scx.taken_by_ref.contains(&f.name)
-            || f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "nomangle" | "test"))
+            || name_is_fixed
         {
             return false;
         }
@@ -2064,6 +2135,16 @@ pub fn scalar_abi_param_leaf_widths(
 /// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first
 /// (same traversal as `repr_to_leaves`/`cdata_leaves`).
 fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
+    // Twin of `leaf_paths_rec`: a nullable nested shape leads with its presence
+    // leaf, so it needs a NAME or the Lua-side params drift one short of what
+    // `repr_to_leaves` splats. Currently unreachable -- this names `inline(lua)`
+    // params, and a `nobox` value cannot cross that boundary (it rejects as an
+    // opaque-body crossing) -- but the two functions walk the same shape and a
+    // silent divergence between them is precisely the copy-drift this arc is
+    // about, so they stay in step.
+    if shape.nullable && !base.is_empty() {
+        out.push(base.to_string());
+    }
     for (fname, fs) in &shape.fields {
         match fs {
             FieldShape::Prim => out.push(format!("{base}__{fname}")),
@@ -2618,6 +2699,7 @@ pub fn lower_function_spec(
         static_counters: HashMap::new(),
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
+        presence_only: None,
     };
     b.reject_nobox_fn_taken_by_value()?;
     b.lower_params();
@@ -2679,6 +2761,7 @@ pub fn lower_global(
         static_counters: HashMap::new(),
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
+        presence_only: None,
     };
     // A `nobox` global is category-2 storage: its layout comes from the declared
     // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
@@ -2743,6 +2826,7 @@ pub fn lower_decorator(
         static_counters: HashMap::new(),
         nested_fn_globals: HashMap::new(),
         nested_fn_counters: HashMap::new(),
+        presence_only: None,
     };
     // `target` is param 0, then the decorator's declared params.
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
@@ -2842,6 +2926,12 @@ struct Builder<'a> {
     /// Per nested-fn source-name counter (source order), the `static_counters`
     /// analogue for shadowing duplicates.
     nested_fn_counters: HashMap<Ustr, u32>,
+    /// The one expression currently being lowered for its PRESENCE only (`x ==
+    /// null`): a `V?` place read there skips its copy-out, because a nil test
+    /// answers the same question without a cdata
+    /// ([`Builder::nullable_place_value_of`]). Exact node, never a subtree -- a
+    /// nested read that feeds a real whole-value use still copies.
+    presence_only: Option<Idx<Expr>>,
 }
 
 impl Builder<'_> {
@@ -3346,6 +3436,7 @@ impl Builder<'_> {
             static_counters: HashMap::new(),
             nested_fn_globals: self.nested_fn_globals.clone(),
             nested_fn_counters: HashMap::new(),
+            presence_only: None,
         };
 
         for (i, pb) in params.into_iter().enumerate() {
@@ -3718,7 +3809,7 @@ impl Builder<'_> {
             // A global holding a value struct routes through the repr layer so a
             // whole-value read copies the box (a global is a mutable place).
             Expr::Global(name) => {
-                if self.value_struct_of(e).is_some() {
+                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e).is_some() {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
                 }
@@ -3824,7 +3915,7 @@ impl Builder<'_> {
                 // A whole-value read of a value-struct element COPIES (via the repr
                 // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
                 // than binding the interior array reference.
-                if self.value_struct_of(e).is_some() {
+                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e).is_some() {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
                 }
@@ -4080,7 +4171,53 @@ impl Builder<'_> {
                             let g = self.swizzle_from_packed(bv, &idxs);
                             self.pack(g)
                         }
-                        None => self.emit_cur(Inst::Field { base: bv, field }),
+                        // An embed/nobox field has NO slot under its own name --
+                        // its leaves live on the parent under dotted keys -- so
+                        // the read rebuilds from them, exactly as the non-safe-nav
+                        // paths do (`physical_field` at the place-base read,
+                        // `embed_field_of` at the repr read). Deciding storage
+                        // BEFORE emitting is the whole point: an `Inst::Field` here
+                        // reads a key that does not exist, and for a NULLABLE child
+                        // reads its presence tag, which the next link then indexes.
+                        None if self.embed_field_of(base, field).is_some() => {
+                            let cname =
+                                self.embed_field_of(base, field).expect("guard matched");
+                            // Compose through `physical_field`, exactly as the
+                            // place-base read does -- NOT off `bv`. When the base
+                            // is itself an embed read, `bv` is a re-materialized
+                            // box whose fields are ordinary keys, so reading the
+                            // dotted leaves off it finds nothing; composing walks
+                            // up to the real physical parent instead
+                            // (`T.child?.inner` -> `T["child.inner"]`).
+                            let (pbase, key) = self.physical_field(base, field);
+                            let parent =
+                                if pbase == base { bv } else { self.lower_expr(pbase)? };
+                            if self.embed_read_is_nullable(base, field) {
+                                self.materialize_embed_nullable(parent, key, cname)
+                            } else {
+                                self.materialize_embed(parent, key, cname)
+                            }
+                        }
+                        // `o?.p` reads a value field whole out of a mutable place, so
+                        // it copies exactly as `o.p` does. The base is non-nil on
+                        // this arm; the FIELD may still be absent, so a nullable one
+                        // takes the presence-aware copy.
+                        None => {
+                            let fv = self.emit_cur(Inst::Field { base: bv, field });
+                            match self
+                                .value_struct_name_of(e)
+                                .filter(|_| self.is_mutable_place(base))
+                            {
+                                Some(name) if self.embed_read_is_nullable(base, field) => {
+                                    self.nullable_boxed_value_copy(fv, name)
+                                }
+                                Some(name) => {
+                                    let copy = self.boxed_value_copy_repr(fv, name);
+                                    self.pack(copy)
+                                }
+                                None => fv,
+                            }
+                        }
                     },
                 };
                 self.store_and_join(result, fv, join);
@@ -4840,6 +4977,27 @@ impl Builder<'_> {
                                 ),
                             ));
                         }
+                    }
+                }
+            }
+        }
+        // `cast<T>(v)` is identity at runtime (`return value`), so a `nobox`
+        // RESULT threads the argument's repr instead of packing it for the boxed
+        // `any` param and field-reading the leaves back off that box. This is
+        // what lets a whole COLUMN element read widen to `T?`: every stdlib
+        // entry point that widens one spells it `cast(__vec_data_get(..))`, and
+        // `__vec_data_get` already lowers to a Group of column reads -- the box
+        // was minted only to cross `cast`. Same identity treatment the newtype
+        // ctor and the bound `iter` call below already get.
+        // Keyed on the RESOLVED callee, never the spelling: a user fn named
+        // `cast` returning a nobox value is a different function, and threading
+        // its argument through would delete the call and emit a leaf read of
+        // whatever was passed in (pinned by tests/nobox_cast_identity.rock).
+        if let Callee::Unresolved { name, .. } = callee {
+            if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
+                if let [inner] = arg_idxs[..] {
+                    if self.resolves_to_inline_builtin(e, name) {
+                        return self.lower_expr_repr(inner);
                     }
                 }
             }
@@ -5752,6 +5910,48 @@ impl Builder<'_> {
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             match fs {
                 FieldShape::Prim => out.push(fv),
+                // A NULLABLE nested child: the stored box may be absent, so split
+                // it presence-aware rather than field-reading straight off a
+                // possible nil. Mirrors `repr_to_leaves`' `Scalar(v) if
+                // shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0,
+                // then the child's own leaves, nils on the absent arm -- because
+                // the two must agree leaf-for-leaf or `rebuild_from_leaves`
+                // indexes past the end. This function had NO nullable handling:
+                // its one caller stripped `.nullable` first, which was safe only
+                // while no shape carried it below the outermost level.
+                FieldShape::Nested(sub) if sub.nullable => {
+                    let field_count = sub.leaf_count() - 1;
+                    let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                    let present = self.emit_cur(Inst::NotEq(fv, nil));
+                    let cells: Vec<Idx<Cell>> =
+                        (0..field_count).map(|_| self.f.new_cell(None)).collect();
+                    let nil_bb = self.f.new_block();
+                    let value_bb = self.f.new_block();
+                    let join = self.f.new_block();
+                    self.f.set_term(
+                        self.cur,
+                        Term::Branch { cond: present, then_bb: value_bb, else_bb: nil_bb },
+                    );
+                    self.cur = nil_bb;
+                    for c in &cells {
+                        let z = self.emit_cur(Inst::Const(Lit::Nil));
+                        self.emit_cur(Inst::Store { cell: *c, value: z });
+                    }
+                    self.f.set_term(self.cur, Term::Goto(join));
+                    self.cur = value_bb;
+                    let mut inner = sub.clone();
+                    inner.nullable = false;
+                    let leaves = self.cdata_leaves(fv, &inner);
+                    for (c, lv) in cells.iter().zip(leaves) {
+                        self.emit_cur(Inst::Store { cell: *c, value: lv });
+                    }
+                    self.f.set_term(self.cur, Term::Goto(join));
+                    self.cur = join;
+                    out.push(present);
+                    out.extend(
+                        cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect::<Vec<_>>(),
+                    );
+                }
                 FieldShape::Nested(sub) => out.extend(self.cdata_leaves(fv, sub)),
             }
         }
@@ -5777,6 +5977,33 @@ impl Builder<'_> {
         let leaves = self.cdata_leaves(boxed, &shape);
         let mut idx = 0;
         self.rebuild_from_leaves(&shape, &leaves, &mut idx)
+    }
+
+    /// The `V?` twin of [`Self::boxed_value_copy_repr`]: an absent value has no
+    /// leaves to split, so the copy runs on the PRESENT arm only and `nil` threads
+    /// through untouched. The result is a single value (a fresh box or `nil`), not
+    /// a `Group` -- a Group carries no presence for `pack`, which would materialize
+    /// a box for an absent value and break `== null`.
+    fn nullable_boxed_value_copy(&mut self, boxed: Idx<Inst>, name: Ustr) -> Idx<Inst> {
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(boxed, nil));
+        let result = self.f.new_cell(None);
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let copy = self.boxed_value_copy_repr(boxed, name);
+        let packed = self.pack(copy);
+        self.store_and_join(result, packed, join);
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
     }
 
     /// One element of an indexable collection, for the loop lowerings that bind a
@@ -6640,8 +6867,12 @@ impl Builder<'_> {
                 // read out of a mutable place, so it copies.
                 let basev = self.pack(br);
                 let fv = self.emit_cur(Inst::Field { base: basev, field });
-                match self.value_struct_of(e).filter(|_| self.is_mutable_place(base)) {
-                    Some(name) => Ok(self.boxed_value_copy_repr(fv, name)),
+                if let Some(name) = self.value_struct_of(e).filter(|_| self.is_mutable_place(base))
+                {
+                    return Ok(self.boxed_value_copy_repr(fv, name));
+                }
+                match self.nullable_place_value_of(e) {
+                    Some(name) => Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(fv, name))),
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
             }
@@ -6657,6 +6888,12 @@ impl Builder<'_> {
                 let name = self.value_struct_of(e).unwrap();
                 let gv = self.emit_cur(Inst::Global(g));
                 Ok(self.boxed_value_copy_repr(gv, name))
+            }
+            // A `V?` global copies the same way, gated on presence.
+            Expr::Global(g) if self.nullable_place_value_of(e).is_some() => {
+                let name = self.nullable_place_value_of(e).unwrap();
+                let gv = self.emit_cur(Inst::Global(g));
+                Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(gv, name)))
             }
             // A value-struct literal stays an unboxed Group (its fields lowered as
             // reprs); `pack` builds the cdata only if a boxed context needs it.
@@ -6683,8 +6920,16 @@ impl Builder<'_> {
             // Group of leaf reads off the checked slot: a leaf projection reads the
             // part live, while `pack` (a whole-value use -- let-bind, arg, return,
             // store) rebuilds a fresh value instead of aliasing the array slot.
-            Expr::Index { base, index } if self.value_struct_of(e).is_some() => {
-                let name = self.value_struct_of(e).unwrap();
+            // A `V?` element takes the same shape, gated on presence at the copy.
+            Expr::Index { base, index }
+                if self.value_struct_of(e).is_some()
+                    || self.nullable_place_value_of(e).is_some() =>
+            {
+                let nullable = self.value_struct_of(e).is_none();
+                let name = self
+                    .value_struct_of(e)
+                    .or_else(|| self.nullable_place_value_of(e))
+                    .expect("guard matched");
                 let (b, kind) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 // Column storage: there is no element slot to read leaves off --
@@ -6701,6 +6946,9 @@ impl Builder<'_> {
                     }
                 }
                 let slot = self.emit_cur(Inst::Index { base: b, index: i, kind });
+                if nullable {
+                    return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(slot, name)));
+                }
                 Ok(self.boxed_value_copy_repr(slot, name))
             }
             Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs }
@@ -6939,6 +7187,21 @@ impl Builder<'_> {
                 "function value `{name}` is an unresolved overload (distinct signatures)"
             ))),
         }
+    }
+
+    /// Whether the call at `e` resolves to an `inline(lua)`-bodied definition of
+    /// `name`. Guards the name-keyed intrinsic fast paths: a user fn may legally
+    /// share a stdlib name, and rewriting ITS call as the intrinsic miscompiles.
+    /// A rock-bodied user fn has no inline body, which is the discriminant --
+    /// module identity is not, because the test harnesses build their own
+    /// stdlib. Fails CLOSED: an unresolved callee is not the intrinsic.
+    fn resolves_to_inline_builtin(&self, e: Idx<Expr>, name: ustr::Ustr) -> bool {
+        let Ok(fref) = self.resolve_funcref(e, name) else {
+            return false;
+        };
+        self.ws.module(fref.module).functions[fref.func]
+            .inline_body
+            .is_some()
     }
 
     fn resolve_funcref(
@@ -7818,6 +8081,24 @@ impl Builder<'_> {
                     None
                 };
                 if let Some(v) = null_side {
+                    // A `V?` place read here is read for its PRESENCE: the copy
+                    // such a read otherwise takes would allocate a cdata per nil
+                    // test (`mouse_screen`'s `sim_mouse_override`, every frame).
+                    if self.nobox_value_name(v).is_none()
+                        && !self.expr_is_flat_enum(v)
+                        && self.nullable_place_value_of(v).is_some()
+                    {
+                        let outer = self.presence_only.replace(v);
+                        let value = self.lower_expr(v);
+                        self.presence_only = outer;
+                        let value = value?;
+                        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                        return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
+                            Inst::Eq(value, nil)
+                        } else {
+                            Inst::NotEq(value, nil)
+                        }));
+                    }
                     if self.nobox_value_name(v).is_some() {
                         let repr = self.lower_expr_repr(v)?;
                         let present = match repr {
@@ -9118,7 +9399,29 @@ impl Builder<'_> {
                 let cdata = name.is_some() && en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
-                    let fv = self.scrut_named(scrut, rpf.name, cdata);
+                    // An embed/nobox field has NO slot under its own name, so a
+                    // BINDING for it rebuilds from the parent's dotted leaves --
+                    // the same rule the field-read paths follow. `scrut_named`
+                    // would emit `Inst::Field` against a key that does not exist.
+                    // `embed_field_of_struct` fails closed on anything that is not
+                    // a plain struct (an enum variant name is not in
+                    // `struct_by_name`), so a variant record falls through.
+                    let embedded = name
+                        .and_then(|sname| {
+                            self.embed_field_of_struct(sname, rpf.name).map(|cn| (sname, cn))
+                        })
+                        .filter(|_| matches!(scrut, Scrut::Val(_)));
+                    let fv = match (embedded, scrut) {
+                        (Some((sname, cname)), Scrut::Val(v)) => {
+                            let parent = *v;
+                            if self.embed_field_is_nullable(sname, rpf.name) {
+                                self.materialize_embed_nullable(parent, rpf.name, cname)
+                            } else {
+                                self.materialize_embed(parent, rpf.name, cname)
+                            }
+                        }
+                        _ => self.scrut_named(scrut, rpf.name, cdata),
+                    };
                     self.match_pattern(&Scrut::Val(fv), rpf.pat, fail, variants, false, None)?;
                 }
                 Ok(())
@@ -9780,16 +10083,52 @@ impl Builder<'_> {
     }
 
     /// The value-struct type of `e`, EITHER tier. `None` for a non-value type or
-    /// unsolved inference, and for a `V?` -- `expr_ty` PEELS `Nullable`, and
-    /// splitting a possibly-null value into leaves would index nil.
+    /// unsolved inference, and for a `V?` -- an ABSENT value has no leaves, so an
+    /// unconditional split would index nil. A nullable read that still needs the
+    /// copy takes the presence-aware path instead
+    /// ([`Self::nullable_place_value_of`]).
     fn value_struct_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         if self.expr_is_nullable(e) {
             return None;
         }
+        self.value_struct_name_of(e)
+    }
+
+    /// The value-struct type of `e` IGNORING nullability (`expr_ty` peels
+    /// `Nullable`, so a `V?` resolves to `V` here).
+    fn value_struct_name_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
             return None;
         };
         self.is_value_struct(name).then_some(name)
+    }
+
+    /// The value-struct type of a NULLABLE whole-value read out of a mutable place
+    /// -- a field, a global, a container element. The copy is required exactly as
+    /// it is for the non-nullable twin (`value_struct_of(e).filter(|_|
+    /// is_mutable_place(base))`); presence is the only difference, and it is
+    /// supplied by `nullable_boxed_value_copy`.
+    ///
+    /// A `nobox` global is excluded: its leaves ARE the storage, so the read is
+    /// already a snapshot and there is no box to copy out of. So is a read whose
+    /// only consumer is a nil test ([`Builder::presence_only`]).
+    fn nullable_place_value_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if self.presence_only == Some(e) {
+            return None;
+        }
+        if !self.expr_is_nullable(e) {
+            return None;
+        }
+        let is_place = match &self.body.expr_arena[e] {
+            Expr::Global(_) => self.nobox_global_place(e).is_none(),
+            Expr::Index { .. } => true,
+            Expr::FieldAccess { base, .. } => self.is_mutable_place(*base),
+            _ => false,
+        };
+        if !is_place {
+            return None;
+        }
+        self.value_struct_name_of(e)
     }
 
     /// The nominal type name of a non-nullable AGGREGATE expression -- a value
@@ -10379,35 +10718,66 @@ impl Builder<'_> {
     /// sinkable rather than becoming the storage the feature removed.
     fn materialize_embed(&mut self, parent: Idx<Inst>, prefix: Ustr, cname: Ustr) -> Idx<Inst> {
         let mut fields = Vec::new();
+        self.collect_embed_slots(parent, prefix, "", cname, &mut fields);
+        if self.is_value_struct(cname) {
+            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
+        } else {
+            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
+        }
+    }
+
+    /// The rebuilt child's slots: for each of `cname`'s fields, the key it holds
+    /// on the CHILD paired with the read of the key it lives at on `parent`.
+    /// `rel` is the child-relative prefix, so this is the exact inverse of the
+    /// store side's keying ([`Builder::embed_field_slots`]: relative leaves under
+    /// the field name, presence tag at the field name itself).
+    ///
+    /// An embed field stays FLAT here, for the reason the flat-enum arm already
+    /// gives: a `Mid` whose `inner` is embedded is canonically
+    /// `{["inner.v"]=3, inner=true, m=9}`, so re-boxing `inner` under its own name
+    /// hands consumers a shape they never read. Recursing into a nested box (which
+    /// is what this did) miscompiled BOTH directions across a call boundary -- an
+    /// absent inner came back non-nil because the box always had one, and a
+    /// PRESENT inner's leaf came back nil because the callee reads `["inner.v"]`
+    /// and the box stored a table at `inner`.
+    ///
+    /// The presence tag needs no branch: an absent field's leaves and tag are all
+    /// nil on the parent, and nil at those keys IS the canonical absent form (the
+    /// ctor emits `["inner.v"] = nil, inner = nil`), so an unconditional read
+    /// reproduces it.
+    fn collect_embed_slots(
+        &mut self,
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        rel: &str,
+        cname: Ustr,
+        out: &mut Vec<(Ustr, Idx<Inst>)>,
+    ) {
         for f in self.struct_field_names(cname).unwrap_or_default() {
             let key = Ustr::from(&format!("{prefix}.{f}"));
+            let relkey = format!("{rel}{f}");
             match self.embed_field_of_struct(cname, f) {
                 Some(inner) => {
-                    let v = self.materialize_embed(parent, key, inner);
-                    fields.push((f, v));
+                    if self.embed_field_is_nullable(cname, f) {
+                        let v = self.emit_cur(Inst::Field { base: parent, field: key });
+                        out.push((Ustr::from(relkey.as_str()), v));
+                    }
+                    self.collect_embed_slots(parent, key, &format!("{relkey}."), inner, out);
                 }
-                // A flat-enum field stays FLAT in the rebuilt child: consumers
-                // read it as `child["f.#"]`, so re-boxing it under `f` would
-                // hand them a shape they never look at.
                 None => match self.flat_field_of_struct(cname, f) {
                     Some(shape) => {
                         for slot in flat_slot_names(f, &shape) {
                             let src = Ustr::from(&format!("{prefix}.{slot}"));
                             let v = self.emit_cur(Inst::Field { base: parent, field: src });
-                            fields.push((slot, v));
+                            out.push((Ustr::from(&format!("{rel}{slot}")), v));
                         }
                     }
                     None => {
                         let v = self.emit_cur(Inst::Field { base: parent, field: key });
-                        fields.push((f, v));
+                        out.push((Ustr::from(relkey.as_str()), v));
                     }
                 },
             }
-        }
-        if self.is_value_struct(cname) {
-            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
-        } else {
-            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
         }
     }
 
@@ -11381,7 +11751,23 @@ impl Builder<'_> {
         self.is_nobox_struct(name).then_some(name)
     }
 
+    /// Under `values_first_class` NOTHING is nobox: the flag says the target has no
+    /// boxed representation to avoid, so a `value` struct is already a first-class
+    /// `vecN` and there is no leaf form to prefer. Answering `true` here would put
+    /// a local into leaf cells named `<name>__<i>`, which is both a duplicated
+    /// initializer and a RESERVED GLSL identifier (spec 3.7).
+    ///
+    /// The gate lives on the predicate rather than on each shape helper because
+    /// every representation decision reaches nobox-ness through here -- binding
+    /// shapes, expression shapes, signature splat gates and the column-storage
+    /// rejections alike. Gating one consumer leaves the others to remember it, and
+    /// they did not: `Statement::Let` falls through `nobox_binding_shape` to
+    /// `nobox_value_shape_of`, so gating the binding shape alone still emitted
+    /// `shift__0`.
     fn is_nobox_struct(&self, name: Ustr) -> bool {
+        if self.scx.values_first_class {
+            return false;
+        }
         self.ws
             .struct_by_name
             .get(&name)
@@ -11416,20 +11802,49 @@ impl Builder<'_> {
     /// one with a `nobox` signature by value -- pinned in
     /// `tests/errors/nobox_toplevel_fn_by_value.rock.err`, which is where the
     /// fix goes if that changes.
+    /// Argument positions of a `ShaderPipeline` expansion, where a bare fn name is
+    /// consumed by the compiler and never becomes a runtime fn value:
+    /// `rock_shader(frag)` lowers its argument to the entry's NAME as a string
+    /// literal, so the ABI-disagreement hazard [`Self::reject_nobox_fn_taken_by_value`]
+    /// guards against cannot arise there. Without this the check fires on the name
+    /// alone, which rejected every fullscreen `rock_shader` registration written in
+    /// a fn body once `Vec2` was marked -- a diagnostic owed to nothing.
+    fn expansion_arg_exprs(&self) -> HashSet<Idx<Expr>> {
+        let mut out = HashSet::new();
+        for (e, expr) in self.body.expr_arena.iter() {
+            let Expr::Call { callee, args } = expr else { continue };
+            let Callee::Unresolved { name, .. } = callee else { continue };
+            let Ok(func) = self.resolve_funcref(e, *name) else { continue };
+            // ONLY `ShaderPipeline`. It resolves its argument to a fn NAME and emits a
+            // string literal, so the name never becomes a runtime value. The sibling
+            // kinds evaluate theirs -- `expand_materialize` calls `lower_expr_repr` on
+            // it -- so exempting them let `materialize(<nobox-carrying fn>)` bypass the
+            // ABI rejection entirely, which is a hole, not a narrowing.
+            if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) {
+                out.extend(args.clone().into_iter());
+            }
+        }
+        out
+    }
+
     fn reject_nobox_fn_taken_by_value(&self) -> Result<(), CompilerError> {
         if self.scx.values_first_class {
             return Ok(());
         }
+        let expansion_args = self.expansion_arg_exprs();
         for (e, expr) in self.body.expr_arena.iter() {
             let Expr::Global(name) = expr else { continue };
+            if expansion_args.contains(&e) {
+                continue;
+            }
             let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
             // ANY overload of the name: the value reference names the whole
             // overload set, so one nobox-bearing member is enough to make the
             // ABI at an indirect call unknowable.
             let carries_nobox = overloads.iter().any(|(mid, fid)| {
                 let f = &self.ws.module(*mid).functions[*fid];
-                f.param_decls.iter().any(|pd| nobox_sig_shape(self.ws, pd.ty).is_some())
-                    || f.return_ty.is_some_and(|t| nobox_sig_shape(self.ws, t).is_some())
+                f.param_decls.iter().any(|pd| nobox_declared_shape(self.ws, pd.ty).is_some())
+                    || f.return_ty.is_some_and(|t| nobox_declared_shape(self.ws, t).is_some())
             });
             if carries_nobox {
                 return Err(CompilerError::new_with_label(
@@ -11482,30 +11897,17 @@ impl Builder<'_> {
     }
 
     fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
-        let ty = self.resolve_tyid(ty)?;
-        match self.ty_node(ty)? {
-            TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            } if self.is_nobox_struct(name) => value_shape_of_nominal(self.ws, name),
-            TypeExpr::Nullable(inner) => {
-                let inner = self.resolve_tyid(ty.with_idx(inner))?;
-                let TypeExpr::App {
-                    ctor: TypeCtor::Nominal(name),
-                    ..
-                } = self.ty_node(inner)?
-                else {
-                    return None;
-                };
-                if !self.is_nobox_struct(name) {
-                    return None;
-                }
-                let mut shape = value_shape_of_nominal(self.ws, name)?;
-                shape.nullable = true;
-                Some(shape)
-            }
-            _ => None,
+        // The BODY arena's spelling of [`nullable_nominal_shape`]: same rule, its
+        // own type-node lookup. `is_nobox_struct` (not `is_nobox_nominal`) is the
+        // one real difference -- it also honours `scx.values_first_class`, which
+        // the GLSL backend sets -- so the guard stays here and the core sees an
+        // already-filtered nominal.
+        if !self.scx.values_first_class {
+            return nullable_nominal_shape(self.ws, ty, &|t| {
+                self.ty_node(self.resolve_tyid(t)?)
+            });
         }
+        None
     }
 
     /// The leaf globals a place rooted at a `nobox` global denotes, plus the

@@ -281,9 +281,13 @@ pub fn cleanup(func: &mut MirFunc) {
             round += 1;
         }
         let changed = has_scalarizable_store(func) && scalarize_struct_cells_once(func);
+        // Inside the loop, because SROA is what CREATES the shape: forwarding a
+        // nullable value field's read to the literal that filled it leaves a
+        // presence test whose operand is now a fresh ctor.
+        let folded = fold_never_nil_compares(func);
         let subst = copy_propagate_subst(func);
         dce_core(func, subst.as_deref());
-        if !changed {
+        if !changed && !folded {
             break;
         }
     }
@@ -311,6 +315,51 @@ fn has_scalarizable_store(func: &MirFunc) -> bool {
             )
         })
     })
+}
+
+/// Fold a nil test whose operand is a freshly CONSTRUCTED aggregate: a ctor result
+/// is never nil, so `Eq(ctor, nil)` is statically false and `NotEq` statically true.
+/// [`fold_const_branches`] then turns the branch into a `Goto` and DCE removes the
+/// unreachable arm along with the boxes only it used.
+///
+/// This exists because SROA manufactures the shape rather than the lowering emitting
+/// it: a presence-aware read of a nullable value field tests `Inst::Field` against
+/// nil, which is a real test, and forwarding that field read to the literal behind
+/// it turns the operand into a ctor. 18 generated shapes boxed a value twice and
+/// branched on the result purely for this, and the value oracle read every one as
+/// CORRECT because the ANSWER was right.
+fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
+    let never_nil = |func: &MirFunc, v: Idx<Inst>| {
+        matches!(
+            &func.insts[v],
+            Inst::MakeValueStruct { .. }
+                | Inst::MakeStruct { .. }
+                | Inst::MakeEnum { .. }
+                | Inst::MakeTuple(_)
+        )
+    };
+    let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
+
+    let mut rewrites: Vec<(Idx<Inst>, bool)> = Vec::new();
+    for (iid, inst) in func.insts.iter() {
+        let (a, b, eq) = match inst {
+            Inst::Eq(a, b) => (*a, *b, true),
+            Inst::NotEq(a, b) => (*a, *b, false),
+            _ => continue,
+        };
+        let known = (never_nil(func, a) && is_nil(func, b))
+            || (never_nil(func, b) && is_nil(func, a));
+        if known {
+            rewrites.push((iid, !eq));
+        }
+    }
+    if rewrites.is_empty() {
+        return false;
+    }
+    for (iid, value) in rewrites {
+        func.insts[iid] = Inst::Const(Lit::Bool(value));
+    }
+    true
 }
 
 /// Fold `Branch` on a constant bool condition into a `Goto`, then clear blocks
