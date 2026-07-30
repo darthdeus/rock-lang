@@ -249,16 +249,25 @@ impl Builder<'_> {
                     return Err(gap("bound `next` call with non-unary args"));
                 };
                 let arg_v = self.lower_expr(arg)?;
-                // Bound conformance fixes the shape at exactly `(bool, E)`.
-                let dests: Vec<Idx<Cell>> = (0..2).map(|_| self.f.new_cell(None)).collect();
-                self.emit_cur(Inst::CallBoundMulti {
+                // Bound conformance fixes the SLOTS at exactly `(bool, E)`; `E`'s
+                // shape is this body's specialization to answer, so a value
+                // element arrives as leaves instead of one opaque slot. Leaving
+                // it opaque forces the splice to rebuild an aggregate, which a
+                // presence-carrying element cannot be rebuilt into.
+                let shape = self.bound_next_tuple_shape(gidx);
+                let dests: Vec<Idx<Cell>> =
+                    (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+                let call = self.emit_cur(Inst::CallBoundMulti {
                     dests: dests.clone(),
                     generic_idx: gidx as u32,
                     args: vec![arg_v],
                 });
+                if shape.splats() {
+                    self.f.bound_next_split.insert(call);
+                }
                 let loads: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-                return Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads))));
+                return Ok(self.tuple_result(&shape, &loads));
             }
         }
         // A spread arg fills param slots by field name, so it takes the
@@ -655,13 +664,17 @@ impl Builder<'_> {
     /// already-lowered value (the safe-nav receiver). The receiver fills param 0
     /// (splat its leaves if that param is a value), args fill the rest; a value
     /// return packs to a single value (the safe-nav result is one nullable value).
-    pub(crate) fn scalar_ufcs_call(
+    /// A scalar-ABI UFCS call with the receiver already lowered, yielding a REPR:
+    /// a value callee hands back its leaves, so a safe-nav join that stores PER
+    /// SLOT never has to take a box apart again. The single packing caller went
+    /// away when `?.` stopped packing.
+    pub(crate) fn scalar_ufcs_call_repr(
         &mut self,
         func: FuncRef,
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
         abi: &FnScalarAbi,
-    ) -> Result<Idx<Inst>, CompilerError> {
+    ) -> Result<ValueRepr, CompilerError> {
         let mut argv = Vec::new();
         match abi.param_shapes.first().and_then(|s| s.clone()) {
             Some(shape) => argv.extend(self.cdata_leaves(recv, &shape)),
@@ -684,10 +697,9 @@ impl Builder<'_> {
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
-                let r = self.rebuild_from_leaves(&shape, &leaves, &mut idx);
-                Ok(self.pack(r))
+                Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
-            None => Ok(self.emit_cur(Inst::Call { func, args: argv })),
+            None => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args: argv }))),
         }
     }
 

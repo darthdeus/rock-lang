@@ -177,6 +177,7 @@ impl Builder<'_> {
             ws: self.ws,
             scx: self.scx,
             spec_subst: self.spec_subst,
+            generic_bounds: self.generic_bounds,
             body: self.body,
             inf: self.inf,
             f: mf,

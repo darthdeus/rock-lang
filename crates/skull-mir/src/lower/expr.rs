@@ -432,65 +432,7 @@ impl Builder<'_> {
                 self.store_and_join(result, n, join);
 
                 self.cur = val_bb;
-                let fv = match field.as_str().parse::<usize>() {
-                    // `x?.0` on a transparent newtype is identity (see TupleIndex).
-                    Ok(_) if self.expr_is_newtype(base) => bv,
-                    Ok(index) => self.emit_cur(Inst::TupleIndex { base: bv, index }),
-                    Err(_) => match self.swizzle_of(base, field) {
-                        // `v?.yx`: expand on the non-null arm, packed for the join cell.
-                        Some(idxs) => {
-                            let g = self.swizzle_from_packed(bv, &idxs);
-                            self.pack(g)
-                        }
-                        // An embed/nobox field has NO slot under its own name --
-                        // its leaves live on the parent under dotted keys -- so
-                        // the read rebuilds from them, exactly as the non-safe-nav
-                        // paths do (`physical_field` at the place-base read,
-                        // `embed_field_of` at the repr read). Deciding storage
-                        // BEFORE emitting is the whole point: an `Inst::Field` here
-                        // reads a key that does not exist, and for a NULLABLE child
-                        // reads its presence tag, which the next link then indexes.
-                        None if self.embed_field_of(base, field).is_some() => {
-                            let cname =
-                                self.embed_field_of(base, field).expect("guard matched");
-                            // Compose through `physical_field`, exactly as the
-                            // place-base read does -- NOT off `bv`. When the base
-                            // is itself an embed read, `bv` is a re-materialized
-                            // box whose fields are ordinary keys, so reading the
-                            // dotted leaves off it finds nothing; composing walks
-                            // up to the real physical parent instead
-                            // (`T.child?.inner` -> `T["child.inner"]`).
-                            let (pbase, key) = self.physical_field(base, field);
-                            let parent =
-                                if pbase == base { bv } else { self.lower_expr(pbase)? };
-                            if self.embed_read_is_nullable(base, field) {
-                                self.materialize_embed_nullable(parent, key, cname)
-                            } else {
-                                self.materialize_embed(parent, key, cname)
-                            }
-                        }
-                        // `o?.p` reads a value field whole out of a mutable place, so
-                        // it copies exactly as `o.p` does. The base is non-nil on
-                        // this arm; the FIELD may still be absent, so a nullable one
-                        // takes the presence-aware copy.
-                        None => {
-                            let fv = self.emit_cur(Inst::Field { base: bv, field });
-                            match self
-                                .value_struct_name_of(e)
-                                .filter(|_| self.is_mutable_place(base))
-                            {
-                                Some(name) if self.embed_read_is_nullable(base, field) => {
-                                    self.nullable_boxed_value_copy(fv, name)
-                                }
-                                Some(name) => {
-                                    let copy = self.boxed_value_copy_repr(fv, name);
-                                    self.pack(copy)
-                                }
-                                None => fv,
-                            }
-                        }
-                    },
-                };
+                let fv = self.safe_nav_field_value(e, base, bv, field)?;
                 self.store_and_join(result, fv, join);
 
                 self.cur = join;
@@ -956,30 +898,18 @@ impl Builder<'_> {
         }
     }
 
-    /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call
-    /// `method(recv, args)` (cdata-everywhere: no scalar splat). Args evaluate
-    /// only on the non-null path. Result flows through a cell.
-    pub(crate) fn lower_safe_nav_call(
+    /// The non-nil arm of `recv?.method(args)`, with the receiver already
+    /// lowered. Returns a REPR: a scalar-ABI value callee yields its leaves, so a
+    /// per-slot join never has to take a box apart again. Shared by the scalar
+    /// lowering and the repr twin -- one value arm, two joins.
+    pub(crate) fn safe_nav_call_value_repr(
         &mut self,
         e: Idx<Expr>,
         receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let recv = self.lower_expr(receiver)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
-        let result = self.f.new_cell(None);
-        let nil_bb = self.f.new_block();
-        let call_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: call_bb });
-
-        self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
-        self.store_and_join(result, n, join);
-
-        self.cur = call_bb;
+        recv: Idx<Inst>,
+    ) -> Result<ValueRepr, CompilerError> {
         let cv = if self.struct_field_is_fn(receiver, method) {
             // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
             // `(recv.field)(args)` — the field IS the callee, no receiver arg.
@@ -997,7 +927,7 @@ impl Builder<'_> {
             if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
                 // Scalar-ABI callee: splat the value receiver + value args into
                 // leaves (a value return packs to the single safe-nav result).
-                self.scalar_ufcs_call(func, recv, &arg_idxs, &abi)?
+                return self.scalar_ufcs_call_repr(func, recv, &arg_idxs, &abi)
             } else {
                 let mut argv = vec![recv];
                 for a in arg_idxs {
@@ -1032,10 +962,195 @@ impl Builder<'_> {
                 }
             }
         };
+        Ok(ValueRepr::Scalar(cv))
+    }
+
+    /// [`Self::lower_safe_nav_call`] joining PER SLOT.
+    pub(crate) fn safe_nav_call_repr(
+        &mut self,
+        e: Idx<Expr>,
+        receiver: Idx<Expr>,
+        method: Ustr,
+        args: IdxRange<Expr>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        self.safe_nav_repr(receiver, shape, move |s, recv| {
+            s.safe_nav_call_value_repr(e, receiver, method, args, recv)
+        })
+    }
+
+    fn pack_safe_nav_call_value(
+        &mut self,
+        e: Idx<Expr>,
+        receiver: Idx<Expr>,
+        method: Ustr,
+        args: IdxRange<Expr>,
+        recv: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let r = self.safe_nav_call_value_repr(e, receiver, method, args, recv)?;
+        Ok(self.pack(r))
+    }
+
+    /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call
+    /// `method(recv, args)` (cdata-everywhere: no scalar splat). Args evaluate
+    /// only on the non-null path. Result flows through a cell.
+    pub(crate) fn lower_safe_nav_call(
+        &mut self,
+        e: Idx<Expr>,
+        receiver: Idx<Expr>,
+        method: Ustr,
+        args: IdxRange<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let recv = self.lower_expr(receiver)?;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let result = self.f.new_cell(None);
+        let nil_bb = self.f.new_block();
+        let call_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: call_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = call_bb;
+        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv)?;
         self.store_and_join(result, cv, join);
 
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// The non-nil arm of `base?.field`, with the receiver already lowered to
+    /// `bv`. Shared by the scalar lowering and the per-slot repr twin so the two
+    /// cannot drift about what a field read IS -- and so the receiver is lowered
+    /// exactly once either way.
+    pub(crate) fn safe_nav_field_value(
+        &mut self,
+        e: Idx<Expr>,
+        base: Idx<Expr>,
+        bv: Idx<Inst>,
+        field: Ustr,
+    ) -> Result<Idx<Inst>, CompilerError> {
+                let fv = match field.as_str().parse::<usize>() {
+                    // `x?.0` on a transparent newtype is identity (see TupleIndex).
+                    Ok(_) if self.expr_is_newtype(base) => bv,
+                    Ok(index) => self.emit_cur(Inst::TupleIndex { base: bv, index }),
+                    Err(_) => match self.swizzle_of(base, field) {
+                        // `v?.yx`: expand on the non-null arm, packed for the join cell.
+                        Some(idxs) => {
+                            let g = self.swizzle_from_packed(bv, &idxs);
+                            self.pack(g)
+                        }
+                        // An embed/nobox field has NO slot under its own name --
+                        // its leaves live on the parent under dotted keys -- so
+                        // the read rebuilds from them, exactly as the non-safe-nav
+                        // paths do (`physical_field` at the place-base read,
+                        // `embed_field_of` at the repr read). Deciding storage
+                        // BEFORE emitting is the whole point: an `Inst::Field` here
+                        // reads a key that does not exist, and for a NULLABLE child
+                        // reads its presence tag, which the next link then indexes.
+                        None if self.embed_field_of(base, field).is_some() => {
+                            let cname =
+                                self.embed_field_of(base, field).expect("guard matched");
+                            // Compose through `physical_field`, exactly as the
+                            // place-base read does -- NOT off `bv`. When the base
+                            // is itself an embed read, `bv` is a re-materialized
+                            // box whose fields are ordinary keys, so reading the
+                            // dotted leaves off it finds nothing; composing walks
+                            // up to the real physical parent instead
+                            // (`T.child?.inner` -> `T["child.inner"]`).
+                            let (pbase, key) = self.physical_field(base, field);
+                            let parent =
+                                if pbase == base { bv } else { self.lower_expr(pbase)? };
+                            if self.embed_read_is_nullable(base, field) {
+                                self.materialize_embed_nullable(parent, key, cname)
+                            } else {
+                                self.materialize_embed(parent, key, cname)
+                            }
+                        }
+                        // `o?.p` reads a value field whole out of a mutable place, so
+                        // it copies exactly as `o.p` does. The base is non-nil on
+                        // this arm; the FIELD may still be absent, so a nullable one
+                        // takes the presence-aware copy.
+                        None => {
+                            let fv = self.emit_cur(Inst::Field { base: bv, field });
+                            match self
+                                .value_struct_name_of(e)
+                                .filter(|_| self.is_mutable_place(base))
+                            {
+                                Some(name) if self.embed_read_is_nullable(base, field) => {
+                                    self.nullable_boxed_value_copy(fv, name)
+                                }
+                                Some(name) => {
+                                    let copy = self.boxed_value_copy_repr(fv, name);
+                                    self.pack(copy)
+                                }
+                                None => fv,
+                            }
+                        }
+                    },
+                };
+        Ok(fv)
+    }
+
+    /// [`Self::lower_safe_nav_let`] joining PER SLOT, so a `nobox` body result
+    /// crosses as leaves. The body is the whole value arm, so it just recurses
+    /// into the repr lowering.
+    pub(crate) fn safe_nav_let_repr(
+        &mut self,
+        receiver: Idx<Expr>,
+        binding: Idx<bone_semantic::hir::BindingInfo>,
+        body: Idx<Expr>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        self.safe_nav_repr(receiver, shape, |s, recv| {
+            let cell = s.f.new_cell(Some(s.body.binding_arena[binding].name));
+            s.emit_cur(Inst::Store { cell, value: recv });
+            s.binds.insert(raw(binding), cell);
+            s.lower_expr_repr(body)
+        })
+    }
+
+    /// [`Expr::SafeNav`] joining PER SLOT. Only the `nobox`/embed field read
+    /// differs from the scalar arm: it builds the child's Group off the parent's
+    /// dotted leaves instead of materializing a box from them, which is the whole
+    /// point -- `materialize_embed` IS the packing this path had to do to fit one
+    /// cell. Every other field flavour packs as before and rides one slot.
+    pub(crate) fn safe_nav_field_repr(
+        &mut self,
+        e: Idx<Expr>,
+        base: Idx<Expr>,
+        field: Ustr,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        let embed = self.embed_field_of(base, field);
+        let group_shape = embed.and_then(|cname| self.nobox_embed_group_shape(cname));
+        let nullable_child = embed.is_some() && self.embed_read_is_nullable(base, field);
+        self.safe_nav_repr(base, shape, move |s, bv| {
+            let Some(vs) = group_shape else {
+                // No embed group to project: fall back to the scalar field read
+                // for this one arm, then ride the single slot.
+                return Ok(ValueRepr::Scalar(s.safe_nav_field_value(e, base, bv, field)?));
+            };
+            // Compose through `physical_field` exactly as the scalar arm does:
+            // when the base is itself an embed read, `bv` is a re-materialized
+            // box whose keys are undotted, so the dotted leaves are not on it.
+            let (pbase, key) = s.physical_field(base, field);
+            let parent = if pbase == base { bv } else { s.lower_expr(pbase)? };
+            let mut g = s.embed_group(parent, key, &vs);
+            if nullable_child {
+                // A nullable child carries presence in the field's own undotted
+                // key; the Group takes it rather than gating the read, so an
+                // absent child's leaves are nil and consumers branch on presence.
+                let present = s.emit_cur(Inst::Field { base: parent, field: key });
+                if let ValueRepr::Group { present: p, .. } = &mut g {
+                    *p = Some(present);
+                }
+            }
+            Ok(g)
+        })
     }
 
     /// `recv?.let { b -> body }` — `nil` if `recv` is nil, else `body` with `b`

@@ -1044,6 +1044,7 @@ pub fn lower_function_spec(
         ws,
         scx,
         spec_subst: subst,
+        generic_bounds: &func.generic_bounds,
         body,
         inf,
         f,
@@ -1119,6 +1120,7 @@ pub fn lower_global(
         ws,
         scx,
         spec_subst: &empty_subst,
+        generic_bounds: &[],
         body,
         inf,
         f,
@@ -1190,6 +1192,7 @@ pub fn lower_decorator(
         ws,
         scx,
         spec_subst: &empty_subst,
+        generic_bounds: &[],
         body,
         inf,
         f,
@@ -1237,6 +1240,12 @@ struct Builder<'a> {
     /// so type resolution (`type_of`/`native_buffer_alloc_ctype`/param shapes)
     /// sees the concrete type and the body scalarizes.
     spec_subst: &'a SpecSubst,
+    /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
+    /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
+    /// source for a placeholder `next`'s element shape -- the call's inferred
+    /// type is checked once against the bound and does not carry the
+    /// instantiation, so reading the element off it plans the wrong shape.
+    generic_bounds: &'a [Option<TyId>],
     body: &'a Body,
     inf: Option<&'a BodyInference>,
     f: MirFunc,

@@ -1,42 +1,29 @@
-//! SENTINEL -- returning a `nobox` value option whose value came from a PHI of
-//! a present arm and `null` crashes on the absent path, and hardcodes presence
-//! on the present one.
+//! A `nobox` value option whose value comes from a PHI of a present arm and
+//! `null`: `let v: P? = if present { P { x: 5, y: 6 } } else { null }`.
 //!
-//! `let v: P? = if present { P { x: 5, y: 6 } } else { null }` emits an
-//! unconditional leaf splat in the null arm:
+//! The join's shape is widened from its ARMS, not read off the join
+//! expression's own inferred type. `if c { P { .. } } else { null }` infers as
+//! plain `P` -- the null arm does not widen it -- so reading nullability off the
+//! expression planned a shape with no presence leaf. The null arm then split nil
+//! into fields (`r0 = nil; r1 = r0.x`) and faulted, and the join returned a
+//! CONSTANT `true` presence, so even without the crash the absent path could not
+//! be reported. Both halves are asserted below.
 //!
-//! ```text
-//! ::bb2::
-//!   r0 = nil
-//!   r1 = r0.x     -- attempt to index local 'r0' (a nil value)
-//!   r0 = r0.y
-//! ```
+//! `materialize` was NOT the mechanism -- deleting it left an identical crash,
+//! which is what ruled it out. It did carry a SECOND defect of its own: an
+//! absent group was built through the ctor regardless of presence, so the leaves
+//! arrived nil and the cdata conversion failed. It now branches, which is legal
+//! exactly where the repack's branch is not: `materialize` is the authorized
+//! box, so building one is the request rather than a violation of the mark.
 //!
-//! and the merge block returns a CONSTANT presence: `do return (true), r0, r1
-//! end`. So even without the crash the absent path could not be reported.
-//!
-//! `materialize` is NOT the mechanism. The reported repro wrapped the return in
-//! `materialize(v)`; deleting the call leaves an identical crash at an identical
-//! line in an identical function, which the first control below pins. What is
-//! load-bearing is the PHI: `let v: P? = null; return v` (no merge) is correct,
-//! and a statement-position `return null` is correct -- both controlled here.
-//!
-//! Nor is it mechanism K (embed-field slot keying), where an unconditional read
-//! is argued correct: there the slot is always backed, here the arm the read
-//! sits in is exactly the arm where it is not.
-//!
-//! Nothing covered this because every existing `q6_materialize_*` probe
-//! materializes a NON-null value, and the marked-option shapes elsewhere in the
-//! suite return `null` from statement position.
-//!
-//! PINNED BEHAVIOR (BUG): the two sentinels assert that the absent path DIES at
-//! runtime. When the fix lands they go RED -- flip each to
-//! `common::run_luajit(...)` and assert `"absent=true"`, and delete this
-//! paragraph.
+//! The controls bound the shape from three sides, and each was load-bearing
+//! while this was a sentinel: a nullable marked local with NO merge, a
+//! statement-position `return null`, and `materialize` on a non-nullable marked
+//! value. The concrete-shape premises this belongs to are in
+//! `tests/nobox_concrete_nullable_ops.rock`; the positive value coverage is
+//! `tests/nobox_nullable_merge.rock`.
 
 mod common;
-
-use std::process::Command;
 
 /// The reported repro, `materialize` and all.
 const PHI_WITH_MATERIALIZE: &str = r#"
@@ -114,48 +101,23 @@ fn main() {
 }
 "#;
 
-/// Run under luajit WITHOUT asserting success -- these cases die on purpose.
-fn run_allowing_death(src: &str, tag: &str) -> (bool, String) {
-    let lua = common::try_emit_module(src).expect("must emit");
-    let path = std::env::temp_dir().join(format!("skull_phi_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write program");
-    let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (out.status.success(), combined)
-}
-
 fn run(src: &str, tag: &str) -> String {
     let lua = common::try_emit_module(src).expect("must emit");
     common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
 #[test]
-fn an_absent_nobox_option_from_a_phi_crashes_through_materialize_sentinel() {
-    let (ok, out) = run_allowing_death(PHI_WITH_MATERIALIZE, "phi_materialize");
-    assert!(
-        !ok && out.contains("attempt to index local 'r0'"),
-        "PINNED BEHAVIOR (BUG): the absent path is expected to die indexing a \
-         nil leaf holder. It produced ok={ok}:\n{out}\nIf it now prints \
-         `absent=true`, the fix landed -- flip this to assert the output."
-    );
+fn an_absent_nobox_option_from_a_phi_reports_absent_through_materialize() {
+    assert_eq!(run(PHI_WITH_MATERIALIZE, "phi_materialize"), "absent=true");
 }
 
-/// The discriminant: identical crash with `materialize` gone, so a fix aimed at
-/// `materialize` alone would leave this one red-handed.
+/// The discriminant that was load-bearing while this was a sentinel: the same
+/// absent path with `materialize` deleted. It crashed identically, which is how
+/// `materialize` was ruled out as the mechanism -- and both are correct now for
+/// the same reason, the join carrying a real presence slot.
 #[test]
-fn an_absent_nobox_option_from_a_phi_crashes_without_materialize_sentinel() {
-    let (ok, out) = run_allowing_death(PHI_WITHOUT_MATERIALIZE, "phi_bare");
-    assert!(
-        !ok && out.contains("attempt to index local 'r0'"),
-        "PINNED BEHAVIOR (BUG): the same absent path with no `materialize` is \
-         expected to die identically. It produced ok={ok}:\n{out}\nIf it now \
-         prints `absent=true`, the fix landed -- flip this to assert the output."
-    );
+fn an_absent_nobox_option_from_a_phi_reports_absent_without_materialize() {
+    assert_eq!(run(PHI_WITHOUT_MATERIALIZE, "phi_bare"), "absent=true");
 }
 
 #[test]

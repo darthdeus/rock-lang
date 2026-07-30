@@ -210,6 +210,14 @@ impl Builder<'_> {
     /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
     /// bare tuple and get mis-splatted.
     pub(crate) fn expr_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        // A bound `next` answers from its DECLARATION, never from the type this
+        // body's single generic check left on the call: the destructure that
+        // consumes the shape and the call that emits it must read the same
+        // oracle, or the binding takes a different number of leaves than the
+        // call returns and the difference is made up with a constant.
+        if let Some(&gidx) = self.inf?.bound_calls.get(&e) {
+            return Some(self.bound_next_tuple_shape(gidx));
+        }
         self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
     }
 
@@ -217,7 +225,46 @@ impl Builder<'_> {
         if let Some(shape) = self.expr_tuple_shape(e).filter(TupleRetShape::splats) {
             return Some(RetSlot::Nested(shape));
         }
-        self.nobox_value_shape_of(e).map(RetSlot::Leaves)
+        let mut shape = self.nobox_value_shape_of(e)?;
+        // A join's shape must represent every value that reaches it, and the
+        // arms are right here. `if c { P { .. } } else { null }` infers as plain
+        // `P` -- the `null` arm does not widen it -- so reading nullability off
+        // the join EXPRESSION alone plans a shape with no presence leaf, and the
+        // null arm then splits nil into fields and faults. Widening from the arms
+        // cannot manufacture a phantom presence slot the way keying on a foreign
+        // expression's nullability would: an arm that can be null is a value the
+        // join has to carry, and if the sink is non-nullable bone has already
+        // rejected the program.
+        if !shape.nullable && self.join_arm_is_nullable(e) {
+            shape.nullable = true;
+        }
+        Some(RetSlot::Leaves(shape))
+    }
+
+    /// Whether any arm of a join expression can produce `null`. Arms are blocks,
+    /// so each is peeled to its tail value before asking.
+    fn join_arm_is_nullable(&self, e: Idx<Expr>) -> bool {
+        let arms: Vec<Idx<Expr>> = match &self.body.expr_arena[e] {
+            Expr::If { then_branch, else_branch, .. } => {
+                std::iter::once(*then_branch).chain(*else_branch).collect()
+            }
+            Expr::Match { arms, .. } => {
+                arms.clone().map(|a| self.body.match_arm_arena[a].body).collect()
+            }
+            _ => return false,
+        };
+        arms.into_iter().any(|a| {
+            let v = self.peel_block_tail(a);
+            self.is_null_lit(v) || self.expr_is_nullable(v)
+        })
+    }
+
+    /// A block arm's value is its tail; anything else is its own value.
+    fn peel_block_tail(&self, e: Idx<Expr>) -> Idx<Expr> {
+        match &self.body.expr_arena[e] {
+            Expr::Block { tail: Some(t), .. } => self.peel_block_tail(*t),
+            _ => e,
+        }
     }
 
     /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
@@ -245,7 +292,58 @@ impl Builder<'_> {
         Some(TupleRetShape { slots, nullable: false })
     }
 
+    /// The element slot of a placeholder `next` on the `Iterator`-bounded generic
+    /// at `gidx`, read from the enclosing fn's DECLARED bound under this body's
+    /// specialization.
+    ///
+    /// The declaration is the source because it is the only one that carries the
+    /// instantiation. A bounded body is type-checked ONCE against its bound, so
+    /// the `next(x)` call's inferred `(bool, E)` is a body-local type from that
+    /// single check -- it neither names the generic nor tracks the site, and
+    /// reading the element off it plans a shape for whatever that check happened
+    /// to leave there. Same rule as the presence slot: read a declaration, never
+    /// an expression's type.
+    ///
+    /// `Opaque` whenever the specialization does not resolve the element -- the
+    /// shared generic snapshot keeps one opaque slot and the splice's repack
+    /// keeps correcting it.
+    pub(crate) fn bound_next_elem_slot(&self, gidx: usize) -> RetSlot {
+        match self.generic_bounds.get(gidx).copied().flatten() {
+            Some(elem) => ret_slot(self.ws, self.spec_subst, elem),
+            None => RetSlot::Opaque,
+        }
+    }
+
+    /// The full `(bool, E)` shape of a placeholder `next` on the generic at
+    /// `gidx` -- THE oracle every consumer of that call routes through.
+    pub(crate) fn bound_next_tuple_shape(&self, gidx: usize) -> TupleRetShape {
+        TupleRetShape {
+            nullable: false,
+            slots: vec![RetSlot::Opaque, self.bound_next_elem_slot(gidx)],
+        }
+    }
+
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
+        // The generic this slot stands for, if the substitution names it. An
+        // element of a tuple literal's inferred type arrives as the declared
+        // generic in one `next` body and as an inference VAR in another, so both
+        // spellings are chased -- but only to answer THIS question. Resolving
+        // `ty` for the rest of the function instead is wrong: it erases a
+        // `Nullable` binding's `?` on the way through `ty_node`, which silently
+        // re-planned every nullable-column body to a non-nullable shape.
+        let bound_generic = match self.raw_ty_node(ty) {
+            Some(TypeExpr::Generic(var, _)) => Some(var),
+            Some(TypeExpr::Infer(..)) => match self.resolve_tyid(ty).and_then(|t| self.raw_ty_node(t)) {
+                Some(TypeExpr::Generic(var, _)) => Some(var),
+                _ => None,
+            },
+            _ => None,
+        };
+        // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
+        // (see `reified_type_node`), so it is read off the substitution directly.
+        if let Some(bound @ ReifiedType::Tuple(_)) = bound_generic.and_then(|v| self.spec_subst.get(&v)) {
+            return reified_ret_slot(self.ws, bound);
+        }
         if let Some(shape) = self.body_nobox_shape(ty) {
             return RetSlot::Leaves(shape);
         }
@@ -362,8 +460,13 @@ impl Builder<'_> {
         // App params -- v0 specializes leaf types only -- so no consumer indexes
         // into `new_empty()`.
         if let TypeExpr::Generic(var, _) = node {
-            if let Some(ty) = self.spec_subst.get(&var) {
-                return Some(reified_type_node(ty));
+            // A tuple binding has no node to stand for it, and answers `None`.
+            // Falling through to the generic is exactly what this saw before
+            // tuples reified at all, so no consumer changes behaviour; the ones
+            // that need a tuple's slots read the binding through
+            // `reified_ret_slot` instead.
+            if let Some(sub) = self.spec_subst.get(&var).and_then(reified_type_node) {
+                return Some(sub);
             }
         }
         Some(node)

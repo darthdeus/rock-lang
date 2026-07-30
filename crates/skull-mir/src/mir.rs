@@ -312,8 +312,10 @@ pub enum Inst {
     /// (via the site's `BoundTree`) into a [`Inst::CallMulti`] when this fn's
     /// body is spliced at a concrete root. Emitting a body that still
     /// contains one is a compile error (bounded fns exist only inlined).
-    /// `dests` is always 2 (`ok, elem` -- bound conformance requires exactly
-    /// `(bool, E)`).
+    /// Bound conformance fixes the SLOTS at `(bool, E)`, but `E`'s shape is the
+    /// enclosing body's specialization to answer, so `dests` is 2 only when `E`
+    /// stays opaque; a value element is split into its leaves here
+    /// ([`MirFunc::bound_next_split`]) rather than rebuilt at the splice.
     CallBoundMulti {
         dests: Vec<Idx<Cell>>,
         generic_idx: u32,
@@ -700,6 +702,15 @@ pub struct MirFunc {
     /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
     /// (its args are splatted, so the shared generic body cannot serve it).
     pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::SpecKey>,
+    /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
+    /// split into leaf cells: `dests` is sized to the real return arity and the
+    /// loop pattern is bound to the leaves, so the splice must leave both alone.
+    ///
+    /// Membership is not derivable from `dests.len()`: a ONE-leaf element is two
+    /// dests either way, which is exactly the shape a repack must still correct
+    /// when lowering could NOT resolve it. So the fact is recorded rather than
+    /// re-inferred.
+    pub bound_next_split: bone_semantic::prelude::FxHashSet<Idx<Inst>>,
     /// Nested `fn`s declared in this fn's body, each lowered to its own MirFunc
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
@@ -732,6 +743,7 @@ impl MirFunc {
             for_iter_headers: Vec::new(),
             bound_trees: Default::default(),
             spec_bindings: Default::default(),
+            bound_next_split: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
         }

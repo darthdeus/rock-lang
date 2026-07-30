@@ -25,6 +25,21 @@ impl Builder<'_> {
                 Some(shape) => self.lower_match_repr(scrutinee, arms, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_match(scrutinee, arms)?)),
             },
+            // `?.` is a join like `if`/`match`, and takes the same multi-cell
+            // path when its result splats -- otherwise a `nobox` result has
+            // nowhere to live but the single packed cell.
+            Expr::SafeNav { base, field } => match self.repr_join_slot(e) {
+                Some(shape) => self.safe_nav_field_repr(e, base, field, shape),
+                None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
+            },
+            Expr::SafeNavCall { receiver, method, args } => match self.repr_join_slot(e) {
+                Some(shape) => self.safe_nav_call_repr(e, receiver, method, args, shape),
+                None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
+            },
+            Expr::SafeNavLet { receiver, binding, body } => match self.repr_join_slot(e) {
+                Some(shape) => self.safe_nav_let_repr(receiver, binding, body, shape),
+                None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
+            },
             // A tuple literal whose type splats stays a `Tuple` repr, so a
             // `nobox` element reaches the return boundary as leaves instead of
             // being packed into the table first.
