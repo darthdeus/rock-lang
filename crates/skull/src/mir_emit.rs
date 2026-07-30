@@ -529,7 +529,13 @@ fn emit_global_unit(
             out.pending_init = Some((g.name, key, line));
         }
         Ok(None) => {}
-        Err(e) => out.skipped = Some((g.name.as_str().to_string(), e.message)),
+        // A global initializer that fails to LOWER is a hard error, not a
+        // lenient skip. `skipped` drops the init and says nothing (it prints only
+        // under `SKULL_DEBUG_SKIPPED`), so the global silently becomes nil at
+        // runtime -- and when the failure is a GUARANTEE rejection, downgrading
+        // it is precisely what this struct's own contract forbids. A `nobox`
+        // fn-value ABI rejection landed here and vanished.
+        Err(e) => out.hard_error = Some(e),
     }
     out
 }

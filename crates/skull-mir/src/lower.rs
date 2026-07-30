@@ -2774,6 +2774,11 @@ pub fn lower_global(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
+    // Same gate the fn and decorator bodies run. An initializer can name a fn
+    // whose fixed ABI cannot adopt the type-derived leaf ABI, and a global is a
+    // fn value's most ordinary home (a dispatch table); without this the name
+    // reached codegen and the leaves splatted into a callee expecting a box.
+    b.reject_incompatible_nobox_fn_value_abi()?;
     // A `nobox` global is category-2 storage: its layout comes from the declared
     // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
     // per leaf. Without this the body packs a box the verifier then rejects.
