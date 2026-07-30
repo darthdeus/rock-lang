@@ -168,6 +168,20 @@ pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
 }
 
 fn leaf_paths_rec(shape: &ValueShape, prefix: &str, out: &mut Vec<Ustr>) {
+    // A NULLABLE nested shape leads with its presence leaf, matching
+    // `repr_to_leaves` (which pushes presence before the fields) and `leaf_count`
+    // (which counts it). Its key is the field's own UNDOTTED name -- injective
+    // against its own children (`a` vs `a.x`, and `.` cannot appear in a Rock
+    // identifier), and the same convention embed storage already uses for a
+    // nullable child. Without this the column set is one short of `leaf_count`
+    // and a `[Outer]` literal fails with a column arity mismatch.
+    //
+    // Only the NESTED case: a top-level nullable shape has no field name to key
+    // on, and no column path reaches one today (a column element is
+    // non-nullable), so that case is deliberately left as it was.
+    if shape.nullable && !prefix.is_empty() {
+        out.push(Ustr::from(prefix.trim_end_matches('.')));
+    }
     for (fname, fs) in &shape.fields {
         match fs {
             FieldShape::Prim if prefix.is_empty() => out.push(*fname),
@@ -497,14 +511,14 @@ fn round_up(n: usize, align: usize) -> usize {
 
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValueShape {
     name: Ustr,
     fields: Vec<(Ustr, FieldShape)>,
     nullable: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum FieldShape {
     Prim,
     Nested(ValueShape),
@@ -565,7 +579,12 @@ enum ValueRepr {
     /// leaves can reach a destructure without being packed. Packing one emits
     /// the ordinary `MakeTuple` of packed parts, which is how a whole-tuple use
     /// of a `nobox` element still reaches the guarantee's rejection.
-    Tuple(Vec<ValueRepr>),
+    Tuple {
+        parts: Vec<ValueRepr>,
+        /// The declared return was `(..)?`: the presence bool that led the wire.
+        /// Same convention as `Group::present`, one level up.
+        present: Option<Idx<Inst>>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -657,6 +676,26 @@ fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Opti
                     FieldShape::Nested(value_shape_rec(ws, n, visiting)?)
                 }
             }
+            // A NULLABLE `nobox` child threads its own presence tag as leaf 0 of
+            // its nested shape -- the same rule the signature/local/global
+            // contexts already apply at the outermost slot, reached through the
+            // one resolver rather than re-spelled here. Without this arm the
+            // field type fell to the catch-all and disqualified the WHOLE struct,
+            // which is mechanism A: the parent then had no shape, fell back to a
+            // box, and the materialization verifier refused it.
+            //
+            // Gated on `nobox` by the resolver: an UNMARKED nullable value field
+            // keeps its box + nil sentinel, which is legal today (a box is not a
+            // guarantee violation for an unmarked type), so this changes no
+            // existing emission.
+            TypeExpr::Nullable(_) => match nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
+            {
+                Some(sub) => FieldShape::Nested(sub),
+                None => {
+                    visiting.pop();
+                    return None;
+                }
+            },
             _ => {
                 visiting.pop();
                 return None;
@@ -717,7 +756,22 @@ fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> O
                     FieldShape::Prim
                 }
             }
-            // Builtin scalar, generic `T`, nullable, tuple -> one slot.
+            // A NULLABLE `nobox` child threads leaves + presence, exactly as in
+            // `value_shape_rec`. The two constructors are alternates for the SAME
+            // struct, so they must agree on leaf COUNT: giving the arm to one and
+            // not the other makes a producer and a consumer disagree, and
+            // `rebuild_from_leaves` indexes past the end. That is not theoretical
+            // -- it is what `a_nullable_nobox_field_round_trips_both_ways` (a
+            // GC-tier outer) caught when only `value_shape_rec` had it.
+            Some(TypeExpr::Nullable(_))
+                if nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t)).is_some() =>
+            {
+                FieldShape::Nested(
+                    nullable_nominal_shape(ws, f.ty, &|t| static_ty(ws, t))
+                        .expect("guard matched"),
+                )
+            }
+            // Builtin scalar, generic `T`, non-nobox nullable, tuple -> one slot.
             _ => FieldShape::Prim,
         };
         fields.push((f.name, fs));
@@ -901,31 +955,75 @@ pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
-/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
-/// is leaf 0), `None` for every other type. bone requires an explicit annotation
-/// on every global, so this is exact for a `GlobalDef`'s `ty`, and equally for a
-/// top-level fn's param/return -- both are workspace-arena types `static_ty` can
-/// see and the body-arena walker cannot. [`Builder::nobox_shape_of_ty`] is this
-/// same rule over the BODY arena; keep the two in step.
-fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
-    match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if is_nobox_nominal(ws, name) => {
-            value_shape_of_nominal(ws, name)
-        }
+/// THE nullable-nominal shape rule, arena-independent: a `nobox` nominal resolves
+/// to its leaf shape, and a NULLABLE one to the same shape with `nullable = true`
+/// (presence is leaf 0). Everything else is `None`.
+///
+/// `resolve` is the caller's type-node lookup, which is the only thing that
+/// differed between the copies this replaces: the workspace arena reads through
+/// `static_ty`, a body arena through `resolve_tyid`/`ty_node`. Every context that
+/// needs the rule calls this -- `nobox_declared_shape` (globals + top-level
+/// signatures) and [`Builder::nobox_shape_of_ty`] (body-arena locals) -- so a new
+/// context joins by calling it rather than by copying fifteen lines.
+fn nullable_nominal_shape(
+    ws: &Workspace,
+    ty: TyId,
+    resolve: &dyn Fn(TyId) -> Option<TypeExpr>,
+) -> Option<ValueShape> {
+    let nobox_shape = |name: Ustr| {
+        is_nobox_nominal(ws, name).then(|| value_shape_of_nominal(ws, name)).flatten()
+    };
+    match resolve(ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => nobox_shape(name),
         TypeExpr::Nullable(inner) => {
-            let inner = static_ty(ws, ty.with_idx(inner))?;
-            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = inner else {
+            let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = resolve(ty.with_idx(inner))?
+            else {
                 return None;
             };
-            if !is_nobox_nominal(ws, name) {
-                return None;
-            }
-            let mut shape = value_shape_of_nominal(ws, name)?;
+            let mut shape = nobox_shape(name)?;
             shape.nullable = true;
             Some(shape)
         }
         _ => None,
     }
+}
+
+/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
+/// is leaf 0), `None` for every other type. bone requires an explicit annotation
+/// on every global, so this is exact for a `GlobalDef`'s `ty`, and equally for a
+/// top-level fn's param/return -- both are workspace-arena types `static_ty` can
+/// see and the body-arena walker cannot.
+fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
+}
+
+fn nobox_declared_shape_spec(
+    ws: &Workspace,
+    subst: &SpecSubst,
+    ty: TyId,
+) -> Option<ValueShape> {
+    if let TyId::Static(m, idx) = ty {
+        match ws.module(m).ty_arena[idx] {
+            TypeExpr::Generic(var, _) => {
+                let name = spec_nominal(subst, var)?;
+                return is_nobox_nominal(ws, name)
+                    .then(|| value_shape_of_nominal(ws, name))
+                    .flatten();
+            }
+            TypeExpr::Nullable(inner) => {
+                if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
+                    let name = spec_nominal(subst, var)?;
+                    let mut shape = is_nobox_nominal(ws, name)
+                        .then(|| value_shape_of_nominal(ws, name))
+                        .flatten()?;
+                    shape.nullable = true;
+                    return Some(shape);
+                }
+            }
+            _ => {}
+        }
+    }
+    nobox_declared_shape(ws, ty)
 }
 
 /// The leaf globals a `nobox`-typed global is stored in, `None` for every other
@@ -935,6 +1033,24 @@ fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
 pub fn nobox_global_leaves(ws: &Workspace, name: Ustr, ty: TyId) -> Option<Vec<Ustr>> {
     let shape = nobox_declared_shape(ws, ty)?;
     Some((0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect())
+}
+
+/// The value-struct type a `nobox` global's logical value has, plus its leaf
+/// PATHS in ctor order -- what reflection needs to rebuild the logical value from
+/// the leaf globals and to take it apart again. `None` for every other global,
+/// on the same gate as [`nobox_global_leaves`], so accessors exist for exactly
+/// the globals whose storage IS leaves.
+///
+/// Paths, not just an arity, because both directions address by path: the ctor is
+/// positional over this sequence, and the write side assigns `v.<path>` per leaf.
+///
+/// The `bool` is whether the global is NULLABLE. Its presence leaf leads the
+/// leaves but has no path -- presence is not addressable as `v.<something>` --
+/// so the accessor must branch on it rather than read it, and the caller needs
+/// to know the two sequences line up only from leaf 1 on.
+pub fn nobox_global_shape_paths(ws: &Workspace, ty: TyId) -> Option<(Ustr, Vec<Ustr>, bool)> {
+    let shape = nobox_declared_shape(ws, ty)?;
+    Some((shape.name, value_leaf_paths(&shape), shape.nullable))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -1262,12 +1378,21 @@ impl RetSlot {
 #[derive(Clone, Debug)]
 struct TupleRetShape {
     slots: Vec<RetSlot>,
+    /// The DECLARED return was `(..)?`: a presence bool leads the wire, then the
+    /// slots (`false, nil, ...` when absent). Same presence-leads convention as
+    /// `ValueShape::nullable` one level down.
+    ///
+    /// Only ever set from a declared return type ([`tuple_ret_shape`]), never
+    /// inferred from an expression's type: safe-nav manufactures the identical
+    /// `Nullable(Tuple)` with NO presence slot, so keying on nullability there
+    /// would add a phantom slot and corrupt every safe-nav tuple call.
+    nullable: bool,
 }
 
 impl TupleRetShape {
     /// Total returned values.
     fn slot_count(&self) -> usize {
-        self.slots.iter().map(RetSlot::slot_count).sum()
+        self.slots.iter().map(RetSlot::slot_count).sum::<usize>() + self.nullable as usize
     }
 
     /// Whether any element carries leaves -- `false` means this is byte-for-byte
@@ -1277,21 +1402,91 @@ impl TupleRetShape {
     }
 }
 
-/// The multi-return ABI of a tuple RETURN type: `Some` iff `ty` is a
-/// (non-nullable) tuple `(A, B, ...)`, which returns its slots as separate
-/// values instead of one heap table (slice 1,
-/// `docs/iterator-implementation-plan.md`). `None` for a non-tuple -- a
-/// `Nullable(Tuple)` included, since a multi-value boundary has no room for the
-/// null discriminant.
+/// The multi-return ABI of a tuple RETURN type: `Some` iff `ty` is a tuple
+/// `(A, B, ...)`, which returns its slots as separate values instead of one heap
+/// table (slice 1, `docs/iterator-implementation-plan.md`).
+///
+/// A `Nullable(Tuple)` joins that wire with a presence bool leading its slots --
+/// but ONLY when an element actually splats. A nullable tuple of ordinary
+/// elements has nothing to gain from the multi-value form and keeps its single
+/// boxed table (and `nil`), byte-for-byte the pre-existing ABI. THE declared-type
+/// entry point: `TupleRetShape::nullable` is set here and nowhere else.
 fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleRetShape> {
-    let TypeExpr::Tuple { elements } = static_ty(ws, ty)? else {
-        return None;
+    let (elem_ty, elements, nullable) = match static_ty(ws, ty)? {
+        TypeExpr::Tuple { elements } => (ty, elements, false),
+        TypeExpr::Nullable(inner) => {
+            let inner_ty = ty.with_idx(inner);
+            let TypeExpr::Tuple { elements } = static_ty(ws, inner_ty)? else {
+                return None;
+            };
+            (inner_ty, elements, true)
+        }
+        _ => return None,
     };
     let slots = elements
         .into_iter()
-        .map(|el| ret_slot(ws, subst, ty.with_idx(el)))
+        .map(|el| ret_slot(ws, subst, elem_ty.with_idx(el)))
         .collect();
-    Some(TupleRetShape { slots })
+    let shape = TupleRetShape { slots, nullable };
+    if nullable && !shape.splats() {
+        return None;
+    }
+    Some(shape)
+}
+
+/// What a concrete `next` actually returns at a splice site, for the ONE caller
+/// that cannot know it at lowering time: the placeholder `CallBoundMulti` in a
+/// generic combinator body, whose arity bound conformance fixes at `(bool, E)`.
+///
+/// `slot_count` is the real returned-value count and `elem` names the element's
+/// value struct plus its leaf FIELDS in ctor order when the element splats. The
+/// splice sizes its dests from the former and repacks the element from the
+/// latter; see `resolve_cloned_bound_calls`.
+///
+/// The three cases are kept DISTINCT on purpose: "nothing to repack" and "a shape
+/// the flat repack cannot express" must not collapse into one `None`, or an
+/// unsupported element silently takes the do-nothing path and miscompiles exactly
+/// as it does today.
+pub enum BoundNextElem {
+    /// Today's ABI -- one opaque slot. Nothing to do.
+    Opaque,
+    /// A `nobox` value: its struct name and leaf fields in ctor order.
+    Flat(Ustr, Vec<Ustr>),
+    /// Splats through a nested or nullable shape the flat repack cannot express.
+    /// The splice REJECTS on this rather than guess a leaf-to-field pairing --
+    /// a wrong pairing writes one leaf's value into another field, silently.
+    Unsupported,
+}
+
+pub struct BoundNextShape {
+    pub slot_count: usize,
+    pub elem: BoundNextElem,
+}
+
+pub fn bound_next_shape(
+    ws: &Workspace,
+    fref: FuncRef,
+    key: Option<&SpecKey>,
+) -> Option<BoundNextShape> {
+    let subst = key.map(|k| spec_subst_from_key(ws, fref, k)).unwrap_or_default();
+    let ret = ws.module(fref.module).functions[fref.func].return_ty?;
+    let shape = tuple_ret_shape(ws, &subst, ret)?;
+    let elem = match shape.slots.get(1) {
+        Some(RetSlot::Leaves(vs)) if !vs.nullable => {
+            let flat: Option<Vec<Ustr>> = vs
+                .fields
+                .iter()
+                .map(|(n, fs)| matches!(fs, FieldShape::Prim).then_some(*n))
+                .collect();
+            match flat {
+                Some(fields) => BoundNextElem::Flat(vs.name, fields),
+                None => BoundNextElem::Unsupported,
+            }
+        }
+        Some(RetSlot::Leaves(_)) | Some(RetSlot::Nested(_)) => BoundNextElem::Unsupported,
+        _ => BoundNextElem::Opaque,
+    };
+    Some(BoundNextShape { slot_count: shape.slot_count(), elem })
 }
 
 fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
@@ -1736,10 +1931,9 @@ enum Scrut {
     },
 }
 
-/// Workspace-wide scalar-ABI context: the set of function names referenced as a
-/// VALUE (a fn pointer) anywhere. Such a fn is called indirectly (`CallValue`,
-/// which can't splat), so it MUST keep the single-cdata ABI on its definition and
-/// at every direct call site too — otherwise the two ABIs drift. Computed once.
+/// Workspace-wide scalar-ABI context. Address-taken functions use the
+/// type-derived fn-value ABI at their definitions and direct calls, so all three
+/// call forms agree without callee-identity analysis.
 pub struct ScalarCtx {
     taken_by_ref: HashSet<Ustr>,
     /// Per-body contribution: each body's set of fn-names it references by value.
@@ -1756,9 +1950,8 @@ pub struct ScalarCtx {
     /// keeps value structs as first-class single values (params/returns/args),
     /// never splatting them to leaf scalars. Used by the GLSL backend, where a
     /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves
-    /// (`docs/shaders.md` finding 5). The toggle is contained because
-    /// [`fn_uses_scalar_abi`] is the single gate the definition and every call site
-    /// both consult, so flipping it here can never drift the two ABIs apart.
+    /// (`docs/shaders.md` finding 5). The toggle is contained in
+    /// [`fn_scalar_abi`], which definitions and direct calls both consult.
     values_first_class: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
@@ -1870,61 +2063,76 @@ impl ScalarCtx {
     }
 }
 
-/// Whether `fref` participates in the scalar value ABI on BOTH its definition and
-/// every call site (so the two never drift). True iff it has a scalarizable value
-/// param/return AND either (a) it carries an explicit `@scalar_abi` opt-in (the
-/// author committed to per-field `<base>__<field>` params — used by hot
-/// `inline(lua)` engine fns like `append_vertex`), or (b) it's an ordinary rock
-/// body that is NOT called by a fixed name from outside skull's view
-/// (`@nomangle` / `@test` / `main`) and NOT taken by reference (an indirect callee
-/// can't splat). A non-scalar callee receives/returns a single cdata. The
-/// `@nomangle` half of that is snapshot-scoped -- see [`fn_uses_scalar_abi_spec`].
-fn fn_uses_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> bool {
-    fn_uses_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FnScalarAbi {
+    param_shapes: Vec<Option<ValueShape>>,
+    ret_shape: Option<ValueShape>,
 }
 
-/// [`fn_uses_scalar_abi`] under a specialization substitution: a generic param /
-/// return bound to a value leaf at this instantiation joins the scalar ABI
-/// (`sig_value_shape_spec`). Empty `subst` is exactly [`fn_uses_scalar_abi`].
-/// Both the specialized callee body ([`lower_function_spec`]) and the specialized
-/// call site consult this with the SAME `subst`, so the two ABIs never drift.
-fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst: &SpecSubst) -> bool {
+/// The one ABI policy read by a top-level definition and every direct call.
+/// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
+/// derive from the fn type; direct-only bodies may scalarize every eligible value.
+fn fn_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<FnScalarAbi> {
+    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+}
+
+fn fn_nobox_abi_spec(
+    ws: &Workspace,
+    fref: FuncRef,
+    subst: &SpecSubst,
+) -> Option<FnScalarAbi> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let param_shapes: Vec<Option<ValueShape>> = f
+        .param_decls
+        .iter()
+        .map(|pd| nobox_declared_shape_spec(ws, subst, pd.ty))
+        .collect();
+    let ret_shape =
+        f.return_ty.and_then(|ty| nobox_declared_shape_spec(ws, subst, ty));
+    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
+}
+
+fn fn_scalar_abi_spec(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+    subst: &SpecSubst,
+) -> Option<FnScalarAbi> {
     if scx.values_first_class {
-        return false;
+        return None;
     }
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern {
-        return false;
+        return None;
     }
     let has_scalar_abi = f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
-    if !has_scalar_abi {
-        // Implicit scalarization is limited to ordinary rock-bodied fns reachable
-        // only by direct call. `@scalar_abi` overrides all of these gates.
-        // `@nomangle` gates the SHARED snapshot only. It reserves the bare name
-        // for callers outside skull's view (codegen text, `inline(lua)` bodies),
-        // and those callers spell the bare name -- which `spec_fn_name` never
-        // hands to a specialized copy. A specialized instantiation is therefore
-        // reachable only by direct call, the condition this gate encodes.
+    let nobox_only = if has_scalar_abi {
+        false
+    } else {
         let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
             "nomangle" => subst.is_empty(),
             "test" => true,
             _ => false,
         });
-        if f.inline_body.is_some()
-            || f.name.as_str() == "main"
-            || scx.taken_by_ref.contains(&f.name)
-            || name_is_fixed
-        {
-            return false;
+        if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
+            return None;
         }
+        scx.taken_by_ref.contains(&f.name)
+    };
+    if nobox_only {
+        return fn_nobox_abi_spec(ws, fref, subst);
     }
-    f.param_decls.iter().any(|pd| sig_value_shape_spec(ws, subst, pd.ty).is_some())
-        || f.return_ty.is_some_and(|t| sig_value_shape_spec(ws, subst, t).is_some())
+    let param_shapes: Vec<Option<ValueShape>> =
+        f.param_decls.iter().map(|pd| sig_value_shape_spec(ws, subst, pd.ty)).collect();
+    let ret_shape = f.return_ty.and_then(|ty| sig_value_shape_spec(ws, subst, ty));
+    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
 }
 
 /// A hoisted nested `fn`: the private top-level name it resolves to, and the
 /// value ABI its definition and every call site both read (so the two can never
-/// drift, the same single-gate discipline as [`fn_uses_scalar_abi`]).
+/// drift, the same single-gate discipline as [`fn_scalar_abi`]).
 #[derive(Clone)]
 struct NestedFn {
     hoisted: Ustr,
@@ -1953,13 +2161,11 @@ pub fn scalar_abi_lua_param_names(
     scx: &ScalarCtx,
     fref: FuncRef,
 ) -> Option<Vec<String>> {
-    if !fn_uses_scalar_abi(ws, scx, fref) {
-        return None;
-    }
+    let abi = fn_scalar_abi(ws, scx, fref)?;
     let f = &ws.module(fref.module).functions[fref.func];
     let mut names = Vec::new();
-    for pd in &f.param_decls {
-        match sig_value_shape(ws, pd.ty) {
+    for (pd, shape) in f.param_decls.iter().zip(abi.param_shapes) {
+        match shape {
             Some(shape) => leaf_param_names(pd.name.as_str(), &shape, &mut names),
             None => names.push(pd.name.as_str().to_string()),
         }
@@ -1977,14 +2183,11 @@ pub fn scalar_abi_param_leaf_widths(
     scx: &ScalarCtx,
     fref: FuncRef,
 ) -> Option<Vec<usize>> {
-    if !fn_uses_scalar_abi(ws, scx, fref) {
-        return None;
-    }
-    let f = &ws.module(fref.module).functions[fref.func];
+    let abi = fn_scalar_abi(ws, scx, fref)?;
     Some(
-        f.param_decls
+        abi.param_shapes
             .iter()
-            .map(|pd| sig_value_shape(ws, pd.ty).map(|s| s.leaf_count()).unwrap_or(1))
+            .map(|s| s.as_ref().map_or(1, ValueShape::leaf_count))
             .collect(),
     )
 }
@@ -1992,10 +2195,22 @@ pub fn scalar_abi_param_leaf_widths(
 /// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first
 /// (same traversal as `repr_to_leaves`/`cdata_leaves`).
 fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
+    // Twin of `leaf_paths_rec`: a nullable nested shape leads with its presence
+    // leaf, so it needs a NAME or the Lua-side params drift one short of what
+    // `repr_to_leaves` splats.
+    if shape.nullable && !base.is_empty() {
+        out.push(base.to_string());
+    }
     for (fname, fs) in &shape.fields {
         match fs {
             FieldShape::Prim => out.push(format!("{base}__{fname}")),
-            FieldShape::Nested(sub) => leaf_param_names(base, sub, out),
+            // The field name must JOIN the base, exactly as `leaf_paths_rec`
+            // dots its column keys. Recursing with `base` unchanged made the
+            // namer non-injective -- `Rect { tl: V2, br: V2 }` emitted
+            // `f(r__x, r__y, r__x, r__y)`, and Lua binds the later pair over the
+            // earlier, so a hand-written body silently read `br` where it wrote
+            // `tl`. `__` rather than `.` because these are Lua identifiers.
+            FieldShape::Nested(sub) => leaf_param_names(&format!("{base}__{fname}"), sub, out),
         }
     }
 }
@@ -2499,13 +2714,9 @@ pub fn lower_function_spec(
     // instantiation additionally treats a generic param/return bound to a value
     // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
     let self_ref = FuncRef { module: mid, func: fid };
-    let (param_shapes, ret_shape) = if fn_uses_scalar_abi_spec(ws, scx, self_ref, subst) {
-        let ps = func.param_decls.iter().map(|pd| sig_value_shape_spec(ws, subst, pd.ty)).collect();
-        let rs = func.return_ty.and_then(|t| sig_value_shape_spec(ws, subst, t));
-        (ps, rs)
-    } else {
-        (Vec::new(), None)
-    };
+    let abi = fn_scalar_abi_spec(ws, scx, self_ref, subst);
+    let param_shapes = abi.as_ref().map(|a| a.param_shapes.clone()).unwrap_or_default();
+    let ret_shape = abi.and_then(|a| a.ret_shape);
     let mut b = Builder {
         ws,
         scx,
@@ -2530,6 +2741,7 @@ pub fn lower_function_spec(
         fn_name_span: Some(func.name_span),
         cur_span: None,
         group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
         // a nested fn (both bake the owner into a private global name that must be
@@ -2548,7 +2760,7 @@ pub fn lower_function_spec(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    b.reject_nobox_fn_taken_by_value()?;
+    b.reject_incompatible_nobox_fn_value_abi()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -2603,6 +2815,7 @@ pub fn lower_global(
         fn_name_span: None,
         cur_span: None,
         group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
         static_counters: HashMap::new(),
@@ -2610,6 +2823,11 @@ pub fn lower_global(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
+    // Same gate the fn and decorator bodies run. An initializer can name a fn
+    // whose fixed ABI cannot adopt the type-derived leaf ABI, and a global is a
+    // fn value's most ordinary home (a dispatch table); without this the name
+    // reached codegen and the leaves splatted into a callee expecting a box.
+    b.reject_incompatible_nobox_fn_value_abi()?;
     // A `nobox` global is category-2 storage: its layout comes from the declared
     // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
     // per leaf. Without this the body packs a box the verifier then rejects.
@@ -2668,6 +2886,7 @@ pub fn lower_decorator(
         fn_name_span: None,
         cur_span: None,
         group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
         static_counters: HashMap::new(),
@@ -2679,7 +2898,7 @@ pub fn lower_decorator(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
-    b.reject_nobox_fn_taken_by_value()?;
+    b.reject_incompatible_nobox_fn_value_abi()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -2753,6 +2972,12 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// The tuple twin of [`Self::group_binds`]: a NAME bound to a splatting
+    /// tuple holds its slot cells, so `if let t = <nullable tuple call>` can
+    /// rebuild the unboxed repr on each read of `t` instead of packing it.
+    /// Keyed the same way; the shape is stored non-nullable because presence
+    /// was already consumed by the branch that bound it.
+    tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleRetShape)>,
     /// `static` locals: raw binding idx -> the private global cell name a read /
     /// write of the binding resolves to (an `Inst::Global`/`StoreGlobal`, not a
     /// local cell). Populated by `lower_static`.
@@ -2973,6 +3198,9 @@ impl Builder<'_> {
             return Ok(self.repr_to_leaves(&r, &shape));
         }
         if let Some(shape) = self.ret_tuple.clone() {
+            if shape.nullable {
+                return self.nullable_tuple_return_slots(e, &shape);
+            }
             if shape.splats() {
                 let r = self.lower_expr_repr(e)?;
                 return Ok(self.tuple_repr_to_slots(r, &shape));
@@ -2986,6 +3214,45 @@ impl Builder<'_> {
             None => v,
         };
         Ok(vec![v])
+    }
+
+    fn absent_tuple_slots(&mut self, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        let mut out = Vec::with_capacity(shape.slot_count());
+        if shape.nullable {
+            out.push(self.emit_cur(Inst::Const(Lit::Bool(false))));
+        }
+        while out.len() < shape.slot_count() {
+            out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+        }
+        out
+    }
+
+    /// The `present, <slots...>` wire for a `-> (..)?` return, the tuple analogue
+    /// of the nullable arms in [`Self::repr_to_leaves`]: a literal `null` folds to
+    /// `false, nil, ...` and a tuple value leads with `true`.
+    ///
+    /// A tuple-or-nil arriving as an already-packed SCALAR (a variable, an if-join)
+    /// would need a runtime `~= nil` test and a per-slot branch. That is a real
+    /// shape, just not one any in-tree caller writes, so it gaps rather than
+    /// silently boxing the nobox element the wire exists to keep unboxed.
+    fn nullable_tuple_return_slots(
+        &mut self,
+        e: Idx<Expr>,
+        shape: &TupleRetShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let r = self.lower_expr_repr(e)?;
+        if let ValueRepr::Scalar(v) = &r {
+            if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
+                return Err(gap(
+                    "returning an already-packed nullable tuple through the splatting ABI \
+                     (return the tuple literal or `null` directly)",
+                ));
+            }
+            return Ok(self.absent_tuple_slots(shape));
+        }
+        let mut out = vec![self.emit_cur(Inst::Const(Lit::Bool(true)))];
+        out.extend(self.tuple_repr_to_slots(r, shape));
+        Ok(out)
     }
 
     /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
@@ -3010,8 +3277,14 @@ impl Builder<'_> {
     /// else is a packed tuple, so each element is read back with `TupleIndex`
     /// and a `Leaves` slot is field-read off the box.
     fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        // A phantom tuple has no aggregate to project; every wire slot is absent.
+        if let ValueRepr::Scalar(v) = &r {
+            if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
+                return self.absent_tuple_slots(shape);
+            }
+        }
         let parts: Vec<ValueRepr> = match r {
-            ValueRepr::Tuple(parts) if parts.len() == shape.slots.len() => parts,
+            ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
                 let base = self.pack(other);
                 (0..shape.slots.len())
@@ -3053,13 +3326,20 @@ impl Builder<'_> {
         slots: &[Idx<Inst>],
         idx: &mut usize,
     ) -> ValueRepr {
+        // Presence leads the wire, exactly as it does one level down in
+        // `rebuild_from_leaves`, so it is consumed before the slots.
+        let present = shape.nullable.then(|| {
+            let v = slots[*idx];
+            *idx += 1;
+            v
+        });
         let parts = shape
             .slots
             .clone()
             .iter()
             .map(|slot| self.slot_repr(slot, slots, idx))
             .collect();
-        ValueRepr::Tuple(parts)
+        ValueRepr::Tuple { parts, present }
     }
 
     /// One element of [`Self::tuple_from_slots`], consuming its slots from `*idx`.
@@ -3072,6 +3352,14 @@ impl Builder<'_> {
             }
             RetSlot::Leaves(vs) => self.rebuild_from_leaves(vs, slots, idx),
             RetSlot::Nested(inner) => self.tuple_from_slots(inner, slots, idx),
+        }
+    }
+
+    fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
+        match slot {
+            RetSlot::Opaque => vec![self.pack(repr)],
+            RetSlot::Leaves(shape) => self.repr_to_leaves(&repr, shape),
+            RetSlot::Nested(shape) => self.tuple_repr_to_slots(repr, shape),
         }
     }
 
@@ -3130,13 +3418,9 @@ impl Builder<'_> {
     }
 
     /// The value ABI of a nested `fn`, read by both its definition and its call
-    /// sites. Same rule as [`fn_uses_scalar_abi`] for a top-level fn, minus the
-    /// annotation gates a nested fn cannot carry: it splats iff it has a
-    /// scalarizable value param/return AND is never referenced as a fn VALUE (an
-    /// indirect callee can't splat). The enclosing function is ONE body arena, so
-    /// scanning it for `Expr::Var(name)` also covers sibling nested fns and
-    /// lambdas -- a `Callee::Local` callee is not an `Expr::Var`, so a plain call
-    /// never counts as taking the fn by value.
+    /// sites. Same rule as [`fn_scalar_abi`] for a top-level fn, minus annotation
+    /// gates: a fn value narrows to `nobox` shapes; a direct-only fn may use every
+    /// scalarizable value shape.
     fn nested_fn_abi(
         &self,
         name: Idx<BindingInfo>,
@@ -3275,6 +3559,7 @@ impl Builder<'_> {
             fn_name_span: None,
             cur_span: None,
             group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
             // inherited (bone rejects capturing them).
@@ -3544,6 +3829,26 @@ impl Builder<'_> {
         Ok(())
     }
 
+    fn lower_block_repr(
+        &mut self,
+        statements: comfy_la_arena::IdxRange<Statement>,
+        tail: Option<Idx<Expr>>,
+    ) -> Result<ValueRepr, CompilerError> {
+        self.defers.push(Vec::new());
+        let terminated = self.lower_stmts(statements)?;
+        if terminated {
+            self.defers.pop();
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+        }
+        let repr = match tail {
+            Some(tail) => self.lower_expr_repr(tail)?,
+            None => ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+        };
+        self.run_top_frame()?;
+        self.defers.pop();
+        Ok(repr)
+    }
+
     /// Lower an expression in statement position (value discarded). A tail-less
     /// block lowers to nothing (no dead unit); side-effecting tails still run.
     fn lower_stmt_expr(&mut self, e: Idx<Expr>) -> Result<(), CompilerError> {
@@ -3630,6 +3935,13 @@ impl Builder<'_> {
             // name (a plain global read -- zero closure alloc).
             Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
                 Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)].hoisted)))
+            }
+            // A whole-tuple use of a name bound to slot cells: rebuild and pack.
+            // Packing a `nobox` element here is exactly how a whole-tuple escape
+            // still reaches the guarantee's rejection.
+            Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -3733,21 +4045,8 @@ impl Builder<'_> {
             }
 
             Expr::Block { statements, tail } => {
-                self.defers.push(Vec::new());
-                let terminated = self.lower_stmts(statements)?;
-                if terminated {
-                    self.defers.pop();
-                    return Ok(self.emit_cur(Inst::Const(Lit::Nil)));
-                }
-                let v = match tail {
-                    Some(t) => self.lower_expr(t)?,
-                    None => self.emit_cur(Inst::Const(Lit::Nil)),
-                };
-                // Block-scope defers run after the tail value, before the block
-                // yields it.
-                self.run_top_frame()?;
-                self.defers.pop();
-                Ok(v)
+                let repr = self.lower_block_repr(statements, tail)?;
+                Ok(self.pack(repr))
             }
 
             Expr::Call { callee, args } => self.lower_call(e, callee, args),
@@ -3781,16 +4080,18 @@ impl Builder<'_> {
                 let r = self.lower_expr_repr(e)?;
                 Ok(self.pack(r))
             }
-            Expr::TupleIndex { tuple, index } => {
-                let b = self.lower_expr(tuple)?;
+            Expr::TupleIndex { tuple, .. } => {
                 // `w.0` on a transparent newtype is identity -- its runtime value
                 // IS the inner, not a positional table -- so `TupleIndex` (a
                 // `[1]` read) would index a scalar and yield nil.
                 if self.expr_is_newtype(tuple) {
-                    Ok(b)
-                } else {
-                    Ok(self.emit_cur(Inst::TupleIndex { base: b, index }))
+                    return self.lower_expr(tuple);
                 }
+                // Otherwise through the repr layer, same as `FieldAccess` above:
+                // a splatting base projects its part instead of packing a table
+                // and reading a boxed element back out.
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
             }
             // A value-struct literal is built via the repr layer (so a callsite
             // can splat it without a cdata); a plain struct is a Lua table.
@@ -4565,10 +4866,10 @@ impl Builder<'_> {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            if fn_uses_scalar_abi(self.ws, self.scx, func) {
+            if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
                 // Scalar-ABI callee: splat the value receiver + value args into
                 // leaves (a value return packs to the single safe-nav result).
-                self.scalar_ufcs_call(func, recv, &arg_idxs)?
+                self.scalar_ufcs_call(func, recv, &arg_idxs, &abi)?
             } else {
                 let mut argv = vec![recv];
                 for a in arg_idxs {
@@ -5233,9 +5534,18 @@ impl Builder<'_> {
             .and_then(|t| tuple_ret_shape(self.ws, subst, t));
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
+        } else {
+            self.reject_nobox_opaque_value_return(e, func)?;
         }
-        let uses_scalar_abi = fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst);
-        if !uses_scalar_abi {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        // Resolve phantom before tuple flattening can project from its nil placeholder.
+        if arg_idxs.is_empty()
+            && callee.inline_body.is_some_and(|(_, body)| body.trim() == "return nil")
+        {
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+        }
+        let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
+        let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
@@ -5271,11 +5581,14 @@ impl Builder<'_> {
                 self.f.spec_bindings.insert(call, k);
             }
             return Ok(ValueRepr::Scalar(call));
-        }
-        let args = self.scalar_call_args(func, arg_idxs, any_named, subst)?;
-        let ret_shape = self.ws.module(func.module).functions[func.func]
-            .return_ty
-            .and_then(|t| sig_value_shape_spec(self.ws, subst, t));
+        };
+        let args = self.scalar_call_args(
+            func,
+            arg_idxs,
+            any_named,
+            &scalar_abi.param_shapes,
+        )?;
+        let ret_shape = scalar_abi.ret_shape;
         let key = spec.map(|(k, _)| k);
         match ret_shape {
             Some(shape) => {
@@ -5427,19 +5740,15 @@ impl Builder<'_> {
         func: FuncRef,
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
+        abi: &FnScalarAbi,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let param_shapes: Vec<Option<ValueShape>> = self.ws.module(func.module).functions[func.func]
-            .param_decls
-            .iter()
-            .map(|pd| sig_value_shape(self.ws, pd.ty))
-            .collect();
         let mut argv = Vec::new();
-        match param_shapes.first().and_then(|s| s.clone()) {
+        match abi.param_shapes.first().and_then(|s| s.clone()) {
             Some(shape) => argv.extend(self.cdata_leaves(recv, &shape)),
             None => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            match param_shapes.get(i + 1).and_then(|s| s.clone()) {
+            match abi.param_shapes.get(i + 1).and_then(|s| s.clone()) {
                 Some(shape) => {
                     let r = self.lower_expr_repr(a)?;
                     argv.extend(self.repr_to_leaves(&r, &shape));
@@ -5447,10 +5756,7 @@ impl Builder<'_> {
                 None => argv.push(self.lower_expr(a)?),
             }
         }
-        let ret_shape = self.ws.module(func.module).functions[func.func]
-            .return_ty
-            .and_then(|t| sig_value_shape(self.ws, t));
-        match ret_shape {
+        match abi.ret_shape.clone() {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
@@ -5474,13 +5780,8 @@ impl Builder<'_> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-        subst: &SpecSubst,
+        param_shapes: &[Option<ValueShape>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let param_shapes: Vec<Option<ValueShape>> = self.ws.module(func.module).functions[func.func]
-            .param_decls
-            .iter()
-            .map(|pd| sig_value_shape_spec(self.ws, subst, pd.ty))
-            .collect();
         if !any_named {
             let mut out = Vec::new();
             for (i, &a) in arg_idxs.iter().enumerate() {
@@ -5499,7 +5800,7 @@ impl Builder<'_> {
             .iter()
             .map(|pd| pd.name)
             .collect();
-        self.slotted_call_args(&param_names, &param_shapes, arg_idxs)
+        self.slotted_call_args(&param_names, param_shapes, arg_idxs)
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -5567,7 +5868,7 @@ impl Builder<'_> {
             ValueRepr::Scalar(v) => v,
             // A splatting tuple's box. Its `nobox` elements pack too, which is
             // exactly how a whole-tuple use reaches the guarantee's rejection.
-            ValueRepr::Tuple(parts) => {
+            ValueRepr::Tuple { parts, .. } => {
                 let vs = parts.into_iter().map(|p| self.pack(p)).collect();
                 self.emit_cur(Inst::MakeTuple(vs))
             }
@@ -5645,7 +5946,7 @@ impl Builder<'_> {
         match r {
             // A tuple at a value-shaped sink is a boxed source: pack and
             // field-read, the `Scalar` treatment.
-            ValueRepr::Tuple(_) => {
+            ValueRepr::Tuple { .. } => {
                 let v = self.pack(r.clone());
                 self.repr_to_leaves(&ValueRepr::Scalar(v), shape)
             }
@@ -5767,6 +6068,48 @@ impl Builder<'_> {
             let fv = self.emit_cur(Inst::Field { base: v, field: *fname });
             match fs {
                 FieldShape::Prim => out.push(fv),
+                // A NULLABLE nested child: the stored box may be absent, so split
+                // it presence-aware rather than field-reading straight off a
+                // possible nil. Mirrors `repr_to_leaves`' `Scalar(v) if
+                // shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0,
+                // then the child's own leaves, nils on the absent arm -- because
+                // the two must agree leaf-for-leaf or `rebuild_from_leaves`
+                // indexes past the end. This function had NO nullable handling:
+                // its one caller stripped `.nullable` first, which was safe only
+                // while no shape carried it below the outermost level.
+                FieldShape::Nested(sub) if sub.nullable => {
+                    let field_count = sub.leaf_count() - 1;
+                    let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                    let present = self.emit_cur(Inst::NotEq(fv, nil));
+                    let cells: Vec<Idx<Cell>> =
+                        (0..field_count).map(|_| self.f.new_cell(None)).collect();
+                    let nil_bb = self.f.new_block();
+                    let value_bb = self.f.new_block();
+                    let join = self.f.new_block();
+                    self.f.set_term(
+                        self.cur,
+                        Term::Branch { cond: present, then_bb: value_bb, else_bb: nil_bb },
+                    );
+                    self.cur = nil_bb;
+                    for c in &cells {
+                        let z = self.emit_cur(Inst::Const(Lit::Nil));
+                        self.emit_cur(Inst::Store { cell: *c, value: z });
+                    }
+                    self.f.set_term(self.cur, Term::Goto(join));
+                    self.cur = value_bb;
+                    let mut inner = sub.clone();
+                    inner.nullable = false;
+                    let leaves = self.cdata_leaves(fv, &inner);
+                    for (c, lv) in cells.iter().zip(leaves) {
+                        self.emit_cur(Inst::Store { cell: *c, value: lv });
+                    }
+                    self.f.set_term(self.cur, Term::Goto(join));
+                    self.cur = join;
+                    out.push(present);
+                    out.extend(
+                        cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect::<Vec<_>>(),
+                    );
+                }
                 FieldShape::Nested(sub) => out.extend(self.cdata_leaves(fv, sub)),
             }
         }
@@ -6288,9 +6631,10 @@ impl Builder<'_> {
                     return Err(gap(format!("column insert arity mismatch for [{elem}]")));
                 }
                 let f = self.stdlib_funcref("__rock_col_insert")?;
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for (path, leaf) in paths.into_iter().zip(leaves) {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, leaf] });
+                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, len, leaf] });
                 }
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
@@ -6308,11 +6652,14 @@ impl Builder<'_> {
                 // dotted leaf path, so the emitted table is the same shape
                 // `MakeVecColumns` writes for a literal.
                 let mut fields = Vec::with_capacity(paths.len() + 2);
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for path in paths {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    fields.push((path, self.emit_cur(Inst::Call { func: f, args: vec![col] })));
+                    fields.push((
+                        path,
+                        self.emit_cur(Inst::Call { func: f, args: vec![col, len] }),
+                    ));
                 }
-                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 fields.push((Ustr::from("len"), len));
                 let old_header = self.column_header(vec);
                 let capacity = self.emit_cur(Inst::Field {
@@ -6329,27 +6676,38 @@ impl Builder<'_> {
             // The two ops that need the LOGICAL elements, not the physical
             // columns: a sort key is a function of the whole element, and
             // `to_lua_array`'s whole contract is handing a Lua array of elements
-            // to a foreign API. Both redirect to the one materializing helper --
-            // the storage contract's third category (erased/external boundaries
-            // materialize explicitly), and the only place a column Vec builds
-            // element tables.
+            // to a foreign API. `to_lua_array` redirects to the materializing
+            // helper -- the storage contract's third category (erased/external
+            // boundaries materialize explicitly), and the only place a column Vec
+            // builds element tables.
+            //
+            // `sort` needs the element only to APPLY THE KEY, and the key is
+            // reached through a fn value, whose ABI is derived from the fn type.
+            // At a `nobox` element that ABI is the leaves, which are the columns,
+            // so the key applies with no element at all and the two forms split
+            // here rather than at a box the mark would forbid.
             ("__vec_data_sort", [recv, key_fn]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
-                if self.is_nobox_struct(elem) {
-                    return Err(CompilerError::new_with_label(
-                        self.body.expr_spans[*recv],
-                        format!(
-                            "cannot sort a column-stored nobox value `{elem}`: \
-                             the key function requires implicit element materialization"
-                        ),
-                    ));
-                }
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
-                let f = self.stdlib_funcref("__rock_col_sort")?;
-                Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
-                )))
+                if !self.is_nobox_struct(elem) {
+                    let f = self.stdlib_funcref("__rock_col_sort")?;
+                    return Ok(Some(ValueRepr::Scalar(
+                        self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
+                    )));
+                }
+                let shape = value_shape(self.ws, elem)
+                    .ok_or_else(|| gap("column element is not a value struct"))?;
+                let paths: Vec<_> = value_leaf_paths(&shape)
+                    .into_iter()
+                    .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
+                    .collect();
+                let paths = self.emit_cur(Inst::MakeTuple(paths));
+                let f = self.stdlib_funcref("__rock_col_sort_leaves")?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
+                    func: f,
+                    args: vec![vec, k, paths],
+                }))))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
@@ -6668,6 +7026,21 @@ impl Builder<'_> {
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         match self.body.expr_arena[e].clone() {
+            Expr::Block { statements, tail } => self.lower_block_repr(statements, tail),
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => match self.repr_join_slot(e) {
+                Some(shape) => self.lower_if_repr(cond, then_branch, else_branch, shape),
+                None => Ok(ValueRepr::Scalar(
+                    self.lower_if(cond, then_branch, else_branch)?,
+                )),
+            },
+            Expr::Match { scrutinee, arms } => match self.repr_join_slot(e) {
+                Some(shape) => self.lower_match_repr(scrutinee, arms, shape),
+                None => Ok(ValueRepr::Scalar(self.lower_match(scrutinee, arms)?)),
+            },
             // A tuple literal whose type splats stays a `Tuple` repr, so a
             // `nobox` element reaches the return boundary as leaves instead of
             // being packed into the table first.
@@ -6676,7 +7049,33 @@ impl Builder<'_> {
                     .into_iter()
                     .map(|el| self.lower_expr_repr(el))
                     .collect::<Result<_, CompilerError>>()?;
-                Ok(ValueRepr::Tuple(parts))
+                Ok(ValueRepr::Tuple { parts, present: None })
+            }
+            // `t.0` off a splatting tuple projects the part REPR directly. Without
+            // this the base packs to a table and the index reads a boxed element
+            // back out, which re-materializes a `nobox` one. A newtype's `.0` is
+            // identity and a non-splatting base keeps the packed `TupleIndex`, so
+            // only the unboxed case changes.
+            Expr::TupleIndex { tuple, index } if !self.expr_is_newtype(tuple) => {
+                let r = self.lower_expr_repr(tuple)?;
+                if let ValueRepr::Tuple { parts, .. } = r {
+                    return parts
+                        .into_iter()
+                        .nth(index)
+                        .ok_or_else(|| gap("tuple index past the end of a splatting tuple"));
+                }
+                let base = self.pack(r);
+                Ok(ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
+            }
+            // A name bound to a splatting tuple: rebuild the unboxed Tuple repr
+            // from its slot cells, so `t.0` projects a part instead of indexing a
+            // packed table (which would re-materialize a `nobox` element).
+            Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
+                let (cells, shape) = self.tuple_binds.get(&raw(b)).cloned().unwrap();
+                let slots: Vec<Idx<Inst>> =
+                    cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let mut idx = 0;
+                Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
             }
             // A scalarized value param: rebuild the unboxed Group from leaf cells.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
@@ -7540,7 +7939,7 @@ impl Builder<'_> {
                     },
                 )?,
                 ValueRepr::Scalar(value) => self.stringify_struct_leaf(field.ty, value)?,
-                part @ ValueRepr::Tuple(_) => {
+                part @ ValueRepr::Tuple { .. } => {
                     let value = self.pack(part);
                     self.stringify_struct_leaf(field.ty, value)?
                 }
@@ -8018,6 +8417,30 @@ impl Builder<'_> {
                             present
                         });
                     }
+                    // The tuple twin of the nobox-value case above: a `(..)?`
+                    // whose element splats carries its own presence SLOT, and
+                    // that slot is the answer. Packing instead would build a
+                    // `MakeTuple` -- a table, never nil -- so `== null` would be
+                    // false even on the absent arm.
+                    if self.nullable_tuple_call_shape(v).is_some() {
+                        let repr = self.lower_expr_repr(v)?;
+                        let present = match repr {
+                            ValueRepr::Tuple {
+                                present: Some(value),
+                                ..
+                            } => value,
+                            other => {
+                                let value = self.pack(other);
+                                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                                self.emit_cur(Inst::NotEq(value, nil))
+                            }
+                        };
+                        return Ok(if matches!(op, BinOp::Eq) {
+                            self.emit_cur(Inst::Not(present))
+                        } else {
+                            present
+                        });
+                    }
                     if self.expr_is_flat_enum(v) {
                         let tag = match self.lower_expr_repr(v)? {
                             ValueRepr::Group { parts, .. } => {
@@ -8114,7 +8537,20 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let repr =
+            self.lower_if_repr(cond, then_branch, else_branch, RetSlot::Opaque)?;
+        Ok(self.pack(repr))
+    }
+
+    fn lower_if_repr(
+        &mut self,
+        cond: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let cond_v = self.lower_expr(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
@@ -8129,18 +8565,21 @@ impl Builder<'_> {
         );
 
         self.cur = then_bb;
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
+        let tv = self.lower_expr_repr(then_branch)?;
+        self.store_repr_and_join(&results, &shape, tv, join)?;
 
         self.cur = else_bb;
         let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
+            Some(eb) => self.lower_expr_repr(eb)?,
+            None => ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
         };
-        self.store_and_join(result, ev, join);
+        self.store_repr_and_join(&results, &shape, ev, join)?;
 
         self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
 
     /// `if` in STATEMENT position (value discarded): branch + arms-as-statements
@@ -8186,6 +8625,31 @@ impl Builder<'_> {
             });
             self.f.set_term(self.cur, Term::Goto(join));
         }
+    }
+
+    fn store_repr_and_join(
+        &mut self,
+        results: &[Idx<Cell>],
+        shape: &RetSlot,
+        value: ValueRepr,
+        join: Idx<Block>,
+    ) -> Result<(), CompilerError> {
+        if !self.is_open() {
+            return Ok(());
+        }
+        let slots = self.repr_to_slot_values(value, shape);
+        if results.len() != slots.len() {
+            return Err(gap(format!(
+                "aggregate join produced {} slots for {} result cells",
+                slots.len(),
+                results.len()
+            )));
+        }
+        for (&cell, value) in results.iter().zip(slots) {
+            self.emit_cur(Inst::Store { cell, value });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        Ok(())
     }
 
     /// `a && b` == `if a then b else false`.
@@ -8460,6 +8924,7 @@ impl Builder<'_> {
                     .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
             }
             BoundNext::CallerGeneric(_) => TupleRetShape {
+                nullable: false,
                 slots: vec![RetSlot::Opaque, RetSlot::Opaque],
             },
         };
@@ -8519,7 +8984,7 @@ impl Builder<'_> {
             dests[1..].iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         let elem_slot = match &ret_shape.slots[1..] {
             [one] => one.clone(),
-            rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec() }),
+            rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec(), nullable: false }),
         };
         let mut idx = 0;
         self.bind_pattern_slot(vars, &elem_slot, &loads, &mut idx);
@@ -8609,9 +9074,16 @@ impl Builder<'_> {
         };
         let _ = leaves;
 
+        // The element type, when it is column-eligible: under bookkeeping SoA the
+        // arena's `data` is an ordinary `[T]`, so at an all-scalar value `T` it is
+        // COLUMN-stored and a bare `Index` would read a table that isn't there.
+        let column_elem = self.arena_column_elem_of(iter);
+
         let arena = self.lower_expr(iter)?;
-        let entries = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("entries") });
-        let n = self.emit_cur(Inst::Len { base: entries, kind: ContainerKind::Vec });
+        let occupied = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("occupied") });
+        let generations = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("generations") });
+        let data = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("data") });
+        let n = self.emit_cur(Inst::Len { base: occupied, kind: ContainerKind::Vec });
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -8637,22 +9109,22 @@ impl Builder<'_> {
         let c = self.emit_cur(Inst::IntLt(i, n));
         self.f.set_term(self.cur, Term::Branch { cond: c, then_bb: body_bb, else_bb: exit });
 
-        // body: read entry; skip nil.
+        // body: nothing to skip before the occupancy read -- the walk is bounded
+        // by the occupancy column's own length, and a `[bool]` column has no
+        // holes, so the old nil test had nothing left to catch.
         self.cur = body_bb;
         let idx = self.emit_cur(Inst::Load(i_cell));
-        let entry = self.emit_cur(Inst::Index { base: entries, index: idx, kind: ContainerKind::Vec });
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let isnil = self.emit_cur(Inst::Eq(entry, nil));
-        self.f.set_term(self.cur, Term::Branch { cond: isnil, then_bb: latch, else_bb: occ_bb });
+        self.f.set_term(self.cur, Term::Goto(occ_bb));
 
         // occ: skip unoccupied.
         self.cur = occ_bb;
-        let occ = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("is_occupied") });
+        let occ = self.emit_cur(Inst::Index { base: occupied, index: idx, kind: ContainerKind::Vec });
         self.f.set_term(self.cur, Term::Branch { cond: occ, then_bb: do_bb, else_bb: latch });
 
         // do: build Entity, bind, run body.
         self.cur = do_bb;
-        // `entry` is an `ArenaEntry` (fields `index`/`generation`); the built
+        // A slot's index IS its position, so the loop counter is the Entity's
+        // `_index` and only the generation needs a column read. The built
         // value is an `Entity` whose fields are `_`-prefixed (soft-private).
         // `Entity` is a `value` struct (GC-carrying tier): build it as a
         // `MakeValueStruct` so it scalarizes (a non-escaping `for (e, _)` scan
@@ -8661,17 +9133,27 @@ impl Builder<'_> {
         // A raw `MakeStruct` here would leak an un-tagged, metatable-less table
         // whose `==` silently mis-compares (arena-scan entities not equal to
         // pairs-scan entities).
-        let e_index = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("index") });
-        let e_gen = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("generation") });
+        let e_gen =
+            self.emit_cur(Inst::Index { base: generations, index: idx, kind: ContainerKind::Vec });
         let entity = self.emit_cur(Inst::MakeValueStruct {
             name: Ustr::from("Entity"),
             fields: vec![
                 (Ustr::from("_arena"), arena),
-                (Ustr::from("_index"), e_index),
+                (Ustr::from("_index"), idx),
                 (Ustr::from("_generation"), e_gen),
             ],
         });
-        let data = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("_data") });
+        // A column element is rebuilt from its leaves here. For an ordinary value
+        // struct SROA folds the field reads back to the leaf cells, so the pack
+        // costs nothing; for a `nobox` element it is an implicit materialization
+        // and the verifier rejects it by name rather than emitting a quiet box.
+        let data = match column_elem {
+            Some(elem) => {
+                let repr = self.column_element_repr(data, idx, elem)?;
+                self.pack(repr)
+            }
+            None => self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec }),
+        };
         match &pat {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
                 self.bind_for_pattern(&subs[0], entity);
@@ -9130,7 +9612,18 @@ impl Builder<'_> {
         scrut: Idx<Expr>,
         arms: comfy_la_arena::IdxRange<MatchArm>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let repr = self.lower_match_repr(scrut, arms, RetSlot::Opaque)?;
+        Ok(self.pack(repr))
+    }
+
+    fn lower_match_repr(
+        &mut self,
+        scrut: Idx<Expr>,
+        arms: comfy_la_arena::IdxRange<MatchArm>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
         let scrut_s = self.lower_scrut(scrut)?;
@@ -9155,8 +9648,8 @@ impl Builder<'_> {
                 );
                 self.cur = kept;
             }
-            let bv = self.lower_expr(arm.body)?;
-            self.store_and_join(result, bv, join);
+            let bv = self.lower_expr_repr(arm.body)?;
+            self.store_repr_and_join(&results, &shape, bv, join)?;
 
             self.cur = next;
         }
@@ -9164,7 +9657,10 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Unreachable);
 
         self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
 
     /// `match` in STATEMENT position (value discarded): mirrors [`Self::lower_match`]
@@ -9576,6 +10072,9 @@ impl Builder<'_> {
             if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
                 return self.lower_if_let_nobox(b, value, then_branch, else_branch);
             }
+            if let Some(shape) = self.nullable_tuple_call_shape(value) {
+                return self.lower_if_let_nullable_tuple(b, value, &shape, then_branch, else_branch);
+            }
         }
         let result = self.f.new_cell(None);
         let scrut = self.lower_scrut(value)?;
@@ -9642,6 +10141,82 @@ impl Builder<'_> {
 
         self.cur = then_bb;
         self.bind_leaves(b, &values, shape);
+        let tv = self.lower_expr(then_branch)?;
+        self.store_and_join(result, tv, join);
+
+        self.cur = else_bb;
+        let ev = match else_branch {
+            Some(eb) => self.lower_expr(eb)?,
+            None => self.emit_cur(Inst::Const(Lit::Nil)),
+        };
+        self.store_and_join(result, ev, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// The DECLARED nullable-tuple shape of a call, without lowering it.
+    ///
+    /// Read off the CALLEE's return type, never off `e`'s own type: safe-nav
+    /// gives `h?.pair()` the same `Nullable(Tuple)` with no presence slot, so
+    /// keying on the expression type would branch on a slot that is not there.
+    fn nullable_tuple_call_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            ..
+        } = self.body.expr_arena[e]
+        else {
+            return None;
+        };
+        let func = self.resolve_funcref(e, name).ok()?;
+        let ret = self.ws.module(func.module).functions[func.func].return_ty?;
+        let shape = tuple_ret_shape(self.ws, self.spec_subst, ret)?;
+        shape.nullable.then_some(shape)
+    }
+
+    /// `if let t = <call returning (..)?>` where an element splats: the presence
+    /// SLOT is the branch condition and `t` binds the remaining slots as cells,
+    /// so nothing is packed to be tested and immediately unpacked again. The
+    /// tuple twin of [`Self::lower_if_let_nobox`].
+    fn lower_if_let_nullable_tuple(
+        &mut self,
+        b: Idx<BindingInfo>,
+        value: Idx<Expr>,
+        shape: &TupleRetShape,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell(None);
+        let repr = self.lower_expr_repr(value)?;
+        let ValueRepr::Tuple {
+            parts,
+            present: Some(present),
+        } = repr
+        else {
+            return Err(gap("a nullable tuple scrutinee arrived without its presence slot"));
+        };
+        // Presence is consumed by the branch, so what `t` holds is the plain tuple.
+        let bound_shape = TupleRetShape { slots: shape.slots.clone(), nullable: false };
+
+        let then_bb = self.f.new_block();
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
+
+        self.cur = then_bb;
+        let slots = self.tuple_repr_to_slots(
+            ValueRepr::Tuple { parts, present: None },
+            &bound_shape,
+        );
+        let cells: Vec<Idx<Cell>> = slots
+            .iter()
+            .map(|v| {
+                let c = self.f.new_cell(None);
+                self.emit_cur(Inst::Store { cell: c, value: *v });
+                c
+            })
+            .collect();
+        self.tuple_binds.insert(raw(b), (cells, bound_shape));
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 
@@ -10210,7 +10785,7 @@ impl Builder<'_> {
     fn materialize_repr(&mut self, repr: ValueRepr) -> Idx<Inst> {
         match repr {
             ValueRepr::Scalar(value) => value,
-            ValueRepr::Tuple(parts) => {
+            ValueRepr::Tuple { parts, .. } => {
                 let vs = parts.into_iter().map(|p| self.materialize_repr(p)).collect();
                 self.emit_cur(Inst::MakeTuple(vs))
             }
@@ -10565,35 +11140,66 @@ impl Builder<'_> {
     /// sinkable rather than becoming the storage the feature removed.
     fn materialize_embed(&mut self, parent: Idx<Inst>, prefix: Ustr, cname: Ustr) -> Idx<Inst> {
         let mut fields = Vec::new();
+        self.collect_embed_slots(parent, prefix, "", cname, &mut fields);
+        if self.is_value_struct(cname) {
+            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
+        } else {
+            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
+        }
+    }
+
+    /// The rebuilt child's slots: for each of `cname`'s fields, the key it holds
+    /// on the CHILD paired with the read of the key it lives at on `parent`.
+    /// `rel` is the child-relative prefix, so this is the exact inverse of the
+    /// store side's keying ([`Builder::embed_field_slots`]: relative leaves under
+    /// the field name, presence tag at the field name itself).
+    ///
+    /// An embed field stays FLAT here, for the reason the flat-enum arm already
+    /// gives: a `Mid` whose `inner` is embedded is canonically
+    /// `{["inner.v"]=3, inner=true, m=9}`, so re-boxing `inner` under its own name
+    /// hands consumers a shape they never read. Recursing into a nested box (which
+    /// is what this did) miscompiled BOTH directions across a call boundary -- an
+    /// absent inner came back non-nil because the box always had one, and a
+    /// PRESENT inner's leaf came back nil because the callee reads `["inner.v"]`
+    /// and the box stored a table at `inner`.
+    ///
+    /// The presence tag needs no branch: an absent field's leaves and tag are all
+    /// nil on the parent, and nil at those keys IS the canonical absent form (the
+    /// ctor emits `["inner.v"] = nil, inner = nil`), so an unconditional read
+    /// reproduces it.
+    fn collect_embed_slots(
+        &mut self,
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        rel: &str,
+        cname: Ustr,
+        out: &mut Vec<(Ustr, Idx<Inst>)>,
+    ) {
         for f in self.struct_field_names(cname).unwrap_or_default() {
             let key = Ustr::from(&format!("{prefix}.{f}"));
+            let relkey = format!("{rel}{f}");
             match self.embed_field_of_struct(cname, f) {
                 Some(inner) => {
-                    let v = self.materialize_embed(parent, key, inner);
-                    fields.push((f, v));
+                    if self.embed_field_is_nullable(cname, f) {
+                        let v = self.emit_cur(Inst::Field { base: parent, field: key });
+                        out.push((Ustr::from(relkey.as_str()), v));
+                    }
+                    self.collect_embed_slots(parent, key, &format!("{relkey}."), inner, out);
                 }
-                // A flat-enum field stays FLAT in the rebuilt child: consumers
-                // read it as `child["f.#"]`, so re-boxing it under `f` would
-                // hand them a shape they never look at.
                 None => match self.flat_field_of_struct(cname, f) {
                     Some(shape) => {
                         for slot in flat_slot_names(f, &shape) {
                             let src = Ustr::from(&format!("{prefix}.{slot}"));
                             let v = self.emit_cur(Inst::Field { base: parent, field: src });
-                            fields.push((slot, v));
+                            out.push((Ustr::from(&format!("{rel}{slot}")), v));
                         }
                     }
                     None => {
                         let v = self.emit_cur(Inst::Field { base: parent, field: key });
-                        fields.push((f, v));
+                        out.push((Ustr::from(relkey.as_str()), v));
                     }
                 },
             }
-        }
-        if self.is_value_struct(cname) {
-            self.emit_cur(Inst::MakeValueStruct { name: cname, fields })
-        } else {
-            self.emit_cur(Inst::MakeStruct { ty: Some(cname), fields })
         }
     }
 
@@ -11217,6 +11823,29 @@ impl Builder<'_> {
         is_ffi_clean_value_struct(self.ws, en).then_some(en)
     }
 
+    /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
+    /// [`Self::vec_column_elem_of`] one container out: an arena's `data` field is
+    /// an ordinary `[E]`, so it columnizes on exactly the same rule, and the
+    /// hardcoded `for`-over-arena walk has to read it the same way the Vec path
+    /// would.
+    fn arena_column_elem_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(_), params } = self.ty_node(ty)? else {
+            return None;
+        };
+        let p = params.into_iter().next()?;
+        let elem = self.resolve_tyid(ty.with_idx(p))?;
+        let en = match self.ty_node(elem)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+                Some(ty) => ty.nominal()?,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        vec_column_elem(self.ws, en)
+    }
+
     /// The Vec container kind for base expr `e`: an all-scalar value-struct
     /// element stores as flat columns, everything else keeps the single `_data`
     /// backing. An unresolved / generic element is NOT eligible -- the columns
@@ -11374,12 +12003,9 @@ impl Builder<'_> {
             .map(|pd| pd.ty)
     }
 
-    /// The caller gates this on `!fn_uses_scalar_abi`, which reads as "this callee
-    /// takes a real boxed value" only where the scalar ABI is the alternative.
-    /// Under `values_first_class` that flag is forced false for EVERY fn because a
-    /// `value` struct is already a first-class `vecN` -- there is no box on that
-    /// target, and no collection to put one in, so the proxy inverts and every
-    /// shader call would reject a nobox arg.
+    /// The caller reaches this only when [`fn_scalar_abi_spec`] returns `None`.
+    /// Under `values_first_class`, a `value` struct is already a first-class
+    /// `vecN`, so there is no box to authorize.
     /// Re-mark a nobox box packed for a `@gpu_only` callee as an EXPLICIT one.
     ///
     /// Emission is identical (both render `<name>_ct`), the verifier ignores
@@ -11487,6 +12113,63 @@ impl Builder<'_> {
             self.body.expr_spans[e],
             format!(
                 "nobox value cannot cross the boxed tuple return of `{}` \
+                 (an `inline(lua)` body must opt in with `@scalar_abi` and return the leaves)",
+                callee.name
+            ),
+        ))
+    }
+
+    /// The BARE-return companion of [`Self::reject_nobox_opaque_tuple_return`].
+    /// That one covers `-> (bool, NV2)`; a plain `-> NV2` had no check in any
+    /// position, so an opaque body handing back a hand-built box compiled clean
+    /// AND PASSED -- Lua's `.field` does not distinguish a table from cdata, so
+    /// the guarantee was violated with no diagnostic. Live shape:
+    /// `stone_measure_text_vec2_for` and its `inline(js)` twin.
+    ///
+    /// Keyed on the SIGNATURE, which is transport-independent -- the JS backend
+    /// packs leaves into an array rather than multi-returning them, and this
+    /// check is correct for both.
+    fn reject_nobox_opaque_value_return(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Result<(), CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(());
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        // Same authorization as the arg direction: a `@gpu_only` intrinsic's
+        // boxed return is not a real boundary (on the GPU it is a native vector,
+        // and the Lua body only `error(...)`s).
+        if crate::intrinsics::is_gpu_only(callee) {
+            return Ok(());
+        }
+        let opaque = callee.is_extern
+            || (callee.inline_body.is_some()
+                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        if !opaque {
+            return Ok(());
+        }
+        let Some(ret) = callee.return_ty else {
+            return Ok(());
+        };
+        let Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        }) = static_ty(self.ws, ret)
+        else {
+            return Ok(());
+        };
+        let Some(sid) = self.ws.struct_by_name.get(&name) else {
+            return Ok(());
+        };
+        if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+            return Ok(());
+        }
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "nobox value `{name}` cannot cross the boxed return of `{}` \
                  (an `inline(lua)` body must opt in with `@scalar_abi` and return the leaves)",
                 callee.name
             ),
@@ -11602,29 +12285,10 @@ impl Builder<'_> {
 
     /// The leaf shape of a `nobox`-typed `ty` (nullable included: presence is
     /// leaf 0), `None` for every other type.
-    /// Reject taking a TOP-LEVEL fn with a `nobox` value in its signature as a
-    /// fn VALUE.
-    ///
-    /// This is what makes [`Self::fn_value_abi`] sound. A top-level fn's ABI is
-    /// decided by a WHOLE-PROGRAM property (`ScalarCtx::taken_by_ref` drops it
-    /// to boxed), while the fn TYPE at an indirect call site says nothing about
-    /// that -- so the call site would splat leaves into a callee compiled to
-    /// take one box. That is a silent miscompile, not a rejection: it emits, and
-    /// dies at runtime indexing a number.
-    ///
-    /// Lambdas and nested fns are exempt because they now keep the leaf ABI when
-    /// taken by value, derived from the same type the call site reads. Only a
-    /// top-level fn has the whole-program dependency, and nothing in tree takes
-    /// one with a `nobox` signature by value -- pinned in
-    /// `tests/errors/nobox_toplevel_fn_by_value.rock.err`, which is where the
-    /// fix goes if that changes.
     /// Argument positions of a `ShaderPipeline` expansion, where a bare fn name is
     /// consumed by the compiler and never becomes a runtime fn value:
     /// `rock_shader(frag)` lowers its argument to the entry's NAME as a string
-    /// literal, so the ABI-disagreement hazard [`Self::reject_nobox_fn_taken_by_value`]
-    /// guards against cannot arise there. Without this the check fires on the name
-    /// alone, which rejected every fullscreen `rock_shader` registration written in
-    /// a fn body once `Vec2` was marked -- a diagnostic owed to nothing.
+    /// literal, so no function-value ABI applies there.
     fn expansion_arg_exprs(&self) -> HashSet<Idx<Expr>> {
         let mut out = HashSet::new();
         for (e, expr) in self.body.expr_arena.iter() {
@@ -11643,7 +12307,7 @@ impl Builder<'_> {
         out
     }
 
-    fn reject_nobox_fn_taken_by_value(&self) -> Result<(), CompilerError> {
+    fn reject_incompatible_nobox_fn_value_abi(&self) -> Result<(), CompilerError> {
         if self.scx.values_first_class {
             return Ok(());
         }
@@ -11654,22 +12318,17 @@ impl Builder<'_> {
                 continue;
             }
             let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
-            // ANY overload of the name: the value reference names the whole
-            // overload set, so one nobox-bearing member is enough to make the
-            // ABI at an indirect call unknowable.
-            let carries_nobox = overloads.iter().any(|(mid, fid)| {
-                let f = &self.ws.module(*mid).functions[*fid];
-                f.param_decls.iter().any(|pd| nobox_declared_shape(self.ws, pd.ty).is_some())
-                    || f.return_ty.is_some_and(|t| nobox_declared_shape(self.ws, t).is_some())
+            let incompatible = overloads.iter().any(|(mid, fid)| {
+                let fref = FuncRef { module: *mid, func: *fid };
+                let expected = fn_nobox_abi_spec(self.ws, fref, &SpecSubst::new());
+                expected.is_some() && fn_scalar_abi(self.ws, self.scx, fref) != expected
             });
-            if carries_nobox {
+            if incompatible {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(
-                        "`{name}` has a `nobox` value in its signature and cannot be taken as a \
-                         fn value: a top-level fn's ABI depends on whether the program takes it \
-                         by value, so an indirect call could not agree with it. Wrap it in a \
-                         lambda, which keeps the leaf ABI."
+                        "`{name}` cannot be used as a fn value because its fixed ABI does not \
+                         match the type-derived `nobox` fn-value ABI"
                     ),
                 ));
             }
@@ -11713,30 +12372,17 @@ impl Builder<'_> {
     }
 
     fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
-        let ty = self.resolve_tyid(ty)?;
-        match self.ty_node(ty)? {
-            TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            } if self.is_nobox_struct(name) => value_shape_of_nominal(self.ws, name),
-            TypeExpr::Nullable(inner) => {
-                let inner = self.resolve_tyid(ty.with_idx(inner))?;
-                let TypeExpr::App {
-                    ctor: TypeCtor::Nominal(name),
-                    ..
-                } = self.ty_node(inner)?
-                else {
-                    return None;
-                };
-                if !self.is_nobox_struct(name) {
-                    return None;
-                }
-                let mut shape = value_shape_of_nominal(self.ws, name)?;
-                shape.nullable = true;
-                Some(shape)
-            }
-            _ => None,
+        // The BODY arena's spelling of [`nullable_nominal_shape`]: same rule, its
+        // own type-node lookup. `is_nobox_struct` (not `is_nobox_nominal`) is the
+        // one real difference -- it also honours `scx.values_first_class`, which
+        // the GLSL backend sets -- so the guard stays here and the core sees an
+        // already-filtered nominal.
+        if !self.scx.values_first_class {
+            return nullable_nominal_shape(self.ws, ty, &|t| {
+                self.ty_node(self.resolve_tyid(t)?)
+            });
         }
+        None
     }
 
     /// The leaf globals a place rooted at a `nobox` global denotes, plus the
@@ -12052,6 +12698,13 @@ impl Builder<'_> {
         self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
     }
 
+    fn repr_join_slot(&self, e: Idx<Expr>) -> Option<RetSlot> {
+        if let Some(shape) = self.expr_tuple_shape(e).filter(TupleRetShape::splats) {
+            return Some(RetSlot::Nested(shape));
+        }
+        self.nobox_value_shape_of(e).map(RetSlot::Leaves)
+    }
+
     /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
     /// the lambda body then splats its slots so an indirect call site captures
     /// them (multi-return ABI). Read off the lambda's inferred `fn(..) -> (..)`
@@ -12074,7 +12727,7 @@ impl Builder<'_> {
             .into_iter()
             .map(|el| self.body_ret_slot(ty.with_idx(el)))
             .collect();
-        Some(TupleRetShape { slots })
+        Some(TupleRetShape { slots, nullable: false })
     }
 
     fn body_ret_slot(&self, ty: TyId) -> RetSlot {
@@ -13013,13 +13666,9 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
     })
 }
 
-/// Reject a CPU-side (Lua-emission) DIRECT call to a `@gpu_only` intrinsic
-/// (`texture()`, stdlib/shader.rock). Allowed only when the calling fn is itself
-/// GPU-side (`@shader(...)` or `@gpu_only`) -- shader bodies compile through the
-/// Lua backend (bitgun's `heat_shimmer_frag`) and must keep working. Only DIRECT
-/// calls are rejected: taking the fn as a value and calling it indirectly is out
-/// of scope and keeps hitting the runtime-error body (the never-silent-stub
-/// defense, CLAUDE.md "NEVER swallow errors"). Returns the first spanned reject.
+/// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side
+/// functions as runtime fn values. Shader-pipeline expansion arguments are names,
+/// not runtime values, and remain legal.
 pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
@@ -13032,24 +13681,70 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         if caller_is_gpu {
             continue;
         }
+        let mut shader_expansion_args = HashSet::new();
         for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            let Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+            } = expr
+            else {
                 continue;
             };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
-            let f = &ws.module(fmod).functions[fid];
-            if !crate::intrinsics::is_gpu_only(f) {
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
                 continue;
+            };
+            let f = &ws.module(fmod).functions[fid];
+            if matches!(
+                crate::intrinsics::expand_kind(f),
+                Some(ExpandKind::ShaderPipeline)
+            ) {
+                shader_expansion_args.extend(args.clone().into_iter());
             }
-            let fname = f.name;
-            return Some(CompilerError::new_with_label(
-                body.expr_spans[e],
-                format!(
-                    "`{fname}` is GPU-only and cannot be called from CPU (Lua) code. \
-                     Shader helper code that calls `{fname}` must annotate its fn `@shader(...)` \
-                     or `@gpu_only`."
-                ),
-            ));
+        }
+        for (e, expr) in body.expr_arena.iter() {
+            match expr {
+                Expr::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    ..
+                } => {
+                    let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                        continue;
+                    };
+                    let f = &ws.module(fmod).functions[fid];
+                    if !crate::intrinsics::is_gpu_only(f) {
+                        continue;
+                    }
+                    let fname = f.name;
+                    return Some(CompilerError::new_with_label(
+                        body.expr_spans[e],
+                        format!(
+                            "`{fname}` is GPU-only and cannot be called from CPU (Lua) code. \
+                             Shader helper code that calls `{fname}` must annotate its fn \
+                             `@shader(...)` or `@gpu_only`."
+                        ),
+                    ));
+                }
+                Expr::Global(name) if !shader_expansion_args.contains(&e) => {
+                    let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                        continue;
+                    };
+                    let f = &ws.module(fmod).functions[fid];
+                    if !crate::intrinsics::is_gpu_context(f) {
+                        continue;
+                    }
+                    let fname = f.name;
+                    let kind =
+                        if crate::intrinsics::is_gpu_only(f) { "GPU-only" } else { "a shader entry" };
+                    return Some(CompilerError::new_with_label(
+                        body.expr_spans[e],
+                        format!(
+                            "`{fname}` is {kind} and cannot be used as a fn value from CPU \
+                             (Lua) code"
+                        ),
+                    ));
+                }
+                _ => {}
+            }
         }
     }
     None

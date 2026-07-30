@@ -536,11 +536,15 @@ fn run_emitted_tests(
     // No @test functions: fall back to the load-only validity gate.
     if tests.is_empty() {
         match rock_host::lua_runner::run_lua_code_with_timeout(lua, timeout) {
-            Ok(out) if !out.contains("STDERR:") => return Ok(SkullOutcome::Pass { tests: 0 }),
+            Ok(out) if out.success => return Ok(SkullOutcome::Pass { tests: 0 }),
             Ok(out) => {
                 return Err(SkullFailure {
                     reason: "invalid lua emitted (skull bug)".to_string(),
-                    rendered: format!("{out}\n\n--- emitted lua (truncated) ---\n{}", truncate(lua)),
+                    rendered: format!(
+                        "{}\n\n--- emitted lua (truncated) ---\n{}",
+                        out.combined(),
+                        truncate(lua)
+                    ),
                 });
             }
             Err(e) => {
@@ -554,8 +558,13 @@ fn run_emitted_tests(
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
     let program = format!("{lua}{}", build_test_harness(tests));
-    let stdout = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
-        Ok(s) => s,
+    // The harness `pcall`s each test, so an ordinary assertion failure becomes a
+    // FAIL marker and the process still exits 0. A non-zero status therefore
+    // means the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
+    // after that point never ran. Keep the output either way: a truncated run
+    // still has to say what it managed to report.
+    let (stdout, died) = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
+        Ok(run) => (run.combined(), !run.success),
         Err(e) => {
             return Err(SkullFailure {
                 reason: "test run errored (skull bug)".to_string(),
@@ -593,6 +602,28 @@ fn run_emitted_tests(
             Ok(()) => passed += 1,
             Err(detail) => fails.push(format!("{name}: {detail}")),
         }
+    }
+
+    // Every declared test owes exactly one marker. Counting only the markers
+    // that ARRIVED makes a truncated run self-consistent -- three tests, one
+    // marker, `1/1 passed` -- so the tests that never ran leave the total
+    // instead of failing it. This is the only signal for a premature
+    // `os.exit(0)`, which exits success and emits no marker at all.
+    // A PASS marker carries no test name, so this counts rather than names them.
+    let reported = passed + fails.len();
+    if reported < tests.len() {
+        fails.push(format!(
+            "the run stopped early: {} of {} @tests never reported{}",
+            tests.len() - reported,
+            tests.len(),
+            if died { "; the process died" } else { "; the process exited 0" }
+        ));
+    } else if died {
+        fails.push(
+            "every @test reported, but the harness process exited non-zero -- \
+             something after the tests failed"
+                .to_string(),
+        );
     }
 
     if fails.is_empty() {
@@ -1072,8 +1103,17 @@ pub fn skull_run(path: &str) -> Result<()> {
         lua
     };
     match rock_host::lua_runner::run_lua_code(&program) {
-        Ok(output) => {
-            print!("{}", output);
+        Ok(run) => {
+            print!("{}", run.stdout);
+            if !run.stderr.is_empty() {
+                eprint!("{}", run.stderr);
+            }
+            // The program's own exit status is the answer. Printing a crash and
+            // returning Ok is how `rock run` used to exit 0 on a dead program.
+            if !run.success {
+                log::error!(target: "SKULL", "program exited with a runtime error");
+                std::process::exit(1);
+            }
             Ok(())
         }
         Err(e) => {
@@ -1251,13 +1291,14 @@ fn build_rock_globals_registry(
         let Some(pkg) = matched else { continue };
         let entry = by_package.entry(pkg.to_string()).or_default();
         for (_gid, g) in m.globals.iter() {
-            // A `nobox` global has no slot under its own name -- it IS its leaf
-            // globals, so that is what reflection reads and restores. Listing the
-            // base name would dump nil and restore nothing.
-            match skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
-                Some(leaves) => entry.extend(leaves.iter().map(|l| l.to_string())),
-                None => entry.push(g.name.as_str().to_string()),
-            }
+            // Every global is published under its LOGICAL name, `nobox` or not.
+            // A `nobox` global has no slot under that name -- its storage IS its
+            // leaves -- so the name alone would dump nil and restore nothing;
+            // `__ROCK_NOBOX_GLOBALS` carries the rebuild/take-apart pair, and the
+            // consumers go through `__rock_global_get`/`_set` rather than `_G[name]`.
+            // Publishing leaves here instead (which is what this did) put physical
+            // names in the dump, in save files and in replay keyframes.
+            entry.push(g.name.as_str().to_string());
         }
     }
     by_package.retain(|_, names| !names.is_empty());
@@ -1279,7 +1320,122 @@ fn build_rock_globals_registry(
         out.push_str("},");
     }
     out.push_str("}\n");
+    // The accessor table rides WITH the registry, never appended separately: four
+    // emit paths append this block, and a registry whose consumers had no
+    // accessors would read nil for every `nobox` global.
+    out.push_str(&build_nobox_global_accessors(ws));
     out
+}
+
+/// Build `_G.__ROCK_NOBOX_GLOBALS`, the rebuild/take-apart pair per `nobox`
+/// global. A `nobox` global's storage is its leaf globals, so reflection cannot
+/// reach it by name; these two closures are what `__rock_global_get`/`_set` call
+/// so every consumer addresses the LOGICAL value under the LOGICAL name.
+///
+/// Both directions come off one canonical leaf-path sequence
+/// (`nobox_global_shape_paths`), so they cannot drift from each other or from the
+/// storage: `get` is the positional leaf ctor over the leaves in that order, and
+/// `set` assigns `v.<path>` per leaf in the same order. The ctor suffix follows
+/// the same three-way rule as every other pack site (`skull-codegen-lua`'s
+/// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
+/// otherwise the GC tier's table ctor or the cdata one.
+///
+/// Position past the global defs is irrelevant -- the closures only read the leaf
+/// globals when called (same argument as the registry block it rides with).
+fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> String {
+    use bone_semantic::prelude::ModuleId;
+
+    let mut rows: Vec<String> = Vec::new();
+    for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (_gid, g) in m.globals.iter() {
+            let Some((ty_name, paths, nullable)) =
+                skull_mir::lower::nobox_global_shape_paths(ws, g.ty)
+            else {
+                continue;
+            };
+            let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
+                .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
+            // A nullable global leads with a presence leaf that has no path: it is
+            // not a field, so it is branched on rather than read. Everything below
+            // pairs the REMAINING leaves with the paths.
+            let (present, leaves) = if nullable {
+                let (p, rest) = leaves.split_first().expect("a nullable shape has a presence leaf");
+                (Some(*p), rest.to_vec())
+            } else {
+                (None, leaves)
+            };
+            if leaves.len() != paths.len() {
+                log::error!(
+                    target: "SKULL",
+                    "nobox global `{}`: {} leaves but {} leaf paths -- the ctor is \
+                     positional over the paths, so an accessor built from a \
+                     mismatched pair would write one leaf's value into another",
+                    g.name, leaves.len(), paths.len()
+                );
+                std::process::exit(1);
+            }
+            // A path that is a proper PREFIX of another is a nullable nested
+            // field's presence leaf, not a readable field: `v.<path>` would hand
+            // the write side the nested value where the ctor wants the tag. No
+            // in-tree shape reaches this, and guessing is how a leak becomes a
+            // miscompile -- so reject instead of emitting a wrong accessor.
+            if let Some(p) = paths
+                .iter()
+                .find(|p| paths.iter().any(|q| q.as_str().starts_with(&format!("{p}."))))
+            {
+                log::error!(
+                    target: "SKULL",
+                    "nobox global `{}` of type `{ty_name}` has a presence leaf \
+                     (`{p}`), which reflection cannot yet rebuild: its logical \
+                     value is not addressable as `v.{p}`. Mechanism J of \
+                     docs/nobox-case-matrix.md covers the readable shapes only.",
+                    g.name
+                );
+                std::process::exit(1);
+            }
+            let suffix = if paths.iter().any(|p| p.contains('.')) {
+                "_lct"
+            } else if skull_mir::lower::value_struct_is_gc(ws, ty_name) {
+                "_vt"
+            } else {
+                "_ct"
+            };
+            let args = leaves.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
+            let writes = leaves
+                .iter()
+                .zip(&paths)
+                .map(|(l, p)| format!("{l} = v.{p}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let (get, set) = match present {
+                // Presence gates BOTH directions: rebuilding an absent value would
+                // hand reflection a struct of nils, and a write that left the leaves
+                // behind would let a later read resurrect the old value.
+                Some(p) => (
+                    format!("if not {p} then return nil end return {ty_name}{suffix}({args})"),
+                    format!(
+                        "{p} = v ~= nil; if v ~= nil then {writes} else {} end",
+                        leaves
+                            .iter()
+                            .map(|l| format!("{l} = nil"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                ),
+                None => (format!("return {ty_name}{suffix}({args})"), writes),
+            };
+            rows.push(format!(
+                "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
+                g.name.as_str()
+            ));
+        }
+    }
+    // Assigned even when EMPTY. A full reload re-executes the chunk in the live
+    // process, so what the new chunk omits it inherits: emitting nothing here
+    // would leave the previous build's accessors installed, and changing the last
+    // `nobox` global to an ordinary one would keep reflection reading leaf globals
+    // that no longer back it.
+    format!("\n_G.__ROCK_NOBOX_GLOBALS = {{{}}}\n", rows.concat())
 }
 
 /// Collect `@sim` info from the bone workspace -- the skull analog of rock's
@@ -1423,8 +1579,17 @@ fn skull_run_project(dir: &str) -> Result<()> {
         lua
     };
     match rock_host::lua_runner::run_lua_code(&program) {
-        Ok(output) => {
-            print!("{}", output);
+        Ok(run) => {
+            print!("{}", run.stdout);
+            if !run.stderr.is_empty() {
+                eprint!("{}", run.stderr);
+            }
+            // The program's own exit status is the answer. Printing a crash and
+            // returning Ok is how `rock run` used to exit 0 on a dead program.
+            if !run.success {
+                log::error!(target: "SKULL", "program exited with a runtime error");
+                std::process::exit(1);
+            }
             Ok(())
         }
         Err(e) => {
@@ -1670,8 +1835,8 @@ impl ExecOutcome {
 fn exec_lua(program: &str) -> ExecOutcome {
     let timeout = Some(Duration::from_secs(15));
     match rock_host::lua_runner::run_lua_code_with_timeout(program, timeout) {
-        Ok(out) if out.contains("STDERR:") => ExecOutcome::Errored(out),
-        Ok(out) => ExecOutcome::Output(out),
+        Ok(out) if !out.success => ExecOutcome::Errored(out.combined()),
+        Ok(out) => ExecOutcome::Output(out.combined()),
         Err(e) => ExecOutcome::Errored(format!("lua runner failed: {e}")),
     }
 }

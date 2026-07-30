@@ -8,9 +8,9 @@
 //! luajit emitter's `callee_name` does, and a call whose specialization was not
 //! emitted must reject rather than fall back to the boxed shared body.
 //!
-//! `sort` is the case where the specialized lowering itself refuses -- the key
-//! function needs a whole element -- and JS now reports the same rejection
-//! luajit does instead of running the boxed body and dying on `undefined._data`.
+//! `sort` is the case JS cannot serve at all: luajit applies the key to the
+//! leaves through `__rock_col_sort_leaves`, which has no JS body, so JS rejects
+//! instead of running the boxed body and dying on `undefined._data`.
 
 use std::process::Command;
 
@@ -122,15 +122,17 @@ fn a_specialized_column_call_round_trips_under_node() {
     assert_eq!(s.trim(), "11", "wrong result\n{program}");
 }
 
-/// `sort` over a column element: the specialized lowering refuses (the key fn
-/// needs a whole element), so JS reports the SAME rejection luajit does. The
-/// alternative -- resolving to the shared body -- is the soundness hole `nobox`
-/// exists to prevent, and it died at runtime on `undefined._data`.
+/// `sort` over a column element: luajit serves it by applying the key to the
+/// leaves (mechanism G, `__rock_col_sort_leaves`), which has no JS body, so JS
+/// rejects on the missing body. What this pins is that it REJECTS -- resolving
+/// to the shared boxed body instead is the soundness hole `nobox` exists to
+/// prevent, and it died at runtime on `undefined._data`. Serving it on JS is a
+/// backlog item; when that body lands this flips to a round-trip.
 #[test]
-fn an_unservable_column_sort_rejects_as_it_does_on_lua() {
+fn an_unservable_column_sort_rejects_on_js() {
     let e = emit_js("sorted").expect_err("column-stored nobox sort must reject on JS");
     assert!(
-        e.contains("column-stored nobox value `NV2`"),
-        "expected luajit's column-sort rejection, got: {e}"
+        e.contains("__rock_col_sort_leaves") && e.contains("Js"),
+        "expected the missing-JS-body rejection for the leaf sort helper, got: {e}"
     );
 }

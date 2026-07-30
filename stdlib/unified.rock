@@ -10,13 +10,6 @@ struct __DecoTarget {
     func: any,
 }
 
-struct ArenaEntry<T> {
-    _data: T,
-    index: int,
-    generation: int,
-    is_occupied: bool,
-}
-
 @pure @inline inline(lua) fn int(value: int) -> int = "return value"
 
 @pure fn int(value: float) -> int { return floor(value) as int }
@@ -564,8 +557,14 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // conditionally expensive invariant checks at the source level.
 @nomangle inline(lua) fn is_release_mode() -> bool = "return _G.__ROCK_RELEASE == true"
 
+// Bookkeeping SoA. A slot's index IS its position in every column, so the
+// per-entry wrapper (and the index it had to carry) is gone: arena ops touch
+// column SUBSETS -- `contains` reads occupancy+generations, `get` adds data,
+// `values()` never looks at generations at all.
 struct Arena<T> {
-    entries: [ArenaEntry<T>],
+    generations: [int],
+    occupied: [bool],
+    data: [T],
     free_indices: [int],
     occupied_count: int = 0,
 }
@@ -1624,13 +1623,19 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Column-storage counterparts, called by the lowering with ONE column table at
 // a time -- so the leaf count stays a compile-time fact and no runtime key walk
 // is needed.
-@nomangle inline(lua) fn __rock_col_insert(col: any, lua_index: int, value: any) = """
-    table.insert(col, lua_index, value)
+// `len` is passed in rather than read as `#col`. A column of a NULLABLE field
+// holds a real `nil` for every absent element, and `#` on a table with holes is
+// undefined in Lua -- so `table.insert` shifted a sparse column by a different
+// amount than its dense siblings (desyncing the rows) and a `#col`-bounded copy
+// stopped at the first hole. The Vec tracks the length; nothing here may guess it.
+@nomangle inline(lua) fn __rock_col_insert(col: any, lua_index: int, len: int, value: any) = """
+    for i = len, lua_index, -1 do col[i + 1] = col[i] end
+    col[lua_index] = value
 """
 
-@nomangle inline(lua) fn __rock_col_copy(col: any) -> any = """
+@nomangle inline(lua) fn __rock_col_copy(col: any, len: int) -> any = """
     local copy = {}
-    for i = 1, #col do copy[i] = col[i] end
+    for i = 1, len do copy[i] = col[i] end
     return copy
 """
 
@@ -1698,6 +1703,33 @@ inline(lua) fn table_new() -> any = """return {}"""
         out[i] = __rock_materialize_column_element(vec, i)
     end
     return out
+"""
+
+// The `nobox` counterpart. A fn value taking a `nobox` element takes its LEAVES,
+// which are exactly the columns, so the key is applied without an element ever
+// existing. `paths` is the ABI leaf order handed down from the lowering -- the
+// key fn binds positionally, so a runtime key walk (`__rock_col_paths`, which is
+// alphabetical) would silently transpose the arguments.
+@nomangle inline(lua) fn __rock_col_sort_leaves(vec: any, key_fn: any, paths: any) = """
+    local n = vec.len or 0
+    local width = #paths
+    local cols = {}
+    for j = 1, width do cols[j] = vec[paths[j]] end
+    local order, leaves = {}, {}
+    for i = 1, n do order[i] = i end
+    -- The key is applied per COMPARISON, as both other sorts do; a decorate-sort
+    -- would be fewer calls but a different observable for a key fn with effects.
+    local function key_at(i)
+        for j = 1, width do leaves[j] = cols[j][i] end
+        return key_fn(unpack(leaves, 1, width))
+    end
+    table.sort(order, function(a, b) return key_at(a) < key_at(b) end)
+    for j = 1, width do
+        local col = cols[j]
+        local tmp = {}
+        for i = 1, n do tmp[i] = col[order[i]] end
+        for i = 1, n do col[i] = tmp[i] end
+    end
 """
 
 @nomangle inline(lua) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
