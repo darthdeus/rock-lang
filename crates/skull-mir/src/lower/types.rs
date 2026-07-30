@@ -217,7 +217,46 @@ impl Builder<'_> {
         if let Some(shape) = self.expr_tuple_shape(e).filter(TupleRetShape::splats) {
             return Some(RetSlot::Nested(shape));
         }
-        self.nobox_value_shape_of(e).map(RetSlot::Leaves)
+        let mut shape = self.nobox_value_shape_of(e)?;
+        // A join's shape must represent every value that reaches it, and the
+        // arms are right here. `if c { P { .. } } else { null }` infers as plain
+        // `P` -- the `null` arm does not widen it -- so reading nullability off
+        // the join EXPRESSION alone plans a shape with no presence leaf, and the
+        // null arm then splits nil into fields and faults. Widening from the arms
+        // cannot manufacture a phantom presence slot the way keying on a foreign
+        // expression's nullability would: an arm that can be null is a value the
+        // join has to carry, and if the sink is non-nullable bone has already
+        // rejected the program.
+        if !shape.nullable && self.join_arm_is_nullable(e) {
+            shape.nullable = true;
+        }
+        Some(RetSlot::Leaves(shape))
+    }
+
+    /// Whether any arm of a join expression can produce `null`. Arms are blocks,
+    /// so each is peeled to its tail value before asking.
+    fn join_arm_is_nullable(&self, e: Idx<Expr>) -> bool {
+        let arms: Vec<Idx<Expr>> = match &self.body.expr_arena[e] {
+            Expr::If { then_branch, else_branch, .. } => {
+                std::iter::once(*then_branch).chain(*else_branch).collect()
+            }
+            Expr::Match { arms, .. } => {
+                arms.clone().map(|a| self.body.match_arm_arena[a].body).collect()
+            }
+            _ => return false,
+        };
+        arms.into_iter().any(|a| {
+            let v = self.peel_block_tail(a);
+            self.is_null_lit(v) || self.expr_is_nullable(v)
+        })
+    }
+
+    /// A block arm's value is its tail; anything else is its own value.
+    fn peel_block_tail(&self, e: Idx<Expr>) -> Idx<Expr> {
+        match &self.body.expr_arena[e] {
+            Expr::Block { tail: Some(t), .. } => self.peel_block_tail(*t),
+            _ => e,
+        }
     }
 
     /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
