@@ -118,32 +118,31 @@ enum Surface {
     Emit,
 }
 
-/// Which stdlib the process reads. `stdlib/*.rock` is read from disk at runtime,
-/// so the marked variant is a patched COPY plus `ROCK_STDLIB_DIR` -- one binary,
-/// two stdlibs, the marker the only variable (`benchmarks/nobox-vec2/README.md`).
+/// Which stdlib the process reads. The checked-in stdlib has marked `Vec2`; the
+/// boxed control is a patched copy selected through `ROCK_STDLIB_DIR`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum StdlibVariant {
-    Vanilla,
-    Vec2Nobox,
+    CheckedIn,
+    Vec2Boxed,
 }
 
 /// Built ONCE per test process, into a directory unique to that process.
 ///
 /// Both halves are load-bearing. It used to run per spawned `rock` against one
-/// FIXED path, so every marked observation delete-and-rebuilt the stdlib that other
+/// FIXED path, so every boxed observation delete-and-rebuilt the stdlib that other
 /// in-flight compiles were reading. `OnceLock` alone does not fix it: nextest runs
 /// each test in its own process, so a shared fixed path is still two processes
 /// clobbering one directory. Nothing had failed yet, which is luck rather than
 /// safety -- a torn read misclassifies a verdict instead of erroring, so the
 /// failure mode is a WRONG BUCKET, not a crash.
-fn marked_stdlib() -> PathBuf {
+fn boxed_stdlib() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(build_marked_stdlib).clone()
+    DIR.get_or_init(build_boxed_stdlib).clone()
 }
 
-fn build_marked_stdlib() -> PathBuf {
+fn build_boxed_stdlib() -> PathBuf {
     let dir = std::env::temp_dir()
-        .join(format!("rock_shape_oracle_stdlib_vec2_nobox_{}", std::process::id()));
+        .join(format!("rock_shape_oracle_stdlib_vec2_boxed_{}", std::process::id()));
     let src = repo_root().join("stdlib");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -154,12 +153,12 @@ fn build_marked_stdlib() -> PathBuf {
         }
         let mut text = std::fs::read_to_string(entry.path()).unwrap();
         if entry.file_name() == std::ffi::OsStr::new("vec.rock") {
-            let marked = text.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
+            let boxed = text.replace("\nnobox value Vec2 {", "\nvalue Vec2 {");
             assert_ne!(
-                marked, text,
-                "stdlib/vec.rock no longer declares `value Vec2 {{`"
+                boxed, text,
+                "stdlib/vec.rock no longer declares `nobox value Vec2 {{`"
             );
-            text = marked;
+            text = boxed;
         }
         std::fs::write(dir.join(entry.file_name()), text).unwrap();
     }
@@ -171,8 +170,8 @@ fn run_rock(args: &[&str], stdlib: StdlibVariant) -> (String, bool) {
     cmd.current_dir(repo_root())
         .args(args)
         .env("ROCK_TEST_VERBOSE", "1");
-    if stdlib == StdlibVariant::Vec2Nobox {
-        cmd.env("ROCK_STDLIB_DIR", marked_stdlib());
+    if stdlib == StdlibVariant::Vec2Boxed {
+        cmd.env("ROCK_STDLIB_DIR", boxed_stdlib());
     }
     let out = cmd.output().expect("failed to spawn the rock binary");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -502,7 +501,7 @@ const SEEDS: &[SeedCase] = &[
         name: "column_read_widen",
         file: "column_read_widen.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("column read widened to `T?` (fixed, cad7fa39d)"),
     },
@@ -510,7 +509,7 @@ const SEEDS: &[SeedCase] = &[
         name: "cast_name_hijack",
         file: "cast_name_hijack.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("`cast` name hijack (fixed, b10cf9274)"),
     },
@@ -518,7 +517,7 @@ const SEEDS: &[SeedCase] = &[
         name: "cast_shadow_call_shapes",
         file: "cast_shadow_call_shapes.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("`cast` name hijack, deepened to a value-struct argument"),
     },
@@ -526,7 +525,7 @@ const SEEDS: &[SeedCase] = &[
         name: "cast_shadow_fn_value_reference",
         file: "cast_shadow_fn_value_reference.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::LoudReject {
             names: "ambiguous fn-value reference",
         },
@@ -536,7 +535,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nullable_read_aliasing",
         file: "nullable_read_aliasing.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("nullable whole-value read aliases (fixed, presence-aware copy-out)"),
     },
@@ -546,7 +545,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nullable_read_aliasing_js",
         file: "nullable_read_aliasing.rock",
         surface: Surface::Js,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("nullable whole-value read aliases (fixed, shared MIR lowering)"),
     },
@@ -554,7 +553,7 @@ const SEEDS: &[SeedCase] = &[
         name: "value_local_field_write",
         file: "value_local_field_write.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::LoudReject {
             names: "immutable local",
         },
@@ -564,7 +563,7 @@ const SEEDS: &[SeedCase] = &[
         name: "value_place_roots",
         file: "value_place_roots.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
@@ -572,7 +571,7 @@ const SEEDS: &[SeedCase] = &[
         name: "fn_value_off_field",
         file: "fn_value_off_field.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::LoudReject {
             names: "survived lowering",
         },
@@ -582,7 +581,7 @@ const SEEDS: &[SeedCase] = &[
         name: "fn_value_off_field_bound",
         file: "fn_value_off_field_bound.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
@@ -590,7 +589,7 @@ const SEEDS: &[SeedCase] = &[
         name: "lambda_returning_nobox_at_let",
         file: "lambda_returning_nobox_at_let.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::LoudReject {
             names: "survived lowering",
         },
@@ -603,17 +602,15 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_tuple_return_projected",
         file: "nobox_tuple_return_projected.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
-        expect: Expect::LoudReject {
-            names: "survived lowering",
-        },
-        gap: Some("M3: a nobox projected off a fn's tuple return at the call (LIVE)"),
+        stdlib: StdlibVariant::CheckedIn,
+        expect: Expect::Correct,
+        gap: None,
     },
     SeedCase {
         name: "nobox_coalesce_at_ctor_field",
         file: "nobox_coalesce_at_ctor_field.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         // Was an M5 GAP and is now CORRECT: `fold_never_nil_compares` made the
         // coalesce's box eliminable, so the nobox value stops surviving lowering.
         // This is the item-2 trace confirmed by a fix -- the mechanism was never the
@@ -625,7 +622,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_lambda_literal_position",
         file: "nobox_lambda_literal_position.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::LoudReject {
             names: "survived lowering",
         },
@@ -637,7 +634,7 @@ const SEEDS: &[SeedCase] = &[
         surface: Surface::Glsl {
             entry: "shape_probe_frag",
         },
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::Vec2Boxed,
         expect: Expect::Correct,
         gap: None,
     },
@@ -647,7 +644,7 @@ const SEEDS: &[SeedCase] = &[
         surface: Surface::Glsl {
             entry: "shape_probe_frag",
         },
-        stdlib: StdlibVariant::Vec2Nobox,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("GLSL locals inherit nobox repr (fixed, `is_nobox_struct` gates on `values_first_class`)"),
     },
@@ -655,7 +652,7 @@ const SEEDS: &[SeedCase] = &[
         name: "shader_registration_fn_body_unmarked",
         file: "shader_registration_fn_value.rock",
         surface: Surface::Emit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::Vec2Boxed,
         expect: Expect::Correct,
         gap: None,
     },
@@ -663,7 +660,7 @@ const SEEDS: &[SeedCase] = &[
         name: "shader_registration_fn_body_vec2_marked",
         file: "shader_registration_fn_value.rock",
         surface: Surface::Emit,
-        stdlib: StdlibVariant::Vec2Nobox,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some(
             "NEW: `rock_shader(<entry>)` in a FN BODY rejects under marking; the \
@@ -674,7 +671,7 @@ const SEEDS: &[SeedCase] = &[
         name: "shader_registration_global_init_unmarked",
         file: "shader_registration_global_init.rock",
         surface: Surface::Emit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::Vec2Boxed,
         expect: Expect::Correct,
         gap: None,
     },
@@ -685,7 +682,7 @@ const SEEDS: &[SeedCase] = &[
         name: "shader_registration_global_init_vec2_marked",
         file: "shader_registration_global_init.rock",
         surface: Surface::Emit,
-        stdlib: StdlibVariant::Vec2Nobox,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
@@ -703,7 +700,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_tuple_return_projected_control",
         file: "nobox_tuple_return_projected_control.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
@@ -711,7 +708,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_coalesce_at_ctor_field_control",
         file: "nobox_coalesce_at_ctor_field_control.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
@@ -719,28 +716,23 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_lambda_literal_position_control",
         file: "nobox_lambda_literal_position_control.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
-    // The exemption's SCOPE. `materialize` evaluates its argument, so a fn name there
-    // is a real runtime fn value: exempting every ExpandKind opened a hole that turned
-    // this spanned rejection into a runtime failure.
     SeedCase {
         name: "expansion_arg_exemption_scope",
         file: "expansion_arg_exemption_scope.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
-        expect: Expect::LoudReject {
-            names: "cannot be taken as a fn value",
-        },
-        gap: None,
+        stdlib: StdlibVariant::CheckedIn,
+        expect: Expect::Correct,
+        gap: Some("top-level fn values use the type-derived nobox ABI"),
     },
     SeedCase {
         name: "index_place_refinement",
         file: "index_place_refinement.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::LoudReject {
             names: "on non-struct type",
         },
@@ -750,7 +742,7 @@ const SEEDS: &[SeedCase] = &[
         name: "index_place_refinement_field_control",
         file: "index_place_refinement_field_control.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
@@ -758,7 +750,7 @@ const SEEDS: &[SeedCase] = &[
         name: "index_place_refinement_bound_control",
         file: "index_place_refinement_bound_control.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: None,
     },
@@ -770,7 +762,7 @@ const SEEDS: &[SeedCase] = &[
         name: "embed_safenav_leaf_projection",
         file: "embed_safenav_leaf_projection.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("H1 FIXED: safe-nav composes through `physical_field` instead of \
                    emitting a bare-key read"),
@@ -779,7 +771,7 @@ const SEEDS: &[SeedCase] = &[
         name: "embed_safenav_leaf_projection_control",
         file: "embed_safenav_leaf_projection_control.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("H1 control: scopes the defect to safe-nav, not to embed fields"),
     },
@@ -787,7 +779,7 @@ const SEEDS: &[SeedCase] = &[
         name: "embed_safenav_nullable_field",
         file: "embed_safenav_nullable_field.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("H1 FIXED: a nullable embed field no longer yields its presence tag"),
     },
@@ -795,7 +787,7 @@ const SEEDS: &[SeedCase] = &[
         name: "embed_match_destructure",
         file: "embed_match_destructure.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("H2 FIXED: a destructure binding rebuilds from the parent's leaves"),
     },
@@ -804,7 +796,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nullable_struct_field",
         file: "nobox_nullable_struct_field.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("A FIXED: the struct-field context threads a nested presence tag"),
     },
@@ -812,7 +804,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nullable_struct_field_control",
         file: "nobox_nullable_struct_field_control.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("A control: scopes it to the `?`, not to nesting"),
     },
@@ -820,7 +812,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nullable_enum_payload",
         file: "nobox_nullable_enum_payload.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
             flip_when: "an enum repr gains a place for a MULTI-LEAF value payload. \
@@ -836,7 +828,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nonnullable_enum_payload_escaping",
         file: "nobox_nonnullable_enum_payload_escaping.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
             flip_when: "same as its nullable twin -- both flip together, which is \
@@ -848,16 +840,14 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nullable_vec_element",
         file: "nobox_nullable_vec_element.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "a column set can carry a TOP-LEVEL nullable element, i.e. a \
-                        presence column. `leaf_paths_rec` handles a nullable NESTED \
-                        shape only and says so outright; `vec_column_elem_of` bails \
-                        at `_ => None` on the `Nullable` element before any shape is \
-                        built. This one IS mechanism A, but it is a build, not an arm",
-        },
-        gap: Some("A: nullable nobox Vec element"),
+        stdlib: StdlibVariant::CheckedIn,
+        expect: Expect::Correct,
+        gap: Some(
+            "A FIXED: `[P?]` carries a PRESENCE column (`@p`) beside its leaf \
+             columns. It did not come along free with the nested-shape arm -- the \
+             key is minted by `column_leaf_paths`, not `leaf_paths_rec`, and \
+             specialization had to learn `T = E?` first",
+        ),
     },
     // --- mechanism A: CONSUMER guards between step and step ------------------
     // Each rejects TODAY for the UPSTREAM reason (no shape exists at all). The
@@ -868,7 +858,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nested_nullable_leaf_paths",
         file: "nobox_nested_nullable_leaf_paths.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("A consumer FIXED: `leaf_paths_rec` names the nested presence leaf"),
     },
@@ -876,7 +866,7 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nested_nullable_leaf_params",
         file: "nobox_nested_nullable_leaf_params.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::Correct,
         gap: Some("A: the scalar-ABI leaf COUNT carries the nested presence tag"),
     },
@@ -884,41 +874,40 @@ const SEEDS: &[SeedCase] = &[
         name: "nobox_nested_nullable_embed_group",
         file: "nobox_nested_nullable_embed_group.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "`embed_leaf_values`' literal walk contributes a nested VALUE \
-                        field's own leaves instead of one boxed leaf. NOT \
-                        `embed_group` (it reads, and recurses correctly) and NOT \
-                        nullability -- the non-nullable control rejects identically",
-        },
-        gap: Some("nested value field inside an embed field -- the splice, not the read"),
+        stdlib: StdlibVariant::CheckedIn,
+        expect: Expect::Correct,
+        gap: Some("A: a nullable nested field makes the outer LEAF-TABLE, so the embed \
+                   splice contributes its dotted leaves"),
     },
-    // The control that falsified the filing above. Two narrower controls place the
-    // boundary: the same nesting in a plain global works, and an embed of an
-    // all-primitive nobox works.
+    // The control, and the two now differ: nullability of the nested field IS the
+    // discriminant, because it is what makes the outer GC-tier and therefore
+    // leaf-table. A non-nullable nested value field leaves the outer FFI-clean, so
+    // the embed splice still lowers it to one boxed leaf.
     SeedCase {
         name: "nobox_nonnullable_embed_nested_value",
         file: "nobox_nonnullable_embed_nested_value.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
+        stdlib: StdlibVariant::CheckedIn,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
-            flip_when: "same as its nullable twin -- both flip together",
+            flip_when: "`embed_leaf_values`' literal walk contributes an FFI-CLEAN \
+                        nested value field's own leaves instead of one boxed leaf. \
+                        Its nullable twin already passes: that outer is leaf-table, \
+                        so the same walk already reaches the dotted leaves",
         },
-        gap: Some("control: proves the embed-nesting gap is not nullability"),
+        gap: Some("FFI-clean nested value field inside an embed field -- the splice, \
+                   not the read"),
     },
     SeedCase {
         name: "nobox_vec_combinator_element",
         file: "nobox_vec_combinator_element.rock",
         surface: Surface::Luajit,
-        stdlib: StdlibVariant::Vanilla,
-        expect: Expect::Miscompile {
-            flip_when: "specialized bound calls (lower.rs:4957) consume the concrete \
-                        tuple return shape instead of a hardcoded 2 slots -- a \
-                        specialization/tuple-ABI fix, NOT the H1/H2 field-read fix",
-        },
-        gap: Some("I: generic return-shape mismatch at the bound-call boundary"),
+        stdlib: StdlibVariant::CheckedIn,
+        expect: Expect::Correct,
+        gap: Some(
+            "I FIXED: the splice sizes `next`'s dests from the CONCRETE callee and \
+             repacks the element from its leaves",
+        ),
     },
 ];
 
@@ -2178,7 +2167,7 @@ fn run_sweep(label: &str, shapes: &[Shape], surface: Surface, tmp: &str) -> Swee
         };
         let file = dir.join(format!("{}.rock", shape.name()));
         std::fs::write(&file, &prog.source).unwrap();
-        let obs = observe(&file, surface, StdlibVariant::Vanilla);
+        let obs = observe(&file, surface, StdlibVariant::CheckedIn);
         *counts.entry(obs.bucket).or_insert(0) += 1;
         match obs.bucket {
             Bucket::Miscompile => {
@@ -2378,7 +2367,7 @@ fn the_emitted_shape_holds_the_materialization_invariants() {
         let name = shape.name();
         let file = dir.join(format!("{name}.rock"));
         std::fs::write(&file, &prog.source).unwrap();
-        let lua = match emitted_lua(&file, StdlibVariant::Vanilla) {
+        let lua = match emitted_lua(&file, StdlibVariant::CheckedIn) {
             Ok(lua) => lua,
             Err(_) => {
                 *counts.entry(Bucket::LoudReject).or_insert(0) += 1;
@@ -2412,7 +2401,7 @@ fn the_emitted_shape_holds_the_materialization_invariants() {
     let corpus = corpus_dir();
     let mut seed_report = String::from("\nemitted-shape seeds:\n");
     for seed in EMIT_SEEDS {
-        let lua = match emitted_lua(&corpus.join(seed.file), StdlibVariant::Vanilla) {
+        let lua = match emitted_lua(&corpus.join(seed.file), StdlibVariant::CheckedIn) {
             Ok(lua) => lua,
             Err(e) => {
                 complaints.push(format!("{}: expected to EMIT, rejected: {e}", seed.name));
@@ -2424,7 +2413,7 @@ fn the_emitted_shape_holds_the_materialization_invariants() {
         let obs = observe(
             &corpus.join(seed.file),
             Surface::Luajit,
-            StdlibVariant::Vanilla,
+            StdlibVariant::CheckedIn,
         );
         if obs.bucket != Bucket::Correct {
             complaints.push(format!(
@@ -2514,7 +2503,7 @@ fn the_pairwise_sweep_on_js_finds_no_unexpected_miscompile() {
         let name = shape.name();
         let file = dir.join(format!("{name}.rock"));
         std::fs::write(&file, &prog.source).unwrap();
-        let obs = observe(&file, Surface::Js, StdlibVariant::Vanilla);
+        let obs = observe(&file, Surface::Js, StdlibVariant::CheckedIn);
         *counts.entry(obs.bucket).or_insert(0) += 1;
         if obs.bucket == Bucket::Miscompile {
             if KNOWN_MISCOMPILES.iter().any(|(n, _)| *n == name) {
@@ -2683,8 +2672,8 @@ impl GlslShape {
             self.production,
             self.consumption,
             match self.stdlib {
-                StdlibVariant::Vanilla => "unmarked",
-                StdlibVariant::Vec2Nobox => "vec2nobox",
+                StdlibVariant::CheckedIn => "vec2nobox",
+                StdlibVariant::Vec2Boxed => "vec2boxed",
             }
         )
         .to_lowercase()
@@ -2711,7 +2700,8 @@ const GLSL_CONSUMPTIONS: [GlslConsumption; 5] = [
     GlslConsumption::Intrinsic,
     GlslConsumption::GpuOnlyIntrinsic,
 ];
-const GLSL_STDLIBS: [StdlibVariant; 2] = [StdlibVariant::Vanilla, StdlibVariant::Vec2Nobox];
+const GLSL_STDLIBS: [StdlibVariant; 2] =
+    [StdlibVariant::Vec2Boxed, StdlibVariant::CheckedIn];
 
 const GLSL_AXES: [usize; 5] = [
     GLSL_VECS.len(),

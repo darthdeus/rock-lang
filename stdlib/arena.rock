@@ -24,21 +24,21 @@ fn entity_key<T>(entity: Entity<T>) -> string {
     return "{entity._index}:{entity._generation}"
 }
 
-fn arena_entry_new<T>(data: T, index: int, generation: int) -> ArenaEntry<T> {
-    return ArenaEntry {
-        _data: data,
-        index: index,
-        generation: generation,
-        is_occupied: true,
-    }
-}
-
 fn arena_new<T>() -> Arena<T> {
-    return Arena { entries: [], free_indices: [], occupied_count: 0 }
+    return Arena { generations: [], occupied: [], data: [], free_indices: [], occupied_count: 0 }
 }
 
 // Helper functions for arena
 fn arena_pop_free_index(free_indices: [int]) -> int { return pop(free_indices).unwrap() }
+
+// Whether `index` names a live slot matching `generation`. The single
+// occupancy+generation test every op shares -- `occupied.get` doubles as the
+// range check, returning null past the end.
+fn arena_slot_live<T>(arena: Arena<T>, index: int, generation: int) -> bool {
+    let live = arena.occupied.get(index)
+    if is_null(live) || !live.unwrap() { return false }
+    return arena.generations[index] == generation
+}
 
 fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     let index: int = 0
@@ -48,15 +48,16 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     let has_free_indices: bool = vec_len(arena.free_indices) > 0
     if has_free_indices {
         index = arena_pop_free_index(arena.free_indices)
-        let entry = vec_get(arena.entries, index).unwrap()
-        generation = entry.generation + 1
-        entry._data = value
-        entry.generation = generation
-        entry.is_occupied = true
+        generation = arena.generations[index] + 1
+        arena.generations.set(index, generation)
+        arena.occupied.set(index, true)
+        arena.data.set(index, value)
     } else {
         generation = 0
-        index = vec_len(arena.entries)
-        vec_push(arena.entries, arena_entry_new(value, index, generation))
+        index = vec_len(arena.occupied)
+        vec_push(arena.generations, generation)
+        vec_push(arena.occupied, true)
+        vec_push(arena.data, value)
     }
 
     arena.occupied_count = arena.occupied_count + 1
@@ -64,29 +65,12 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
 }
 
 fn Arena<T>.get(arena, entity: Entity<T>) -> T? {
-    let index: int = entity._index
-    let entry: ArenaEntry<T>? = vec_get(arena.entries, index)
-    if is_null(entry) {
-        return null
-    } else {
-        let e: ArenaEntry<T> = entry.unwrap()
-        let occupied: bool = e.is_occupied
-
-        if !occupied {
-            return null
-        } else {
-            if e.generation != entity._generation { return null } else { return e._data }
-        }
-    }
+    if !arena_slot_live(arena, entity._index, entity._generation) { return null }
+    return arena.data[entity._index]
 }
 
 fn Arena<T>.contains(arena, entity: Entity<T>) -> bool {
-    let entry = vec_get(arena.entries, entity._index)
-    if is_null(entry) {
-        return false
-    }
-    let e = entry.unwrap()
-    return e.is_occupied && e.generation == entity._generation
+    return arena_slot_live(arena, entity._index, entity._generation)
 }
 
 fn Entity<T>.remove(entity) -> T? {
@@ -95,21 +79,13 @@ fn Entity<T>.remove(entity) -> T? {
 
 fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
     let index = entity._index
-    let entry = vec_get(arena.entries, index)
-    if is_null(entry) {
-        return null
-    } else {
-        let e = entry.unwrap()
-
-        if e.is_occupied && e.generation == entity._generation {
-            e.is_occupied = false
-            vec_push(arena.free_indices, index)
-            arena.occupied_count = arena.occupied_count - 1
-            return e._data
-        } else {
-            return null
-        }
-    }
+    if !arena_slot_live(arena, index, entity._generation) { return null }
+    // `data[index]` is left as-is: nothing reads a free slot (every read goes
+    // through the occupancy test), and clearing it would mean inventing a T.
+    arena.occupied.set(index, false)
+    vec_push(arena.free_indices, index)
+    arena.occupied_count = arena.occupied_count - 1
+    return arena.data[index]
 }
 
 fn Arena<T>.len(arena) -> int {
@@ -118,7 +94,9 @@ fn Arena<T>.len(arena) -> int {
 
 
 fn Arena<T>.clear(arena) {
-    arena.entries = []
+    arena.generations = []
+    arena.occupied = []
+    arena.data = []
     arena.free_indices = []
     arena.occupied_count = 0
 }
@@ -131,15 +109,13 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
     // to make the last occupied slot reachable.
     let random_index = random_int(0, len)
     let current_count = 0
-    let entries_len = vec_len(arena.entries)
+    let slots = vec_len(arena.occupied)
 
-    for i in 0..entries_len {
-        let entry = vec_get(arena.entries, i)
-        if !is_null(entry) && entry.unwrap().is_occupied {
+    for i in 0..slots {
+        if arena.occupied[i] {
             if current_count == random_index {
-                let unwrapped_entry = entry.unwrap()
-                let entity = Entity { _arena: arena, _index: unwrapped_entry.index, _generation: unwrapped_entry.generation }
-                return (entity, unwrapped_entry._data)
+                let entity = Entity { _arena: arena, _index: i, _generation: arena.generations[i] }
+                return (entity, arena.data[i])
             }
             current_count += 1
         }
@@ -165,83 +141,95 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
 // once per loop (mutation mid-iteration beyond removing the current element
 // is recorded UB).
 
+// Each iterator snapshots only the columns it yields from: `values()` never
+// touches generations, `keys()` never touches data.
+
 struct ArenaValIter<T> {
-    entries: [ArenaEntry<T>],
+    occupied: [bool],
+    data: [T],
     n: int,
     i: int,
 }
 
 @inline
 fn values<T>(a: Arena<T>) -> ArenaValIter<T> {
-    return ArenaValIter { entries: a.entries, n: a.entries.len, i: 0 }
+    return ArenaValIter { occupied: a.occupied, data: a.data, n: a.occupied.len, i: 0 }
 }
 
 @inline
 fn next<T>(it: ArenaValIter<T>) -> (bool, T) {
     let i = it.i
     if i >= it.n { return (false, phantom()) }
-    let slot = it.entries.get(i)
-    while is_null(slot) || !slot.unwrap().is_occupied {
+    while !it.occupied[i] {
         i = i + 1
         if i >= it.n { it.i = i; return (false, phantom()) }
-        slot = it.entries.get(i)
     }
     it.i = i + 1
-    return (true, slot.unwrap()._data)
+    return (true, it.data[i])
 }
 
 struct ArenaPairIter<T> {
     arena: Arena<T>,
-    entries: [ArenaEntry<T>],
+    occupied: [bool],
+    generations: [int],
+    data: [T],
     n: int,
     i: int,
 }
 
 @inline
 fn pairs<T>(a: Arena<T>) -> ArenaPairIter<T> {
-    return ArenaPairIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
+    return ArenaPairIter {
+        arena: a,
+        occupied: a.occupied,
+        generations: a.generations,
+        data: a.data,
+        n: a.occupied.len,
+        i: 0,
+    }
 }
 
 @inline
 fn next<T>(it: ArenaPairIter<T>) -> (bool, (Entity<T>, T)) {
     let i = it.i
     if i >= it.n { return (false, phantom()) }
-    let slot = it.entries.get(i)
-    while is_null(slot) || !slot.unwrap().is_occupied {
+    while !it.occupied[i] {
         i = i + 1
         if i >= it.n { it.i = i; return (false, phantom()) }
-        slot = it.entries.get(i)
     }
-    let e = slot.unwrap()
     it.i = i + 1
-    return (true, (Entity { _arena: it.arena, _index: e.index, _generation: e.generation }, e._data))
+    return (true, (Entity { _arena: it.arena, _index: i, _generation: it.generations[i] }, it.data[i]))
 }
 
 struct ArenaKeyIter<T> {
     arena: Arena<T>,
-    entries: [ArenaEntry<T>],
+    occupied: [bool],
+    generations: [int],
     n: int,
     i: int,
 }
 
 @inline
 fn keys<T>(a: Arena<T>) -> ArenaKeyIter<T> {
-    return ArenaKeyIter { arena: a, entries: a.entries, n: a.entries.len, i: 0 }
+    return ArenaKeyIter {
+        arena: a,
+        occupied: a.occupied,
+        generations: a.generations,
+        n: a.occupied.len,
+        i: 0,
+    }
 }
 
 @inline
 fn next<T>(it: ArenaKeyIter<T>) -> (bool, Entity<T>) {
     let i = it.i
     if i >= it.n { return (false, phantom()) }
-    let slot = it.entries.get(i)
-    while is_null(slot) || !slot.unwrap().is_occupied {
+    while !it.occupied[i] {
         i = i + 1
         if i >= it.n { it.i = i; return (false, phantom()) }
-        slot = it.entries.get(i)
     }
-    let e = slot.unwrap()
     it.i = i + 1
-    return (true, Entity { _arena: it.arena, _index: e.index, _generation: e.generation })
+    return (true, Entity { _arena: it.arena, _index: i, _generation: it.generations[i] })
 }
 
 @inline

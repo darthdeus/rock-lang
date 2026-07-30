@@ -529,7 +529,13 @@ fn emit_global_unit(
             out.pending_init = Some((g.name, key, line));
         }
         Ok(None) => {}
-        Err(e) => out.skipped = Some((g.name.as_str().to_string(), e.message)),
+        // A global initializer that fails to LOWER is a hard error, not a
+        // lenient skip. `skipped` drops the init and says nothing (it prints only
+        // under `SKULL_DEBUG_SKIPPED`), so the global silently becomes nil at
+        // runtime -- and when the failure is a GUARANTEE rejection, downgrading
+        // it is precisely what this struct's own contract forbids. A `nobox`
+        // fn-value ABI rejection landed here and vanished.
+        Err(e) => out.hard_error = Some(e),
     }
     out
 }
@@ -1763,9 +1769,14 @@ fn assemble(
                     match f.return_ty.and_then(|t| extern_ret_value_struct(ws, t)) {
                         Some(sname) => {
                             let call_args = if params.is_empty() { "__out".to_string() } else { format!("__out, {params}") };
+                            // Returns an OWNING copy, never `__out[0]`. LuaJIT does
+                            // not keep the parent array alive through a reference
+                            // into it, so handing one back is a use-after-free that
+                            // reads fine until the memory is reused
+                            // (`tests/extern_value_return_ownership.rs`).
                             let _ = writeln!(
                                 out,
-                                "function {nm}({params})\n  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return __out[0]\nend"
+                                "function {nm}({params})\n  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])\nend"
                             );
                         }
                         None => {
@@ -2099,6 +2110,18 @@ pub fn emit_full_in(
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
     let scx = skull_mir::lower::ScalarCtx::new(ws);
+
+    // The emitted param list must be injective. Checked per SIGNATURE, over every
+    // function rather than just the emitted set: a duplicate Lua param is illegal
+    // regardless of which filter would have reached the body.
+    for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (fid, _) in m.functions.iter() {
+            let fref = FuncRef { module: m.id, func: fid };
+            for (key, err) in skull_mir::lower::scalar_abi_param_collisions(ws, &scx, fref) {
+                cg.reject(key, err);
+            }
+        }
+    }
 
     let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
         .modules

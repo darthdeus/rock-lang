@@ -31,16 +31,11 @@ fn messages_owned(src: &str) -> Vec<String> {
 /// still hiding two sites.
 const THREE_SINKS: &str = r#"
 nobox value NV2 { x: float, y: float }
-value E5 { pos: NV2, a: float, b: float, c: float }
-value Opt { pos: NV2?, a: float, b: float, c: float }
+global XS: [NV2] = []
 
-global G: Opt? = null
-global H: Opt? = null
-global I: Opt? = null
-
-fn sink_one() { G = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 1.0, b: 2.0, c: 3.0 } }
-fn sink_two() { H = Opt { pos: NV2 { x: 3.0, y: 4.0 }, a: 4.0, b: 5.0, c: 6.0 } }
-fn sink_three() { I = Opt { pos: NV2 { x: 5.0, y: 6.0 }, a: 7.0, b: 8.0, c: 9.0 } }
+fn sink_one() { let ts: [(NV2, float)] = [] ts.push((XS[0], 1.0)) print("{ts.len}") }
+fn sink_two() { let ts: [(NV2, float)] = [] ts.push((XS[1], 2.0)) print("{ts.len}") }
+fn sink_three() { let ts: [(NV2, float)] = [] ts.push((XS[2], 3.0)) print("{ts.len}") }
 
 fn main() {
     sink_one()
@@ -116,7 +111,11 @@ fn every_failing_specialization_is_reported_not_just_the_first() {
     let err =
         try_emit_module(TWO_FAILING_SPECIALIZATIONS).expect_err("both specializations must reject");
     let all = messages(&err);
-    for want in ["specialized `tuple_in_coll", "specialized `pair"] {
+    // `pair` itself now SPLATS its `(T, float)?` return (presence bool then the
+    // slots), so the nobox value no longer materializes there; the rejection moved
+    // one frame out to `nullable_pair`, which packs the result to test it against
+    // null. Two failing specializations either way -- which is the property.
+    for want in ["specialized `tuple_in_coll", "specialized `nullable_pair"] {
         assert!(
             all.iter().any(|m| m.contains(want)),
             "no rejection names `{want}`:\n{}",
@@ -143,14 +142,12 @@ fn the_rejection_order_is_deterministic() {
 fn a_failing_global_init_does_not_mask_a_failing_function() {
     const BOTH: &str = r#"
 nobox value NV2 { x: float, y: float }
-value Opt { pos: NV2?, a: float, b: float, c: float }
+global XS: [NV2] = []
+global G: [(NV2, float)] = [(NV2 { x: 1.0, y: 2.0 }, 1.0)]
 
-global G: Opt? = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 1.0, b: 2.0, c: 3.0 }
-global H: Opt? = null
+fn sink_fn() { let ts: [(NV2, float)] = [] ts.push((XS[0], 1.0)) print("{ts.len}") }
 
-fn sink_fn() { H = Opt { pos: NV2 { x: 3.0, y: 4.0 }, a: 4.0, b: 5.0, c: 6.0 } }
-
-fn main() { sink_fn() }
+fn main() { sink_fn() print("{G.len}") }
 "#;
     let err = try_emit_module(BOTH).expect_err("both definitions must reject");
     let all = messages(&err);
@@ -169,9 +166,8 @@ fn main() { sink_fn() }
 fn a_lone_rejection_has_no_siblings() {
     const ONE_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
-value Opt { pos: NV2?, a: float, b: float, c: float }
-global G: Opt? = null
-fn sink_one() { G = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 1.0, b: 2.0, c: 3.0 } }
+global XS: [NV2] = []
+fn sink_one() { let ts: [(NV2, float)] = [] ts.push((XS[0], 1.0)) print("{ts.len}") }
 fn main() { sink_one() }
 "#;
     let err = try_emit_module(ONE_SINK).expect_err("the nobox sink must reject");

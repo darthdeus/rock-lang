@@ -536,11 +536,15 @@ fn run_emitted_tests(
     // No @test functions: fall back to the load-only validity gate.
     if tests.is_empty() {
         match rock_host::lua_runner::run_lua_code_with_timeout(lua, timeout) {
-            Ok(out) if !out.contains("STDERR:") => return Ok(SkullOutcome::Pass { tests: 0 }),
+            Ok(out) if out.success => return Ok(SkullOutcome::Pass { tests: 0 }),
             Ok(out) => {
                 return Err(SkullFailure {
                     reason: "invalid lua emitted (skull bug)".to_string(),
-                    rendered: format!("{out}\n\n--- emitted lua (truncated) ---\n{}", truncate(lua)),
+                    rendered: format!(
+                        "{}\n\n--- emitted lua (truncated) ---\n{}",
+                        out.combined(),
+                        truncate(lua)
+                    ),
                 });
             }
             Err(e) => {
@@ -554,8 +558,13 @@ fn run_emitted_tests(
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
     let program = format!("{lua}{}", build_test_harness(tests));
-    let stdout = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
-        Ok(s) => s,
+    // The harness `pcall`s each test, so an ordinary assertion failure becomes a
+    // FAIL marker and the process still exits 0. A non-zero status therefore
+    // means the run DIED -- `os.exit`, a C-level abort, an OOM -- and every test
+    // after that point never ran. Keep the output either way: a truncated run
+    // still has to say what it managed to report.
+    let (stdout, died) = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
+        Ok(run) => (run.combined(), !run.success),
         Err(e) => {
             return Err(SkullFailure {
                 reason: "test run errored (skull bug)".to_string(),
@@ -593,6 +602,28 @@ fn run_emitted_tests(
             Ok(()) => passed += 1,
             Err(detail) => fails.push(format!("{name}: {detail}")),
         }
+    }
+
+    // Every declared test owes exactly one marker. Counting only the markers
+    // that ARRIVED makes a truncated run self-consistent -- three tests, one
+    // marker, `1/1 passed` -- so the tests that never ran leave the total
+    // instead of failing it. This is the only signal for a premature
+    // `os.exit(0)`, which exits success and emits no marker at all.
+    // A PASS marker carries no test name, so this counts rather than names them.
+    let reported = passed + fails.len();
+    if reported < tests.len() {
+        fails.push(format!(
+            "the run stopped early: {} of {} @tests never reported{}",
+            tests.len() - reported,
+            tests.len(),
+            if died { "; the process died" } else { "; the process exited 0" }
+        ));
+    } else if died {
+        fails.push(
+            "every @test reported, but the harness process exited non-zero -- \
+             something after the tests failed"
+                .to_string(),
+        );
     }
 
     if fails.is_empty() {
@@ -1072,8 +1103,17 @@ pub fn skull_run(path: &str) -> Result<()> {
         lua
     };
     match rock_host::lua_runner::run_lua_code(&program) {
-        Ok(output) => {
-            print!("{}", output);
+        Ok(run) => {
+            print!("{}", run.stdout);
+            if !run.stderr.is_empty() {
+                eprint!("{}", run.stderr);
+            }
+            // The program's own exit status is the answer. Printing a crash and
+            // returning Ok is how `rock run` used to exit 0 on a dead program.
+            if !run.success {
+                log::error!(target: "SKULL", "program exited with a runtime error");
+                std::process::exit(1);
+            }
             Ok(())
         }
         Err(e) => {
@@ -1308,12 +1348,22 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some((ty_name, paths)) = skull_mir::lower::nobox_global_shape_paths(ws, g.ty)
+            let Some((ty_name, paths, nullable)) =
+                skull_mir::lower::nobox_global_shape_paths(ws, g.ty)
             else {
                 continue;
             };
             let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
                 .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
+            // A nullable global leads with a presence leaf that has no path: it is
+            // not a field, so it is branched on rather than read. Everything below
+            // pairs the REMAINING leaves with the paths.
+            let (present, leaves) = if nullable {
+                let (p, rest) = leaves.split_first().expect("a nullable shape has a presence leaf");
+                (Some(*p), rest.to_vec())
+            } else {
+                (None, leaves)
+            };
             if leaves.len() != paths.len() {
                 log::error!(
                     target: "SKULL",
@@ -1357,9 +1407,25 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
                 .map(|(l, p)| format!("{l} = v.{p}"))
                 .collect::<Vec<_>>()
                 .join("; ");
+            let (get, set) = match present {
+                // Presence gates BOTH directions: rebuilding an absent value would
+                // hand reflection a struct of nils, and a write that left the leaves
+                // behind would let a later read resurrect the old value.
+                Some(p) => (
+                    format!("if not {p} then return nil end return {ty_name}{suffix}({args})"),
+                    format!(
+                        "{p} = v ~= nil; if v ~= nil then {writes} else {} end",
+                        leaves
+                            .iter()
+                            .map(|l| format!("{l} = nil"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                ),
+                None => (format!("return {ty_name}{suffix}({args})"), writes),
+            };
             rows.push(format!(
-                "[{:?}]={{get=function() return {ty_name}{suffix}({args}) end,\
-                 set=function(v) {writes} end}},",
+                "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
                 g.name.as_str()
             ));
         }
@@ -1513,8 +1579,17 @@ fn skull_run_project(dir: &str) -> Result<()> {
         lua
     };
     match rock_host::lua_runner::run_lua_code(&program) {
-        Ok(output) => {
-            print!("{}", output);
+        Ok(run) => {
+            print!("{}", run.stdout);
+            if !run.stderr.is_empty() {
+                eprint!("{}", run.stderr);
+            }
+            // The program's own exit status is the answer. Printing a crash and
+            // returning Ok is how `rock run` used to exit 0 on a dead program.
+            if !run.success {
+                log::error!(target: "SKULL", "program exited with a runtime error");
+                std::process::exit(1);
+            }
             Ok(())
         }
         Err(e) => {
@@ -1760,8 +1835,8 @@ impl ExecOutcome {
 fn exec_lua(program: &str) -> ExecOutcome {
     let timeout = Some(Duration::from_secs(15));
     match rock_host::lua_runner::run_lua_code_with_timeout(program, timeout) {
-        Ok(out) if out.contains("STDERR:") => ExecOutcome::Errored(out),
-        Ok(out) => ExecOutcome::Output(out),
+        Ok(out) if !out.success => ExecOutcome::Errored(out.combined()),
+        Ok(out) => ExecOutcome::Output(out.combined()),
         Err(e) => ExecOutcome::Errored(format!("lua runner failed: {e}")),
     }
 }

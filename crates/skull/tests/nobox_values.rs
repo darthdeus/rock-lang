@@ -513,32 +513,6 @@ fn post_transform_gate_rejects_an_implicit_nobox_box() {
     assert!(err.message.contains("nobox") && err.message.contains("NV2"), "{err:?}");
 }
 
-const NOBOX_COLUMN_SORT: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn bad() {
-    let xs: [NV2] = [
-        NV2 { x: 2.0, y: 0.0 },
-        NV2 { x: 1.0, y: 0.0 },
-    ]
-    xs.sort(v => v.x)
-}
-
-fn main() {
-    bad()
-}
-"#;
-
-#[test]
-fn column_sort_rejects_implicit_nobox_element_materialization() {
-    let err = try_emit_module(NOBOX_COLUMN_SORT)
-        .expect_err("column sort must not materialize nobox elements for its key function");
-    assert!(
-        err.message.contains("nobox") && err.message.contains("sort"),
-        "{err:?}"
-    );
-}
-
 const NOBOX_COLUMN_INSPECT: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -1049,6 +1023,92 @@ fn direct_and_indirect_calls_of_one_fn_agree_on_arity() {
     );
 }
 
+const NOBOX_TOPLEVEL_FN_BY_VALUE: &str = r#"
+nobox value NV2 { x: float, y: float }
+value Boxed { x: float }
+
+fn combine(n: float, p: NV2, b: Boxed) -> float {
+    return n + p.x + p.y + b.x
+}
+
+fn apply(f: (float, NV2, Boxed) -> float, n: float, p: NV2, b: Boxed) -> float {
+    return f(n, p, b)
+}
+
+fn main() {
+    let p = NV2 { x: 2.0, y: 3.0 }
+    let b = Boxed { x: 4.0 }
+    print("{combine(1.0, p, b)} {apply(combine, 5.0, p, b)}")
+}
+"#;
+
+#[test]
+fn a_top_level_fn_value_uses_the_type_derived_nobox_abi() {
+    let lua = emit_module(NOBOX_TOPLEVEL_FN_BY_VALUE);
+    let body = function_body(&lua, "combine");
+    let header = body.lines().next().expect("function header");
+    let params = header
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(params, _)| params.split(',').count())
+        .expect("function params");
+    assert_eq!(params, 4, "float + two nobox leaves + one boxed value:\n{header}");
+    assert!(!body.contains("NV2_ct("), "the top-level fn value materialized NV2:\n{body}");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_toplevel_fn_value"),
+        "10 14"
+    );
+}
+
+const NOBOX_OPAQUE_TOPLEVEL_FN_BY_VALUE: &str = r#"
+nobox value NV2 { x: float, y: float }
+
+inline(lua) fn opaque(v: NV2) -> float = """return v.x + v.y"""
+
+fn apply(f: (NV2) -> float, v: NV2) -> float {
+    return f(v)
+}
+
+fn main() {
+    let f = opaque
+    print("{apply(f, NV2 { x: 2.0, y: 3.0 })}")
+}
+"#;
+
+#[test]
+fn an_opaque_top_level_nobox_fn_value_still_rejects() {
+    let err = try_emit_module(NOBOX_OPAQUE_TOPLEVEL_FN_BY_VALUE)
+        .expect_err("an opaque body cannot adopt the type-derived nobox ABI");
+    assert!(
+        err.message.contains("opaque") && err.message.contains("fixed ABI"),
+        "{err:?}"
+    );
+}
+
+const GPU_ONLY_TOPLEVEL_FN_BY_VALUE: &str = r#"
+@intrinsic @gpu_only inline(lua) fn gpu_only(v: int) -> int = """error("GPU only")"""
+
+fn apply(f: (int) -> int, v: int) -> int {
+    return f(v)
+}
+
+fn main() {
+    print("{apply(gpu_only, 3)}")
+}
+"#;
+
+#[test]
+fn a_gpu_only_fn_cannot_bypass_the_cpu_restriction_as_a_value() {
+    let err = try_emit_module(GPU_ONLY_TOPLEVEL_FN_BY_VALUE)
+        .expect_err("a GPU-only function value must reject in CPU code");
+    assert!(
+        err.message.contains("gpu_only")
+            && err.message.contains("GPU-only")
+            && err.message.contains("fn value"),
+        "{err:?}"
+    );
+}
+
 /// A `nobox` value crosses an INDIRECT call as leaves, both directions: a nested
 /// fn taken by value receives them, and a lambda returns them through the
 /// multi-return wire.
@@ -1297,6 +1357,87 @@ fn a_nobox_value_in_a_tuple_return_carries_its_leaves() {
         "the flag plus two leaves must come back as three values:\n{lua}"
     );
     assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nobox_tuple_return"), "true 1 2");
+}
+
+const NOBOX_PHI_CONTROLS: &str = r#"
+nobox value NV2 { x: float, y: float }
+enum Choice { A, B, C }
+
+fn pick_two(right: bool) -> NV2 {
+    let p = if right { NV2 { x: 3.0, y: 4.0 } } else { NV2 { x: 1.0, y: 2.0 } }
+    return p
+}
+
+fn pick_flat(c: Choice) -> NV2 {
+    let p = match c {
+        Choice::A => NV2 { x: 5.0, y: 6.0 },
+        Choice::B => NV2 { x: 7.0, y: 8.0 },
+        Choice::C => NV2 { x: 9.0, y: 10.0 },
+    }
+    return p
+}
+
+fn main() {
+    let a = pick_two(true)
+    let b = pick_flat(Choice::B)
+    print("{a.x} {a.y} {b.x} {b.y}")
+}
+"#;
+
+#[test]
+fn nobox_phi_controls_stay_unboxed() {
+    let lua = emit_module(NOBOX_PHI_CONTROLS);
+    for name in ["pick_two", "pick_flat"] {
+        let body = function_body(&lua, name);
+        assert!(!body.contains("NV2_ct("), "`{name}` materialized its result:\n{body}");
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_phi_controls"),
+        "3 4 7 8"
+    );
+}
+
+const NOBOX_PHI_AGGREGATES: &str = r#"
+nobox value NV2 { x: float, y: float }
+enum Choice { A, B, C }
+
+fn pick_nested(n: int) -> NV2 {
+    let p = if n == 0 {
+        NV2 { x: 1.0, y: 2.0 }
+    } else if n == 1 {
+        NV2 { x: 3.0, y: 4.0 }
+    } else {
+        NV2 { x: 5.0, y: 6.0 }
+    }
+    return p
+}
+
+fn pick_pair(c: Choice) -> (NV2, NV2) {
+    return match c {
+        Choice::A => (NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }),
+        Choice::B => (NV2 { x: 7.0, y: 8.0 }, NV2 { x: 9.0, y: 10.0 }),
+        Choice::C => (NV2 { x: 11.0, y: 12.0 }, NV2 { x: 13.0, y: 14.0 }),
+    }
+}
+
+fn main() {
+    let p = pick_nested(1)
+    let (a, b) = pick_pair(Choice::B)
+    print("{p.x} {p.y} {a.x} {a.y} {b.x} {b.y}")
+}
+"#;
+
+#[test]
+fn nobox_phi_joins_keep_aggregate_reprs() {
+    let lua = emit_module(NOBOX_PHI_AGGREGATES);
+    for name in ["pick_nested", "pick_pair"] {
+        let body = function_body(&lua, name);
+        assert!(!body.contains("NV2_ct("), "`{name}` materialized a nobox value:\n{body}");
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_phi_aggregates"),
+        "3 4 7 8 9 10"
+    );
 }
 
 const NOBOX_OPAQUE_TUPLE_RETURN: &str = r#"

@@ -1529,6 +1529,16 @@ impl Emitter<'_> {
                 // has no cdata layout to write leaves into -- a value struct is
                 // a plain object -- so rebuild the nested objects the declared
                 // shape expects. luajit instead calls the generated `_lct`.
+                //
+                // The dot test is a PROXY for leaf form and it does not always
+                // hold: a nullable child with no data leaves contributes a single
+                // undotted leaf keyed on the field's own name, so a leaf-table
+                // struct can reach here with no dot in sight. That is harmless
+                // HERE and nowhere else -- with no data leaves the flat object
+                // and the declared object are the same object, so both arms
+                // agree. luajit had to be re-keyed on `value_struct_is_leaf_table`
+                // for exactly this shape, because its two arms are different
+                // FUNCTIONS and one of them is never emitted.
                 if fields.iter().any(|(f, _)| f.contains('.')) {
                     // Same strictness as the Lua emitter: a PARTIAL flattening
                     // must reject, not silently emit a half-shaped object.

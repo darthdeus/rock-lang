@@ -520,3 +520,34 @@ fn combinator_chain_preserves_column_element_type() {
         "4"
     );
 }
+
+const NOBOX_COLUMN_SORT: &str = r#"
+nobox value NP { x: float, y: float }
+
+fn main() {
+    let a: [NP] = [NP { x: 3.0, y: 30.0 }, NP { x: 1.0, y: 10.0 }, NP { x: 2.0, y: 20.0 }]
+    a.sort(v => v.x)
+    print("{a[0].x},{a[0].y},{a[1].x},{a[1].y},{a[2].x},{a[2].y}")
+}
+"#;
+
+/// Sorting a column Vec needs the key applied to each ELEMENT, which the boxed
+/// helper supplies by materializing one. Under `nobox` that box is exactly what
+/// the mark forbids -- but the key fn is reached through a fn value, whose ABI
+/// is derived from the fn type, so at a `nobox` element it already takes LEAVES.
+/// The leaves are the columns, so the sort hands them over directly and no
+/// element is ever built.
+#[test]
+fn nobox_column_sort_never_materializes_an_element() {
+    let lua = common::try_emit_module(NOBOX_COLUMN_SORT).expect("[NP].sort must emit");
+    let body = common::function_body(&lua, "main");
+    assert!(
+        !body.contains("NP_ct(") && !body.contains("NP_lct("),
+        "[NP].sort built an element; the key fn takes leaves:\n{body}"
+    );
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "col_nobox_sort"),
+        "1,10,2,20,3,30",
+        "every column must permute in lockstep with the key's column"
+    );
+}
