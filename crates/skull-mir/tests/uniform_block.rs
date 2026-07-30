@@ -26,7 +26,7 @@
 use std::sync::LazyLock;
 use ustr::Ustr;
 
-use skull_mir::gpu_layout::{uniform_block, UniformBlockPlan, WireKind};
+use skull_mir::gpu_layout::{uniform_block, LeafStore, UniformBlockPlan, WireKind, WireView};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -219,4 +219,66 @@ fn a_nested_user_struct_is_rejected_until_a_consumer_needs_it() {
     let ws = ws_of("value Inner { a: float }\nvalue Outer { i: Inner, b: float }");
     let e = uniform_block(&ws, Ustr::from("Outer")).expect_err("must reject");
     assert!(e.message.contains("Inner"), "the message must name the field's type: {}", e.message);
+}
+
+// -- Leaf stores. The plan states member offsets; the packer emits one store
+// per PRIMITIVE, because the value side arrives as a tree of leaves (a Mat4 is
+// four Vec4s is sixteen floats). Deriving that expansion at each consumer is
+// how the validator and the expander drift apart, so the plan states it once.
+
+fn stores(p: &UniformBlockPlan) -> Vec<(u32, WireView)> {
+    p.leaf_stores().iter().map(|s| (s.offset, s.view)).collect()
+}
+
+/// The dominant A1 shape -- six in-tree uniform structs carry two or three
+/// Mat4s. std140's column stride of 16 equals four tightly packed floats, and
+/// stdlib Mat4 is already four column-major Vec4s, so each run is contiguous:
+/// no transpose, no per-column gap. Two of them, because a single Mat4 sits at
+/// offset 0 and would read the same whether the member offset were applied or
+/// dropped.
+#[test]
+fn consecutive_mat4s_expand_to_contiguous_sixteen_float_runs() {
+    let p = plan_of("value M { a: Mat4, b: Mat4 }", "M");
+    let want: Vec<(u32, WireView)> = (0..32).map(|i| (i * 4, WireView::Float)).collect();
+    assert_eq!(stores(&p), want);
+    assert_eq!(p.members[1].leaf_stores()[0].offset, 64);
+}
+
+/// The view is a property of the wire kind, not of the packer: a block bool is
+/// a 32-bit value, so it stores through the int view alongside int, while
+/// everything else goes through the float view.
+#[test]
+fn int_and_bool_leaves_store_through_the_int_view() {
+    let p = plan_of("value B { flag: bool, count: int, scale: float }", "B");
+    assert_eq!(
+        stores(&p),
+        vec![(0, WireView::Int), (4, WireView::Int), (8, WireView::Float)]
+    );
+}
+
+/// The std140 gap is visible at LEAF level, which is the level the packer
+/// writes at: `direction`'s two floats sit at 8 and 12, where the C layout
+/// would have put them at 4 and 8.
+#[test]
+fn bloom_blurs_leaf_stores_carry_the_std140_gap() {
+    let p = plan_of(
+        "value BloomBlurU { radius: float, direction: Vec2, resolution: float }",
+        "BloomBlurU",
+    );
+    assert_eq!(
+        stores(&p),
+        vec![
+            (0, WireView::Float),
+            (8, WireView::Float),
+            (12, WireView::Float),
+            (16, WireView::Float)
+        ]
+    );
+    // One store per primitive leaf: the count the validator checks the value
+    // side against.
+    assert_eq!(p.leaf_stores().len(), 4);
+    assert_eq!(p.members[1].leaf_stores(), vec![
+        LeafStore { offset: 8, view: WireView::Float },
+        LeafStore { offset: 12, view: WireView::Float },
+    ]);
 }

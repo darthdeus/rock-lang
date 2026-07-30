@@ -241,6 +241,32 @@ impl WireKind {
             WireKind::Mat4 => 64,
         }
     }
+
+    /// The view a leaf of this kind stores through. A block `bool` is a 32-bit
+    /// value, so it rides the int view alongside `int`.
+    fn view(self) -> WireView {
+        match self {
+            WireKind::I32 | WireKind::Bool32 => WireView::Int,
+            _ => WireView::Float,
+        }
+    }
+}
+
+/// Which typed view a leaf store goes through. Every std140 kind a block can
+/// hold is a run of 4-byte components, so one `float*` and one `int32_t*` view
+/// over the block's single allocation reach every member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireView {
+    Float,
+    Int,
+}
+
+/// One primitive store the packer emits: a byte offset into the block and the
+/// view it goes through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeafStore {
+    pub offset: u32,
+    pub view: WireView,
 }
 
 /// One member of a uniform block, at its std140 offset.
@@ -270,6 +296,30 @@ pub struct UniformBlockPlan {
     /// Always at least 16 -- a std140 block's alignment is its largest member's
     /// alignment rounded up to a vec4.
     pub align: u32,
+}
+
+impl BlockMember {
+    /// The member's primitive stores, in the order the value side presents its
+    /// leaves. A flat 4-byte run is sound for every kind a block can hold --
+    /// including `Mat4`, whose std140 column stride of 16 is exactly four
+    /// packed floats, and whose stdlib form is already four column-major
+    /// `Vec4`s. Change either and this stops being a run.
+    pub fn leaf_stores(&self) -> Vec<LeafStore> {
+        let view = self.kind.view();
+        (0..self.kind.size() / 4)
+            .map(|i| LeafStore { offset: self.offset + i * 4, view })
+            .collect()
+    }
+}
+
+impl UniformBlockPlan {
+    /// Every store in the block, member order -- one per primitive leaf of the
+    /// group struct. The packer pairs this with the value's flattened leaves,
+    /// and the two lengths agreeing is what keeps the expander and its
+    /// validator from each deriving the expansion and drifting.
+    pub fn leaf_stores(&self) -> Vec<LeafStore> {
+        self.members.iter().flat_map(|m| m.leaf_stores()).collect()
+    }
 }
 
 fn round_up(v: u32, align: u32) -> u32 {
