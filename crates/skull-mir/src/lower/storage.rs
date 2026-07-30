@@ -1,0 +1,960 @@
+//! Element STORAGE lowering: native-buffer leaf addressing, and the column form
+//! of a vec / map whose element is a `nobox` value (header, push, append, index,
+//! per-leaf store, and the presence column beside the leaf columns).
+//!
+//! Column eligibility itself is decided in `shape` -- this is the code that
+//! builds and reads the layout that module describes.
+use super::*;
+
+impl Builder<'_> {
+    /// A column-stored element (`xs[i]` where `xs: [E]` stores flat columns) as
+    /// an unboxed `Group`: bounds-check `i` once, then read leaf `k` from column
+    /// `k`. No element table is touched because none exists.
+    ///
+    /// `value_leaf_paths` and `rebuild_from_leaves` both walk fields in
+    /// declaration order depth-first, so the flat read order lines up with the
+    /// nested shape without a second traversal.
+    /// `Some((buf, checked_index, elem, dotted_path))` iff `<base>.<field>` is a
+    /// field path rooted at `buf[i]` over a leaf-addressed NativeBuffer.
+    ///
+    /// Peels the FieldAccess chain to build the dotted path the leaf plan is
+    /// keyed by (`buf[i].lo.n` -> `"lo.n"`), so a write at ANY depth lands on
+    /// the right leaves. The bounds check is emitted once, here.
+    pub(crate) fn nb_leaf_field_place(
+        &mut self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, String)>, CompilerError> {
+        // Walk down through nested field accesses to the `buf[i]` root.
+        let mut segs = vec![field];
+        let mut cur = base;
+        loop {
+            match self.body.expr_arena[cur] {
+                Expr::FieldAccess { base: b, field: f } => {
+                    segs.push(f);
+                    cur = b;
+                }
+                Expr::Index { base: ib, index } => {
+                    let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib) else {
+                        return Ok(None);
+                    };
+                    if !self.is_leaf_addressed(elem) {
+                        return Ok(None);
+                    }
+                    let (b, _) = self.lower_index_base(ib)?;
+                    let i = self.lower_expr(index)?;
+                    let checked = self.nb_checked_index(b, i)?;
+                    segs.reverse();
+                    let path =
+                        segs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
+                    return Ok(Some((b, checked, elem, path)));
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// Write `buf[i].<path> = value` leaf-wise. `path` names either one
+    /// primitive leaf or a nested value field spanning several; both are just a
+    /// prefix match over the element's leaf plan, so depth costs nothing.
+    pub(crate) fn nb_leaf_field_store(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        elem: Ustr,
+        path: &str,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let dot = format!("{path}.");
+        let hit: Vec<LeafAddr> = plan
+            .into_iter()
+            .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
+            .collect();
+        if hit.is_empty() {
+            return Err(gap(format!("`{path}` is not a leaf of NativeBuffer<{elem}>")));
+        }
+        // An exact primitive leaf is the one hit whose path IS `path`. A NESTED
+        // field spanning a single leaf also yields one hit, but its path is
+        // `<path>.<leaf>` -- so discriminating on hit COUNT lowers that field's
+        // aggregate RHS as a scalar and writes the whole cdata through a
+        // primitive view. Everything that is not an exact leaf is an aggregate.
+        let leaves = if hit.len() == 1 && hit[0].path.as_str() == path {
+            vec![self.lower_expr(value)?]
+        } else {
+            let sub = self
+                .value_aggregate_of(value)
+                .and_then(|n| value_shape(self.ws, n))
+                .ok_or_else(|| {
+                    gap(format!(
+                        "whole write to `{path}` needs a value-struct or cdata-enum RHS"
+                    ))
+                })?;
+            let repr = self.lower_expr_repr(value)?;
+            self.repr_to_leaves(&repr, &sub)
+        };
+        if leaves.len() != hit.len() {
+            return Err(gap(format!(
+                "leaf store arity mismatch for `{elem}.{path}`: {} leaves vs {} slots",
+                leaves.len(),
+                hit.len()
+            )));
+        }
+        let mut views = HashMap::new();
+        for (a, leaf) in hit.iter().zip(leaves) {
+            let at = self.leaf_index(checked, a);
+            let view = self.leaf_view(buf, a.view_field, &mut views);
+            self.emit_cur(Inst::StoreIndex {
+                base: view,
+                index: at,
+                value: leaf,
+                kind: ContainerKind::NativeBufferLeaf,
+            });
+        }
+        Ok(())
+    }
+
+    /// Whether `elem` is leaf-addressable: it has a validated C leaf layout
+    /// whose every leaf divides its view cleanly. `false` keeps the buffer on
+    /// the existing slot-reference path, which is CORRECT, just boxier --
+    /// leaf addressing does not change storage, so the two address the same
+    /// bytes and a program may mix them freely.
+    pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> bool {
+        // LuaJIT only. Leaf addressing IS `ffi.cast` views over the element
+        // storage; JS backs a NativeBuffer with a TypedArray and lowers element
+        // access through its own flat-slot arithmetic, which already allocates
+        // nothing. Emitting the leaf shape there would only push every buffer
+        // test into the skip histogram. The JS analogue (a TypedArray per leaf C
+        // type over one ArrayBuffer) is S6 in
+        // docs/native-buffer-leaf-addressing-plan.md.
+        if self.scx.target == bone_semantic::hir::FnBackend::Js {
+            return false;
+        }
+        leaf_addr_plan(self.ws, elem).is_ok()
+    }
+
+    /// `buf[i]` on a leaf-addressed NativeBuffer: bounds-check the ELEMENT once,
+    /// then read each leaf from its own view. No slot reference is taken, so the
+    /// read allocates nothing; the element is rebuilt as a `Group`, exactly the
+    /// shape `let v = buf[i]` takes, so SROA peels it wherever the binding is
+    /// only projected from.
+    pub(crate) fn nb_leaf_element_repr(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let checked = self.nb_checked_index(buf, index)?;
+        let mut views = HashMap::new();
+        let leaves: Vec<Idx<Inst>> = plan
+            .iter()
+            .map(|a| {
+                let at = self.leaf_index(checked, a);
+                let view = self.leaf_view(buf, a.view_field, &mut views);
+                self.emit_cur(Inst::Index {
+                    base: view,
+                    index: at,
+                    kind: ContainerKind::NativeBufferLeaf,
+                })
+            })
+            .collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+    }
+
+    /// `buf[i] = v` into a leaf-addressed NativeBuffer: bounds-check once, then
+    /// store leaf `k` through its view. The element never materializes, which is
+    /// what lets a `nobox` type live in one.
+    pub(crate) fn nb_leaf_element_store(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: Ustr,
+    ) -> Result<(), CompilerError> {
+        let shape = value_shape(self.ws, elem)
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let repr = self.lower_expr_repr(value)?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        if leaves.len() != plan.len() {
+            return Err(gap(format!(
+                "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
+                leaves.len(),
+                plan.len()
+            )));
+        }
+        // The check precedes every leaf write: checking after would let the
+        // out-of-bounds writes happen first.
+        let checked = self.nb_checked_index(buf, index)?;
+        let mut views = HashMap::new();
+        for (a, leaf) in plan.iter().zip(leaves) {
+            let at = self.leaf_index(checked, a);
+            let view = self.leaf_view(buf, a.view_field, &mut views);
+            self.emit_cur(Inst::StoreIndex {
+                base: view,
+                index: at,
+                value: leaf,
+                kind: ContainerKind::NativeBufferLeaf,
+            });
+        }
+        Ok(())
+    }
+
+    /// The view projection for `field`, read ONCE per element access and reused
+    /// across that element's leaves -- a table read per leaf is pure waste when
+    /// every leaf of one type shares a view.
+    pub(crate) fn leaf_view(
+        &mut self,
+        buf: Idx<Inst>,
+        field: Ustr,
+        cache: &mut HashMap<Ustr, Idx<Inst>>,
+    ) -> Idx<Inst> {
+        if let Some(v) = cache.get(&field) {
+            return *v;
+        }
+        let v = self.emit_cur(Inst::Field { base: buf, field });
+        cache.insert(field, v);
+        v
+    }
+
+    /// `i * stride + offset` in the leaf's own view units. Both constants; the
+    /// `+ 0` and `* 1` cases fold so a flat all-one-type element reads as
+    /// plainly as it did before.
+    pub(crate) fn leaf_index(&mut self, checked: Idx<Inst>, a: &LeafAddr) -> Idx<Inst> {
+        let mut at = checked;
+        if a.stride != 1 {
+            let s = self.emit_cur(Inst::Const(Lit::Int(a.stride)));
+            at = self.emit_cur(Inst::IntMul(at, s));
+        }
+        if a.offset != 0 {
+            let o = self.emit_cur(Inst::Const(Lit::Int(a.offset)));
+            at = self.emit_cur(Inst::IntAdd(at, o));
+        }
+        at
+    }
+
+    /// `__nb_checked_index(buf, i)` -- bounds-check the element access WITHOUT
+    /// taking a slot reference, returning the index. One call per element
+    /// access, never per leaf.
+    pub(crate) fn nb_checked_index(
+        &mut self,
+        buf: Idx<Inst>,
+        index: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let f = self.stdlib_funcref("__nb_checked_index")?;
+        Ok(self.emit_cur(Inst::Call {
+            func: f,
+            args: vec![buf, index],
+        }))
+    }
+
+    pub(crate) fn column_element_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let one_based = self.checked_column_index(vec, index);
+        // Presence leads the reads for a nullable element, which is exactly what
+        // `rebuild_from_leaves` consumes it as -- the Group comes back with its
+        // `present` set from the column instead of a nil compare on a box.
+        let leaves: Vec<Idx<Inst>> = column_leaf_paths(&shape)
+            .into_iter()
+            .map(|path| {
+                let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                self.emit_cur(Inst::Index {
+                    base: col,
+                    index: one_based,
+                    kind: ContainerKind::VecColumn,
+                })
+            })
+            .collect();
+        let mut idx = 0;
+        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+    }
+
+    /// The unique stdlib function `name`, for a lowering that SYNTHESIZES a call
+    /// (the cold column ops, which have no call expr of their own to resolve
+    /// through). Rejects rather than falling back: a missing or ambiguous name
+    /// means the stdlib and this lowering have drifted apart.
+    pub(crate) fn stdlib_funcref(&self, name: &str) -> Result<FuncRef, CompilerError> {
+        match self.ws.functions_by_name.get(&Ustr::from(name)).map(|l| l.as_slice()) {
+            Some([(module, func)]) => Ok(FuncRef { module: *module, func: *func }),
+            Some(_) => Err(gap(format!("stdlib `{name}` is ambiguous"))),
+            None => Err(gap(format!("stdlib `{name}` not found"))),
+        }
+    }
+
+    /// Column-aware lowering of `__vec_data_get/_set/_unset` when the receiver's
+    /// element type is concretely column-stored. `Ok(None)` = not one of these, or
+    /// a boxed element, in which case the stdlib `inline(lua)` body stands.
+    ///
+    /// `unset` is deliberately a NO-OP. On the boxed backing it exists to drop the
+    /// reference so the element can be collected; a column holds scalars, so there
+    /// is nothing to release, and nothing reads past `len` (every column access
+    /// goes through `__vec_checked_index`, which bounds-checks against it). Writing
+    /// nil into the columns would also be actively harmful: it punches holes in
+    /// dense numeric arrays and can push them from array to hash part, which is the
+    /// representation's whole advantage.
+    pub(crate) fn column_data_primitive(
+        &mut self,
+        name: &str,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        match (name, arg_idxs) {
+            ("__vec_data_get", [recv, index]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                Ok(Some(self.column_element_repr(vec, i, elem)?))
+            }
+            ("__vec_data_set", [recv, index, value]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                self.column_element_store(vec, i, *value, elem)?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            ("__vec_data_unset", [recv, _index]) => {
+                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            ("__vec_data_capacity", [recv]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape = self.column_shape(elem)?;
+                let vec = self.lower_expr(*recv)?;
+                let header = self.column_header(vec);
+                let reserved = self.emit_cur(Inst::Field {
+                    base: header,
+                    field: Ustr::from("cap"),
+                });
+                // The PRESENCE column when there is one: it holds a real bool for
+                // every slot, where a leaf column of an absent element holds nil,
+                // and `#` over a table with holes is undefined in Lua.
+                let physical = match column_leaf_paths(&shape).first() {
+                    Some(path) => {
+                        let col = self.emit_cur(Inst::Field {
+                            base: vec,
+                            field: *path,
+                        });
+                        let f = self.stdlib_funcref("table_len")?;
+                        self.emit_cur(Inst::Call {
+                            func: f,
+                            args: vec![col],
+                        })
+                    }
+                    None => self.emit_cur(Inst::Field {
+                        base: vec,
+                        field: Ustr::from("len"),
+                    }),
+                };
+                let f = self.stdlib_funcref("__rock_col_capacity")?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
+                    func: f,
+                    args: vec![reserved, physical],
+                }))))
+            }
+            // Shift every column at the same slot, so they stay in lockstep. The
+            // element is consumed as LEAVES, so the inserted value never boxes.
+            ("__vec_data_insert", [recv, index, value]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape = self.column_shape(elem)?;
+                let paths = column_leaf_paths(&shape);
+                let vec = self.lower_expr(*recv)?;
+                let i = self.lower_expr(*index)?;
+                let repr = self.lower_expr_repr(*value)?;
+                let leaves = self.repr_to_leaves(&repr, &shape);
+                if leaves.len() != paths.len() {
+                    return Err(gap(format!(
+                        "column insert arity mismatch for [{}]",
+                        elem.name
+                    )));
+                }
+                let f = self.stdlib_funcref("__rock_col_insert")?;
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+                for (path, leaf) in paths.into_iter().zip(leaves) {
+                    let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, len, leaf] });
+                }
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            // A fresh column table whose columns are copies -- the clone must not
+            // share a column with the original, or a later push would be seen by
+            // both.
+            ("__vec_data_clone", [recv]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let shape = self.column_shape(elem)?;
+                let paths = column_leaf_paths(&shape);
+                let vec = self.lower_expr(*recv)?;
+                let f = self.stdlib_funcref("__rock_col_copy")?;
+                // Built as a `Vec`-tagged struct: `write_table_key` brackets a
+                // dotted leaf path, so the emitted table is the same shape
+                // `MakeVecColumns` writes for a literal.
+                let mut fields = Vec::with_capacity(paths.len() + 2);
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+                for path in paths {
+                    let col = self.emit_cur(Inst::Field { base: vec, field: path });
+                    fields.push((
+                        path,
+                        self.emit_cur(Inst::Call { func: f, args: vec![col, len] }),
+                    ));
+                }
+                fields.push((Ustr::from("len"), len));
+                let old_header = self.column_header(vec);
+                let capacity = self.emit_cur(Inst::Field {
+                    base: old_header,
+                    field: Ustr::from("cap"),
+                });
+                let header = self.make_column_header(elem, capacity);
+                fields.push((Ustr::from(VEC_COLUMN_HEADER_FIELD), header));
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+                    ty: Some(Ustr::from("Vec")),
+                    fields,
+                }))))
+            }
+            // The two ops that need the LOGICAL elements, not the physical
+            // columns: a sort key is a function of the whole element, and
+            // `to_lua_array`'s whole contract is handing a Lua array of elements
+            // to a foreign API. `to_lua_array` redirects to the materializing
+            // helper -- the storage contract's third category (erased/external
+            // boundaries materialize explicitly), and the only place a column Vec
+            // builds element tables.
+            //
+            // `sort` needs the element only to APPLY THE KEY, and the key is
+            // reached through a fn value, whose ABI is derived from the fn type.
+            // At a `nobox` element that ABI is the leaves, which are the columns,
+            // so the key applies with no element at all and the two forms split
+            // here rather than at a box the mark would forbid.
+            ("__vec_data_sort", [recv, key_fn]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let vec = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key_fn)?;
+                if !self.is_nobox_struct(elem.name) {
+                    let f = self.stdlib_funcref("__rock_col_sort")?;
+                    return Ok(Some(ValueRepr::Scalar(
+                        self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
+                    )));
+                }
+                let shape = self.column_shape(elem)?;
+                // The key fn's ABI at a nullable element leads with presence, so
+                // the path list must too -- it is the positional binding the
+                // helper unpacks into the key.
+                let paths: Vec<_> = column_leaf_paths(&shape)
+                    .into_iter()
+                    .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
+                    .collect();
+                let paths = self.emit_cur(Inst::MakeTuple(paths));
+                let f = self.stdlib_funcref("__rock_col_sort_leaves")?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
+                    func: f,
+                    args: vec![vec, k, paths],
+                }))))
+            }
+            ("__rock_vec_to_lua_array", [recv]) => {
+                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                if self.is_nobox_struct(elem.name) {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[*recv],
+                        format!(
+                            "cannot convert column-stored nobox value `{}` to a Lua array: \
+                             the bridge requires implicit element materialization",
+                            elem.name
+                        ),
+                    ));
+                }
+                let vec = self.lower_expr(*recv)?;
+                let f = self.stdlib_funcref("__rock_vec_column_elements")?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.emit_cur(Inst::Call { func: f, args: vec![vec] }),
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn make_column_header(&mut self, elem: ColumnElem, capacity: Idx<Inst>) -> Idx<Inst> {
+        let repr = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(VEC_COLUMN_REPR))));
+        let elem = self.emit_cur(Inst::Const(Lit::Str(elem.name)));
+        self.emit_cur(Inst::MakeStruct {
+            ty: None,
+            fields: vec![
+                (Ustr::from("repr"), repr),
+                (Ustr::from("elem"), elem),
+                (Ustr::from("cap"), capacity),
+            ],
+        })
+    }
+
+    pub(crate) fn column_header(&mut self, vec: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::Field {
+            base: vec,
+            field: Ustr::from(VEC_COLUMN_HEADER_FIELD),
+        })
+    }
+
+    pub(crate) fn empty_column_vec(
+        &mut self,
+        elem: ColumnElem,
+        capacity: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let columns = column_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
+        Ok(self.emit_cur(Inst::MakeVecColumns {
+            elem: elem.name,
+            columns,
+            len: 0,
+            capacity,
+        }))
+    }
+
+    /// A fresh column-stored `Map<K, V>`: a hash spine of slot indices over an
+    /// empty column Vec, plus the free list and the live count. Arena's
+    /// bookkeeping-SoA field names deliberately -- the two are one structure
+    /// (`docs/unfuck-backlog.md`).
+    ///
+    /// The `data` columns must exist before the first store, which is why this
+    /// mints a zero-length `MakeVecColumns` rather than an empty table.
+    pub(crate) fn empty_column_map(&mut self, elem: ColumnElem) -> Result<Idx<Inst>, CompilerError> {
+        let zero_cap = self.emit_cur(Inst::Const(Lit::Int(0)));
+        let data = self.empty_column_vec(elem, zero_cap)?;
+        let spine = self.emit_cur(Inst::MakeStruct { ty: None, fields: Vec::new() });
+        let free = self.emit_cur(Inst::MakeVec(Vec::new()));
+        let count = self.emit_cur(Inst::Const(Lit::Int(0)));
+        Ok(self.emit_cur(Inst::MakeStruct {
+            ty: None,
+            fields: vec![
+                (Ustr::from("spine"), spine),
+                (Ustr::from("data"), data),
+                (Ustr::from("free_indices"), free),
+                (Ustr::from("occupied_count"), count),
+            ],
+        }))
+    }
+
+    /// Column-aware lowering of the Map storage boundary when the receiver's
+    /// VALUE type is concretely column-stored. `Ok(None)` = not one of these, or
+    /// a boxed value, in which case the stdlib body stands.
+    ///
+    /// Resolves through the active `SpecSubst` for the same reason
+    /// [`Self::column_data_primitive`] does: the shared snapshot of a generic
+    /// body keeps the bare-table representation, the snapshot specialized at a
+    /// column-eligible value lowers to spine operations. Static per
+    /// instantiation, never a runtime test for whether a spine exists.
+    pub(crate) fn map_column_primitive(
+        &mut self,
+        name: &str,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        match (name, arg_idxs) {
+            ("get", [recv, key]) => {
+                let Some(elem) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key)?;
+                Ok(Some(self.map_column_get_repr(m, k, elem)?))
+            }
+            ("table_unset", [recv, key]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key)?;
+                self.call_spine("__map_col_free", vec![m, k])?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            ("len" | "map_len", [recv]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                Ok(Some(ValueRepr::Scalar(self.call_spine("__map_col_len", vec![m])?)))
+            }
+            ("contains", [recv, key]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key)?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.call_spine("__map_col_contains", vec![m, k])?,
+                )))
+            }
+            ("clear", [recv]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                self.call_spine("__map_col_clear", vec![m])?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn column_vec_from_raw_array(
+        &mut self,
+        raw: Idx<Inst>,
+        len: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let vec = self.empty_column_vec(elem, len)?;
+        let i_cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
+
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = header;
+        let i = self.emit_cur(Inst::Load(i_cell));
+        let cmp = self.emit_cur(Inst::IntLt(i, len));
+        self.f.set_term(self.cur, Term::Branch { cond: cmp, then_bb: body, else_bb: exit });
+
+        self.cur = body;
+        let i_now = self.emit_cur(Inst::Load(i_cell));
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let one_based = self.emit_cur(Inst::IntAdd(i_now, one));
+        let value = self.emit_cur(Inst::Index {
+            base: raw,
+            index: one_based,
+            kind: ContainerKind::VecColumn,
+        });
+        self.column_append_repr(vec, &ValueRepr::Scalar(value), elem)?;
+        let next = self.emit_cur(Inst::IntAdd(i_now, one));
+        self.emit_cur(Inst::Store {
+            cell: i_cell,
+            value: next,
+        });
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = exit;
+        Ok(vec)
+    }
+
+    /// `xs.push(v)` onto a column-stored Vec: bump the shared `len` once, then
+    /// store leaf `k` into column `k` at the new slot. The element is consumed
+    /// as leaves (`repr_to_leaves`), so a literal argument never builds a box.
+    pub(crate) fn column_push(
+        &mut self,
+        recv: Idx<Expr>,
+        item: Idx<Expr>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let vec = self.lower_expr(recv)?;
+        let repr = self.lower_expr_repr(item)?;
+        self.column_append_repr_with_shape(vec, &repr, elem, &shape)?;
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    pub(crate) fn column_append_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let shape = self.column_shape(elem)?;
+        self.column_append_repr_with_shape(vec, repr, elem, &shape)
+    }
+
+    pub(crate) fn column_append_repr_with_shape(
+        &mut self,
+        vec: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: ColumnElem,
+        shape: &ValueShape,
+    ) -> Result<(), CompilerError> {
+        let leaves = self.repr_to_leaves(repr, shape);
+        let paths = column_leaf_paths(shape);
+        if leaves.len() != paths.len() {
+            return Err(gap(format!(
+                "column push arity mismatch for [{}]: {} leaves vs {} columns",
+                elem.name,
+                leaves.len(),
+                paths.len()
+            )));
+        }
+        // `len` is shared by every column, so it advances ONCE. Bumping per
+        // column would desync them.
+        let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let next = self.emit_cur(Inst::IntAdd(len, one));
+        self.emit_cur(Inst::StoreField {
+            base: vec,
+            field: Ustr::from("len"),
+            value: next,
+        });
+        for (path, leaf) in paths.into_iter().zip(leaves) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col,
+                index: next,
+                value: leaf,
+                kind: ContainerKind::VecColumn,
+            });
+        }
+        Ok(())
+    }
+
+    /// `Some((vec, one_based_index, elem))` iff `e` is `xs[i]` over a
+    /// column-stored Vec — the shape that has no element slot to serve as a
+    /// place base.
+    pub(crate) fn column_index_place(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {
+        let Expr::Index { base, index } = self.body.expr_arena[e] else {
+            return Ok(None);
+        };
+        // A column-stored Map resolves to the SAME place one indirection out:
+        // the spine turns the key into a slot, and the slot indexes `data`.
+        // Without this a field write through `m[k]` takes a whole-element place
+        // base, which the wrapper has no slot for.
+        if let Some(elem) = self.map_column_value_of(base) {
+            let m = self.lower_expr(base)?;
+            let k = self.lower_expr(index)?;
+            let slot = self.call_spine("__map_col_slot_checked", vec![m, k])?;
+            let data = self.map_col_data(m);
+            let one_based = self.checked_column_index(data, slot);
+            return Ok(Some((data, one_based, elem)));
+        }
+        let Some(elem) = self.vec_column_elem_of(base) else {
+            return Ok(None);
+        };
+        let vec = self.lower_expr(base)?;
+        let i = self.lower_expr(index)?;
+        let one_based = self.checked_column_index(vec, i);
+        Ok(Some((vec, one_based, elem)))
+    }
+
+    /// `xs[i].<field> = v` on a column-stored Vec: store into the column that
+    /// holds that leaf. `field` must name a PRIMITIVE leaf — a nested value
+    /// field (`xs[i].inner = ..`, `xs[i].inner.a = ..`) spans several columns
+    /// and is rejected rather than silently writing one.
+    pub(crate) fn column_leaf_store(
+        &mut self,
+        vec: Idx<Inst>,
+        one_based: Idx<Inst>,
+        elem: ColumnElem,
+        field: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        // A NULLABLE element has no field place at all: bone rejects `.field` on
+        // a `T?` before this, and writing one leaf of a slot whose presence says
+        // "absent" would be a silent half-write. Reject rather than trust that.
+        if elem.nullable {
+            return Err(gap(format!(
+                "cannot write `{field}` through an element of `[{}?]`; refine the \
+                 element to non-null and store it whole",
+                elem.name
+            )));
+        }
+        let shape = self.column_shape(elem)?;
+        if !value_leaf_paths(&shape).iter().any(|p| *p == field) {
+            return Err(gap(format!(
+                "`{field}` is not a scalar leaf of column-stored `[{}]`; a \
+                 nested value field spans several columns and needs a whole-element store",
+                elem.name
+            )));
+        }
+        let v = self.lower_expr(value)?;
+        let col = self.emit_cur(Inst::Field { base: vec, field });
+        self.emit_cur(Inst::StoreIndex {
+            base: col,
+            index: one_based,
+            value: v,
+            kind: ContainerKind::VecColumn,
+        });
+        Ok(())
+    }
+
+    /// `xs[i] = v` into a column-stored Vec: bounds-check once, then store leaf
+    /// `k` into column `k`. The element never materializes.
+    pub(crate) fn column_element_store(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let repr = self.lower_expr_repr(value)?;
+        self.column_element_store_repr(vec, index, &repr, elem)
+    }
+
+    /// A synthesized call to one of the scalar spine helpers. These are
+    /// non-generic by necessity -- `Inst::Call` carries no generic arguments, so
+    /// a generic Rock helper could never specialize here.
+    pub(crate) fn call_spine(
+        &mut self,
+        name: &str,
+        args: Vec<Idx<Inst>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let func = self.stdlib_funcref(name)?;
+        Ok(self.emit_cur(Inst::Call { func, args }))
+    }
+
+    /// `m[k] = v` into a column-stored Map: take (or allocate) the key's slot,
+    /// then store leaf-wise into `data`'s columns. The value never materializes.
+    ///
+    /// A NULLABLE value collapses to key removal when absent. Rock's Map already
+    /// cannot distinguish an absent key from a key holding null -- a nil store
+    /// removes the key -- so nothing writes a top-level presence tag, and the
+    /// `[P?]` presence-column gap is not on this path.
+    pub(crate) fn map_column_store(
+        &mut self,
+        m: Idx<Inst>,
+        key: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let repr = self.lower_expr_repr(value)?;
+        // A SCALAR here is a nullable value that never became a Group -- a literal
+        // `null`, or a boxed source. Its presence is a runtime nil test, and the
+        // leaves come from field reads off the box, which is why `boxed` defers
+        // the rebuild to the PRESENT arm below: reading `s.x` unconditionally
+        // faults on the literal-null store.
+        let (present, boxed) = match &repr {
+            ValueRepr::Group { present, .. } => (*present, None),
+            ValueRepr::Scalar(s) => {
+                let s = *s;
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                (Some(self.emit_cur(Inst::NotEq(s, nil))), Some(s))
+            }
+            _ => (None, None),
+        };
+        let Some(present) = present else {
+            let slot = self.call_spine("__map_col_slot", vec![m, key])?;
+            let data = self.map_col_data(m);
+            return self.column_element_store_repr(data, slot, &repr, elem);
+        };
+        let set_bb = self.f.new_block();
+        let del_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: set_bb, else_bb: del_bb },
+        );
+        self.cur = set_bb;
+        let stored = match boxed {
+            Some(s) => self.boxed_value_copy_repr(s, elem.name),
+            None => repr,
+        };
+        let slot = self.call_spine("__map_col_slot", vec![m, key])?;
+        let data = self.map_col_data(m);
+        self.column_element_store_repr(data, slot, &stored, elem)?;
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = del_bb;
+        self.call_spine("__map_col_free", vec![m, key])?;
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        Ok(())
+    }
+
+    /// `m[k]` on a column-stored Map -- errors on a miss, like the boxed
+    /// `__map_get_checked` it replaces.
+    pub(crate) fn map_column_index_repr(
+        &mut self,
+        m: Idx<Inst>,
+        key: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let slot = self.call_spine("__map_col_slot_checked", vec![m, key])?;
+        let data = self.map_col_data(m);
+        self.column_element_repr(data, slot, elem)
+    }
+
+    /// `m.get(k)` on a column-stored Map: a `V?` whose presence is the SPINE.
+    ///
+    /// The columns are read only in the present arm -- at a missing key the slot
+    /// is -1 and indexing `data` would fault, and a freed slot still holds stale
+    /// leaves that must not be observable.
+    pub(crate) fn map_column_get_repr(
+        &mut self,
+        m: Idx<Inst>,
+        key: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let slot = self.call_spine("__map_col_slot_of", vec![m, key])?;
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        let present = self.emit_cur(Inst::IntGeq(slot, zero));
+        let leaf_cells: Vec<Idx<Cell>> = value_leaf_paths(&shape)
+            .iter()
+            .map(|_| self.f.new_cell(None))
+            .collect();
+        let hit = self.f.new_block();
+        let miss = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: hit, else_bb: miss },
+        );
+        self.cur = hit;
+        let data = self.map_col_data(m);
+        let found = self.column_element_repr(data, slot, elem)?;
+        let leaves = self.repr_to_leaves(&found, &shape);
+        for (cell, leaf) in leaf_cells.iter().zip(leaves) {
+            self.emit_cur(Inst::Store { cell: *cell, value: leaf });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = miss;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        for cell in &leaf_cells {
+            self.emit_cur(Inst::Store { cell: *cell, value: nil });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        let loaded: Vec<Idx<Inst>> = leaf_cells
+            .iter()
+            .map(|c| self.emit_cur(Inst::Load(*c)))
+            .collect();
+        let mut idx = 0;
+        let inner = self.rebuild_from_leaves(&shape, &loaded, &mut idx);
+        Ok(match inner {
+            ValueRepr::Group { name, parts, .. } => ValueRepr::Group {
+                name,
+                parts,
+                present: Some(present),
+            },
+            other => other,
+        })
+    }
+
+    /// [`Self::column_element_store`] from an already-lowered repr, for a caller
+    /// that had to inspect the value's presence before choosing a block to store
+    /// in (the column Map's nullable arm).
+    pub(crate) fn column_element_store_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let leaves = self.repr_to_leaves(repr, &shape);
+        let paths = column_leaf_paths(&shape);
+        if leaves.len() != paths.len() {
+            return Err(gap(format!(
+                "column store arity mismatch for [{}]: {} leaves vs {} columns",
+                elem.name,
+                leaves.len(),
+                paths.len()
+            )));
+        }
+        let one_based = self.checked_column_index(vec, index);
+        for (path, leaf) in paths.into_iter().zip(leaves) {
+            let col = self.emit_cur(Inst::Field { base: vec, field: path });
+            self.emit_cur(Inst::StoreIndex {
+                base: col,
+                index: one_based,
+                value: leaf,
+                kind: ContainerKind::VecColumn,
+            });
+        }
+        Ok(())
+    }
+
+    /// `__vec_checked_index(vec, i)` — the 1-based backing index, bounds-checked
+    /// against `vec.len`. One call per ELEMENT access, not per column.
+    pub(crate) fn checked_column_index(&mut self, vec: Idx<Inst>, index: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::VecCheckedIndex { vec, index })
+    }
+}
