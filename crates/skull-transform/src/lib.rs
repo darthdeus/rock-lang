@@ -1502,6 +1502,23 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
                         }
                     }
                 }
+                // `TupleIndex(<tuple ctor>, i) -> the ctor's i-th operand`. A Rock
+                // tuple has no assignable place, so a `MakeTuple` is immutable for
+                // the same reason a `MakeValueStruct` is. This is what lets a
+                // combinator's `let (ok, x) = next(inner)` reach the element the
+                // mechanism-I repack built: without it the element stays behind an
+                // un-forwarded `TupleIndex`, and the presence test on it is a
+                // whole-value use that pins the box `nobox` forbids.
+                Inst::TupleIndex { base, index } => {
+                    let (base, index) = (*base, *index);
+                    let rb = resolve_subst(&subst, base);
+                    if let Inst::MakeTuple(vs) = &func.insts[rb] {
+                        if let Some(op) = vs.get(index) {
+                            subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                            any_subst = true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }

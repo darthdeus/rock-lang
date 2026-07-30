@@ -1419,12 +1419,56 @@ fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleR
 pub enum BoundNextElem {
     /// Today's ABI -- one opaque slot. Nothing to do.
     Opaque,
-    /// A `nobox` value: its struct name and leaf fields in ctor order.
-    Flat(Ustr, Vec<Ustr>),
-    /// Splats through a nested or nullable shape the flat repack cannot express.
-    /// The splice REJECTS on this rather than guess a leaf-to-field pairing --
-    /// a wrong pairing writes one leaf's value into another field, silently.
+    /// The element splats; the plan says how to put it back together.
+    Rebuild(ElemRebuild),
+    /// Splats through a shape the repack cannot express (a nullable value, whose
+    /// presence leaf has no field to pair with). The splice REJECTS on this rather
+    /// than guess a leaf-to-field pairing -- a wrong pairing writes one leaf's
+    /// value into another field, silently.
     Unsupported,
+}
+
+/// How to rebuild one splatting element from the wire values, public because the
+/// splice that consumes it lives in `skull-transform`. It mirrors [`RetSlot`],
+/// which stays private: this is the part the other crate needs, not the shape
+/// machinery behind it.
+pub enum ElemRebuild {
+    /// One wire value, used as-is (an unmarked element inside a splatting tuple).
+    Passthrough,
+    /// A `nobox` value: its struct name and leaf fields in ctor order.
+    Value(Ustr, Vec<Ustr>),
+    /// A tuple element (`zip`'s pair, `enumerate`'s `(int, T)`): rebuild each part,
+    /// then pack them.
+    Tuple(Vec<ElemRebuild>),
+}
+
+impl ElemRebuild {
+    /// Wire values this plan consumes.
+    pub fn leaf_count(&self) -> usize {
+        match self {
+            ElemRebuild::Passthrough => 1,
+            ElemRebuild::Value(_, fields) => fields.len(),
+            ElemRebuild::Tuple(parts) => parts.iter().map(Self::leaf_count).sum(),
+        }
+    }
+}
+
+fn elem_rebuild(slot: &RetSlot) -> Option<ElemRebuild> {
+    match slot {
+        RetSlot::Opaque => Some(ElemRebuild::Passthrough),
+        RetSlot::Leaves(vs) if !vs.nullable => {
+            let fields: Option<Vec<Ustr>> = vs
+                .fields
+                .iter()
+                .map(|(n, fs)| matches!(fs, FieldShape::Prim).then_some(*n))
+                .collect();
+            fields.map(|f| ElemRebuild::Value(vs.name, f))
+        }
+        RetSlot::Nested(inner) if !inner.nullable => {
+            inner.slots.iter().map(elem_rebuild).collect::<Option<Vec<_>>>().map(ElemRebuild::Tuple)
+        }
+        RetSlot::Leaves(_) | RetSlot::Nested(_) => None,
+    }
 }
 
 pub struct BoundNextShape {
@@ -1440,20 +1484,21 @@ pub fn bound_next_shape(
     let subst = key.map(|k| spec_subst_from_key(ws, fref, k)).unwrap_or_default();
     let ret = ws.module(fref.module).functions[fref.func].return_ty?;
     let shape = tuple_ret_shape(ws, &subst, ret)?;
-    let elem = match shape.slots.get(1) {
-        Some(RetSlot::Leaves(vs)) if !vs.nullable => {
-            let flat: Option<Vec<Ustr>> = vs
-                .fields
-                .iter()
-                .map(|(n, fs)| matches!(fs, FieldShape::Prim).then_some(*n))
-                .collect();
-            match flat {
-                Some(fields) => BoundNextElem::Flat(vs.name, fields),
-                None => BoundNextElem::Unsupported,
-            }
+    // The element is slot 1 alone, or slots 1.. as a tuple -- the same pairing
+    // `lower_for_user_iter` makes when it binds the pattern, so the two paths
+    // cannot disagree about what the element IS.
+    let elem_slot = match shape.slots.get(1..)? {
+        [] => return None,
+        [one] => one.clone(),
+        rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec(), nullable: false }),
+    };
+    let elem = if elem_slot.splats() {
+        match elem_rebuild(&elem_slot) {
+            Some(plan) => BoundNextElem::Rebuild(plan),
+            None => BoundNextElem::Unsupported,
         }
-        Some(RetSlot::Leaves(_)) | Some(RetSlot::Nested(_)) => BoundNextElem::Unsupported,
-        _ => BoundNextElem::Opaque,
+    } else {
+        BoundNextElem::Opaque
     };
     Some(BoundNextShape { slot_count: shape.slot_count(), elem })
 }
