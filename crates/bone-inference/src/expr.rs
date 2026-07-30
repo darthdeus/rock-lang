@@ -1343,11 +1343,14 @@ pub fn infer_expr_used(
                     seen_unguarded_wildcard = true;
                 }
 
+                let tag = unqualified_arm_variant(c, gamma, arm.pattern, scrut_ty, expr_span)?;
                 check_pattern(c, gamma, arm.pattern, scrut_ty, expr_span)?;
 
                 if let Some(guard) = arm.guard {
                     let guard_ty = infer_expr(c, gamma, guard)?;
                     unify(gamma, guard_ty, gamma.workspace.builtins.bool(), expr_span)?;
+                } else if let Some(v) = tag {
+                    covered.insert(v);
                 } else {
                     if matches!(
                         c.body.pattern_arena[arm.pattern],

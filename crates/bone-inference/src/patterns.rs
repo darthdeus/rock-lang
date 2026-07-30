@@ -21,6 +21,65 @@ pub(crate) fn collect_covered_enum_variants(c: BodyCtx, pat: Idx<Pattern>, out: 
     }
 }
 
+/// A match arm whose whole pattern is a bare `Name` is ambiguous: skull reads it
+/// as a nullary-variant tag test when the name is a variant of the scrutinee
+/// enum, and as an irrefutable binding otherwise -- so a typo'd variant silently
+/// becomes a catch-all. The parser already settles the same ambiguity by
+/// capitalization (`Color::Red` vs `value :: int`, `peek_is_uppercase_ident`),
+/// so an uppercase bare name against an enum scrutinee must be a real variant.
+///
+/// `Some(v)` means the arm tag-tests `v` (it covers a variant and catches
+/// nothing else); `None` means a genuine binding.
+pub(crate) fn unqualified_arm_variant(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    pat: Idx<Pattern>,
+    scrut_ty: TyId,
+    span: Span,
+) -> Result<Option<Ustr>, CompilerError> {
+    let Pattern::Bind(b) = c.body.pattern_arena[pat] else {
+        return Ok(None);
+    };
+
+    let name = c.body.binding_arena[b].name;
+    if !name.as_str().starts_with(|ch: char| ch.is_ascii_uppercase()) {
+        return Ok(None);
+    }
+
+    let scrut_ty = resolve(gamma, scrut_ty, span);
+    let TypeExpr::App {
+        ctor: TypeCtor::Nominal(ename),
+        ..
+    } = *gamma.get(scrut_ty)
+    else {
+        return Ok(None);
+    };
+
+    let Some(eid) = resolve_enum(gamma, ename) else {
+        return Ok(None);
+    };
+
+    let def = &gamma.workspace.module(eid.module).enums[eid.def];
+    if def.variants.iter().any(|v| v.name == name) {
+        return Ok(Some(name));
+    }
+
+    let known = def
+        .variants
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(CompilerError::new_with_label(
+        c.body.binding_spans.get(b).copied().unwrap_or(span),
+        format!(
+            "enum `{ename}` has no variant `{name}` (an uppercase match-arm name \
+             is read as a variant, not a binding). Known variants: {known}"
+        ),
+    ))
+}
+
 pub(crate) fn check_pattern(
     c: BodyCtx,
     gamma: &mut Gamma,

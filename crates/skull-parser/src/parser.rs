@@ -1247,6 +1247,13 @@ impl Parser {
         let generics = self.parse_generics();
         self.expect(TokenKind::OpenParen)?;
         let wrapped = self.parse_type()?;
+        if self.kind() == TokenKind::Comma {
+            return Err(self.err(format!(
+                "a newtype wraps exactly one type, but `{}` declares more than one \
+                 (use a struct, or wrap a tuple: `newtype {}((A, B))`)",
+                name.name, name.name
+            )));
+        }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
         Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
