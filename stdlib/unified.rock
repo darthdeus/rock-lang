@@ -10,13 +10,6 @@ struct __DecoTarget {
     func: any,
 }
 
-struct ArenaEntry<T> {
-    _data: T,
-    index: int,
-    generation: int,
-    is_occupied: bool,
-}
-
 @pure @inline inline(lua) fn int(value: int) -> int = "return value"
 
 @pure fn int(value: float) -> int { return floor(value) as int }
@@ -564,8 +557,14 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // conditionally expensive invariant checks at the source level.
 @nomangle inline(lua) fn is_release_mode() -> bool = "return _G.__ROCK_RELEASE == true"
 
+// Bookkeeping SoA. A slot's index IS its position in every column, so the
+// per-entry wrapper (and the index it had to carry) is gone: arena ops touch
+// column SUBSETS -- `contains` reads occupancy+generations, `get` adds data,
+// `values()` never looks at generations at all.
 struct Arena<T> {
-    entries: [ArenaEntry<T>],
+    generations: [int],
+    occupied: [bool],
+    data: [T],
     free_indices: [int],
     occupied_count: int = 0,
 }

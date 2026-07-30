@@ -8907,9 +8907,16 @@ impl Builder<'_> {
         };
         let _ = leaves;
 
+        // The element type, when it is column-eligible: under bookkeeping SoA the
+        // arena's `data` is an ordinary `[T]`, so at an all-scalar value `T` it is
+        // COLUMN-stored and a bare `Index` would read a table that isn't there.
+        let column_elem = self.arena_column_elem_of(iter);
+
         let arena = self.lower_expr(iter)?;
-        let entries = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("entries") });
-        let n = self.emit_cur(Inst::Len { base: entries, kind: ContainerKind::Vec });
+        let occupied = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("occupied") });
+        let generations = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("generations") });
+        let data = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("data") });
+        let n = self.emit_cur(Inst::Len { base: occupied, kind: ContainerKind::Vec });
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -8935,22 +8942,22 @@ impl Builder<'_> {
         let c = self.emit_cur(Inst::IntLt(i, n));
         self.f.set_term(self.cur, Term::Branch { cond: c, then_bb: body_bb, else_bb: exit });
 
-        // body: read entry; skip nil.
+        // body: nothing to skip before the occupancy read -- the walk is bounded
+        // by the occupancy column's own length, and a `[bool]` column has no
+        // holes, so the old nil test had nothing left to catch.
         self.cur = body_bb;
         let idx = self.emit_cur(Inst::Load(i_cell));
-        let entry = self.emit_cur(Inst::Index { base: entries, index: idx, kind: ContainerKind::Vec });
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let isnil = self.emit_cur(Inst::Eq(entry, nil));
-        self.f.set_term(self.cur, Term::Branch { cond: isnil, then_bb: latch, else_bb: occ_bb });
+        self.f.set_term(self.cur, Term::Goto(occ_bb));
 
         // occ: skip unoccupied.
         self.cur = occ_bb;
-        let occ = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("is_occupied") });
+        let occ = self.emit_cur(Inst::Index { base: occupied, index: idx, kind: ContainerKind::Vec });
         self.f.set_term(self.cur, Term::Branch { cond: occ, then_bb: do_bb, else_bb: latch });
 
         // do: build Entity, bind, run body.
         self.cur = do_bb;
-        // `entry` is an `ArenaEntry` (fields `index`/`generation`); the built
+        // A slot's index IS its position, so the loop counter is the Entity's
+        // `_index` and only the generation needs a column read. The built
         // value is an `Entity` whose fields are `_`-prefixed (soft-private).
         // `Entity` is a `value` struct (GC-carrying tier): build it as a
         // `MakeValueStruct` so it scalarizes (a non-escaping `for (e, _)` scan
@@ -8959,17 +8966,27 @@ impl Builder<'_> {
         // A raw `MakeStruct` here would leak an un-tagged, metatable-less table
         // whose `==` silently mis-compares (arena-scan entities not equal to
         // pairs-scan entities).
-        let e_index = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("index") });
-        let e_gen = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("generation") });
+        let e_gen =
+            self.emit_cur(Inst::Index { base: generations, index: idx, kind: ContainerKind::Vec });
         let entity = self.emit_cur(Inst::MakeValueStruct {
             name: Ustr::from("Entity"),
             fields: vec![
                 (Ustr::from("_arena"), arena),
-                (Ustr::from("_index"), e_index),
+                (Ustr::from("_index"), idx),
                 (Ustr::from("_generation"), e_gen),
             ],
         });
-        let data = self.emit_cur(Inst::Field { base: entry, field: Ustr::from("_data") });
+        // A column element is rebuilt from its leaves here. For an ordinary value
+        // struct SROA folds the field reads back to the leaf cells, so the pack
+        // costs nothing; for a `nobox` element it is an implicit materialization
+        // and the verifier rejects it by name rather than emitting a quiet box.
+        let data = match column_elem {
+            Some(elem) => {
+                let repr = self.column_element_repr(data, idx, elem)?;
+                self.pack(repr)
+            }
+            None => self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec }),
+        };
         match &pat {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
                 self.bind_for_pattern(&subs[0], entity);
@@ -11637,6 +11654,29 @@ impl Builder<'_> {
             _ => return None,
         };
         is_ffi_clean_value_struct(self.ws, en).then_some(en)
+    }
+
+    /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
+    /// [`Self::vec_column_elem_of`] one container out: an arena's `data` field is
+    /// an ordinary `[E]`, so it columnizes on exactly the same rule, and the
+    /// hardcoded `for`-over-arena walk has to read it the same way the Vec path
+    /// would.
+    fn arena_column_elem_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Nominal(_), params } = self.ty_node(ty)? else {
+            return None;
+        };
+        let p = params.into_iter().next()?;
+        let elem = self.resolve_tyid(ty.with_idx(p))?;
+        let en = match self.ty_node(elem)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+                Some(ty) => ty.nominal()?,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        vec_column_elem(self.ws, en)
     }
 
     /// The Vec container kind for base expr `e`: an all-scalar value-struct
