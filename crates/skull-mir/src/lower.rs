@@ -4764,6 +4764,11 @@ impl Builder<'_> {
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return self.column_element_store(b, i, value, elem);
                 }
+                // A column-stored Map has no slot at the key either: the write
+                // goes through the spine to a slot, then leaf-wise into `data`.
+                if let Some(elem) = self.map_column_value_of(base) {
+                    return self.map_column_store(b, i, value, elem);
+                }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
                     if self.is_leaf_addressed(elem) {
                         return self.nb_leaf_element_store(b, i, value, elem);
@@ -5445,6 +5450,23 @@ impl Builder<'_> {
                 if let Some(elem) = self.vec_column_elem_of(e) {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
+                }
+            }
+            // The Map surface. `get`/`table_unset` are the storage boundary the
+            // generic Rock bodies reach through -- `remove`, `contains`,
+            // `get_or_insert`, `update` and `upsert` are all built on them, so
+            // converting these converts that surface at once. `len`/`clear` are
+            // intercepted despite having working generic bodies: the generic
+            // `clear` unsets while iterating the very table it walks, and `len`
+            // counts a spine it can read in O(1).
+            if let Some(r) = self.map_column_primitive(name.as_str(), &arg_idxs)? {
+                return Ok(r);
+            }
+            // `map_new()` is the Map's `vec_new`: its value type comes from the
+            // CALL's own type, so it cannot be read off an argument.
+            if name.as_str() == "map_new" && arg_idxs.is_empty() {
+                if let Some(elem) = self.map_column_value_of(e) {
+                    return Ok(ValueRepr::Scalar(self.empty_column_map(elem)?));
                 }
             }
             if name.as_str() == "__rock_vec_from_lua_array" {
@@ -6903,6 +6925,81 @@ impl Builder<'_> {
         }))
     }
 
+    /// A fresh column-stored `Map<K, V>`: a hash spine of slot indices over an
+    /// empty column Vec, plus the free list and the live count. Arena's
+    /// bookkeeping-SoA field names deliberately -- the two are one structure
+    /// (`docs/unfuck-backlog.md`).
+    ///
+    /// The `data` columns must exist before the first store, which is why this
+    /// mints a zero-length `MakeVecColumns` rather than an empty table.
+    fn empty_column_map(&mut self, elem: ColumnElem) -> Result<Idx<Inst>, CompilerError> {
+        let zero_cap = self.emit_cur(Inst::Const(Lit::Int(0)));
+        let data = self.empty_column_vec(elem, zero_cap)?;
+        let spine = self.emit_cur(Inst::MakeStruct { ty: None, fields: Vec::new() });
+        let free = self.emit_cur(Inst::MakeVec(Vec::new()));
+        let count = self.emit_cur(Inst::Const(Lit::Int(0)));
+        Ok(self.emit_cur(Inst::MakeStruct {
+            ty: None,
+            fields: vec![
+                (Ustr::from("spine"), spine),
+                (Ustr::from("data"), data),
+                (Ustr::from("free_indices"), free),
+                (Ustr::from("occupied_count"), count),
+            ],
+        }))
+    }
+
+    /// Column-aware lowering of the Map storage boundary when the receiver's
+    /// VALUE type is concretely column-stored. `Ok(None)` = not one of these, or
+    /// a boxed value, in which case the stdlib body stands.
+    ///
+    /// Resolves through the active `SpecSubst` for the same reason
+    /// [`Self::column_data_primitive`] does: the shared snapshot of a generic
+    /// body keeps the bare-table representation, the snapshot specialized at a
+    /// column-eligible value lowers to spine operations. Static per
+    /// instantiation, never a runtime test for whether a spine exists.
+    fn map_column_primitive(
+        &mut self,
+        name: &str,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        match (name, arg_idxs) {
+            ("get", [recv, key]) => {
+                let Some(elem) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key)?;
+                Ok(Some(self.map_column_get_repr(m, k, elem)?))
+            }
+            ("table_unset", [recv, key]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key)?;
+                self.call_spine("__map_col_free", vec![m, k])?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            ("len" | "map_len", [recv]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                Ok(Some(ValueRepr::Scalar(self.call_spine("__map_col_len", vec![m])?)))
+            }
+            ("contains", [recv, key]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                let k = self.lower_expr(*key)?;
+                Ok(Some(ValueRepr::Scalar(
+                    self.call_spine("__map_col_contains", vec![m, k])?,
+                )))
+            }
+            ("clear", [recv]) => {
+                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let m = self.lower_expr(*recv)?;
+                self.call_spine("__map_col_clear", vec![m])?;
+                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn column_vec_from_raw_array(
         &mut self,
         raw: Idx<Inst>,
@@ -7020,6 +7117,18 @@ impl Builder<'_> {
         let Expr::Index { base, index } = self.body.expr_arena[e] else {
             return Ok(None);
         };
+        // A column-stored Map resolves to the SAME place one indirection out:
+        // the spine turns the key into a slot, and the slot indexes `data`.
+        // Without this a field write through `m[k]` takes a whole-element place
+        // base, which the wrapper has no slot for.
+        if let Some(elem) = self.map_column_value_of(base) {
+            let m = self.lower_expr(base)?;
+            let k = self.lower_expr(index)?;
+            let slot = self.call_spine("__map_col_slot_checked", vec![m, k])?;
+            let data = self.map_col_data(m);
+            let one_based = self.checked_column_index(data, slot);
+            return Ok(Some((data, one_based, elem)));
+        }
         let Some(elem) = self.vec_column_elem_of(base) else {
             return Ok(None);
         };
@@ -7079,9 +7188,161 @@ impl Builder<'_> {
         value: Idx<Expr>,
         elem: ColumnElem,
     ) -> Result<(), CompilerError> {
-        let shape = self.column_shape(elem)?;
         let repr = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_leaves(&repr, &shape);
+        self.column_element_store_repr(vec, index, &repr, elem)
+    }
+
+    /// A synthesized call to one of the scalar spine helpers. These are
+    /// non-generic by necessity -- `Inst::Call` carries no generic arguments, so
+    /// a generic Rock helper could never specialize here.
+    fn call_spine(
+        &mut self,
+        name: &str,
+        args: Vec<Idx<Inst>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let func = self.stdlib_funcref(name)?;
+        Ok(self.emit_cur(Inst::Call { func, args }))
+    }
+
+    /// `m[k] = v` into a column-stored Map: take (or allocate) the key's slot,
+    /// then store leaf-wise into `data`'s columns. The value never materializes.
+    ///
+    /// A NULLABLE value collapses to key removal when absent. Rock's Map already
+    /// cannot distinguish an absent key from a key holding null -- a nil store
+    /// removes the key -- so nothing writes a top-level presence tag, and the
+    /// `[P?]` presence-column gap is not on this path.
+    fn map_column_store(
+        &mut self,
+        m: Idx<Inst>,
+        key: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let repr = self.lower_expr_repr(value)?;
+        // A SCALAR here is a nullable value that never became a Group -- a literal
+        // `null`, or a boxed source. Its presence is a runtime nil test, and the
+        // leaves come from field reads off the box, which is why `boxed` defers
+        // the rebuild to the PRESENT arm below: reading `s.x` unconditionally
+        // faults on the literal-null store.
+        let (present, boxed) = match &repr {
+            ValueRepr::Group { present, .. } => (*present, None),
+            ValueRepr::Scalar(s) => {
+                let s = *s;
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                (Some(self.emit_cur(Inst::NotEq(s, nil))), Some(s))
+            }
+            _ => (None, None),
+        };
+        let Some(present) = present else {
+            let slot = self.call_spine("__map_col_slot", vec![m, key])?;
+            let data = self.map_col_data(m);
+            return self.column_element_store_repr(data, slot, &repr, elem);
+        };
+        let set_bb = self.f.new_block();
+        let del_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: set_bb, else_bb: del_bb },
+        );
+        self.cur = set_bb;
+        let stored = match boxed {
+            Some(s) => self.boxed_value_copy_repr(s, elem.name),
+            None => repr,
+        };
+        let slot = self.call_spine("__map_col_slot", vec![m, key])?;
+        let data = self.map_col_data(m);
+        self.column_element_store_repr(data, slot, &stored, elem)?;
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = del_bb;
+        self.call_spine("__map_col_free", vec![m, key])?;
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        Ok(())
+    }
+
+    /// `m[k]` on a column-stored Map -- errors on a miss, like the boxed
+    /// `__map_get_checked` it replaces.
+    fn map_column_index_repr(
+        &mut self,
+        m: Idx<Inst>,
+        key: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let slot = self.call_spine("__map_col_slot_checked", vec![m, key])?;
+        let data = self.map_col_data(m);
+        self.column_element_repr(data, slot, elem)
+    }
+
+    /// `m.get(k)` on a column-stored Map: a `V?` whose presence is the SPINE.
+    ///
+    /// The columns are read only in the present arm -- at a missing key the slot
+    /// is -1 and indexing `data` would fault, and a freed slot still holds stale
+    /// leaves that must not be observable.
+    fn map_column_get_repr(
+        &mut self,
+        m: Idx<Inst>,
+        key: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<ValueRepr, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let slot = self.call_spine("__map_col_slot_of", vec![m, key])?;
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        let present = self.emit_cur(Inst::IntGeq(slot, zero));
+        let leaf_cells: Vec<Idx<Cell>> = value_leaf_paths(&shape)
+            .iter()
+            .map(|_| self.f.new_cell(None))
+            .collect();
+        let hit = self.f.new_block();
+        let miss = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: hit, else_bb: miss },
+        );
+        self.cur = hit;
+        let data = self.map_col_data(m);
+        let found = self.column_element_repr(data, slot, elem)?;
+        let leaves = self.repr_to_leaves(&found, &shape);
+        for (cell, leaf) in leaf_cells.iter().zip(leaves) {
+            self.emit_cur(Inst::Store { cell: *cell, value: leaf });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = miss;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        for cell in &leaf_cells {
+            self.emit_cur(Inst::Store { cell: *cell, value: nil });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        let loaded: Vec<Idx<Inst>> = leaf_cells
+            .iter()
+            .map(|c| self.emit_cur(Inst::Load(*c)))
+            .collect();
+        let mut idx = 0;
+        let inner = self.rebuild_from_leaves(&shape, &loaded, &mut idx);
+        Ok(match inner {
+            ValueRepr::Group { name, parts, .. } => ValueRepr::Group {
+                name,
+                parts,
+                present: Some(present),
+            },
+            other => other,
+        })
+    }
+
+    /// [`Self::column_element_store`] from an already-lowered repr, for a caller
+    /// that had to inspect the value's presence before choosing a block to store
+    /// in (the column Map's nullable arm).
+    fn column_element_store_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        repr: &ValueRepr,
+        elem: ColumnElem,
+    ) -> Result<(), CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let leaves = self.repr_to_leaves(repr, &shape);
         let paths = column_leaf_paths(&shape);
         if leaves.len() != paths.len() {
             return Err(gap(format!(
@@ -7374,6 +7635,12 @@ impl Builder<'_> {
                 // direct column reads. Bounds are checked ONCE for the element.
                 if let ContainerKind::VecValueColumns(elem) = kind {
                     return self.column_element_repr(b, i, elem);
+                }
+                // A column-stored Map reaches its leaves the same way, one
+                // indirection out: the spine resolves the key to a slot, and the
+                // slot indexes `data`'s columns.
+                if let Some(elem) = self.map_column_value_of(base) {
+                    return self.map_column_index_repr(b, i, elem);
                 }
                 // Leaf addressing: no slot reference, no nested ctor -- each
                 // leaf comes straight from its typed view.
@@ -9340,7 +9607,15 @@ impl Builder<'_> {
         iter: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        // A column-stored Map iterates its SPINE: the walk yields (key, slot),
+        // and the value is read leaf-wise out of `data` at that slot. No element
+        // table is touched, because none exists.
+        let col = self.map_column_value_of(iter);
         let m = self.lower_expr(iter)?;
+        let table = match col {
+            Some(_) => self.emit_cur(Inst::Field { base: m, field: Ustr::from("spine") }),
+            None => m,
+        };
         let key_cell = self.f.new_cell(None);
         let val_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(key_cell);
@@ -9360,7 +9635,7 @@ impl Builder<'_> {
         self.emit_cur(Inst::MapNext {
             key_cell,
             val_cell,
-            table: m,
+            table,
         });
         let k = self.emit_cur(Inst::Load(key_cell));
         let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
@@ -9375,7 +9650,16 @@ impl Builder<'_> {
         );
 
         self.cur = body_bb;
-        self.bind_map_entry(vars, key_cell, val_cell)?;
+        let vv = match col {
+            Some(elem) => {
+                let slot = self.emit_cur(Inst::Load(val_cell));
+                let data = self.map_col_data(m);
+                let repr = self.column_element_repr(data, slot, elem)?;
+                Some(self.pack(repr))
+            }
+            None => None,
+        };
+        self.bind_map_entry(vars, key_cell, val_cell, vv)?;
         self.loop_targets.push((header, exit)); // continue -> header (re-runs next)
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
@@ -9424,7 +9708,7 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Branch { cond: done, then_bb: exit, else_bb: body_bb });
 
         self.cur = body_bb;
-        self.bind_map_entry(xpat, key_cell, val_cell)?;
+        self.bind_map_entry(xpat, key_cell, val_cell, None)?;
         self.loop_targets.push((latch, exit)); // continue -> latch (steps counter)
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
@@ -9443,23 +9727,33 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// `col_value` is the already-built element for a COLUMN-stored Map, whose
+    /// value is leaves at a slot rather than a cell. `None` keeps the boxed
+    /// walk, loading the value cell in place so the emitted order is unchanged.
     fn bind_map_entry(
         &mut self,
         vars: &BindingPattern,
         key_cell: Idx<Cell>,
         val_cell: Idx<Cell>,
+        col_value: Option<Idx<Inst>>,
     ) -> Result<(), CompilerError> {
         match vars {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
                 let kv = self.emit_cur(Inst::Load(key_cell));
                 self.bind_for_pattern(&subs[0], kv);
-                let vv = self.emit_cur(Inst::Load(val_cell));
+                let vv = match col_value {
+                    Some(v) => v,
+                    None => self.emit_cur(Inst::Load(val_cell)),
+                };
                 self.bind_for_pattern(&subs[1], vv);
                 Ok(())
             }
             BindingPattern::Leaf(_) => {
                 let kv = self.emit_cur(Inst::Load(key_cell));
-                let vv = self.emit_cur(Inst::Load(val_cell));
+                let vv = match col_value {
+                    Some(v) => v,
+                    None => self.emit_cur(Inst::Load(val_cell)),
+                };
                 let pair = self.emit_cur(Inst::MakeTuple(vec![kv, vv]));
                 self.bind_for_pattern(vars, pair);
                 Ok(())
@@ -12085,6 +12379,48 @@ impl Builder<'_> {
             .ok_or_else(|| gap("column element is not a value struct"))?;
         shape.nullable = elem.nullable;
         Ok(shape)
+    }
+
+    /// The column-eligible value-struct VALUE of `e`'s `Map<K, V>` type, if any.
+    ///
+    /// The Map sibling of [`Self::vec_column_elem_of`], resolving through the
+    /// active [`SpecSubst`] for the same reason: inside a specialized generic
+    /// body the value must read as the concrete struct, or the body lowers
+    /// against a bare table the column representation does not have.
+    ///
+    /// The KEY is deliberately not consulted -- a value-struct key rejects
+    /// upstream (LuaJIT hashes cdata by pointer), and the spine stores whatever
+    /// key the boxed representation already stored.
+    fn map_column_value_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
+        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
+        let TypeExpr::App { ctor: TypeCtor::Map, params } = self.ty_node(ty)? else {
+            return None;
+        };
+        let v = params.into_iter().nth(1)?;
+        let mut val = self.resolve_tyid(ty.with_idx(v))?;
+        // `Map<K, P?>` is column-stored too, and unlike `[P?]` it needs no
+        // presence column: an absent value collapses to key REMOVAL, because a
+        // bare Map already cannot tell an absent key from a key holding null.
+        if let Some(TypeExpr::Nullable(inner)) = self.ty_node(val) {
+            val = self.resolve_tyid(val.with_idx(inner))?;
+        }
+        let vn = match self.ty_node(val)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
+            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+                Some(ty) => ty.nominal()?,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        // `nullable: false` is the point of the peel above -- the spine carries
+        // presence, so the value columns never need a presence leaf.
+        vec_column_elem(self.ws, vn, false).map(|name| ColumnElem { name, nullable: false })
+    }
+
+    /// `m.data`, the column Vec a column-stored Map's values live in. Every
+    /// leaf read/write goes through the ordinary Vec column machinery on this.
+    fn map_col_data(&mut self, m: Idx<Inst>) -> Idx<Inst> {
+        self.emit_cur(Inst::Field { base: m, field: Ustr::from("data") })
     }
 
     /// The NativeBuffer container kind for base expr `e`: value-struct elements

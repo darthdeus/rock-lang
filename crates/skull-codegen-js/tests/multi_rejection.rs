@@ -80,13 +80,17 @@ fn every_unmapped_callee_in_one_body_is_reported() {
 /// which is exactly the misreading the accumulation exists to prevent.
 #[test]
 fn a_nobox_rejection_names_the_body_it_was_emitting() {
-    // A `Map` VALUE store is the sink: `Map` has no flat storage, so a nobox
-    // element still boxes there (`docs/nobox-case-matrix.md` mechanism D). A
-    // `[NV2]` element does NOT work here -- it column-stores.
+    // A TUPLE element is the sink (`docs/nobox-case-matrix.md` row 13): a
+    // `[(NV2, int)]` element has no column shape, so the value materializes.
+    // It has to be this channel -- `inspect` boxes too, but reports through
+    // "cannot cross boxed call boundary", which carries no body name. Neither
+    // plain container works: `[NV2]` column-stores, and so does a
+    // `Map<_, NV2>` VALUE since the spine landed
+    // (`docs/nobox-map-value-design.md`).
     const TWO_SINK_FNS: &str = "\
 nobox value NV2 { x: float, y: float }
-fn a(k: float) -> int { let m: Map<string, NV2> = map_new(); m[\"a\"] = NV2{x:k,y:0.0}; 1 }
-fn b(k: float) -> int { let m: Map<string, NV2> = map_new(); m[\"b\"] = NV2{x:0.0,y:k}; 2 }
+fn a(k: float) -> int { let v: [(NV2, int)] = [(NV2{x:k,y:0.0}, 1)]; v.len }
+fn b(k: float) -> int { let v: [(NV2, int)] = [(NV2{x:0.0,y:k}, 2)]; v.len }
 fn root(y: float) -> int { a(y) + b(y) }
 ";
     let all = reject_messages(TWO_SINK_FNS);
