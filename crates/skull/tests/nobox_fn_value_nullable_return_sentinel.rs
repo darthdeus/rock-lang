@@ -24,8 +24,16 @@
 //! present path, so a fix to either one moves exactly one of the two.
 //!
 //! The controls below bound the class to a lambda that is RETURNED: the same
-//! lambda bound to a typed local is a loud REJECT today, and every named-fn
-//! route through the identical fn-value type answers 5.
+//! lambda bound to a typed LOCAL is correct, and every named-fn route through
+//! the identical fn-value type answers 5. What separates the two is which bone
+//! path records the lambda's type. A lambda filling a hole with a known type
+//! (a let with a declared type, a call argument) goes through `check_expr`,
+//! which records the EXPECTED type -- so the body and the indirect call site
+//! read one fn type and agree on the presence slot. A lambda in RETURN position
+//! never reaches `check_expr`: `Expr::Return` infers it and coerces to the
+//! declared return, so what gets recorded is the lambda's OWN type, whose return
+//! is narrower than the hole (`if c { P {..} } else { null }` infers `P`, not
+//! `P?`). Closing this means routing the return position through the same check.
 //!
 //! PINNED BEHAVIOR (BUG): the sentinel asserts the wrong field, `6`. When the
 //! fix lands this test goes RED -- flip it to assert `5`, matching the controls,
@@ -151,18 +159,17 @@ fn a_named_fn_passed_as_a_fn_value_param_is_correct() {
     );
 }
 
-/// The asymmetry that lets the sentinel exist: the gate fires for the
-/// locally-bound lambda and not for the returned one. If a fix makes the
-/// returned form reject too, that is the correct outcome -- see the header.
+/// The asymmetry that localizes what is left: this form is CORRECT. A lambda in
+/// a LET is checked against the declared type and records it, so both ends of
+/// the fn value read `(bool) -> P?` and the body emits its presence slot. A
+/// lambda in RETURN position never reaches `check_expr` -- `Expr::Return` infers
+/// it and coerces -- so it records its own narrower `(bool) -> P` and emits two
+/// leaves against a three-dest call site.
 #[test]
-fn the_same_lambda_bound_to_a_typed_local_is_rejected() {
-    let err = common::try_emit_module(LOCALLY_BOUND_LAMBDA)
-        .expect_err("a locally-bound lambda at a nullable nobox return must reject");
-    // The raw error names the enclosing `main`; the CLI renders it with the
-    // nested-body attribution (`in nested body \`main__lambda0\``).
-    assert!(
-        err.message.contains("survived lowering as an implicit materialization"),
-        "expected the materialization gate, got: {}",
-        err.message
+fn the_same_lambda_bound_to_a_typed_local_is_correct() {
+    assert_eq!(
+        run(LOCALLY_BOUND_LAMBDA, "fnval_local_lambda"),
+        "5",
+        "a locally-bound lambda at a nullable nobox return must read the right field"
     );
 }

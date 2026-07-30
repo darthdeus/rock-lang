@@ -1610,7 +1610,16 @@ pub(crate) fn check_expr(
                 Some(fn_ty.with_idx(ret)),
                 c.body.expr_spans[e],
             )?;
-            return coerce(gamma, lam_ty, expected, span);
+            coerce(gamma, lam_ty, expected, span)?;
+            // The EXPECTED type, not the lambda's own -- same as the `Array` and
+            // `SiblingRef` arms below. A lambda's inferred return is narrower than
+            // the hole it fills (`if c { P {..} } else { null }` infers `P`, the
+            // `null` arm does not widen it), and codegen reads this type to decide
+            // the fn-value ABI at BOTH ends. Recording the narrow one gives the
+            // body a return shape with no presence slot while the indirect call
+            // site, reading the declared fn type, binds one.
+            gamma.assign_expr_type(c, e, exp_r)?;
+            return Ok(());
         }
     }
 

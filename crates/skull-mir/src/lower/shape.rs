@@ -1256,6 +1256,13 @@ pub(crate) fn reify_type(
         TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedType::Prim("int")),
         TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedType::Prim("float")),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedType::Prim("bool")),
+        // A string leaf is opaque to every shape decision, but it still has to
+        // REIFY: a tuple reifies only when all its parts do, so leaving this out
+        // made `(T, string)` unreifiable and the substitution then had no entry
+        // for the generic bound to it -- which is the one thing `ty_node` cannot
+        // answer. It cannot widen specialization on its own (`any_value` gates
+        // that on a value-struct leaf, which a prim is not).
+        TypeExpr::Builtin(BuiltinTy::String) => Some(ReifiedType::Prim("string")),
         TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
         TypeExpr::Tuple { elements } => {
             let parts = elements

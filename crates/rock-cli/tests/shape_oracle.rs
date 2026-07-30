@@ -590,10 +590,10 @@ const SEEDS: &[SeedCase] = &[
         file: "lambda_returning_nobox_at_let.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::LoudReject {
-            names: "survived lowering",
-        },
-        gap: Some("NEW: a lambda returning a nobox value rejects at a `let`"),
+        // L1 FIXED: a lambda filling a hole with a known fn type now records that
+        // type, so its return narrows to the same leaf ABI the call site derives.
+        expect: Expect::Correct,
+        gap: None,
     },
     // M3's three, each reproduced minimally against a control that EMITS before
     // being named. All are LOUD, so none is urgent; the judgement each wants is
@@ -623,10 +623,10 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_lambda_literal_position.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::LoudReject {
-            names: "survived lowering",
-        },
-        gap: Some("M3: a nobox-returning lambda LITERAL at an argument (LIVE)"),
+        // L1 FIXED, same mechanism as `lambda_returning_nobox_at_let`: an
+        // argument is a hole with a known type, so `check_expr` records it.
+        expect: Expect::Correct,
+        gap: None,
     },
     SeedCase {
         name: "glsl_local_unmarked",
