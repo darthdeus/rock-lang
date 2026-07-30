@@ -1364,9 +1364,11 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
             ));
         }
     }
-    if rows.is_empty() {
-        return String::new();
-    }
+    // Assigned even when EMPTY. A full reload re-executes the chunk in the live
+    // process, so what the new chunk omits it inherits: emitting nothing here
+    // would leave the previous build's accessors installed, and changing the last
+    // `nobox` global to an ordinary one would keep reflection reading leaf globals
+    // that no longer back it.
     format!("\n_G.__ROCK_NOBOX_GLOBALS = {{{}}}\n", rows.concat())
 }
 

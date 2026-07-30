@@ -274,3 +274,72 @@ fn on_update(dt: float) {
          means the restore did not take). Dump: {pkg:#}"
     );
 }
+
+/// Emit a project and return its compiled `main.lua`.
+fn emit_project_lua(pkg: &str, source: &str) -> String {
+    let dir = tempfile::tempdir().expect("project dir");
+    let stone = workspace_root().join("stone");
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        format!(
+            "[package]\nname = \"{pkg}\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+             [dependencies]\nstone = {{ path = \"{}\" }}\n",
+            stone.display()
+        ),
+    )
+    .expect("write stick.toml");
+    std::fs::write(
+        dir.path().join("main.rock"),
+        format!(
+            "{source}\nfn main() {{\n    \
+             stone_run_game(GameConfig {{ title: \"j probe\", width: 64, height: 64 }})\n}}\n"
+        ),
+    )
+    .expect("write main.rock");
+    let out = tempfile::tempdir().expect("out dir");
+    let status = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame",
+            &dir.path().to_string_lossy(),
+            "-n",
+            "1",
+            "--output",
+            &out.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn rock frame");
+    assert!(
+        status.status.success(),
+        "rock frame exited {:?}\nstderr:\n{}",
+        status.status,
+        String::from_utf8_lossy(&status.stderr)
+    );
+    std::fs::read_to_string(out.path().join("main.lua")).expect("read emitted main.lua")
+}
+
+/// A build with NO `nobox` globals must still RESET `__ROCK_NOBOX_GLOBALS`.
+///
+/// A full hot reload re-executes the chunk in the LIVE process
+/// (`stone/engine/hot_reload.rock`, `run_loaded_chunk`), so anything the new
+/// chunk does not assign survives from the old one. Emitting nothing when the
+/// table would be empty leaves the PREVIOUS build's accessors installed: change
+/// the last `nobox` global to an ordinary one and reflection keeps selecting a
+/// stale accessor, reading and writing leaf globals that no longer back it.
+///
+/// Same class as the emitted preservation idioms in `docs/backends.md` -- what a
+/// reloaded chunk omits is not absent, it is inherited.
+#[test]
+#[ignore = "spawns `rock frame` against a generated project (-P full)"]
+fn a_build_with_no_nobox_globals_still_resets_the_accessor_table() {
+    let lua = emit_project_lua(
+        "nobox_reset_probe",
+        "value Probe { x: int, y: int }\n\nglobal SPOT: Probe = Probe { x: 3, y: 4 }\n",
+    );
+    assert!(
+        lua.contains("_G.__ROCK_NOBOX_GLOBALS = {"),
+        "a build with no nobox globals must still assign __ROCK_NOBOX_GLOBALS, or a \
+         reload inherits the previous build's accessors"
+    );
+}
