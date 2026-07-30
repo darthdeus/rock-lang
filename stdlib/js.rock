@@ -58,11 +58,14 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 // Their luajit siblings are in `unified.rock`; each is the same operation over a
 // 0-based JS array instead of a 1-based Lua table.
 
-@nomangle inline(js) fn __rock_col_insert(col: any, lua_index: int, value: any) = """
-  col.splice(lua_index - 1, 0, value);
+// `len` rather than the array's own length: a column reserved past `len` holds
+// stale slots, and shifting those would carry them into the live range.
+@nomangle inline(js) fn __rock_col_insert(col: any, lua_index: int, len: int, value: any) = """
+  for (var i = len; i >= lua_index; i--) col[i] = col[i - 1];
+  col[lua_index - 1] = value;
 """
 
-@nomangle inline(js) fn __rock_col_copy(col: any) -> any = "return col.slice();"
+@nomangle inline(js) fn __rock_col_copy(col: any, len: int) -> any = "return col.slice(0, len);"
 
 @nomangle inline(js) fn __rock_col_capacity(reserved: int, physical: int) -> int = """
   return reserved > physical ? reserved : physical;

@@ -265,23 +265,11 @@ fn the_checked_index_is_zero_based_on_js() {
     );
 }
 
-/// SENTINEL -- pins a known JS bug. Flip when fixed.
-///
-/// `insert_at` on a `[NP?]` column shifts the LEAF columns but not the presence
-/// column, so the inserted `null` reads back as present. The digits are
-/// `len`, `a[0].y`, `a[1] == null`, `a[2].y`: correct is `3214`, and only the
-/// presence digit is wrong, which is what names the defect -- the leaves shift
-/// in lockstep, presence is simply left behind.
-///
-/// Asserted at `3204` because that is what the emitter produces TODAY; this test
-/// passes because the bug exists. luajit is the control and gets it right:
-/// `tests/nobox_nullable_column.rock`'s
-/// `test_insert_at_shifts_presence_with_its_leaves` runs the same shape and
-/// passes on skull while failing under `--backend js`.
-///
-/// When this goes red the fix landed: assert `3214` instead, delete this note
-/// down to one line, and clear the `insert_at` item in `docs/parked/js.md`.
+/// `insert_at` inserts the VALUE into each column, not the `len` it is sized by.
+/// The digits are `len`, `a[0].y`, `a[1] == null`, `a[2].y`; a JS sibling that
+/// drops a param binds `value` to whatever sits at its position and splices that
+/// in, which reads back through the presence column as a present element.
 #[test]
-fn nullable_column_insert_at_presence_sentinel() {
-    eval_int("insert_at_presence", 3204);
+fn nullable_column_insert_at_presence() {
+    eval_int("insert_at_presence", 3214);
 }
