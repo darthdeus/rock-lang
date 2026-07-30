@@ -1,0 +1,2599 @@
+//! bone HIR -> skull MIR lowering (Phase 1: the straight-line spine).
+//!
+//! A type-directed mechanical walk over bone's already-resolved HIR (names,
+//! overloads, operators, and types are all decided by `semantic_pass`). A
+//! `Builder` holds a cursor on the "current block" and appends instructions;
+//! `lower_expr` returns the [`Idx<Inst>`] that holds the expression's value.
+//!
+//! Variables (`let`/param) become mutable [`Cell`]s; a `Var` read is an
+//! [`Inst::Load`], a binding's initializer an [`Inst::Store`]. Arithmetic
+//! arrives as `__op_*` calls (rock's desugar) and is dispatched to **typed**
+//! ops at build time (decision 8): `int`+`int` -> [`Inst::IntAdd`], `float` ->
+//! [`Inst::FloatAdd`], `string`+`+` -> [`Inst::StringConcat`].
+//!
+//! Phase 1 is straight-line ONLY: control flow (`if`/`&&`/`??`/loops/`match`),
+//! coroutines, calls-to-`FuncRef`, and aggregates are not here yet — they
+//! `gap` (return a clear error) and land in later phases. The gate is the real
+//! corpus, not this comment; see `docs/skull-bone-mir-faithful-plan.md`.
+
+use std::collections::{HashMap, HashSet};
+
+use bone_semantic::hir::{
+    BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
+    MatchArm, Pattern, Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
+};
+use ustr::Ustr;
+use bone_semantic::inference::{BodyInference, Workspace};
+use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
+use comfy_la_arena::{Idx, IdxRange};
+use skull_parser::CompilerError;
+
+use crate::intrinsics::ExpandKind;
+use crate::mir::*;
+
+fn gap(msg: impl std::fmt::Display) -> CompilerError {
+    CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
+}
+
+// --- scalarized value ABI (rock parity) -------------------------------------
+//
+// A `value` struct is passed/returned as its flattened primitive LEAF scalars
+// (no per-call cdata at the ABI boundary), reconstructed where a real value is
+// needed. The static shape drives flatten/rebuild; the runtime carrier `ValueRepr`
+// threads the unboxed form through lowering; `pack` is the single place a Group
+// becomes a real `<name>_ct(...)` cdata (an escape). See the plan doc.
+
+/// Whether a fn with backend `b` can serve codegen `target`: an `Any` (portable
+/// Rock) body serves every target, else the backend must match exactly.
+fn serves_target(b: bone_semantic::hir::FnBackend, target: bone_semantic::hir::FnBackend) -> bool {
+    use bone_semantic::hir::FnBackend;
+    b == FnBackend::Any || b == target
+}
+
+/// `Some(k)` iff `name` is a GC-free `value` struct whose every flattened
+/// primitive leaf is `float` (recursively), where `k` is the leaf count; `None`
+/// otherwise (not such a struct, or any int/bool/enum leaf). The JS backend uses
+/// it to lower a `NativeBuffer<Vertex>` (all-float value struct, e.g. the vertex
+/// pool) to one flat `Float32Array(n * k)` -- JS has no per-struct ctype.
+
+/// Value/enum REPRESENTATION analysis over a `Workspace` -- what a type looks
+/// like, as opposed to how a body lowers. Re-exported flat so the ~168 external
+/// `skull_mir::lower::*` call sites keep their paths.
+mod shape;
+pub use shape::*;
+
+/// The `impl Builder` walk, split by topic. Each is a plain `impl Builder<'_>`
+/// block in a child module -- Rust allows the impl to be spread across the
+/// crate, and a child sees this module's private items, so nothing needed
+/// widening to make the split.
+mod call;
+mod control;
+mod embed;
+mod expr;
+mod flat;
+mod interp;
+mod kinds;
+mod loops;
+mod nobox;
+mod pattern;
+mod resolve;
+mod stmt;
+mod storage;
+mod structs;
+mod types;
+
+// A flattened child field's physical slots are DOTTED parent keys, the same
+// encoding `embed` uses (`docs/scalarization-and-boxing-design.md` S 6). `.` is
+// not an identifier character, so a slot key can never equal a legal user field
+// name -- which the `__`-based encoding this replaced could: an enum field `sig`
+// and a user field `sig__tag` both wrote `sig__tag`, so the table ctor emitted
+// the key twice and Lua's last-write-wins clobbered the discriminant, silently
+// breaking every match on that enum.
+//
+// The three forms are disjoint by their suffix: `#` for the discriminant (not an
+// identifier character and not a digit), all-digits for a positional payload (an
+// identifier cannot start with a digit), an identifier for a named payload. They
+// cannot collide with an `embed` leaf key either, because both are prefixed by
+// the owning parent FIELD name and a field name denotes exactly one field.
+
+/// Re-key relative embed leaf paths under an owning field: `[("x", v)]` under
+/// `p` becomes `[("p.x", v)]`. Relative paths let a leaf list be computed once
+/// and attached wherever the child is spliced.
+fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>)> {
+    leaves
+        .into_iter()
+        .map(|(k, v)| (Ustr::from(&format!("{field}.{k}")), v))
+        .collect()
+}
+
+/// The parent-table slot holding a flattened enum field's discriminant (variant
+/// name string), e.g. field `sig` -> `sig.#`.
+fn flat_tag_slot(field: Ustr) -> Ustr {
+    Ustr::from(format!("{field}.#").as_str())
+}
+
+/// The parent-table slot holding a flattened enum field's `i`th positional payload,
+/// e.g. field `sig` payload 0 -> `sig.0`.
+fn flat_payload_slot(field: Ustr, i: usize) -> Ustr {
+    Ustr::from(format!("{field}.{i}").as_str())
+}
+
+/// The parent-table slot holding a flattened enum field's named (record) payload,
+/// e.g. field `shape` record field `r` -> `shape.r`.
+fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
+    Ustr::from(format!("{field}.{rec_field}").as_str())
+}
+
+/// Every relative slot a flattened enum field occupies: discriminant, positional
+/// payloads, named payloads. A flat-enum field is MULTI-SLOT, so any site walking
+/// a struct's physical leaves must expand it -- treating the field name as one
+/// leaf silently splits the field across two encodings (the store writes
+/// `f.#`/`f.0`, the walker touches `f`).
+fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
+    let mut out = vec![flat_tag_slot(field)];
+    for i in 0..shape.tuple_width {
+        out.push(flat_payload_slot(field, i));
+    }
+    for rf in &shape.record_fields {
+        out.push(flat_named_slot(field, *rf));
+    }
+    out
+}
+
+/// A flattened enum value's runtime cells: the discriminant + every union slot
+/// (positional tuple slots and named record slots), nil where unused.
+#[derive(Clone)]
+struct FlatCells {
+    tag: Idx<Inst>,
+    positional: Vec<Idx<Inst>>,
+    named: Vec<(Ustr, Idx<Inst>)>,
+}
+
+/// A `match`/`if let`/`while let` scrutinee: either an ordinary lowered value, or a
+/// FLATTENED enum field still living as `parent.{prefix}__tag`/`__i` slots. The
+/// flat form lets the tag test + payload binds read the parent's slots directly --
+/// no box -- and only materializes (`scrut_value`) on a whole-value path.
+#[derive(Clone)]
+enum Scrut {
+    Val(Idx<Inst>),
+    Flat {
+        parent: Idx<Inst>,
+        prefix: Ustr,
+        shape: EnumFlatShape,
+    },
+    /// A flat enum already threaded as scalar cells (a scalarized param/return or a
+    /// constructed-and-matched temporary) -- tag + payload values held directly, so
+    /// the tag test + payload binds need no box and no slot read.
+    Cells {
+        tag: Idx<Inst>,
+        positional: Vec<Idx<Inst>>,
+        named: Vec<(Ustr, Idx<Inst>)>,
+        shape: EnumFlatShape,
+    },
+}
+
+/// Workspace-wide scalar-ABI context. Address-taken functions use the
+/// type-derived fn-value ABI at their definitions and direct calls, so all three
+/// call forms agree without callee-identity analysis.
+pub struct ScalarCtx {
+    taken_by_ref: HashSet<Ustr>,
+    /// Per-body contribution: each body's set of fn-names it references by value.
+    /// Keyed by `(module, owner)` so a body edit can diff its OLD vs NEW set
+    /// without rescanning the whole workspace. Empty-contribution bodies are
+    /// omitted (absent == empty).
+    per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>>,
+    /// Number of distinct bodies referencing each name by value.
+    /// `taken_by_ref == { name : count > 0 }`. Only a membership flip (0<->1)
+    /// changes scalar-ABI eligibility, so [`update_body`](Self::update_body)
+    /// reports exactly those.
+    ref_counts: HashMap<Ustr, u32>,
+    /// When set, the scalarized value ABI is disabled workspace-wide: every fn
+    /// keeps value structs as first-class single values (params/returns/args),
+    /// never splatting them to leaf scalars. Used by the GLSL backend, where a
+    /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves
+    /// (`docs/shaders.md` finding 5). The toggle is contained in
+    /// [`fn_scalar_abi`], which definitions and direct calls both consult.
+    values_first_class: bool,
+    /// The codegen backend this lowering feeds. Drives backend-variant selection
+    /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
+    /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
+    /// when the collapsed representative is a luajit-native variant. `Any`
+    /// disables the filtering entirely (the GLSL backend + generic/test callers).
+    target: bone_semantic::hir::FnBackend,
+}
+
+/// The fn-names a single body references by value (`Expr::Global(name)` whose
+/// `name` is a function) — the way `let f = v2_sum` / passing `f` as an arg
+/// surfaces in HIR (a direct call's callee is a `Callee`, not an `Expr`).
+fn scan_body_value_refs(ws: &Workspace, body: &Body) -> HashSet<Ustr> {
+    let mut set = HashSet::new();
+    for (_, expr) in body.expr_arena.iter() {
+        if let Expr::Global(name) = expr {
+            if ws.functions_by_name.contains_key(name) {
+                set.insert(*name);
+            }
+        }
+    }
+    set
+}
+
+impl ScalarCtx {
+    pub fn new(ws: &Workspace) -> Self {
+        let mut taken_by_ref = HashSet::new();
+        let mut per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>> = HashMap::new();
+        let mut ref_counts: HashMap<Ustr, u32> = HashMap::new();
+        for module in ws.modules.iter() {
+            for (owner, body) in module.bodies.iter() {
+                let set = scan_body_value_refs(ws, body);
+                for name in &set {
+                    *ref_counts.entry(*name).or_insert(0) += 1;
+                    taken_by_ref.insert(*name);
+                }
+                if !set.is_empty() {
+                    per_body.insert((module.id, *owner), set);
+                }
+            }
+        }
+        // Default target is Lua: skull-codegen-lua is the primary consumer and its
+        // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
+        // GLSL backend override via `with_target`.
+        Self {
+            taken_by_ref,
+            per_body,
+            ref_counts,
+            values_first_class: false,
+            target: bone_semantic::hir::FnBackend::Lua,
+        }
+    }
+
+    /// Set the codegen backend this lowering feeds (see [`target`]).
+    pub fn with_target(mut self, target: bone_semantic::hir::FnBackend) -> Self {
+        self.target = target;
+        self
+    }
+
+    /// Like [`new`](Self::new) but with the scalarized value ABI disabled: value
+    /// structs stay first-class single values everywhere (the GLSL backend's
+    /// requirement -- a `vecN` is not scalar leaves). See [`values_first_class`].
+    /// The GLSL backend does not participate in Lua/JS backend-variant selection,
+    /// so its target is `Any` (filtering disabled).
+    pub fn new_values_first_class(ws: &Workspace) -> Self {
+        let mut scx = Self::new(ws);
+        scx.values_first_class = true;
+        scx.target = bone_semantic::hir::FnBackend::Any;
+        scx
+    }
+
+    /// Incrementally fold one re-inferred body's value-reference contribution into
+    /// the cached set, and return the names whose GLOBAL taken-by-ref membership
+    /// FLIPPED (entered or left the set). A flip means a fn's scalar-ABI
+    /// eligibility changed, so the named fn(s) and every direct caller must
+    /// re-emit -- the caller adds the flipped names to the affected set.
+    /// Body edits keep the body SET fixed (add/remove fn is interface-tier ->
+    /// full rebuild), so diffing only the re-inferred bodies is complete.
+    pub fn update_body(&mut self, ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> Vec<Ustr> {
+        let key = (mid, owner);
+        let old = self.per_body.remove(&key).unwrap_or_default();
+        let new = match ws.module(mid).bodies.get(&owner) {
+            Some(body) => scan_body_value_refs(ws, body),
+            None => HashSet::new(),
+        };
+        let mut flipped = Vec::new();
+        for name in old.difference(&new) {
+            if let Some(c) = self.ref_counts.get_mut(name) {
+                *c -= 1;
+                if *c == 0 {
+                    self.ref_counts.remove(name);
+                    self.taken_by_ref.remove(name);
+                    flipped.push(*name);
+                }
+            }
+        }
+        for name in new.difference(&old) {
+            let c = self.ref_counts.entry(*name).or_insert(0);
+            *c += 1;
+            if *c == 1 {
+                self.taken_by_ref.insert(*name);
+                flipped.push(*name);
+            }
+        }
+        if !new.is_empty() {
+            self.per_body.insert(key, new);
+        }
+        flipped
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FnScalarAbi {
+    param_shapes: Vec<Option<ValueShape>>,
+    ret_shape: Option<ValueShape>,
+}
+
+/// The one ABI policy read by a top-level definition and every direct call.
+/// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
+/// derive from the fn type; direct-only bodies may scalarize every eligible value.
+fn fn_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<FnScalarAbi> {
+    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+}
+
+fn fn_nobox_abi_spec(
+    ws: &Workspace,
+    fref: FuncRef,
+    subst: &SpecSubst,
+) -> Option<FnScalarAbi> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let param_shapes: Vec<Option<ValueShape>> = f
+        .param_decls
+        .iter()
+        .map(|pd| nobox_declared_shape_spec(ws, subst, pd.ty))
+        .collect();
+    let ret_shape =
+        f.return_ty.and_then(|ty| nobox_declared_shape_spec(ws, subst, ty));
+    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
+}
+
+fn fn_scalar_abi_spec(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+    subst: &SpecSubst,
+) -> Option<FnScalarAbi> {
+    if scx.values_first_class {
+        return None;
+    }
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.is_extern {
+        return None;
+    }
+    let has_scalar_abi = f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
+    let nobox_only = if has_scalar_abi {
+        false
+    } else {
+        let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
+            "nomangle" => subst.is_empty(),
+            "test" => true,
+            _ => false,
+        });
+        if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
+            return None;
+        }
+        scx.taken_by_ref.contains(&f.name)
+    };
+    if nobox_only {
+        return fn_nobox_abi_spec(ws, fref, subst);
+    }
+    let param_shapes: Vec<Option<ValueShape>> =
+        f.param_decls.iter().map(|pd| sig_value_shape_spec(ws, subst, pd.ty)).collect();
+    let ret_shape = f.return_ty.and_then(|ty| sig_value_shape_spec(ws, subst, ty));
+    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
+}
+
+/// A hoisted nested `fn`: the private top-level name it resolves to, and the
+/// value ABI its definition and every call site both read (so the two can never
+/// drift, the same single-gate discipline as [`fn_scalar_abi`]).
+#[derive(Clone)]
+struct NestedFn {
+    hoisted: Ustr,
+    /// Declared param names, so a call site can place named args into slots
+    /// (`slotted_call_args`) exactly as a top-level callee's would be.
+    param_names: Vec<Ustr>,
+    /// Per-param value shape; all-`None` when the fn keeps the boxed ABI.
+    param_shapes: Vec<Option<ValueShape>>,
+    ret_shape: Option<ValueShape>,
+}
+
+impl NestedFn {
+    fn uses_scalar_abi(&self) -> bool {
+        self.ret_shape.is_some() || self.param_shapes.iter().any(|s| s.is_some())
+    }
+}
+
+/// The Lua parameter-name list for a scalar-ABI `inline(lua)` fn (`@scalar_abi`):
+/// each value param expands to its depth-first leaf names `<base>__<leaf>` (the
+/// names the hand-written body references), non-value params keep their name.
+/// `None` if the fn doesn't use the scalar ABI (the caller emits the plain list).
+/// The leaf ORDER matches `repr_to_leaves`, so def params line up with the
+/// callsite splat positionally.
+pub fn scalar_abi_lua_param_names(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+) -> Option<Vec<String>> {
+    let abi = fn_scalar_abi(ws, scx, fref)?;
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mut names = Vec::new();
+    for (pd, shape) in f.param_decls.iter().zip(abi.param_shapes) {
+        match shape {
+            Some(shape) => leaf_param_names(pd.name.as_str(), &shape, &mut names),
+            None => names.push(pd.name.as_str().to_string()),
+        }
+    }
+    Some(names)
+}
+
+/// Per-declared-param LEAF width under the scalar ABI (a value-struct param's
+/// flattened leaf count, 1 for everything else); `None` when `fref` does not
+/// use the scalar ABI. Pairs with `scalar_abi_lua_param_names` -- the JS arity
+/// guard needs widths per DECLARED param so a defaulted value-struct param
+/// counts as its whole leaf group, not one slot.
+pub fn scalar_abi_param_leaf_widths(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+) -> Option<Vec<usize>> {
+    let abi = fn_scalar_abi(ws, scx, fref)?;
+    Some(
+        abi.param_shapes
+            .iter()
+            .map(|s| s.as_ref().map_or(1, ValueShape::leaf_count))
+            .collect(),
+    )
+}
+
+/// THE invariant: a function's emitted Lua parameter list must be INJECTIVE.
+///
+/// The scalar-ABI leaf encoding joins nested field names with `__`, and `__` is
+/// legal in a Rock identifier, so the join cannot be made injective on its own.
+/// Two distinct sources can land on one emitted name:
+///   - two leaves of the same value param (`value Bad { tl__x: float, tl: V2 }`
+///     flattens both `tl__x` and `tl.x` to `r__tl__x`), or
+///   - a leaf and a SIBLING param (`fn f(r: V2, r__x: float)` emits
+///     `f(r__x, r__y, r__x)`).
+/// Either way Lua binds the later one and the body silently reads the wrong
+/// value. Reject rather than emit the duplicate -- same discipline as
+/// [`crate::mangle::collision_errors`].
+///
+/// Keyed on the SIGNATURE, at the point leaves actually become parameter names --
+/// not on the value declaration. A declaration key is both unsound and
+/// over-broad: it misses the sibling-param collision entirely (the struct is
+/// clean there), and it rejects a program whose ambiguous shape never reaches a
+/// param list at all, which is legal and observably correct today.
+///
+/// The names come from [`scalar_abi_lua_param_names`] -- the very list the
+/// emitter writes -- so the checker cannot disagree with what is emitted.
+///
+/// Scoped to `inline(lua)` bodies because that is the ONLY emission that names
+/// leaves: an ordinary Rock fn's params are emitted as `c<N>` cells, positional
+/// and injective by construction, so an ambiguous shape flowing through one is
+/// harmless and must keep compiling.
+pub fn scalar_abi_param_collisions(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+) -> Vec<(String, CompilerError)> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.inline_body.is_none() {
+        return Vec::new();
+    }
+    let Some(names) = scalar_abi_lua_param_names(ws, scx, fref) else {
+        return Vec::new();
+    };
+    let origins = scalar_abi_param_origins(ws, scx, fref);
+    debug_assert_eq!(names.len(), origins.len(), "one derivation, two spellings");
+
+    let mut out = Vec::new();
+    let mut seen: HashMap<&str, &str> = HashMap::new();
+    let mut reported: HashSet<&str> = HashSet::new();
+    for (name, origin) in names.iter().zip(origins.iter()) {
+        match seen.get(name.as_str()) {
+            Some(prev) if !reported.contains(name.as_str()) => {
+                reported.insert(name.as_str());
+                let fname = f.name;
+                let msg = format!(
+                    "`{fname}` would emit the Lua parameter `{name}` twice: it is both {prev} and \
+                     {origin}. The scalar ABI joins nested value fields with `__`, which is legal \
+                     in an identifier too, so the two are indistinguishable and the body would \
+                     read whichever Lua bound last -- rename one of them"
+                );
+                out.push((
+                    format!("{fname}.{name}"),
+                    CompilerError::new_with_label(f.name_span, msg),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(name.as_str(), origin.as_str());
+            }
+        }
+    }
+    out
+}
+
+/// A human description per emitted parameter, positionally parallel to
+/// [`scalar_abi_lua_param_names`]: either the declared param itself, or which
+/// leaf of which value param it flattens from (dotted, so it is readable and
+/// unambiguous). Built by the same walk under the `.` separator.
+fn scalar_abi_param_origins(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Vec<String> {
+    let Some(abi) = fn_scalar_abi(ws, scx, fref) else {
+        return Vec::new();
+    };
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mut out = Vec::new();
+    for (pd, shape) in f.param_decls.iter().zip(abi.param_shapes) {
+        let pname = pd.name;
+        match shape {
+            Some(shape) => out.extend(
+                leaf_names(&shape, pname.as_str(), ".")
+                    .into_iter()
+                    .map(|p| format!("the leaf `{p}` of value param `{pname}`")),
+            ),
+            None => out.push(format!("the declared param `{pname}`")),
+        }
+    }
+    out
+}
+
+/// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first.
+/// `__` rather than `.` because these are Lua identifiers -- which is exactly
+/// what makes the encoding non-injective and needs
+/// [`value_leaf_name_collisions`] to guard it.
+fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
+    out.extend(leaf_names(shape, base, LEAF_PARAM_SEP));
+}
+
+/// The Lua leaf-param separator, and the reason a `__`-bearing field name can
+/// collide with a nested path.
+const LEAF_PARAM_SEP: &str = "__";
+
+/// A chunk of a `string.format` conversion string: a static literal, or a
+/// runtime int expression (dynamic width/precision) stringified into the format.
+enum FmtPiece {
+    Lit(String),
+    DynInt(Idx<Expr>),
+}
+
+/// Decompose an interpolation spec into `string.format` conversion pieces
+/// (`%[flags][width][.precision]type`). All-`Lit` => a static conversion; any
+/// `DynInt` => assemble at runtime. `inferred_ty` supplies the conversion letter
+/// when the spec omits one. `skip_width` leaves width out (the caller pads after
+/// grouping); `skip_pad_attrs` leaves alignment/fill to the pad helper. `None`
+/// for specs with no printf equivalent (custom fill / center alignment) — the
+/// caller gaps so we never silently mis-format. Mirrors old skull `fmt_pieces`.
+fn fmt_pieces(
+    spec: &bone_semantic::hir::InterpSpec,
+    inferred_ty: Option<char>,
+    skip_width: bool,
+    skip_pad_attrs: bool,
+) -> Option<Vec<FmtPiece>> {
+    if spec.fill.is_some() && !skip_pad_attrs {
+        return None;
+    }
+    let ty = spec.format_type.or(inferred_ty)?;
+
+    let mut pieces = Vec::new();
+    let mut buf = String::from("%");
+    if !skip_pad_attrs {
+        match spec.alignment {
+            None | Some('>') => {}       // right-align is printf's default
+            Some('<') => buf.push('-'),  // left-align
+            _ => return None,            // center etc. — no printf equivalent
+        }
+    }
+    match spec.sign {
+        Some('+') => buf.push('+'),
+        Some(' ') => buf.push(' '),
+        _ => {}
+    }
+    if spec.alternate {
+        buf.push('#');
+    }
+    // Zero-pad only with a STATIC width (a dynamic width can't bake `0`+width
+    // into the literal; falls back to space pad).
+    if spec.zero_pad && spec.width_expr.is_none() {
+        buf.push('0');
+    }
+    if skip_width {
+    } else if let Some(w) = spec.width {
+        buf.push_str(&w.to_string());
+    } else if let Some(we) = spec.width_expr {
+        pieces.push(FmtPiece::Lit(std::mem::take(&mut buf)));
+        pieces.push(FmtPiece::DynInt(we));
+    }
+    if spec.precision.is_some() || spec.precision_expr.is_some() {
+        buf.push('.');
+        if let Some(p) = spec.precision {
+            buf.push_str(&p.to_string());
+        } else if let Some(pe) = spec.precision_expr {
+            pieces.push(FmtPiece::Lit(std::mem::take(&mut buf)));
+            pieces.push(FmtPiece::DynInt(pe));
+        }
+    }
+    buf.push(ty);
+    pieces.push(FmtPiece::Lit(buf));
+    Some(pieces)
+}
+
+// A short tag for an unhandled expr variant, so a lowering gap names the form it
+// hit (`...: InterpolatedString`) -- the corpus coverage lens buckets on it.
+fn expr_tag(e: &Expr) -> &'static str {
+    match e {
+        Expr::As { .. } => "As",
+        Expr::IncDec { .. } => "IncDec",
+        Expr::InterpolatedString(_) => "InterpolatedString",
+        Expr::Lambda { .. } => "Lambda",
+        Expr::Range { .. } => "Range",
+        Expr::Return(_) => "Return",
+        Expr::SafeNav { .. } => "SafeNav",
+        Expr::SafeNavCall { .. } => "SafeNavCall",
+        Expr::SafeNavLet { .. } => "SafeNavLet",
+        Expr::SiblingRef { .. } => "SiblingRef",
+        Expr::Spread(_) => "Spread",
+        Expr::Yield(_) => "Yield",
+        Expr::YieldDelegate(_) => "YieldDelegate",
+        _ => "other",
+    }
+}
+
+fn raw(b: Idx<BindingInfo>) -> u32 {
+    b.into_raw().into()
+}
+
+/// The `NativeBuffer*` nominal type names (T-typed + phantom-size variants).
+fn is_native_buffer(name: &str) -> bool {
+    matches!(
+        name,
+        "NativeBuffer"
+            | "NativeBufferU8"
+            | "NativeBufferI8"
+            | "NativeBufferU16"
+            | "NativeBufferI16"
+            | "NativeBufferU32"
+            | "NativeBufferI32"
+    )
+}
+
+/// The scalar class of an operand, for the native-arithmetic dispatch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ArithTy {
+    Int,
+    Float,
+    Str,
+}
+
+/// The typed native arithmetic instruction for an `__op_*` over two scalar
+/// values of the given classes (the build-time int/float/string split, D8).
+fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) -> Result<Inst, CompilerError> {
+    let float = lt == ArithTy::Float || rt == ArithTy::Float;
+    Ok(match op {
+        "__op_add" if lt == ArithTy::Str || rt == ArithTy::Str => Inst::StringConcat(lv, rv),
+        "__op_add" if float => Inst::FloatAdd(lv, rv),
+        "__op_add" => Inst::IntAdd(lv, rv),
+        "__op_sub" if float => Inst::FloatSub(lv, rv),
+        "__op_sub" => Inst::IntSub(lv, rv),
+        "__op_mul" if float => Inst::FloatMul(lv, rv),
+        "__op_mul" => Inst::IntMul(lv, rv),
+        // `/` is always float division (Lua `/` promotes int operands);
+        // integer floor division is the separate `./` -> `__op_idiv`, which
+        // codegen renders `math.floor(a / b)`.
+        "__op_div" => Inst::FloatDiv(lv, rv),
+        "__op_idiv" => Inst::IntDiv(lv, rv),
+        "__op_mod" if float => Inst::FloatMod(lv, rv),
+        "__op_mod" => Inst::IntMod(lv, rv),
+        _ => return Err(gap(format!("native arith op {op}"))),
+    })
+}
+
+/// Lower a single function to a [`MirFunc`]. Errors (a `gap`) when the body uses
+/// a construct Phase 1 doesn't lower yet.
+/// Owner segment of a `static`'s cell name. Stable across body edits (depends
+/// only on the fn name + rendered param types), distinct per overload. Not the
+/// mangled name -- skull-mir is upstream of the mangler -- but mir_emit reads
+/// the resulting cell names back verbatim from `MirFunc::statics`, so exact
+/// equality with the mangled name is not needed.
+fn static_owner_tag(
+    ws: &Workspace,
+    inf: Option<&BodyInference>,
+    name: Ustr,
+    params: &[bone_semantic::hir::ParamDecl],
+) -> Ustr {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.as_str().hash(&mut h);
+    for pd in params {
+        ws.render(inf, pd.ty).hash(&mut h);
+    }
+    Ustr::from(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
+}
+
+/// Content hash of a `static` initializer -- the reload key's init half. Hashes
+/// names / literals / operator kinds and recurses, but NEVER an arena `Idx`
+/// (those shift when unrelated code in the body is edited). So it changes iff
+/// the initializer's meaning changes, and editing code elsewhere in the fn
+/// leaves it untouched (the cell is preserved across that reload).
+fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map::DefaultHasher) {
+    use bone_semantic::hir::{Callee, Expr, InterpPart, VariantArgs};
+    use std::hash::Hash;
+    macro_rules! go {
+        ($x:expr) => {
+            hash_init_expr(body, $x, h)
+        };
+    }
+    macro_rules! tag {
+        ($n:expr) => {
+            ($n as u16).hash(h)
+        };
+    }
+    match body.expr_arena[e] {
+        Expr::Unit => tag!(0),
+        Expr::Null => tag!(1),
+        Expr::Hole(n) => {
+            tag!(2);
+            n.hash(h);
+        }
+        Expr::Int(v) => {
+            tag!(3);
+            v.hash(h);
+        }
+        Expr::Float(v) => {
+            tag!(4);
+            v.hash(h);
+        }
+        Expr::Bool(v) => {
+            tag!(5);
+            v.hash(h);
+        }
+        Expr::String(s) => {
+            tag!(6);
+            s.hash(h);
+        }
+        Expr::Var(b) => {
+            tag!(7);
+            body.binding_arena[b].name.hash(h);
+        }
+        Expr::Global(n) => {
+            tag!(8);
+            n.hash(h);
+        }
+        Expr::SiblingRef(n) => {
+            tag!(9);
+            n.hash(h);
+        }
+        Expr::Tuple(es) | Expr::Array(es) => {
+            tag!(10);
+            for x in es {
+                go!(x);
+            }
+        }
+        Expr::InterpolatedString(parts) => {
+            tag!(13);
+            for p in parts {
+                match body.interp_part_arena[p] {
+                    InterpPart::Literal(s) => {
+                        tag!(130);
+                        s.hash(h);
+                    }
+                    InterpPart::Value { expr, .. } => {
+                        tag!(131);
+                        go!(expr);
+                    }
+                }
+            }
+        }
+        Expr::Not(i)
+        | Expr::BitNot(i)
+        | Expr::UnaryMinus(i)
+        | Expr::Spread(i)
+        | Expr::YieldDelegate(i) => {
+            tag!(14);
+            go!(i);
+        }
+        Expr::Return(o) => {
+            tag!(19);
+            if let Some(i) = o {
+                go!(i);
+            }
+        }
+        Expr::Yield(o) => {
+            tag!(20);
+            if let Some(i) = o {
+                go!(i);
+            }
+        }
+        Expr::Break => tag!(21),
+        Expr::Continue => tag!(22),
+        Expr::As { value, target } => {
+            tag!(23);
+            target.hash(h);
+            go!(value);
+        }
+        Expr::TupleIndex { tuple, index } => {
+            tag!(24);
+            index.hash(h);
+            go!(tuple);
+        }
+        Expr::FieldAccess { base, field } | Expr::SafeNav { base, field } => {
+            tag!(25);
+            field.hash(h);
+            go!(base);
+        }
+        Expr::IncDec { target, decrement, postfix } => {
+            tag!(27);
+            decrement.hash(h);
+            postfix.hash(h);
+            go!(target);
+        }
+        Expr::Index { base, index } => {
+            tag!(28);
+            go!(base);
+            go!(index);
+        }
+        Expr::Range { low, high } => {
+            tag!(29);
+            go!(low);
+            go!(high);
+        }
+        Expr::BinOp { op, lhs, rhs } => {
+            tag!(30);
+            std::mem::discriminant(&op).hash(h);
+            go!(lhs);
+            go!(rhs);
+        }
+        Expr::Assign { target, value } => {
+            tag!(31);
+            go!(target);
+            go!(value);
+        }
+        Expr::CompoundAssign { target, op_fn, value } => {
+            tag!(32);
+            op_fn.hash(h);
+            go!(target);
+            go!(value);
+        }
+        Expr::If { cond, then_branch, else_branch } => {
+            tag!(33);
+            go!(cond);
+            go!(then_branch);
+            if let Some(x) = else_branch {
+                go!(x);
+            }
+        }
+        Expr::IfLet { value, then_branch, else_branch, .. } => {
+            tag!(34);
+            go!(value);
+            go!(then_branch);
+            if let Some(x) = else_branch {
+                go!(x);
+            }
+        }
+        Expr::Lambda { body: b, .. } => {
+            tag!(35);
+            go!(b);
+        }
+        Expr::Block { statements, tail } => {
+            tag!(36);
+            for s in statements {
+                hash_init_stmt(body, s, h);
+            }
+            if let Some(t) = tail {
+                go!(t);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            tag!(37);
+            go!(scrutinee);
+            for a in arms {
+                let arm = body.match_arm_arena[a];
+                if let Some(g) = arm.guard {
+                    go!(g);
+                }
+                go!(arm.body);
+            }
+        }
+        Expr::Call { callee, args } => {
+            tag!(38);
+            match callee {
+                Callee::Unresolved { name, .. } => {
+                    tag!(380);
+                    name.hash(h);
+                }
+                Callee::Local(b) => {
+                    tag!(381);
+                    body.binding_arena[b].name.hash(h);
+                }
+                Callee::Value(v) => {
+                    tag!(382);
+                    go!(v);
+                }
+            }
+            for x in args {
+                go!(x);
+            }
+        }
+        Expr::SafeNavCall { receiver, method, args } => {
+            tag!(39);
+            method.hash(h);
+            go!(receiver);
+            for x in args {
+                go!(x);
+            }
+        }
+        Expr::SafeNavLet { receiver, body: b, .. } => {
+            tag!(40);
+            go!(receiver);
+            go!(b);
+        }
+        Expr::StructLiteral { name, fields, bases } => {
+            tag!(41);
+            name.hash(h);
+            for b in bases {
+                go!(b);
+            }
+            for fld in fields {
+                let f = body.struct_lit_field_arena[fld];
+                f.name.hash(h);
+                go!(f.value);
+            }
+        }
+        Expr::EnumVariant { enum_name, variant, args, .. } => {
+            tag!(42);
+            enum_name.hash(h);
+            variant.hash(h);
+            match args {
+                VariantArgs::Unit => tag!(420),
+                VariantArgs::Tuple(es) => {
+                    tag!(421);
+                    for x in es {
+                        go!(x);
+                    }
+                }
+                VariantArgs::Record(fs) => {
+                    tag!(422);
+                    for fld in fs {
+                        let f = body.struct_lit_field_arena[fld];
+                        f.name.hash(h);
+                        go!(f.value);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash_map::DefaultHasher) {
+    use bone_semantic::hir::Statement;
+    use std::hash::Hash;
+    macro_rules! go {
+        ($x:expr) => {
+            hash_init_expr(body, $x, h)
+        };
+    }
+    match body.statement_arena[s] {
+        Statement::Let { value, .. }
+        | Statement::LetTuple { value, .. }
+        | Statement::LetNewtype { value, .. }
+        | Statement::Expr(value)
+        | Statement::Defer(value)
+        | Statement::Return(Some(value))
+        | Statement::Static { value, .. } => go!(value),
+        Statement::Fn { body: b, .. } => go!(b),
+        Statement::For { iter, body: b, .. } => {
+            go!(iter);
+            go!(b);
+        }
+        Statement::While { cond, body: b } => {
+            go!(cond);
+            go!(b);
+        }
+        Statement::WhileLet { value, body: b, .. } => {
+            go!(value);
+            go!(b);
+        }
+        Statement::Return(None) | Statement::Break | Statement::Continue | Statement::Comment(_) => {
+            (b'x').hash(h)
+        }
+    }
+}
+
+pub fn lower_function(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mid: ModuleId,
+    fid: Idx<Function>,
+) -> Result<MirFunc, CompilerError> {
+    lower_function_spec(ws, scx, mid, fid, &SpecSubst::new())
+}
+
+/// Lower `fref` with a per-instantiation generic substitution (`docs/flatvec-plan.md`,
+/// call-site specialization). `subst` maps the callee's generic `VarId`s to concrete
+/// leaves so a value-instantiated body lowers as if hand-written for that type: value
+/// params explode field-wise, `buf[i]=v` scalarizes, `native_buffer_alloc<T>` resolves
+/// its ctype. An EMPTY `subst` is exactly [`lower_function`] (the shared generic /
+/// non-generic snapshot), byte-identical.
+pub fn lower_function_spec(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mid: ModuleId,
+    fid: Idx<Function>,
+    subst: &SpecSubst,
+) -> Result<MirFunc, CompilerError> {
+    let module = ws.module(mid);
+    let func = &module.functions[fid];
+    if func.inline_body.is_some() {
+        return Err(gap("inline(lua) body"));
+    }
+    let body = module
+        .bodies
+        .get(&BodyOwner::Function(fid))
+        .ok_or_else(|| gap("function has no body (extern?)"))?;
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
+
+    let mut f = MirFunc::new(func.name);
+    // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
+    // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
+    // rewrites it into the stackless state machine.
+    let resume_arg = func
+        .is_coroutine
+        .then(|| f.new_cell(Some(Ustr::from("__resume_arg"))));
+    f.is_coroutine = func.is_coroutine;
+    f.resume_arg = resume_arg;
+    let cur = f.entry();
+    // Scalar value ABI: when this fn participates, each value param expands to
+    // leaf cells and a value return becomes a multi-value `Return`. A specialized
+    // instantiation additionally treats a generic param/return bound to a value
+    // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
+    let self_ref = FuncRef { module: mid, func: fid };
+    let abi = fn_scalar_abi_spec(ws, scx, self_ref, subst);
+    let param_shapes = abi.as_ref().map(|a| a.param_shapes.clone()).unwrap_or_default();
+    let ret_shape = abi.and_then(|a| a.ret_shape);
+    let mut b = Builder {
+        ws,
+        scx,
+        spec_subst: subst,
+        body,
+        inf,
+        f,
+        cur,
+        binds: HashMap::new(),
+        loop_targets: Vec::new(),
+        used_break_targets: HashSet::default(),
+        defers: Vec::new(),
+        in_defer_body: false,
+        resume_arg,
+        // A coroutine body emits via `emit_coroutine` before `inline_functions`
+        // runs, so it is never spliced -- box value args (see field docs).
+        in_unspliced_ctx: func.is_coroutine,
+        param_shapes,
+        ret_shape,
+        ret_tuple: func.return_ty.and_then(|t| tuple_ret_shape(ws, subst, t)),
+        ret_ty: func.return_ty,
+        fn_name_span: Some(func.name_span),
+        cur_span: None,
+        group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        // Lazy: only pay the param-type render/hash when the body has a static or
+        // a nested fn (both bake the owner into a private global name that must be
+        // distinct per overload). Keeps the tag off every other fn's compile.
+        static_owner: if body
+            .statement_arena
+            .iter()
+            .any(|(_, s)| matches!(s, Statement::Static { .. } | Statement::Fn { .. }))
+        {
+            static_owner_tag(ws, inf, func.name, &func.param_decls)
+        } else {
+            func.name
+        },
+        static_counters: HashMap::new(),
+        nested_fn_globals: HashMap::new(),
+        nested_fn_counters: HashMap::new(),
+        presence_only: None,
+    };
+    b.reject_incompatible_nobox_fn_value_abi()?;
+    b.lower_params();
+    b.fill_param_defaults()?;
+    b.lower_root()?;
+    Ok(b.f)
+}
+
+/// Lower a module-level global's initializer body into a 0-param [`MirFunc`]
+/// named `name` that **returns** the init value — the codegen emits it as a
+/// `function name() ... end` and a `<GLOBAL> = name()` load-time line. `Ok(None)`
+/// for a global with no initializer (declared, never assigned at module scope).
+pub fn lower_global(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mid: ModuleId,
+    gid: Idx<bone_semantic::hir::GlobalDef>,
+    name: Ustr,
+) -> Result<Option<MirFunc>, CompilerError> {
+    let module = ws.module(mid);
+    let body = module
+        .bodies
+        .get(&BodyOwner::Global(gid))
+        .ok_or_else(|| gap("global has no body"))?;
+    if body.root.is_none() {
+        return Ok(None);
+    }
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
+    let f = MirFunc::new(name);
+    let cur = f.entry();
+    let empty_subst = SpecSubst::new();
+    let mut b = Builder {
+        ws,
+        scx,
+        spec_subst: &empty_subst,
+        body,
+        inf,
+        f,
+        cur,
+        binds: HashMap::new(),
+        loop_targets: Vec::new(),
+        used_break_targets: HashSet::default(),
+        defers: Vec::new(),
+        in_defer_body: false,
+        resume_arg: None,
+        // Global-init bodies never run `inline_functions` -- box value args.
+        in_unspliced_ctx: true,
+        param_shapes: Vec::new(),
+        ret_shape: None,
+        ret_tuple: None,
+        ret_ty: None,
+        fn_name_span: None,
+        cur_span: None,
+        group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        static_owner: name,
+        static_counters: HashMap::new(),
+        nested_fn_globals: HashMap::new(),
+        nested_fn_counters: HashMap::new(),
+        presence_only: None,
+    };
+    // Same gate the fn and decorator bodies run. An initializer can name a fn
+    // whose fixed ABI cannot adopt the type-derived leaf ABI, and a global is a
+    // fn value's most ordinary home (a dispatch table); without this the name
+    // reached codegen and the leaves splatted into a callee expecting a box.
+    b.reject_incompatible_nobox_fn_value_abi()?;
+    // A `nobox` global is category-2 storage: its layout comes from the declared
+    // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
+    // per leaf. Without this the body packs a box the verifier then rejects.
+    let g = &module.globals[gid];
+    b.ret_shape = nobox_declared_shape(ws, g.ty);
+    b.lower_root()?;
+    Ok(Some(b.f))
+}
+
+/// Lower a `deco <kind> <name> { body }` definition into a [`MirFunc`] named
+/// `name` (the codegen `__deco_<name>`) taking `(target, <declared params>)`.
+/// `target` is the decorated-fn descriptor (`{ name, params, func }`) the body
+/// reads via `target.name` etc.; the body's value is discarded (run at module
+/// load per `@<name>` application).
+pub fn lower_decorator(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mid: ModuleId,
+    did: Idx<bone_semantic::hir::DecoratorDef>,
+    name: Ustr,
+) -> Result<MirFunc, CompilerError> {
+    let module = ws.module(mid);
+    let body = module
+        .bodies
+        .get(&BodyOwner::Decorator(did))
+        .ok_or_else(|| gap("decorator has no body"))?;
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::Decorator(did)));
+    let target = body
+        .deco_target
+        .ok_or_else(|| gap("decorator body has no target binding"))?;
+    let f = MirFunc::new(name);
+    let cur = f.entry();
+    let empty_subst = SpecSubst::new();
+    let mut b = Builder {
+        ws,
+        scx,
+        spec_subst: &empty_subst,
+        body,
+        inf,
+        f,
+        cur,
+        binds: HashMap::new(),
+        loop_targets: Vec::new(),
+        used_break_targets: HashSet::default(),
+        defers: Vec::new(),
+        in_defer_body: false,
+        resume_arg: None,
+        // Decorator bodies never run `inline_functions` -- box value args.
+        in_unspliced_ctx: true,
+        param_shapes: Vec::new(),
+        ret_shape: None,
+        ret_tuple: None,
+        ret_ty: None,
+        fn_name_span: None,
+        cur_span: None,
+        group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
+        static_cells: HashMap::new(),
+        static_owner: name,
+        static_counters: HashMap::new(),
+        nested_fn_globals: HashMap::new(),
+        nested_fn_counters: HashMap::new(),
+        presence_only: None,
+    };
+    // `target` is param 0, then the decorator's declared params.
+    let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
+    b.f.params.push(tcell);
+    b.binds.insert(raw(target), tcell);
+    b.reject_incompatible_nobox_fn_value_abi()?;
+    b.lower_params();
+    b.fill_param_defaults()?;
+    b.lower_root()?;
+    Ok(b.f)
+}
+
+struct Builder<'a> {
+    ws: &'a Workspace,
+    scx: &'a ScalarCtx,
+    /// Per-instantiation generic substitution (`docs/flatvec-plan.md` call-site
+    /// specialization). Empty for the shared generic / non-generic snapshot; a
+    /// value-instantiated splice carries `callee generic VarId -> concrete type`
+    /// so type resolution (`type_of`/`native_buffer_alloc_ctype`/param shapes)
+    /// sees the concrete type and the body scalarizes.
+    spec_subst: &'a SpecSubst,
+    body: &'a Body,
+    inf: Option<&'a BodyInference>,
+    f: MirFunc,
+    cur: Idx<Block>,
+    /// raw binding index -> the variable cell it maps to.
+    binds: HashMap<u32, Idx<Cell>>,
+    /// Innermost-last stack of `(continue_target, break_target)` blocks.
+    loop_targets: Vec<(Idx<Block>, Idx<Block>)>,
+    /// Break targets some `break` actually jumped to. A `while true` whose exit
+    /// was never targeted terminates the statement list (its fall-through is
+    /// unreachable), which is what lets a `while true { ... return ... }` co fn
+    /// body pass the non-unit fall-off rejection.
+    used_break_targets: HashSet<Idx<Block>>,
+    /// Innermost-last stack of pending `defer` bodies per block scope; spliced
+    /// (LIFO) at block exit and before every `return`. In a co fn each entry
+    /// also carries its terminal-cleanup flag cell (see `MirFunc::coro_defers`);
+    /// the splice clears it so kill/error never double-run a completed defer.
+    defers: Vec<Vec<(Idx<Expr>, Option<Idx<Cell>>)>>,
+    /// True while lowering a `defer` body (inline splice or terminal copy) --
+    /// `yield`/`await` inside a defer body is a compile error.
+    in_defer_body: bool,
+    /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
+    /// the next `resume(arg)`). `None` outside a coroutine.
+    resume_arg: Option<Idx<Cell>>,
+    /// True while lowering a body whose calls this pass cannot give the
+    /// specialized scalar ABI: a closure sub-CFG, a hoisted nested fn, a
+    /// coroutine, a global init, or a decorator. A call here must NOT take the
+    /// SPECIALIZED scalar ABI (splatting a value arg to leaves), which is only
+    /// sound when the inliner replaces the call with the matching specialized
+    /// body -- an unspliced residual would call the SHARED generic body (`T` = one
+    /// boxed slot) with splatted args and drop every leaf but the first. Boxing
+    /// the value arg matches the shared body exactly.
+    in_unspliced_ctx: bool,
+    /// Per-param scalarized shape: `Some` for a value param expanded to leaf
+    /// cells (parallel to `body.param_bindings`). Empty when the fn doesn't use
+    /// the scalar ABI (globals, decorators, non-value fns).
+    param_shapes: Vec<Option<ValueShape>>,
+    /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
+    ret_shape: Option<ValueShape>,
+    /// `Some` when the fn's return type is a tuple -- it returns its slots as
+    /// separate values (multi-return ABI), not one heap table. Set for named
+    /// fns; lambdas decide per-body at their own return site.
+    ret_tuple: Option<TupleRetShape>,
+    /// The fn's declared return type -- the expected type at a scalar `return`
+    /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
+    ret_ty: Option<TyId>,
+    /// The fn's name span, for spanned emit-time rejections that have no better
+    /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
+    fn_name_span: Option<Span>,
+    /// The source span currently being lowered, maintained by [`Builder::lower_expr`].
+    /// Instructions a post-transform check can reject stamp it into
+    /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
+    /// than at the enclosing fn.
+    cur_span: Option<Span>,
+    /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
+    /// the param reconstructs the unboxed `Group` from these; a field read
+    /// projects a leaf directly (no cdata).
+    group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// The tuple twin of [`Self::group_binds`]: a NAME bound to a splatting
+    /// tuple holds its slot cells, so `if let t = <nullable tuple call>` can
+    /// rebuild the unboxed repr on each read of `t` instead of packing it.
+    /// Keyed the same way; the shape is stored non-nullable because presence
+    /// was already consumed by the branch that bound it.
+    tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleRetShape)>,
+    /// `static` locals: raw binding idx -> the private global cell name a read /
+    /// write of the binding resolves to (an `Inst::Global`/`StoreGlobal`, not a
+    /// local cell). Populated by `lower_static`.
+    static_cells: HashMap<u32, Ustr>,
+    /// Owner tag baked into a static's cell name -- stable across body edits,
+    /// distinct per overload (fn name + rendered param types). NOT the mangled
+    /// name (skull-mir is upstream of the mangler); it only needs uniqueness +
+    /// stability, which mir_emit reads back verbatim from `MirFunc::statics`.
+    static_owner: Ustr,
+    /// Per static source-name counter (source order) so shadowing duplicates get
+    /// distinct cells and adding an unrelated static never renames siblings.
+    static_counters: HashMap<Ustr, u32>,
+    /// Nested `fn` names: raw binding idx -> the hoisted `__local_*` global a
+    /// call / value-ref of the binding resolves to, plus its value ABI.
+    /// Inherited (cloned) by a nested fn's own builder so it can reference
+    /// itself + prior siblings.
+    nested_fn_globals: HashMap<u32, NestedFn>,
+    /// Per nested-fn source-name counter (source order), the `static_counters`
+    /// analogue for shadowing duplicates.
+    nested_fn_counters: HashMap<Ustr, u32>,
+    /// The one expression currently being lowered for its PRESENCE only (`x ==
+    /// null`): a `V?` place read there skips its copy-out, because a nil test
+    /// answers the same question without a cdata
+    /// ([`Builder::nullable_place_value_of`]). Exact node, never a subtree -- a
+    /// nested read that feeds a real whole-value use still copies.
+    presence_only: Option<Idx<Expr>>,
+}
+
+impl Builder<'_> {
+    /// [`gap`] anchored at the construct currently being lowered. Use wherever a
+    /// gap names a user-visible type or expression -- an unspanned one leaves the
+    /// reader with a whole project to search.
+    fn gap_here(&self, msg: impl std::fmt::Display) -> CompilerError {
+        match self.cur_span {
+            Some(span) => CompilerError::new_with_label(
+                span,
+                format!("skull-mir: lowering gap: {msg}"),
+            ),
+            None => gap(msg),
+        }
+    }
+
+    fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
+        let id = self.f.emit(self.cur, inst);
+        if let Some(span) = self.cur_span {
+            self.f.inst_spans.insert(id, span);
+        }
+        id
+    }
+
+    /// Whether the current block is still open (no terminator set yet). A
+    /// diverging sub-expression (`return`/`break`/`continue`) sets a real
+    /// terminator, so after lowering it `is_open()` is false and the caller
+    /// must NOT append a fall-through `Store`/`Goto`.
+    fn is_open(&self) -> bool {
+        matches!(self.f.blocks[self.cur].term, Term::Unreachable)
+    }
+
+    fn lower_params(&mut self) {
+        let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
+        for (i, pb) in pbs.iter().enumerate() {
+            let name = self.body.binding_arena[*pb].name;
+            // A value param under the scalar ABI expands to N leaf cells (the Lua
+            // param list); reads reconstruct the unboxed Group from them.
+            match self.param_shapes.get(i).and_then(|s| s.clone()) {
+                Some(shape) => {
+                    let n = shape.leaf_count();
+                    let mut cells = Vec::with_capacity(n);
+                    for li in 0..n {
+                        let cn = Ustr::from(format!("{name}__{li}").as_str());
+                        let c = self.f.new_cell(Some(cn));
+                        self.f.params.push(c);
+                        cells.push(c);
+                    }
+                    self.group_binds.insert(raw(*pb), (cells, shape));
+                }
+                None => {
+                    let cty = self.binding_ty(*pb);
+                    let cell = self.f.new_cell_typed(Some(name), cty);
+                    self.f.params.push(cell);
+                    self.binds.insert(raw(*pb), cell);
+                }
+            }
+        }
+    }
+
+    /// Callee-side default fill: an omitted argument arrives as Lua `nil`, so for
+    /// each defaulted param emit `if cell == nil { cell = <default> }` at the top
+    /// of the body (rock's convention — the default expr lives in THIS body's
+    /// arena). A trailing omitted arg is simply not passed (Lua nils it); a
+    /// named-arg gap is passed an explicit nil by the call site.
+    fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
+        let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
+        let defaults = self.body.param_defaults.clone();
+        for (i, def) in defaults.iter().enumerate() {
+            let Some(def) = def else { continue };
+            let Some(&pb) = pbs.get(i) else { continue };
+            // A scalarized value param's omitted arg arrives as N nils — guard on
+            // the FIRST leaf cell and fill all leaves from the default's leaves.
+            if let Some((cells, shape)) = self.group_binds.get(&raw(pb)).cloned() {
+                let cur = self.emit_cur(Inst::Load(cells[0]));
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(cur, nil));
+                let then_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
+                self.cur = then_bb;
+                let r = self.lower_expr_repr(*def)?;
+                let leaves = self.repr_to_leaves(&r, &shape);
+                for (c, v) in cells.iter().zip(leaves) {
+                    self.emit_cur(Inst::Store { cell: *c, value: v });
+                }
+                if self.is_open() {
+                    self.f.set_term(self.cur, Term::Goto(join));
+                }
+                self.cur = join;
+                continue;
+            }
+            let Some(&cell) = self.binds.get(&raw(pb)) else { continue };
+            let cur = self.emit_cur(Inst::Load(cell));
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            let is_nil = self.emit_cur(Inst::Eq(cur, nil));
+            let then_bb = self.f.new_block();
+            let join = self.f.new_block();
+            self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb, else_bb: join });
+            self.cur = then_bb;
+            let dv = self.lower_expr(*def)?;
+            self.emit_cur(Inst::Store { cell, value: dv });
+            self.f.set_term(self.cur, Term::Goto(join));
+            self.cur = join;
+        }
+        Ok(())
+    }
+
+    /// Lower the body's root expression, ending the entry block in a `Return`.
+    /// A top-level `Block` is special-cased so a tail-less body returns bare.
+    fn lower_root(&mut self) -> Result<(), CompilerError> {
+        let Some(root) = self.body.root else {
+            self.f.set_term(self.cur, Term::Return(vec![]));
+            return Ok(());
+        };
+        if let Expr::Block { statements, tail } = self.body.expr_arena[root] {
+            self.defers.push(Vec::new());
+            let terminated = self.lower_stmts(statements)?;
+            if terminated {
+                self.defers.pop();
+                return Ok(());
+            }
+            // A coroutine result comes ONLY from explicit `return` statements
+            // (bone discards a co fn's body tail without coercing it to R), so
+            // ANY reachable body end -- bare fall-off or unchecked tail -- is a
+            // fall-off for the non-unit-R rejection below.
+            if self.f.is_coroutine {
+                self.reject_nonunit_coroutine_falloff()?;
+            }
+            let leaves = self.return_leaves(tail)?;
+            self.run_top_frame()?; // splice this scope's defers before the return
+            self.defers.pop();
+            self.f.set_term(self.cur, Term::Return(leaves));
+            Ok(())
+        } else {
+            let leaves = self.return_leaves(Some(root))?;
+            self.f.set_term(self.cur, Term::Return(leaves));
+            Ok(())
+        }
+    }
+
+    /// Reject a REACHABLE fall-off in a `co fn` whose declared result R is a
+    /// concrete non-unit, non-nullable type: bone coerces only explicit
+    /// `return <expr>` statements to R (a coroutine's body tail is discarded,
+    /// never coerced), so a fall-off would stamp the completed terminal with
+    /// `__return` nil and `result()`/`take_result` would hand out a nil typed
+    /// as R. Unit R (the default), nullable R (nil is a legal value), and
+    /// generic R (unknown at the shared lowering; explicit `return` sites in
+    /// instantiations are still checked by bone) all stay admitted. Called only
+    /// when the body's end is reachable, so `while true` bodies never trip it.
+    fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
+        let Some(ret) = self.ret_ty else { return Ok(()) };
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = static_ty(self.ws, ret)
+        else {
+            return Ok(());
+        };
+        if n.as_str() != "Coroutine" {
+            return Ok(());
+        }
+        let TyId::Static(m, _) = ret else { return Ok(()) };
+        // Fewer than two args means R was default-filled to `()`.
+        let Some(r_idx) = params.into_iter().nth(1) else { return Ok(()) };
+        let nonunit_concrete = match self.ws.module(m).ty_arena[r_idx] {
+            TypeExpr::Builtin(BuiltinTy::Unit | BuiltinTy::Error) => false,
+            TypeExpr::Tuple { elements } if elements.into_iter().count() == 0 => false,
+            TypeExpr::Nullable(_) => false,
+            TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
+            _ => true,
+        };
+        if nonunit_concrete {
+            let msg = format!(
+                "co fn `{}` can fall off the end of its body, but its coroutine result type is not `()` -- \
+                 a completed coroutine would hand `result()` a nil typed as the declared result; \
+                 add an explicit `return <value>` on every path",
+                self.f.name
+            );
+            return Err(match self.fn_name_span {
+                Some(span) => CompilerError::new_with_label(span, msg),
+                None => CompilerError::new_no_location(msg),
+            });
+        }
+        Ok(())
+    }
+
+    /// The return-value list for `opt`: under the scalar value ABI a value return
+    /// flattens to its leaf scalars (`return v0, v1, ...`); otherwise it's the
+    /// single (boxed) value, or empty for a bare return.
+    fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let Some(e) = opt else { return Ok(vec![]) };
+        if let Some(shape) = self.ret_shape.clone() {
+            let r = self.lower_expr_repr(e)?;
+            return Ok(self.repr_to_leaves(&r, &shape));
+        }
+        if let Some(shape) = self.ret_tuple.clone() {
+            if shape.nullable {
+                return self.nullable_tuple_return_slots(e, &shape);
+            }
+            if shape.splats() {
+                let r = self.lower_expr_repr(e)?;
+                return Ok(self.tuple_repr_to_slots(r, &shape));
+            }
+            let v = self.lower_expr(e)?;
+            return Ok(self.tuple_return_operands(v, shape.slots.len()));
+        }
+        let v = self.lower_expr(e)?;
+        let v = match self.ret_ty {
+            Some(rt) => self.coerced(v, e, rt),
+            None => v,
+        };
+        Ok(vec![v])
+    }
+
+    fn absent_tuple_slots(&mut self, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        let mut out = Vec::with_capacity(shape.slot_count());
+        if shape.nullable {
+            out.push(self.emit_cur(Inst::Const(Lit::Bool(false))));
+        }
+        while out.len() < shape.slot_count() {
+            out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+        }
+        out
+    }
+
+    /// The `present, <slots...>` wire for a `-> (..)?` return, the tuple analogue
+    /// of the nullable arms in [`Self::repr_to_leaves`]: a literal `null` folds to
+    /// `false, nil, ...` and a tuple value leads with `true`.
+    ///
+    /// A tuple-or-nil arriving as an already-packed SCALAR (a variable, an if-join)
+    /// would need a runtime `~= nil` test and a per-slot branch. That is a real
+    /// shape, just not one any in-tree caller writes, so it gaps rather than
+    /// silently boxing the nobox element the wire exists to keep unboxed.
+    fn nullable_tuple_return_slots(
+        &mut self,
+        e: Idx<Expr>,
+        shape: &TupleRetShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let r = self.lower_expr_repr(e)?;
+        if let ValueRepr::Scalar(v) = &r {
+            if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
+                return Err(gap(
+                    "returning an already-packed nullable tuple through the splatting ABI \
+                     (return the tuple literal or `null` directly)",
+                ));
+            }
+            return Ok(self.absent_tuple_slots(shape));
+        }
+        let mut out = vec![self.emit_cur(Inst::Const(Lit::Bool(true)))];
+        out.extend(self.tuple_repr_to_slots(r, shape));
+        Ok(out)
+    }
+
+    /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
+    /// in return position (the common `return (a, b)` and the `return f()` forward
+    /// where `f()` lowered to `MakeTuple(loads)`) is elided to its operands -- no
+    /// table alloc. A tuple value from elsewhere (a var/field holding a packed
+    /// table) is unpacked with `TupleIndex`.
+    fn tuple_return_operands(&mut self, v: Idx<Inst>, n: usize) -> Vec<Idx<Inst>> {
+        if let Inst::MakeTuple(vs) = &self.f.insts[v] {
+            if vs.len() == n {
+                return vs.clone();
+            }
+        }
+        (0..n)
+            .map(|i| self.emit_cur(Inst::TupleIndex { base: v, index: i }))
+            .collect()
+    }
+
+    /// Flatten a tuple repr to the slot values `shape` describes -- the tuple
+    /// analogue of [`Self::repr_to_leaves`]. A `Tuple` repr (a splatting call
+    /// forwarded straight out, or a tuple literal) yields its parts; anything
+    /// else is a packed tuple, so each element is read back with `TupleIndex`
+    /// and a `Leaves` slot is field-read off the box.
+    fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
+        // A phantom tuple has no aggregate to project; every wire slot is absent.
+        if let ValueRepr::Scalar(v) = &r {
+            if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
+                return self.absent_tuple_slots(shape);
+            }
+        }
+        let parts: Vec<ValueRepr> = match r {
+            ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
+            other => {
+                let base = self.pack(other);
+                (0..shape.slots.len())
+                    .map(|index| ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
+                    .collect()
+            }
+        };
+        let mut out = Vec::with_capacity(shape.slot_count());
+        for (slot, part) in shape.slots.iter().zip(parts) {
+            match slot {
+                RetSlot::Opaque => out.push(self.pack(part)),
+                // A BOXED source at a non-nullable splatting slot is the iterator
+                // protocol's "no element" placeholder (`return (false,
+                // phantom())`), which is nil -- field-reading it would fault, and
+                // the slot is dead anyway because the tuple's own flag guards it.
+                // The nullable spread already branches on nil, so borrow it and
+                // drop the presence leaf.
+                RetSlot::Leaves(vs)
+                    if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) =>
+                {
+                    let mut nullable = vs.clone();
+                    nullable.nullable = true;
+                    let leaves = self.repr_to_leaves(&part, &nullable);
+                    out.extend(leaves.into_iter().skip(1));
+                }
+                RetSlot::Leaves(vs) => out.extend(self.repr_to_leaves(&part, vs)),
+                RetSlot::Nested(inner) => out.extend(self.tuple_repr_to_slots(part, inner)),
+            }
+        }
+        out
+    }
+
+    /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
+    /// inverse of [`Self::tuple_repr_to_slots`], used at a call site to hand a
+    /// destructure its elements without ever boxing a `nobox` one.
+    fn tuple_from_slots(
+        &mut self,
+        shape: &TupleRetShape,
+        slots: &[Idx<Inst>],
+        idx: &mut usize,
+    ) -> ValueRepr {
+        // Presence leads the wire, exactly as it does one level down in
+        // `rebuild_from_leaves`, so it is consumed before the slots.
+        let present = shape.nullable.then(|| {
+            let v = slots[*idx];
+            *idx += 1;
+            v
+        });
+        let parts = shape
+            .slots
+            .clone()
+            .iter()
+            .map(|slot| self.slot_repr(slot, slots, idx))
+            .collect();
+        ValueRepr::Tuple { parts, present }
+    }
+
+    /// One element of [`Self::tuple_from_slots`], consuming its slots from `*idx`.
+    fn slot_repr(&mut self, slot: &RetSlot, slots: &[Idx<Inst>], idx: &mut usize) -> ValueRepr {
+        match slot {
+            RetSlot::Opaque => {
+                let v = slots[*idx];
+                *idx += 1;
+                ValueRepr::Scalar(v)
+            }
+            RetSlot::Leaves(vs) => self.rebuild_from_leaves(vs, slots, idx),
+            RetSlot::Nested(inner) => self.tuple_from_slots(inner, slots, idx),
+        }
+    }
+
+    fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
+        match slot {
+            RetSlot::Opaque => vec![self.pack(repr)],
+            RetSlot::Leaves(shape) => self.repr_to_leaves(&repr, shape),
+            RetSlot::Nested(shape) => self.tuple_repr_to_slots(repr, shape),
+        }
+    }
+
+}
+
+// -- Map value-struct key rejection (a fatal emit-time pass; see
+// `value_struct_map_key`). These mirror the `Lowerer` type helpers but take
+// `(ws, inf)` directly so the check runs without building a full lowering
+// context. --
+
+fn ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
+    match ty {
+        TyId::Static(mid, idx) => Some(ws.module(mid).ty_arena[idx]),
+        TyId::Local(idx) => Some(inf.ty_arena[idx]),
+    }
+}
+
+fn resolve_tyid(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TyId> {
+    match ty_node(ws, inf, ty)? {
+        TypeExpr::Infer(var, _) => resolve_tyid(ws, inf, inf.substitutions.get(var)?),
+        _ => Some(ty),
+    }
+}
+
+fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
+    ws.struct_by_name
+        .get(&name)
+        .map(|sid| ws.modules[sid.module.index()].structs[sid.def].is_value)
+        .unwrap_or(false)
+}
+
+/// When `ty` resolves to `Map<K, V>` with `K` a `value` struct, returns K's name.
+fn map_key_value_struct(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, ty)?;
+    let TypeExpr::App { ctor: TypeCtor::Map, params } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    let k = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match ty_node(ws, inf, k)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// Scan module `mid`'s function bodies for a `Map<K, V>` whose key `K` is a
+/// `value` struct. Value structs are C-layout cdata; as Lua table keys they
+/// hash by pointer identity, so a runtime-built key silently misses an entry
+/// stored under an equal-by-value but distinct instance (store `mk(1,2)`, read
+/// a fresh `mk(1,2)` -> nil). int / string / bool / float / newtype keys are Lua
+/// value-keyed and stay allowed. Returns the first offending (key name, span).
+pub fn value_struct_map_key(ws: &Workspace, mid: ModuleId) -> Option<(Ustr, Span)> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (fid, _f) in module.functions.iter() {
+        let owner = BodyOwner::Function(fid);
+        let (Some(body), Some(inf)) = (module.bodies.get(&owner), ir.per_fn.get(&owner)) else {
+            continue;
+        };
+        for (e, tyid) in inf.expr_types.iter() {
+            if let Some(name) = map_key_value_struct(ws, inf, *tyid) {
+                return Some((name, body.expr_spans[e]));
+            }
+        }
+    }
+    None
+}
+
+/// A GC-carrying `value` struct (table repr, no C layout) named at a nominal
+/// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
+/// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
+fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
+    map_is_value_struct(ws, name) && value_struct_is_gc(ws, name)
+}
+
+/// When `ty` resolves to `NativeBuffer<E>` with `E` a GC-carrying value struct,
+/// returns E's name -- `ffi.new("E[?]")` would name a non-existent ctype.
+fn native_buffer_gc_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, ty)?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    if nb.as_str() != "NativeBuffer" {
+        return None;
+    }
+    let elem = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match ty_node(ws, inf, elem)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if nominal_is_gc_value(ws, name) => {
+            Some(name)
+        }
+        _ => None,
+    }
+}
+
+/// The C-array element type name for a `native_buffer_alloc<T>` call whose
+/// result type `ret` is `NativeBuffer<T>`. `Ok` is an FFI-clean value struct's
+/// cdef name, or `int`/`float`/`bool`. `Err(reason)` when `T` is a GC-carrying
+/// value struct, an unresolved generic (opaque `T`), or any non-C-array type --
+/// the intrinsic can only emit `ffi.new("<ctype>[?]")` when the concrete element
+/// is known at the call site. The single source for both the lowering
+/// interception and the hard emit-time [`native_buffer_alloc_reject`] pass.
+fn native_buffer_alloc_elem_ctype(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ret: TyId,
+) -> Result<Ustr, String> {
+    let ret = resolve_tyid(ws, inf, ret)
+        .ok_or_else(|| "`native_buffer_alloc` result type could not be resolved".to_string())?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ret)
+        .ok_or_else(|| "`native_buffer_alloc` result is not a `NativeBuffer<T>`".to_string())?
+    else {
+        return Err("`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string());
+    };
+    if nb.as_str() != "NativeBuffer" {
+        return Err(format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"));
+    }
+    let elem = params
+        .into_iter()
+        .next()
+        .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
+        .ok_or_else(|| "`NativeBuffer` element type is missing".to_string())?;
+    match ty_node(ws, inf, elem) {
+        Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(Ustr::from("int")),
+        Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(Ustr::from("float")),
+        Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(Ustr::from("bool")),
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name) => {
+            if value_struct_is_gc(ws, name) {
+                Err(format!(
+                    "`native_buffer_alloc<{name}>` is invalid: `{name}` is a GC-carrying `value` \
+                     struct (immutable Lua table) with no C layout, so `ffi.new(\"{name}[?]\")` \
+                     names no ctype. Only FFI-clean value structs (C-mappable fields) and \
+                     `int`/`float`/`bool` are allocatable."
+                ))
+            } else {
+                Ok(name)
+            }
+        }
+        Some(TypeExpr::Generic(..)) | Some(TypeExpr::Infer(..)) => Err(
+            "`native_buffer_alloc<T>` needs a concrete element type here, but `T` is an \
+             unresolved generic. skull emits generic bodies once with `T` opaque, so it cannot \
+             name the ffi ctype -- call it where the element type is concrete (a per-type \
+             wrapper fn), not inside a generic body."
+                .to_string(),
+        ),
+        _ => Err(
+            "`native_buffer_alloc<T>` requires `T` to be an FFI-clean `value` struct or \
+             `int`/`float`/`bool` -- a heap struct / non-C-array type has no flat layout."
+                .to_string(),
+        ),
+    }
+}
+
+/// Whether a `NativeBuffer<E>` result type's element `E` is an unresolved generic
+/// param (in `inf`) -- the opaque-`T` case that call-site specialization resolves,
+/// distinct from a concrete-but-unallocatable element (heap / GC value struct).
+fn native_buffer_elem_is_generic(ws: &Workspace, inf: &BodyInference, ret: TyId) -> bool {
+    let Some(ret) = resolve_tyid(ws, inf, ret) else { return false };
+    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(nb), params }) = ty_node(ws, inf, ret) else {
+        return false;
+    };
+    if nb.as_str() != "NativeBuffer" {
+        return false;
+    }
+    let Some(elem) = params.into_iter().next().map(|p| ret.with_idx(p)) else {
+        return false;
+    };
+    // Peel Infer chains but NOT a Generic -- a Generic is the opaque case.
+    let Some(elem) = resolve_tyid(ws, inf, elem) else { return false };
+    matches!(ty_node(ws, inf, elem), Some(TypeExpr::Generic(..)))
+}
+
+/// The verdict of scanning every workspace call to an intrinsic-bearing generic
+/// `F`: whether its standalone (opaque-`T`) body is reachable un-specialized.
+/// If `fref` is a generic fn whose body DIRECTLY calls `native_buffer_alloc<T>`
+/// with an opaque-generic element (the FlatVec-storage shape), return that call's
+/// `NativeBuffer<T>` result type (in `fref`'s own inference) so a call site can
+/// check its specialization resolves the element ctype. `None` otherwise.
+fn fn_opaque_intrinsic_ret(ws: &Workspace, fref: FuncRef) -> Option<TyId> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.generics.is_empty() || f.inline_body.is_some() {
+        return None;
+    }
+    let body = ws.module(fref.module).bodies.get(&BodyOwner::Function(fref.func))?;
+    let inf = ws.inference(fref.module)?.per_fn.get(&BodyOwner::Function(fref.func))?;
+    for (e, expr) in body.expr_arena.iter() {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            continue;
+        };
+        if name.as_str() != "native_buffer_alloc" {
+            continue;
+        }
+        if let Some(&ret) = inf.expr_types.get(e) {
+            if native_buffer_elem_is_generic(ws, inf, ret) {
+                return Some(ret);
+            }
+        }
+    }
+    None
+}
+
+/// Whether calls to `fref` can reach an opaque-`T` `native_buffer_alloc`
+/// whose element depends on `fref`'s own instantiation: directly
+/// ([`fn_opaque_intrinsic_ret`]) or TRANSITIVELY through a nested generic
+/// call whose bindings do not all reify to concrete leaves (i.e. the nested
+/// call passes `fref`'s generics through -- `push` -> `grow` -> intrinsic).
+/// A nested call whose every binding reifies concrete specializes at any
+/// lowering of this body and is not a pass-through. Cycle-safe; conservative
+/// (does not track WHICH generic flows to the intrinsic).
+fn fn_opaque_intrinsic_transitive(
+    ws: &Workspace,
+    fref: FuncRef,
+    seen: &mut HashSet<FuncRef>,
+) -> bool {
+    if !seen.insert(fref) {
+        return false;
+    }
+    if fn_opaque_intrinsic_ret(ws, fref).is_some() {
+        return true;
+    }
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.generics.is_empty() || f.inline_body.is_some() {
+        return false;
+    }
+    let Some(inf) = ws
+        .inference(fref.module)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fref.func)))
+    else {
+        return false;
+    };
+    for (c, resolved) in inf.resolved_overload_calls.iter() {
+        let callee = FuncRef { module: resolved.0, func: resolved.1 };
+        let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
+        let empty = SpecSubst::new();
+        if bindings.iter().all(|&b| reify_type(ws, inf, b, &empty).is_some()) {
+            continue;
+        }
+        if fn_opaque_intrinsic_transitive(ws, callee, seen) {
+            return true;
+        }
+    }
+    false
+}
+
+/// [`native_buffer_alloc_elem_ctype`] under a specialization `subst`: a
+/// `NativeBuffer<T>` element that is a generic bound in `subst` resolves to its
+/// concrete type's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
+/// if that type still is not allocatable (a GC-carrying value struct).
+/// A non-substituted element defers to the concrete [`native_buffer_alloc_elem_ctype`].
+fn native_buffer_alloc_elem_ctype_spec(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ret: TyId,
+    subst: &SpecSubst,
+) -> Result<Ustr, String> {
+    let Some(ret) = resolve_tyid(ws, inf, ret) else {
+        return native_buffer_alloc_elem_ctype(ws, inf, ret);
+    };
+    let leaf = match ty_node(ws, inf, ret) {
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(nb), params }) if nb.as_str() == "NativeBuffer" => {
+            params
+                .into_iter()
+                .next()
+                .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
+                .and_then(|e| match ty_node(ws, inf, e) {
+                    Some(TypeExpr::Generic(var, _)) => subst.get(&var).cloned(),
+                    _ => None,
+                })
+        }
+        _ => None,
+    };
+    match leaf {
+        Some(ReifiedType::Prim(p)) => Ok(Ustr::from(p)),
+        Some(ty) if ty.nominal().is_some() => {
+            let n = ty.nominal().unwrap();
+            if !map_is_value_struct(ws, n) {
+                Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
+            } else if value_struct_is_gc(ws, n) {
+                Err(format!(
+                    "`native_buffer_alloc<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
+                     (no C layout), so `ffi.new(\"{n}[?]\")` names no ctype."
+                ))
+            } else {
+                Ok(n)
+            }
+        }
+        Some(_) => Err(
+            "`native_buffer_alloc<T>` requires a primitive or FFI-clean value-struct element"
+                .to_string(),
+        ),
+        None => native_buffer_alloc_elem_ctype(ws, inf, ret),
+    }
+}
+
+/// Hard emit-time rejection for `native_buffer_alloc<T>` uses that would emit
+/// broken / dropped code. Runs as a dedicated pass in `emit_full` (beside
+/// [`gc_value_c_boundary`]) so the error is SURFACED, not swallowed by the lenient
+/// per-body lowering-gap skip. Two scans over `mid`:
+///
+/// 1. A DIRECT intrinsic call in this module whose element is a CONCRETE
+///    unallocatable type (a heap struct / GC value struct -- the P1 cases).
+/// 2. SITE-AWARE (docs/flatvec-plan.md P2): a call to a generic fn whose body
+///    allocates via an opaque-`T` intrinsic (e.g. `flat_vec_new<T>`, possibly in
+///    the stdlib), where THIS call does not specialize the element to an FFI-clean
+///    value struct -- so it would reach the shared generic body that cannot name
+///    the ctype (a primitive, GC-value, or nested-generic instantiation). The call
+///    site is named.
+///
+/// An opaque-generic intrinsic that is never called un-specialized (all callers
+/// specialize, or -- a library fn -- has no callers at all) is exempt: its
+/// standalone body's lowering-gap skip is then correct. Returns the first offender.
+pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
+    const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    // 1. Direct intrinsic calls with a concrete unallocatable element.
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+                continue;
+            };
+            if name.as_str() != "native_buffer_alloc" {
+                continue;
+            }
+            let Some(&ret) = inf.expr_types.get(e) else { continue };
+            // Opaque-generic elements are a per-CALL-SITE property (scan 2), never
+            // rejected on the definition body -- specialization may resolve them.
+            if native_buffer_elem_is_generic(ws, inf, ret) {
+                continue;
+            }
+            if let Err(msg) = native_buffer_alloc_elem_ctype(ws, inf, ret) {
+                return Some((msg, body.expr_spans[e]));
+            }
+        }
+    }
+    // 2. Calls to an opaque-`T`-intrinsic-bearing generic fn that this site does
+    //    not specialize to an allocatable element.
+    for (owner, body) in module.bodies.iter() {
+        // A call INSIDE an @inline/@pure generic body (e.g. the stdlib `push`'s
+        // own `fv.grow()`) is not an independent surviving use: it specializes
+        // when the enclosing generic is specialized, and is dead in the enclosing
+        // fn's standalone body otherwise. Its fate is decided at the ENCLOSING
+        // fn's call sites, which are scanned as their own (eventually
+        // non-generic) roots -- skip. A NON-eligible generic is NEVER
+        // specialized (the inliner only splices @inline/@pure), so its standalone
+        // body is the only emission and an intrinsic-bearing call inside it
+        // survives -- gate it like a non-inlined context.
+        // Whether the inliner processes this body -- specialization only happens
+        // via inlining. An ordinary (non-coroutine) function is inlined; a
+        // global initializer / decorator / `co fn` is NOT inlined, so a
+        // specialized call there would SURVIVE un-inlined (dangling nil) and
+        // must reject.
+        let owner_inlined = match owner {
+            BodyOwner::Function(fid) => {
+                let f = &ws.module(mid).functions[*fid];
+                if !f.generics.is_empty() {
+                    if f.annotations
+                        .iter()
+                        .any(|a| matches!(a.name.name.as_str(), "inline" | "pure"))
+                    {
+                        continue;
+                    }
+                    false
+                } else {
+                    !f.is_coroutine
+                }
+            }
+            _ => false,
+        };
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (c, resolved) in inf.resolved_overload_calls.iter() {
+            let c = *c;
+            let fref = FuncRef { module: resolved.0, func: resolved.1 };
+            let intr_ret = fn_opaque_intrinsic_ret(ws, fref);
+            if intr_ret.is_none()
+                && !fn_opaque_intrinsic_transitive(ws, fref, &mut HashSet::new())
+            {
+                continue;
+            }
+            let Some(fref_inf) = ws
+                .inference(fref.module)
+                .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fref.func)))
+            else {
+                continue;
+            };
+            let resolves = owner_inlined
+                && match intr_ret {
+                    // Direct: validate the intrinsic's element under this site's subst.
+                    // `Lua` because column storage never changes whether a
+                    // `native_buffer_alloc<T>` site RESOLVES its ctype -- it is
+                    // the FFI-clean element that decides -- so this validator
+                    // stays backend-agnostic by asking the column-bearing target.
+                    Some(intr_ret) => {
+                        compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA)
+                            .is_some_and(|(_, subst)| {
+                                native_buffer_alloc_elem_ctype_spec(
+                                    ws, fref_inf, intr_ret, &subst,
+                                )
+                                .is_ok()
+                            })
+                    }
+                    // Transitive (the intrinsic lives deeper in the chain): the
+                    // site must specialize, and conservatively every reified
+                    // leaf must be allocatable (a GC-value leaf reaching the
+                    // intrinsic would fail cdef resolution inside the splice,
+                    // which lowering swallows -- reject it loudly here).
+                    None => compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA)
+                        .is_some_and(|(key, _)| {
+                            key.iter().all(|l| match l {
+                                Some(ReifiedType::Prim(_)) => true,
+                                Some(ty) => {
+                                    !ty.any_nominal(&|name| nominal_is_gc_value(ws, name))
+                                }
+                                None => false,
+                            })
+                        }),
+                };
+            if !resolves {
+                let fname = ws.module(fref.module).functions[fref.func].name;
+                let msg = format!(
+                    "`{fname}` allocates via `native_buffer_alloc<T>` (directly or through \
+                     nested generic calls), which needs a concrete, FFI-clean element type. \
+                     This call does not specialize `{fname}` to an allocatable `value`-struct \
+                     element (its generic binds to a primitive, a GC-carrying value struct, a \
+                     nested generic, or nothing inferrable), so it would reach the shared \
+                     generic body that cannot name the ffi ctype. Call it at a concrete \
+                     FFI-clean `value`-struct instantiation, or use a per-type buffer \
+                     (`native_buffer_int`/`_float`) for primitive elements. If this call is \
+                     inside a generic fn, mark that fn `@inline` so it specializes at its own \
+                     call sites -- a plain generic fn is never specialized."
+                );
+                return Some((msg, body.expr_spans[c]));
+            }
+        }
+    }
+    None
+}
+
+/// Reject a GC-carrying value struct used at a genuine C boundary (an `extern`
+/// signature, or a `NativeBuffer<T>` element) -- a spanned emit-time error, since
+/// the cdef the boundary needs was never emitted for this tier. Replaces the old
+/// silent skip-then-crash (unfuck #51). Returns `(message, span)` for the first
+/// offender, scanning externs then body types. FFI-clean value structs are
+/// unaffected (they have a cdef and stay boundary-legal).
+pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
+    let module = ws.module(mid);
+    // 1. extern signatures: a param/return that is a GC-carrying value struct.
+    for (_, f) in module.functions.iter() {
+        if !f.is_extern {
+            continue;
+        }
+        let tys = f.param_decls.iter().map(|p| p.ty).chain(f.return_ty);
+        for ty in tys {
+            if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) = static_ty(ws, ty) {
+                if nominal_is_gc_value(ws, n) {
+                    return Some((format!(
+                        "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
+                         cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
+                         value struct (fields int/float/bool or nested FFI-clean value structs), \
+                         or pass the fields individually."
+                    ), f.name_span));
+                }
+            }
+        }
+    }
+    // 2. NativeBuffer<GcValue> element anywhere in a body's inferred types.
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else {
+            continue;
+        };
+        for (e, tyid) in inf.expr_types.iter() {
+            if let Some(n) = native_buffer_gc_elem(ws, inf, *tyid) {
+                return Some((format!(
+                    "`NativeBuffer<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
+                     (immutable Lua table) with no C layout, so `ffi.new(\"{n}[?]\")` names no \
+                     ctype. Only FFI-clean value structs (C-mappable fields) are NativeBuffer \
+                     elements."
+                ), body.expr_spans[e]));
+            }
+        }
+    }
+    None
+}
+
+// -- `@struct_expand` emit-time rejection (docs/shaders.md, Layer 2).
+// The lowering expander replaces a valid call; this pass is the FATAL gate that
+// rejects an invalid one, since a per-fn lowering error would only be recorded as
+// a lenient skip. Both resolve fields through `struct_expand_variants`, so they
+// never diverge. --
+
+/// The declaration-order `(field, ty)` list of value struct `name`, else `None`.
+fn resolve_call_fn(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+    name: Ustr,
+) -> Option<(ModuleId, Idx<Function>)> {
+    if let Some(&r) = inf.resolved_overload_calls.get(&e) {
+        return Some(r);
+    }
+    match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
+        Some([single]) => Some(*single),
+        _ => None,
+    }
+}
+
+/// Scan module `mid`'s bodies for a `@struct_expand` call that the lowering
+/// expander could not honor: a non-value-struct argument, a field whose type has
+/// no payload-unique variant of the target enum, a field type matching two
+/// variants, or a return type that is not `[(string, <enum>)]`. Returns the first
+/// spanned rejection.
+pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let f = &ws.module(fmod).functions[fid];
+            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::StructPairs)) {
+                continue;
+            }
+            let fname = f.name;
+            let call_span = body.expr_spans[e];
+            let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
+
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            let [arg] = arg_idxs[..] else {
+                return reject(call_span, format!("`@struct_expand` fn `{fname}` takes exactly one argument"));
+            };
+            let arg_span = body.expr_spans[arg];
+
+            let Some(enum_name) = f.return_ty.and_then(|ret| pairs_return_enum(ws, ret)) else {
+                return reject(
+                    call_span,
+                    format!(
+                        "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
+                        f.return_ty.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
+                    ),
+                );
+            };
+
+            let struct_name = inf
+                .expr_types
+                .get(arg)
+                .and_then(|t| resolve_tyid(ws, inf, *t))
+                .and_then(|t| match ty_node(ws, inf, t) {
+                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => Some(n),
+                    _ => None,
+                });
+            let Some(fields) = struct_name.and_then(|n| value_struct_field_tys(ws, n)) else {
+                return reject(
+                    arg_span,
+                    format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
+                );
+            };
+
+            if let Err(msg) = struct_expand_variants(ws, enum_name, &fields) {
+                return reject(arg_span, format!("`@struct_expand`: {msg}"));
+            }
+        }
+    }
+    None
+}
+
+// -- `@shader_expand` (`rock_shader`) expansion + rejection
+// (docs/shaders.md). A call collapses to the pipeline key const
+// `"<vert>+<frag>"`; the driver (skull::mir_emit) emits one top-level
+// `__rock_shader_register(key, glsl)` per distinct pair. The lowering expander,
+// the fatal rejection gate, and the driver's pair collector all resolve args
+// through `resolve_shader_pair`, so they never diverge. skull-mir stays free of
+// GLSL emission (the layering constraint): only FuncRefs + the key cross up. --
+
+/// A resolved `rock_shader(...)` pipeline. Two forms:
+/// - two-arg `rock_shader(vert, frag)`: `vert = Some(..)`, `key = "<vert>+<frag>"`;
+///   the driver runs `emit_shader_pipeline`.
+/// - one-arg fullscreen `rock_shader(frag)`: `vert = None`, `key = "<frag>"` (a
+///   bare name, never containing '+', so it can never collide with a pair key);
+///   the driver runs `emit_shader_entry`.
+/// `key` is the pipeline name const `pipeline()` looks up.
+#[derive(Clone, Debug)]
+pub struct ShaderPair {
+    pub key: String,
+    pub vert: Option<FuncRef>,
+    pub frag: FuncRef,
+}
+
+pub struct ShaderCollection {
+    pub pairs: Vec<ShaderPair>,
+    pub callsites: Vec<(ModuleId, BodyOwner)>,
+}
+
+/// The `@shader(<stage>)` stage of `f` (`"vertex"`/`"fragment"`), else `None`.
+/// A local read of the annotation (skull-codegen-glsl has the same helper, but
+/// skull-mir must not depend on it -- the layering constraint).
+fn shader_stage_of(f: &Function) -> Option<&'static str> {
+    let ann = f.annotations.iter().find(|a| a.name.name.as_str() == "shader")?;
+    match ann.args.first().map(|a| &a.value) {
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => Some("vertex"),
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
+            Some("fragment")
+        }
+        _ => None,
+    }
+}
+
+/// Resolve one `rock_shader` argument to a direct reference to a top-level
+/// `@shader(<want_stage>)` fn. Rejects (spanned) a non-`Expr::Global` arg (a
+/// local, lambda, literal, call -- anything that is not a bare top-level fn
+/// name), a name that is not a unique top-level fn, a non-`@shader` fn, or a
+/// stage mismatch.
+fn resolve_shader_arg(
+    ws: &Workspace,
+    body: &Body,
+    arg: Idx<Expr>,
+    want_stage: &str,
+) -> Result<FuncRef, CompilerError> {
+    let span = body.expr_spans[arg];
+    let reject = |msg: String| CompilerError::new_with_label(span, msg);
+    let Expr::Global(name) = body.expr_arena[arg] else {
+        return Err(reject(format!(
+            "`rock_shader` argument must be a direct reference to a top-level `@shader({want_stage})` fn"
+        )));
+    };
+    let fref = match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
+        Some([(module, func)]) => FuncRef { module: *module, func: *func },
+        _ => {
+            return Err(reject(format!(
+                "`rock_shader` argument `{name}` is not a unique top-level fn"
+            )))
+        }
+    };
+    let f = &ws.module(fref.module).functions[fref.func];
+    match shader_stage_of(f) {
+        Some(stage) if stage == want_stage => Ok(fref),
+        Some(other) => Err(reject(format!(
+            "`rock_shader` expects a `@shader({want_stage})` fn here, but `{name}` is `@shader({other})`"
+        ))),
+        None => Err(reject(format!(
+            "`rock_shader` argument `{name}` is not a `@shader` fn"
+        ))),
+    }
+}
+
+/// Resolve a `rock_shader(...)` call's args to a [`ShaderPair`], or the first
+/// spanned rejection. Arity dispatches the form: one arg -> fullscreen
+/// (`vert = None`, key = bare frag name), two args -> pair (key = `"<vert>+<frag>"`).
+/// Any other arity rejects, naming BOTH legal forms. Shared by the lowering
+/// expander ([`Builder::expand_shader_pipeline`]), the fatal gate
+/// ([`shader_expand_rejection`]), and the driver collector
+/// ([`collect_shader_pairs`]) -- one resolver, never forked.
+pub fn resolve_shader_pair(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+) -> Result<ShaderPair, CompilerError> {
+    match args {
+        [frag_arg] => {
+            let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
+            let fname = ws.module(frag.module).functions[frag.func].name;
+            // Bare frag name -- no '+', so it can never collide with a pair key.
+            Ok(ShaderPair { key: fname.to_string(), vert: None, frag })
+        }
+        [vert_arg, frag_arg] => {
+            let vert = resolve_shader_arg(ws, body, *vert_arg, "vertex")?;
+            let frag = resolve_shader_arg(ws, body, *frag_arg, "fragment")?;
+            let vname = ws.module(vert.module).functions[vert.func].name;
+            let fname = ws.module(frag.module).functions[frag.func].name;
+            Ok(ShaderPair { key: format!("{vname}+{fname}"), vert: Some(vert), frag })
+        }
+        _ => Err(CompilerError::new_with_label(
+            body.expr_spans[call_expr],
+            "`rock_shader` takes either one argument -- rock_shader(fragment_fn) \
+             (fullscreen) -- or two -- rock_shader(vertex_fn, fragment_fn)"
+                .to_string(),
+        )),
+    }
+}
+
+/// Scan module `mid`'s bodies for a `rock_shader` call the lowering expander
+/// could not honor (bad arity, a non-`@shader` / non-direct-reference arg, a
+/// stage mismatch). Returns the first spanned rejection. FATAL gate: a per-fn
+/// lowering error is only a lenient skip, so validation lives here.
+pub fn shader_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            if !matches!(
+                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                Some(ExpandKind::ShaderPipeline)
+            ) {
+                continue;
+            }
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Err(err) = resolve_shader_pair(ws, body, e, &arg_idxs) {
+                return Some(err);
+            }
+        }
+    }
+    None
+}
+
+/// Every distinct `rock_shader` pair across the workspace, deduped by key and
+/// sorted by key (deterministic registration order -> byte-stable re-emission).
+/// The driver ([`skull::mir_emit`]) turns each into one top-level
+/// `__rock_shader_register`. Any resolution failure surfaces as `Err` (the fatal
+/// [`shader_expand_rejection`] gate runs first, so this is normally infallible).
+pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerError> {
+    Ok(collect_shader_collection(ws)?.pairs)
+}
+
+pub fn body_has_shader_pipeline_call(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> bool {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return false };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    body.expr_arena.iter().any(|(e, expr)| {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            return false;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        resolved.is_some_and(|(fmod, fid)| {
+            matches!(
+                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                Some(ExpandKind::ShaderPipeline)
+            )
+        })
+    })
+}
+
+pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
+    let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
+        std::collections::BTreeMap::new();
+    let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
+    for (_, &mid) in ws.module_ids.iter() {
+        let module = ws.module(mid);
+        let ir = ws.inference(mid);
+        for (owner, body) in module.bodies.iter() {
+            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
+            for (e, expr) in body.expr_arena.iter() {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                    continue;
+                };
+                let resolved = match inf {
+                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
+                    None => match ws.functions_by_name.get(name).map(|l| l.as_slice()) {
+                        Some([single]) => Some(*single),
+                        _ => None,
+                    },
+                };
+                let Some((fmod, fid)) = resolved else { continue };
+                if !matches!(
+                    crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                    Some(ExpandKind::ShaderPipeline)
+                ) {
+                    continue;
+                }
+                callsites.insert((mid, *owner));
+                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+                let pair = resolve_shader_pair(ws, body, e, &arg_idxs)?;
+                by_key.entry(pair.key.clone()).or_insert(pair);
+            }
+        }
+    }
+    Ok(ShaderCollection {
+        pairs: by_key.into_values().collect(),
+        callsites: callsites.into_iter().collect(),
+    })
+}
+
+/// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side
+/// functions as runtime fn values. Shader-pipeline expansion arguments are names,
+/// not runtime values, and remain legal.
+pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        let caller_is_gpu = match owner {
+            BodyOwner::Function(fid) => crate::intrinsics::is_gpu_context(&module.functions[*fid]),
+            _ => false,
+        };
+        if caller_is_gpu {
+            continue;
+        }
+        let mut shader_expansion_args = HashSet::new();
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+            } = expr
+            else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                continue;
+            };
+            let f = &ws.module(fmod).functions[fid];
+            if matches!(
+                crate::intrinsics::expand_kind(f),
+                Some(ExpandKind::ShaderPipeline)
+            ) {
+                shader_expansion_args.extend(args.clone().into_iter());
+            }
+        }
+        for (e, expr) in body.expr_arena.iter() {
+            match expr {
+                Expr::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    ..
+                } => {
+                    let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                        continue;
+                    };
+                    let f = &ws.module(fmod).functions[fid];
+                    if !crate::intrinsics::is_gpu_only(f) {
+                        continue;
+                    }
+                    let fname = f.name;
+                    return Some(CompilerError::new_with_label(
+                        body.expr_spans[e],
+                        format!(
+                            "`{fname}` is GPU-only and cannot be called from CPU (Lua) code. \
+                             Shader helper code that calls `{fname}` must annotate its fn \
+                             `@shader(...)` or `@gpu_only`."
+                        ),
+                    ));
+                }
+                Expr::Global(name) if !shader_expansion_args.contains(&e) => {
+                    let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                        continue;
+                    };
+                    let f = &ws.module(fmod).functions[fid];
+                    if !crate::intrinsics::is_gpu_context(f) {
+                        continue;
+                    }
+                    let fname = f.name;
+                    let kind =
+                        if crate::intrinsics::is_gpu_only(f) { "GPU-only" } else { "a shader entry" };
+                    return Some(CompilerError::new_with_label(
+                        body.expr_spans[e],
+                        format!(
+                            "`{fname}` is {kind} and cannot be used as a fn value from CPU \
+                             (Lua) code"
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
+    match body.expr_arena[e] {
+        Expr::Int(v) => Some(v),
+        Expr::UnaryMinus(inner) => match body.expr_arena[inner] {
+            Expr::Int(v) => Some(-v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Scan module `mid`'s bodies for a `string_char(<literal>)` call whose literal
+/// argument is outside ASCII 0..=127. `string_char` is `string.char` on luajit:
+/// a code > 127 emits a lone high byte (invalid UTF-8 alone, a different code
+/// unit on a UTF-16 backend); a negative code aborts `string.char` at runtime.
+/// Portable only for 0..=127; for code points use `from_codepoint`. Dynamic
+/// (non-literal) arguments are out of scope. Returns the offending arg's span.
+pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option<Span> {
+    let module = ws.module(mid);
+    for (_owner, body) in module.bodies.iter() {
+        for (_e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = *expr else {
+                continue;
+            };
+            if name.as_str() != "string_char" {
+                continue;
+            }
+            let Some(arg) = args.into_iter().next() else { continue };
+            let Some(code) = const_int(body, arg) else { continue };
+            if !(0..=127).contains(&code) {
+                return Some(body.expr_spans[arg]);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests;

@@ -30,7 +30,7 @@ use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
 use skull_mir::lower::{
     bound_next_shape, lower_function_spec, spec_key_from_next_generics, spec_subst_from_key,
-    BoundNextElem, ScalarCtx, SpecKey, SpecSubst,
+    BoundNextElem, ElemRebuild, ScalarCtx, SpecKey, SpecSubst,
 };
 use skull_mir::mir::*;
 
@@ -757,55 +757,49 @@ fn repack_bound_next_element(
     // still needs the repack, because what lands in the element cell is a bare
     // leaf the body then projects a field off. Gating on arity leaves exactly that
     // case broken, which is the seed's "NOT arity" probe.
-    let (name, fields) = match &shape.elem {
+    let plan = match &shape.elem {
         BoundNextElem::Opaque => return Ok(()),
-        BoundNextElem::Flat(n, f) => (*n, f.clone()),
+        BoundNextElem::Rebuild(plan) => plan,
         // Never rewrite the call without knowing how to put the element back
         // together: the leaves would land in cells nothing reads while the body
         // still projects fields off one of them.
         BoundNextElem::Unsupported => {
             return Err(CompilerError::new_no_location(format!(
                 "`{}` returns {} values at this specialization but its element \
-                 cannot be rebuilt from leaves (nested or nullable `nobox` \
-                 element). Mechanism I of docs/nobox-case-matrix.md covers the \
-                 flat case only.",
+                 cannot be rebuilt from leaves (a nullable `nobox` element, whose \
+                 presence leaf pairs with no field). Mechanism I of \
+                 docs/nobox-case-matrix.md.",
                 func.name, shape.slot_count
             )));
         }
     };
     let elem_cell = dests[1];
-    if fields.len() + 1 != shape.slot_count {
+    let leaf_count = plan.leaf_count();
+    if leaf_count + 1 != shape.slot_count {
         return Err(CompilerError::new_no_location(format!(
             "`{}`: `next` returns {} values but its element has {} leaves -- the \
-             ctor is positional over those leaves, so repacking a mismatched pair \
-             would write one leaf's value into another field",
-            func.name,
-            shape.slot_count,
-            fields.len()
+             rebuild is positional over those leaves, so repacking a mismatched \
+             pair would write one leaf's value into another field",
+            func.name, shape.slot_count, leaf_count
         )));
     }
 
     // The call keeps `ok` and gains one fresh cell per leaf; the element cell is
     // no longer a destination, it is what the repack stores into.
-    let leaf_cells: Vec<Idx<Cell>> = fields.iter().map(|_| func.new_cell(None)).collect();
+    let leaf_cells: Vec<Idx<Cell>> = (0..leaf_count).map(|_| func.new_cell(None)).collect();
     let mut new_dests = vec![dests[0]];
     new_dests.extend(leaf_cells.iter().copied());
     if let Inst::CallMulti { dests, .. } = &mut func.insts[call] {
         *dests = new_dests;
     }
 
-    let loads: Vec<Idx<Inst>> =
-        leaf_cells.iter().map(|c| func.insts.alloc(Inst::Load(*c))).collect();
-    let packed = func.insts.alloc(Inst::MakeValueStruct {
-        name,
-        fields: fields.iter().copied().zip(loads.iter().copied()).collect(),
-    });
+    let mut tail: Vec<Idx<Inst>> = Vec::new();
+    let mut taken = 0usize;
+    let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail);
     let store = func.insts.alloc(Inst::Store { cell: elem_cell, value: packed });
 
     // Inserted immediately after the call, in its own block: the element cell must
     // hold the rebuilt value before the `ok` branch reads it.
-    let mut tail: Vec<Idx<Inst>> = loads;
-    tail.push(packed);
     tail.push(store);
     for (_, block) in func.blocks.iter_mut() {
         if let Some(at) = block.insts.iter().position(|i| *i == call) {
@@ -817,6 +811,52 @@ fn repack_bound_next_element(
         "internal: substituted `next` call in `{}` is not in any block",
         func.name
     )))
+}
+
+/// Emit the rebuild of one element from `cells`, consuming them left to right,
+/// appending every inst it creates to `tail` in evaluation order. Returns the
+/// value the element cell should hold.
+///
+/// The rebuild is a TRANSIENT in every arm: copy-prop forwards a field read of a
+/// `MakeValueStruct` and a `TupleIndex` of a `MakeTuple` to the construction
+/// operand, so the aggregates die in DCE and the `nobox` guarantee still holds
+/// over the emitted body.
+fn emit_elem_rebuild(
+    func: &mut MirFunc,
+    plan: &ElemRebuild,
+    cells: &[Idx<Cell>],
+    taken: &mut usize,
+    tail: &mut Vec<Idx<Inst>>,
+) -> Idx<Inst> {
+    match plan {
+        ElemRebuild::Passthrough => {
+            let l = func.insts.alloc(Inst::Load(cells[*taken]));
+            *taken += 1;
+            tail.push(l);
+            l
+        }
+        ElemRebuild::Value(name, fields) => {
+            let mut fs = Vec::with_capacity(fields.len());
+            for f in fields {
+                let l = func.insts.alloc(Inst::Load(cells[*taken]));
+                *taken += 1;
+                tail.push(l);
+                fs.push((*f, l));
+            }
+            let packed = func.insts.alloc(Inst::MakeValueStruct { name: *name, fields: fs });
+            tail.push(packed);
+            packed
+        }
+        ElemRebuild::Tuple(parts) => {
+            let mut vs = Vec::with_capacity(parts.len());
+            for p in parts {
+                vs.push(emit_elem_rebuild(func, p, cells, taken, tail));
+            }
+            let packed = func.insts.alloc(Inst::MakeTuple(vs));
+            tail.push(packed);
+            packed
+        }
+    }
 }
 
 /// Import the cloned callee body's `spec_bindings` into the caller (keys remapped

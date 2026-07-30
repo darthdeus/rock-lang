@@ -17,18 +17,16 @@ fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
-// A nobox field inside a GC-TIER outer (the nullable field makes `Opt` emit as a
-// `_vt` table), so there is no cdata to write leaves into and the nested ctor
-// still materializes.
-const NOBOX_IN_GC_TIER_OUTER: &str = r#"
+// A nobox value as a TUPLE element in a collection: a tuple slot is a boxed
+// slot, so the element materializes with nowhere else to go.
+const NOBOX_IN_A_TUPLE_ELEMENT: &str = r#"
 nobox value NB { x: float, y: float }
-value Opt { pos: NB?, a: float, b: float, c: float }
-global XS: [Opt]
-fn setup() { XS = vec_new() }
+global XS: [NB] = []
 fn main() {
-    setup()
-    XS.push(Opt { pos: NB { x: 1.0, y: 2.0 }, a: 1.0, b: 2.0, c: 3.0 })
-    print("{XS.len}")
+    XS.push(NB { x: 1.0, y: 2.0 })
+    let ts: [(NB, float)] = []
+    ts.push((XS[0], 1.0))
+    print("{ts.len}")
 }
 "#;
 
@@ -49,7 +47,7 @@ fn compile_stderr(src: &str) -> String {
 
 #[test]
 fn a_nobox_rejection_names_the_function_being_emitted() {
-    let stderr = compile_stderr(NOBOX_IN_GC_TIER_OUTER);
+    let stderr = compile_stderr(NOBOX_IN_A_TUPLE_ELEMENT);
     assert!(
         stderr.contains("main"),
         "the rejection must name the enclosing function -- otherwise sites that \

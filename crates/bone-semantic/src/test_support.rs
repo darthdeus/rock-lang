@@ -43,6 +43,14 @@ pub fn check_types(src: &str) -> Result<(), String> {
     // no-marker path below) so ariadne can fetch the source for error rendering
     // -- a mismatch triggers a stderr "Unable to fetch source" warning per label.
     let module = parse_module(src, ustr("<parse_rock>")).map_err(|e| stage("parse_rock", e))?;
+
+    // `parse_module` recovers past a malformed item and returns Ok, parking the
+    // error on `recovery_errors` -- the compile gate rejects on it, so a fixture
+    // must too. Without this a parse-rejected shape reads as ACCEPTED here.
+    if let Some(e) = module.recovery_errors.first() {
+        return Err(stage("parse_rock", e.clone()));
+    }
+
     let ws = semantic_pass(&mut [module]).map_err(|e| stage("semantic_pass", e))?;
 
     // `semantic_pass` Ok means "lowered and checked", not "no type errors" —

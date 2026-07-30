@@ -1,17 +1,18 @@
-// CONTROL for `nobox_nested_nullable_embed_group`, and it FALSIFIES that case's
-// filing. The nested field here is NON-nullable and it rejects identically, so
-// the `?` is not the discriminant and this is not mechanism A.
+// CONTROL for `nobox_nested_nullable_embed_group`. The nested field here is
+// NON-nullable, which leaves `Outer` FFI-clean rather than leaf-table -- and
+// that tier is the discriminant: the nullable twin passes, this rejects.
 //
-// Two narrower controls place the boundary: the same nesting in a PLAIN global
-// (no embed) works, and an embed of a nobox whose fields are all primitive works.
-// What fails is a nobox value with a NESTED value field inside an embed field.
+// Two narrower controls place the remaining boundary: the same nesting in a
+// PLAIN global (no embed) works, and an embed of a nobox whose fields are all
+// primitive works. What fails is an FFI-CLEAN nested value field inside an embed
+// field.
 //
-// The site is not `embed_group` either -- that reads, and it recurses on
-// `Nested(sub)` correctly. The rejection names the WRITES (`__skull_ginit_H` and
-// `fill`): in `embed_leaf_values`' literal walk, `embed_field_of_struct` bails on
-// a value struct, so a nested value field falls to the `(None, None)` arm and is
-// lowered to ONE boxed leaf instead of contributing its own dotted leaves the way
-// the embed and flat-enum arms do.
+// The site is not `embed_group` -- that reads, and it recurses on `Nested(sub)`
+// correctly. The rejection names the WRITES (`__skull_ginit_H` and `fill`): in
+// `embed_leaf_values`' literal walk, `embed_field_of_struct` bails on an
+// FFI-clean value struct, so a nested value field falls to the `(None, None)`
+// arm and is lowered to ONE boxed leaf instead of contributing its own dotted
+// leaves the way the embed and flat-enum arms do.
 
 nobox value P { x: int, y: int }
 nobox value Outer { a: P, b: int }

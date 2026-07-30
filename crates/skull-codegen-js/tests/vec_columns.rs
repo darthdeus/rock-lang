@@ -49,6 +49,16 @@ fn written() -> int {
     return int(xs[0].x) * 10 + int(xs[0].y)
 }
 
+nobox value NP { x: float, y: float }
+
+fn insert_at_presence() -> int {
+    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, NP { x: 3.0, y: 4.0 }]
+    a.insert_at(1, null)
+    let present = 0
+    if a[1] == null { present = 1 }
+    return a.len * 1000 + int(a[0]?.y ?? 0.0) * 100 + present * 10 + int(a[2]?.y ?? 0.0)
+}
+
 fn main() { let _ = unmarked() }
 "#;
 
@@ -253,4 +263,25 @@ fn the_checked_index_is_zero_based_on_js() {
         js.contains("__vec_checked_index("),
         "column element access must go through the checked index:\n{js}"
     );
+}
+
+/// SENTINEL -- pins a known JS bug. Flip when fixed.
+///
+/// `insert_at` on a `[NP?]` column shifts the LEAF columns but not the presence
+/// column, so the inserted `null` reads back as present. The digits are
+/// `len`, `a[0].y`, `a[1] == null`, `a[2].y`: correct is `3214`, and only the
+/// presence digit is wrong, which is what names the defect -- the leaves shift
+/// in lockstep, presence is simply left behind.
+///
+/// Asserted at `3204` because that is what the emitter produces TODAY; this test
+/// passes because the bug exists. luajit is the control and gets it right:
+/// `tests/nobox_nullable_column.rock`'s
+/// `test_insert_at_shifts_presence_with_its_leaves` runs the same shape and
+/// passes on skull while failing under `--backend js`.
+///
+/// When this goes red the fix landed: assert `3214` instead, delete this note
+/// down to one line, and clear the `insert_at` item in `docs/parked/js.md`.
+#[test]
+fn nullable_column_insert_at_presence_sentinel() {
+    eval_int("insert_at_presence", 3204);
 }

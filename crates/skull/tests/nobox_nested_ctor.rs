@@ -4,11 +4,12 @@
 //! struct boxing is fine and expected; building it *through* a nobox box is not.
 //!
 //! Normalization flattens the nested ctor into its parent's leaves, so these
-//! assert the flattened emit plus a luajit round-trip. ONE case is still a
-//! SENTINEL (`docs/test-sentinels.md`): a nullable nobox field in a GC-tier
-//! outer has no cdata to write leaves into and still rejects --
-//! `assert_rejects_today` marks it, and it goes red the day that lands.
-//! Design + work list: `docs/nobox-nested-ctor-plan.md`.
+//! assert the flattened emit plus a luajit round-trip. A nullable field makes
+//! the outer GC-tier, which has no cdata to write leaves into: it stores flat
+//! instead (dotted leaf keys plus a presence key) through `<Name>_lct`. The
+//! leaf-count sweep that separates this from the column threshold lives in
+//! `nobox_column_threshold.rs`. Design + work list:
+//! `docs/nobox-nested-ctor-plan.md`.
 
 mod common;
 use common::{function_body, run_luajit, try_emit_module};
@@ -59,25 +60,44 @@ fn main() {
 }
 "#;
 
-/// SENTINEL, and it pins a RESIDUAL CLASS rather than a gap in the pass: a
-/// nullable field makes the outer GC-tier (it emits `Opt_vt`, a table), so there
-/// is no cdata to write leaves into and allocate-then-write cannot apply. Flip
-/// only if GC-tier outers ever learn to carry nobox leaves; the design's answer
-/// today is an explicit `materialize`.
+/// The MINIMAL cell: a nullable nobox field makes the outer GC-tier, so it
+/// materializes as a table rather than cdata. ONE field is enough -- the leaf
+/// count is not the discriminant here (that is the `[Opt]` column threshold,
+/// pinned separately in `nobox_column_threshold.rs`), and a global is what
+/// forces the outer to materialize at all.
 const NULLABLE_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
-value Opt { pos: NV2?, a: float, b: float, c: float }
-global G: Opt
-global H: Opt
-fn setup() {
-    G = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0, b: 4.0, c: 5.0 }
-    H = Opt { pos: null, a: 6.0, b: 7.0, c: 8.0 }
-}
+value Opt { pos: NV2? }
+global G: Opt = Opt { pos: NV2 { x: 1.0, y: 2.0 } }
+fn main() { print("{G.pos?.x ?? -1.0}") }
+"#;
+
+/// A leaf-table box read back OUT of a container. The declared field name holds
+/// only the presence tag there, so a read that keys off it hands the consumer a
+/// bool -- which indexes, and silently reads `nil` for every leaf.
+const LEAF_TABLE_OUT_OF_A_MAP: &str = r#"
+nobox value NV2 { x: float, y: float }
+value Opt { pos: NV2?, a: float }
+global M: Map<string, Opt> = map_new()
 fn main() {
-    setup()
-    let gp = if G.pos != null { G.pos.unwrap().x } else { -1.0 }
-    let hp = if H.pos != null { H.pos.unwrap().x } else { -1.0 }
-    print("{gp} {hp}")
+    M["k"] = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
+    let v = M["k"]
+    print("{v.pos?.x ?? -1.0} {v.pos?.y ?? -1.0} {v.a}")
+}
+"#;
+
+/// The two ways to spell an ABSENT payload -- an absent literal and a later
+/// `= null` write -- must produce the same storage. `__eq` compares per key, so
+/// a ctor spelling absence `false` while a store spells it `nil` makes two
+/// logically-equal values compare unequal.
+const ABSENT_SPELLINGS_AGREE: &str = r#"
+nobox value NV2 { x: float, y: float }
+value Opt { pos: NV2?, a: float }
+global G: Opt = Opt { pos: null, a: 3.0 }
+global H: Opt = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
+fn main() {
+    H.pos = null
+    print("{G == H} {H.pos == null}")
 }
 "#;
 
@@ -109,22 +129,6 @@ fn emit_ok(src: &str, what: &str) -> String {
         Ok(lua) => lua,
         Err(e) => panic!("{what} must emit, got a rejection: {e:?}"),
     }
-}
-
-/// INVERTED: pins a shape that still rejects. Flip to `emit_ok` + the
-/// assertions in the caller's comment when it starts emitting.
-fn assert_rejects_today(src: &str, what: &str) {
-    let Err(e) = try_emit_module(src) else {
-        panic!(
-            "{what} now EMITS -- flip this sentinel: see the caller's comment \
-             for the assertions it should carry instead."
-        )
-    };
-    let msg = format!("{e:?}");
-    assert!(
-        msg.contains("survived lowering as an implicit materialization"),
-        "{what} must fail on the nobox guarantee, not something else: {msg}"
-    );
 }
 
 /// Every leaf gets a DISTINCT value, so an ordering drift between the shape walk
@@ -176,8 +180,36 @@ main()
 }
 
 #[test]
-fn a_nullable_nobox_field_round_trips_both_ways() {
-    assert_rejects_today(NULLABLE_FIELD, "a nullable nobox field in a GC-tier outer");
+fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
+    let lua = emit_ok(NULLABLE_FIELD, "a nullable nobox field in a GC-tier outer");
+    assert!(
+        !function_body(&lua, "__skull_ginit_G").contains("NV2_ct("),
+        "the nullable nobox field materialized a cdata:
+{lua}"
+    );
+    // The presence tag leads the leaves, so an absent payload is representable
+    // without a box to be nil.
+    assert!(
+        function_body(&lua, "__skull_ginit_G").contains("Opt_lct((true), (1.0), (2.0))"),
+        "the GC-tier outer did not take the presence-carrying leaf ctor:
+{lua}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "nullable_field").trim(), "1");
+}
+
+#[test]
+fn a_leaf_table_element_read_out_of_a_container_projects_its_leaves() {
+    let lua = emit_ok(LEAF_TABLE_OUT_OF_A_MAP, "a leaf-table Map value");
+    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), "map_value").trim(), "1 2 3");
+}
+
+#[test]
+fn both_absent_spellings_store_the_same_tag() {
+    let lua = emit_ok(ABSENT_SPELLINGS_AGREE, "an absent literal against a null write");
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "absent_spellings").trim(),
+        "true true"
+    );
 }
 
 #[test]

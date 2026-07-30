@@ -756,6 +756,51 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
         let n = s.name;
         let mt = format!("__rock_vt_{n}");
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
+        // A leaf-table struct has no declared-field keys to compare or print, so
+        // both metamethods and its ctor run off the leaf paths instead.
+        if skull_mir::lower::value_struct_is_leaf_table(ws, n) {
+            let paths = skull_mir::lower::value_leaf_paths_of(ws, n).unwrap_or_default();
+            out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
+            out.push_str(
+                "  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n",
+            );
+            let cmps: Vec<String> =
+                paths.iter().map(|p| format!("a[\"{p}\"] == b[\"{p}\"]")).collect();
+            out.push_str(&format!(
+                "  return {}\n",
+                if cmps.is_empty() { "true".to_string() } else { cmps.join(" and ") }
+            ));
+            out.push_str("end\n");
+            out.push_str(&format!("{mt}.__tostring = function(v)\n"));
+            let ts: Vec<String> =
+                paths.iter().map(|p| format!("\"{p}: \" .. tostring(v[\"{p}\"])")).collect();
+            out.push_str(&format!(
+                "  return \"{n} {{ \" .. {} .. \" }}\"\nend\n",
+                if ts.is_empty() { "\"\"".to_string() } else { ts.join(" .. \", \" .. ") }
+            ));
+            let params: Vec<String> = (0..paths.len()).map(|i| format!("l{i}")).collect();
+            // An absent tag canonicalizes to `nil` -- the form a `= null` write
+            // and an absent literal both store. The scalar ABI spells absence
+            // `false` on the wire, and two logically-equal absent values then
+            // compared unequal (`__eq` is a per-key compare, and `false ~= nil`).
+            let presence =
+                skull_mir::lower::value_leaf_presence_flags_of(ws, n).unwrap_or_default();
+            let assigns: Vec<String> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let tag = presence.get(i).copied().unwrap_or(false);
+                    let v = if tag { format!("l{i} or nil") } else { format!("l{i}") };
+                    format!("[\"{p}\"] = {v}, ")
+                })
+                .collect();
+            out.push_str(&format!(
+                "{n}_lct = function({p})\n  return setmetatable({{ {b}__ty = \"{n}\" }}, {mt})\nend\n",
+                p = params.join(", "),
+                b = assigns.concat(),
+            ));
+            continue;
+        }
         // value __eq
         out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
         out.push_str("  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n");

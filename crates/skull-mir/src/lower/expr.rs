@@ -1,0 +1,1250 @@
+//! Expression lowering: the main dispatch, place bases, assignment and
+//! compound assignment, `++`/`--`, safe navigation, and array/spread literals.
+use super::*;
+
+impl Builder<'_> {
+    pub(crate) fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        // Source cursor for instruction-level diagnostics: whatever is lowered
+        // from here down came from `e` unless a nested `lower_expr` narrows it,
+        // and the restore puts the enclosing expression back on the way out.
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let v = self.lower_expr_inner(e);
+        self.cur_span = outer;
+        let v = v?;
+        // Implicit iterable->iterator coercion at a bounded call arg: bone
+        // recorded the resolved `iter` fn; wrap the arg value in that call
+        // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
+        if let Some(&(m, f)) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
+            return Ok(self.emit_cur(Inst::Call {
+                func: FuncRef { module: m, func: f },
+                args: vec![v],
+            }));
+        }
+        Ok(v)
+    }
+
+    pub(crate) fn lower_expr_inner(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        match self.body.expr_arena[e].clone() {
+            Expr::Unit | Expr::Null => Ok(self.emit_cur(Inst::Const(Lit::Nil))),
+            Expr::Int(i) => Ok(self.emit_cur(Inst::Const(Lit::Int(i)))),
+            Expr::Float(of) => Ok(self.emit_cur(Inst::Const(Lit::Float(of.0)))),
+            Expr::Bool(x) => Ok(self.emit_cur(Inst::Const(Lit::Bool(x)))),
+            Expr::String(s) => Ok(self.emit_cur(Inst::Const(Lit::Str(s)))),
+
+            // A field-ref key path (`.field` resolved against `FieldRef<T, V>`)
+            // lowers to its interned field name. skull emits named struct keys,
+            // so `obj[name]` is identical to `obj.field`.
+            Expr::SiblingRef(name) => Ok(self.emit_cur(Inst::Const(Lit::Str(name)))),
+
+            // A scalarized value param read in a BOXED context reconstructs the
+            // cdata (`pack` the rebuilt Group); a plain local is a cell load.
+            Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
+            }
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
+            }
+            // A nested fn used as a value: reference the hoisted top-level fn by
+            // name (a plain global read -- zero closure alloc).
+            Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
+                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)].hoisted)))
+            }
+            // A whole-tuple use of a name bound to slot cells: rebuild and pack.
+            // Packing a `nobox` element here is exactly how a whole-tuple escape
+            // still reaches the guarantee's rejection.
+            Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
+            }
+            Expr::Var(b) => {
+                let cell = *self
+                    .binds
+                    .get(&raw(b))
+                    .ok_or_else(|| gap("read of an unbound variable"))?;
+                Ok(self.emit_cur(Inst::Load(cell)))
+            }
+            // A bare name resolving to a FUNCTION taken by value (`let f = adder`,
+            // passing `adder` as an arg, a `func: adder` field) must reference the
+            // fn's MANGLED emitted symbol -- every non-exempt fn mangles, so a bare
+            // `Inst::Global(name)` would read a nil global. The JS backend is the
+            // exception: it resolves fn-values through its own discovery keyed on
+            // the SURFACE name (`discover_globals` -> `callee_js_name`), so it keeps
+            // the bare name and mangles at its own emit boundary. A real global
+            // variable keeps its bare name on every target.
+            Expr::Global(name)
+                if self.scx.target != bone_semantic::hir::FnBackend::Js
+                    && self.ws.functions_by_name.contains_key(&name) =>
+            {
+                let sym = self.fn_value_symbol(e, name)?;
+                Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
+            }
+            // A global holding a value struct routes through the repr layer so a
+            // whole-value read copies the box (a global is a mutable place).
+            Expr::Global(name) => {
+                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e).is_some() {
+                    let r = self.lower_expr_repr(e)?;
+                    return Ok(self.pack(r));
+                }
+                Ok(self.emit_cur(Inst::Global(name)))
+            }
+
+            // A reached `?` hole is a not-yet-filled marker: raise a readable
+            // runtime error (naming the hole) rather than silently evaluating to
+            // nil. `error` diverges, so the trailing nil is never read -- it only
+            // satisfies the expression's value slot.
+            Expr::Hole(name) => {
+                let label = match name {
+                    Some(n) => format!("reached unfilled hole ?{n}"),
+                    None => "reached unfilled hole ?".to_string(),
+                };
+                let msg = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(label.as_str()))));
+                let func = self
+                    .ws
+                    .functions_by_name
+                    .get(&Ustr::from("error"))
+                    .and_then(|l| l.first())
+                    .map(|&(module, func)| FuncRef { module, func })
+                    .ok_or_else(|| gap("stdlib `error` missing for hole lowering"))?;
+                self.emit_cur(Inst::Call { func, args: vec![msg] });
+                Ok(self.emit_cur(Inst::Const(Lit::Nil)))
+            }
+
+            // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
+            // records the target on `e`); a scalar uses the native op.
+            Expr::Not(x) => {
+                let v = self.lower_expr(x)?;
+                match self.overload_target(e) {
+                    Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
+                    None => Ok(self.emit_cur(Inst::Not(v))),
+                }
+            }
+            Expr::BitNot(x) => {
+                let v = self.lower_expr(x)?;
+                match self.overload_target(e) {
+                    Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
+                    None => Ok(self.emit_cur(Inst::BitNot(v))),
+                }
+            }
+            Expr::UnaryMinus(x) => {
+                let v = self.lower_expr(x)?;
+                match self.overload_target(e) {
+                    Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
+                    None => Ok(self.emit_cur(Inst::Neg(v))),
+                }
+            }
+
+            Expr::BinOp { op, lhs, rhs } => self.lower_binop(op, lhs, rhs),
+
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => self.lower_if(cond, then_branch, else_branch),
+
+            // `break`/`continue` in expression position: emit a placeholder value
+            // (never read — the block diverges) then a goto to the loop target.
+            Expr::Break => {
+                let (_, brk) = self.loop_target("break")?;
+                self.used_break_targets.insert(brk);
+                let v = self.emit_cur(Inst::Const(Lit::Nil));
+                self.f.set_term(self.cur, Term::Goto(brk));
+                Ok(v)
+            }
+            Expr::Continue => {
+                let (cont, _) = self.loop_target("continue")?;
+                let v = self.emit_cur(Inst::Const(Lit::Nil));
+                self.f.set_term(self.cur, Term::Goto(cont));
+                Ok(v)
+            }
+
+            Expr::Block { statements, tail } => {
+                let repr = self.lower_block_repr(statements, tail)?;
+                Ok(self.pack(repr))
+            }
+
+            Expr::Call { callee, args } => self.lower_call(e, callee, args),
+
+            // --- aggregates + projections + container reads ---
+            Expr::Tuple(elems) => {
+                let vs = self.lower_exprs(elems)?;
+                Ok(self.emit_cur(Inst::MakeTuple(vs)))
+            }
+            Expr::Array(elems) => self.lower_array_literal(e, elems),
+            Expr::Index { base, index } => {
+                // A whole-value read of a value-struct element COPIES (via the repr
+                // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
+                // than binding the interior array reference.
+                //
+                // Column storage routes on the CONTAINER, not on the element
+                // type: inside a body specialized at `T = E?` the element type is
+                // an unsubstituted generic (a nullable binding has no
+                // synthesizable node), so the type predicates below see nothing
+                // while the storage still has no element slot to name.
+                if self.value_struct_of(e).is_some()
+                    || self.nullable_place_value_of(e).is_some()
+                    || self.vec_column_elem_of(base).is_some()
+                {
+                    let r = self.lower_expr_repr(e)?;
+                    return Ok(self.pack(r));
+                }
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                Ok(self.emit_cur(Inst::Index {
+                    base: b,
+                    index: i,
+                    kind,
+                }))
+            }
+            // Route through the repr layer: a field read on a scalarized value
+            // projects a leaf directly (no intermediate cdata); a boxed base
+            // reads the field off the value as before.
+            Expr::FieldAccess { .. } => {
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
+            }
+            Expr::TupleIndex { tuple, .. } => {
+                // `w.0` on a transparent newtype is identity -- its runtime value
+                // IS the inner, not a positional table -- so `TupleIndex` (a
+                // `[1]` read) would index a scalar and yield nil.
+                if self.expr_is_newtype(tuple) {
+                    return self.lower_expr(tuple);
+                }
+                // Otherwise through the repr layer, same as `FieldAccess` above:
+                // a splatting base projects its part instead of packing a table
+                // and reading a boxed element back out.
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
+            }
+            // A value-struct literal is built via the repr layer (so a callsite
+            // can splat it without a cdata); a plain struct is a Lua table.
+            Expr::StructLiteral { name, fields, bases } if self.is_value_struct(name) => {
+                let r = self.value_literal_repr(name, fields, bases)?;
+                Ok(self.pack(r))
+            }
+            Expr::StructLiteral { name, fields, bases } => {
+                self.lower_struct_literal(e, name, fields, bases)
+            }
+            Expr::EnumVariant {
+                enum_name,
+                variant,
+                args,
+                ..
+            } => self.lower_enum_variant(enum_name, variant, args),
+
+            Expr::Assign { target, value } => {
+                self.lower_assign_effect(target, value)?;
+                Ok(self.emit_cur(Inst::Const(Lit::Nil)))
+            }
+            Expr::CompoundAssign {
+                target,
+                op_fn,
+                value,
+            } => {
+                self.lower_compound_assign_effect(e, target, op_fn, value)?;
+                Ok(self.emit_cur(Inst::Const(Lit::Nil)))
+            }
+
+            Expr::InterpolatedString(parts) => self.lower_interp(parts),
+
+            // `yield e` (or bare `yield`): end the block with `Term::Yield`, then
+            // continue in the resume block; the expression evaluates to the
+            // resume arg (the value of the next `resume(arg)`).
+            Expr::Yield(opt) => {
+                if self.in_defer_body {
+                    return Err(gap("`yield` inside a `defer` body is not allowed"));
+                }
+                // A flat-enum yield value threads as leaves through the frame-slot
+                // channel (the transform writes them to reused `s.__y*` slots, 0
+                // alloc); a scalar/non-flat value stays a single packed value.
+                let values: Vec<Idx<Inst>> = match opt {
+                    Some(eb) => match self.flat_enum_value_shape_of(eb) {
+                        Some(shape) => {
+                            let r = self.lower_expr_repr(eb)?;
+                            self.repr_to_leaves(&r, &shape)
+                        }
+                        None => vec![self.lower_expr(eb)?],
+                    },
+                    None => Vec::new(),
+                };
+                let resume = self.f.new_block();
+                self.f.set_term(self.cur, Term::Yield { values, resume });
+                self.cur = resume;
+                let rac = self.resume_arg.ok_or_else(|| gap("yield outside a coroutine"))?;
+                Ok(self.emit_cur(Inst::Load(rac)))
+            }
+            Expr::YieldDelegate(sub) => {
+                if self.in_defer_body {
+                    return Err(gap("`await` inside a `defer` body is not allowed"));
+                }
+                self.lower_yield_delegate(sub)
+            }
+
+            // A closure: lower its body into a sub-CFG in the shared arenas.
+            // Captured outer vars are the enclosing cells (Lua upvalues); the
+            // closure's params are fresh cells (its Lua arg list).
+            Expr::Lambda { params, body } => {
+                // A `nobox` param arrives as leaves, so the lambda binds a Group
+                // over N cells instead of one -- the same shape a scalar-ABI fn
+                // gives its params. Decided by the lambda's own fn TYPE, which is
+                // what the call site reads too (`fn_value_abi`), so the two ends
+                // agree without either seeing the other.
+                let lam_abi = self.expr_fn_value_abi(e);
+                // Param shapes come from the param BINDINGS, which is where a
+                // lambda's param types actually land -- its own `fn(..) -> ..`
+                // node can still hold unresolved vars at this point, while the
+                // bindings carry what inference unified them WITH, i.e. the same
+                // types the call site reads off the fn type.
+                let param_shapes: Vec<Option<ValueShape>> = params
+                    .into_iter()
+                    .map(|pb| self.binding_ty(pb).and_then(|t| self.nobox_shape_of_ty(t)))
+                    .collect();
+                let mut param_cells: Vec<Idx<Cell>> = Vec::new();
+                for (i, pb) in params.into_iter().enumerate() {
+                    let pname = self.body.binding_arena[pb].name;
+                    match param_shapes.get(i).and_then(|s| s.clone()) {
+                        Some(shape) => {
+                            let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
+                                .map(|li| {
+                                    self.f.new_cell(Some(Ustr::from(
+                                        format!("{pname}__{li}").as_str(),
+                                    )))
+                                })
+                                .collect();
+                            param_cells.extend(cells.iter().copied());
+                            self.group_binds.insert(raw(pb), (cells, shape));
+                        }
+                        None => {
+                            let cell = self.f.new_cell(Some(pname));
+                            self.binds.insert(raw(pb), cell);
+                            param_cells.push(cell);
+                        }
+                    }
+                }
+                let entry = self.f.new_block();
+                let saved = self.cur;
+                self.cur = entry;
+                // The lambda body returns via the LAMBDA's ABI, not the enclosing
+                // fn's: a bone-desugared `() => e` body is a block with a `return e`
+                // statement, so the return machinery (`return_leaves`) must see the
+                // lambda's own return shape. A tuple-returning lambda splats N values
+                // so an indirect call site can capture them (multi-return ABI); the
+                // enclosing value-struct `ret_shape` never applies (a lambda is
+                // called through a boxed fn-value). Save/restore around the body.
+                let saved_ret_tuple = self.ret_tuple.take();
+                let saved_ret_shape = self.ret_shape.take();
+                // Isolate the defer state, like `lower_nested_fn`. A lambda body
+                // is its OWN fn scope: bone desugars `() => e` to a block with
+                // `return e`, so the body's return runs `run_all_defers` -- which
+                // must see only the lambda's own pending defers, never the
+                // enclosing fn's. Leaving the stack shared spliced every pending
+                // enclosing defer into the lambda body (it then ran on every call)
+                // and, when the defer body was what created the lambda, recursed
+                // forever (run_all_defers re-splices the still-pending defer ->
+                // re-lowers the lambda). `in_defer_body` resets to false: the
+                // lambda body is not the defer body's code (a `yield`/`await`
+                // there is already rejected by bone as yield-in-plain-lambda, so
+                // the reset unmasks no diagnostic -- it just makes the flag honest).
+                let saved_defers = std::mem::take(&mut self.defers);
+                let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
+                // Box value args (see field docs). A lambda body IS spliced into
+                // now -- `convert_closures` splits it out and the inliner runs
+                // over the standalone body -- but that happens after lowering, so
+                // this decision cannot see the specialized callee it would need.
+                let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
+                self.ret_tuple = self.lambda_ret_tuple_shape(e);
+                // A `nobox` return leaves as leaves, same multi-return wire the
+                // tuple ABI uses and the same fn-TYPE key.
+                self.ret_shape = lam_abi.as_ref().and_then(|(_, rs)| rs.clone());
+                if let Some(shape) = self.ret_shape.clone() {
+                    let r = self.lower_expr_repr(body)?;
+                    if self.is_open() {
+                        let leaves = self.repr_to_leaves(&r, &shape);
+                        self.f.set_term(self.cur, Term::Return(leaves));
+                    }
+                    self.defers = saved_defers;
+                    self.in_defer_body = saved_in_defer;
+                    self.in_unspliced_ctx = saved_unspliced;
+                    self.ret_tuple = saved_ret_tuple;
+                    self.ret_shape = saved_ret_shape;
+                    self.cur = saved;
+                    return Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }));
+                }
+                match self.ret_tuple.clone() {
+                    // A splatting tuple return needs the body as a repr, so a
+                    // `nobox` element reaches the wire as leaves.
+                    Some(shape) if shape.splats() => {
+                        let r = self.lower_expr_repr(body)?;
+                        if self.is_open() {
+                            let leaves = self.tuple_repr_to_slots(r, &shape);
+                            self.f.set_term(self.cur, Term::Return(leaves));
+                        }
+                    }
+                    other => {
+                        let v = self.lower_expr(body)?;
+                        if self.is_open() {
+                            let leaves = match other {
+                                Some(shape) => self.tuple_return_operands(v, shape.slots.len()),
+                                None => vec![v],
+                            };
+                            self.f.set_term(self.cur, Term::Return(leaves));
+                        }
+                    }
+                }
+                self.defers = saved_defers;
+                self.in_defer_body = saved_in_defer;
+                self.in_unspliced_ctx = saved_unspliced;
+                self.ret_tuple = saved_ret_tuple;
+                self.ret_shape = saved_ret_shape;
+                self.cur = saved;
+                Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }))
+            }
+
+            // `as` is identity at runtime EXCEPT `float as int`, which floors
+            // (Lua numbers are all doubles) — mirrors rock-codegen.
+            Expr::As { value, target } => {
+                let v = self.lower_expr(value)?;
+                let to_int = matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int)));
+                let from_float =
+                    matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Float)));
+                if to_int && from_float {
+                    Ok(self.emit_cur(Inst::FloatToInt(v)))
+                } else {
+                    Ok(v)
+                }
+            }
+
+            // `x?.field` -> `if x == nil then nil else x.field`, joined through a
+            // result cell (mirrors rock-codegen). A numeric field is a tuple read
+            // (`x?.0`), a name is a struct/enum-record field.
+            Expr::SafeNav { base, field } => {
+                let bv = self.lower_expr(base)?;
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(bv, nil));
+                let result = self.f.new_cell(None);
+                let nil_bb = self.f.new_block();
+                let val_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+                self.cur = nil_bb;
+                let n = self.emit_cur(Inst::Const(Lit::Nil));
+                self.store_and_join(result, n, join);
+
+                self.cur = val_bb;
+                let fv = match field.as_str().parse::<usize>() {
+                    // `x?.0` on a transparent newtype is identity (see TupleIndex).
+                    Ok(_) if self.expr_is_newtype(base) => bv,
+                    Ok(index) => self.emit_cur(Inst::TupleIndex { base: bv, index }),
+                    Err(_) => match self.swizzle_of(base, field) {
+                        // `v?.yx`: expand on the non-null arm, packed for the join cell.
+                        Some(idxs) => {
+                            let g = self.swizzle_from_packed(bv, &idxs);
+                            self.pack(g)
+                        }
+                        // An embed/nobox field has NO slot under its own name --
+                        // its leaves live on the parent under dotted keys -- so
+                        // the read rebuilds from them, exactly as the non-safe-nav
+                        // paths do (`physical_field` at the place-base read,
+                        // `embed_field_of` at the repr read). Deciding storage
+                        // BEFORE emitting is the whole point: an `Inst::Field` here
+                        // reads a key that does not exist, and for a NULLABLE child
+                        // reads its presence tag, which the next link then indexes.
+                        None if self.embed_field_of(base, field).is_some() => {
+                            let cname =
+                                self.embed_field_of(base, field).expect("guard matched");
+                            // Compose through `physical_field`, exactly as the
+                            // place-base read does -- NOT off `bv`. When the base
+                            // is itself an embed read, `bv` is a re-materialized
+                            // box whose fields are ordinary keys, so reading the
+                            // dotted leaves off it finds nothing; composing walks
+                            // up to the real physical parent instead
+                            // (`T.child?.inner` -> `T["child.inner"]`).
+                            let (pbase, key) = self.physical_field(base, field);
+                            let parent =
+                                if pbase == base { bv } else { self.lower_expr(pbase)? };
+                            if self.embed_read_is_nullable(base, field) {
+                                self.materialize_embed_nullable(parent, key, cname)
+                            } else {
+                                self.materialize_embed(parent, key, cname)
+                            }
+                        }
+                        // `o?.p` reads a value field whole out of a mutable place, so
+                        // it copies exactly as `o.p` does. The base is non-nil on
+                        // this arm; the FIELD may still be absent, so a nullable one
+                        // takes the presence-aware copy.
+                        None => {
+                            let fv = self.emit_cur(Inst::Field { base: bv, field });
+                            match self
+                                .value_struct_name_of(e)
+                                .filter(|_| self.is_mutable_place(base))
+                            {
+                                Some(name) if self.embed_read_is_nullable(base, field) => {
+                                    self.nullable_boxed_value_copy(fv, name)
+                                }
+                                Some(name) => {
+                                    let copy = self.boxed_value_copy_repr(fv, name);
+                                    self.pack(copy)
+                                }
+                                None => fv,
+                            }
+                        }
+                    },
+                };
+                self.store_and_join(result, fv, join);
+
+                self.cur = join;
+                Ok(self.emit_cur(Inst::Load(result)))
+            }
+
+            Expr::Match { scrutinee, arms } => self.lower_match(scrutinee, arms),
+            Expr::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => self.lower_if_let(pattern, value, then_branch, else_branch),
+
+            Expr::IncDec { target, decrement, postfix } => {
+                self.lower_incdec(target, decrement, postfix)
+            }
+
+            // A range used as a VALUE (not a `for` iterable — `lower_for`
+            // intercepts that) materializes to the stdlib Vec-shaped `__range`.
+            Expr::Range { low, high } => {
+                let lo = self.lower_expr(low)?;
+                let hi = self.lower_expr(high)?;
+                let func = self.resolve_global_fn("__range")?;
+                Ok(self.emit_cur(Inst::Call { func, args: vec![lo, hi] }))
+            }
+
+            // `return e` in expression position (`x ?? return`, `cond ? a : return`).
+            // Diverges: run defers, set the Return terminator. The block is now
+            // closed, so callers skip any fall-through (via `is_open()`); the
+            // placeholder value is never used.
+            Expr::Return(opt) => {
+                let leaves = self.return_leaves(opt)?;
+                self.run_all_defers()?;
+                self.f.set_term(self.cur, Term::Return(leaves));
+                Ok(self.emit_cur(Inst::Const(Lit::Nil)))
+            }
+
+            Expr::SafeNavCall { receiver, method, args } => {
+                self.lower_safe_nav_call(e, receiver, method, args)
+            }
+            Expr::SafeNavLet { receiver, binding, body } => {
+                self.lower_safe_nav_let(receiver, binding, body)
+            }
+
+            other => Err(gap(format!("expression form not in Phase 1: {}", expr_tag(&other)))),
+        }
+    }
+
+    /// `target = value` -> a `Store`/`StoreField`/`StoreIndex`/`StoreGlobal`
+    /// (the effect; no value). The expression form wraps this with a unit value.
+    /// The BASE of an assignment target, lowered as a PLACE: the slot itself,
+    /// never a packed copy of it. `lower_expr` on a value-struct element/field is
+    /// an RVALUE read and rebuilds a fresh box (the whole-value copy rule), so
+    /// using it here would land the store on a temporary. The syntactic position
+    /// ("I am an assignment target's base") is known here, so nothing needs to be
+    /// plumbed down from bone. Recurses the whole chain: `a.b[i].c.x = 5` must not
+    /// pack at any level.
+    pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
+        match self.body.expr_arena[e].clone() {
+            Expr::Index { base, index } => {
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                Ok(self.emit_cur(Inst::Index { base: b, index: i, kind }))
+            }
+            // A `nobox` global has no single slot -- `Inst::Global(name)` would
+            // read a nil global and the write would land on nothing. Every
+            // reachable place form (whole group, leaf field) is handled before
+            // this; reject rather than emit that silent nil.
+            Expr::Global(name) if self.nobox_global_place(e).is_some() => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    format!(
+                        "`{name}` is a `nobox` global, which is stored as leaves and has no \
+                         slot this assignment target can write through"
+                    ),
+                ))
+            }
+            Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            // A swizzle and a flattened-enum field are not places (both
+            // materialize a fresh value); leave them to the rvalue path, which
+            // rejects or copies as it does today.
+            Expr::FieldAccess { base, field }
+                if self.swizzle_of(base, field).is_none()
+                    && self.flat_field_of(base, field).is_none() =>
+            {
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                Ok(self.emit_cur(Inst::Field { base: b, field: key }))
+            }
+            // A call returning a VALUE is not storage: the rvalue lowering packs a
+            // fresh box, so the store lands on a temporary and emits
+            // `(Pt_ct(a, b)).x = v` -- not valid Lua, so the whole chunk fails to
+            // parse at load. bone rejects the reachable form (`1dd209b65`), so
+            // this is unreachable by construction; it rejects rather than falls
+            // back so a future admission change surfaces here instead of as an
+            // unparseable chunk.
+            //
+            // A call returning a REFERENCE struct IS storage -- it hands back the
+            // shared table, so the write is real. `o.next.unwrap().value = v` is
+            // the live shape (`tests/lambda_stress_tests.rock`).
+            Expr::Call { .. } | Expr::SafeNavCall { .. } if self.expr_is_value_struct(e) => {
+                Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    "assignment target's base is a `value` call result, which is not storage: \
+                     the write would land on a temporary and be discarded"
+                        .to_string(),
+                ))
+            }
+            _ => self.lower_expr(e),
+        }
+    }
+
+    pub(crate) fn lower_assign_effect(
+        &mut self,
+        target: Idx<Expr>,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        match self.body.expr_arena[target].clone() {
+            // A threaded (group_binds) var -- a scalarized flat-enum local or value
+            // param -- updates its leaf cells, not one boxed cell.
+            Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
+                let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
+                let r = self.lower_expr_repr(value)?;
+                let leaves = self.repr_to_leaves(&r, &shape);
+                for (c, lv) in cells.iter().zip(leaves) {
+                    self.emit_cur(Inst::Store { cell: *c, value: lv });
+                }
+            }
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let v = self.lower_expr(value)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: v });
+            }
+            Expr::Var(b) => {
+                let cell = *self
+                    .binds
+                    .get(&raw(b))
+                    .ok_or_else(|| gap("assignment to an unbound variable"))?;
+                let v = self.lower_expr(value)?;
+                let v = self.coerced_to_binding(v, value, b);
+                self.emit_cur(Inst::Store { cell, value: v });
+            }
+            // A leaf of a `nobox` global (`SPOT.x = v`, `SPOT.a.b = v`): the
+            // group has no slot to take a place base of, so the write lands in
+            // the leaf global itself.
+            Expr::FieldAccess { .. } if self.nobox_global_place(target).is_some() => {
+                let (leaves, shape) =
+                    self.nobox_global_place(target).expect("guard matched");
+                self.nobox_global_store(&leaves, shape, value)?;
+            }
+            Expr::FieldAccess { base, field } => {
+                // `xs[i].x = v` on a column-stored Vec: there is no element slot
+                // to take a place base of, so the write lands directly in the
+                // leaf's own column.
+                if let Some((vec, idx, elem)) = self.column_index_place(base)? {
+                    return self.column_leaf_store(vec, idx, elem, field, value);
+                }
+                // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
+                // leaf-addressed NativeBuffer: there is no element slot to take a
+                // place base of, so the write lands in the leaves under this
+                // field's path. A whole nested field spans several leaves; a
+                // primitive field is exactly one.
+                if let Some((buf, idx, elem, path)) = self.nb_leaf_field_place(base, field)? {
+                    return self.nb_leaf_field_store(buf, idx, elem, &path, value);
+                }
+                // A whole embedded field (`p.f = Foo { .. }`): the child has no
+                // slot of its own, so write its leaves. Composition happens
+                // BEFORE this, so `p.f` here is the child, not a physical key.
+                if let Some(cname) = self.embed_field_of(base, field) {
+                    let b = self.lower_place_base(base)?;
+                    self.store_embed(b, base, field, cname, value)?;
+                    return Ok(());
+                }
+                // An embed LEAF write composes to one dotted key on the parent
+                // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                // A flattened enum field: write the discriminant + payload slots
+                // directly on the parent table (no nested box).
+                if let Some(shape) = self.flat_field_of(base, field) {
+                    let cells = self.lower_flat_value(&shape, value)?;
+                    self.store_flat_cells(b, key, cells);
+                    return Ok(());
+                }
+                let v = self.lower_expr(value)?;
+                self.emit_cur(Inst::StoreField {
+                    base: b,
+                    field: key,
+                    value: v,
+                });
+            }
+            Expr::Index { base, index } => {
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                // Column storage has no element slot: the write goes leaf-wise
+                // into K columns, so the value is consumed as a repr and never
+                // boxed. Mirrors `column_element_repr` on the read side.
+                if let ContainerKind::VecValueColumns(elem) = kind {
+                    return self.column_element_store(b, i, value, elem);
+                }
+                // A column-stored Map has no slot at the key either: the write
+                // goes through the spine to a slot, then leaf-wise into `data`.
+                if let Some(elem) = self.map_column_value_of(base) {
+                    return self.map_column_store(b, i, value, elem);
+                }
+                if let ContainerKind::NativeBufferValue(elem) = kind {
+                    if self.is_leaf_addressed(elem) {
+                        return self.nb_leaf_element_store(b, i, value, elem);
+                    }
+                }
+                let v = self.lower_expr(value)?;
+                self.emit_cur(Inst::StoreIndex {
+                    base: b,
+                    index: i,
+                    value: v,
+                    kind,
+                });
+            }
+            Expr::Global(_) if self.nobox_global_place(target).is_some() => {
+                let (leaves, shape) =
+                    self.nobox_global_place(target).expect("guard matched");
+                self.nobox_global_store(&leaves, shape, value)?;
+            }
+            Expr::Global(name) => {
+                let v = self.lower_expr(value)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: v });
+            }
+            // `base?.field = value` — silently skip if any `?.` link is null (the
+            // receiver `base` lowers to nil then). `value` evaluates ONLY on the
+            // non-null path. Deep `a?.b?.c = v` works: `base` (`a?.b`) is itself
+            // a SafeNav that lowers to nil if any inner link is null.
+            Expr::SafeNav { base, field } => {
+                let recv = self.lower_place_base(base)?;
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+                let store_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: join, else_bb: store_bb });
+                self.cur = store_bb;
+                let v = self.lower_expr(value)?;
+                self.emit_cur(Inst::StoreField { base: recv, field, value: v });
+                self.f.set_term(self.cur, Term::Goto(join));
+                self.cur = join;
+            }
+            _ => return Err(gap("assignment to this target form (later)")),
+        }
+        Ok(())
+    }
+
+    /// `target <op>= value` == `target = target <op> value` (the effect), over
+    /// var / global / field / index targets. The place is read and written
+    /// through a SINGLE base/index evaluation (no double side effects). A scalar
+    /// target uses native arith; a non-scalar target (struct/value with an
+    /// operator overload) routes `op_fn(target, value)` through the resolved
+    /// overload (bone records it on the CompoundAssign expr).
+    pub(crate) fn lower_compound_assign_effect(
+        &mut self,
+        e: Idx<Expr>,
+        target: Idx<Expr>,
+        op_fn: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        let scalar = self.arith_ty(target).zip(self.arith_ty(value));
+        // Non-scalar: resolve the operator overload once (overload target on the
+        // expr, else the named op fn).
+        let overload = if scalar.is_none() {
+            Some(match self.overload_target(e) {
+                Some(f) => f,
+                None => self.resolve_funcref(e, op_fn)?,
+            })
+        } else {
+            None
+        };
+        match self.body.expr_arena[target].clone() {
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let cur = self.emit_cur(Inst::Global(name));
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: new_v });
+            }
+            Expr::Var(b) => {
+                let cell = *self
+                    .binds
+                    .get(&raw(b))
+                    .ok_or_else(|| gap("compound-assign to an unbound variable"))?;
+                let cur = self.emit_cur(Inst::Load(cell));
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::Store { cell, value: new_v });
+            }
+            // A `nobox` global is stored as leaves, so neither the whole-group
+            // nor the leaf form has a slot the arms below can read-modify-write
+            // through. bone desugars `t <op>= v` to `t = t <op> v` before skull
+            // sees it, so this is unreachable by construction (proved by
+            // `error`-ing the arm over the full surface: zero fires). It rejects
+            // rather than falling through so a future routing change surfaces
+            // here instead of as a silent read of a nil global.
+            _ if self.nobox_global_place(target).is_some() => {
+                return Err(gap("compound assignment reached a `nobox` global place"))
+            }
+            Expr::Global(name) => {
+                let cur = self.emit_cur(Inst::Global(name));
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::StoreGlobal { name, value: new_v });
+            }
+            Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let cur = self.nb_leaf_load(buf, checked, &addr);
+                    let rv = self.lower_expr(value)?;
+                    let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                    self.nb_leaf_store(buf, checked, &addr, new_v);
+                    return Ok(());
+                }
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                let cur = self.emit_cur(Inst::Field { base: b, field: key });
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::StoreField { base: b, field: key, value: new_v });
+            }
+            Expr::Index { base, index } => {
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                let cur = self.emit_cur(Inst::Index { base: b, index: i, kind });
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::StoreIndex { base: b, index: i, value: new_v, kind });
+            }
+            // `base?.field <op>= value` — skip silently if any `?.` link is null.
+            // The read-modify-write and `value` run only on the non-null path.
+            Expr::SafeNav { base, field } => {
+                let recv = self.lower_place_base(base)?;
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+                let store_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: join, else_bb: store_bb });
+                self.cur = store_bb;
+                let cur = self.emit_cur(Inst::Field { base: recv, field });
+                let rv = self.lower_expr(value)?;
+                let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                self.emit_cur(Inst::StoreField { base: recv, field, value: new_v });
+                self.f.set_term(self.cur, Term::Goto(join));
+                self.cur = join;
+            }
+            _ => return Err(gap("compound-assign to this target form (later)")),
+        }
+        Ok(())
+    }
+
+    /// `cur <op> rv`: native arith for a scalar target, else the resolved
+    /// operator-overload call `op_fn(cur, rv)`.
+    pub(crate) fn compound_combine(
+        &mut self,
+        scalar: Option<(ArithTy, ArithTy)>,
+        op_fn: Ustr,
+        overload: Option<FuncRef>,
+        cur: Idx<Inst>,
+        rv: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        match scalar {
+            Some((lt, rt)) => {
+                let inst = arith_inst(op_fn.as_str(), lt, rt, cur, rv)?;
+                Ok(self.emit_cur(inst))
+            }
+            None => Ok(self.emit_cur(Inst::Call {
+                func: overload.expect("non-scalar compound-assign resolved an overload"),
+                args: vec![cur, rv],
+            })),
+        }
+    }
+
+    /// `target++` / `target--` (prefix or postfix). Reads the target, adds +/-1
+    /// (typed: `IntAdd`/`FloatAdd` per the target's scalar type), writes it back,
+    /// and yields the OLD value (postfix) or NEW value (prefix). Var / global /
+    /// field / index targets, mirroring assignment.
+    pub(crate) fn lower_incdec(
+        &mut self,
+        target: Idx<Expr>,
+        decrement: bool,
+        postfix: bool,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let ty = self
+            .arith_ty(target)
+            .filter(|t| matches!(t, ArithTy::Int | ArithTy::Float))
+            .ok_or_else(|| gap("inc/dec of a non-int/float target"))?;
+        let bump = |s: &mut Self, old: Idx<Inst>| -> Idx<Inst> {
+            let delta = match (ty, decrement) {
+                (ArithTy::Float, false) => Inst::Const(Lit::Float(1.0)),
+                (ArithTy::Float, true) => Inst::Const(Lit::Float(-1.0)),
+                (_, false) => Inst::Const(Lit::Int(1)),
+                (_, true) => Inst::Const(Lit::Int(-1)),
+            };
+            let d = s.emit_cur(delta);
+            let inst = if ty == ArithTy::Float {
+                Inst::FloatAdd(old, d)
+            } else {
+                Inst::IntAdd(old, d)
+            };
+            s.emit_cur(inst)
+        };
+        match self.body.expr_arena[target].clone() {
+            Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
+                let name = self.static_cells[&raw(b)];
+                let old = self.emit_cur(Inst::Global(name));
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreGlobal { name, value: new });
+                Ok(if postfix { old } else { new })
+            }
+            Expr::Var(b) => {
+                let cell = *self
+                    .binds
+                    .get(&raw(b))
+                    .ok_or_else(|| gap("inc/dec of an unbound variable"))?;
+                let old = self.emit_cur(Inst::Load(cell));
+                let new = bump(self, old);
+                self.emit_cur(Inst::Store { cell, value: new });
+                Ok(if postfix { old } else { new })
+            }
+            // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
+            // `arith_ty` already restricted the target to int/float, so a whole
+            // group can never reach here.
+            _ if matches!(self.nobox_global_place(target), Some((_, None))) => {
+                let (leaves, _) = self.nobox_global_place(target).expect("guard matched");
+                let name = leaves[0];
+                let old = self.emit_cur(Inst::Global(name));
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreGlobal { name, value: new });
+                Ok(if postfix { old } else { new })
+            }
+            Expr::Global(name) => {
+                let old = self.emit_cur(Inst::Global(name));
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreGlobal { name, value: new });
+                Ok(if postfix { old } else { new })
+            }
+            Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let old = self.nb_leaf_load(buf, checked, &addr);
+                    let new = bump(self, old);
+                    self.nb_leaf_store(buf, checked, &addr, new);
+                    return Ok(if postfix { old } else { new });
+                }
+                let (pbase, key) = self.physical_field(base, field);
+                let b = self.lower_place_base(pbase)?;
+                let old = self.emit_cur(Inst::Field { base: b, field: key });
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreField { base: b, field: key, value: new });
+                Ok(if postfix { old } else { new })
+            }
+            Expr::Index { base, index } => {
+                let (b, kind) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                let old = self.emit_cur(Inst::Index { base: b, index: i, kind });
+                let new = bump(self, old);
+                self.emit_cur(Inst::StoreIndex { base: b, index: i, value: new, kind });
+                Ok(if postfix { old } else { new })
+            }
+            _ => Err(gap("inc/dec of a non-assignable target")),
+        }
+    }
+
+    /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call
+    /// `method(recv, args)` (cdata-everywhere: no scalar splat). Args evaluate
+    /// only on the non-null path. Result flows through a cell.
+    pub(crate) fn lower_safe_nav_call(
+        &mut self,
+        e: Idx<Expr>,
+        receiver: Idx<Expr>,
+        method: Ustr,
+        args: IdxRange<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let recv = self.lower_expr(receiver)?;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let result = self.f.new_cell(None);
+        let nil_bb = self.f.new_block();
+        let call_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: call_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = call_bb;
+        let cv = if self.struct_field_is_fn(receiver, method) {
+            // `recv?.field(args)` on a fn-typed FIELD: nil-guarded indirect call
+            // `(recv.field)(args)` — the field IS the callee, no receiver arg.
+            let fieldv = self.emit_cur(Inst::Field { base: recv, field: method });
+            let mut argv = Vec::new();
+            for a in args {
+                argv.push(self.lower_expr(a)?);
+            }
+            let shape = self.peeled_tuple_shape(e);
+            self.emit_call_value_n(shape, fieldv, argv)
+        } else {
+            // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
+            let func = self.resolve_funcref(e, method)?;
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
+                // Scalar-ABI callee: splat the value receiver + value args into
+                // leaves (a value return packs to the single safe-nav result).
+                self.scalar_ufcs_call(func, recv, &arg_idxs, &abi)?
+            } else {
+                let mut argv = vec![recv];
+                for a in arg_idxs {
+                    argv.push(self.lower_expr(a)?);
+                }
+                // The instantiation key travels through `?.` like it does through a
+                // plain call: a storage the shared generic body cannot serve --
+                // a column-stored element, or a leaf-addressed buffer element on
+                // JS -- keeps its spec binding.
+                let key = self
+                    .call_spec(e, func)
+                    .filter(|(k, _)| {
+                        !self.in_unspliced_ctx
+                            || spec_key_has_target_storage(self.ws, k, self.scx.target)
+                    })
+                    .map(|(k, _)| k);
+                // A tuple-returning method splats N values; capture + pack into
+                // the single (boxed, nullable) safe-nav result.
+                let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
+                match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
+                    Some(shape) => {
+                        let r = self.emit_tuple_call_tree(func, argv, &shape, None, key);
+                        self.pack(r)
+                    }
+                    None => {
+                        let call = self.emit_cur(Inst::Call { func, args: argv });
+                        if let Some(k) = key {
+                            self.f.spec_bindings.insert(call, k);
+                        }
+                        call
+                    }
+                }
+            }
+        };
+        self.store_and_join(result, cv, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// `recv?.let { b -> body }` — `nil` if `recv` is nil, else `body` with `b`
+    /// bound to the (non-nil) receiver. Result flows through a cell.
+    pub(crate) fn lower_safe_nav_let(
+        &mut self,
+        receiver: Idx<Expr>,
+        binding: Idx<bone_semantic::hir::BindingInfo>,
+        body: Idx<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let recv = self.lower_expr(receiver)?;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let result = self.f.new_cell(None);
+        let nil_bb = self.f.new_block();
+        let let_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: let_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = let_bb;
+        let cell = self.f.new_cell(Some(self.body.binding_arena[binding].name));
+        self.emit_cur(Inst::Store { cell, value: recv });
+        self.binds.insert(raw(binding), cell);
+        let bv = self.lower_expr(body)?;
+        self.store_and_join(result, bv, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// A `[T]` literal whose element stores as columns lowers every element to
+    /// its leaves, including elements supplied through a spread.
+    pub(crate) fn column_vec_literal(
+        &mut self,
+        elems: &[Idx<Expr>],
+        elem: ColumnElem,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let shape = self.column_shape(elem)?;
+        let paths = column_leaf_paths(&shape);
+        let mut columns: Vec<(Ustr, Vec<Idx<Inst>>)> =
+            paths.iter().map(|p| (*p, Vec::with_capacity(elems.len()))).collect();
+        for &e in elems {
+            let repr = self.lower_expr_repr(e)?;
+            let leaves = self.repr_to_leaves(&repr, &shape);
+            if leaves.len() != paths.len() {
+                return Err(gap(format!(
+                    "column literal arity mismatch for [{}]: {} leaves vs {} columns",
+                    elem.name,
+                    leaves.len(),
+                    paths.len()
+                )));
+            }
+            for (col, leaf) in columns.iter_mut().zip(leaves) {
+                col.1.push(leaf);
+            }
+        }
+        let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
+        Ok(self.emit_cur(Inst::MakeVecColumns {
+            elem: elem.name,
+            columns,
+            len: elems.len(),
+            capacity,
+        }))
+    }
+
+    pub(crate) fn lower_array_literal(
+        &mut self,
+        lit: Idx<Expr>,
+        elems: IdxRange<Expr>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let idxs: Vec<Idx<Expr>> = elems.into_iter().collect();
+        let has_spread = idxs
+            .iter()
+            .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
+        if !has_spread {
+            // Column storage: transpose the literal's elements into one array
+            // per leaf. Each element lowers as a repr, so no element box is
+            // built even for a literal with entries.
+            if let Some(elem) = self.vec_column_elem_of(lit) {
+                return self.column_vec_literal(&idxs, elem);
+            }
+            let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
+            return Ok(self.emit_cur(Inst::MakeVec(vs)));
+        }
+        if let Some(elem) = self.vec_column_elem_of(lit) {
+            let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
+            let arr = self.empty_column_vec(elem, capacity)?;
+            for &e in &idxs {
+                if let Expr::Spread(inner) = self.body.expr_arena[e] {
+                    self.spread_into(arr, inner, SpreadDest::Columns(elem))?;
+                } else {
+                    let repr = self.lower_expr_repr(e)?;
+                    self.column_append_repr(arr, &repr, elem)?;
+                }
+            }
+            return Ok(arr);
+        }
+        let arr = self.emit_cur(Inst::MakeVec(vec![]));
+        for &e in &idxs {
+            if let Expr::Spread(inner) = self.body.expr_arena[e] {
+                self.spread_into(arr, inner, SpreadDest::Container(ContainerKind::Vec))?;
+            } else {
+                let v = self.lower_expr(e)?;
+                self.emit_cur(Inst::ArrayPush { arr, value: v, kind: ContainerKind::Vec });
+            }
+        }
+        Ok(arr)
+    }
+
+    pub(crate) fn append_spread_repr(
+        &mut self,
+        arr: Idx<Inst>,
+        repr: ValueRepr,
+        dest: SpreadDest,
+    ) -> Result<(), CompilerError> {
+        match dest {
+            SpreadDest::Container(kind) => {
+                let value = self.pack(repr);
+                self.emit_cur(Inst::ArrayPush { arr, value, kind });
+                Ok(())
+            }
+            SpreadDest::Columns(elem) => self.column_append_repr(arr, &repr, elem),
+        }
+    }
+
+    /// Splice `inner` into `arr`: a tuple by static arity, a struct by declared
+    /// fields, or an array/Vec through one runtime loop. Only the destination
+    /// append differs between ordinary and column storage.
+    pub(crate) fn spread_into(
+        &mut self,
+        arr: Idx<Inst>,
+        inner: Idx<Expr>,
+        dest: SpreadDest,
+    ) -> Result<(), CompilerError> {
+        if let (SpreadDest::Columns(elem), Expr::Tuple(elements)) =
+            (dest, self.body.expr_arena[inner])
+        {
+            for element in elements {
+                let repr = self.lower_expr_repr(element)?;
+                self.column_append_repr(arr, &repr, elem)?;
+            }
+            return Ok(());
+        }
+        let v = self.lower_expr(inner)?;
+        match self.expr_ty(inner) {
+            Some(TypeExpr::Tuple { elements }) => {
+                for i in 0..elements.into_iter().count() {
+                    let value = self.emit_cur(Inst::TupleIndex { base: v, index: i });
+                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+                }
+                Ok(())
+            }
+            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
+                self.spread_array_loop(arr, inner, v, dest)
+            }
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
+                let fields = self
+                    .struct_field_names(name)
+                    .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
+                for field in fields {
+                    let value = self.emit_cur(Inst::Field { base: v, field });
+                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+                }
+                Ok(())
+            }
+            _ => Err(gap("spread of an unsupported type")),
+        }
+    }
+
+    /// Runtime copy of every element of `src` (read per its `coll_kind`) into
+    /// `arr` through the destination's append operation.
+    pub(crate) fn spread_array_loop(
+        &mut self,
+        arr: Idx<Inst>,
+        src_expr: Idx<Expr>,
+        src: Idx<Inst>,
+        dest: SpreadDest,
+    ) -> Result<(), CompilerError> {
+        let src_kind = self.coll_kind(src_expr);
+        let n = self.emit_cur(Inst::Len { base: src, kind: src_kind });
+        let i_cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.emit_cur(Inst::Store { cell: i_cell, value: zero });
+
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = header;
+        let i = self.emit_cur(Inst::Load(i_cell));
+        let cmp = self.emit_cur(Inst::IntLt(i, n));
+        self.f.set_term(self.cur, Term::Branch { cond: cmp, then_bb: body, else_bb: exit });
+
+        self.cur = body;
+        let i_now = self.emit_cur(Inst::Load(i_cell));
+        let repr = self.loop_element_repr_at(src, i_now, src_kind)?;
+        self.append_spread_repr(arr, repr, dest)?;
+        let i2 = self.emit_cur(Inst::Load(i_cell));
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let inc = self.emit_cur(Inst::IntAdd(i2, one));
+        self.emit_cur(Inst::Store { cell: i_cell, value: inc });
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = exit;
+        Ok(())
+    }
+}

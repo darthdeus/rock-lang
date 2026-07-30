@@ -199,10 +199,6 @@ impl CodegenCtx {
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors(ws));
-        // Same discipline one level down: a `value` struct whose scalar-ABI leaf
-        // names are ambiguous (a `__`-containing field colliding with a nested
-        // path) cannot be given distinct Lua params at all.
-        collisions.extend(skull_mir::lower::value_leaf_name_collisions(ws));
         CodegenCtx { reserved, rejections: Mutex::new(collisions) }
     }
 
@@ -1697,7 +1693,18 @@ impl Emitter<'_> {
                 // passes only (SROA), not the wire shape. The ctor NAME is chosen
                 // by tier from the ONE classification: `_vt` (table) for a
                 // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
-                let suffix = if is_leaf_form(fields) {
+                //
+                // A leaf-table struct is decided by TYPE, ahead of any operand
+                // check: it has no declared-field ctor at all (the prelude emits
+                // only `_lct` for it), and its pack site is unconditionally leaf
+                // form. Asking the operands instead reads the same oracle through
+                // a proxy that does not hold -- a nullable child with no data
+                // leaves contributes one leaf keyed on the field's own name, so
+                // the leaf sequence is textually identical to the declared field
+                // list and no operand-shape test can tell them apart.
+                let suffix = if skull_mir::lower::value_struct_is_leaf_table(self.ws, *name) {
+                    "_lct"
+                } else if is_leaf_form(fields) {
                     "_lct"
                 } else if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
                     "_vt"
