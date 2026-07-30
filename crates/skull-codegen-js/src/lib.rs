@@ -814,10 +814,11 @@ function stone_sprite_init() {
 }
 function stone_sprite_shutdown() {}
 
-// The 10-float/40B vertex layout, lockstep with sprite.rs:582-586:
-// 0 pos vec2 @0B, 1 uv vec2 @8B, 2 color vec4 @16B, 3 pivot_y float @32B,
-// 4 entity_id float @36B. Fails closed if no program bound (sprite.rs:621-627).
-function stone_draw_mesh(data, count, stride, tex) {
+// The layout is the CALLER's, same contract as the native stone_draw_mesh:
+// component counts in location order, offsets accumulated from them. Nothing
+// here states the sprite vertex; the Rock `Vertex` struct owns it and the
+// caller derives both numbers from it. Fails closed if no program bound.
+function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
   var gl = __SW.gl;
   if (!gl || count <= 0) return;
   var sh = __SW.shaders[__SW.curShader];
@@ -841,17 +842,26 @@ function stone_draw_mesh(data, count, stride, tex) {
   if (ltr) gl.uniformMatrix4fv(ltr, false, __SW_IDENTITY);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
   gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count * stride), gl.STREAM_DRAW);
+  var sum = 0;
+  for (var i = 0; i < attr_count; i++) {
+    var n = attr_sizes[i];
+    if (n < 1 || n > 4) {
+      __sw_log_once("stone_draw_mesh: attr sizes must be 1..4, got " + n);
+      return;
+    }
+    sum += n;
+  }
+  if (sum !== stride) {
+    __sw_log_once("stone_draw_mesh: attr sizes sum to " + sum + " but stride is " + stride);
+    return;
+  }
   var sb = stride * 4;
-  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, sb, 0);
-  gl.enableVertexAttribArray(0);
-  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, sb, 8);
-  gl.enableVertexAttribArray(1);
-  gl.vertexAttribPointer(2, 4, gl.FLOAT, false, sb, 16);
-  gl.enableVertexAttribArray(2);
-  gl.vertexAttribPointer(3, 1, gl.FLOAT, false, sb, 32);
-  gl.enableVertexAttribArray(3);
-  gl.vertexAttribPointer(4, 1, gl.FLOAT, false, sb, 36);
-  gl.enableVertexAttribArray(4);
+  var off = 0;
+  for (var i = 0; i < attr_count; i++) {
+    gl.vertexAttribPointer(i, attr_sizes[i], gl.FLOAT, false, sb, off * 4);
+    gl.enableVertexAttribArray(i);
+    off += attr_sizes[i];
+  }
   gl.drawArrays(gl.TRIANGLES, 0, count);
 }
 
