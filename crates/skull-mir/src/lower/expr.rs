@@ -295,32 +295,24 @@ impl Builder<'_> {
                 // node can still hold unresolved vars at this point, while the
                 // bindings carry what inference unified them WITH, i.e. the same
                 // types the call site reads off the fn type.
-                let param_shapes: Vec<Option<ValueShape>> = params
+                let param_slots: Vec<RetSlot> = params
                     .into_iter()
-                    .map(|pb| self.binding_ty(pb).and_then(|t| self.nobox_shape_of_ty(t)))
+                    .map(|pb| {
+                        self.binding_ty(pb)
+                            .map_or(RetSlot::Opaque, |t| self.nobox_param_slot_of_ty(t))
+                    })
                     .collect();
-                let mut param_cells: Vec<Idx<Cell>> = Vec::new();
+                // A lambda's params land in the SAME cell namespace as the
+                // enclosing body's, so it collects its own list off `f.params`
+                // rather than owning it -- but the binding rule itself is
+                // `bind_param_slot`, shared with the other two definition forms.
+                let before = self.f.params.len();
                 for (i, pb) in params.into_iter().enumerate() {
                     let pname = self.body.binding_arena[pb].name;
-                    match param_shapes.get(i).and_then(|s| s.clone()) {
-                        Some(shape) => {
-                            let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
-                                .map(|li| {
-                                    self.f.new_cell(Some(Ustr::from(
-                                        format!("{pname}__{li}").as_str(),
-                                    )))
-                                })
-                                .collect();
-                            param_cells.extend(cells.iter().copied());
-                            self.group_binds.insert(raw(pb), (cells, shape));
-                        }
-                        None => {
-                            let cell = self.f.new_cell(Some(pname));
-                            self.binds.insert(raw(pb), cell);
-                            param_cells.push(cell);
-                        }
-                    }
+                    let slot = param_slots.get(i).cloned().unwrap_or(RetSlot::Opaque);
+                    self.bind_param_slot(pb, pname, &slot);
                 }
+                let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;

@@ -306,7 +306,7 @@ impl ScalarCtx {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FnScalarAbi {
-    param_shapes: Vec<Option<ValueShape>>,
+    param_shapes: Vec<RetSlot>,
     ret_shape: Option<ValueShape>,
 }
 
@@ -323,14 +323,14 @@ fn fn_nobox_abi_spec(
     subst: &SpecSubst,
 ) -> Option<FnScalarAbi> {
     let f = &ws.module(fref.module).functions[fref.func];
-    let param_shapes: Vec<Option<ValueShape>> = f
+    let param_shapes: Vec<RetSlot> = f
         .param_decls
         .iter()
-        .map(|pd| nobox_declared_shape_spec(ws, subst, pd.ty))
+        .map(|pd| nobox_param_slot_spec(ws, subst, pd.ty))
         .collect();
     let ret_shape =
         f.return_ty.and_then(|ty| nobox_declared_shape_spec(ws, subst, ty));
-    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
         .then_some(FnScalarAbi { param_shapes, ret_shape })
 }
 
@@ -364,10 +364,10 @@ fn fn_scalar_abi_spec(
     if nobox_only {
         return fn_nobox_abi_spec(ws, fref, subst);
     }
-    let param_shapes: Vec<Option<ValueShape>> =
-        f.param_decls.iter().map(|pd| sig_value_shape_spec(ws, subst, pd.ty)).collect();
+    let param_shapes: Vec<RetSlot> =
+        f.param_decls.iter().map(|pd| sig_param_slot_spec(ws, subst, pd.ty)).collect();
     let ret_shape = f.return_ty.and_then(|ty| sig_value_shape_spec(ws, subst, ty));
-    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
         .then_some(FnScalarAbi { param_shapes, ret_shape })
 }
 
@@ -380,14 +380,14 @@ struct NestedFn {
     /// Declared param names, so a call site can place named args into slots
     /// (`slotted_call_args`) exactly as a top-level callee's would be.
     param_names: Vec<Ustr>,
-    /// Per-param value shape; all-`None` when the fn keeps the boxed ABI.
-    param_shapes: Vec<Option<ValueShape>>,
+    /// Per-param wire slot; all-`Opaque` when the fn keeps the boxed ABI.
+    param_shapes: Vec<RetSlot>,
     ret_shape: Option<ValueShape>,
 }
 
 impl NestedFn {
     fn uses_scalar_abi(&self) -> bool {
-        self.ret_shape.is_some() || self.param_shapes.iter().any(|s| s.is_some())
+        self.ret_shape.is_some() || self.param_shapes.iter().any(RetSlot::splats)
     }
 }
 
@@ -405,11 +405,8 @@ pub fn scalar_abi_lua_param_names(
     let abi = fn_scalar_abi(ws, scx, fref)?;
     let f = &ws.module(fref.module).functions[fref.func];
     let mut names = Vec::new();
-    for (pd, shape) in f.param_decls.iter().zip(abi.param_shapes) {
-        match shape {
-            Some(shape) => leaf_param_names(pd.name.as_str(), &shape, &mut names),
-            None => names.push(pd.name.as_str().to_string()),
-        }
+    for (pd, slot) in f.param_decls.iter().zip(abi.param_shapes) {
+        slot_param_names(pd.name.as_str(), &slot, &mut names);
     }
     Some(names)
 }
@@ -426,10 +423,7 @@ pub fn scalar_abi_param_leaf_widths(
 ) -> Option<Vec<usize>> {
     let abi = fn_scalar_abi(ws, scx, fref)?;
     Some(
-        abi.param_shapes
-            .iter()
-            .map(|s| s.as_ref().map_or(1, ValueShape::leaf_count))
-            .collect(),
+        abi.param_shapes.iter().map(RetSlot::slot_count).collect(),
     )
 }
 
@@ -512,16 +506,8 @@ fn scalar_abi_param_origins(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> V
     };
     let f = &ws.module(fref.module).functions[fref.func];
     let mut out = Vec::new();
-    for (pd, shape) in f.param_decls.iter().zip(abi.param_shapes) {
-        let pname = pd.name;
-        match shape {
-            Some(shape) => out.extend(
-                leaf_names(&shape, pname.as_str(), ".")
-                    .into_iter()
-                    .map(|p| format!("the leaf `{p}` of value param `{pname}`")),
-            ),
-            None => out.push(format!("the declared param `{pname}`")),
-        }
+    for (pd, slot) in f.param_decls.iter().zip(abi.param_shapes) {
+        slot_param_origins(pd.name.as_str(), &slot, &mut out);
     }
     out
 }
@@ -532,6 +518,41 @@ fn scalar_abi_param_origins(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> V
 /// [`value_leaf_name_collisions`] to guard it.
 fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
     out.extend(leaf_names(shape, base, LEAF_PARAM_SEP));
+}
+
+/// The emitted param names ONE declared param contributes, per its wire slot.
+/// A tuple slot indexes into the base (`pq__0__x`) using the same `__` join the
+/// leaf encoding already uses, so the whole list stays one namespace and the
+/// injectivity check below sees tuple leaves like any other.
+fn slot_param_names(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
+    match slot {
+        RetSlot::Opaque => out.push(base.to_string()),
+        RetSlot::Leaves(shape) => leaf_param_names(base, shape, out),
+        RetSlot::Nested(inner) => {
+            for (i, s) in inner.slots.iter().enumerate() {
+                slot_param_names(&format!("{base}{LEAF_PARAM_SEP}{i}"), s, out);
+            }
+        }
+    }
+}
+
+/// [`slot_param_names`] in the human-facing spelling the collision diagnostic
+/// uses -- the same traversal, so a reported origin always names a real emitted
+/// param.
+fn slot_param_origins(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
+    match slot {
+        RetSlot::Opaque => out.push(format!("the declared param `{base}`")),
+        RetSlot::Leaves(shape) => out.extend(
+            leaf_names(shape, base, ".")
+                .into_iter()
+                .map(|p| format!("the leaf `{p}` of value param `{base}`")),
+        ),
+        RetSlot::Nested(inner) => {
+            for (i, s) in inner.slots.iter().enumerate() {
+                slot_param_origins(&format!("{base}.{i}"), s, out);
+            }
+        }
+    }
 }
 
 /// The Lua leaf-param separator, and the reason a `__`-bearing field name can
@@ -1282,7 +1303,7 @@ struct Builder<'a> {
     /// Per-param scalarized shape: `Some` for a value param expanded to leaf
     /// cells (parallel to `body.param_bindings`). Empty when the fn doesn't use
     /// the scalar ABI (globals, decorators, non-value fns).
-    param_shapes: Vec<Option<ValueShape>>,
+    param_shapes: Vec<RetSlot>,
     /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
     ret_shape: Option<ValueShape>,
     /// `Some` when the fn's return type is a tuple -- it returns its slots as
@@ -1372,27 +1393,49 @@ impl Builder<'_> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
-            // A value param under the scalar ABI expands to N leaf cells (the Lua
-            // param list); reads reconstruct the unboxed Group from them.
-            match self.param_shapes.get(i).and_then(|s| s.clone()) {
-                Some(shape) => {
-                    let n = shape.leaf_count();
-                    let mut cells = Vec::with_capacity(n);
-                    for li in 0..n {
-                        let cn = Ustr::from(format!("{name}__{li}").as_str());
-                        let c = self.f.new_cell(Some(cn));
-                        self.f.params.push(c);
-                        cells.push(c);
-                    }
-                    self.group_binds.insert(raw(*pb), (cells, shape));
-                }
-                None => {
-                    let cty = self.binding_ty(*pb);
-                    let cell = self.f.new_cell_typed(Some(name), cty);
-                    self.f.params.push(cell);
-                    self.binds.insert(raw(*pb), cell);
-                }
+            let slot = self.param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            self.bind_param_slot(*pb, name, &slot);
+        }
+    }
+
+    /// Bind one declared param to the cells its wire slot occupies, in the Lua
+    /// parameter list.
+    ///
+    /// THE definition-side counterpart of `slot_param_names`, and the single
+    /// implementation for all three definition forms (a top-level body, a
+    /// hoisted nested fn, a lambda). They must agree with the caller on both the
+    /// COUNT and the depth-first ORDER: Lua nil-fills a short call rather than
+    /// rejecting it, so a disagreement here is a silent wrong answer, not an
+    /// error. A splatting param has no single cell, so it binds as a GROUP (a
+    /// value's leaves) or a TUPLE (a tuple's slots) and reads rebuild from them.
+    pub(crate) fn bind_param_slot(
+        &mut self,
+        pb: Idx<BindingInfo>,
+        name: Ustr,
+        slot: &RetSlot,
+    ) {
+        if !slot.splats() {
+            let cty = self.binding_ty(pb);
+            let cell = self.f.new_cell_typed(Some(name), cty);
+            self.f.params.push(cell);
+            self.binds.insert(raw(pb), cell);
+            return;
+        }
+        let cells: Vec<Idx<Cell>> = (0..slot.slot_count())
+            .map(|li| {
+                let c = self.f.new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())));
+                self.f.params.push(c);
+                c
+            })
+            .collect();
+        match slot {
+            RetSlot::Leaves(shape) => {
+                self.group_binds.insert(raw(pb), (cells, shape.clone()));
             }
+            RetSlot::Nested(inner) => {
+                self.tuple_binds.insert(raw(pb), (cells, inner.clone()));
+            }
+            RetSlot::Opaque => unreachable!("guarded by `splats`"),
         }
     }
 
@@ -1687,7 +1730,23 @@ impl Builder<'_> {
         }
     }
 
-    fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
+    /// The values ONE argument contributes to a flat call-argument list, per its
+    /// param slot. Every calling convention routes through this so a caller and
+    /// its callee cannot disagree about an argument's arity -- the failure mode
+    /// there is silent, since a short list is nil-filled rather than rejected.
+    pub(crate) fn arg_values_for_slot(
+        &mut self,
+        slot: &RetSlot,
+        a: Idx<Expr>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        if !slot.splats() {
+            return Ok(vec![self.lower_expr(a)?]);
+        }
+        let r = self.lower_expr_repr(a)?;
+        Ok(self.repr_to_slot_values(r, slot))
+    }
+
+    pub(crate) fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
         match slot {
             RetSlot::Opaque => vec![self.pack(repr)],
             RetSlot::Leaves(shape) => self.repr_to_leaves(&repr, shape),

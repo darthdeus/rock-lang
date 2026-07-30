@@ -600,19 +600,14 @@ impl Builder<'_> {
     /// that is the whole point of keying on the type ([`Self::fn_value_abi`]).
     pub(crate) fn indirect_call_by_abi(
         &mut self,
-        (param_shapes, ret_shape): (Vec<Option<ValueShape>>, Option<ValueShape>),
+        (param_shapes, ret_shape): (Vec<RetSlot>, Option<ValueShape>),
         callee: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
-            match param_shapes.get(i).and_then(|s| s.clone()) {
-                Some(shape) => {
-                    let r = self.lower_expr_repr(a)?;
-                    argv.extend(self.repr_to_leaves(&r, &shape));
-                }
-                None => argv.push(self.lower_expr(a)?),
-            }
+            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         let Some(shape) = ret_shape else {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
@@ -676,18 +671,19 @@ impl Builder<'_> {
         abi: &FnScalarAbi,
     ) -> Result<ValueRepr, CompilerError> {
         let mut argv = Vec::new();
-        match abi.param_shapes.first().and_then(|s| s.clone()) {
-            Some(shape) => argv.extend(self.cdata_leaves(recv, &shape)),
-            None => argv.push(recv),
+        // The RECEIVER arrives already lowered, so it cannot go through
+        // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
+        // `Leaves` is the only splatting slot reachable here.
+        match abi.param_shapes.first() {
+            Some(RetSlot::Leaves(shape)) => {
+                let leaves = self.cdata_leaves(recv, &shape.clone());
+                argv.extend(leaves);
+            }
+            _ => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            match abi.param_shapes.get(i + 1).and_then(|s| s.clone()) {
-                Some(shape) => {
-                    let r = self.lower_expr_repr(a)?;
-                    argv.extend(self.repr_to_leaves(&r, &shape));
-                }
-                None => argv.push(self.lower_expr(a)?),
-            }
+            let slot = abi.param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
+            argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         match abi.ret_shape.clone() {
             Some(shape) => {
@@ -712,18 +708,13 @@ impl Builder<'_> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-        param_shapes: &[Option<ValueShape>],
+        param_shapes: &[RetSlot],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if !any_named {
             let mut out = Vec::new();
             for (i, &a) in arg_idxs.iter().enumerate() {
-                match param_shapes.get(i).and_then(|s| s.clone()) {
-                    Some(shape) => {
-                        let r = self.lower_expr_repr(a)?;
-                        out.extend(self.repr_to_leaves(&r, &shape));
-                    }
-                    None => out.push(self.lower_expr(a)?),
-                }
+                let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+                out.extend(self.arg_values_for_slot(&slot, a)?);
             }
             return Ok(out);
         }
@@ -741,11 +732,11 @@ impl Builder<'_> {
     /// else positionally. This is the one slot-placement rule, shared by every
     /// calling convention that has param names -- a convention with its own
     /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
-    /// `param_shapes` shorter than `param_names` (or all-`None`) is the boxed ABI.
+    /// `param_shapes` shorter than `param_names` (or all-`Opaque`) is the boxed ABI.
     pub(crate) fn slotted_call_args(
         &mut self,
         param_names: &[Ustr],
-        param_shapes: &[Option<ValueShape>],
+        param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
@@ -777,15 +768,16 @@ impl Builder<'_> {
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::new();
         for i in 0..hi {
-            match (slots[i].clone(), param_shapes.get(i).and_then(|s| s.clone())) {
-                (Some(r), Some(shape)) => out.extend(self.repr_to_leaves(&r, &shape)),
-                (Some(r), None) => out.push(self.pack(r)),
-                (None, Some(shape)) => {
-                    for _ in 0..shape.leaf_count() {
+            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            match slots[i].clone() {
+                Some(r) => out.extend(self.repr_to_slot_values(r, &slot)),
+                // An omitted param arrives as one nil PER WIRE VALUE, so the
+                // callee's default-fill sees a nil in every leaf it binds.
+                None => {
+                    for _ in 0..slot.slot_count() {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));
                     }
                 }
-                (None, None) => out.push(self.emit_cur(Inst::Const(Lit::Nil))),
             }
         }
         Ok(out)

@@ -1484,7 +1484,7 @@ pub(crate) fn spec_nominal(subst: &SpecSubst, var: bone_semantic::hir::VarId) ->
 }
 
 /// The wire shape of ONE element of a tuple return.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RetSlot {
     /// One opaque value -- today's ABI, and what every element that is not a
     /// `nobox` value keeps.
@@ -1520,7 +1520,7 @@ impl RetSlot {
 /// The shape is derived from the return TYPE alone -- no callee identity -- so a
 /// direct call, an indirect call through a fn value and the definition all
 /// agree by construction, exactly as the plain multi-return arity does.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TupleRetShape {
     pub(crate) slots: Vec<RetSlot>,
     /// The DECLARED return was `(..)?`: a presence bool leads the wire, then the
@@ -1697,6 +1697,48 @@ pub fn bound_next_shape(
         BoundNextElem::Opaque
     };
     Some(BoundNextShape { slot_count: shape.slot_count(), elem })
+}
+
+/// The wire slot of a PARAM, under the wide (`@scalar_abi`) shape rule.
+///
+/// Same vocabulary as [`ret_slot`], and deliberately the same tuple rule: only a
+/// `nobox` element splats, so params and returns agree about what a tuple of
+/// values is on the wire. Without the `Nested` arm a param could only say
+/// "one box or one value's leaves", and a tuple carrying a `nobox` element had
+/// nowhere to go but the box the mark forbids -- a `ValueShape` is a NAMED
+/// struct shape, which a tuple is not.
+pub(crate) fn sig_param_slot_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    match sig_value_shape_spec(ws, subst, ty) {
+        Some(shape) => RetSlot::Leaves(shape),
+        None => tuple_param_slot(ws, subst, ty),
+    }
+}
+
+/// [`sig_param_slot_spec`] under the `nobox`-only rule (the ABI a fn taken by
+/// reference narrows to).
+pub(crate) fn nobox_param_slot_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    match nobox_declared_shape_spec(ws, subst, ty) {
+        Some(shape) => RetSlot::Leaves(shape),
+        None => tuple_param_slot(ws, subst, ty),
+    }
+}
+
+fn tuple_param_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    // A tuple the signature SPELLS, not a generic that happens to be bound to
+    // one. Both would agree between caller and callee -- they read the same
+    // substitution -- so this is a choice, and it is made on where the box ends
+    // up: a generic param's body is what decides whether the tuple can stay
+    // leaves, and a body that stores it (`Vec<T>.push` -> `vec_push`) boxes it
+    // anyway. Splatting into one only moves the materialization deeper, out of
+    // the caller's line and into the spliced stdlib body, which costs the
+    // diagnostic its span and buys nothing.
+    if !matches!(static_ty(ws, ty), Some(TypeExpr::Tuple { .. })) {
+        return RetSlot::Opaque;
+    }
+    match tuple_ret_shape(ws, subst, ty) {
+        Some(inner) if inner.splats() => RetSlot::Nested(inner),
+        _ => RetSlot::Opaque,
+    }
 }
 
 pub(crate) fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
