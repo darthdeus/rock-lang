@@ -1104,6 +1104,17 @@ pub enum ReifiedType {
     /// and a binding that dropped the `?` would specialize a body to the wrong
     /// arity rather than merely to a slower one.
     Nullable(Box<ReifiedType>),
+    /// A generic bound to a TUPLE (`zip`'s `(A, B)`, `enumerate`'s `(int, T)`).
+    /// Its own variant rather than an `App`, because a tuple has no nominal and
+    /// its slots decide an ARITY: a body specialized at `(Vec2?, int)` returns
+    /// four values where one at `(Vec2, int)` returns three.
+    ///
+    /// This is the one binding [`reified_type_node`] cannot answer -- a
+    /// `TypeExpr::Tuple` holds an arena range and there is no arena here to mint
+    /// one. Consumers that need the slots read the binding DIRECTLY
+    /// ([`reified_ret_slot`]); `ty_node` keeps returning the generic, exactly as
+    /// it did when the binding did not reify at all.
+    Tuple(Vec<ReifiedType>),
 }
 
 impl ReifiedType {
@@ -1130,6 +1141,7 @@ impl ReifiedType {
         match self {
             Self::Prim(_) => false,
             Self::Nullable(inner) => inner.any_nominal(pred),
+            Self::Tuple(parts) => parts.iter().any(|part| part.any_nominal(pred)),
             Self::App { ctor, params } => {
                 matches!(ctor, ReifiedCtor::Nominal(name) if pred(*name))
                     || params.iter().any(|param| param.any_nominal(pred))
@@ -1180,9 +1192,20 @@ pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, Reifie
 /// ([`Builder::is_nullable_ty`], which grows the matching generic arm). Modelling
 /// it any other way would need a `TypeExpr::Nullable` node, and that holds an
 /// arena index this has no arena to mint.
-pub(crate) fn reified_type_node(ty: &ReifiedType) -> TypeExpr {
-    match ty {
-        ReifiedType::Nullable(inner) => reified_type_node(inner),
+/// The substituted type NODE for a binding, or `None` where no node can stand
+/// for it.
+///
+/// A tuple is the `None`: `TypeExpr::Tuple` holds an `IdxRange` into a type
+/// arena, and there is none to mint here. Answering with an EMPTY range would be
+/// far worse than answering nothing -- `tyid_tuple_ret_shape` would read a
+/// 0-slot tuple and `unit_ty` would read the binding as unit, both silently. The
+/// caller falls back to the unsubstituted generic, which is exactly what it saw
+/// before tuples reified at all; the consumers that need a tuple's slots read
+/// the binding directly through [`reified_ret_slot`].
+pub(crate) fn reified_type_node(ty: &ReifiedType) -> Option<TypeExpr> {
+    Some(match ty {
+        ReifiedType::Nullable(inner) => return reified_type_node(inner),
+        ReifiedType::Tuple(_) => return None,
         ReifiedType::App { ctor, .. } => TypeExpr::App {
             ctor: match ctor {
                 ReifiedCtor::Array => TypeCtor::Array,
@@ -1195,7 +1218,31 @@ pub(crate) fn reified_type_node(ty: &ReifiedType) -> TypeExpr {
         ReifiedType::Prim("float") => TypeExpr::Builtin(BuiltinTy::Float),
         ReifiedType::Prim("bool") => TypeExpr::Builtin(BuiltinTy::Bool),
         ReifiedType::Prim(_) => TypeExpr::Builtin(BuiltinTy::Error),
+    })
+}
+
+/// The [`RetSlot`] of a binding, read straight off the reified type.
+///
+/// The counterpart to [`ret_slot`] for the one case that has no type node to go
+/// through: a generic bound to a TUPLE. Mirrors [`nobox_sig_shape_spec`]'s
+/// policy exactly -- only a `nobox` nominal splats, and a nullable one takes the
+/// nullable shape -- so a tuple slot answers the same as the spelled-out type in
+/// that position would.
+pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
+    if let ReifiedType::Tuple(parts) = ty {
+        let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
+        return RetSlot::Nested(TupleRetShape { slots, nullable: false });
     }
+    let (payload, nullable) = ty.peel_nullable();
+    let Some(nominal) = payload.nominal().filter(|n| is_nobox_nominal(ws, *n)) else {
+        return RetSlot::Opaque;
+    };
+    let shape = if nullable {
+        sig_shape_of_nullable_nominal(ws, nominal)
+    } else {
+        sig_shape_of_nominal(ws, nominal)
+    };
+    shape.map_or(RetSlot::Opaque, RetSlot::Leaves)
 }
 
 pub(crate) fn reify_type(
@@ -1210,6 +1257,13 @@ pub(crate) fn reify_type(
         TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedType::Prim("float")),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedType::Prim("bool")),
         TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
+        TypeExpr::Tuple { elements } => {
+            let parts = elements
+                .into_iter()
+                .map(|el| reify_type(ws, inf, ty.with_idx(el), enclosing))
+                .collect::<Option<Vec<_>>>()?;
+            Some(ReifiedType::Tuple(parts))
+        }
         TypeExpr::Nullable(inner) => Some(ReifiedType::Nullable(Box::new(reify_type(
             ws,
             inf,
@@ -1450,6 +1504,18 @@ impl TupleRetShape {
 /// boxed table (and `nil`), byte-for-byte the pre-existing ABI. THE declared-type
 /// entry point: `TupleRetShape::nullable` is set here and nowhere else.
 pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleRetShape> {
+    // A generic bound to a tuple has no type node to read (see
+    // `reified_type_node`), so its slots come off the binding itself. Only here:
+    // this is the sole consumer that needs a tuple's arity, and answering it
+    // from the binding keeps `ty_node` honest about what it cannot mint.
+    if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty) {
+        if let Some(bound @ ReifiedType::Tuple(_)) = subst.get(&var) {
+            let RetSlot::Nested(shape) = reified_ret_slot(ws, bound) else {
+                return None;
+            };
+            return Some(shape);
+        }
+    }
     let (elem_ty, elements, nullable) = match static_ty(ws, ty)? {
         TypeExpr::Tuple { elements } => (ty, elements, false),
         TypeExpr::Nullable(inner) => {

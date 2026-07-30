@@ -70,6 +70,17 @@ fn encode_reified_type(ty: &crate::lower::ReifiedType, out: &mut String) {
             out.push_str("o_");
             encode_reified_type(inner, out);
         }
+        // Length-prefixed and terminated like `App`, so `(A, B)` cannot encode
+        // the same as a one-slot tuple of something that encodes as `A_B`.
+        ReifiedType::Tuple(parts) => {
+            out.push_str("t_");
+            out.push_str(&parts.len().to_string());
+            for part in parts {
+                out.push('_');
+                encode_reified_type(part, out);
+            }
+            out.push_str("_z");
+        }
         ReifiedType::App { ctor, params } => {
             out.push_str("a_");
             match ctor {

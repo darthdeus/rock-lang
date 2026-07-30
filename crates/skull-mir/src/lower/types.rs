@@ -324,6 +324,26 @@ impl Builder<'_> {
     }
 
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
+        // The generic this slot stands for, if the substitution names it. An
+        // element of a tuple literal's inferred type arrives as the declared
+        // generic in one `next` body and as an inference VAR in another, so both
+        // spellings are chased -- but only to answer THIS question. Resolving
+        // `ty` for the rest of the function instead is wrong: it erases a
+        // `Nullable` binding's `?` on the way through `ty_node`, which silently
+        // re-planned every nullable-column body to a non-nullable shape.
+        let bound_generic = match self.raw_ty_node(ty) {
+            Some(TypeExpr::Generic(var, _)) => Some(var),
+            Some(TypeExpr::Infer(..)) => match self.resolve_tyid(ty).and_then(|t| self.raw_ty_node(t)) {
+                Some(TypeExpr::Generic(var, _)) => Some(var),
+                _ => None,
+            },
+            _ => None,
+        };
+        // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
+        // (see `reified_type_node`), so it is read off the substitution directly.
+        if let Some(bound @ ReifiedType::Tuple(_)) = bound_generic.and_then(|v| self.spec_subst.get(&v)) {
+            return reified_ret_slot(self.ws, bound);
+        }
         if let Some(shape) = self.body_nobox_shape(ty) {
             return RetSlot::Leaves(shape);
         }
@@ -440,8 +460,13 @@ impl Builder<'_> {
         // App params -- v0 specializes leaf types only -- so no consumer indexes
         // into `new_empty()`.
         if let TypeExpr::Generic(var, _) = node {
-            if let Some(ty) = self.spec_subst.get(&var) {
-                return Some(reified_type_node(ty));
+            // A tuple binding has no node to stand for it, and answers `None`.
+            // Falling through to the generic is exactly what this saw before
+            // tuples reified at all, so no consumer changes behaviour; the ones
+            // that need a tuple's slots read the binding through
+            // `reified_ret_slot` instead.
+            if let Some(sub) = self.spec_subst.get(&var).and_then(reified_type_node) {
+                return Some(sub);
             }
         }
         Some(node)

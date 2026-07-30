@@ -662,20 +662,10 @@ impl Builder<'_> {
     /// already-lowered value (the safe-nav receiver). The receiver fills param 0
     /// (splat its leaves if that param is a value), args fill the rest; a value
     /// return packs to a single value (the safe-nav result is one nullable value).
-    /// [`Self::scalar_ufcs_call_repr`] packed. The split exists because a
-    /// safe-nav join that stores PER SLOT wants the leaves, and packing them just
-    /// to take them apart again is the materialization the mark forbids.
-    pub(crate) fn scalar_ufcs_call(
-        &mut self,
-        func: FuncRef,
-        recv: Idx<Inst>,
-        arg_idxs: &[Idx<Expr>],
-        abi: &FnScalarAbi,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let r = self.scalar_ufcs_call_repr(func, recv, arg_idxs, abi)?;
-        Ok(self.pack(r))
-    }
-
+    /// A scalar-ABI UFCS call with the receiver already lowered, yielding a REPR:
+    /// a value callee hands back its leaves, so a safe-nav join that stores PER
+    /// SLOT never has to take a box apart again. The single packing caller went
+    /// away when `?.` stopped packing.
     pub(crate) fn scalar_ufcs_call_repr(
         &mut self,
         func: FuncRef,
