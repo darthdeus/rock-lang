@@ -497,14 +497,14 @@ fn round_up(n: usize, align: usize) -> usize {
 
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValueShape {
     name: Ustr,
     fields: Vec<(Ustr, FieldShape)>,
     nullable: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum FieldShape {
     Prim,
     Nested(ValueShape),
@@ -981,6 +981,35 @@ fn nullable_nominal_shape(
 /// see and the body-arena walker cannot.
 fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
+}
+
+fn nobox_declared_shape_spec(
+    ws: &Workspace,
+    subst: &SpecSubst,
+    ty: TyId,
+) -> Option<ValueShape> {
+    if let TyId::Static(m, idx) = ty {
+        match ws.module(m).ty_arena[idx] {
+            TypeExpr::Generic(var, _) => {
+                let name = spec_nominal(subst, var)?;
+                return is_nobox_nominal(ws, name)
+                    .then(|| value_shape_of_nominal(ws, name))
+                    .flatten();
+            }
+            TypeExpr::Nullable(inner) => {
+                if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
+                    let name = spec_nominal(subst, var)?;
+                    let mut shape = is_nobox_nominal(ws, name)
+                        .then(|| value_shape_of_nominal(ws, name))
+                        .flatten()?;
+                    shape.nullable = true;
+                    return Some(shape);
+                }
+            }
+            _ => {}
+        }
+    }
+    nobox_declared_shape(ws, ty)
 }
 
 /// The leaf globals a `nobox`-typed global is stored in, `None` for every other
@@ -1853,10 +1882,9 @@ enum Scrut {
     },
 }
 
-/// Workspace-wide scalar-ABI context: the set of function names referenced as a
-/// VALUE (a fn pointer) anywhere. Such a fn is called indirectly (`CallValue`,
-/// which can't splat), so it MUST keep the single-cdata ABI on its definition and
-/// at every direct call site too — otherwise the two ABIs drift. Computed once.
+/// Workspace-wide scalar-ABI context. Address-taken functions use the
+/// type-derived fn-value ABI at their definitions and direct calls, so all three
+/// call forms agree without callee-identity analysis.
 pub struct ScalarCtx {
     taken_by_ref: HashSet<Ustr>,
     /// Per-body contribution: each body's set of fn-names it references by value.
@@ -1873,9 +1901,8 @@ pub struct ScalarCtx {
     /// keeps value structs as first-class single values (params/returns/args),
     /// never splatting them to leaf scalars. Used by the GLSL backend, where a
     /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves
-    /// (`docs/shaders.md` finding 5). The toggle is contained because
-    /// [`fn_uses_scalar_abi`] is the single gate the definition and every call site
-    /// both consult, so flipping it here can never drift the two ABIs apart.
+    /// (`docs/shaders.md` finding 5). The toggle is contained in
+    /// [`fn_scalar_abi`], which definitions and direct calls both consult.
     values_first_class: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
@@ -1987,61 +2014,76 @@ impl ScalarCtx {
     }
 }
 
-/// Whether `fref` participates in the scalar value ABI on BOTH its definition and
-/// every call site (so the two never drift). True iff it has a scalarizable value
-/// param/return AND either (a) it carries an explicit `@scalar_abi` opt-in (the
-/// author committed to per-field `<base>__<field>` params — used by hot
-/// `inline(lua)` engine fns like `append_vertex`), or (b) it's an ordinary rock
-/// body that is NOT called by a fixed name from outside skull's view
-/// (`@nomangle` / `@test` / `main`) and NOT taken by reference (an indirect callee
-/// can't splat). A non-scalar callee receives/returns a single cdata. The
-/// `@nomangle` half of that is snapshot-scoped -- see [`fn_uses_scalar_abi_spec`].
-fn fn_uses_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> bool {
-    fn_uses_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FnScalarAbi {
+    param_shapes: Vec<Option<ValueShape>>,
+    ret_shape: Option<ValueShape>,
 }
 
-/// [`fn_uses_scalar_abi`] under a specialization substitution: a generic param /
-/// return bound to a value leaf at this instantiation joins the scalar ABI
-/// (`sig_value_shape_spec`). Empty `subst` is exactly [`fn_uses_scalar_abi`].
-/// Both the specialized callee body ([`lower_function_spec`]) and the specialized
-/// call site consult this with the SAME `subst`, so the two ABIs never drift.
-fn fn_uses_scalar_abi_spec(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, subst: &SpecSubst) -> bool {
+/// The one ABI policy read by a top-level definition and every direct call.
+/// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
+/// derive from the fn type; direct-only bodies may scalarize every eligible value.
+fn fn_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<FnScalarAbi> {
+    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+}
+
+fn fn_nobox_abi_spec(
+    ws: &Workspace,
+    fref: FuncRef,
+    subst: &SpecSubst,
+) -> Option<FnScalarAbi> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let param_shapes: Vec<Option<ValueShape>> = f
+        .param_decls
+        .iter()
+        .map(|pd| nobox_declared_shape_spec(ws, subst, pd.ty))
+        .collect();
+    let ret_shape =
+        f.return_ty.and_then(|ty| nobox_declared_shape_spec(ws, subst, ty));
+    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
+}
+
+fn fn_scalar_abi_spec(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+    subst: &SpecSubst,
+) -> Option<FnScalarAbi> {
     if scx.values_first_class {
-        return false;
+        return None;
     }
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern {
-        return false;
+        return None;
     }
     let has_scalar_abi = f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
-    if !has_scalar_abi {
-        // Implicit scalarization is limited to ordinary rock-bodied fns reachable
-        // only by direct call. `@scalar_abi` overrides all of these gates.
-        // `@nomangle` gates the SHARED snapshot only. It reserves the bare name
-        // for callers outside skull's view (codegen text, `inline(lua)` bodies),
-        // and those callers spell the bare name -- which `spec_fn_name` never
-        // hands to a specialized copy. A specialized instantiation is therefore
-        // reachable only by direct call, the condition this gate encodes.
+    let nobox_only = if has_scalar_abi {
+        false
+    } else {
         let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
             "nomangle" => subst.is_empty(),
             "test" => true,
             _ => false,
         });
-        if f.inline_body.is_some()
-            || f.name.as_str() == "main"
-            || scx.taken_by_ref.contains(&f.name)
-            || name_is_fixed
-        {
-            return false;
+        if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
+            return None;
         }
+        scx.taken_by_ref.contains(&f.name)
+    };
+    if nobox_only {
+        return fn_nobox_abi_spec(ws, fref, subst);
     }
-    f.param_decls.iter().any(|pd| sig_value_shape_spec(ws, subst, pd.ty).is_some())
-        || f.return_ty.is_some_and(|t| sig_value_shape_spec(ws, subst, t).is_some())
+    let param_shapes: Vec<Option<ValueShape>> =
+        f.param_decls.iter().map(|pd| sig_value_shape_spec(ws, subst, pd.ty)).collect();
+    let ret_shape = f.return_ty.and_then(|ty| sig_value_shape_spec(ws, subst, ty));
+    (ret_shape.is_some() || param_shapes.iter().any(Option::is_some))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
 }
 
 /// A hoisted nested `fn`: the private top-level name it resolves to, and the
 /// value ABI its definition and every call site both read (so the two can never
-/// drift, the same single-gate discipline as [`fn_uses_scalar_abi`]).
+/// drift, the same single-gate discipline as [`fn_scalar_abi`]).
 #[derive(Clone)]
 struct NestedFn {
     hoisted: Ustr,
@@ -2070,13 +2112,11 @@ pub fn scalar_abi_lua_param_names(
     scx: &ScalarCtx,
     fref: FuncRef,
 ) -> Option<Vec<String>> {
-    if !fn_uses_scalar_abi(ws, scx, fref) {
-        return None;
-    }
+    let abi = fn_scalar_abi(ws, scx, fref)?;
     let f = &ws.module(fref.module).functions[fref.func];
     let mut names = Vec::new();
-    for pd in &f.param_decls {
-        match sig_value_shape(ws, pd.ty) {
+    for (pd, shape) in f.param_decls.iter().zip(abi.param_shapes) {
+        match shape {
             Some(shape) => leaf_param_names(pd.name.as_str(), &shape, &mut names),
             None => names.push(pd.name.as_str().to_string()),
         }
@@ -2094,14 +2134,11 @@ pub fn scalar_abi_param_leaf_widths(
     scx: &ScalarCtx,
     fref: FuncRef,
 ) -> Option<Vec<usize>> {
-    if !fn_uses_scalar_abi(ws, scx, fref) {
-        return None;
-    }
-    let f = &ws.module(fref.module).functions[fref.func];
+    let abi = fn_scalar_abi(ws, scx, fref)?;
     Some(
-        f.param_decls
+        abi.param_shapes
             .iter()
-            .map(|pd| sig_value_shape(ws, pd.ty).map(|s| s.leaf_count()).unwrap_or(1))
+            .map(|s| s.as_ref().map_or(1, ValueShape::leaf_count))
             .collect(),
     )
 }
@@ -2628,13 +2665,9 @@ pub fn lower_function_spec(
     // instantiation additionally treats a generic param/return bound to a value
     // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
     let self_ref = FuncRef { module: mid, func: fid };
-    let (param_shapes, ret_shape) = if fn_uses_scalar_abi_spec(ws, scx, self_ref, subst) {
-        let ps = func.param_decls.iter().map(|pd| sig_value_shape_spec(ws, subst, pd.ty)).collect();
-        let rs = func.return_ty.and_then(|t| sig_value_shape_spec(ws, subst, t));
-        (ps, rs)
-    } else {
-        (Vec::new(), None)
-    };
+    let abi = fn_scalar_abi_spec(ws, scx, self_ref, subst);
+    let param_shapes = abi.as_ref().map(|a| a.param_shapes.clone()).unwrap_or_default();
+    let ret_shape = abi.and_then(|a| a.ret_shape);
     let mut b = Builder {
         ws,
         scx,
@@ -2678,7 +2711,7 @@ pub fn lower_function_spec(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    b.reject_nobox_fn_taken_by_value()?;
+    b.reject_incompatible_nobox_fn_value_abi()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -2811,7 +2844,7 @@ pub fn lower_decorator(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
-    b.reject_nobox_fn_taken_by_value()?;
+    b.reject_incompatible_nobox_fn_value_abi()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -3257,6 +3290,14 @@ impl Builder<'_> {
         }
     }
 
+    fn repr_to_slot_values(&mut self, repr: ValueRepr, slot: &RetSlot) -> Vec<Idx<Inst>> {
+        match slot {
+            RetSlot::Opaque => vec![self.pack(repr)],
+            RetSlot::Leaves(shape) => self.repr_to_leaves(&repr, shape),
+            RetSlot::Nested(shape) => self.tuple_repr_to_slots(repr, shape),
+        }
+    }
+
     /// Lower a statement sequence into the current block. Returns `true` if a
     /// `return` terminated the block (the rest is dead).
     /// `static name = init` -> a private global cell + done-flag, guarded so the
@@ -3312,13 +3353,9 @@ impl Builder<'_> {
     }
 
     /// The value ABI of a nested `fn`, read by both its definition and its call
-    /// sites. Same rule as [`fn_uses_scalar_abi`] for a top-level fn, minus the
-    /// annotation gates a nested fn cannot carry: it splats iff it has a
-    /// scalarizable value param/return AND is never referenced as a fn VALUE (an
-    /// indirect callee can't splat). The enclosing function is ONE body arena, so
-    /// scanning it for `Expr::Var(name)` also covers sibling nested fns and
-    /// lambdas -- a `Callee::Local` callee is not an `Expr::Var`, so a plain call
-    /// never counts as taking the fn by value.
+    /// sites. Same rule as [`fn_scalar_abi`] for a top-level fn, minus annotation
+    /// gates: a fn value narrows to `nobox` shapes; a direct-only fn may use every
+    /// scalarizable value shape.
     fn nested_fn_abi(
         &self,
         name: Idx<BindingInfo>,
@@ -3727,6 +3764,26 @@ impl Builder<'_> {
         Ok(())
     }
 
+    fn lower_block_repr(
+        &mut self,
+        statements: comfy_la_arena::IdxRange<Statement>,
+        tail: Option<Idx<Expr>>,
+    ) -> Result<ValueRepr, CompilerError> {
+        self.defers.push(Vec::new());
+        let terminated = self.lower_stmts(statements)?;
+        if terminated {
+            self.defers.pop();
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+        }
+        let repr = match tail {
+            Some(tail) => self.lower_expr_repr(tail)?,
+            None => ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
+        };
+        self.run_top_frame()?;
+        self.defers.pop();
+        Ok(repr)
+    }
+
     /// Lower an expression in statement position (value discarded). A tail-less
     /// block lowers to nothing (no dead unit); side-effecting tails still run.
     fn lower_stmt_expr(&mut self, e: Idx<Expr>) -> Result<(), CompilerError> {
@@ -3923,21 +3980,8 @@ impl Builder<'_> {
             }
 
             Expr::Block { statements, tail } => {
-                self.defers.push(Vec::new());
-                let terminated = self.lower_stmts(statements)?;
-                if terminated {
-                    self.defers.pop();
-                    return Ok(self.emit_cur(Inst::Const(Lit::Nil)));
-                }
-                let v = match tail {
-                    Some(t) => self.lower_expr(t)?,
-                    None => self.emit_cur(Inst::Const(Lit::Nil)),
-                };
-                // Block-scope defers run after the tail value, before the block
-                // yields it.
-                self.run_top_frame()?;
-                self.defers.pop();
-                Ok(v)
+                let repr = self.lower_block_repr(statements, tail)?;
+                Ok(self.pack(repr))
             }
 
             Expr::Call { callee, args } => self.lower_call(e, callee, args),
@@ -4744,10 +4788,10 @@ impl Builder<'_> {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            if fn_uses_scalar_abi(self.ws, self.scx, func) {
+            if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
                 // Scalar-ABI callee: splat the value receiver + value args into
                 // leaves (a value return packs to the single safe-nav result).
-                self.scalar_ufcs_call(func, recv, &arg_idxs)?
+                self.scalar_ufcs_call(func, recv, &arg_idxs, &abi)?
             } else {
                 let mut argv = vec![recv];
                 for a in arg_idxs {
@@ -5413,8 +5457,8 @@ impl Builder<'_> {
         } else {
             self.reject_nobox_opaque_value_return(e, func)?;
         }
-        let uses_scalar_abi = fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst);
-        if !uses_scalar_abi {
+        let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
+        let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
@@ -5450,11 +5494,14 @@ impl Builder<'_> {
                 self.f.spec_bindings.insert(call, k);
             }
             return Ok(ValueRepr::Scalar(call));
-        }
-        let args = self.scalar_call_args(func, arg_idxs, any_named, subst)?;
-        let ret_shape = self.ws.module(func.module).functions[func.func]
-            .return_ty
-            .and_then(|t| sig_value_shape_spec(self.ws, subst, t));
+        };
+        let args = self.scalar_call_args(
+            func,
+            arg_idxs,
+            any_named,
+            &scalar_abi.param_shapes,
+        )?;
+        let ret_shape = scalar_abi.ret_shape;
         let key = spec.map(|(k, _)| k);
         match ret_shape {
             Some(shape) => {
@@ -5606,19 +5653,15 @@ impl Builder<'_> {
         func: FuncRef,
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
+        abi: &FnScalarAbi,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let param_shapes: Vec<Option<ValueShape>> = self.ws.module(func.module).functions[func.func]
-            .param_decls
-            .iter()
-            .map(|pd| sig_value_shape(self.ws, pd.ty))
-            .collect();
         let mut argv = Vec::new();
-        match param_shapes.first().and_then(|s| s.clone()) {
+        match abi.param_shapes.first().and_then(|s| s.clone()) {
             Some(shape) => argv.extend(self.cdata_leaves(recv, &shape)),
             None => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            match param_shapes.get(i + 1).and_then(|s| s.clone()) {
+            match abi.param_shapes.get(i + 1).and_then(|s| s.clone()) {
                 Some(shape) => {
                     let r = self.lower_expr_repr(a)?;
                     argv.extend(self.repr_to_leaves(&r, &shape));
@@ -5626,10 +5669,7 @@ impl Builder<'_> {
                 None => argv.push(self.lower_expr(a)?),
             }
         }
-        let ret_shape = self.ws.module(func.module).functions[func.func]
-            .return_ty
-            .and_then(|t| sig_value_shape(self.ws, t));
-        match ret_shape {
+        match abi.ret_shape.clone() {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
@@ -5653,13 +5693,8 @@ impl Builder<'_> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-        subst: &SpecSubst,
+        param_shapes: &[Option<ValueShape>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let param_shapes: Vec<Option<ValueShape>> = self.ws.module(func.module).functions[func.func]
-            .param_decls
-            .iter()
-            .map(|pd| sig_value_shape_spec(self.ws, subst, pd.ty))
-            .collect();
         if !any_named {
             let mut out = Vec::new();
             for (i, &a) in arg_idxs.iter().enumerate() {
@@ -5678,7 +5713,7 @@ impl Builder<'_> {
             .iter()
             .map(|pd| pd.name)
             .collect();
-        self.slotted_call_args(&param_names, &param_shapes, arg_idxs)
+        self.slotted_call_args(&param_names, param_shapes, arg_idxs)
     }
 
     /// Build a call's argument list by placing each argument into its PARAM SLOT
@@ -6807,6 +6842,21 @@ impl Builder<'_> {
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         match self.body.expr_arena[e].clone() {
+            Expr::Block { statements, tail } => self.lower_block_repr(statements, tail),
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => match self.repr_join_slot(e) {
+                Some(shape) => self.lower_if_repr(cond, then_branch, else_branch, shape),
+                None => Ok(ValueRepr::Scalar(
+                    self.lower_if(cond, then_branch, else_branch)?,
+                )),
+            },
+            Expr::Match { scrutinee, arms } => match self.repr_join_slot(e) {
+                Some(shape) => self.lower_match_repr(scrutinee, arms, shape),
+                None => Ok(ValueRepr::Scalar(self.lower_match(scrutinee, arms)?)),
+            },
             // A tuple literal whose type splats stays a `Tuple` repr, so a
             // `nobox` element reaches the return boundary as leaves instead of
             // being packed into the table first.
@@ -8303,7 +8353,20 @@ impl Builder<'_> {
         then_branch: Idx<Expr>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let repr =
+            self.lower_if_repr(cond, then_branch, else_branch, RetSlot::Opaque)?;
+        Ok(self.pack(repr))
+    }
+
+    fn lower_if_repr(
+        &mut self,
+        cond: Idx<Expr>,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let cond_v = self.lower_expr(cond)?;
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
@@ -8318,18 +8381,21 @@ impl Builder<'_> {
         );
 
         self.cur = then_bb;
-        let tv = self.lower_expr(then_branch)?;
-        self.store_and_join(result, tv, join);
+        let tv = self.lower_expr_repr(then_branch)?;
+        self.store_repr_and_join(&results, &shape, tv, join)?;
 
         self.cur = else_bb;
         let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
-            None => self.emit_cur(Inst::Const(Lit::Nil)),
+            Some(eb) => self.lower_expr_repr(eb)?,
+            None => ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
         };
-        self.store_and_join(result, ev, join);
+        self.store_repr_and_join(&results, &shape, ev, join)?;
 
         self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
 
     /// `if` in STATEMENT position (value discarded): branch + arms-as-statements
@@ -8375,6 +8441,31 @@ impl Builder<'_> {
             });
             self.f.set_term(self.cur, Term::Goto(join));
         }
+    }
+
+    fn store_repr_and_join(
+        &mut self,
+        results: &[Idx<Cell>],
+        shape: &RetSlot,
+        value: ValueRepr,
+        join: Idx<Block>,
+    ) -> Result<(), CompilerError> {
+        if !self.is_open() {
+            return Ok(());
+        }
+        let slots = self.repr_to_slot_values(value, shape);
+        if results.len() != slots.len() {
+            return Err(gap(format!(
+                "aggregate join produced {} slots for {} result cells",
+                slots.len(),
+                results.len()
+            )));
+        }
+        for (&cell, value) in results.iter().zip(slots) {
+            self.emit_cur(Inst::Store { cell, value });
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+        Ok(())
     }
 
     /// `a && b` == `if a then b else false`.
@@ -9317,7 +9408,18 @@ impl Builder<'_> {
         scrut: Idx<Expr>,
         arms: comfy_la_arena::IdxRange<MatchArm>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let result = self.f.new_cell(None);
+        let repr = self.lower_match_repr(scrut, arms, RetSlot::Opaque)?;
+        Ok(self.pack(repr))
+    }
+
+    fn lower_match_repr(
+        &mut self,
+        scrut: Idx<Expr>,
+        arms: comfy_la_arena::IdxRange<MatchArm>,
+        shape: RetSlot,
+    ) -> Result<ValueRepr, CompilerError> {
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
         let scrut_s = self.lower_scrut(scrut)?;
@@ -9342,8 +9444,8 @@ impl Builder<'_> {
                 );
                 self.cur = kept;
             }
-            let bv = self.lower_expr(arm.body)?;
-            self.store_and_join(result, bv, join);
+            let bv = self.lower_expr_repr(arm.body)?;
+            self.store_repr_and_join(&results, &shape, bv, join)?;
 
             self.cur = next;
         }
@@ -9351,7 +9453,10 @@ impl Builder<'_> {
         self.f.set_term(self.cur, Term::Unreachable);
 
         self.cur = join;
-        Ok(self.emit_cur(Inst::Load(result)))
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
     }
 
     /// `match` in STATEMENT position (value discarded): mirrors [`Self::lower_match`]
@@ -11671,12 +11776,9 @@ impl Builder<'_> {
             .map(|pd| pd.ty)
     }
 
-    /// The caller gates this on `!fn_uses_scalar_abi`, which reads as "this callee
-    /// takes a real boxed value" only where the scalar ABI is the alternative.
-    /// Under `values_first_class` that flag is forced false for EVERY fn because a
-    /// `value` struct is already a first-class `vecN` -- there is no box on that
-    /// target, and no collection to put one in, so the proxy inverts and every
-    /// shader call would reject a nobox arg.
+    /// The caller reaches this only when [`fn_scalar_abi_spec`] returns `None`.
+    /// Under `values_first_class`, a `value` struct is already a first-class
+    /// `vecN`, so there is no box to authorize.
     /// Re-mark a nobox box packed for a `@gpu_only` callee as an EXPLICIT one.
     ///
     /// Emission is identical (both render `<name>_ct`), the verifier ignores
@@ -11956,29 +12058,10 @@ impl Builder<'_> {
 
     /// The leaf shape of a `nobox`-typed `ty` (nullable included: presence is
     /// leaf 0), `None` for every other type.
-    /// Reject taking a TOP-LEVEL fn with a `nobox` value in its signature as a
-    /// fn VALUE.
-    ///
-    /// This is what makes [`Self::fn_value_abi`] sound. A top-level fn's ABI is
-    /// decided by a WHOLE-PROGRAM property (`ScalarCtx::taken_by_ref` drops it
-    /// to boxed), while the fn TYPE at an indirect call site says nothing about
-    /// that -- so the call site would splat leaves into a callee compiled to
-    /// take one box. That is a silent miscompile, not a rejection: it emits, and
-    /// dies at runtime indexing a number.
-    ///
-    /// Lambdas and nested fns are exempt because they now keep the leaf ABI when
-    /// taken by value, derived from the same type the call site reads. Only a
-    /// top-level fn has the whole-program dependency, and nothing in tree takes
-    /// one with a `nobox` signature by value -- pinned in
-    /// `tests/errors/nobox_toplevel_fn_by_value.rock.err`, which is where the
-    /// fix goes if that changes.
     /// Argument positions of a `ShaderPipeline` expansion, where a bare fn name is
     /// consumed by the compiler and never becomes a runtime fn value:
     /// `rock_shader(frag)` lowers its argument to the entry's NAME as a string
-    /// literal, so the ABI-disagreement hazard [`Self::reject_nobox_fn_taken_by_value`]
-    /// guards against cannot arise there. Without this the check fires on the name
-    /// alone, which rejected every fullscreen `rock_shader` registration written in
-    /// a fn body once `Vec2` was marked -- a diagnostic owed to nothing.
+    /// literal, so no function-value ABI applies there.
     fn expansion_arg_exprs(&self) -> HashSet<Idx<Expr>> {
         let mut out = HashSet::new();
         for (e, expr) in self.body.expr_arena.iter() {
@@ -11997,7 +12080,7 @@ impl Builder<'_> {
         out
     }
 
-    fn reject_nobox_fn_taken_by_value(&self) -> Result<(), CompilerError> {
+    fn reject_incompatible_nobox_fn_value_abi(&self) -> Result<(), CompilerError> {
         if self.scx.values_first_class {
             return Ok(());
         }
@@ -12008,22 +12091,17 @@ impl Builder<'_> {
                 continue;
             }
             let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
-            // ANY overload of the name: the value reference names the whole
-            // overload set, so one nobox-bearing member is enough to make the
-            // ABI at an indirect call unknowable.
-            let carries_nobox = overloads.iter().any(|(mid, fid)| {
-                let f = &self.ws.module(*mid).functions[*fid];
-                f.param_decls.iter().any(|pd| nobox_declared_shape(self.ws, pd.ty).is_some())
-                    || f.return_ty.is_some_and(|t| nobox_declared_shape(self.ws, t).is_some())
+            let incompatible = overloads.iter().any(|(mid, fid)| {
+                let fref = FuncRef { module: *mid, func: *fid };
+                let expected = fn_nobox_abi_spec(self.ws, fref, &SpecSubst::new());
+                expected.is_some() && fn_scalar_abi(self.ws, self.scx, fref) != expected
             });
-            if carries_nobox {
+            if incompatible {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(
-                        "`{name}` has a `nobox` value in its signature and cannot be taken as a \
-                         fn value: a top-level fn's ABI depends on whether the program takes it \
-                         by value, so an indirect call could not agree with it. Wrap it in a \
-                         lambda, which keeps the leaf ABI."
+                        "`{name}` cannot be used as a fn value because its fixed ABI does not \
+                         match the type-derived `nobox` fn-value ABI"
                     ),
                 ));
             }
@@ -12391,6 +12469,13 @@ impl Builder<'_> {
     /// bare tuple and get mis-splatted.
     fn expr_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
         self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
+    }
+
+    fn repr_join_slot(&self, e: Idx<Expr>) -> Option<RetSlot> {
+        if let Some(shape) = self.expr_tuple_shape(e).filter(TupleRetShape::splats) {
+            return Some(RetSlot::Nested(shape));
+        }
+        self.nobox_value_shape_of(e).map(RetSlot::Leaves)
     }
 
     /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
@@ -13346,13 +13431,9 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
     })
 }
 
-/// Reject a CPU-side (Lua-emission) DIRECT call to a `@gpu_only` intrinsic
-/// (`texture()`, stdlib/shader.rock). Allowed only when the calling fn is itself
-/// GPU-side (`@shader(...)` or `@gpu_only`) -- shader bodies compile through the
-/// Lua backend (bitgun's `heat_shimmer_frag`) and must keep working. Only DIRECT
-/// calls are rejected: taking the fn as a value and calling it indirectly is out
-/// of scope and keeps hitting the runtime-error body (the never-silent-stub
-/// defense, CLAUDE.md "NEVER swallow errors"). Returns the first spanned reject.
+/// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side
+/// functions as runtime fn values. Shader-pipeline expansion arguments are names,
+/// not runtime values, and remain legal.
 pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
@@ -13365,24 +13446,70 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         if caller_is_gpu {
             continue;
         }
+        let mut shader_expansion_args = HashSet::new();
         for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            let Expr::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+            } = expr
+            else {
                 continue;
             };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
-            let f = &ws.module(fmod).functions[fid];
-            if !crate::intrinsics::is_gpu_only(f) {
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
                 continue;
+            };
+            let f = &ws.module(fmod).functions[fid];
+            if matches!(
+                crate::intrinsics::expand_kind(f),
+                Some(ExpandKind::ShaderPipeline)
+            ) {
+                shader_expansion_args.extend(args.clone().into_iter());
             }
-            let fname = f.name;
-            return Some(CompilerError::new_with_label(
-                body.expr_spans[e],
-                format!(
-                    "`{fname}` is GPU-only and cannot be called from CPU (Lua) code. \
-                     Shader helper code that calls `{fname}` must annotate its fn `@shader(...)` \
-                     or `@gpu_only`."
-                ),
-            ));
+        }
+        for (e, expr) in body.expr_arena.iter() {
+            match expr {
+                Expr::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    ..
+                } => {
+                    let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                        continue;
+                    };
+                    let f = &ws.module(fmod).functions[fid];
+                    if !crate::intrinsics::is_gpu_only(f) {
+                        continue;
+                    }
+                    let fname = f.name;
+                    return Some(CompilerError::new_with_label(
+                        body.expr_spans[e],
+                        format!(
+                            "`{fname}` is GPU-only and cannot be called from CPU (Lua) code. \
+                             Shader helper code that calls `{fname}` must annotate its fn \
+                             `@shader(...)` or `@gpu_only`."
+                        ),
+                    ));
+                }
+                Expr::Global(name) if !shader_expansion_args.contains(&e) => {
+                    let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
+                        continue;
+                    };
+                    let f = &ws.module(fmod).functions[fid];
+                    if !crate::intrinsics::is_gpu_context(f) {
+                        continue;
+                    }
+                    let fname = f.name;
+                    let kind =
+                        if crate::intrinsics::is_gpu_only(f) { "GPU-only" } else { "a shader entry" };
+                    return Some(CompilerError::new_with_label(
+                        body.expr_spans[e],
+                        format!(
+                            "`{fname}` is {kind} and cannot be used as a fn value from CPU \
+                             (Lua) code"
+                        ),
+                    ));
+                }
+                _ => {}
+            }
         }
     }
     None
