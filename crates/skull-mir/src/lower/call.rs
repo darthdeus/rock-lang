@@ -398,6 +398,45 @@ impl Builder<'_> {
         compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst, self.scx.target)
     }
 
+    /// [`Self::call_spec`] narrowed by the target's storage filter -- the form
+    /// every consumer of a call's INSTANTIATION must use, so none of them
+    /// disagrees about whether this call specializes.
+    pub(crate) fn call_spec_for_target(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Option<(SpecKey, SpecSubst)> {
+        self.call_spec(e, func).filter(|(k, _)| {
+            !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
+        })
+    }
+
+    /// THE tuple-return shape of a call, read off the CALLEE's declared return
+    /// type under the CALLEE's instantiation.
+    ///
+    /// One oracle, because there were two and they disagreed. `lower_call`
+    /// computed this under the call's own `SpecSubst` while the presence
+    /// consumers (`nullable_tuple_call_shape`) computed it under the ENCLOSING
+    /// body's -- empty in a non-generic caller, so the callee's generic stayed
+    /// unbound, every slot came back `Opaque`, and `tuple_ret_shape`'s
+    /// `nullable && !splats` guard answered `None`. The callee then faithfully
+    /// returned its `false` presence slot and the call site threw it away:
+    /// `!= null` fell through to packing a `MakeTuple`, which is structurally
+    /// never nil, so it const-folded to `true` and `if let` emitted no branch at
+    /// all. A shape disagreement here cannot fail loudly -- it just branches on
+    /// a slot that is not there, or fails to.
+    pub(crate) fn call_ret_tuple_shape(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Option<TupleRetShape> {
+        let spec = self.call_spec_for_target(e, func);
+        let empty = SpecSubst::new();
+        let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
+        let ret = self.ws.module(func.module).functions[func.func].return_ty?;
+        tuple_ret_shape(self.ws, subst, ret)
+    }
+
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
     /// come from bone's `next_generics` rather than a call expr. Ordered into
     /// the callee's generic declaration order, which is what [`SpecKey`] is.
@@ -445,21 +484,13 @@ impl Builder<'_> {
         // longer the only thing that can serve it: the call targets a standalone
         // specialized copy, lowered under this same substitution, so the two agree
         // on the ABI without an inliner ever running.
-        let spec = self
-            .call_spec(e, func)
-            .filter(|(k, _)| {
-                !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
-            });
-        let empty = SpecSubst::new();
-        let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
+        let spec = self.call_spec_for_target(e, func);
         // The instantiation key is recorded on the emitted call inst whenever this
         // is a specialized call -- even on the boxed (non-scalar-ABI) path, because
         // the specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
         let key = spec.as_ref().map(|(k, _)| k.clone());
-        let ret_tuple = self.ws.module(func.module).functions[func.func]
-            .return_ty
-            .and_then(|t| tuple_ret_shape(self.ws, subst, t));
+        let ret_tuple = self.call_ret_tuple_shape(e, func);
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
@@ -472,6 +503,8 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
+        let empty_subst = SpecSubst::new();
+        let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
