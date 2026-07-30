@@ -6482,9 +6482,10 @@ impl Builder<'_> {
                     return Err(gap(format!("column insert arity mismatch for [{elem}]")));
                 }
                 let f = self.stdlib_funcref("__rock_col_insert")?;
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for (path, leaf) in paths.into_iter().zip(leaves) {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, leaf] });
+                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, len, leaf] });
                 }
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
@@ -6502,11 +6503,14 @@ impl Builder<'_> {
                 // dotted leaf path, so the emitted table is the same shape
                 // `MakeVecColumns` writes for a literal.
                 let mut fields = Vec::with_capacity(paths.len() + 2);
+                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for path in paths {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    fields.push((path, self.emit_cur(Inst::Call { func: f, args: vec![col] })));
+                    fields.push((
+                        path,
+                        self.emit_cur(Inst::Call { func: f, args: vec![col, len] }),
+                    ));
                 }
-                let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 fields.push((Ustr::from("len"), len));
                 let old_header = self.column_header(vec);
                 let capacity = self.emit_cur(Inst::Field {

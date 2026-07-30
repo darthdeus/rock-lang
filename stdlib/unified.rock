@@ -1624,13 +1624,19 @@ inline(lua) fn table_new() -> any = """return {}"""
 // Column-storage counterparts, called by the lowering with ONE column table at
 // a time -- so the leaf count stays a compile-time fact and no runtime key walk
 // is needed.
-@nomangle inline(lua) fn __rock_col_insert(col: any, lua_index: int, value: any) = """
-    table.insert(col, lua_index, value)
+// `len` is passed in rather than read as `#col`. A column of a NULLABLE field
+// holds a real `nil` for every absent element, and `#` on a table with holes is
+// undefined in Lua -- so `table.insert` shifted a sparse column by a different
+// amount than its dense siblings (desyncing the rows) and a `#col`-bounded copy
+// stopped at the first hole. The Vec tracks the length; nothing here may guess it.
+@nomangle inline(lua) fn __rock_col_insert(col: any, lua_index: int, len: int, value: any) = """
+    for i = len, lua_index, -1 do col[i + 1] = col[i] end
+    col[lua_index] = value
 """
 
-@nomangle inline(lua) fn __rock_col_copy(col: any) -> any = """
+@nomangle inline(lua) fn __rock_col_copy(col: any, len: int) -> any = """
     local copy = {}
-    for i = 1, #col do copy[i] = col[i] end
+    for i = 1, len do copy[i] = col[i] end
     return copy
 """
 
