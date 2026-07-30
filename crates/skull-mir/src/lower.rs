@@ -1322,6 +1322,61 @@ fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleR
     Some(TupleRetShape { slots })
 }
 
+/// What a concrete `next` actually returns at a splice site, for the ONE caller
+/// that cannot know it at lowering time: the placeholder `CallBoundMulti` in a
+/// generic combinator body, whose arity bound conformance fixes at `(bool, E)`.
+///
+/// `slot_count` is the real returned-value count and `elem` names the element's
+/// value struct plus its leaf FIELDS in ctor order when the element splats. The
+/// splice sizes its dests from the former and repacks the element from the
+/// latter; see `resolve_cloned_bound_calls`.
+///
+/// The three cases are kept DISTINCT on purpose: "nothing to repack" and "a shape
+/// the flat repack cannot express" must not collapse into one `None`, or an
+/// unsupported element silently takes the do-nothing path and miscompiles exactly
+/// as it does today.
+pub enum BoundNextElem {
+    /// Today's ABI -- one opaque slot. Nothing to do.
+    Opaque,
+    /// A `nobox` value: its struct name and leaf fields in ctor order.
+    Flat(Ustr, Vec<Ustr>),
+    /// Splats through a nested or nullable shape the flat repack cannot express.
+    /// The splice REJECTS on this rather than guess a leaf-to-field pairing --
+    /// a wrong pairing writes one leaf's value into another field, silently.
+    Unsupported,
+}
+
+pub struct BoundNextShape {
+    pub slot_count: usize,
+    pub elem: BoundNextElem,
+}
+
+pub fn bound_next_shape(
+    ws: &Workspace,
+    fref: FuncRef,
+    key: Option<&SpecKey>,
+) -> Option<BoundNextShape> {
+    let subst = key.map(|k| spec_subst_from_key(ws, fref, k)).unwrap_or_default();
+    let ret = ws.module(fref.module).functions[fref.func].return_ty?;
+    let shape = tuple_ret_shape(ws, &subst, ret)?;
+    let elem = match shape.slots.get(1) {
+        Some(RetSlot::Leaves(vs)) if !vs.nullable => {
+            let flat: Option<Vec<Ustr>> = vs
+                .fields
+                .iter()
+                .map(|(n, fs)| matches!(fs, FieldShape::Prim).then_some(*n))
+                .collect();
+            match flat {
+                Some(fields) => BoundNextElem::Flat(vs.name, fields),
+                None => BoundNextElem::Unsupported,
+            }
+        }
+        Some(RetSlot::Leaves(_)) | Some(RetSlot::Nested(_)) => BoundNextElem::Unsupported,
+        _ => BoundNextElem::Opaque,
+    };
+    Some(BoundNextShape { slot_count: shape.slot_count(), elem })
+}
+
 fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
     if let Some(shape) = nobox_sig_shape_spec(ws, subst, ty) {
         return RetSlot::Leaves(shape);

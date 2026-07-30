@@ -913,12 +913,11 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_vec_combinator_element.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::Miscompile {
-            flip_when: "specialized bound calls (lower.rs:4957) consume the concrete \
-                        tuple return shape instead of a hardcoded 2 slots -- a \
-                        specialization/tuple-ABI fix, NOT the H1/H2 field-read fix",
-        },
-        gap: Some("I: generic return-shape mismatch at the bound-call boundary"),
+        expect: Expect::Correct,
+        gap: Some(
+            "I FIXED: the splice sizes `next`'s dests from the CONCRETE callee and \
+             repacks the element from its leaves",
+        ),
     },
 ];
 
