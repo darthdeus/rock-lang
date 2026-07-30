@@ -314,6 +314,52 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// The nil-guarded join every `?.` form shares, storing PER SLOT.
+    ///
+    /// The three safe-nav lowerings differ only in what the non-nil arm computes,
+    /// and each joined its arms through ONE result cell. A `nobox` value is leaves
+    /// plus a presence tag and does not fit one cell, so it packed to a box --
+    /// the materialization the mark forbids. This is the same multi-cell join
+    /// `if`/`match` as values already use ([`Self::store_repr_and_join`]); safe-nav
+    /// was simply never dispatched through it.
+    ///
+    /// The nil arm needs no special case: `repr_to_leaves` already folds a
+    /// `Const(Nil)` at a nullable shape to `false` plus one nil per leaf.
+    ///
+    /// `value_arm` receives the receiver VALUE, lowered once before the test --
+    /// re-lowering the receiver expression on the non-nil arm would run its side
+    /// effects twice (`none()?.v` would call `none` again).
+    pub(crate) fn safe_nav_repr(
+        &mut self,
+        receiver: Idx<Expr>,
+        shape: RetSlot,
+        value_arm: impl FnOnce(&mut Self, Idx<Inst>) -> Result<ValueRepr, CompilerError>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let recv = self.lower_expr(receiver)?;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let results: Vec<Idx<Cell>> =
+            (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+        let nil_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: is_nil, then_bb: nil_bb, else_bb: val_bb });
+
+        self.cur = nil_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_repr_and_join(&results, &shape, ValueRepr::Scalar(n), join)?;
+
+        self.cur = val_bb;
+        let v = value_arm(self, recv)?;
+        self.store_repr_and_join(&results, &shape, v, join)?;
+
+        self.cur = join;
+        let slots: Vec<Idx<Inst>> =
+            results.iter().map(|&cell| self.emit_cur(Inst::Load(cell))).collect();
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
+    }
+
     /// If the current block is still open, store `value` into `result` and jump
     /// to `join` (the fall-through merge). A diverged arm leaves it untouched.
     pub(crate) fn store_and_join(&mut self, result: Idx<Cell>, value: Idx<Inst>, join: Idx<Block>) {
