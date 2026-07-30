@@ -717,7 +717,11 @@ fn resolve_cloned_bound_calls(
                 // element (`count`) drops it as dead -- which is why this does not
                 // reintroduce the box the mark forbids, and why it does not
                 // over-reject `count` the way a splice-time arity check did.
-                repack_bound_next_element(func, new_id, ws, concrete, spec.as_ref())?;
+                if callee.bound_next_split.contains(&old_id) {
+                    check_bound_next_split(func, new_id, ws, concrete, spec.as_ref())?;
+                } else {
+                    repack_bound_next_element(func, new_id, ws, concrete, spec.as_ref())?;
+                }
             }
             Some(BoundNext::CallerGeneric(_)) | None => {
                 return Err(CompilerError::new_no_location(format!(
@@ -728,6 +732,41 @@ fn resolve_cloned_bound_calls(
         }
     }
     Ok(())
+}
+
+/// The lowering already split this placeholder's element into leaf cells, so
+/// there is nothing to rebuild -- only the two sides' agreement to confirm.
+///
+/// They read the same instantiation from opposite ends: the lowering from the
+/// loop pattern's binding types, this from the concrete callee's return type. A
+/// disagreement means the body binds a different number of leaves than the call
+/// returns, which is a positional mis-pairing -- a leaf's value landing in
+/// another leaf's cell, silently. Rejected rather than repacked, because a
+/// repack over an already-split element would write into a cell nothing reads.
+fn check_bound_next_split(
+    func: &MirFunc,
+    call: Idx<Inst>,
+    ws: &Workspace,
+    concrete: FuncRef,
+    spec: Option<&SpecKey>,
+) -> Result<(), CompilerError> {
+    let Some(shape) = bound_next_shape(ws, concrete, spec) else {
+        return Ok(());
+    };
+    let Inst::CallMulti { dests, .. } = &func.insts[call] else {
+        return Ok(());
+    };
+    if dests.len() == shape.slot_count {
+        return Ok(());
+    }
+    Err(CompilerError::new_no_location(format!(
+        "`{}`: the loop element was split into {} destinations but `next` returns \
+         {} values at this specialization -- the two read the same instantiation \
+         and must agree, or a leaf's value lands in another leaf's cell",
+        func.name,
+        dests.len(),
+        shape.slot_count
+    )))
 }
 
 /// Re-size a just-substituted `next` call to the concrete callee's real return

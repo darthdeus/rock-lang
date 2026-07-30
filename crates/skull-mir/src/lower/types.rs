@@ -210,6 +210,14 @@ impl Builder<'_> {
     /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
     /// bare tuple and get mis-splatted.
     pub(crate) fn expr_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        // A bound `next` answers from its DECLARATION, never from the type this
+        // body's single generic check left on the call: the destructure that
+        // consumes the shape and the call that emits it must read the same
+        // oracle, or the binding takes a different number of leaves than the
+        // call returns and the difference is made up with a constant.
+        if let Some(&gidx) = self.inf?.bound_calls.get(&e) {
+            return Some(self.bound_next_tuple_shape(gidx));
+        }
         self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
     }
 
@@ -282,6 +290,37 @@ impl Builder<'_> {
             .map(|el| self.body_ret_slot(ty.with_idx(el)))
             .collect();
         Some(TupleRetShape { slots, nullable: false })
+    }
+
+    /// The element slot of a placeholder `next` on the `Iterator`-bounded generic
+    /// at `gidx`, read from the enclosing fn's DECLARED bound under this body's
+    /// specialization.
+    ///
+    /// The declaration is the source because it is the only one that carries the
+    /// instantiation. A bounded body is type-checked ONCE against its bound, so
+    /// the `next(x)` call's inferred `(bool, E)` is a body-local type from that
+    /// single check -- it neither names the generic nor tracks the site, and
+    /// reading the element off it plans a shape for whatever that check happened
+    /// to leave there. Same rule as the presence slot: read a declaration, never
+    /// an expression's type.
+    ///
+    /// `Opaque` whenever the specialization does not resolve the element -- the
+    /// shared generic snapshot keeps one opaque slot and the splice's repack
+    /// keeps correcting it.
+    pub(crate) fn bound_next_elem_slot(&self, gidx: usize) -> RetSlot {
+        match self.generic_bounds.get(gidx).copied().flatten() {
+            Some(elem) => ret_slot(self.ws, self.spec_subst, elem),
+            None => RetSlot::Opaque,
+        }
+    }
+
+    /// The full `(bool, E)` shape of a placeholder `next` on the generic at
+    /// `gidx` -- THE oracle every consumer of that call routes through.
+    pub(crate) fn bound_next_tuple_shape(&self, gidx: usize) -> TupleRetShape {
+        TupleRetShape {
+            nullable: false,
+            slots: vec![RetSlot::Opaque, self.bound_next_elem_slot(gidx)],
+        }
     }
 
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {

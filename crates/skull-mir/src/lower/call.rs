@@ -249,16 +249,25 @@ impl Builder<'_> {
                     return Err(gap("bound `next` call with non-unary args"));
                 };
                 let arg_v = self.lower_expr(arg)?;
-                // Bound conformance fixes the shape at exactly `(bool, E)`.
-                let dests: Vec<Idx<Cell>> = (0..2).map(|_| self.f.new_cell(None)).collect();
-                self.emit_cur(Inst::CallBoundMulti {
+                // Bound conformance fixes the SLOTS at exactly `(bool, E)`; `E`'s
+                // shape is this body's specialization to answer, so a value
+                // element arrives as leaves instead of one opaque slot. Leaving
+                // it opaque forces the splice to rebuild an aggregate, which a
+                // presence-carrying element cannot be rebuilt into.
+                let shape = self.bound_next_tuple_shape(gidx);
+                let dests: Vec<Idx<Cell>> =
+                    (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+                let call = self.emit_cur(Inst::CallBoundMulti {
                     dests: dests.clone(),
                     generic_idx: gidx as u32,
                     args: vec![arg_v],
                 });
+                if shape.splats() {
+                    self.f.bound_next_split.insert(call);
+                }
                 let loads: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-                return Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(loads))));
+                return Ok(self.tuple_result(&shape, &loads));
             }
         }
         // A spread arg fills param slots by field name, so it takes the

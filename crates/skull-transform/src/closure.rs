@@ -395,6 +395,7 @@ pub fn convert_closures_framed(
             // body's region address unreachable blocks and are ignored -- both the
             // inliner and the residual-binding check work on reachable blocks.
             spec_bindings: mf.spec_bindings.clone(),
+            bound_next_split: mf.bound_next_split.clone(),
             nested_fns: Vec::new(),
             // Same arena clone, same `Idx` space: the parent's spans address the
             // instructions this body now owns.

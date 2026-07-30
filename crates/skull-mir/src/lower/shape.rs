@@ -1472,19 +1472,23 @@ pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Op
     Some(shape)
 }
 
-/// What a concrete `next` actually returns at a splice site, for the ONE caller
-/// that cannot know it at lowering time: the placeholder `CallBoundMulti` in a
-/// generic combinator body, whose arity bound conformance fixes at `(bool, E)`.
+/// What a concrete `next` actually returns at a splice site, for the placeholder
+/// `CallBoundMulti` whose arity bound conformance fixes at `(bool, E)`.
 ///
 /// `slot_count` is the real returned-value count and `elem` names the element's
 /// value struct plus its leaf FIELDS in ctor order when the element splats. The
 /// splice sizes its dests from the former and repacks the element from the
 /// latter; see `resolve_cloned_bound_calls`.
 ///
+/// Read only where the LOWERING could not resolve the element itself: a body
+/// specialized at a value element splits `E` into leaf cells there
+/// (`MirFunc::bound_next_split`) and this only CHECKS the two agree. What is
+/// left is the case specialization cannot express -- a generic bound to a tuple,
+/// which does not reify -- so the element stays opaque and has to be rebuilt.
+///
 /// The three cases are kept DISTINCT on purpose: "nothing to repack" and "a shape
 /// the flat repack cannot express" must not collapse into one `None`, or an
-/// unsupported element silently takes the do-nothing path and miscompiles exactly
-/// as it does today.
+/// unsupported element silently takes the do-nothing path and miscompiles.
 pub enum BoundNextElem {
     /// Today's ABI -- one opaque slot. Nothing to do.
     Opaque,
@@ -1494,6 +1498,10 @@ pub enum BoundNextElem {
     /// presence leaf has no field to pair with). The splice REJECTS on this rather
     /// than guess a leaf-to-field pairing -- a wrong pairing writes one leaf's
     /// value into another field, silently.
+    ///
+    /// Reached only when the lowering left the element opaque, which for a
+    /// nullable value now means a TUPLE element (`zip`'s pair): a generic bound
+    /// to a tuple does not reify, so the body never specialized.
     Unsupported,
 }
 

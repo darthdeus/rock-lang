@@ -176,9 +176,13 @@ impl Builder<'_> {
                 .filter(|k| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)),
             BoundNext::CallerGeneric(_) => None,
         };
-        // A placeholder next is always `(bool, E)` with `E` opaque (bound
-        // conformance requires exactly that shape, and the placeholder body is
-        // substituted later).
+        // A placeholder next is `(bool, E)` by bound conformance, but `E`'s SHAPE
+        // is this body's own specialization to answer -- the concrete callee is
+        // only the source of how many values come back, and the two agree because
+        // both read the same instantiation. Resolving it here is what splits a
+        // presence-carrying element into {presence cell, leaf cells} at the point
+        // the shape is known; leaving it opaque forces the splice to rebuild an
+        // aggregate, and a presence leaf has no field to rebuild into.
         let ret_shape = match &info.next {
             BoundNext::Concrete { func: (m, f), .. } => {
                 let func = FuncRef { module: *m, func: *f };
@@ -191,10 +195,7 @@ impl Builder<'_> {
                     .and_then(|t| tuple_ret_shape(self.ws, &subst, t))
                     .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
             }
-            BoundNext::CallerGeneric(_) => TupleRetShape {
-                nullable: false,
-                slots: vec![RetSlot::Opaque, RetSlot::Opaque],
-            },
+            BoundNext::CallerGeneric(gidx) => self.bound_next_tuple_shape(*gidx),
         };
         if ret_shape.slots.len() < 2 {
             return Err(gap("for-iter `next` must return `(bool, E)`"));
@@ -233,11 +234,14 @@ impl Builder<'_> {
                 }
             }
             BoundNext::CallerGeneric(gidx) => {
-                self.emit_cur(Inst::CallBoundMulti {
+                let call = self.emit_cur(Inst::CallBoundMulti {
                     dests: dests.clone(),
                     generic_idx: *gidx as u32,
                     args: vec![it_load],
                 });
+                if ret_shape.splats() {
+                    self.f.bound_next_split.insert(call);
+                }
             }
         }
         let ok = self.emit_cur(Inst::Load(dests[0]));
