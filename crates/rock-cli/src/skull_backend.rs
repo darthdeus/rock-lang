@@ -536,11 +536,15 @@ fn run_emitted_tests(
     // No @test functions: fall back to the load-only validity gate.
     if tests.is_empty() {
         match rock_host::lua_runner::run_lua_code_with_timeout(lua, timeout) {
-            Ok(out) if !out.contains("STDERR:") => return Ok(SkullOutcome::Pass { tests: 0 }),
+            Ok(out) if out.success => return Ok(SkullOutcome::Pass { tests: 0 }),
             Ok(out) => {
                 return Err(SkullFailure {
                     reason: "invalid lua emitted (skull bug)".to_string(),
-                    rendered: format!("{out}\n\n--- emitted lua (truncated) ---\n{}", truncate(lua)),
+                    rendered: format!(
+                        "{}\n\n--- emitted lua (truncated) ---\n{}",
+                        out.combined(),
+                        truncate(lua)
+                    ),
                 });
             }
             Err(e) => {
@@ -554,8 +558,11 @@ fn run_emitted_tests(
 
     // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
     let program = format!("{lua}{}", build_test_harness(tests));
+    // NOTE: a non-zero status is NOT decided here. A `@test` that fails an
+    // assertion legitimately dies non-zero, and the markers below distinguish an
+    // individual test failing from the module never loading.
     let stdout = match rock_host::lua_runner::run_lua_code_with_timeout(&program, timeout) {
-        Ok(s) => s,
+        Ok(run) => run.combined(),
         Err(e) => {
             return Err(SkullFailure {
                 reason: "test run errored (skull bug)".to_string(),
@@ -1072,8 +1079,17 @@ pub fn skull_run(path: &str) -> Result<()> {
         lua
     };
     match rock_host::lua_runner::run_lua_code(&program) {
-        Ok(output) => {
-            print!("{}", output);
+        Ok(run) => {
+            print!("{}", run.stdout);
+            if !run.stderr.is_empty() {
+                eprint!("{}", run.stderr);
+            }
+            // The program's own exit status is the answer. Printing a crash and
+            // returning Ok is how `rock run` used to exit 0 on a dead program.
+            if !run.success {
+                log::error!(target: "SKULL", "program exited with a runtime error");
+                std::process::exit(1);
+            }
             Ok(())
         }
         Err(e) => {
@@ -1539,8 +1555,17 @@ fn skull_run_project(dir: &str) -> Result<()> {
         lua
     };
     match rock_host::lua_runner::run_lua_code(&program) {
-        Ok(output) => {
-            print!("{}", output);
+        Ok(run) => {
+            print!("{}", run.stdout);
+            if !run.stderr.is_empty() {
+                eprint!("{}", run.stderr);
+            }
+            // The program's own exit status is the answer. Printing a crash and
+            // returning Ok is how `rock run` used to exit 0 on a dead program.
+            if !run.success {
+                log::error!(target: "SKULL", "program exited with a runtime error");
+                std::process::exit(1);
+            }
             Ok(())
         }
         Err(e) => {
@@ -1786,8 +1811,8 @@ impl ExecOutcome {
 fn exec_lua(program: &str) -> ExecOutcome {
     let timeout = Some(Duration::from_secs(15));
     match rock_host::lua_runner::run_lua_code_with_timeout(program, timeout) {
-        Ok(out) if out.contains("STDERR:") => ExecOutcome::Errored(out),
-        Ok(out) => ExecOutcome::Output(out),
+        Ok(out) if !out.success => ExecOutcome::Errored(out.combined()),
+        Ok(out) => ExecOutcome::Output(out.combined()),
         Err(e) => ExecOutcome::Errored(format!("lua runner failed: {e}")),
     }
 }

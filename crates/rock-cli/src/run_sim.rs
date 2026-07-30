@@ -220,6 +220,18 @@ fn entry_passed(summary: &SimSummary) -> bool {
         && !summary.has_failures()
 }
 
+/// The word printed in a sim's verdict line. Derived from [`entry_passed`] so the
+/// human-facing report and the process exit status can never disagree -- this
+/// used to be computed from `has_failures()` alone, which printed `PASS` for a
+/// sim that aborted mid-body (an abort fails no expect).
+fn verdict_word(summary: &SimSummary) -> &'static str {
+    if entry_passed(summary) {
+        "PASS"
+    } else {
+        "FAIL"
+    }
+}
+
 /// Run a specific list of named sims (the `rock sim <project> a b c` form).
 /// A single name delegates to `do_run_sim_opts` and streams full per-expect
 /// detail. Multiple names run concise: no live log, just each sim's verdict
@@ -1237,9 +1249,17 @@ impl SimSummary {
             }
         }
         let total = self.expects_ok + self.expects_fail.len();
-        let status = if self.has_failures() { "FAIL" } else { "PASS" };
+        // The PRINTED verdict must come from the same predicate as the real
+        // outcome. Computing it from `has_failures()` alone printed `PASS` for a
+        // sim that had aborted mid-body -- a C++ assert in imgui produced
+        // `PASS (0/0 expects passed)` next to the crash -- because an abort
+        // fails no expect. The exit status was already correct (`entry_passed`
+        // requires `saw_stop`), so only the human-facing line lied, which is
+        // worse than either being wrong alone: a log reader and a shell `&&`
+        // disagreed.
+        let status = verdict_word(self);
         let stop_note = if !self.saw_stop {
-            " (no stop_sim() observed -- sim may have aborted early)"
+            " (no stop_sim() observed -- sim aborted early)"
         } else {
             ""
         };
@@ -1392,6 +1412,27 @@ mod tests {
         assert!(entry_passed(&s));
         s.expects_fail.push(SiteMessage { message: "x".into(), site: "f:1".into() });
         assert!(!entry_passed(&s));
+    }
+
+    #[test]
+    fn an_aborted_sim_prints_fail_not_pass() {
+        // The imgui docking abort: zero expects ran, none failed, and the sim
+        // never reached stop_sim(). The verdict word must follow the real
+        // outcome, not the expect tally.
+        let mut aborted = SimSummary::default();
+        assert!(!aborted.has_failures(), "an abort fails no expect -- that is the trap");
+        assert_eq!(verdict_word(&aborted), "FAIL");
+
+        aborted.saw_stop = true;
+        assert_eq!(verdict_word(&aborted), "PASS");
+
+        let mut timed_out = SimSummary { saw_stop: true, ..SimSummary::default() };
+        timed_out.timed_out = true;
+        assert_eq!(verdict_word(&timed_out), "FAIL");
+
+        let mut died = SimSummary { saw_stop: true, ..SimSummary::default() };
+        died.process_failure_code = Some(1);
+        assert_eq!(verdict_word(&died), "FAIL");
     }
 
     #[test]
