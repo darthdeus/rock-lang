@@ -5313,6 +5313,8 @@ impl Builder<'_> {
             .and_then(|t| tuple_ret_shape(self.ws, subst, t));
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
+        } else {
+            self.reject_nobox_opaque_value_return(e, func)?;
         }
         let uses_scalar_abi = fn_uses_scalar_abi_spec(self.ws, self.scx, func, subst);
         if !uses_scalar_abi {
@@ -11555,6 +11557,63 @@ impl Builder<'_> {
             self.body.expr_spans[e],
             format!(
                 "nobox value cannot cross the boxed tuple return of `{}` \
+                 (an `inline(lua)` body must opt in with `@scalar_abi` and return the leaves)",
+                callee.name
+            ),
+        ))
+    }
+
+    /// The BARE-return companion of [`Self::reject_nobox_opaque_tuple_return`].
+    /// That one covers `-> (bool, NV2)`; a plain `-> NV2` had no check in any
+    /// position, so an opaque body handing back a hand-built box compiled clean
+    /// AND PASSED -- Lua's `.field` does not distinguish a table from cdata, so
+    /// the guarantee was violated with no diagnostic. Live shape:
+    /// `stone_measure_text_vec2_for` and its `inline(js)` twin.
+    ///
+    /// Keyed on the SIGNATURE, which is transport-independent -- the JS backend
+    /// packs leaves into an array rather than multi-returning them, and this
+    /// check is correct for both.
+    fn reject_nobox_opaque_value_return(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Result<(), CompilerError> {
+        if self.scx.values_first_class {
+            return Ok(());
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        // Same authorization as the arg direction: a `@gpu_only` intrinsic's
+        // boxed return is not a real boundary (on the GPU it is a native vector,
+        // and the Lua body only `error(...)`s).
+        if crate::intrinsics::is_gpu_only(callee) {
+            return Ok(());
+        }
+        let opaque = callee.is_extern
+            || (callee.inline_body.is_some()
+                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        if !opaque {
+            return Ok(());
+        }
+        let Some(ret) = callee.return_ty else {
+            return Ok(());
+        };
+        let Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        }) = static_ty(self.ws, ret)
+        else {
+            return Ok(());
+        };
+        let Some(sid) = self.ws.struct_by_name.get(&name) else {
+            return Ok(());
+        };
+        if !self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+            return Ok(());
+        }
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "nobox value `{name}` cannot cross the boxed return of `{}` \
                  (an `inline(lua)` body must opt in with `@scalar_abi` and return the leaves)",
                 callee.name
             ),
