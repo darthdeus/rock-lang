@@ -119,18 +119,74 @@ impl Builder<'_> {
     /// the existing slot-reference path, which is CORRECT, just boxier --
     /// leaf addressing does not change storage, so the two address the same
     /// bytes and a program may mix them freely.
+    ///
+    /// Both targets. The views are `ffi.cast` pointers on luajit and TypedArrays
+    /// over one ArrayBuffer on JS, but the ADDRESSING is the same C layout either
+    /// way -- `leaf_addr_plan`'s stride and offset are already in units of each
+    /// view's own element type, so one lowering serves both.
     pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> bool {
-        // LuaJIT only. Leaf addressing IS `ffi.cast` views over the element
-        // storage; JS backs a NativeBuffer with a TypedArray and lowers element
-        // access through its own flat-slot arithmetic, which already allocates
-        // nothing. Emitting the leaf shape there would only push every buffer
-        // test into the skip histogram. The JS analogue (a TypedArray per leaf C
-        // type over one ArrayBuffer) is S6 in
-        // docs/native-buffer-leaf-addressing-plan.md.
-        if self.scx.target == bone_semantic::hir::FnBackend::Js {
-            return false;
-        }
         leaf_addr_plan(self.ws, elem).is_ok()
+    }
+
+    /// Read `buf[i].<path>`'s single primitive leaf, for a read-modify-write
+    /// (`buf[i].pos.x++`, `buf[i].w += 1`). `None` when `target` is not such a
+    /// place, or when the path is not exactly ONE leaf -- a `+=` over an
+    /// aggregate has no scalar to combine.
+    ///
+    /// JS ONLY, deliberately. Every other read/write shape is leaf-addressed on
+    /// both targets, but a read-modify-write reads a PLACE: luajit's `.ptr[i]`
+    /// is a struct reference, so `buf[i].pos.x` is a real assignable lvalue and
+    /// the ordinary field path is both correct and tighter. JS has no such
+    /// reference -- `ptr[i]` is a number -- so without this the whole element is
+    /// materialized and the write lands on a copy.
+    pub(crate) fn nb_leaf_rmw_place(
+        &mut self,
+        target: Idx<Expr>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, LeafAddr)>, CompilerError> {
+        if self.scx.target != bone_semantic::hir::FnBackend::Js {
+            return Ok(None);
+        }
+        let Expr::FieldAccess { base, field } = self.body.expr_arena[target] else {
+            return Ok(None);
+        };
+        let Some((buf, checked, elem, path)) = self.nb_leaf_field_place(base, field)? else {
+            return Ok(None);
+        };
+        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let Some(addr) = plan.into_iter().find(|a| a.path.as_str() == path) else {
+            return Ok(None);
+        };
+        Ok(Some((buf, checked, elem, addr)))
+    }
+
+    /// The load half of [`Self::nb_leaf_rmw_place`].
+    pub(crate) fn nb_leaf_load(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        addr: &LeafAddr,
+    ) -> Idx<Inst> {
+        let at = self.leaf_index(checked, addr);
+        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
+        self.emit_cur(Inst::Index { base: view, index: at, kind: ContainerKind::NativeBufferLeaf })
+    }
+
+    /// The store half of [`Self::nb_leaf_rmw_place`].
+    pub(crate) fn nb_leaf_store(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        addr: &LeafAddr,
+        value: Idx<Inst>,
+    ) {
+        let at = self.leaf_index(checked, addr);
+        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
+        self.emit_cur(Inst::StoreIndex {
+            base: view,
+            index: at,
+            value,
+            kind: ContainerKind::NativeBufferLeaf,
+        });
     }
 
     /// `buf[i]` on a leaf-addressed NativeBuffer: bounds-check the ELEMENT once,
@@ -259,7 +315,7 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.column_shape(elem)?;
-        let one_based = self.checked_column_index(vec, index);
+        let slot = self.checked_column_index(vec, index);
         // Presence leads the reads for a nullable element, which is exactly what
         // `rebuild_from_leaves` consumes it as -- the Group comes back with its
         // `present` set from the column instead of a nil compare on a box.
@@ -269,7 +325,7 @@ impl Builder<'_> {
                 let col = self.emit_cur(Inst::Field { base: vec, field: path });
                 self.emit_cur(Inst::Index {
                     base: col,
-                    index: one_based,
+                    index: slot,
                     kind: ContainerKind::VecColumn,
                 })
             })
@@ -282,11 +338,30 @@ impl Builder<'_> {
     /// (the cold column ops, which have no call expr of their own to resolve
     /// through). Rejects rather than falling back: a missing or ambiguous name
     /// means the stdlib and this lowering have drifted apart.
+    ///
+    /// Multiple decls of one name are the backend-sibling scheme, so pick the one
+    /// serving this target; only a residual tie is ambiguous.
     pub(crate) fn stdlib_funcref(&self, name: &str) -> Result<FuncRef, CompilerError> {
-        match self.ws.functions_by_name.get(&Ustr::from(name)).map(|l| l.as_slice()) {
-            Some([(module, func)]) => Ok(FuncRef { module: *module, func: *func }),
-            Some(_) => Err(gap(format!("stdlib `{name}` is ambiguous"))),
-            None => Err(gap(format!("stdlib `{name}` not found"))),
+        let Some(decls) = self.ws.functions_by_name.get(&Ustr::from(name)) else {
+            return Err(gap(format!("stdlib `{name}` not found")));
+        };
+        let serving: Vec<FuncRef> = decls
+            .iter()
+            .filter(|(module, func)| {
+                serves_target(
+                    self.ws.modules[module.index()].functions[*func].backend,
+                    self.scx.target,
+                )
+            })
+            .map(|(module, func)| FuncRef { module: *module, func: *func })
+            .collect();
+        match serving.as_slice() {
+            [one] => Ok(*one),
+            [] => Err(gap(format!(
+                "stdlib `{name}` has no body serving the {:?} backend",
+                self.scx.target
+            ))),
+            _ => Err(gap(format!("stdlib `{name}` is ambiguous"))),
         }
     }
 
@@ -677,6 +752,12 @@ impl Builder<'_> {
         let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let next = self.emit_cur(Inst::IntAdd(len, one));
+        // A column indexes the way its backend's `_data` does -- 1-based on
+        // luajit, 0-based on JS -- so the appended slot is the NEW length on one
+        // and the OLD length on the other. The read side gets this from
+        // `__vec_checked_index`, whose two implementations differ by the same
+        // one; this is the write side of that single decision.
+        let slot = if self.column_base_is_one() { next } else { len };
         self.emit_cur(Inst::StoreField {
             base: vec,
             field: Ustr::from("len"),
@@ -686,7 +767,7 @@ impl Builder<'_> {
             let col = self.emit_cur(Inst::Field { base: vec, field: path });
             self.emit_cur(Inst::StoreIndex {
                 base: col,
-                index: next,
+                index: slot,
                 value: leaf,
                 kind: ContainerKind::VecColumn,
             });
@@ -694,7 +775,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `Some((vec, one_based_index, elem))` iff `e` is `xs[i]` over a
+    /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a
     /// column-stored Vec — the shape that has no element slot to serve as a
     /// place base.
     pub(crate) fn column_index_place(
@@ -713,16 +794,16 @@ impl Builder<'_> {
             let k = self.lower_expr(index)?;
             let slot = self.call_spine("__map_col_slot_checked", vec![m, k])?;
             let data = self.map_col_data(m);
-            let one_based = self.checked_column_index(data, slot);
-            return Ok(Some((data, one_based, elem)));
+            let at = self.checked_column_index(data, slot);
+            return Ok(Some((data, at, elem)));
         }
         let Some(elem) = self.vec_column_elem_of(base) else {
             return Ok(None);
         };
         let vec = self.lower_expr(base)?;
         let i = self.lower_expr(index)?;
-        let one_based = self.checked_column_index(vec, i);
-        Ok(Some((vec, one_based, elem)))
+        let slot = self.checked_column_index(vec, i);
+        Ok(Some((vec, slot, elem)))
     }
 
     /// `xs[i].<field> = v` on a column-stored Vec: store into the column that
@@ -732,7 +813,7 @@ impl Builder<'_> {
     pub(crate) fn column_leaf_store(
         &mut self,
         vec: Idx<Inst>,
-        one_based: Idx<Inst>,
+        slot: Idx<Inst>,
         elem: ColumnElem,
         field: Ustr,
         value: Idx<Expr>,
@@ -759,7 +840,7 @@ impl Builder<'_> {
         let col = self.emit_cur(Inst::Field { base: vec, field });
         self.emit_cur(Inst::StoreIndex {
             base: col,
-            index: one_based,
+            index: slot,
             value: v,
             kind: ContainerKind::VecColumn,
         });
@@ -939,12 +1020,12 @@ impl Builder<'_> {
                 paths.len()
             )));
         }
-        let one_based = self.checked_column_index(vec, index);
+        let slot = self.checked_column_index(vec, index);
         for (path, leaf) in paths.into_iter().zip(leaves) {
             let col = self.emit_cur(Inst::Field { base: vec, field: path });
             self.emit_cur(Inst::StoreIndex {
                 base: col,
-                index: one_based,
+                index: slot,
                 value: leaf,
                 kind: ContainerKind::VecColumn,
             });
@@ -952,9 +1033,18 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// `__vec_checked_index(vec, i)` — the 1-based backing index, bounds-checked
+    /// `__vec_checked_index(vec, i)` — the backing slot index, bounds-checked
     /// against `vec.len`. One call per ELEMENT access, not per column.
     pub(crate) fn checked_column_index(&mut self, vec: Idx<Inst>, index: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::VecCheckedIndex { vec, index })
+    }
+
+    /// Whether a leaf column is 1-based on the target. It follows that backend's
+    /// `_data`: luajit's is 1-based, JS's is 0-based. JS cannot simply adopt the
+    /// 1-based form to share one rule -- leaving index 0 empty makes every column
+    /// a HOLEY array in V8, which forfeits the packed-double fast path the whole
+    /// layout is measured against (`docs/js-vec-columns-plan.md`).
+    pub(crate) fn column_base_is_one(&self) -> bool {
+        self.scx.target != bone_semantic::hir::FnBackend::Js
     }
 }

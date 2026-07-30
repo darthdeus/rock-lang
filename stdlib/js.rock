@@ -1,0 +1,154 @@
+// JS-backend bodies for stdlib functions whose luajit body lives in another
+// stdlib file.
+//
+// They are HERE rather than beside their luajit sibling because an `inline(js)`
+// fn added to a lua-emitting file pushes every `__SITE__` below it down a line,
+// and `__SITE__` is "file:line" -- so co-locating one breaks Lua byte-identity
+// for every log site under it. A whole new FILE shifts nothing.
+//
+// They are here rather than in `stone/engine/web/js_ffi.rock` -- where the first
+// few of them lived -- because that file is the web ENGINE, staged only by
+// `rock web`. A stdlib function whose JS body ships with stone has no binding in
+// a JS program that does not use stone, which is every `--backend js` test.
+// Engine-owned fns keep their siblings in `js_ffi.rock`; only stdlib-owned ones
+// belong here.
+
+// docs/field-refs-plan.md 1. A field ref IS the key on both backends, so both
+// bodies are the same indexing operation spelled twice.
+@inline inline(js) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = "return o[f];"
+
+@inline inline(js) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = "o[f] = v;"
+
+// luajit narrows through the ffi; a JS number is already the value.
+@pure @inline inline(js) fn int(value: int) -> int = "return value;"
+
+// There is no FFI pointer on JS at all, so what luajit reconstructs from a
+// `char*` is already a string here; `len` has nothing to bound.
+inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
+  return typeof ptr === "string" ? ptr : String(ptr);
+"""
+
+// `unwrap()` on a null reaches this, so a JS program with no stone in it still
+// needs a traceback.
+@inline inline(js) fn __debug_traceback() -> string = "return new Error().stack || \"\";"
+
+// Reports LUA type names, not JS ones -- the return value is compared against
+// `"table"` / `"function"` in Rock source, so the names are the contract and JS
+// is the thing being translated. An env record `{__fn, ..}` deliberately reports
+// `table`, because that is what `type()` says about luajit's
+// `setmetatable({__fn=..}, __rock_fn_mt)` -- only a CAPTURE-FREE lambda is a
+// bare function on either backend. `cdata`/`userdata`/`thread` have no JS side,
+// so a NativeBuffer `{ptr, len}` reports `table` where luajit says `cdata`.
+@inline inline(js) fn typeof(x: any) -> string = """
+  return (x === null || x === undefined) ? "nil"
+    : typeof x === "object" ? "table"
+    : typeof x;
+"""
+
+// The `__ty` string tag is the lone type marker on BOTH backends (structs,
+// enums, Vec and coroutine handles all carry it), so this is the same field
+// read spelled twice. `null` is `typeof "object"` in JS, hence the extra guard
+// the Lua body does not need.
+@nomangle inline(js) fn __rock_get_type(obj: any) -> string? = """
+  if (obj === null || typeof obj !== "object") return null;
+  return obj.__ty === undefined ? null : obj.__ty;
+"""
+
+// Column-storage boundary primitives (`docs/js-vec-columns-plan.md` stage B).
+// Their luajit siblings are in `unified.rock`; each is the same operation over a
+// 0-based JS array instead of a 1-based Lua table.
+
+// `len` rather than the array's own length: a column reserved past `len` holds
+// stale slots, and shifting those would carry them into the live range.
+@nomangle inline(js) fn __rock_col_insert(col: any, lua_index: int, len: int, value: any) = """
+  for (var i = len; i >= lua_index; i--) col[i] = col[i - 1];
+  col[lua_index - 1] = value;
+"""
+
+@nomangle inline(js) fn __rock_col_copy(col: any, len: int) -> any = "return col.slice(0, len);"
+
+@nomangle inline(js) fn __rock_col_capacity(reserved: int, physical: int) -> int = """
+  return reserved > physical ? reserved : physical;
+"""
+
+@nomangle inline(js) fn __rock_is_column_vec(v: any) -> bool = """
+  if (v === null || typeof v !== "object" || v.__ty !== "Vec") return false;
+  var h = v["@vec"];
+  return h !== null && typeof h === "object" && h.repr === "columns";
+"""
+
+@nomangle inline(js) fn __rock_col_paths(vec: any) -> any = """
+  var names = [];
+  for (var k in vec) {
+    if (Object.prototype.hasOwnProperty.call(vec, k) &&
+        k !== "len" && k !== "__ty" && k !== "@vec" && Array.isArray(vec[k])) {
+      names.push(k);
+    }
+  }
+  names.sort();
+  return names;
+"""
+
+// luajit walks `__ROCK_TYPE_TABLE` here; JS dispatches to the per-type rebuilder
+// the emitter wrote for this element (`build_col_mat_defs`). A missing entry is
+// a compiler bug, not a shape to guess at, so it throws.
+@nomangle inline(js) fn __rock_materialize_column_element(vec: any, index: int) -> any = """
+  var h = vec["@vec"];
+  if (h === null || typeof h !== "object" || h.repr !== "columns") {
+    throw new Error("expected column Vec");
+  }
+  var mat = __rock_col_mat[h.elem];
+  if (mat === undefined) {
+    throw new Error("no column materializer emitted for element type " + h.elem);
+  }
+  return mat(vec, index);
+"""
+
+@nomangle inline(js) fn __rock_vec_column_elements(vec: any) -> any = """
+  var out = [];
+  for (var i = 0; i < (vec.len || 0); i++) out.push(__rock_materialize_column_element(vec, i));
+  return out;
+"""
+
+@nomangle inline(js) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+  var n = vec.len || 0;
+  var order = [], elements = [];
+  for (var i = 0; i < n; i++) {
+    order.push(i);
+    elements.push(__rock_materialize_column_element(vec, i));
+  }
+  order.sort(function(a, b) {
+    var ka = __rock_call(key_fn, elements[a]), kb = __rock_call(key_fn, elements[b]);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+  var paths = __rock_col_paths(vec);
+  for (var p = 0; p < paths.length; p++) {
+    var col = vec[paths[p]], tmp = [];
+    for (var i = 0; i < n; i++) tmp.push(col[order[i]]);
+    for (var i = 0; i < n; i++) col[i] = tmp[i];
+  }
+"""
+
+// One bounds check per ELEMENT access, ahead of the leaf reads/writes that
+// follow (`docs/native-buffer-leaf-addressing-plan.md` S5). The luajit sibling
+// is in `unified.rock`; the message shape follows it.
+@nomangle inline(js) fn __nb_checked_index(buf: any, i: int) -> int = """
+  if (i < 0 || i >= buf.len) {
+    throw new Error("NativeBuffer index out of bounds: index " + i +
+                    " is outside [0, " + buf.len + ")");
+  }
+  return i;
+"""
+
+// Reseating `.ptr` by hand leaves every typed leaf view over the OLD storage.
+// The luajit sibling re-casts from `__ROCK_LEAF_VIEWS`; a JS view already knows
+// its own type, so re-making it through its constructor cannot drift from the
+// emitter's choice. Same UNCHECKED contract as luajit: reseat by hand, call this.
+@nomangle inline(js) fn __nb_refresh_views(buf: any) = """
+  for (var k in buf) {
+    if (Object.prototype.hasOwnProperty.call(buf, k) && k !== "ptr" &&
+        ArrayBuffer.isView(buf[k])) {
+      buf[k] = new buf[k].constructor(buf.ptr.buffer, buf.ptr.byteOffset);
+    }
+  }
+"""

@@ -102,19 +102,6 @@ function __nb_checked_set(buf, i, v) {
   }
   buf.ptr[i] = v;
 }
-function __nbv_check(buf, i) {
-  if (i < 0 || i >= buf.len) {
-    throw new Error(\"NativeBuffer index out of bounds: index \" + i + \" is outside [0, \" + buf.len + \")\");
-  }
-}
-function __nbv_get(buf, i, k, off) {
-  __nbv_check(buf, i);
-  return buf.ptr[i * k + off];
-}
-function __nbv_set(buf, i, k, off, v) {
-  __nbv_check(buf, i);
-  buf.ptr[i * k + off] = v;
-}
 ";
 
 /// JS shims for the checked Vec indexing helpers codegen emits
@@ -131,6 +118,15 @@ function __vec_checked_get(vec, i) {
 function __vec_checked_set(vec, i, v) {
   if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
   vec._data[i] = v;
+}
+// Column storage checks the element index ONCE, then every per-leaf read/write
+// indexes its column raw. Returns `i` where the luajit sibling returns `i + 1`
+// (`stdlib/unified.rock`): a column indexes the way `_data` does on its own
+// backend, and JS `_data` is 0-based. This is the only place that base
+// difference lives.
+function __vec_checked_index(vec, i) {
+  if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
+  return i;
 }
 // `Vec.sort(key_fn)`: the stdlib inline(lua) is `table.sort(_data, |a,b| key(a) <
 // key(b))`. Sort the logical `0..len` slice, then write back. `key_fn` is a fn
@@ -165,6 +161,13 @@ pub const JS_TABLE_PRIM: &str = r#"
 function __table_get(t, k) { return (t instanceof Map) ? t.get(k) : t[k]; }
 function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v; }
 function __table_unset(t, k) { if (t instanceof Map) t.delete(k); else delete t[k]; }
+// Lua `#t`. Defined for a Map and for a hole-free array; a plain object has no
+// Lua sequence length, so throw rather than hand back a 0 that reads as empty.
+function __table_len(t) {
+  if (t instanceof Map) return t.size;
+  if (Array.isArray(t)) return t.length;
+  throw new Error("table_len of a non-sequence");
+}
 "#;
 
 /// Map iteration (`Inst::MapNext`, the Lua `k, v = next(t, k)` protocol). JS has
@@ -311,10 +314,64 @@ function __rock_make_enum(variant, ty, kv) {
 /// only checks that inspect RUNS; the byte-checked cases are the brace-free
 /// scalars (`"str"`, numbers, bools). Compact/multiline threshold + key sort
 /// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
+///
+/// A struct renders through `__rock_inspect_ty[<__ty>]`, a per-type function
+/// `build_inspect_ty_defs` emits for every reachable struct: it supplies the
+/// DECLARED fields, because a null field is an absent key and a key walk alone
+/// therefore under-reports the shape, and an `embed` field is stored as flat
+/// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's
+/// `_G.__ROCK_TYPE_TABLE` lookup replaced by compile-time-emitted dispatch
+/// (`docs/runtime-globals-audit.md` S4.2b) -- no universal type table on JS.
 pub const JS_INSPECT_RUNTIME: &str = r#"
+var __rock_inspect_ty = {};
+var __rock_col_mat = {};
+// A column-stored Vec has no `_data`: one plain array per leaf, sharing the
+// Vec's `len`. Rendering its own keys would show the PHYSICAL layout (`@vec`,
+// `x = { 1 }`), so materialize each element first -- luajit's
+// `__rock_vec_column_elements`, over emitted per-type rebuilders instead of a
+// runtime type table.
+function __rock_col_header(t) {
+  var h = t["@vec"];
+  return (h !== null && typeof h === "object" && h.repr === "columns") ? h : null;
+}
 function __rock_inspect_key_lt(a, b) {
   var sa = lua_tostring(a), sb = lua_tostring(b);
   return sa < sb ? -1 : (sa > sb ? 1 : 0);
+}
+// Reference-struct tier: declared fields (already sorted), plus any own key the
+// declaration does not name -- minus the compiler-minted PHYSICAL slots, which
+// are exactly the dotted keys (`embed` leaves, a flattened enum's `.#`/`.0`).
+function __rock_inspect_struct(header, t, declared, indent, path, visited, precision) {
+  var pairs = declared.slice();
+  var seen = {};
+  for (var i = 0; i < declared.length; i++) seen["$" + declared[i][0]] = true;
+  var extra = false;
+  for (var k in t) {
+    if (Object.prototype.hasOwnProperty.call(t, k) && k !== "__ty" && k !== "__variant" &&
+        seen["$" + k] !== true && k.indexOf(".") === -1) {
+      pairs.push([k, t[k]]);
+      extra = true;
+    }
+  }
+  if (extra) pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
+  if (pairs.length <= 2) {
+    var cparts = pairs.map(function(kv) {
+      return kv[0] + " = " + __rock_inspect_value(kv[1], indent, path + "." + kv[0], visited, precision);
+    });
+    return header + " { " + cparts.join(", ") + " }";
+  }
+  var lines = pairs.map(function(kv) {
+    return indent + "  " + kv[0] + " = " + __rock_inspect_value(kv[1], indent + "  ", path + "." + kv[0], visited, precision);
+  });
+  return header + " {\n" + lines.join(",\n") + "\n" + indent + "}";
+}
+// FFI-clean `value` struct tier: luajit renders those from `__ROCK_C_STRUCT`
+// (a cdata, not a table), which is a different renderer -- `: ` separators,
+// declaration order, always one line, children through the top-level `inspect`.
+function __rock_inspect_value_struct(header, pairs) {
+  if (pairs.length === 0) return header + " { }";
+  var parts = pairs.map(function(kv) { return kv[0] + ": " + inspect(kv[1]); });
+  return header + " { " + parts.join(", ") + " }";
 }
 function __rock_inspect_value(v, indent, path, visited, precision) {
   if (v === null || v === undefined) return "nil";
@@ -338,14 +395,26 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
     visited.set(t, path);
   }
   var type_name = t.__ty;
-  if (type_name === "Vec" && t._data && t.len !== undefined) {
+  var colh = type_name === "Vec" && t.len !== undefined ? __rock_col_header(t) : null;
+  if (type_name === "Vec" && t.len !== undefined && (t._data || colh)) {
+    var mat = colh ? __rock_col_mat[colh.elem] : null;
+    if (colh && mat === undefined) {
+      throw new Error("no column materializer emitted for element type " + colh.elem);
+    }
     var vparts = [];
     for (var i = 0; i < t.len; i++) {
-      vparts.push(__rock_inspect_value(t._data[i], indent, path + "[" + i + "]", visited, precision));
+      var elem = colh ? mat(t, i) : t._data[i];
+      vparts.push(__rock_inspect_value(elem, indent, path + "[" + i + "]", visited, precision));
     }
     if (visited) visited.delete(t);
     if (vparts.length === 0) return "Vec { }";
     return "Vec { " + vparts.join(", ") + " }";
+  }
+  if (type_name !== undefined && t.__variant === undefined &&
+      __rock_inspect_ty[type_name] !== undefined) {
+    var sres = __rock_inspect_ty[type_name](t, indent, path, visited, precision);
+    if (visited) visited.delete(t);
+    return sres;
   }
   if (Array.isArray(t)) {
     if (visited) visited.delete(t);
@@ -363,7 +432,7 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   } else {
     for (var k in t) {
       if (Object.prototype.hasOwnProperty.call(t, k) &&
-          k !== "__variant" && k !== "__ty") {
+          k !== "__variant" && k !== "__ty" && k.indexOf(".") === -1) {
         pairs.push([k, t[k]]);
       }
     }
@@ -658,7 +727,6 @@ function __sw_keycode_to_string(kc) {
 }
 
 // --- lifecycle ---
-function stone_init() { return true; }
 // Lazily create the AudioContext + sfx/music gain graph. Returns null (and
 // pins `unavailable`) in a no-AudioContext env so every audio fn stays silent.
 function __sw_audio_ctx() {
@@ -698,8 +766,6 @@ function __sw_audio_decode(id, path) {
   return id;
 }
 function stone_audio_init() { __sw_audio_ctx(); return true; }
-function stone_audio_quit() {}
-function stone_teardown() {}
 function stone_quit() { __SW.quitReq = true; }
 function stone_quit_requested() { return __SW.quitReq; }
 function stone_is_initialized() { return __SW.initialized; }
@@ -764,7 +830,6 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
   __SW.initialized = true;
   return { __sw_window: true };
 }
-function stone_destroy_window(w) {}
 
 // --- events / input ---
 function stone_poll_event(ev) {
@@ -780,7 +845,6 @@ function stone_get_global_mouse_position(px, py) { px[0] = Math.round(__SW.mouse
 function stone_is_key_down(key) { return !!__SW.keysDown[key]; }
 function stone_is_mouse_button_down(button) { return !!__SW.mouseButtons[button]; }
 // No separate scancode state on web; treat a pressed key-string equivalently.
-function stone_is_key_pressed(scancode) { return false; }
 
 // --- window / time ---
 function stone_get_window_size(pw, ph) { pw[0] = __SW.logicalW; ph[0] = __SW.logicalH; }
@@ -789,17 +853,8 @@ function stone_get_drawable_size(pw, ph) {
 }
 function stone_get_dpi_scale() { return __SW.dpr; }
 function stone_take_window_resized() { var r = __SW.resized; __SW.resized = false; return r; }
-function stone_take_window_moved() { return false; }
-function stone_take_window_display_changed() { return false; }
-function stone_save_window_geometry(title) {}
-function stone_get_time() { return (typeof performance !== "undefined" ? performance.now() : Date.now()) / 1000; }
-function stone_swap_window(w) {} // browser presents at rAF return
 function stone_gl_finish() { if (__SW.gl && __SW.gl.finish) __SW.gl.finish(); }
 function stone_gl_flush() { if (__SW.gl && __SW.gl.flush) __SW.gl.flush(); }
-function stone_vsync_active() { return false; } // present_sync stays a no-op; rAF is the sync
-function stone_set_vsync(v) {}
-function stone_force_vsync_off(v) {}
-function stone_reset_frame_stats() {}
 function stone_set_default_texture_filter(f) { __SW.texFilter = f; }
 
 // --- sprite system / mesh draw ---
@@ -812,7 +867,6 @@ function stone_sprite_init() {
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   return true;
 }
-function stone_sprite_shutdown() {}
 
 // The 10-float/40B vertex layout, lockstep with sprite.rs:582-586:
 // 0 pos vec2 @0B, 1 uv vec2 @8B, 2 color vec4 @16B, 3 pivot_y float @32B,
@@ -966,19 +1020,6 @@ function stone_unload_image(h) {
   delete __SW.imageSizes[h];
   for (var p in __SW.imageHandles) { if (__SW.imageHandles[p] === h) delete __SW.imageHandles[p]; }
 }
-function stone_reload_image(h, path) { return false; }
-function stone_create_image_data(w, h) { return 0; }
-function stone_destroy_image_data(h) {}
-function stone_image_data_clone(src) { return 0; }
-function stone_image_data_copy_into(dst, src) { return false; }
-function stone_image_data_set_pixel(h, x, y, r, g, b, a) {}
-function stone_image_data_get_pixel(h, x, y, pr, pg, pb, pa) { pr[0] = 0; pg[0] = 0; pb[0] = 0; pa[0] = 0; }
-function stone_image_data_fill_rgba(h, rgba, n) {}
-function stone_image_data_load_png(path) { return 0; }
-function stone_image_data_save_png(h, path) { return false; }
-function stone_image_update_from_data(ih, dh) { return false; }
-function stone_new_image_from_data(dh, fm) { return 0; }
-function stone_save_png_rgba8(path, w, h, pixels) { return false; }
 
 // --- canvases (FBOs) ---
 function stone_create_canvas(w, h, format, depth) {
@@ -1458,10 +1499,6 @@ function stone_measure_text_js(fontId, text, scale) {
   if (lines > 1) h = (lines - 1) * f.em * Math.abs(scale) * 1.2 + f.maxH * Math.abs(scale);
   return [w * scale, h];
 }
-function stone_measure_text_for(fontId, text, scale, ow, oh) {
-  var r = stone_measure_text_js(fontId, text, scale);
-  ow[0] = r[0]; oh[0] = r[1];
-}
 // Baseline = max TOP-based bearing_y over the text's glyphs, * |scale|.
 function stone_get_text_baseline_for(fontId, text, scale) {
   var f = __sw_font(fontId);
@@ -1474,8 +1511,6 @@ function stone_get_text_baseline_for(fontId, text, scale) {
   }
   return b * Math.abs(scale);
 }
-function stone_text_init() { return true; }
-function stone_text_shutdown() {}
 
 // --- filesystem (registry-backed reads, in-memory writes, dir ops no-op) ---
 var __ROCK_WEB_FILES = (globalThis.__ROCK_WEB_FILES = globalThis.__ROCK_WEB_FILES || {});
@@ -1505,21 +1540,16 @@ function __sw_file_get(path) {
   return undefined;
 }
 function stone_file_exists(path) { return __sw_file_get(path) !== undefined; }
-function stone_is_directory(path) { return false; }
 function stone_file_size(path) {
   var c = __sw_file_get(path);
   return c === undefined ? -1 : (c.byteLength !== undefined ? c.byteLength : c.length);
 }
-function stone_file_mtime(path) { return 0; }
-function stone_file_modtime(path) { return 0; }
-function stone_create_directory(path) { return true; }
 function stone_copy_file(src, dst) {
   var c = __sw_file_get(src);
   if (c === undefined) return false;
   __ROCK_WEB_FILES[dst] = c;
   return true;
 }
-function stone_copy_recursive(src, dst) { return false; }
 function stone_rename(src, dst) {
   var c = __sw_file_get(src);
   if (c === undefined) return false;
@@ -1528,10 +1558,6 @@ function stone_rename(src, dst) {
   return true;
 }
 function stone_remove_file(path) { delete __ROCK_WEB_FILES[path]; return true; }
-function stone_remove_dir(path) { return false; }
-function stone_file_sync(path) { return true; }
-function stone_watch_asset(path) {}
-function stone_poll_changed_assets() { return 0; }
 
 // --- subprocess (chess UCI): no child processes in a browser; the spawn is a
 // loud stub returning 0 so sf_start drops to the built-in engine. ---
@@ -1539,9 +1565,6 @@ function stone_proc_spawn(path) {
   __sw_log_once("stone_proc_spawn: subprocess unavailable on web (" + path + "); falling back to the built-in engine");
   return 0;
 }
-function stone_proc_send(h, line) {}
-function stone_proc_alive(h) { return false; }
-function stone_proc_kill(h) {}
 function __sw_bytes_to_string(b) {
   var u8 = b instanceof Uint8Array ? b : new Uint8Array(b);
   var s = "";
@@ -1554,10 +1577,7 @@ function __sw_bytes_to_string(b) {
 var __sw_cameraActive = false;
 function stone_is_camera_active() { return __sw_cameraActive; }
 function stone_current_shader_bound() { return __SW.curShader !== 0; }
-function stone_gl_error_count() { return 0; }
-function stone_get_camera_scale() { return 1; }
 function stone_sprite_begin(shader) { if (shader) stone_set_shader(shader); }
-function stone_sprite_end() {}
 function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
   __sw_log_once("stone_sprite_draw: immediate sprite path not implemented on web yet");
 }
@@ -1624,7 +1644,6 @@ function stone_load_sound(path) {
   if (!ctx) return 0;
   return __sw_audio_decode(__SW.audio.nextSound++, path);
 }
-function stone_load_music(path) { return stone_load_sound(path); }
 function stone_reload_sound(h, path) {
   if (!__sw_audio_ctx()) return false;
   return __sw_audio_decode(h, path) !== 0;
@@ -1657,7 +1676,6 @@ function stone_stop_music() {
 function stone_set_music_volume(v) { var A = __SW.audio; A.musicVol = v; if (A.musicGain) A.musicGain.gain.value = v; }
 function stone_set_sound_volume(v) { var A = __SW.audio; A.sfxVol = v; if (A.sfxGain) A.sfxGain.gain.value = v; }
 // No convolver graph on web v1 (zero game callers); silent stub.
-function stone_set_reverb(e, rs, d, w, dr, wi) {}
 
 // --- uniform introspection / gpu timer / delay / cursors / retained mesh ---
 function stone_shader_uniform_count(h) {
@@ -1679,22 +1697,10 @@ function __sw_shader_uniform_name(h, i) {
   // strip the GLSL array suffix ([0]) like the native side does
   return u ? u.name.replace(/\[0\]$/, "") : "";
 }
-function stone_gpu_timer_begin() {}
-function stone_gpu_timer_end() {}
-function stone_gpu_timer_poll_ms() { return -2; }
-function stone_delay(ms) {} // cannot block the browser main thread
-function stone_show_cursor(show) {}
-function stone_is_cursor_visible() { return true; }
-function stone_set_cursor(id) {}
-function stone_reset_cursor() {}
-function stone_free_cursor(id) {}
 function stone_mesh_create(mode, verts, vc, stride, sizes, ac) {
   __sw_log_once("stone_mesh_create: retained instanced mesh not implemented on web yet");
   return 0;
 }
-function stone_mesh_set_instances(h, data, count, stride, sizes, ac) {}
-function stone_mesh_draw(h, tex, count) {}
-function stone_mesh_free(h) {}
 
 // Immediate polygon (shapes.rs port): fan-triangulate into the 10-float mesh
 // format and submit through stone_draw_mesh under the caller's bound program
@@ -1756,9 +1762,6 @@ function stone_set_draw_buffers(count) {
   gl.drawBuffers(n === 2 ? [gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1] : [gl.COLOR_ATTACHMENT0]);
   if (c) c.drawBufs = n;
 }
-function stone_get_canvas_fbo(h) { return h; }
-function stone_canvas_save_png(h, path) { return false; }
-function stone_canvas_read_rgba8(h, out, cap) { return 0; }
 
 // The (format, type, view, convert) readPixels shape for one pixel of canvas
 // `c`: R32I ids read as RGBA_INTEGER/INT (exact in f32 -- ids are far below
@@ -1872,10 +1875,6 @@ function stone_pixel_readback_consume(id) {
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   return s.readyFmt === 1 ? view[0] / 255.0 : view[0];
 }
-function stone_pixel_readback_read(id, ch, x, y) {
-  stone_pixel_readback_submit(id, ch, x, y);
-  return stone_pixel_readback_consume(id);
-}
 
 // --- window management (fixed canvas on web) ---
 // Element.requestFullscreen() needs a transient user activation, which a
@@ -1883,14 +1882,6 @@ function stone_pixel_readback_read(id, ch, x, y) {
 function stone_set_fullscreen(mode) {
   if (mode) { __sw_log_once("stone_set_fullscreen(" + mode + "): not supported on web; needs a user gesture to call requestFullscreen"); }
 }
-function stone_set_window_title(w, title) { if (typeof document !== "undefined") document.title = title; }
-function stone_set_window_position(x, y) {}
-function stone_get_window_position(px, py) { px[0] = 0; py[0] = 0; }
-function stone_set_window_size(w, h) {}
-function stone_set_window_display(i) {}
-function stone_set_display_mode(w, h) {}
-function stone_get_window_borders(pt, pl, pb, pr) { pt[0] = 0; pl[0] = 0; pb[0] = 0; pr[0] = 0; }
-function stone_get_display_count() { return 1; }
 
 // --- boot: preload assets, register fonts, then main (spec boot step 2) ---
 // __ROCK_WEB_PRELOAD is emitted by the `rock web` assembler. Each entry is

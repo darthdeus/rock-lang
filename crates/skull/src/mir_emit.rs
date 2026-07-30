@@ -1081,45 +1081,6 @@ fn is_stdlib_module_file(file: &str) -> bool {
     file.starts_with("<bone-stdlib:") || file.starts_with("<stdlib")
 }
 
-/// Every call in `mf` that the lowerer gave a SPECIALIZED instantiation and the
-/// inliner did not splice. Each needs a standalone specialized copy of the
-/// callee emitted, which the call already targets by name (`spec_fn_name`) -- its
-/// value args are splatted to leaves, so the shared generic body, which takes `T`
-/// as one boxed slot, could not serve it.
-///
-/// This is what replaced rejecting those calls. A rejection was the honest
-/// response while nothing could serve them, and it caught real miscompiles, but a
-/// standalone copy serves them in EVERY context: it needs no inliner, so the
-/// coroutine and global-init bodies -- neither of which runs one -- are reached
-/// the same way as any other.
-///
-/// Must run on every separately-emitted body, not just the top-level one: a
-/// nested `fn` and a `co fn`'s state machine are their own emitted callables, and
-/// leaving them unchecked made a missing splice silent (the nested fn died at
-/// runtime on a nil `_data`; the `co fn` did not even do that -- `__resume`'s
-/// pcall parked the error in `s.__error` and returned nil, so the caller read an
-/// exhausted coroutine and computed a wrong answer).
-fn collect_residual_spec_bindings(
-    mf: &skull_mir::mir::MirFunc,
-    out: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
-) {
-    // REACHABLE blocks only, as the rule has always been stated: a hoisted lambda
-    // body is a full arena clone of its parent that differs only in `entry`, so it
-    // carries the parent's unreachable blocks and their bindings with it. Judging
-    // those would specialize for a call the body does not contain.
-    for bid in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
-        for &iid in &mf.blocks[bid].insts {
-            let Some(key) = mf.spec_bindings.get(&iid) else { continue };
-            let fref = match &mf.insts[iid] {
-                skull_mir::mir::Inst::Call { func, .. }
-                | skull_mir::mir::Inst::CallMulti { func, .. } => *func,
-                _ => continue,
-            };
-            out.push((fref, key.clone()));
-        }
-    }
-}
-
 /// Emit one top-level Lua function per distinct `(callee, instantiation)` a body
 /// asked for, under the name its call sites already target (`spec_fn_name`).
 ///
@@ -1382,7 +1343,7 @@ fn validate_emitted_body(
     mf: &MirFunc,
     specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
 ) -> Result<(), BodyRejection> {
-    collect_residual_spec_bindings(mf, specs);
+    skull_mir::reach::spec_bound_calls(mf, specs);
     let mut acc = BodyRejection::default();
     if let Err(r) = validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap) {
         acc.absorb(r);

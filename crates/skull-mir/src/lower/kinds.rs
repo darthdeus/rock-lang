@@ -120,7 +120,9 @@ impl Builder<'_> {
         if nullable && !is_nobox_nominal(self.ws, en) {
             return None;
         }
-        vec_column_elem(self.ws, en, nullable).map(|name| ColumnElem { name, nullable })
+        vec_column_elem(self.ws, en, nullable)
+            .filter(|&name| columns_available(self.ws, self.scx.target, name))
+            .map(|name| ColumnElem { name, nullable })
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the

@@ -742,6 +742,13 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let cur = self.nb_leaf_load(buf, checked, &addr);
+                    let rv = self.lower_expr(value)?;
+                    let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                    self.nb_leaf_store(buf, checked, &addr, new_v);
+                    return Ok(());
+                }
                 let (pbase, key) = self.physical_field(base, field);
                 let b = self.lower_place_base(pbase)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field: key });
@@ -866,6 +873,12 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let old = self.nb_leaf_load(buf, checked, &addr);
+                    let new = bump(self, old);
+                    self.nb_leaf_store(buf, checked, &addr, new);
+                    return Ok(if postfix { old } else { new });
+                }
                 let (pbase, key) = self.physical_field(base, field);
                 let b = self.lower_place_base(pbase)?;
                 let old = self.emit_cur(Inst::Field { base: b, field: key });
@@ -921,12 +934,14 @@ impl Builder<'_> {
                     argv.push(self.lower_expr(a)?);
                 }
                 // The instantiation key travels through `?.` like it does through a
-                // plain call: a column-stored element cannot be served by the shared
-                // generic body, which reads a `_data` this storage does not have.
+                // plain call: a storage the shared generic body cannot serve --
+                // a column-stored element, or a leaf-addressed buffer element on
+                // JS -- keeps its spec binding.
                 let key = self
                     .call_spec(e, func)
                     .filter(|(k, _)| {
-                        !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)
+                        !self.in_unspliced_ctx
+                            || spec_key_has_target_storage(self.ws, k, self.scx.target)
                     })
                     .map(|(k, _)| k);
                 // A tuple-returning method splats N values; capture + pack into

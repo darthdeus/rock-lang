@@ -308,6 +308,20 @@ pub fn leaf_addr_plan(ws: &Workspace, elem: Ustr) -> Result<Vec<LeafAddr>, Strin
         .collect()
 }
 
+/// `sizeof(elem)` as LuaJIT lays it out -- the per-element byte stride every
+/// leaf view is strided against. The JS backend sizes its ArrayBuffer with it,
+/// so the two backends' storage is the same bytes in the same places.
+pub fn value_leaf_size(ws: &Workspace, elem: Ustr) -> Result<usize, String> {
+    value_leaf_layout_checked(ws, elem).map(|(_, size, _)| size)
+}
+
+/// The C type a leaf VIEW field carries -- the inverse of [`leaf_view_field`].
+/// The JS emitter needs it to pick the TypedArray and to know a `bool` view
+/// stores 0/1 where the language wants `true`/`false`.
+pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
+    LEAF_VIEWS.iter().find(|(_, f, _)| *f == field).map(|(t, ..)| *t)
+}
+
 /// The distinct leaf view C types of `elem`, in first-use order -- the views a
 /// buffer of `elem` must carry.
 pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, String> {
@@ -969,7 +983,7 @@ pub fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
 }
 
 /// Whether `name` is a `nobox` value struct.
-pub(crate) fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
+pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
@@ -1150,8 +1164,9 @@ impl ReifiedType {
     }
 }
 
-/// Whether any generic in `key` binds a column-eligible element type -- i.e.
-/// whether specializing is a CORRECTNESS requirement rather than an optimization.
+/// Whether any generic in `key` binds a type whose STORAGE the shared generic
+/// body cannot serve -- i.e. whether specializing is a CORRECTNESS requirement
+/// rather than an optimization.
 ///
 /// In a context the inliner never enters, an ordinary call simply forgoes the
 /// scalar ABI (`in_unspliced_ctx`) because the shared generic body still serves a
@@ -1160,18 +1175,48 @@ impl ReifiedType {
 /// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
 /// spec binding exactly when the element is column-stored, and the post-emit
 /// validator turns that into a rejection instead of a miscompile.
-pub(crate) fn spec_key_has_column_elem(ws: &Workspace, key: &SpecKey) -> bool {
-    key.iter()
-        .flatten()
-        // Either flavour counts: the question is whether the shared boxed body
-        // would read a `_data` the storage does not have, and a nullable element
-        // is column-stored on exactly the same terms.
-        .any(|ty| {
-            ty.any_nominal(&|name| {
-                vec_column_elem(ws, name, false).is_some()
-                    || vec_column_elem(ws, name, true).is_some()
-            })
+///
+/// Two storage forms qualify, and the key cannot tell which position the type is
+/// used in -- so it over-approximates, which costs an extra specialized copy and
+/// can never cost correctness:
+///
+/// - a column-stored `Vec` element, where the shared body reads a missing `_data`
+/// - on JS ONLY, a leaf-addressed `NativeBuffer` element. luajit's `.ptr` is a
+///   `T*`, so `p[i]` yields an element reference and the shared body is right;
+///   JS backs the buffer with a TypedArray, so `ptr[i]` is a NUMBER and a whole
+///   element read from an opaque `T` silently returns a leaf. That is a
+///   miscompile, not a slowdown, so it does not wait for an annotation.
+pub(crate) fn spec_key_has_target_storage(
+    ws: &Workspace,
+    key: &SpecKey,
+    target: bone_semantic::hir::FnBackend,
+) -> bool {
+    let js = target == bone_semantic::hir::FnBackend::Js;
+    key.iter().flatten().any(|ty| {
+        ty.any_nominal(&|name| {
+            // Either flavour counts: the question is whether the shared boxed
+            // body would read a `_data` the storage does not have, and a
+            // nullable element is column-stored on exactly the same terms.
+            ((vec_column_elem(ws, name, false).is_some()
+                || vec_column_elem(ws, name, true).is_some())
+                && columns_available(ws, target, name))
+                || (js && leaf_addr_plan(ws, name).is_ok())
         })
+    })
+}
+
+/// Whether `[elem]` takes column storage when lowering for `target`.
+///
+/// Every target now serves columns, so this is unconditional. It survives as a
+/// named predicate because [`spec_key_has_target_storage`] asks the question for a
+/// DIFFERENT reason -- whether specializing a generic callee is a correctness
+/// requirement -- and that reasoning is only sound while the two agree.
+pub(crate) fn columns_available(
+    _ws: &Workspace,
+    _target: bone_semantic::hir::FnBackend,
+    _elem: Ustr,
+) -> bool {
+    true
 }
 
 /// A callee's per-generic instantiation at one call site, in declaration order.
@@ -1305,6 +1350,7 @@ pub(crate) fn compute_call_spec(
     e: Idx<Expr>,
     func: FuncRef,
     enclosing: &SpecSubst,
+    target: bone_semantic::hir::FnBackend,
 ) -> Option<(SpecKey, SpecSubst)> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
@@ -1323,7 +1369,7 @@ pub(crate) fn compute_call_spec(
     // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
     let opted_in =
         f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
-    if !opted_in && !spec_key_has_column_elem(ws, &key) {
+    if !opted_in && !spec_key_has_target_storage(ws, &key, target) {
         return None;
     }
     Some((key, subst))

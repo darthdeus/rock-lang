@@ -395,7 +395,7 @@ impl Builder<'_> {
     /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
     /// splice always resolves; a residual case falls to the site-aware rejection.
     pub(crate) fn call_spec(&self, e: Idx<Expr>, func: FuncRef) -> Option<(SpecKey, SpecSubst)> {
-        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst)
+        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst, self.scx.target)
     }
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
@@ -447,7 +447,9 @@ impl Builder<'_> {
         // on the ABI without an inliner ever running.
         let spec = self
             .call_spec(e, func)
-            .filter(|(k, _)| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k));
+            .filter(|(k, _)| {
+                !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
+            });
         let empty = SpecSubst::new();
         let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
         // The instantiation key is recorded on the emitted call inst whenever this
