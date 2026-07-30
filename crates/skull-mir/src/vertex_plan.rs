@@ -31,6 +31,11 @@ use bone_semantic::inference::Workspace;
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
+/// Bytes per component. Every attribute kind the artifact admits is a 4-byte
+/// float or int, which is also what makes the cumulative-offset model sound --
+/// grep this constant when adding a kind that is not 4 bytes wide.
+const COMPONENT_BYTES: usize = 4;
+
 /// One attribute's place in the buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttrSlot {
@@ -72,13 +77,13 @@ impl VertexPlan {
     pub fn float_unit_stride(&self) -> Result<usize, String> {
         self.reject_integers()?;
         self.check_cumulative_offsets()?;
-        if self.byte_stride % 4 != 0 {
+        if self.byte_stride % COMPONENT_BYTES != 0 {
             return Err(format!(
                 "`{}` has a {}-byte stride, which is not a whole number of floats",
                 self.struct_name, self.byte_stride
             ));
         }
-        Ok(self.byte_stride / 4)
+        Ok(self.byte_stride / COMPONENT_BYTES)
     }
 
     /// The float-unit view carries component counts and a stride but NOT
@@ -103,7 +108,7 @@ impl VertexPlan {
                     self.struct_name, s.name, s.byte_offset
                 ));
             }
-            want += s.kind.components() as usize * 4;
+            want += s.kind.components() as usize * COMPONENT_BYTES;
         }
         // And the attributes must SPAN the stride. `validate_layout` checks
         // `sum(sizes) == stride`, so trailing padding is as undescribable as a
@@ -186,7 +191,7 @@ pub fn vertex_plan(ws: &Workspace, struct_name: Ustr) -> Result<VertexPlan, Comp
             }
             // A vecN binds as one pointer with a stride, so its components must
             // be adjacent. Padding inside one attribute is not expressible.
-            let expect = group[0].byte_off + i * 4;
+            let expect = group[0].byte_off + i * COMPONENT_BYTES;
             if l.byte_off != expect {
                 return Err(reject(format!(
                     "`{struct_name}` field `{}` is not contiguous: leaf `{path}` is at \
