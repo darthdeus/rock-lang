@@ -883,29 +883,40 @@ impl Builder<'_> {
                 let fields = value_leaf_paths(&shape).into_iter().zip(leaves).collect();
                 self.emit_cur(Inst::MakeValueStruct { name, fields })
             }
-            ValueRepr::Group {
-                name,
-                parts,
-                present: _,
-            } => {
-                // The Group's parts are in declared field order (the positional
-                // `<name>_ct` ABI requires it), so they line up with the declared
-                // names. The names let MIR passes forward a `Field` read to its
-                // ctor operand (SROA), eliminating the cdata when it never escapes.
-                // A payload-free enum field is just an `int` value (Prim), packed
-                // like any primitive.
-                let names = struct_field_names(self.ws, name);
-                let fields = parts
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, p)| {
-                        let fname = names.get(i).copied().unwrap_or(name);
-                        (fname, self.pack(p))
-                    })
-                    .collect();
-                self.emit_cur(Inst::MakeValueStruct { name, fields })
+            // `present` is deliberately NOT consulted here. Packing an absent
+            // Group to `nil` is what a `== nil` consumer needs, but `pack` cannot
+            // see its consumer, and the consumers that DO need it already branch
+            // on presence themselves (`??`, safe-nav). Branching here instead
+            // puts the ctor behind a cell, which stops SROA forwarding it, so the
+            // box survives to the residue check -- measured as
+            // `nobox_coalesce_at_ctor_field` regressing CORRECT -> LOUD REJECT,
+            // exactly the win `docs/parked/inline-lua.md` recorded this costing.
+            // Narrowing to a static presence does not help: at a `??` the
+            // presence is dynamic and the coalesce consumes it anyway.
+            ValueRepr::Group { name, parts, present: _ } => {
+                self.pack_group_fields(name, parts)
             }
         }
+    }
+
+    /// The `<name>_ct(..)` cdata for a Group's parts, with no presence test.
+    ///
+    /// The parts are in declared field order (the positional ctor ABI requires
+    /// it), so they line up with the declared names. The names let MIR passes
+    /// forward a `Field` read to its ctor operand (SROA), eliminating the cdata
+    /// when it never escapes. A payload-free enum field is just an `int` value
+    /// (Prim), packed like any primitive.
+    fn pack_group_fields(&mut self, name: Ustr, parts: Vec<ValueRepr>) -> Idx<Inst> {
+        let names = struct_field_names(self.ws, name);
+        let fields = parts
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let fname = names.get(i).copied().unwrap_or(name);
+                (fname, self.pack(p))
+            })
+            .collect();
+        self.emit_cur(Inst::MakeValueStruct { name, fields })
     }
 
     /// Flatten a `ValueRepr` to its primitive leaf values per `shape` (the wire

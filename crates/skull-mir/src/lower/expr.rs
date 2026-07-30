@@ -996,6 +996,53 @@ impl Builder<'_> {
     /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call
     /// `method(recv, args)` (cdata-everywhere: no scalar splat). Args evaluate
     /// only on the non-null path. Result flows through a cell.
+    /// Lower a safe-nav RECEIVER once, keeping whatever tells it apart from nil.
+    ///
+    /// An unboxed nullable value carries its own presence tag, and that tag is
+    /// the only honest absence test: packing the Group to compare it against nil
+    /// builds a ctor, which is statically non-nil, so the absent arm gets
+    /// const-folded away and the miss path runs the hit code on nil leaves. The
+    /// box cannot be moved into `pack` instead -- `pack` cannot see whether its
+    /// consumer needs nil-ness, and putting the ctor behind a branch there costs
+    /// SROA the forwarding that keeps `??`-at-a-ctor-field boxless.
+    pub(crate) fn lower_safe_nav_receiver(
+        &mut self,
+        receiver: Idx<Expr>,
+    ) -> Result<SafeNavRecv, CompilerError> {
+        // Asked of the REPR, not of a `nobox` shape query: this is not a nobox
+        // rule. A plain unmarked `value` read out of a `Map`/`Vec`/embed field
+        // arrives as a Group with a presence tag too, and it is the unmarked case
+        // that crashed. `lower_expr_repr` is a superset of `lower_expr` -- every
+        // form it does not special-case falls through to `Scalar(lower_expr(e))`
+        // -- so nothing outside the Group case changes shape.
+        let r = self.lower_expr_repr(receiver)?;
+        if let ValueRepr::Group { present: Some(p), .. } = &r {
+            return Ok(SafeNavRecv::Unboxed { repr: r.clone(), present: *p });
+        }
+        Ok(SafeNavRecv::Boxed(self.pack(r)))
+    }
+
+    /// The "receiver is absent" branch condition for [`SafeNavRecv`].
+    pub(crate) fn safe_nav_absent_cond(&mut self, r: &SafeNavRecv) -> Idx<Inst> {
+        match r {
+            SafeNavRecv::Boxed(v) => {
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                self.emit_cur(Inst::Eq(*v, nil))
+            }
+            SafeNavRecv::Unboxed { present, .. } => self.emit_cur(Inst::Not(*present)),
+        }
+    }
+
+    /// The receiver VALUE, for the PRESENT arm only. Packing an unboxed Group is
+    /// sound here and nowhere else: this arm runs only when the presence tag
+    /// said so, so the ctor stands for a value that really is there.
+    pub(crate) fn safe_nav_present_value(&mut self, r: SafeNavRecv) -> Idx<Inst> {
+        match r {
+            SafeNavRecv::Boxed(v) => v,
+            SafeNavRecv::Unboxed { repr, .. } => self.pack(repr),
+        }
+    }
+
     pub(crate) fn lower_safe_nav_call(
         &mut self,
         e: Idx<Expr>,
@@ -1003,9 +1050,8 @@ impl Builder<'_> {
         method: Ustr,
         args: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let recv = self.lower_expr(receiver)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let recv = self.lower_safe_nav_receiver(receiver)?;
+        let is_nil = self.safe_nav_absent_cond(&recv);
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let call_bb = self.f.new_block();
@@ -1017,7 +1063,8 @@ impl Builder<'_> {
         self.store_and_join(result, n, join);
 
         self.cur = call_bb;
-        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv)?;
+        let recv_v = self.safe_nav_present_value(recv);
+        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv_v)?;
         self.store_and_join(result, cv, join);
 
         self.cur = join;
@@ -1218,9 +1265,8 @@ impl Builder<'_> {
         binding: Idx<bone_semantic::hir::BindingInfo>,
         body: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let recv = self.lower_expr(receiver)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let recv = self.lower_safe_nav_receiver(receiver)?;
+        let is_nil = self.safe_nav_absent_cond(&recv);
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let let_bb = self.f.new_block();
@@ -1232,8 +1278,9 @@ impl Builder<'_> {
         self.store_and_join(result, n, join);
 
         self.cur = let_bb;
+        let recv_v = self.safe_nav_present_value(recv);
         let cell = self.f.new_cell(Some(self.body.binding_arena[binding].name));
-        self.emit_cur(Inst::Store { cell, value: recv });
+        self.emit_cur(Inst::Store { cell, value: recv_v });
         self.binds.insert(raw(binding), cell);
         let bv = self.lower_expr(body)?;
         self.store_and_join(result, bv, join);

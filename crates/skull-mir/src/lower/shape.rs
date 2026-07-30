@@ -621,6 +621,19 @@ pub(crate) enum ValueRepr {
     },
 }
 
+/// A safe-nav receiver after lowering: either an ordinary boxed value, or an
+/// UNBOXED nullable value that carries its own presence tag.
+///
+/// The distinction exists because the two have different honest absence tests.
+/// A box is absent when it is nil; an unboxed value is absent when its presence
+/// tag says so, and packing it to ask the nil question instead builds a ctor
+/// that is statically non-nil -- which deletes the absent arm outright.
+#[derive(Clone)]
+pub(crate) enum SafeNavRecv {
+    Boxed(Idx<Inst>),
+    Unboxed { repr: ValueRepr, present: Idx<Inst> },
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum SpreadDest {
     Container(ContainerKind),
