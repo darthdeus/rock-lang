@@ -193,6 +193,34 @@ pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     leaf_names(shape, "", ".").into_iter().map(|s| Ustr::from(&s)).collect()
 }
 
+/// Which entries of [`value_leaf_paths`] are a nullable child's PRESENCE tag
+/// rather than a data leaf, positionally. Storage canonicalizes an absent tag to
+/// `nil` (the form a `= null` write and an absent literal both produce), so the
+/// ctor has to know which of its params is a tag; a data leaf must never be
+/// touched, or a `false` bool field would erase itself.
+pub fn value_leaf_presence_flags(shape: &ValueShape) -> Vec<bool> {
+    let mut out = Vec::new();
+    presence_flags_rec(shape, false, &mut out);
+    out
+}
+
+fn presence_flags_rec(shape: &ValueShape, nested: bool, out: &mut Vec<bool>) {
+    if shape.nullable && nested {
+        out.push(true);
+    }
+    for (_, fs) in &shape.fields {
+        match fs {
+            FieldShape::Prim => out.push(false),
+            FieldShape::Nested(sub) => presence_flags_rec(sub, true, out),
+        }
+    }
+}
+
+/// [`value_leaf_presence_flags`] by type name.
+pub fn value_leaf_presence_flags_of(ws: &Workspace, name: Ustr) -> Option<Vec<bool>> {
+    Some(value_leaf_presence_flags(&value_shape(ws, name)?))
+}
+
 /// THE leaf traversal: every primitive leaf of `shape` in declaration order,
 /// each named by joining its ancestor field names with `sep` under `prefix`.
 /// `sep = "."` yields the column keys / dotted source paths, `sep = "__"` the
@@ -1783,6 +1811,32 @@ fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut Vec<Ustr>) -
 /// (`Name_ct` vs `Name_vt`) and the prelude emission consult this one oracle.
 pub fn value_struct_is_gc(ws: &Workspace, name: Ustr) -> bool {
     value_struct_is_gc_guarded(ws, name, &mut Vec::new())
+}
+
+/// A GC-tier value struct that nonetheless has a FULL leaf shape, so it stores
+/// flat: one table key per [`value_leaf_paths`] entry (dotted for a nested
+/// field, the field's own name for a nullable child's presence tag) instead of
+/// one key per declared field.
+///
+/// The only shape that lands here is a nullable `nobox` field: presence is not a
+/// C slot, so the outer cannot be cdata, while every leaf below it is still a
+/// primitive. Every other GC cause -- a string/array/generic field -- has no
+/// leaf shape at all and keeps the declared-field `<Name>_vt` table. Generics
+/// are excluded outright: a `value Wrap<T = int> { a: float }` has a leaf shape
+/// and is GC-tier for a reason that has nothing to do with leaves.
+///
+/// This is the ONE oracle: the `<Name>_lct` table ctor, the leaf-form pack site,
+/// and the flat read all consult it, so the write and read encodings cannot
+/// diverge.
+pub fn value_struct_is_leaf_table(ws: &Workspace, name: Ustr) -> bool {
+    if !value_struct_is_gc(ws, name) {
+        return false;
+    }
+    let Some(sid) = ws.struct_by_name.get(&name) else { return false };
+    if !ws.modules[sid.module.index()].structs[sid.def].generics.is_empty() {
+        return false;
+    }
+    value_shape_rec(ws, name, &mut Vec::new()).is_some()
 }
 
 /// Whether a value-struct field is compared STRUCTURALLY in a GC-tier `__eq`
@@ -6134,6 +6188,17 @@ impl Builder<'_> {
                 self.cur = join;
                 self.emit_cur(Inst::Load(result))
             }
+            // A leaf-table struct's physical keys ARE its leaves, so it packs
+            // through the flat `<Name>_lct` ctor. Packing it field-wise would
+            // box the nullable `nobox` child under its declared name -- the
+            // guarantee's violation, and the only reason this struct is
+            // GC-tier at all.
+            ValueRepr::Group { name, .. } if value_struct_is_leaf_table(self.ws, name) => {
+                let shape = value_shape(self.ws, name).expect("a leaf-table struct has a shape");
+                let leaves = self.repr_to_leaves(&r, &shape);
+                let fields = value_leaf_paths(&shape).into_iter().zip(leaves).collect();
+                self.emit_cur(Inst::MakeValueStruct { name, fields })
+            }
             ValueRepr::Group {
                 name,
                 parts,
@@ -6281,6 +6346,15 @@ impl Builder<'_> {
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = join;
             return cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        }
+        // A leaf-table box stores one key per leaf, so the split IS the key
+        // reads -- the exact inverse of the `<Name>_lct` ctor, including the
+        // presence key at a nullable child's own name.
+        if value_struct_is_leaf_table(self.ws, shape.name) && !shape.nullable {
+            return value_leaf_paths(shape)
+                .into_iter()
+                .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))
+                .collect();
         }
         let mut out = Vec::new();
         for (fname, fs) in &shape.fields {
@@ -7503,6 +7577,18 @@ impl Builder<'_> {
                 // (never bound, returned, captured or stored), so this is the
                 // consuming boundary, not a reintroduced box.
                 if let Some(cname) = self.embed_field_of(base, field) {
+                    // A leaf-table VALUE parent can still be UNBOXED here (a
+                    // local, a param, a call result): project the part off the
+                    // Group rather than packing a table just to read dotted keys
+                    // back out of it. A reference parent is never a Group, so
+                    // this changes nothing for the `embed` case proper.
+                    let br = self.lower_expr_repr(base)?;
+                    if let ValueRepr::Group { name, parts, .. } = &br {
+                        if let Some(i) = self.field_index(*name, field) {
+                            return Ok(parts[i].clone());
+                        }
+                    }
+                    let boxed = self.pack(br);
                     // A `nobox` child stays in LEAF form instead. The transient
                     // box is legal for an unmarked value -- it sinks -- but for
                     // a marked one it is the guarantee's violation itself, so
@@ -7511,7 +7597,7 @@ impl Builder<'_> {
                     // `repr_to_leaves` supplies it, exactly as it already does
                     // for a literal ctor or a call result at the same param.
                     if let Some(shape) = self.nobox_embed_group_shape(cname) {
-                        let parent = self.lower_expr(base)?;
+                        let parent = boxed;
                         let mut g = self.embed_group(parent, field, &shape);
                         // A NULLABLE child carries presence in the field's own
                         // (undotted) key, so the Group takes it as its presence
@@ -7526,11 +7612,10 @@ impl Builder<'_> {
                         }
                         return Ok(g);
                     }
-                    let parent = self.lower_expr(base)?;
                     let v = if self.embed_read_is_nullable(base, field) {
-                        self.materialize_embed_nullable(parent, field, cname)
+                        self.materialize_embed_nullable(boxed, field, cname)
                     } else {
-                        self.materialize_embed(parent, field, cname)
+                        self.materialize_embed(boxed, field, cname)
                     };
                     return Ok(ValueRepr::Scalar(v));
                 }
@@ -7543,7 +7628,21 @@ impl Builder<'_> {
                         self.emit_cur(Inst::Field { base: parent, field: key }),
                     ));
                 }
-                let br = self.lower_expr_repr(base)?;
+                let mut br = self.lower_expr_repr(base)?;
+                // A leaf-table BOX has no declared-field keys -- a nested child
+                // lives at dotted leaves and its own name holds only presence,
+                // so `Field { base, "pos" }` would hand the consumer a bool.
+                // Split it back into leaves and project the rebuilt Group; the
+                // leaves nothing reads die in DCE.
+                if let ValueRepr::Scalar(v) = br {
+                    match self
+                        .value_struct_name_of(base)
+                        .filter(|n| value_struct_is_leaf_table(self.ws, *n))
+                    {
+                        Some(sname) => br = self.boxed_value_copy_repr(v, sname),
+                        None => br = ValueRepr::Scalar(v),
+                    }
+                }
                 if let ValueRepr::Group { name, parts, .. } = &br {
                     if let Some(i) = self.field_index(*name, field) {
                         return Ok(parts[i].clone());
@@ -11528,15 +11627,20 @@ impl Builder<'_> {
     // legality) is bone's half; this is storage only.
 
     /// The embedded child's struct name for `sname.field`, when `field` is
-    /// declared `embed` on a REFERENCE parent. A `value` parent is already
-    /// contiguous cdata, so `embed` there is a no-op GUARANTEE (it asserts the
-    /// layout) and must not re-encode anything.
+    /// declared `embed` on a REFERENCE parent. An FFI-clean `value` parent is
+    /// already contiguous cdata, so `embed` there is a no-op GUARANTEE (it
+    /// asserts the layout) and must not re-encode anything -- but a LEAF-TABLE
+    /// value parent stores exactly like a reference parent does (dotted leaf
+    /// keys, presence at the field's own name), so it takes the same path.
     fn embed_field_of_struct(&self, sname: Ustr, field: Ustr) -> Option<Ustr> {
         // This runs on EVERY field access, so bail in O(1) when the workspace
         // declares no embed field at all. The flag is set while registering
         // fields and never cleared: a stale `true` costs one bool check, a
         // stale `false` would silently skip the flattening.
-        if !(self.ws.has_embed_fields || self.ws.has_nobox_types) || self.is_value_struct(sname) {
+        if !(self.ws.has_embed_fields || self.ws.has_nobox_types) {
+            return None;
+        }
+        if self.is_value_struct(sname) && !value_struct_is_leaf_table(self.ws, sname) {
             return None;
         }
         let sid = *self.ws.struct_by_name.get(&sname)?;

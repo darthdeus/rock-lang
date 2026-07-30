@@ -875,18 +875,14 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_nested_nullable_embed_group.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "`embed_leaf_values`' literal walk contributes a nested VALUE \
-                        field's own leaves instead of one boxed leaf. NOT \
-                        `embed_group` (it reads, and recurses correctly) and NOT \
-                        nullability -- the non-nullable control rejects identically",
-        },
-        gap: Some("nested value field inside an embed field -- the splice, not the read"),
+        expect: Expect::Correct,
+        gap: Some("A: a nullable nested field makes the outer LEAF-TABLE, so the embed \
+                   splice contributes its dotted leaves"),
     },
-    // The control that falsified the filing above. Two narrower controls place the
-    // boundary: the same nesting in a plain global works, and an embed of an
-    // all-primitive nobox works.
+    // The control, and the two now differ: nullability of the nested field IS the
+    // discriminant, because it is what makes the outer GC-tier and therefore
+    // leaf-table. A non-nullable nested value field leaves the outer FFI-clean, so
+    // the embed splice still lowers it to one boxed leaf.
     SeedCase {
         name: "nobox_nonnullable_embed_nested_value",
         file: "nobox_nonnullable_embed_nested_value.rock",
@@ -894,9 +890,13 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::CheckedIn,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
-            flip_when: "same as its nullable twin -- both flip together",
+            flip_when: "`embed_leaf_values`' literal walk contributes an FFI-CLEAN \
+                        nested value field's own leaves instead of one boxed leaf. \
+                        Its nullable twin already passes: that outer is leaf-table, \
+                        so the same walk already reaches the dotted leaves",
         },
-        gap: Some("control: proves the embed-nesting gap is not nullability"),
+        gap: Some("FFI-clean nested value field inside an embed field -- the splice, \
+                   not the read"),
     },
     SeedCase {
         name: "nobox_vec_combinator_element",

@@ -1,9 +1,12 @@
-// CONSUMER GUARD -- `embed_group` (:10484). NOT in the matrix's original
-// six-consumer audit; found by re-verifying the construction sites. It walks
-// `shape.fields` and recurses on `Nested(sub)` with no `sub.nullable` check,
-// while its own doc claims the parts "line up with `repr_to_leaves`' order by
-// construction". That alignment BREAKS for a nested nullable: `repr_to_leaves`
-// emits a presence leaf and `embed_group` emits no part for it.
+// CONSUMER GUARD -- `embed_group`. It walks `shape.fields` and recurses on
+// `Nested(sub)`, and its parts must line up with `repr_to_leaves`' order: a
+// nested nullable emits a presence leaf that the Group has to carry as its
+// `present` rather than as a part.
+//
+// `Outer` here is LEAF-TABLE (a nullable field makes it GC-tier while every
+// leaf below stays primitive), so the embed splice contributes `a`'s dotted
+// leaves. Its non-nullable twin `nobox_nonnullable_embed_nested_value` stays
+// FFI-clean and still rejects -- that is the boundary between the two.
 //
 // The holder is a GLOBAL on purpose. A local one is fully scalarized away
 // (SROA emits `c0..c5` and no table at all), so the embed machinery is never
