@@ -841,15 +841,13 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_nullable_vec_element.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "a column set can carry a TOP-LEVEL nullable element, i.e. a \
-                        presence column. `leaf_paths_rec` handles a nullable NESTED \
-                        shape only and says so outright; `vec_column_elem_of` bails \
-                        at `_ => None` on the `Nullable` element before any shape is \
-                        built. This one IS mechanism A, but it is a build, not an arm",
-        },
-        gap: Some("A: nullable nobox Vec element"),
+        expect: Expect::Correct,
+        gap: Some(
+            "A FIXED: `[P?]` carries a PRESENCE column (`@p`) beside its leaf \
+             columns. It did not come along free with the nested-shape arm -- the \
+             key is minted by `column_leaf_paths`, not `leaf_paths_rec`, and \
+             specialization had to learn `T = E?` first",
+        ),
     },
     // --- mechanism A: CONSUMER guards between step and step ------------------
     // Each rejects TODAY for the UPSTREAM reason (no shape exists at all). The

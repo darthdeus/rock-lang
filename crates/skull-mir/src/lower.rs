@@ -143,18 +143,46 @@ pub fn is_ffi_clean_value_struct(ws: &Workspace, name: Ustr) -> bool {
 /// tree is K <= 4. Numbers + the AoS tier: `docs/vec-value-columns-plan.md`.
 const MAX_COLUMN_LEAVES: usize = 4;
 
-/// The element name of `[E]` eligible for flat column storage: `E` is an
-/// all-scalar `value` struct of at most [`MAX_COLUMN_LEAVES`] leaves.
+/// The element name of `[E]` / `[E?]` eligible for flat column storage: `E` is
+/// an all-scalar `value` struct whose COLUMN COUNT is at most
+/// [`MAX_COLUMN_LEAVES`].
+///
+/// `nullable` adds the presence column to that count, because it is a column
+/// like any other and the write cliff the constant guards is a function of how
+/// many arrays a row touches. A nullable NESTED field already counts its
+/// presence tag the same way (`leaf_paths_rec` emits it, `leaf_count` counts
+/// it), so this is that rule at the top level, not a second budget.
 ///
 /// `len` is excluded as a top-level leaf name because the columns share the
 /// container table with the Vec's own `len` key, and a leaf column would
 /// clobber the length. Only a TOP-LEVEL leaf can collide -- a nested leaf path
 /// contains a `.`, which no identifier can. An excluded type is not an error:
 /// it simply keeps the boxed representation.
-pub fn vec_column_elem(ws: &Workspace, name: Ustr) -> Option<Ustr> {
+pub fn vec_column_elem(ws: &Workspace, name: Ustr, nullable: bool) -> Option<Ustr> {
     let shape = value_shape_rec(ws, name, &mut Vec::new())?;
     let paths = value_leaf_paths(&shape);
-    (paths.len() <= MAX_COLUMN_LEAVES && !paths.iter().any(|p| p.as_str() == "len")).then_some(name)
+    let columns = paths.len() + usize::from(nullable);
+    (columns <= MAX_COLUMN_LEAVES && !paths.iter().any(|p| p.as_str() == "len")).then_some(name)
+}
+
+/// The column KEYS of `shape`, presence first when the element type is nullable.
+///
+/// This is [`value_leaf_paths`] plus the one key that has no path of its own: a
+/// TOP-LEVEL nullable shape's presence leaf is not addressable as `v.<field>`,
+/// so `value_leaf_paths` deliberately omits it while `leaf_count` counts it.
+/// Column storage is the one consumer that must NAME it -- it needs a table key
+/// per leaf -- and it names it here rather than in `leaf_paths_rec`, whose
+/// result the global/reflection accessors read positionally against that same
+/// omission.
+pub fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
+    let paths = value_leaf_paths(shape);
+    if !shape.nullable {
+        return paths;
+    }
+    let mut out = Vec::with_capacity(paths.len() + 1);
+    out.push(Ustr::from(VEC_COLUMN_PRESENCE_FIELD));
+    out.extend(paths);
+    out
 }
 
 /// Every leaf path of value shape `shape`, declaration order, dotted for nested
@@ -594,7 +622,7 @@ enum ValueRepr {
 #[derive(Clone, Copy)]
 enum SpreadDest {
     Container(ContainerKind),
-    Columns(Ustr),
+    Columns(ColumnElem),
 }
 
 /// The result repr of a swizzle: one selected component is the bare scalar;
@@ -1008,11 +1036,19 @@ fn nobox_declared_shape_spec(
 ) -> Option<ValueShape> {
     if let TyId::Static(m, idx) = ty {
         match ws.module(m).ty_arena[idx] {
+            // A generic bound to `E?` keeps its `?` in the BINDING, so the
+            // declared slot is nullable and leads with a presence leaf. This is
+            // still a DECLARED type read at a declaration (`fn .. -> T` at a site
+            // that bound `T = E?`) -- never a nullability inferred off an
+            // expression, which is what manufactures a phantom presence slot.
             TypeExpr::Generic(var, _) => {
-                let name = spec_nominal(subst, var)?;
-                return is_nobox_nominal(ws, name)
+                let (inner, nullable) = subst.get(&var)?.peel_nullable();
+                let name = inner.nominal()?;
+                let mut shape = is_nobox_nominal(ws, name)
                     .then(|| value_shape_of_nominal(ws, name))
-                    .flatten();
+                    .flatten()?;
+                shape.nullable = nullable;
+                return Some(shape);
             }
             TypeExpr::Nullable(inner) => {
                 if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
@@ -1074,9 +1110,19 @@ pub enum ReifiedType {
         ctor: ReifiedCtor,
         params: Vec<ReifiedType>,
     },
+    /// A generic bound to `E?`. Distinct from `App` because nullability decides
+    /// the STORAGE of the binding (a nullable column element leads with a
+    /// presence column, a nullable `nobox` signature slot with a presence leaf),
+    /// and a binding that dropped the `?` would specialize a body to the wrong
+    /// arity rather than merely to a slower one.
+    Nullable(Box<ReifiedType>),
 }
 
 impl ReifiedType {
+    /// The bound NOMINAL, and `None` for a nullable binding on purpose: every
+    /// caller of this asks "is this generic exactly this struct", and a
+    /// presence-carrying binding is not. The presence-aware callers peel with
+    /// [`Self::peel_nullable`] and handle the flag explicitly.
     fn nominal(&self) -> Option<Ustr> {
         match self {
             Self::App { ctor: ReifiedCtor::Nominal(name), .. } => Some(*name),
@@ -1084,9 +1130,18 @@ impl ReifiedType {
         }
     }
 
+    /// `(payload, nullable)` -- the binding with its `?` stripped.
+    fn peel_nullable(&self) -> (&ReifiedType, bool) {
+        match self {
+            Self::Nullable(inner) => (inner.as_ref(), true),
+            other => (other, false),
+        }
+    }
+
     fn any_nominal(&self, pred: &impl Fn(Ustr) -> bool) -> bool {
         match self {
             Self::Prim(_) => false,
+            Self::Nullable(inner) => inner.any_nominal(pred),
             Self::App { ctor, params } => {
                 matches!(ctor, ReifiedCtor::Nominal(name) if pred(*name))
                     || params.iter().any(|param| param.any_nominal(pred))
@@ -1108,7 +1163,15 @@ impl ReifiedType {
 fn spec_key_has_column_elem(ws: &Workspace, key: &SpecKey) -> bool {
     key.iter()
         .flatten()
-        .any(|ty| ty.any_nominal(&|name| vec_column_elem(ws, name).is_some()))
+        // Either flavour counts: the question is whether the shared boxed body
+        // would read a `_data` the storage does not have, and a nullable element
+        // is column-stored on exactly the same terms.
+        .any(|ty| {
+            ty.any_nominal(&|name| {
+                vec_column_elem(ws, name, false).is_some()
+                    || vec_column_elem(ws, name, true).is_some()
+            })
+        })
 }
 
 /// A callee's per-generic instantiation at one call site, in declaration order.
@@ -1123,8 +1186,15 @@ pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, Reifie
 /// The root `TypeExpr` a substituted generic resolves to. Nested arguments stay
 /// in [`SpecSubst`] for recursive call specialization; the synthesized root has
 /// no arena range of its own.
+/// A NULLABLE binding substitutes to its PAYLOAD, which is what the arena spells
+/// for a written-out `E?` too: `resolve_ty` peels `Nullable`, so `expr_ty` at a
+/// `E?` expression already answers `E`, and nullability is a separate question
+/// ([`Builder::is_nullable_ty`], which grows the matching generic arm). Modelling
+/// it any other way would need a `TypeExpr::Nullable` node, and that holds an
+/// arena index this has no arena to mint.
 fn reified_type_node(ty: &ReifiedType) -> TypeExpr {
     match ty {
+        ReifiedType::Nullable(inner) => reified_type_node(inner),
         ReifiedType::App { ctor, .. } => TypeExpr::App {
             ctor: match ctor {
                 ReifiedCtor::Array => TypeCtor::Array,
@@ -1152,6 +1222,12 @@ fn reify_type(
         TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedType::Prim("float")),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedType::Prim("bool")),
         TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
+        TypeExpr::Nullable(inner) => Some(ReifiedType::Nullable(Box::new(reify_type(
+            ws,
+            inf,
+            ty.with_idx(inner),
+            enclosing,
+        )?))),
         TypeExpr::App { ctor, params } => {
             let ctor = match ctor {
                 TypeCtor::Array => ReifiedCtor::Array,
@@ -1286,13 +1362,18 @@ pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> Spec
 fn sig_value_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
     if let TyId::Static(m, idx) = ty {
         match ws.module(m).ty_arena[idx] {
+            // A generic bound to `E?` carries the `?` in the BINDING, so it takes
+            // the nullable policy exactly as a spelled-out one does.
             TypeExpr::Generic(var, _) => {
-                return spec_nominal(subst, var).and_then(|n| value_shape_of_nominal(ws, n));
+                return match subst.get(&var)?.peel_nullable() {
+                    (inner, false) => value_shape_of_nominal(ws, inner.nominal()?),
+                    (inner, true) => sig_shape_of_nullable_nominal(ws, inner.nominal()?),
+                };
             }
             TypeExpr::Nullable(inner) => {
                 if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
-                    return spec_nominal(subst, var)
-                        .and_then(|n| sig_shape_of_nullable_nominal(ws, n));
+                    let (payload, _) = subst.get(&var)?.peel_nullable();
+                    return sig_shape_of_nullable_nominal(ws, payload.nominal()?);
                 }
             }
             _ => {}
@@ -1517,27 +1598,36 @@ fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
 /// generic resolves through the substitution, so a `VecIter<NV2>.next` reaches
 /// the same answer a spelled-out `-> (bool, NV2)` does.
 fn nobox_sig_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
-    let nominal = match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-        TypeExpr::Generic(var, _) => spec_nominal(subst, var)?,
-        TypeExpr::Nullable(inner) => {
-            let inner = ty.with_idx(inner);
-            let n = match static_ty(ws, inner)? {
-                TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-                TypeExpr::Generic(var, _) => spec_nominal(subst, var)?,
-                _ => return None,
-            };
-            if !is_nobox_nominal(ws, n) {
-                return None;
-            }
-            return sig_shape_of_nullable_nominal(ws, n);
-        }
-        _ => return None,
-    };
+    let (nominal, nullable) = sig_spec_nominal(ws, subst, ty)?;
     if !is_nobox_nominal(ws, nominal) {
         return None;
     }
+    if nullable {
+        return sig_shape_of_nullable_nominal(ws, nominal);
+    }
     sig_shape_of_nominal(ws, nominal)
+}
+
+/// `(nominal, nullable)` for a signature slot under a specialization: the type's
+/// own `?` OR-ed with the `?` of whatever a generic is BOUND to.
+///
+/// `T?` at a site that bound `T = E?` is one nullable, not two -- Rock has no
+/// double nullable, and the wire carries one presence leaf either way. Reading
+/// the binding is still reading a DECLARATION (the site's own type argument),
+/// never a nullability inferred from an expression.
+fn sig_spec_nominal(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<(Ustr, bool)> {
+    match static_ty(ws, ty)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some((n, false)),
+        TypeExpr::Generic(var, _) => {
+            let (inner, nullable) = subst.get(&var)?.peel_nullable();
+            Some((inner.nominal()?, nullable))
+        }
+        TypeExpr::Nullable(inner) => {
+            let (n, _) = sig_spec_nominal(ws, subst, ty.with_idx(inner))?;
+            Some((n, true))
+        }
+        _ => None,
+    }
 }
 
 /// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE
@@ -4157,7 +4247,16 @@ impl Builder<'_> {
                 // A whole-value read of a value-struct element COPIES (via the repr
                 // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
                 // than binding the interior array reference.
-                if self.value_struct_of(e).is_some() || self.nullable_place_value_of(e).is_some() {
+                //
+                // Column storage routes on the CONTAINER, not on the element
+                // type: inside a body specialized at `T = E?` the element type is
+                // an unsubstituted generic (a nullable binding has no
+                // synthesizable node), so the type predicates below see nothing
+                // while the storage still has no element slot to name.
+                if self.value_struct_of(e).is_some()
+                    || self.nullable_place_value_of(e).is_some()
+                    || self.vec_column_elem_of(base).is_some()
+                {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
                 }
@@ -5028,11 +5127,10 @@ impl Builder<'_> {
     fn column_vec_literal(
         &mut self,
         elems: &[Idx<Expr>],
-        elem: Ustr,
+        elem: ColumnElem,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("column element is not a value struct"))?;
-        let paths = value_leaf_paths(&shape);
+        let shape = self.column_shape(elem)?;
+        let paths = column_leaf_paths(&shape);
         let mut columns: Vec<(Ustr, Vec<Idx<Inst>>)> =
             paths.iter().map(|p| (*p, Vec::with_capacity(elems.len()))).collect();
         for &e in elems {
@@ -5040,7 +5138,8 @@ impl Builder<'_> {
             let leaves = self.repr_to_leaves(&repr, &shape);
             if leaves.len() != paths.len() {
                 return Err(gap(format!(
-                    "column literal arity mismatch for [{elem}]: {} leaves vs {} columns",
+                    "column literal arity mismatch for [{}]: {} leaves vs {} columns",
+                    elem.name,
                     leaves.len(),
                     paths.len()
                 )));
@@ -5051,7 +5150,7 @@ impl Builder<'_> {
         }
         let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
         Ok(self.emit_cur(Inst::MakeVecColumns {
-            elem,
+            elem: elem.name,
             columns,
             len: elems.len(),
             capacity,
@@ -5227,12 +5326,13 @@ impl Builder<'_> {
             if matches!(name.as_str(), "inspect" | "inspect_formatted") {
                 if let Some(&arg) = arg_idxs.first() {
                     if let Some(elem) = self.vec_column_elem_of(arg) {
-                        if self.is_nobox_struct(elem) {
+                        if self.is_nobox_struct(elem.name) {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
                                 format!(
-                                    "cannot inspect a column-stored nobox value `{elem}`: \
-                                     inspection requires implicit element materialization"
+                                    "cannot inspect a column-stored nobox value `{}`: \
+                                     inspection requires implicit element materialization",
+                                    elem.name
                                 ),
                             ));
                         }
@@ -6547,12 +6647,14 @@ impl Builder<'_> {
         &mut self,
         vec: Idx<Inst>,
         index: Idx<Inst>,
-        elem: Ustr,
+        elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let shape = self.column_shape(elem)?;
         let one_based = self.checked_column_index(vec, index);
-        let leaves: Vec<Idx<Inst>> = value_leaf_paths(&shape)
+        // Presence leads the reads for a nullable element, which is exactly what
+        // `rebuild_from_leaves` consumes it as -- the Group comes back with its
+        // `present` set from the column instead of a nil compare on a box.
+        let leaves: Vec<Idx<Inst>> = column_leaf_paths(&shape)
             .into_iter()
             .map(|path| {
                 let col = self.emit_cur(Inst::Field { base: vec, field: path });
@@ -6615,15 +6717,17 @@ impl Builder<'_> {
             }
             ("__vec_data_capacity", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
-                let shape = value_shape(self.ws, elem)
-                    .ok_or_else(|| gap("column element is not a value struct"))?;
+                let shape = self.column_shape(elem)?;
                 let vec = self.lower_expr(*recv)?;
                 let header = self.column_header(vec);
                 let reserved = self.emit_cur(Inst::Field {
                     base: header,
                     field: Ustr::from("cap"),
                 });
-                let physical = match value_leaf_paths(&shape).first() {
+                // The PRESENCE column when there is one: it holds a real bool for
+                // every slot, where a leaf column of an absent element holds nil,
+                // and `#` over a table with holes is undefined in Lua.
+                let physical = match column_leaf_paths(&shape).first() {
                     Some(path) => {
                         let col = self.emit_cur(Inst::Field {
                             base: vec,
@@ -6650,15 +6754,17 @@ impl Builder<'_> {
             // element is consumed as LEAVES, so the inserted value never boxes.
             ("__vec_data_insert", [recv, index, value]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
-                let shape =
-                    value_shape(self.ws, elem).ok_or_else(|| gap("column element is not a value"))?;
-                let paths = value_leaf_paths(&shape);
+                let shape = self.column_shape(elem)?;
+                let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 let repr = self.lower_expr_repr(*value)?;
                 let leaves = self.repr_to_leaves(&repr, &shape);
                 if leaves.len() != paths.len() {
-                    return Err(gap(format!("column insert arity mismatch for [{elem}]")));
+                    return Err(gap(format!(
+                        "column insert arity mismatch for [{}]",
+                        elem.name
+                    )));
                 }
                 let f = self.stdlib_funcref("__rock_col_insert")?;
                 let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
@@ -6673,9 +6779,8 @@ impl Builder<'_> {
             // both.
             ("__vec_data_clone", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
-                let shape = value_shape(self.ws, elem)
-                    .ok_or_else(|| gap("column element is not a value struct"))?;
-                let paths = value_leaf_paths(&shape);
+                let shape = self.column_shape(elem)?;
+                let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
                 let f = self.stdlib_funcref("__rock_col_copy")?;
                 // Built as a `Vec`-tagged struct: `write_table_key` brackets a
@@ -6720,15 +6825,17 @@ impl Builder<'_> {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
-                if !self.is_nobox_struct(elem) {
+                if !self.is_nobox_struct(elem.name) {
                     let f = self.stdlib_funcref("__rock_col_sort")?;
                     return Ok(Some(ValueRepr::Scalar(
                         self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
                     )));
                 }
-                let shape = value_shape(self.ws, elem)
-                    .ok_or_else(|| gap("column element is not a value struct"))?;
-                let paths: Vec<_> = value_leaf_paths(&shape)
+                let shape = self.column_shape(elem)?;
+                // The key fn's ABI at a nullable element leads with presence, so
+                // the path list must too -- it is the positional binding the
+                // helper unpacks into the key.
+                let paths: Vec<_> = column_leaf_paths(&shape)
                     .into_iter()
                     .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
                     .collect();
@@ -6741,12 +6848,13 @@ impl Builder<'_> {
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
-                if self.is_nobox_struct(elem) {
+                if self.is_nobox_struct(elem.name) {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[*recv],
                         format!(
-                            "cannot convert column-stored nobox value `{elem}` to a Lua array: \
-                             the bridge requires implicit element materialization"
+                            "cannot convert column-stored nobox value `{}` to a Lua array: \
+                             the bridge requires implicit element materialization",
+                            elem.name
                         ),
                     ));
                 }
@@ -6760,9 +6868,9 @@ impl Builder<'_> {
         }
     }
 
-    fn make_column_header(&mut self, elem: Ustr, capacity: Idx<Inst>) -> Idx<Inst> {
+    fn make_column_header(&mut self, elem: ColumnElem, capacity: Idx<Inst>) -> Idx<Inst> {
         let repr = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(VEC_COLUMN_REPR))));
-        let elem = self.emit_cur(Inst::Const(Lit::Str(elem)));
+        let elem = self.emit_cur(Inst::Const(Lit::Str(elem.name)));
         self.emit_cur(Inst::MakeStruct {
             ty: None,
             fields: vec![
@@ -6782,14 +6890,13 @@ impl Builder<'_> {
 
     fn empty_column_vec(
         &mut self,
-        elem: Ustr,
+        elem: ColumnElem,
         capacity: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("column element is not a value struct"))?;
-        let columns = value_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
+        let shape = self.column_shape(elem)?;
+        let columns = column_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
         Ok(self.emit_cur(Inst::MakeVecColumns {
-            elem,
+            elem: elem.name,
             columns,
             len: 0,
             capacity,
@@ -6800,7 +6907,7 @@ impl Builder<'_> {
         &mut self,
         raw: Idx<Inst>,
         len: Idx<Inst>,
-        elem: Ustr,
+        elem: ColumnElem,
     ) -> Result<Idx<Inst>, CompilerError> {
         let vec = self.empty_column_vec(elem, len)?;
         let i_cell = self.f.new_cell(None);
@@ -6845,10 +6952,9 @@ impl Builder<'_> {
         &mut self,
         recv: Idx<Expr>,
         item: Idx<Expr>,
-        elem: Ustr,
+        elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let shape = self.column_shape(elem)?;
         let vec = self.lower_expr(recv)?;
         let repr = self.lower_expr_repr(item)?;
         self.column_append_repr_with_shape(vec, &repr, elem, &shape)?;
@@ -6859,10 +6965,9 @@ impl Builder<'_> {
         &mut self,
         vec: Idx<Inst>,
         repr: &ValueRepr,
-        elem: Ustr,
+        elem: ColumnElem,
     ) -> Result<(), CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let shape = self.column_shape(elem)?;
         self.column_append_repr_with_shape(vec, repr, elem, &shape)
     }
 
@@ -6870,14 +6975,15 @@ impl Builder<'_> {
         &mut self,
         vec: Idx<Inst>,
         repr: &ValueRepr,
-        elem: Ustr,
+        elem: ColumnElem,
         shape: &ValueShape,
     ) -> Result<(), CompilerError> {
         let leaves = self.repr_to_leaves(repr, shape);
-        let paths = value_leaf_paths(&shape);
+        let paths = column_leaf_paths(shape);
         if leaves.len() != paths.len() {
             return Err(gap(format!(
-                "column push arity mismatch for [{elem}]: {} leaves vs {} columns",
+                "column push arity mismatch for [{}]: {} leaves vs {} columns",
+                elem.name,
                 leaves.len(),
                 paths.len()
             )));
@@ -6910,7 +7016,7 @@ impl Builder<'_> {
     fn column_index_place(
         &mut self,
         e: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr)>, CompilerError> {
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {
         let Expr::Index { base, index } = self.body.expr_arena[e] else {
             return Ok(None);
         };
@@ -6931,16 +7037,26 @@ impl Builder<'_> {
         &mut self,
         vec: Idx<Inst>,
         one_based: Idx<Inst>,
-        elem: Ustr,
+        elem: ColumnElem,
         field: Ustr,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("column element is not a value struct"))?;
+        // A NULLABLE element has no field place at all: bone rejects `.field` on
+        // a `T?` before this, and writing one leaf of a slot whose presence says
+        // "absent" would be a silent half-write. Reject rather than trust that.
+        if elem.nullable {
+            return Err(gap(format!(
+                "cannot write `{field}` through an element of `[{}?]`; refine the \
+                 element to non-null and store it whole",
+                elem.name
+            )));
+        }
+        let shape = self.column_shape(elem)?;
         if !value_leaf_paths(&shape).iter().any(|p| *p == field) {
             return Err(gap(format!(
-                "`{field}` is not a scalar leaf of column-stored `[{elem}]`; a \
-                 nested value field spans several columns and needs a whole-element store"
+                "`{field}` is not a scalar leaf of column-stored `[{}]`; a \
+                 nested value field spans several columns and needs a whole-element store",
+                elem.name
             )));
         }
         let v = self.lower_expr(value)?;
@@ -6961,16 +7077,16 @@ impl Builder<'_> {
         vec: Idx<Inst>,
         index: Idx<Inst>,
         value: Idx<Expr>,
-        elem: Ustr,
+        elem: ColumnElem,
     ) -> Result<(), CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("column element is not a value struct"))?;
+        let shape = self.column_shape(elem)?;
         let repr = self.lower_expr_repr(value)?;
         let leaves = self.repr_to_leaves(&repr, &shape);
-        let paths = value_leaf_paths(&shape);
+        let paths = column_leaf_paths(&shape);
         if leaves.len() != paths.len() {
             return Err(gap(format!(
-                "column store arity mismatch for [{elem}]: {} leaves vs {} columns",
+                "column store arity mismatch for [{}]: {} leaves vs {} columns",
+                elem.name,
                 leaves.len(),
                 paths.len()
             )));
@@ -7227,6 +7343,16 @@ impl Builder<'_> {
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
             Expr::Call { callee, args } => self.lower_call_repr(e, callee, args),
+            // A COLUMN element read routes on the container, ahead of the
+            // element-type guard below: column storage has no element slot at
+            // all, and inside a body specialized at `T = E?` the element type is
+            // an unsubstituted generic that no type predicate can classify.
+            Expr::Index { base, index } if self.vec_column_elem_of(base).is_some() => {
+                let elem = self.vec_column_elem_of(base).expect("guard matched");
+                let (b, _) = self.lower_index_base(base)?;
+                let i = self.lower_expr(index)?;
+                self.column_element_repr(b, i, elem)
+            }
             // A value-struct ELEMENT read (`buf[i]`/`fv[i]`/`v[i]`) as an unboxed
             // Group of leaf reads off the checked slot: a leaf projection reads the
             // part live, while `pack` (a whole-value use -- let-bind, arg, return,
@@ -9161,7 +9287,7 @@ impl Builder<'_> {
         // and the verifier rejects it by name rather than emitting a quiet box.
         let data = match column_elem {
             Some(elem) => {
-                let repr = self.column_element_repr(data, idx, elem)?;
+                let repr = self.column_element_repr(data, idx, ColumnElem::plain(elem))?;
                 self.pack(repr)
             }
             None => self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec }),
@@ -9403,12 +9529,13 @@ impl Builder<'_> {
 
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
-        let elem = self.loop_element_at(arr_v, i_now, kind)?;
+        let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
         match &split {
             // split: index already bound to i_cell; bind the element pattern.
-            Some((_, xpat)) => self.bind_for_pattern(xpat, elem),
+            Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr),
             // single: bind the whole `(index, element)` tuple.
             None => {
+                let elem = self.pack(repr);
                 let pair = self.emit_cur(Inst::MakeTuple(vec![i_now, elem]));
                 self.bind_for_pattern(vars, pair);
             }
@@ -9506,6 +9633,39 @@ impl Builder<'_> {
 
         self.cur = exit;
         Ok(())
+    }
+
+    /// [`Self::bind_for_pattern`] for an element that arrived as a repr: a
+    /// `nobox` element binds its LEAVES (`group_binds`, the shape a scalarized
+    /// value param takes) instead of a packed box.
+    ///
+    /// Packing is what the mark forbids, and for a NULLABLE element it is also
+    /// lossy in a way no later pass can undo: `pack` drops the Group's presence,
+    /// so the absent elements would come back as a struct of nils rather than as
+    /// `null`. SROA peels a redundant pack for the non-nullable case, which is
+    /// why that one worked through the boxed bind; presence has no such recovery.
+    fn bind_loop_element_repr(&mut self, vars: &BindingPattern, repr: ValueRepr) {
+        if let BindingPattern::Leaf(b) = vars {
+            if let Some(shape) = self.binding_ty(*b).and_then(|t| self.nobox_shape_of_ty(t)) {
+                let name = self.body.binding_arena[*b].name;
+                let leaves = self.repr_to_leaves(&repr, &shape);
+                let cells: Vec<Idx<Cell>> = leaves
+                    .iter()
+                    .enumerate()
+                    .map(|(li, &value)| {
+                        let c = self
+                            .f
+                            .new_cell(Some(Ustr::from(format!("{name}__{li}").as_str())));
+                        self.emit_cur(Inst::Store { cell: c, value });
+                        c
+                    })
+                    .collect();
+                self.group_binds.insert(raw(*b), (cells, shape));
+                return;
+            }
+        }
+        let value = self.pack(repr);
+        self.bind_for_pattern(vars, value);
     }
 
     /// Bind a for-loop pattern to an element value: `Leaf` -> one cell; `Tuple`
@@ -11855,7 +12015,7 @@ impl Builder<'_> {
             },
             _ => return None,
         };
-        vec_column_elem(self.ws, en)
+        vec_column_elem(self.ws, en, false)
     }
 
     /// The Vec container kind for base expr `e`: an all-scalar value-struct
@@ -11876,25 +12036,55 @@ impl Builder<'_> {
     /// is the concrete struct rather than an opaque `T`. Without this the
     /// stdlib iterator lowers `it.vec[it.i]` against the boxed representation
     /// and reads a `_data` that column storage does not have.
-    fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+    fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let TypeExpr::App { ctor: TypeCtor::Array, params } = self.ty_node(ty)? else {
             return None;
         };
         let p = params.into_iter().next()?;
-        let elem = self.resolve_tyid(ty.with_idx(p))?;
+        let mut elem = self.resolve_tyid(ty.with_idx(p))?;
+        // A NULLABLE element columnizes only when the payload is `nobox`. For an
+        // unmarked value struct the boxed element is a legal representation and
+        // already works, while columnizing it would newly route the materializing
+        // helpers (`__rock_col_sort`, `to_lua_array`, serialization) at a shape
+        // they have no presence concept for. The mark is what makes the box
+        // forbidden, so the mark is what obliges the presence column.
+        //
+        // Asked BEFORE the peel, and through the one nullability query, so a
+        // spelled-out `[E?]` and a generic bound to `E?` answer alike -- the
+        // latter's `?` lives in the binding, and `ty_node` substitutes the
+        // payload over it.
+        let nullable = self.is_nullable_ty(elem);
+        if let Some(TypeExpr::Nullable(inner)) = self.ty_node(elem) {
+            elem = self.resolve_tyid(elem.with_idx(inner))?;
+        }
         let en = match self.ty_node(elem)? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
             // An UNSUBSTITUTED generic element stays boxed: the shared
             // (non-specialized) snapshot of a generic body must keep the
             // representation that every instantiation can read.
             TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
-                Some(ty) => ty.nominal()?,
+                Some(ty) => ty.peel_nullable().0.nominal()?,
                 _ => return None,
             },
             _ => return None,
         };
-        vec_column_elem(self.ws, en)
+        if nullable && !is_nobox_nominal(self.ws, en) {
+            return None;
+        }
+        vec_column_elem(self.ws, en, nullable).map(|name| ColumnElem { name, nullable })
+    }
+
+    /// The column shape of `elem`: its value shape, marked nullable when the
+    /// ELEMENT type is. Every column site builds its shape here, so the leaf
+    /// wire (`repr_to_leaves` / `rebuild_from_leaves`, which both lead a nullable
+    /// shape with presence) and the column keys ([`column_leaf_paths`]) can only
+    /// agree.
+    fn column_shape(&self, elem: ColumnElem) -> Result<ValueShape, CompilerError> {
+        let mut shape = value_shape(self.ws, elem.name)
+            .ok_or_else(|| gap("column element is not a value struct"))?;
+        shape.nullable = elem.nullable;
+        Ok(shape)
     }
 
     /// The NativeBuffer container kind for base expr `e`: value-struct elements
@@ -12390,9 +12580,14 @@ impl Builder<'_> {
         // the GLSL backend sets -- so the guard stays here and the core sees an
         // already-filtered nominal.
         if !self.scx.values_first_class {
-            return nullable_nominal_shape(self.ws, ty, &|t| {
+            let mut shape = nullable_nominal_shape(self.ws, ty, &|t| {
                 self.ty_node(self.resolve_tyid(t)?)
-            });
+            })?;
+            // A generic bound to `E?` reaches the core as its payload nominal, so
+            // the `?` has to be re-applied from the binding. Idempotent for a
+            // spelled-out `E?`, which the core already marked.
+            shape.nullable |= self.is_nullable_ty(ty);
+            return Some(shape);
         }
         None
     }
@@ -12538,6 +12733,14 @@ impl Builder<'_> {
     }
 
     fn is_nullable_ty(&self, ty: TyId) -> bool {
+        // A generic bound to `E?` is nullable, and `ty_node` cannot say so: it
+        // substitutes the PAYLOAD (a `Nullable` node needs an arena index).
+        // Read the raw node first, before that substitution erases the `?`.
+        if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
+            if let Some(b) = self.spec_subst.get(&var) {
+                return b.peel_nullable().1;
+            }
+        }
         match self.ty_node(ty) {
             Some(TypeExpr::Nullable(_)) => true,
             Some(TypeExpr::Infer(var, _)) => self
@@ -12841,11 +13044,18 @@ impl Builder<'_> {
         }
     }
 
-    fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        let node = match ty {
+    /// The stored type node, WITHOUT the specialization substitution -- the only
+    /// place a generic's own identity is still visible, which is what
+    /// [`Self::is_nullable_ty`] needs (the substitution answers with the payload).
+    fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
+        Some(match ty {
             TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
             TyId::Local(idx) => self.inf?.ty_arena[idx],
-        };
+        })
+    }
+
+    fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
+        let node = self.raw_ty_node(ty)?;
         // In a specialized instantiation, a generic param resolves to its concrete
         // leaf so all downstream type-driven lowering (field projection, container
         // element, scalar shape) sees the real type. Synthesized leaves carry no

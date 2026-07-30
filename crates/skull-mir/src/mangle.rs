@@ -63,6 +63,13 @@ fn encode_reified_type(ty: &crate::lower::ReifiedType, out: &mut String) {
             out.push_str("p_");
             out.push_str(name);
         }
+        // `T = E?` is a DIFFERENT specialization from `T = E` (its slots carry a
+        // presence leaf), so the mangled name has to separate them or the two
+        // snapshots collide on one symbol.
+        ReifiedType::Nullable(inner) => {
+            out.push_str("o_");
+            encode_reified_type(inner, out);
+        }
         ReifiedType::App { ctor, params } => {
             out.push_str("a_");
             match ctor {

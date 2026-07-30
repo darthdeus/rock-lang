@@ -29,6 +29,11 @@ use ustr::Ustr;
 
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
 pub const VEC_COLUMN_REPR: &str = "columns";
+/// The PRESENCE column of a `[E?]` whose `E` is `nobox`: one bool per slot,
+/// leading the leaf columns exactly as the presence leaf leads a nullable
+/// shape's leaves. `@` cannot appear in a Rock identifier, so the key can never
+/// collide with a leaf path, and it shares that property with `@vec`.
+pub const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
 
 /// A resolved call target: which function in which module. Mangling (rock's
 /// overload scheme) is deferred to codegen, which also reads `is_extern` /
@@ -72,7 +77,7 @@ pub enum ContainerKind {
     /// `{ <leaf0> = {..}, .., len = n }` — so no per-element table exists.
     /// Replaces the single `_data` backing of [`ContainerKind::Vec`].
     /// Eligibility + layout rationale: `docs/vec-value-columns-plan.md`.
-    VecValueColumns(Ustr),
+    VecValueColumns(ColumnElem),
     /// One leaf column OF a [`ContainerKind::VecValueColumns`] Vec — a bare
     /// 1-indexed Lua array. The index is ALREADY 1-based and already
     /// bounds-checked (`__vec_checked_index` against the owning Vec's `len`),
@@ -91,6 +96,29 @@ pub enum ContainerKind {
     NativeBufferLeaf,
     /// `Map<K,V>` — keyed directly by K, no `+1`.
     Map,
+}
+
+/// The element of a column-stored `[E]` / `[E?]`: the value struct's name, and
+/// whether the ELEMENT type is nullable. Nullability travels with the element
+/// because it decides the column SET (a nullable element leads with
+/// [`VEC_COLUMN_PRESENCE_FIELD`]) — reading it back off an expression's type at
+/// a use site would be the phantom-presence bug.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct ColumnElem {
+    pub name: Ustr,
+    pub nullable: bool,
+}
+
+impl ColumnElem {
+    pub fn plain(name: Ustr) -> Self {
+        ColumnElem { name, nullable: false }
+    }
+}
+
+impl std::fmt::Display for ColumnElem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.name, if self.nullable { "?" } else { "" })
+    }
 }
 
 impl ContainerKind {
