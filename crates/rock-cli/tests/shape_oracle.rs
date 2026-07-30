@@ -604,10 +604,8 @@ const SEEDS: &[SeedCase] = &[
         file: "nobox_tuple_return_projected.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::Vanilla,
-        expect: Expect::LoudReject {
-            names: "survived lowering",
-        },
-        gap: Some("M3: a nobox projected off a fn's tuple return at the call (LIVE)"),
+        expect: Expect::Correct,
+        gap: None,
     },
     SeedCase {
         name: "nobox_coalesce_at_ctor_field",

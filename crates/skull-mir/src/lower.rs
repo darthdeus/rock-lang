@@ -2654,6 +2654,7 @@ pub fn lower_function_spec(
         fn_name_span: Some(func.name_span),
         cur_span: None,
         group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         // Lazy: only pay the param-type render/hash when the body has a static or
         // a nested fn (both bake the owner into a private global name that must be
@@ -2727,6 +2728,7 @@ pub fn lower_global(
         fn_name_span: None,
         cur_span: None,
         group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
         static_counters: HashMap::new(),
@@ -2792,6 +2794,7 @@ pub fn lower_decorator(
         fn_name_span: None,
         cur_span: None,
         group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
         static_owner: name,
         static_counters: HashMap::new(),
@@ -2877,6 +2880,12 @@ struct Builder<'a> {
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// The tuple twin of [`Self::group_binds`]: a NAME bound to a splatting
+    /// tuple holds its slot cells, so `if let t = <nullable tuple call>` can
+    /// rebuild the unboxed repr on each read of `t` instead of packing it.
+    /// Keyed the same way; the shape is stored non-nullable because presence
+    /// was already consumed by the branch that bound it.
+    tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleRetShape)>,
     /// `static` locals: raw binding idx -> the private global cell name a read /
     /// write of the binding resolves to (an `Inst::Global`/`StoreGlobal`, not a
     /// local cell). Populated by `lower_static`.
@@ -3443,6 +3452,7 @@ impl Builder<'_> {
             fn_name_span: None,
             cur_span: None,
             group_binds: HashMap::new(),
+        tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT
             // inherited (bone rejects capturing them).
@@ -3799,6 +3809,13 @@ impl Builder<'_> {
             Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
                 Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)].hoisted)))
             }
+            // A whole-tuple use of a name bound to slot cells: rebuild and pack.
+            // Packing a `nobox` element here is exactly how a whole-tuple escape
+            // still reaches the guarantee's rejection.
+            Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
+            }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
@@ -3949,16 +3966,18 @@ impl Builder<'_> {
                 let r = self.lower_expr_repr(e)?;
                 Ok(self.pack(r))
             }
-            Expr::TupleIndex { tuple, index } => {
-                let b = self.lower_expr(tuple)?;
+            Expr::TupleIndex { tuple, .. } => {
                 // `w.0` on a transparent newtype is identity -- its runtime value
                 // IS the inner, not a positional table -- so `TupleIndex` (a
                 // `[1]` read) would index a scalar and yield nil.
                 if self.expr_is_newtype(tuple) {
-                    Ok(b)
-                } else {
-                    Ok(self.emit_cur(Inst::TupleIndex { base: b, index }))
+                    return self.lower_expr(tuple);
                 }
+                // Otherwise through the repr layer, same as `FieldAccess` above:
+                // a splatting base projects its part instead of packing a table
+                // and reading a boxed element back out.
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
             }
             // A value-struct literal is built via the repr layer (so a callsite
             // can splat it without a cdata); a plain struct is a Lua table.
@@ -6793,6 +6812,32 @@ impl Builder<'_> {
                     .collect::<Result<_, CompilerError>>()?;
                 Ok(ValueRepr::Tuple { parts, present: None })
             }
+            // `t.0` off a splatting tuple projects the part REPR directly. Without
+            // this the base packs to a table and the index reads a boxed element
+            // back out, which re-materializes a `nobox` one. A newtype's `.0` is
+            // identity and a non-splatting base keeps the packed `TupleIndex`, so
+            // only the unboxed case changes.
+            Expr::TupleIndex { tuple, index } if !self.expr_is_newtype(tuple) => {
+                let r = self.lower_expr_repr(tuple)?;
+                if let ValueRepr::Tuple { parts, .. } = r {
+                    return parts
+                        .into_iter()
+                        .nth(index)
+                        .ok_or_else(|| gap("tuple index past the end of a splatting tuple"));
+                }
+                let base = self.pack(r);
+                Ok(ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
+            }
+            // A name bound to a splatting tuple: rebuild the unboxed Tuple repr
+            // from its slot cells, so `t.0` projects a part instead of indexing a
+            // packed table (which would re-materialize a `nobox` element).
+            Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
+                let (cells, shape) = self.tuple_binds.get(&raw(b)).cloned().unwrap();
+                let slots: Vec<Idx<Inst>> =
+                    cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+                let mut idx = 0;
+                Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
+            }
             // A scalarized value param: rebuild the unboxed Group from leaf cells.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
@@ -8121,6 +8166,30 @@ impl Builder<'_> {
                             ValueRepr::Group { present: None, .. } => {
                                 self.emit_cur(Inst::Const(Lit::Bool(true)))
                             }
+                            other => {
+                                let value = self.pack(other);
+                                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                                self.emit_cur(Inst::NotEq(value, nil))
+                            }
+                        };
+                        return Ok(if matches!(op, BinOp::Eq) {
+                            self.emit_cur(Inst::Not(present))
+                        } else {
+                            present
+                        });
+                    }
+                    // The tuple twin of the nobox-value case above: a `(..)?`
+                    // whose element splats carries its own presence SLOT, and
+                    // that slot is the answer. Packing instead would build a
+                    // `MakeTuple` -- a table, never nil -- so `== null` would be
+                    // false even on the absent arm.
+                    if self.nullable_tuple_call_shape(v).is_some() {
+                        let repr = self.lower_expr_repr(v)?;
+                        let present = match repr {
+                            ValueRepr::Tuple {
+                                present: Some(value),
+                                ..
+                            } => value,
                             other => {
                                 let value = self.pack(other);
                                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
@@ -9689,6 +9758,9 @@ impl Builder<'_> {
             if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
                 return self.lower_if_let_nobox(b, value, then_branch, else_branch);
             }
+            if let Some(shape) = self.nullable_tuple_call_shape(value) {
+                return self.lower_if_let_nullable_tuple(b, value, &shape, then_branch, else_branch);
+            }
         }
         let result = self.f.new_cell(None);
         let scrut = self.lower_scrut(value)?;
@@ -9755,6 +9827,82 @@ impl Builder<'_> {
 
         self.cur = then_bb;
         self.bind_leaves(b, &values, shape);
+        let tv = self.lower_expr(then_branch)?;
+        self.store_and_join(result, tv, join);
+
+        self.cur = else_bb;
+        let ev = match else_branch {
+            Some(eb) => self.lower_expr(eb)?,
+            None => self.emit_cur(Inst::Const(Lit::Nil)),
+        };
+        self.store_and_join(result, ev, join);
+
+        self.cur = join;
+        Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    /// The DECLARED nullable-tuple shape of a call, without lowering it.
+    ///
+    /// Read off the CALLEE's return type, never off `e`'s own type: safe-nav
+    /// gives `h?.pair()` the same `Nullable(Tuple)` with no presence slot, so
+    /// keying on the expression type would branch on a slot that is not there.
+    fn nullable_tuple_call_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            ..
+        } = self.body.expr_arena[e]
+        else {
+            return None;
+        };
+        let func = self.resolve_funcref(e, name).ok()?;
+        let ret = self.ws.module(func.module).functions[func.func].return_ty?;
+        let shape = tuple_ret_shape(self.ws, self.spec_subst, ret)?;
+        shape.nullable.then_some(shape)
+    }
+
+    /// `if let t = <call returning (..)?>` where an element splats: the presence
+    /// SLOT is the branch condition and `t` binds the remaining slots as cells,
+    /// so nothing is packed to be tested and immediately unpacked again. The
+    /// tuple twin of [`Self::lower_if_let_nobox`].
+    fn lower_if_let_nullable_tuple(
+        &mut self,
+        b: Idx<BindingInfo>,
+        value: Idx<Expr>,
+        shape: &TupleRetShape,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let result = self.f.new_cell(None);
+        let repr = self.lower_expr_repr(value)?;
+        let ValueRepr::Tuple {
+            parts,
+            present: Some(present),
+        } = repr
+        else {
+            return Err(gap("a nullable tuple scrutinee arrived without its presence slot"));
+        };
+        // Presence is consumed by the branch, so what `t` holds is the plain tuple.
+        let bound_shape = TupleRetShape { slots: shape.slots.clone(), nullable: false };
+
+        let then_bb = self.f.new_block();
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(self.cur, Term::Branch { cond: present, then_bb, else_bb });
+
+        self.cur = then_bb;
+        let slots = self.tuple_repr_to_slots(
+            ValueRepr::Tuple { parts, present: None },
+            &bound_shape,
+        );
+        let cells: Vec<Idx<Cell>> = slots
+            .iter()
+            .map(|v| {
+                let c = self.f.new_cell(None);
+                self.emit_cur(Inst::Store { cell: c, value: *v });
+                c
+            })
+            .collect();
+        self.tuple_binds.insert(raw(b), (cells, bound_shape));
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 
