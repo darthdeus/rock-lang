@@ -1759,9 +1759,14 @@ fn assemble(
                     match f.return_ty.and_then(|t| extern_ret_value_struct(ws, t)) {
                         Some(sname) => {
                             let call_args = if params.is_empty() { "__out".to_string() } else { format!("__out, {params}") };
+                            // Returns an OWNING copy, never `__out[0]`. LuaJIT does
+                            // not keep the parent array alive through a reference
+                            // into it, so handing one back is a use-after-free that
+                            // reads fine until the memory is reused
+                            // (`tests/extern_value_return_ownership.rs`).
                             let _ = writeln!(
                                 out,
-                                "function {nm}({params})\n  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return __out[0]\nend"
+                                "function {nm}({params})\n  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])\nend"
                             );
                         }
                         None => {
