@@ -1308,12 +1308,22 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some((ty_name, paths)) = skull_mir::lower::nobox_global_shape_paths(ws, g.ty)
+            let Some((ty_name, paths, nullable)) =
+                skull_mir::lower::nobox_global_shape_paths(ws, g.ty)
             else {
                 continue;
             };
             let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
                 .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
+            // A nullable global leads with a presence leaf that has no path: it is
+            // not a field, so it is branched on rather than read. Everything below
+            // pairs the REMAINING leaves with the paths.
+            let (present, leaves) = if nullable {
+                let (p, rest) = leaves.split_first().expect("a nullable shape has a presence leaf");
+                (Some(*p), rest.to_vec())
+            } else {
+                (None, leaves)
+            };
             if leaves.len() != paths.len() {
                 log::error!(
                     target: "SKULL",
@@ -1357,9 +1367,25 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
                 .map(|(l, p)| format!("{l} = v.{p}"))
                 .collect::<Vec<_>>()
                 .join("; ");
+            let (get, set) = match present {
+                // Presence gates BOTH directions: rebuilding an absent value would
+                // hand reflection a struct of nils, and a write that left the leaves
+                // behind would let a later read resurrect the old value.
+                Some(p) => (
+                    format!("if not {p} then return nil end return {ty_name}{suffix}({args})"),
+                    format!(
+                        "{p} = v ~= nil; if v ~= nil then {writes} else {} end",
+                        leaves
+                            .iter()
+                            .map(|l| format!("{l} = nil"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                ),
+                None => (format!("return {ty_name}{suffix}({args})"), writes),
+            };
             rows.push(format!(
-                "[{:?}]={{get=function() return {ty_name}{suffix}({args}) end,\
-                 set=function(v) {writes} end}},",
+                "[{:?}]={{get=function() {get} end,set=function(v) {set} end}},",
                 g.name.as_str()
             ));
         }

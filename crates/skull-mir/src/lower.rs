@@ -1000,9 +1000,14 @@ pub fn nobox_global_leaves(ws: &Workspace, name: Ustr, ty: TyId) -> Option<Vec<U
 ///
 /// Paths, not just an arity, because both directions address by path: the ctor is
 /// positional over this sequence, and the write side assigns `v.<path>` per leaf.
-pub fn nobox_global_shape_paths(ws: &Workspace, ty: TyId) -> Option<(Ustr, Vec<Ustr>)> {
+///
+/// The `bool` is whether the global is NULLABLE. Its presence leaf leads the
+/// leaves but has no path -- presence is not addressable as `v.<something>` --
+/// so the accessor must branch on it rather than read it, and the caller needs
+/// to know the two sequences line up only from leaf 1 on.
+pub fn nobox_global_shape_paths(ws: &Workspace, ty: TyId) -> Option<(Ustr, Vec<Ustr>, bool)> {
     let shape = nobox_declared_shape(ws, ty)?;
-    Some((shape.name, value_leaf_paths(&shape)))
+    Some((shape.name, value_leaf_paths(&shape), shape.nullable))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
