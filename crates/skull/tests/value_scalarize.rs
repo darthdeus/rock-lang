@@ -303,6 +303,22 @@ value Bad { tl__x: float, tl: V2 }
 fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
 "#;
 
+const UNDERSCORE_FIELD_VIA_FN_VALUE: &str = r#"
+nobox value P { x: float, y: float }
+nobox value Bad { tl: P, tl__x: float }
+
+@scalar_abi inline(lua) fn probe(r: Bad) -> float = """
+    return r__tl__x * 1.0 + r__tl__y * 10.0
+"""
+
+fn apply(f: (Bad) -> float, r: Bad) -> float { return f(r) }
+
+fn main() {
+    let r = Bad { tl: P { x: 1.0, y: 2.0 }, tl__x: 900.0 }
+    print("{apply(probe, r)}")
+}
+"#;
+
 /// SENTINEL -- pins a residual non-injectivity that
 /// `nested_scalar_abi_leaf_params_are_injective`'s fix does NOT close. A field
 /// literally named `tl__x` joins to the same Lua param as nested `tl.x`, so the
@@ -311,6 +327,10 @@ fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
 /// in a Rock identifier, so the encoding cannot be made injective by joining
 /// alone; the fix is a spanned emit rejection through the `collision_errors`
 /// sink (`skull-codegen-lua/src/lib.rs`), fail-closed on the ambiguity.
+///
+/// The reach is wider than a direct call: the same collision travels through a
+/// FN VALUE (`underscore_field_collision_through_a_fn_value_sentinel` below), so
+/// the rejection has to sit at the namer, not at a call site.
 ///
 /// PINNED BEHAVIOR (BUG): duplicate params are emitted, no diagnostic.
 /// When the rejection lands this goes RED -- delete this test and assert the
@@ -323,5 +343,30 @@ fn underscore_field_name_collides_with_nested_path_sentinel() {
         f.contains("r__tl__x, r__tl__x"),
         "PINNED BEHAVIOR (BUG): a `__`-containing field name should collide with \
          the nested path and emit duplicate params until the reject lands:\n{f}"
+    );
+}
+
+/// SENTINEL -- the same `tl__x`-vs-`tl.x` collision reached through a FN VALUE,
+/// which the sibling sentinel above pins only at a direct call. It matters
+/// because the two routes derive the leaf list from different ends: the direct
+/// call reads the callee's own `@scalar_abi`, the indirect one derives the ABI
+/// from the fn TYPE. Both land on the same non-injective namer, so a fix keyed
+/// on the call site would close one and leave this one open.
+///
+/// This one produces a WRONG ANSWER rather than only a suspicious signature:
+/// `tl__x` (900) binds over nested `tl.x` (1), so the body computes 920 where
+/// the fields say 21.
+///
+/// PINNED BEHAVIOR (BUG): runs, returns 920. When the namer's rejection lands
+/// this goes RED -- delete it and assert the rejection alongside its sibling.
+#[test]
+fn underscore_field_collision_through_a_fn_value_sentinel() {
+    let lua = common::try_emit_module(UNDERSCORE_FIELD_VIA_FN_VALUE)
+        .expect("PINNED BEHAVIOR (BUG): the collision is not rejected today");
+    assert_eq!(
+        common::run_luajit(&format!("{lua}\nmain()\n"), "underscore_fnvalue"),
+        "920",
+        "PINNED BEHAVIOR (BUG): `tl__x` binds over nested `tl.x` through a fn \
+         value, so the body reads the wrong field (21 is the correct answer)"
     );
 }
