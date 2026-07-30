@@ -288,11 +288,23 @@ impl Builder<'_> {
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
     /// license for SROA to rematerialize an escaping load of its cell (item 8).
-    /// `resolve_tyid` chases `Infer` but keeps `Nullable`, so a `V?` binding is a
-    /// `Nullable` node here and returns false; only a bare value-struct `App`
-    /// qualifies. Unsolved inference / non-value types return false (conservative).
+    /// Only a bare value-struct `App` qualifies; unsolved inference / non-value
+    /// types return false (conservative).
+    ///
+    /// Nullability is asked through [`Self::is_nullable_ty`] and NOT off the
+    /// resolved node. An earlier spelling relied on "`resolve_tyid` chases
+    /// `Infer` but keeps `Nullable`", which held for a spelled-out `V?` and
+    /// stopped holding once a GENERIC could be bound to one: `ty_node` applies
+    /// the substitution and `reified_type_node` erases the `?`, so a `T` bound to
+    /// `BV2?` answered as a bare `BV2` and licensed SROA to rebuild an absent row
+    /// as `BV2_ct(nil, nil)`. `is_nullable_ty` reads `raw_ty_node` before the
+    /// substitution erases anything and consults the binding, which is why
+    /// `nobox_shape_of_ty` already routes this same question through it.
     pub(crate) fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
         let Some(ty) = self.binding_ty(b) else { return false };
+        if self.is_nullable_ty(ty) {
+            return false;
+        }
         let Some(rt) = self.resolve_tyid(ty) else { return false };
         matches!(
             self.ty_node(rt),
