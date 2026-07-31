@@ -4811,6 +4811,7 @@ fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
         ("_log_throttled_impl", 4),
         ("log_reset_dedup", 0),
         ("log_dedup_count", 0),
+        ("log_suppression_summary", 0),
     ];
     (cf.is_extern || cf.inline_body.is_some())
         && LOG_FNS.iter().any(|(n, a)| *n == cf.name.as_str() && *a == cf.param_decls.len())

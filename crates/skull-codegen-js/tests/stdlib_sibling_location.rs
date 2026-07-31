@@ -151,11 +151,14 @@ fn a_stdlib_sibling_pair_agrees_on_arity() {
 }
 
 /// `name -> (arity, annotations)` for every fn in `src` whose body is
-/// `inline(<backend>)` / `extern(js)`.
-fn sibling_facts(
+/// `inline(<backend>)` / `extern(js)`. `native_side` additionally admits
+/// `extern(ffi, "lib")` decls, which is how the ENGINE declares its half of a
+/// pair (`lib.rock`) -- the stdlib's halves are `inline(lua)` bodies.
+fn sibling_facts_with(
     src: &str,
     id: &str,
     want_js: bool,
+    native_side: bool,
 ) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
     let ast = skull_parser::parse_module(src, Ustr::from(id)).expect("parse");
     assert!(ast.recovery_errors.is_empty(), "{id} must parse cleanly");
@@ -166,7 +169,8 @@ fn sibling_facts(
             f.body,
             FunctionBody::ExternJs | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _)
         );
-        let is_lua = matches!(f.body, FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _));
+        let is_lua = matches!(f.body, FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _))
+            || (native_side && matches!(f.body, FunctionBody::Ffi(..)));
         if is_js != want_js || (!is_js && !is_lua) {
             continue;
         }
@@ -179,11 +183,23 @@ fn sibling_facts(
             // return early on `inline_body.is_some()` before they read it. So a
             // sibling carrying it and one not carrying it behave identically,
             // and gating on it would only assert a cosmetic difference.
-            .filter(|n| n != "inline")
+            // `@allow` is a lint suppression -- it scopes a diagnostic over the
+            // body it sits on, so it is expected to differ between two bodies
+            // written in different languages (`long_inline_lua` cannot apply to
+            // a JS body) and says nothing about how a caller emits the call.
+            .filter(|n| n != "inline" && n != "allow")
             .collect();
         out.insert(f.name.name.to_string(), (f.params.len(), anns));
     }
     out
+}
+
+fn sibling_facts(
+    src: &str,
+    id: &str,
+    want_js: bool,
+) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
+    sibling_facts_with(src, id, want_js, false)
 }
 
 /// Every paired lua/js sibling must agree on arity AND annotations.
@@ -208,18 +224,42 @@ fn a_sibling_pair_agrees_on_arity_and_annotations() {
     let imgui_js_src =
         std::fs::read_to_string(repo("stone/engine/web/imgui_stubs.rock")).expect("imgui_stubs.rock");
 
-    let pairs: Vec<(&str, _, _)> = vec![
-        ("stdlib", stdlib_lua, stdlib_js),
+    // The ENGINE leaf surface: `extern(ffi, "stone")` in lib.rock against
+    // `extern(js)` in js_ffi.rock. This is the biggest pair set of the three and
+    // was uncovered until `stone_play_sound` drifted -- a `bus` param added
+    // natively, the js sibling left at 4 params. A drifted pair stops collapsing
+    // and `rock web` then rejects on the lua rep, which is a whole-game failure
+    // far from the one-line cause (js_ffi.rock's own header states the rule).
+    let engine_lua_src = std::fs::read_to_string(repo("stone/engine/lib.rock")).expect("lib.rock");
+    let engine_js_src =
+        std::fs::read_to_string(repo("stone/engine/web/js_ffi.rock")).expect("js_ffi.rock");
+
+    // `@nomangle` is compared for stdlib/imgui, where both halves are
+    // `inline(<backend>)` and mangling applies to each. It is NOT compared for
+    // the engine pair: there the native half is `extern(ffi)`, which `is_exempt`
+    // (skull-mir/src/mangle.rs) keeps bare via `f.is_extern` alone, while an
+    // `inline(js)` half needs `@nomangle` to reach that same bare name. The
+    // annotation differing is what CORRECTNESS looks like there, so gating on it
+    // would assert the opposite of the rule.
+    let pairs: Vec<(&str, _, _, &[&str])> = vec![
+        ("stdlib", stdlib_lua, stdlib_js, &[][..]),
         (
             "imgui",
             sibling_facts(&imgui_lua_src, "<imgui>", false),
             sibling_facts(&imgui_js_src, "<imgui_stubs>", true),
+            &[][..],
+        ),
+        (
+            "engine",
+            sibling_facts_with(&engine_lua_src, "<lib>", false, true),
+            sibling_facts_with(&engine_js_src, "<js_ffi>", true, true),
+            &["nomangle"][..],
         ),
     ];
 
     let mut drifted: Vec<String> = Vec::new();
     let mut paired_total = 0usize;
-    for (label, lua, js) in &pairs {
+    for (label, lua, js, ignored) in &pairs {
         let paired: Vec<&String> = js.keys().filter(|n| lua.contains_key(*n)).collect();
         assert!(
             paired.len() >= 10,
@@ -233,14 +273,18 @@ fn a_sibling_pair_agrees_on_arity_and_annotations() {
             if la != ja {
                 drifted.push(format!("{label}::{n} arity lua={la} js={ja}"));
             }
+            let keep = |s: &std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
+                s.iter().filter(|a| !ignored.contains(&a.as_str())).cloned().collect()
+            };
+            let (laa, jaa) = (keep(laa), keep(jaa));
             if laa != jaa {
-                let lua_only: Vec<&String> = laa.difference(jaa).collect();
-                let js_only: Vec<&String> = jaa.difference(laa).collect();
+                let lua_only: Vec<&String> = laa.difference(&jaa).collect();
+                let js_only: Vec<&String> = jaa.difference(&laa).collect();
                 drifted.push(format!("{label}::{n} lua-only={lua_only:?} js-only={js_only:?}"));
             }
         }
     }
-    assert!(paired_total >= 60, "expected both pairs to contribute; got {paired_total}");
+    assert!(paired_total >= 160, "expected all three pairs to contribute; got {paired_total}");
     assert!(
         drifted.is_empty(),
         "these lua/js siblings disagree, so the JS body binds its params or takes its \

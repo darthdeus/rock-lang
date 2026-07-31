@@ -547,23 +547,59 @@ function __stone_log(level, category, msg) {
   __stone_emit(level, category, msg);
 }
 function log_set_level(level) { __G.__stone_log_level = level; }
+// `__stone_log_dedup` holds a COUNT, not a flag: `log_suppression_summary`
+// reports how many times a suppressed site fired, and a site that fired 38k
+// times must not read like one that fired once.
 var __stone_log_dedup = {};
+var __stone_log_counts = {};
+var __stone_log_sites = {};
+var __stone_log_summary_done = false;
 var __stone_log_throttle = {};
 var __stone_log_now_override = null;
 function _log_once_impl(category, msg, site) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
-  if (__stone_log_dedup[site]) return;
-  __stone_log_dedup[site] = true;
+  var n = (__stone_log_dedup[site] || 0) + 1;
+  __stone_log_dedup[site] = n;
+  __stone_log_sites[site] = (category || "") + "|" + msg;
+  if (n > 1) return;
   __stone_emit(0, category, msg);
 }
 function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
+  __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
+  __stone_log_sites[site] = (category || "") + "|" + msg;
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
   __stone_emit(0, category, msg);
+}
+// Ties order differently from the luajit sibling (JS sort is stable, table.sort
+// is not); the counts themselves match.
+function log_suppression_summary() {
+  __stone_log_init();
+  if (__stone_log_summary_done) return;
+  __stone_log_summary_done = true;
+  var rows = [];
+  var collect = function(tbl) {
+    for (var site in tbl) {
+      if (Object.prototype.hasOwnProperty.call(tbl, site) && tbl[site] > 1) {
+        rows.push({ site: site, n: tbl[site] });
+      }
+    }
+  };
+  collect(__stone_log_dedup);
+  collect(__stone_log_counts);
+  if (rows.length === 0) return;
+  rows.sort(function(a, b) { return b.n - a.n; });
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var rec = __stone_log_sites[r.site] || "|";
+    var bar = rec.indexOf("|");
+    __stone_emit(0, rec.slice(0, bar),
+      "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1));
+  }
 }
 function stone_log_set_now(now_sec) { __stone_log_now_override = now_sec; }
 function stone_log_clear_now() { __stone_log_now_override = null; }
@@ -574,7 +610,10 @@ function __stone_log_now() {
 function _log_throttled_impl(category, msg, interval_sec, site) {
   _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site);
 }
-function log_reset_dedup() { __stone_log_dedup = {}; __stone_log_throttle = {}; }
+function log_reset_dedup() {
+  __stone_log_dedup = {}; __stone_log_throttle = {};
+  __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_summary_done = false;
+}
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 "#;
 
@@ -1678,7 +1717,11 @@ function stone_reload_sound(h, path) {
   return __sw_audio_decode(h, path) !== 0;
 }
 function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
-function stone_play_sound(h, volume, speed, decay) {
+// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui.
+// The web mixer has only sfx and music nodes, so music routes to musicGain and
+// every other bus shares sfxGain -- the topology is coarser than native, not
+// ignored.
+function stone_play_sound(h, bus, volume, speed, decay) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
   var src = A.ctx.createBufferSource();
@@ -1687,7 +1730,7 @@ function stone_play_sound(h, volume, speed, decay) {
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
   g.gain.value = vol;
-  src.connect(g); g.connect(A.sfxGain); src.start();
+  src.connect(g); g.connect(bus === 2 ? A.musicGain : A.sfxGain); src.start();
   if (decay > 0) {
     var t = A.ctx.currentTime;
     g.gain.setValueAtTime(vol, t);
