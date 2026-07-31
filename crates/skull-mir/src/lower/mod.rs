@@ -2762,3 +2762,61 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
 
 #[cfg(test)]
 mod tests;
+
+/// Support for `crate::spec_census` -- the Stage-0d reconciliation needs the
+/// RESULT of `compute_call_spec` without `lower::shape` becoming public.
+pub(crate) mod shape_census_support {
+    use super::shape::{compute_call_spec, ReifiedCtor, ReifiedType, SpecKey, SpecSubst};
+    use crate::mir::FuncRef;
+    use bone_semantic::hir::FnBackend;
+    use bone_semantic::inference::{BodyInference, Workspace};
+
+    /// Canonical rendering, byte-identical to `MonoArena::render` for the types
+    /// both trees can express. The reconciliation compares these strings.
+    pub(crate) fn render_reified(ty: &ReifiedType) -> String {
+        match ty {
+            ReifiedType::Prim(p) => (*p).to_string(),
+            ReifiedType::Nullable(inner) => format!("{}?", render_reified(inner)),
+            ReifiedType::Tuple(parts) => {
+                let ps: Vec<String> = parts.iter().map(render_reified).collect();
+                format!("({})", ps.join(", "))
+            }
+            ReifiedType::App { ctor, params } => {
+                let base = match ctor {
+                    ReifiedCtor::Array => "Vec".to_string(),
+                    ReifiedCtor::Map => "Map".to_string(),
+                    ReifiedCtor::Nominal(n) => n.to_string(),
+                };
+                if params.is_empty() {
+                    return base;
+                }
+                let ps: Vec<String> = params.iter().map(render_reified).collect();
+                format!("{base}<{}>", ps.join(", "))
+            }
+        }
+    }
+
+    /// Every call in this body that today's machinery specializes, plus the
+    /// count of sites whose spec decision REJECTED (the Stage-0b invariants).
+    pub(crate) fn specializations_in_body(
+        ws: &Workspace,
+        inf: &BodyInference,
+        target: FnBackend,
+    ) -> (Vec<(FuncRef, SpecKey)>, usize) {
+        // caller is supplied by the census; this returns callee-side data only
+        let empty = SpecSubst::new();
+        let mut out = Vec::new();
+        let mut rejected = 0usize;
+        let mut calls: Vec<_> = inf.resolved_overload_calls.iter().collect();
+        calls.sort_by_key(|(e, _)| **e);
+        for (e, (m, f)) in calls {
+            let func = FuncRef { module: *m, func: *f };
+            match compute_call_spec(ws, inf, *e, func, &empty, target) {
+                Ok(Some((key, _))) => out.push((func, key)),
+                Ok(None) => {}
+                Err(_) => rejected += 1,
+            }
+        }
+        (out, rejected)
+    }
+}

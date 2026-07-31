@@ -234,3 +234,39 @@ fn main() { depth(1, 3) }
     // The walk terminated, which is the point of the cap.
     assert!(g.instances.len() < 500, "instance explosion: {}", g.instances.len());
 }
+
+/// Plan S 15a: every specialization today's conditional machinery produces must
+/// appear in the shadow graph as a complete instance. Equality is NOT expected
+/// -- the shadow side is strictly larger, because the old mechanism is
+/// conditional -- but an absence in THAT direction means the shadow walk cannot
+/// see an edge production already takes.
+///
+/// A miss whose CALLING body the walk never reached is classified separately:
+/// that is a reachability difference (dead code, or a shared generic body no
+/// instance reaches), not a missing instance. Over the whole closed world the
+/// unexplained count is 0 and the classified count is 569.
+#[test]
+fn every_current_specialization_appears_in_the_shadow_graph() {
+    let (ws, g) = graph_of(
+        r#"
+value P { x: float, y: float }
+@inline fn ident<T>(v: T) -> T { return v }
+fn main() {
+    let a = ident(P { x: 1.0, y: 2.0 })
+    let b = ident(1)
+    let xs: [P] = [P { x: 1.0, y: 2.0 }]
+    xs.push(P { x: 3.0, y: 4.0 })
+}
+"#,
+    );
+    let r = instance_graph::reconcile(&ws, &g, bone_semantic::hir::FnBackend::Lua);
+    assert!(r.today > 0, "the fixture produced no specializations to reconcile");
+    assert!(
+        r.missing.is_empty(),
+        "current specializations absent from the shadow graph: {:?}",
+        r.missing
+    );
+    assert_eq!(r.rejected_sites, 0, "a Stage-0b invariant fired on a valid program");
+    // The expected direction: the shadow graph is strictly larger.
+    assert!(r.shadow_only > 0, "shadow graph added nothing over today's specializer");
+}

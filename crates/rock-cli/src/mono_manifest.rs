@@ -48,6 +48,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut direct_rec: std::collections::BTreeSet<String> = Default::default();
     let mut mutual_rec: std::collections::BTreeSet<String> = Default::default();
     let mut changing_rec: std::collections::BTreeSet<String> = Default::default();
+    let mut rec_today = 0usize;
+    let mut rec_matched = 0usize;
+    let mut rec_missing: std::collections::BTreeSet<String> = Default::default();
+    let mut rec_rejected = 0usize;
+    let mut rec_shadow_only = 0usize;
+    let mut rec_unreached = 0usize;
 
     for dir in &projects {
         let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
@@ -62,6 +68,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 direct_rec.extend(row.3.direct_same_instance);
                 mutual_rec.extend(row.3.mutual_same_instance);
                 changing_rec.extend(row.3.changing_instance);
+                rec_today += row.4.today;
+                rec_matched += row.4.matched;
+                rec_rejected += row.4.rejected_sites;
+                rec_shadow_only += row.4.shadow_only;
+                rec_unreached += row.4.missing_unreached_caller;
+                rec_missing.extend(row.4.missing);
                 rows.push(row.0);
             }
             Err(e) => skipped.push((name, e.to_string())),
@@ -140,6 +152,22 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
 
+    println!("## shadow vs. today's conditional specializer");
+    println!();
+    println!("- specializations the CURRENT machinery produces: **{rec_today}**");
+    println!("- ...present in the shadow graph as a complete instance: **{rec_matched}**");
+    println!("- ...MISSING from the shadow graph: **{}**", rec_missing.len());
+    for m in rec_missing.iter().take(10) {
+        println!("  - `{m}`");
+    }
+    println!(
+        "- ...absent because the shadow walk never reached the CALLING body \
+         (a reachability difference, not a missing instance): **{rec_unreached}**"
+    );
+    println!("- shadow instances with no counterpart today: **{rec_shadow_only}**");
+    println!("- call sites whose spec decision REJECTED (Stage 0b): **{rec_rejected}**");
+    println!();
+
     if !skipped.is_empty() {
         println!("## NOT analyzed");
         println!();
@@ -156,6 +184,7 @@ type OneProject = (
     BTreeMap<&'static str, usize>,
     BTreeMap<String, usize>,
     instance_graph::RecursionCensus,
+    instance_graph::Reconciliation,
 );
 
 fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<OneProject> {
@@ -204,7 +233,8 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
         digest: instance_graph::manifest_digest(&ws, &g),
         stable,
     };
-    Ok((row, hist_of(&g), reasons, census))
+    let rec = instance_graph::reconcile(&ws, &g, bone_semantic::hir::FnBackend::Lua);
+    Ok((row, hist_of(&g), reasons, census, rec))
 }
 
 fn hist_of(g: &InstanceGraph) -> BTreeMap<&'static str, usize> {

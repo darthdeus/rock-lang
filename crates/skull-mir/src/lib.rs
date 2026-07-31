@@ -18,5 +18,6 @@ pub mod mangle;
 pub mod mir;
 pub mod monoty;
 pub mod reach;
+pub mod spec_census;
 pub mod verdict;
 pub mod vertex_plan;

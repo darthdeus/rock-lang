@@ -514,3 +514,101 @@ pub fn manifest_digest(ws: &Workspace, g: &InstanceGraph) -> u64 {
 pub fn instance_count(g: &InstanceGraph) -> usize {
     g.instances.len()
 }
+
+/// Reconciliation of today's conditional specializer against the shadow graph
+/// (plan S 15a). Equality is NOT expected -- the old mechanism is conditional,
+/// so the shadow side is strictly larger. What must hold is that nothing today's
+/// machinery produces is MISSING from the shadow graph; an absence in that
+/// direction means the shadow walk cannot see an edge production already takes.
+#[derive(Default, Debug)]
+pub struct Reconciliation {
+    /// Specializations the current machinery produces.
+    pub today: usize,
+    /// ...of which the shadow graph contains a matching instance.
+    pub matched: usize,
+    /// ...of which it does NOT, and whose CALLER the shadow walk did reach.
+    /// Each of these is a failure, not a difference.
+    pub missing: Vec<String>,
+    /// ...of which it does not, but whose caller the shadow walk never reached
+    /// either. A reachability difference, explained rather than unexplained.
+    pub missing_unreached_caller: usize,
+    /// Call sites whose current spec decision was a Stage-0b invariant
+    /// rejection. Expected to be zero on a valid corpus.
+    pub rejected_sites: usize,
+    /// Shadow instances with no counterpart today. These are the EXPECTED
+    /// difference: instances the conditional specializer declines to make.
+    pub shadow_only: usize,
+}
+
+/// A today-slot matches a shadow arg when the slot is `None` (the partial key
+/// erased it, so it constrains nothing) or the rendered types are equal.
+fn slots_match(slots: &[Option<String>], shadow: &[String]) -> bool {
+    slots.len() == shadow.len()
+        && slots
+            .iter()
+            .zip(shadow)
+            .all(|(s, a)| s.as_ref().is_none_or(|s| s == a))
+}
+
+pub fn reconcile(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    target: bone_semantic::hir::FnBackend,
+) -> Reconciliation {
+    let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws, target);
+
+    // Shadow instances grouped by function, as rendered argument lists.
+    let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();
+    for i in &g.instances {
+        by_func
+            .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
+            .or_default()
+            .push(i.args.iter().map(|a| g.arena.render(*a)).collect());
+    }
+
+    let mut r = Reconciliation { today: today.len(), rejected_sites, ..Default::default() };
+    let mut matched_shadow: std::collections::HashSet<(u32, u32, Vec<String>)> =
+        Default::default();
+    for t in &today {
+        let k = (t.func.module.raw(), t.func.func.into_raw().into_u32());
+        let hit = by_func
+            .get(&k)
+            .map(|args| args.iter().find(|a| slots_match(&t.slots, a)))
+            .unwrap_or(None);
+        match hit {
+            Some(a) => {
+                r.matched += 1;
+                matched_shadow.insert((k.0, k.1, a.clone()));
+            }
+            None => {
+                let ck = (t.caller.module.raw(), t.caller.func.into_raw().into_u32());
+                if !by_func.contains_key(&ck) {
+                    r.missing_unreached_caller += 1;
+                    continue;
+                }
+                let f = &ws.module(t.func.module).functions[t.func.func];
+                let caller = &ws.module(t.caller.module).functions[t.caller.func];
+                let slots: Vec<&str> =
+                    t.slots.iter().map(|s| s.as_deref().unwrap_or("<erased>")).collect();
+                r.missing.push(format!(
+                    "{}<{}> (called from `{}`)",
+                    f.name,
+                    slots.join(", "),
+                    caller.name
+                ));
+            }
+        }
+    }
+    r.missing.sort();
+    r.missing.dedup();
+    r.shadow_only = g
+        .instances
+        .iter()
+        .filter(|i| {
+            let k = (i.func.module.raw(), i.func.func.into_raw().into_u32());
+            let args: Vec<String> = i.args.iter().map(|a| g.arena.render(*a)).collect();
+            !matched_shadow.contains(&(k.0, k.1, args))
+        })
+        .count();
+    r
+}
