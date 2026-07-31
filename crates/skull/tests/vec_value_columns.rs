@@ -374,7 +374,7 @@ fn stdlib_vec_surface_works_over_column_storage() {
     // this test is named for: each plain-generic entry point reaches a standalone
     // The encoded `a_n2_V2_0_z` key is the parameterless nominal `V2`.
     for callee in [
-        "vec_set_spec_a_n2_V2_0_z(",
+        "vec_set_arr_T_int_T_ret_unit_spec_a_n2_V2_0_z(",
         "pop_arr_T_ret_T_opt_spec_a_n2_V2_0_z(",
         "clear_arr_T_ret_unit_spec_a_n2_V2_0_z(",
     ] {
