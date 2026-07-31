@@ -26,7 +26,9 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
 use skull_mir::cfg::reverse_postorder;
-use skull_mir::gpu_layout::{AttrKind, SamplerKind, texture_slots, vertex_attrs};
+use skull_mir::gpu_layout::{
+    AttrKind, SamplerKind, UniformBlockPlan, WireKind, texture_slots, uniform_block, vertex_attrs,
+};
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::*;
@@ -1678,6 +1680,11 @@ struct EntryShape {
     /// The `@textures` group's struct name for this stage, if any. Carried so
     /// the emission API can hand the engine the slot order.
     texture_group: Option<Ustr>,
+    /// The `@uniform` group's struct name for this stage, if any. The block
+    /// DECLARATION and its byte layout both come from this via
+    /// [`skull_mir::gpu_layout::uniform_block`], so `uniform_fields` types the
+    /// bare-global reads and never states the layout.
+    uniform_group: Option<Ustr>,
 }
 
 /// The default fullscreen vertex stage -- identical to the hand-written
@@ -1713,6 +1720,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
     let mut tc = None;
     let mut texture_params: Vec<usize> = Vec::new();
     let mut texture_group: Option<Ustr> = None;
+    let mut uniform_group: Option<Ustr> = None;
     for (i, pd) in f.param_decls.iter().enumerate() {
         if has_anno(&pd.annotations, "textures") {
             reject_conflicting_texture_role(&pd.annotations, pd.name, span, "entry")?;
@@ -1762,6 +1770,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
                     uniform_fields.push((fd.name, fty));
                 }
                 uniform_param = Some(i);
+                uniform_group = Some(sname);
             }
         }
     }
@@ -1787,6 +1796,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
         arrays: Vec::new(),
         main_out: None,
         texture_group,
+        uniform_group,
     })
 }
 
@@ -1813,6 +1823,10 @@ pub struct ShaderEmission {
     /// still needs the NAME once, to point each sampler uniform at its unit at
     /// link time; after that it binds by slot and never by name again.
     pub texture_slots: Vec<Ustr>,
+    /// The program's `@uniform` block layout, or `None` when it declares no
+    /// group. The single authority for the block's bytes: the GLSL declaration
+    /// above, the CPU packer and the link-time driver assertion all read it.
+    pub uniform_block: Option<UniformBlockPlan>,
 }
 
 pub fn emit_shader_entry_with_dependencies(
@@ -1863,11 +1877,18 @@ pub fn emit_shader_entry_with_dependencies(
         }
     }
 
+    let block_plan = shape
+        .uniform_group
+        .map(|g| uniform_block(ws, g).map_err(|e| err(f.name_span, e.message)))
+        .transpose()?;
+
     let mut px = String::new();
     px.push_str("in vec2 TexCoord;\nout vec4 FragColor;\n\n");
-    for (n, t) in &shape.uniform_fields {
-        px.push_str(&format!("uniform {} {};\n", t.name(), n));
+    if let Some(plan) = &block_plan {
+        px.push_str(&uniform_block_decl(plan));
     }
+    // Samplers are opaque: GLSL forbids them inside a uniform block, so they
+    // stay loose beside it and bind by unit (`@textures` / ShaderEmission).
     for (_, n, t) in &shape.samplers {
         px.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
     }
@@ -1900,7 +1921,7 @@ pub fn emit_shader_entry_with_dependencies(
         has_bare_sampler(&shape.samplers, &shape.global_params),
         f.name_span,
     )?;
-    Ok(ShaderEmission { source, dependencies, texture_slots })
+    Ok(ShaderEmission { source, dependencies, texture_slots, uniform_block: block_plan })
 }
 
 /// Emission profile (docs/shaders.md): the `#version` line and
@@ -2027,6 +2048,39 @@ fn struct_def_of(ws: &Workspace, ty: TyId) -> Option<&StructDef> {
     let sname = nominal_name(ws, ty)?;
     let &sid = ws.struct_by_name.get(&sname)?;
     Some(&ws.modules[sid.module.index()].structs[sid.def])
+}
+
+/// A block member's GLSL type spelling. The one function a WGSL or Metal
+/// emitter rewrites for the uniform lane, the twin of [`attr_glsl_ty`].
+fn wire_glsl_ty(k: WireKind) -> &'static str {
+    match k {
+        WireKind::F32 => "float",
+        WireKind::F32x2 => "vec2",
+        WireKind::F32x3 => "vec3",
+        WireKind::F32x4 => "vec4",
+        WireKind::I32 => "int",
+        WireKind::Bool32 => "bool",
+        WireKind::Mat4 => "mat4",
+    }
+}
+
+/// The `layout(std140) uniform <Blk> { .. };` declaration for a group.
+///
+/// Declared with NO instance name, which is what keeps this change confined to
+/// declaration lines: an unnamed-instance block's members are bare GLSL globals,
+/// so every body reading them is byte-identical to the loose form.
+///
+/// Members come from the PLAN, not from a second walk of the struct -- the same
+/// single-oracle rule `VertexShape.attrs` follows for attributes. The driver
+/// resolves members by name, so the names here and the offsets the packer writes
+/// must come from one place or they can drift silently.
+fn uniform_block_decl(plan: &UniformBlockPlan) -> String {
+    let mut s = format!("layout(std140) uniform {} {{\n", plan.struct_name);
+    for m in &plan.members {
+        s.push_str(&format!("    {} {};\n", wire_glsl_ty(m.kind), m.name));
+    }
+    s.push_str("};\n");
+    s
 }
 
 /// Attribute/uniform fields of a struct param, GLSL-typed (a sampler-typed field
@@ -2474,6 +2528,8 @@ fn emit_vertex_stage(
         samplers: v.samplers.clone(),
         arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
         texture_group: v.texture_group,
+        // A2 keeps loose uniforms until the second slice.
+        uniform_group: None,
         main_out: Some(MainOut {
             fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect(),
             position_is_gl: true,
@@ -2530,6 +2586,8 @@ fn emit_fragment_stage(
         arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
         main_out,
         texture_group: fs.texture_group,
+        // A2 keeps loose uniforms until the second slice.
+        uniform_group: None,
     };
     let (mf, helpers, dependencies) = lower_reach_helpers(ws, scx, fref, Stage::Fragment)?;
     reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
@@ -2671,7 +2729,9 @@ pub fn emit_shader_pipeline_with_dependencies(
     let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
         || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
     let texture_slots = program_texture_slots(ws, group, bare, vf.name_span)?;
-    Ok(ShaderEmission { source, dependencies, texture_slots })
+    // A2 pipeline stages keep loose uniforms until the second slice, which also
+    // needs the "both stages declare the SAME @uniform type" rule.
+    Ok(ShaderEmission { source, dependencies, texture_slots, uniform_block: None })
 }
 
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated

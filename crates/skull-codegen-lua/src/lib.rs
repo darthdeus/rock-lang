@@ -2195,6 +2195,20 @@ pub fn lua_string_vec(items: &[&str]) -> String {
     out
 }
 
+/// The `[int]` sibling of [`lua_string_vec`], for driver text handing the engine
+/// a list of integers (a uniform block's member offsets).
+pub fn lua_int_vec(items: &[i64]) -> String {
+    let mut out = String::from("{_data = {");
+    for (i, n) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{n}");
+    }
+    let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", items.len());
+    out
+}
+
 /// A field key is a Lua identifier unless it is an `embed` leaf's physical key,
 /// which is a dotted path (`"p.x"`). Lua keywords never reach here -- the
 /// tokenizer already escapes them to `__rock_<kw>` -- so anything non-identifier

@@ -639,6 +639,20 @@ fn js_string_vec(items: &[ustr::Ustr]) -> String {
     out
 }
 
+/// The `[int]` sibling of [`js_string_vec`] (a uniform block's member offsets).
+fn js_int_vec(items: &[i64]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("{_data: [");
+    for (i, n) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{n}");
+    }
+    let _ = write!(out, "], len: {}, __ty: \"Vec\"}}", items.len());
+    out
+}
+
 /// One `__rock_shader_register("<key>", "<glsl>", <slots>)` line per distinct
 /// `rock_shader` pair -- the JS mirror of skull's Lua `shader_registration_lines`
 /// (same collector, same Core330 profile: the profile is a property of the GL
@@ -673,12 +687,26 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
             ),
         }
         .map_err(|e| anyhow::anyhow!(e.message))?;
+        // The `@uniform` block's std140 layout. A shader with no group sends an
+        // empty name and empty lists -- an argument either way. A SHORT call is
+        // silent on JS (the missing argument reads `undefined`), which is what
+        // rock-cli/tests/shader_register_arity_gate.rs exists to catch.
+        let b = emission.uniform_block.as_ref();
+        let member_names: Vec<ustr::Ustr> =
+            b.map(|p| p.members.iter().map(|m| m.name).collect()).unwrap_or_default();
+        let offsets: Vec<i64> =
+            b.map(|p| p.members.iter().map(|m| m.offset as i64).collect()).unwrap_or_default();
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
-            js_string_vec(&emission.texture_slots)
+            js_string_vec(&emission.texture_slots),
+            crate::js_test::js_str(b.map(|p| p.struct_name.as_str()).unwrap_or("")),
+            b.map(|p| p.size).unwrap_or(0),
+            b.map(|p| p.fingerprint()).unwrap_or(0),
+            js_string_vec(&member_names),
+            js_int_vec(&offsets),
         );
     }
     Ok(out)

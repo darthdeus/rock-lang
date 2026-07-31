@@ -314,9 +314,6 @@ pub struct UniformBlockPlan {
     pub members: Vec<BlockMember>,
     /// The block's total size, rounded up to 16.
     pub size: u32,
-    /// Always at least 16 -- a std140 block's alignment is its largest member's
-    /// alignment rounded up to a vec4.
-    pub align: u32,
 }
 
 impl BlockMember {
@@ -358,6 +355,13 @@ impl UniformBlockPlan {
     /// and `{Vec2, float}` agree on size, on both offsets, on leaf count and on
     /// view sequence, differing only in the KIND at each offset. So the kind is
     /// hashed, and the names with it -- the driver resolves members by name.
+    ///
+    /// Folded to 53 bits because it is EMITTED as a plain numeric literal into
+    /// the `__rock_shader_register` call, and LuaJIT and JS both represent
+    /// integers exactly only that far -- a wider value would round on the way
+    /// in, which is the one failure this value exists to prevent. Folding here
+    /// rather than at the emission site is what keeps bind, upload and the
+    /// tests reading ONE number instead of three that have to agree.
     pub fn fingerprint(&self) -> u64 {
         let mut h = fnv1a(0xcbf2_9ce4_8422_2325, self.struct_name.as_bytes());
         for m in &self.members {
@@ -365,7 +369,10 @@ impl UniformBlockPlan {
             h = fnv1a(h, &[m.kind as u8]);
             h = fnv1a(h, &m.offset.to_le_bytes());
         }
-        fnv1a(h, &self.size.to_le_bytes())
+        let h = fnv1a(h, &self.size.to_le_bytes());
+        // XOR-fold the high bits down rather than truncating, so they still
+        // contribute to the 53 that survive.
+        (h ^ (h >> 53)) & ((1 << 53) - 1)
     }
 
     /// The primitive leaf this block expects at each slot, as a dotted field
@@ -438,7 +445,6 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
 
     let mut members = Vec::with_capacity(sd.fields.len());
     let mut offset = 0u32;
-    let mut align = 16u32;
 
     for fd in &sd.fields {
         let Some(kind) = wire_kind(ws, fd.ty) else {
@@ -459,7 +465,6 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
             ));
         };
         offset = round_up(offset, kind.align());
-        align = align.max(kind.align());
         members.push(BlockMember {
             name: fd.name,
             kind,
@@ -469,7 +474,7 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
         offset += kind.size();
     }
 
-    Ok(UniformBlockPlan { struct_name, members, size: round_up(offset, 16), align })
+    Ok(UniformBlockPlan { struct_name, members, size: round_up(offset, 16) })
 }
 
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
