@@ -72,9 +72,13 @@ fn make_seed(main_rock: &str) -> Vec<(String, String)> {
 }
 
 /// Pin the post-fix behavior of `clear_all_systems()` for SHUTDOWN_SYSTEMS:
-/// after one load + clear + one reload, the registry holds one entry
-/// (the just-pushed handler), not two (which would mean the clear is a
-/// no-op for that registry — the leak this test prevents).
+/// after one load + clear + one reload, the registry holds exactly what one
+/// load registers, not double it (which would mean the clear is a no-op for
+/// that registry — the leak this test prevents). The count is taken from the
+/// first load rather than hardcoded: the engine registers `@shutdown`
+/// handlers of its own (log_sink's suppression summary), so a literal 1
+/// pinned "the seed's handler is the only one in the process", which is not
+/// the contract under test.
 #[test]
 fn shutdown_systems_clear_contract_via_real_engine() {
     let seed_owned = make_seed(
@@ -116,8 +120,8 @@ fn shutdown_systems_clear_contract_via_real_engine() {
          _G.HOT_RELOAD = false\n\n\
          -- Phase 1: post-initial-load\n\
          local len_after_load = _G.SHUTDOWN_SYSTEMS.len\n\
-         if len_after_load ~= 1 then\n\
-             print(\"FAIL: post-load SHUTDOWN_SYSTEMS.len = \" .. tostring(len_after_load) .. \", expected 1\")\n\
+         if len_after_load < 1 then\n\
+             print(\"FAIL: post-load SHUTDOWN_SYSTEMS.len = \" .. tostring(len_after_load) .. \", expected at least the seed's own handler\")\n\
              os.exit(1)\n\
          end\n\n\
          -- Phase 2: engine's pre-dofile clear\n\
@@ -130,9 +134,9 @@ fn shutdown_systems_clear_contract_via_real_engine() {
          _G.HOT_RELOAD = true\n\
          dofile(main_lua)\n\
          _G.HOT_RELOAD = false\n\n\
-         -- Phase 4: should be 1 again, not 2\n\
-         if _G.SHUTDOWN_SYSTEMS.len ~= 1 then\n\
-             print(\"FAIL: post-reload SHUTDOWN_SYSTEMS.len = \" .. tostring(_G.SHUTDOWN_SYSTEMS.len) .. \", expected 1 — the cleanup contract is broken (clear_all_systems missed SHUTDOWN_SYSTEMS)\")\n\
+         -- Phase 4: back to one load's worth, not doubled\n\
+         if _G.SHUTDOWN_SYSTEMS.len ~= len_after_load then\n\
+             print(\"FAIL: post-reload SHUTDOWN_SYSTEMS.len = \" .. tostring(_G.SHUTDOWN_SYSTEMS.len) .. \", expected \" .. tostring(len_after_load) .. \" — the cleanup contract is broken (clear_all_systems missed SHUTDOWN_SYSTEMS)\")\n\
              os.exit(1)\n\
          end\n\
          print(\"PASS\")\n",

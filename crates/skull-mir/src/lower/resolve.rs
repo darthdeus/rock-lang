@@ -187,7 +187,14 @@ impl Builder<'_> {
                 // read out of a mutable place, so it copies.
                 let basev = self.pack(br);
                 let fv = self.emit_cur(Inst::Field { base: basev, field });
-                if let Some(name) = self.value_struct_of(e).filter(|_| self.is_mutable_place(base))
+                // A `nobox` field splits to leaves whatever the base is: the box
+                // is the guarantee's violation, not just a copy that would sink.
+                // It also carries presence STATICALLY -- a Group widening to `T?`
+                // supplies `true`, where a Scalar would have to ask `~= nil` at
+                // runtime, and that test pins the cell feeding it against SROA.
+                if let Some(name) = self
+                    .value_struct_of(e)
+                    .filter(|n| self.is_mutable_place(base) || self.is_nobox_struct(*n))
                 {
                     return Ok(self.boxed_value_copy_repr(fv, name));
                 }
