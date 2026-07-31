@@ -52,6 +52,7 @@ mod test_protocol;
 mod lint_cmd;
 pub(crate) mod lint_union;
 pub mod lint_pass;
+mod mono_manifest;
 mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
@@ -176,6 +177,12 @@ pub enum CliCommand {
     /// distinct logical types, and failures bucketed by reason. Changes no
     /// emission. See `monoty_census::do_monoty_census`.
     MonoTyCensus,
+    /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
+    /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
+    /// the closed world (instances keyed by `MonoTy`, not `SpecKey`), and
+    /// report instance/edge counts, the edge-kind histogram and the recursion
+    /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
+    MonoManifest,
     /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
     /// for the per-edit LSP query path on the bone backend (the work the editor
     /// does per keystroke through `BoneWorkspace`): `update` (didChange) +
@@ -284,6 +291,7 @@ impl clap::ValueEnum for CliCommand {
             Self::SkullIncrementalProfile,
             Self::IterIncremental,
             Self::MonoTyCensus,
+            Self::MonoManifest,
             Self::IterLsp,
             Self::LspSurvey,
             Self::IterReinfer,
@@ -333,6 +341,7 @@ impl CliCommand {
             Self::SkullIncrementalProfile => "skull-incremental-profile",
             Self::IterIncremental => "iter-incremental",
             Self::MonoTyCensus => "mono-ty-census",
+            Self::MonoManifest => "mono-manifest",
             Self::IterLsp => "iter-lsp",
             Self::LspSurvey => "lsp-survey",
             Self::IterReinfer => "iter-reinfer",

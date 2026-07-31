@@ -590,6 +590,12 @@ impl CommandContext {
             let root = self.get_path_or_current()?;
             return crate::monoty_census::do_monoty_census(Some(&root));
         }
+        // mono-manifest builds the Stage-0d shadow instance graph; a diagnostic
+        // that touches no emission, dispatched early like its 0c sibling.
+        if self.args.command == CliCommand::MonoManifest {
+            let root = self.get_path_or_current()?;
+            return crate::mono_manifest::do_mono_manifest(Some(&root), None);
+        }
         // iter-lsp is the tight-loop profiler for the per-edit LSP query path
         // (BoneWorkspace on the bone backend); dispatched early like the other
         // iter-* profilers.

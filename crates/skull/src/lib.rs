@@ -15,6 +15,7 @@
 
 pub mod coroutine_emit;
 pub mod inline_stats;
+pub mod instance_graph;
 pub mod mir_emit;
 
 use bone_semantic::inference::Workspace;

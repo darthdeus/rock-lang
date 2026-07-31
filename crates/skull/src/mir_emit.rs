@@ -689,7 +689,7 @@ fn is_library_module(file: &str, project_root: Option<&str>) -> bool {
     }
 }
 
-fn is_emission_root(
+pub(crate) fn is_emission_root(
     file: &str,
     project_root: Option<&str>,
     f: &bone_semantic::hir::Function,
@@ -1404,12 +1404,12 @@ fn unit_errors(units: &[UnitOut]) -> Vec<CompilerError> {
 /// The decorator and global definitions are re-lowered+emitted in PARALLEL
 /// ([`par_map`]); cached function chunks are pulled and their captured phase
 /// times summed in, so `backend-stats` still sees the full per-stage breakdown.
-type DecoMap = FxHashMap<Ustr, (ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>;
+pub(crate) type DecoMap = FxHashMap<Ustr, (ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>;
 
 /// Name -> definition map for every `deco` in the workspace, plus the def list
 /// (an application usually names a decorator declared in another module). Shared
 /// by `assemble` (which also emits the def bodies) and `assemble_overlay`.
-fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>) {
+pub(crate) fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>) {
     let mut deco_map: DecoMap = Default::default();
     let mut deco_items: Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = Vec::new();
     for module in ws.modules.iter() {

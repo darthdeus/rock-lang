@@ -215,6 +215,33 @@ impl MonoArena {
         }
     }
 
+    /// Structural nesting depth of a type: a leaf is 0, `[int]` is 1,
+    /// `[[int]]` is 2. Polymorphic recursion grows this without bound
+    /// (`f<T> -> f<[T]>`), which is why it -- and not a path length -- is the
+    /// sound thing to cap an instantiation walk on.
+    pub fn depth(&self, id: MonoTyId) -> u32 {
+        match self.get(id) {
+            MonoTy::Int
+            | MonoTy::Float
+            | MonoTy::Bool
+            | MonoTy::String
+            | MonoTy::Any
+            | MonoTy::Unit
+            | MonoTy::Never => 0,
+            MonoTy::Nullable(inner) => 1 + self.depth(*inner),
+            MonoTy::Tuple(parts) => {
+                1 + parts.iter().map(|p| self.depth(*p)).max().unwrap_or(0)
+            }
+            MonoTy::App { params, .. } => {
+                1 + params.iter().map(|p| self.depth(*p)).max().unwrap_or(0)
+            }
+            MonoTy::Function { params, ret } => {
+                let p = params.iter().map(|p| self.depth(*p)).max().unwrap_or(0);
+                1 + p.max(self.depth(*ret))
+            }
+        }
+    }
+
     /// FNV-1a over the canonical rendering. Stable across processes and across
     /// insertion orders, unlike anything derived from the integer id or from a
     /// `FxHashMap` iteration.
