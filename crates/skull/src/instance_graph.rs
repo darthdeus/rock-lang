@@ -339,8 +339,9 @@ pub fn build(ws: &Workspace, mut roots: Vec<FuncRef>, perturb: bool) -> Instance
         for (e, (m, f)) in calls {
             let callee = FuncRef { module: m, func: f };
             let bindings = inf.call_generic_bindings.get(&e);
-            let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
             let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+            let kind =
+                if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
             record(&mut g, &mut work, callee, bindings, kind, span);
         }
 

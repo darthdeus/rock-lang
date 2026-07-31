@@ -45,6 +45,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut hist: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut unresolved_reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut unresolved_examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut direct_rec: std::collections::BTreeSet<String> = Default::default();
     let mut mutual_rec: std::collections::BTreeSet<String> = Default::default();
     let mut changing_rec: std::collections::BTreeSet<String> = Default::default();
@@ -74,6 +75,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 rec_shadow_only += row.4.shadow_only;
                 rec_unreached += row.4.missing_unreached_caller;
                 rec_missing.extend(row.4.missing);
+                for (k, v) in row.5 {
+                    let e = unresolved_examples.entry(k).or_default();
+                    for x in v {
+                        if e.len() < 3 && !e.contains(&x) {
+                            e.push(x);
+                        }
+                    }
+                }
                 rows.push(row.0);
             }
             Err(e) => skipped.push((name, e.to_string())),
@@ -130,10 +139,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     if unresolved_reasons.is_empty() {
         println!("none.");
     } else {
-        println!("| reason | count |");
-        println!("|---|---:|");
+        println!("| reason | count | examples |");
+        println!("|---|---:|---|");
         for (k, v) in &unresolved_reasons {
-            println!("| `{k}` | {v} |");
+            let ex = unresolved_examples
+                .get(k)
+                .map(|e| e.join(", "))
+                .unwrap_or_else(|| "--".to_string());
+            println!("| `{k}` | {v} | {ex} |");
         }
     }
     println!();
@@ -185,6 +198,7 @@ type OneProject = (
     BTreeMap<String, usize>,
     instance_graph::RecursionCensus,
     instance_graph::Reconciliation,
+    BTreeMap<String, Vec<String>>,
 );
 
 fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<OneProject> {
@@ -214,6 +228,16 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
     for u in &g.unresolved {
         *reasons.entry(u.reason.to_string()).or_insert(0) += 1;
     }
+    // A few examples per reason: one can be an accident, three show a pattern.
+    let mut examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for u in &g.unresolved {
+        let e = examples.entry(u.reason.to_string()).or_default();
+        let f = &ws.module(u.callee.module).functions[u.callee.func];
+        let at = format!("`{}` at {}:{}", f.name, u.span.file, u.span.line_range.0 + 1);
+        if e.len() < 3 && !e.contains(&at) {
+            e.push(at);
+        }
+    }
     let census = g.recursion_census(&ws);
     let row = ProjectRow {
         // Relative: an absolute path varies by checkout and would make the
@@ -234,7 +258,7 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
         stable,
     };
     let rec = instance_graph::reconcile(&ws, &g, bone_semantic::hir::FnBackend::Lua);
-    Ok((row, hist_of(&g), reasons, census, rec))
+    Ok((row, hist_of(&g), reasons, census, rec, examples))
 }
 
 fn hist_of(g: &InstanceGraph) -> BTreeMap<&'static str, usize> {
