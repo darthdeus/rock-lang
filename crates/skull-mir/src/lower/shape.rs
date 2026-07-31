@@ -1288,8 +1288,13 @@ pub(crate) fn reified_type_node(ty: &ReifiedType) -> Option<TypeExpr> {
 /// that position would.
 pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
     if let ReifiedType::Tuple(parts) = ty {
-        let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
-        return RetSlot::Nested(TupleRetShape { slots, nullable: false });
+        // The same collapse [`ret_slot`] makes: a tuple no part of which splats
+        // is the pre-existing boxed ABI, so it occupies ONE slot. Without it the
+        // two oracles disagree on a NESTED tuple -- the generic side counted an
+        // inner `(Entity<T>, T)` as two wire values while the concrete callee
+        // returned it as one box.
+        let shape = reified_tuple_shape(ws, parts);
+        return if shape.splats() { RetSlot::Nested(shape) } else { RetSlot::Opaque };
     }
     let (payload, nullable) = ty.peel_nullable();
     let Some(nominal) = payload.nominal().filter(|n| is_nobox_nominal(ws, *n)) else {
@@ -1301,6 +1306,14 @@ pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
         sig_shape_of_nominal(ws, nominal)
     };
     shape.map_or(RetSlot::Opaque, RetSlot::Leaves)
+}
+
+/// The per-part slots of a reified tuple, WITHOUT the collapse
+/// [`reified_ret_slot`] applies. Read where the tuple's arity is the question --
+/// a destructure, a `next`'s `(bool, E)` -- rather than what slot it occupies.
+pub(crate) fn reified_tuple_shape(ws: &Workspace, parts: &[ReifiedType]) -> TupleRetShape {
+    let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
+    TupleRetShape { slots, nullable: false }
 }
 
 pub(crate) fn reify_type(
@@ -1575,11 +1588,8 @@ pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Op
     // this is the sole consumer that needs a tuple's arity, and answering it
     // from the binding keeps `ty_node` honest about what it cannot mint.
     if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty) {
-        if let Some(bound @ ReifiedType::Tuple(_)) = subst.get(&var) {
-            let RetSlot::Nested(shape) = reified_ret_slot(ws, bound) else {
-                return None;
-            };
-            return Some(shape);
+        if let Some(ReifiedType::Tuple(parts)) = subst.get(&var) {
+            return Some(reified_tuple_shape(ws, parts));
         }
     }
     let (elem_ty, elements, nullable) = match static_ty(ws, ty)? {

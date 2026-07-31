@@ -289,8 +289,7 @@ impl Builder<'_> {
         // indirect call sees a bare `Generic` and declines to splat, while the
         // fn value it calls splats from its own concrete type.
         if let Some(ReifiedType::Tuple(parts)) = self.bound_generic_subst(ty) {
-            let slots = parts.iter().map(|p| reified_ret_slot(self.ws, p)).collect();
-            return Some(TupleRetShape { slots, nullable: false });
+            return Some(reified_tuple_shape(self.ws, parts));
         }
         let ty = self.resolve_tyid(ty)?;
         let TypeExpr::Tuple { elements } = self.ty_node(ty)? else { return None };
