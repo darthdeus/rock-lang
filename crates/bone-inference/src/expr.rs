@@ -13,13 +13,22 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
         }
 
         Statement::Return(e) => {
-            let e_ty = match e {
-                Some(e) => infer_expr(c, gamma, *e)?,
-                None => gamma.workspace.builtins.unit(),
-            };
-
-            if let Some(declared_ret_ty) = gamma.declared_ret_ty {
-                coerce(gamma, e_ty, declared_ret_ty, c.body.statement_spans[s])?;
+            // CHECKED against the declared return, not inferred-then-coerced: a
+            // returned lambda has to record the type of the hole it fills, or the
+            // body and every indirect call site derive different fn-value ABIs
+            // from it. Same rule the `let` arm below already follows.
+            match (e, gamma.declared_ret_ty) {
+                (Some(e), Some(declared)) => {
+                    check_expr(c, gamma, *e, declared, c.body.statement_spans[s])?;
+                }
+                (Some(e), None) => {
+                    infer_expr(c, gamma, *e)?;
+                }
+                (None, Some(declared)) => {
+                    let unit = gamma.workspace.builtins.unit();
+                    coerce(gamma, unit, declared, c.body.statement_spans[s])?;
+                }
+                (None, None) => {}
             }
         }
 
@@ -842,68 +851,7 @@ pub fn infer_expr_used(
         },
 
         Expr::Block { statements, tail } => {
-            let mut g_saved: Vec<(Idx<BindingInfo>, TyId)> = vec![];
-            // Snapshot the path-refinement set on entry; restore on exit. This
-            // scopes to the block BOTH escaping guard narrows AND
-            // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
-            // flow-sensitively, a refinement established inside a block must not
-            // survive past it (the other control path didn't run it). Whole-local
-            // narrows peel `binding_types` and are restored via `g_saved`. The set
-            // is usually empty/small, so the clone is cheap (an empty FxHashSet
-            // clone doesn't allocate).
-            let refined_snapshot = gamma.refined_nonnull.clone();
-
-            for statement in *statements {
-                if let Err(e) = infer_statement(c, gamma, statement) {
-                    gamma.body_errors.push(e);
-                    continue;
-                };
-
-                for (root, fields) in stmt_guard_narrows(gamma, c, statement) {
-                    match root {
-                        Root::Local(b) if fields.is_empty() => {
-                            if let Some(cur) = gamma.out.binding_types.get(b).copied() {
-                                let narrowed = peel_nullable(gamma, cur, expr_span);
-                                gamma.out.binding_types.insert(b, narrowed);
-                                g_saved.push((b, cur));
-                            }
-                        }
-                        _ => {
-                            gamma.refined_nonnull.insert((root, fields));
-                        }
-                    }
-                }
-            }
-
-            let result = match tail {
-                Some(tail) => match infer_expr_used(c, gamma, *tail, used) {
-                    Ok(t) => t,
-                    Err(err) => {
-                        gamma.body_errors.push(err);
-                        gamma.workspace.builtins.error()
-                    }
-                },
-                None => {
-                    let diverges = (*statements)
-                        .into_iter()
-                        .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
-                        .is_some_and(|s| matches!(c.body.statement_arena[s], Statement::Return(_)));
-
-                    if diverges {
-                        gamma.workspace.builtins.never()
-                    } else {
-                        gamma.workspace.builtins.unit()
-                    }
-                }
-            };
-
-            for (b, old) in g_saved {
-                gamma.out.binding_types.insert(b, old);
-            }
-
-            gamma.refined_nonnull = refined_snapshot;
-
-            result
+            infer_block(c, gamma, statements, tail, used, expr_span, None)
         }
 
         Expr::If {
@@ -1535,13 +1483,19 @@ pub fn infer_expr_used(
         }
 
         Expr::Return(e) => {
-            let e_ty = match e {
-                Some(e) => infer_expr(c, gamma, *e)?,
-                None => gamma.workspace.builtins.unit(),
-            };
-
-            if let Some(declared) = gamma.declared_ret_ty {
-                coerce(gamma, e_ty, declared, expr_span)?;
+            // Checked, not inferred-then-coerced -- see `Statement::Return`.
+            match (e, gamma.declared_ret_ty) {
+                (Some(e), Some(declared)) => {
+                    check_expr(c, gamma, *e, declared, expr_span)?;
+                }
+                (Some(e), None) => {
+                    infer_expr(c, gamma, *e)?;
+                }
+                (None, Some(declared)) => {
+                    let unit = gamma.workspace.builtins.unit();
+                    coerce(gamma, unit, declared, expr_span)?;
+                }
+                (None, None) => {}
             }
 
             gamma.workspace.builtins.never()
@@ -1582,6 +1536,99 @@ pub(crate) fn redundant_optional_on(gamma: &mut Gamma, ty: TyId, span: Span) -> 
     )
 }
 
+
+/// A block's statements, scoping and tail -- the shared body of the `Expr::Block`
+/// arm above and [`check_expr`]'s. `expected` is `Some` only on the checked
+/// path, where it is pushed to the TAIL; everything else is identical, which is
+/// the point: the two must not drift.
+#[allow(clippy::too_many_arguments)]
+fn infer_block(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    statements: &IdxRange<Statement>,
+    tail: &Option<Idx<Expr>>,
+    used: Use,
+    expr_span: Span,
+    expected: Option<TyId>,
+) -> TyId {
+            let mut g_saved: Vec<(Idx<BindingInfo>, TyId)> = vec![];
+            // Snapshot the path-refinement set on entry; restore on exit. This
+            // scopes to the block BOTH escaping guard narrows AND
+            // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
+            // flow-sensitively, a refinement established inside a block must not
+            // survive past it (the other control path didn't run it). Whole-local
+            // narrows peel `binding_types` and are restored via `g_saved`. The set
+            // is usually empty/small, so the clone is cheap (an empty FxHashSet
+            // clone doesn't allocate).
+            let refined_snapshot = gamma.refined_nonnull.clone();
+
+            for statement in *statements {
+                if let Err(e) = infer_statement(c, gamma, statement) {
+                    gamma.body_errors.push(e);
+                    continue;
+                };
+
+                for (root, fields) in stmt_guard_narrows(gamma, c, statement) {
+                    match root {
+                        Root::Local(b) if fields.is_empty() => {
+                            if let Some(cur) = gamma.out.binding_types.get(b).copied() {
+                                let narrowed = peel_nullable(gamma, cur, expr_span);
+                                gamma.out.binding_types.insert(b, narrowed);
+                                g_saved.push((b, cur));
+                            }
+                        }
+                        _ => {
+                            gamma.refined_nonnull.insert((root, fields));
+                        }
+                    }
+                }
+            }
+
+            let result = match tail {
+                // The ONE difference between inferring a block and checking one:
+                // a checked block pushes the hole down to its TAIL. Without it a
+                // lambda in tail position records its own type, which is narrower
+                // than the hole it fills, and the fn-value ABI disagrees at the
+                // two ends (`nobox_fn_value_nullable_return_sentinel`).
+                Some(tail) => match expected {
+                    Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
+                        Ok(()) => exp,
+                        Err(err) => {
+                            gamma.body_errors.push(err);
+                            gamma.workspace.builtins.error()
+                        }
+                    },
+                    None => match infer_expr_used(c, gamma, *tail, used) {
+                        Ok(t) => t,
+                        Err(err) => {
+                            gamma.body_errors.push(err);
+                            gamma.workspace.builtins.error()
+                        }
+                    },
+                },
+                None => {
+                    let diverges = (*statements)
+                        .into_iter()
+                        .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
+                        .is_some_and(|s| matches!(c.body.statement_arena[s], Statement::Return(_)));
+
+                    if diverges {
+                        gamma.workspace.builtins.never()
+                    } else {
+                        gamma.workspace.builtins.unit()
+                    }
+                }
+            };
+
+            for (b, old) in g_saved {
+                gamma.out.binding_types.insert(b, old);
+            }
+
+            gamma.refined_nonnull = refined_snapshot;
+
+            result
+}
+
 pub(crate) fn check_expr(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -1589,6 +1636,21 @@ pub(crate) fn check_expr(
     expected: TyId,
     span: Span,
 ) -> Result<(), CompilerError> {
+    // A block fills the hole with its TAIL, so push `expected` through rather
+    // than inferring the block and coercing the result -- otherwise the arms
+    // below never see a tail expression, and a fn body whose tail is a lambda
+    // records the lambda's own narrower type.
+    if let Expr::Block { statements, tail } = &c.body.expr_arena[e] {
+        let ty = infer_block(c, gamma, statements, tail, Use::Value, span, Some(expected));
+        // No re-coerce: a tail was checked against `expected` already, and a
+        // tail-less block still has to answer for its unit/never type.
+        if tail.is_none() {
+            coerce(gamma, ty, expected, span)?;
+        }
+        gamma.assign_expr_type(c, e, ty)?;
+        return Ok(());
+    }
+
     if let Expr::Lambda { params, body } = c.body.expr_arena[e] {
         let exp_r = resolve(gamma, expected, span);
 
@@ -1610,7 +1672,17 @@ pub(crate) fn check_expr(
                 Some(fn_ty.with_idx(ret)),
                 c.body.expr_spans[e],
             )?;
-            return coerce(gamma, lam_ty, expected, span);
+            coerce(gamma, lam_ty, expected, span)?;
+            // The EXPECTED type, not the lambda's own -- same as the `Array` and
+            // `SiblingRef` arms below. A lambda's inferred return is narrower than
+            // the hole it fills (`if c { P {..} } else { null }` infers `P`, the
+            // `null` arm does not widen it), and codegen reads this type to decide
+            // the fn-value ABI at BOTH ends. Recording the narrow one gives the
+            // body a return shape with no presence slot while the indirect call
+            // site, reading the declared fn type, binds one. Every RETURN position
+            // routes here for exactly that reason -- see the `Block` arm above.
+            gamma.assign_expr_type(c, e, exp_r)?;
+            return Ok(());
         }
     }
 

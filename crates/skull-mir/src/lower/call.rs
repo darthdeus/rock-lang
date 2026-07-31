@@ -405,7 +405,46 @@ impl Builder<'_> {
     /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
     /// splice always resolves; a residual case falls to the site-aware rejection.
     pub(crate) fn call_spec(&self, e: Idx<Expr>, func: FuncRef) -> Option<(SpecKey, SpecSubst)> {
-        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst)
+        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst, self.scx.target)
+    }
+
+    /// [`Self::call_spec`] narrowed by the target's storage filter -- the form
+    /// every consumer of a call's INSTANTIATION must use, so none of them
+    /// disagrees about whether this call specializes.
+    pub(crate) fn call_spec_for_target(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Option<(SpecKey, SpecSubst)> {
+        self.call_spec(e, func).filter(|(k, _)| {
+            !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
+        })
+    }
+
+    /// THE tuple-return shape of a call, read off the CALLEE's declared return
+    /// type under the CALLEE's instantiation.
+    ///
+    /// One oracle, because there were two and they disagreed. `lower_call`
+    /// computed this under the call's own `SpecSubst` while the presence
+    /// consumers (`nullable_tuple_call_shape`) computed it under the ENCLOSING
+    /// body's -- empty in a non-generic caller, so the callee's generic stayed
+    /// unbound, every slot came back `Opaque`, and `tuple_ret_shape`'s
+    /// `nullable && !splats` guard answered `None`. The callee then faithfully
+    /// returned its `false` presence slot and the call site threw it away:
+    /// `!= null` fell through to packing a `MakeTuple`, which is structurally
+    /// never nil, so it const-folded to `true` and `if let` emitted no branch at
+    /// all. A shape disagreement here cannot fail loudly -- it just branches on
+    /// a slot that is not there, or fails to.
+    pub(crate) fn call_ret_tuple_shape(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Option<TupleRetShape> {
+        let spec = self.call_spec_for_target(e, func);
+        let empty = SpecSubst::new();
+        let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
+        let ret = self.ws.module(func.module).functions[func.func].return_ty?;
+        tuple_ret_shape(self.ws, subst, ret)
     }
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
@@ -455,19 +494,13 @@ impl Builder<'_> {
         // longer the only thing that can serve it: the call targets a standalone
         // specialized copy, lowered under this same substitution, so the two agree
         // on the ABI without an inliner ever running.
-        let spec = self
-            .call_spec(e, func)
-            .filter(|(k, _)| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k));
-        let empty = SpecSubst::new();
-        let subst = spec.as_ref().map(|(_, s)| s).unwrap_or(&empty);
+        let spec = self.call_spec_for_target(e, func);
         // The instantiation key is recorded on the emitted call inst whenever this
         // is a specialized call -- even on the boxed (non-scalar-ABI) path, because
         // the specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
         let key = spec.as_ref().map(|(k, _)| k.clone());
-        let ret_tuple = self.ws.module(func.module).functions[func.func]
-            .return_ty
-            .and_then(|t| tuple_ret_shape(self.ws, subst, t));
+        let ret_tuple = self.call_ret_tuple_shape(e, func);
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
@@ -480,6 +513,8 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
+        let empty_subst = SpecSubst::new();
+        let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
@@ -608,19 +643,14 @@ impl Builder<'_> {
     /// that is the whole point of keying on the type ([`Self::fn_value_abi`]).
     pub(crate) fn indirect_call_by_abi(
         &mut self,
-        (param_shapes, ret_shape): (Vec<Option<ValueShape>>, Option<ValueShape>),
+        (param_shapes, ret_shape): (Vec<RetSlot>, Option<ValueShape>),
         callee: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
-            match param_shapes.get(i).and_then(|s| s.clone()) {
-                Some(shape) => {
-                    let r = self.lower_expr_repr(a)?;
-                    argv.extend(self.repr_to_leaves(&r, &shape));
-                }
-                None => argv.push(self.lower_expr(a)?),
-            }
+            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         let Some(shape) = ret_shape else {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
@@ -684,18 +714,19 @@ impl Builder<'_> {
         abi: &FnScalarAbi,
     ) -> Result<ValueRepr, CompilerError> {
         let mut argv = Vec::new();
-        match abi.param_shapes.first().and_then(|s| s.clone()) {
-            Some(shape) => argv.extend(self.cdata_leaves(recv, &shape)),
-            None => argv.push(recv),
+        // The RECEIVER arrives already lowered, so it cannot go through
+        // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
+        // `Leaves` is the only splatting slot reachable here.
+        match abi.param_shapes.first() {
+            Some(RetSlot::Leaves(shape)) => {
+                let leaves = self.cdata_leaves(recv, &shape.clone());
+                argv.extend(leaves);
+            }
+            _ => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            match abi.param_shapes.get(i + 1).and_then(|s| s.clone()) {
-                Some(shape) => {
-                    let r = self.lower_expr_repr(a)?;
-                    argv.extend(self.repr_to_leaves(&r, &shape));
-                }
-                None => argv.push(self.lower_expr(a)?),
-            }
+            let slot = abi.param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
+            argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         match abi.ret_shape.clone() {
             Some(shape) => {
@@ -720,18 +751,13 @@ impl Builder<'_> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-        param_shapes: &[Option<ValueShape>],
+        param_shapes: &[RetSlot],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if !any_named {
             let mut out = Vec::new();
             for (i, &a) in arg_idxs.iter().enumerate() {
-                match param_shapes.get(i).and_then(|s| s.clone()) {
-                    Some(shape) => {
-                        let r = self.lower_expr_repr(a)?;
-                        out.extend(self.repr_to_leaves(&r, &shape));
-                    }
-                    None => out.push(self.lower_expr(a)?),
-                }
+                let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+                out.extend(self.arg_values_for_slot(&slot, a)?);
             }
             return Ok(out);
         }
@@ -749,11 +775,11 @@ impl Builder<'_> {
     /// else positionally. This is the one slot-placement rule, shared by every
     /// calling convention that has param names -- a convention with its own
     /// positional-only arg loop silently miscompiles `f(b: 2, a: 1)`.
-    /// `param_shapes` shorter than `param_names` (or all-`None`) is the boxed ABI.
+    /// `param_shapes` shorter than `param_names` (or all-`Opaque`) is the boxed ABI.
     pub(crate) fn slotted_call_args(
         &mut self,
         param_names: &[Ustr],
-        param_shapes: &[Option<ValueShape>],
+        param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<ValueRepr>> = vec![None; param_names.len()];
@@ -785,15 +811,16 @@ impl Builder<'_> {
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::new();
         for i in 0..hi {
-            match (slots[i].clone(), param_shapes.get(i).and_then(|s| s.clone())) {
-                (Some(r), Some(shape)) => out.extend(self.repr_to_leaves(&r, &shape)),
-                (Some(r), None) => out.push(self.pack(r)),
-                (None, Some(shape)) => {
-                    for _ in 0..shape.leaf_count() {
+            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            match slots[i].clone() {
+                Some(r) => out.extend(self.repr_to_slot_values(r, &slot)),
+                // An omitted param arrives as one nil PER WIRE VALUE, so the
+                // callee's default-fill sees a nil in every leaf it binds.
+                None => {
+                    for _ in 0..slot.slot_count() {
                         out.push(self.emit_cur(Inst::Const(Lit::Nil)));
                     }
                 }
-                (None, None) => out.push(self.emit_cur(Inst::Const(Lit::Nil))),
             }
         }
         Ok(out)
@@ -866,29 +893,77 @@ impl Builder<'_> {
                 let fields = value_leaf_paths(&shape).into_iter().zip(leaves).collect();
                 self.emit_cur(Inst::MakeValueStruct { name, fields })
             }
-            ValueRepr::Group {
-                name,
-                parts,
-                present: _,
-            } => {
-                // The Group's parts are in declared field order (the positional
-                // `<name>_ct` ABI requires it), so they line up with the declared
-                // names. The names let MIR passes forward a `Field` read to its
-                // ctor operand (SROA), eliminating the cdata when it never escapes.
-                // A payload-free enum field is just an `int` value (Prim), packed
-                // like any primitive.
-                let names = struct_field_names(self.ws, name);
-                let fields = parts
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, p)| {
-                        let fname = names.get(i).copied().unwrap_or(name);
-                        (fname, self.pack(p))
-                    })
-                    .collect();
-                self.emit_cur(Inst::MakeValueStruct { name, fields })
+            // `present` is deliberately NOT consulted here. Packing an absent
+            // Group to `nil` is what a `== nil` consumer needs, but `pack` cannot
+            // see its consumer, and the consumers that DO need it already branch
+            // on presence themselves (`??`, safe-nav). Branching here instead
+            // puts the ctor behind a cell, which stops SROA forwarding it, so the
+            // box survives to the residue check -- measured as
+            // `nobox_coalesce_at_ctor_field` regressing CORRECT -> LOUD REJECT,
+            // exactly the win `docs/parked/inline-lua.md` recorded this costing.
+            // Narrowing to a static presence does not help: at a `??` the
+            // presence is dynamic and the coalesce consumes it anyway.
+            ValueRepr::Group { name, parts, present: _ } => {
+                self.pack_group_fields(name, parts)
             }
         }
+    }
+
+    /// [`Self::pack`] for a consumer that can observe NIL-ness of the result --
+    /// a boxed slot an absent value has to reach as `nil`, not as a statically
+    /// non-nil ctor.
+    ///
+    /// `pack` itself deliberately ignores `present` (see its Group arm): it
+    /// cannot see its consumer, and branching for every consumer puts the ctor
+    /// behind a cell, which stops SROA forwarding it and costs
+    /// `nobox_coalesce_at_ctor_field`. The branch is legal HERE because the slot
+    /// is already an escape -- the ctor survives either way, so honouring
+    /// presence buys the correct `nil` for free. Same split safe-nav uses.
+    pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Idx<Inst> {
+        let ValueRepr::Group { name, parts, present: Some(present) } = r else {
+            return self.pack(r);
+        };
+        let result = self.f.new_cell(None);
+        let absent_bb = self.f.new_block();
+        let present_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: present_bb, else_bb: absent_bb },
+        );
+
+        self.cur = absent_bb;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        self.emit_cur(Inst::Store { cell: result, value: nil });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = present_bb;
+        let boxed = self.pack_group_fields(name, parts);
+        self.emit_cur(Inst::Store { cell: result, value: boxed });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
+    }
+
+    /// The `<name>_ct(..)` cdata for a Group's parts, with no presence test.
+    ///
+    /// The parts are in declared field order (the positional ctor ABI requires
+    /// it), so they line up with the declared names. The names let MIR passes
+    /// forward a `Field` read to its ctor operand (SROA), eliminating the cdata
+    /// when it never escapes. A payload-free enum field is just an `int` value
+    /// (Prim), packed like any primitive.
+    fn pack_group_fields(&mut self, name: Ustr, parts: Vec<ValueRepr>) -> Idx<Inst> {
+        let names = struct_field_names(self.ws, name);
+        let fields = parts
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let fname = names.get(i).copied().unwrap_or(name);
+                (fname, self.pack(p))
+            })
+            .collect();
+        self.emit_cur(Inst::MakeValueStruct { name, fields })
     }
 
     /// Flatten a `ValueRepr` to its primitive leaf values per `shape` (the wire

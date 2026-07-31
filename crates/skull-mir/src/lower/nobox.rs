@@ -355,23 +355,37 @@ impl Builder<'_> {
     /// guarantee to keep, so widening this to every FFI-clean value would
     /// re-ABI every lambda in the tree for no correctness gain. Both ends
     /// compute the same predicate from the same type, so they still agree.
-    pub(crate) fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<Option<ValueShape>>, Option<ValueShape>)> {
+    pub(crate) fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
         let ty = self.resolve_tyid(ty)?;
         let TypeExpr::Function { params, ret } = self.ty_node(ty)? else { return None };
-        let ps: Vec<Option<ValueShape>> =
-            params.into_iter().map(|p| self.nobox_shape_of_ty(ty.with_idx(p))).collect();
+        let ps: Vec<RetSlot> =
+            params.into_iter().map(|p| self.nobox_param_slot_of_ty(ty.with_idx(p))).collect();
         let rs = self.nobox_shape_of_ty(ty.with_idx(ret));
-        if rs.is_none() && ps.iter().all(Option::is_none) {
+        if rs.is_none() && !ps.iter().any(RetSlot::splats) {
             return None;
         }
         Some((ps, rs))
+    }
+
+    /// [`Self::nobox_shape_of_ty`] widened to the param SLOT vocabulary, so a
+    /// TUPLE param carrying a `nobox` element rides its leaves like any other
+    /// splatting slot. Both ends of a fn value read this same predicate off the
+    /// same type, so they agree without either seeing the other.
+    pub(crate) fn nobox_param_slot_of_ty(&self, ty: TyId) -> RetSlot {
+        if let Some(shape) = self.nobox_shape_of_ty(ty) {
+            return RetSlot::Leaves(shape);
+        }
+        match self.tyid_tuple_ret_shape(ty) {
+            Some(inner) if inner.splats() => RetSlot::Nested(inner),
+            _ => RetSlot::Opaque,
+        }
     }
 
     /// [`Self::fn_value_abi`] for the fn VALUE an expression denotes.
     pub(crate) fn expr_fn_value_abi(
         &self,
         e: Idx<Expr>,
-    ) -> Option<(Vec<Option<ValueShape>>, Option<ValueShape>)> {
+    ) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
         self.fn_value_abi(*self.inf?.expr_types.get(e)?)
     }
 

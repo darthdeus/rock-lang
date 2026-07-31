@@ -1,6 +1,8 @@
 //! Multi-value ABI + loop-capture emission (T7). A scalarized tuple/multi return
-//! packs into a JS array (`return [a, b]`) the `CallMulti` caller destructures
-//! (`[d0, d1] = f()`); dest cells hoist-declare at the fn top. A closure created
+//! sends leaf 0 as the ordinary return value and leaves 1..N through module-scope
+//! scratch slots (`__rock_ret1 = b; return a;`), which the `CallMulti` caller
+//! captures inseparably (`d0 = f(); d1 = __rock_ret1;`); dest cells hoist-declare
+//! at the fn top. An array would allocate -- see docs/js-nobox-return-abi-plan.md. A closure created
 //! in a loop that captures an iteration-local cell gets a per-iteration `let`
 //! inside the loop body. Boundaries that this raw-lowered path can't emit
 //! correctly REJECT (skip): a closure capturing a loop counter/cursor, a value
@@ -26,12 +28,14 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
         .map_err(|e| e.message)
 }
 
-// A tuple return scalarizes to N leaves packed into a JS array.
+// A tuple return scalarizes to N leaves: one returned, the rest published to the
+// scratch bank. No array anywhere on the wire.
 #[test]
-fn tuple_return_packs_array() {
+fn tuple_return_uses_scratch_slots() {
     let ws = ws_with("fn mk(a: int, b: int) -> (int, int) { (a, b) }");
     let js = emit_user(&ws, "mk");
-    assert!(js.contains("return [v"), "multi-return packs an array:\n{js}");
+    assert!(js.contains("__rock_ret1 = "), "leaf 1 publishes to the bank:\n{js}");
+    assert!(!js.contains("return ["), "multi-return must not allocate an array:\n{js}");
 }
 
 // A closure capturing an iteration-local `let` copy snapshots THAT iteration's
@@ -99,7 +103,7 @@ fn nobox_tuple_element_splats_into_the_return_array() {
     let js = emit_user(&ws, "mk");
     assert!(!js.contains("\"NV2\""), "nobox element materialized an object:\n{js}");
     assert_eq!(
-        return_array_len(&js),
+        return_wire_arity(&js),
         3,
         "the flag plus two leaves must come back as three values:\n{js}"
     );
@@ -113,21 +117,25 @@ fn unmarked_value_tuple_element_keeps_its_box() {
     );
     let js = emit_user(&ws, "mk");
     // Assert the WIRE, not the presence of a `BV2` literal: a splatting return
-    // that packs and re-splits still builds one, so only the array's LENGTH
-    // distinguishes the two ABIs. Every element is a hoisted temp, so the
-    // return line is `return [v.., v..]` and commas count elements.
+    // that packs and re-splits still builds one, so only the wire's ARITY
+    // distinguishes the two ABIs.
     assert_eq!(
-        return_array_len(&js),
+        return_wire_arity(&js),
         2,
         "unmarked element lost its single boxed slot:\n{js}"
     );
 }
 
-/// Element count of the emitted `return [..]` -- the tuple ABI's arity.
-fn return_array_len(js: &str) -> usize {
-    let ret = js
+/// The multi-value wire's arity: leaf 0 rides the return value, so it is the
+/// highest published scratch slot plus one. Zero published slots means a
+/// single-value return, which is not a multi-value wire at all.
+fn return_wire_arity(js: &str) -> usize {
+    let top = js
         .lines()
-        .find(|l| l.trim_start().starts_with("return ["))
-        .unwrap_or_else(|| panic!("no multi-return in:\n{js}"));
-    ret.matches(',').count() + 1
+        .filter_map(|l| l.trim_start().strip_prefix("__rock_ret"))
+        .filter_map(|r| r.split(' ').next())
+        .filter_map(|n| n.parse::<usize>().ok())
+        .max()
+        .unwrap_or_else(|| panic!("no scratch-slot publish in:\n{js}"));
+    top + 1
 }

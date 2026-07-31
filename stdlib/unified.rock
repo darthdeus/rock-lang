@@ -1162,29 +1162,17 @@ fn Vec<T>.swap_remove(vec, index: int) -> T? {
     return value
 }
 
-// enumerate() materializes an eager [(int, value)] Vec. In for-position
-// (`for (i, x) in enumerate(coll)`) bone keeps the builtin template lowering
-// (`builtin_enumerable`) and never calls these overloads; they serve non-`for`
-// uses (`let it = enumerate(v)`), so the declared Vec type is the real runtime
-// shape. Chains (`v.iter().enumerate()`) resolve to the EnumIter overload.
-
-fn Vec<T>.enumerate(collection) -> [(int, T)] {
-    let out: [(int, T)] = []
-    for i in 0..collection.len {
-        out.push((i, collection[i]))
-    }
-    return out
-}
-
-fn Arena<T>.enumerate(collection) -> [(int, (Entity<T>, T))] {
-    let out: [(int, (Entity<T>, T))] = []
-    let i = 0
-    for (e, v) in collection {
-        out.push((i, (e, v)))
-        i = i + 1
-    }
-    return out
-}
+// enumerate() in for-position (`for (i, x) in enumerate(coll)`) keeps bone's
+// builtin template lowering (`builtin_enumerable`) and calls no overload at all.
+// Elsewhere: a VEC resolves to the lazy `EnumIter` below through implicit iter
+// coercion, so `enumerate(v)` is an iterator and a caller wanting the
+// materialized `[(int, T)]` spells `.collect()`.
+//
+// `Map` keeps its EAGER overload, and it is not a style choice: it has no
+// `iter()` at all (only Vec, RingBuffer and Arena do), so coercion has nothing
+// to call and `enumerate(m)` would stop resolving. Finish it when a Map iterator
+// exists; until then deleting it would remove capability, not add uniformity.
+// Arena reaches the lazy one and no longer needs an overload.
 
 fn Map<K, V>.enumerate(collection) -> [(int, (K, V))] {
     let out: [(int, (K, V))] = []

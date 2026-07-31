@@ -173,7 +173,10 @@ impl Builder<'_> {
         let spec = match &info.next {
             BoundNext::Concrete { func: (m, f), next_generics, .. } => self
                 .next_call_spec(FuncRef { module: *m, func: *f }, next_generics)
-                .filter(|k| !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)),
+                .filter(|k| {
+                    !self.in_unspliced_ctx
+                        || spec_key_has_target_storage(self.ws, k, self.scx.target)
+                }),
             BoundNext::CallerGeneric(_) => None,
         };
         // A placeholder next is `(bool, E)` by bound conformance, but `E`'s SHAPE

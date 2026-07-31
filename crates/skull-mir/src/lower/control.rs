@@ -335,9 +335,8 @@ impl Builder<'_> {
         shape: RetSlot,
         value_arm: impl FnOnce(&mut Self, Idx<Inst>) -> Result<ValueRepr, CompilerError>,
     ) -> Result<ValueRepr, CompilerError> {
-        let recv = self.lower_expr(receiver)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let recv = self.lower_safe_nav_receiver(receiver)?;
+        let is_nil = self.safe_nav_absent_cond(&recv);
         let results: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let nil_bb = self.f.new_block();
@@ -350,7 +349,8 @@ impl Builder<'_> {
         self.store_repr_and_join(&results, &shape, ValueRepr::Scalar(n), join)?;
 
         self.cur = val_bb;
-        let v = value_arm(self, recv)?;
+        let recv_v = self.safe_nav_present_value(recv);
+        let v = value_arm(self, recv_v)?;
         self.store_repr_and_join(&results, &shape, v, join)?;
 
         self.cur = join;

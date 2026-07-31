@@ -242,6 +242,27 @@ impl WireKind {
         }
     }
 
+    /// The field path each of this kind's primitives sits at, relative to the
+    /// member. Empty for a scalar (the member IS the leaf).
+    ///
+    /// These are a CLAIM about stdlib's types, not a reading of them:
+    /// [`wire_kind`] matches `Vec2`/`Mat4` by nominal name, so nothing stops
+    /// their fields being reordered or renamed underneath. Leaves are bound to
+    /// std140 slots positionally, so that would permute bytes while keeping
+    /// every count equal. `uniform_block_checked` compares this against the
+    /// value walker, which is what turns the claim into a checked one.
+    fn leaf_suffixes(self) -> Vec<String> {
+        match self {
+            WireKind::F32 | WireKind::I32 | WireKind::Bool32 => vec![String::new()],
+            WireKind::F32x2 => ["x", "y"].iter().map(|k| format!(".{k}")).collect(),
+            WireKind::F32x3 => ["x", "y", "z"].iter().map(|k| format!(".{k}")).collect(),
+            WireKind::F32x4 => ["x", "y", "z", "w"].iter().map(|k| format!(".{k}")).collect(),
+            WireKind::Mat4 => (0..4)
+                .flat_map(|c| ["x", "y", "z", "w"].map(move |k| format!(".c{c}.{k}")))
+                .collect(),
+        }
+    }
+
     /// The view a leaf of this kind stores through. A block `bool` is a 32-bit
     /// value, so it rides the int view alongside `int`.
     fn view(self) -> WireView {
@@ -312,7 +333,51 @@ impl BlockMember {
     }
 }
 
+/// FNV-1a. Written out rather than reaching for `DefaultHasher` because this
+/// value is EMITTED into the chunk: a toolchain bump must not silently change
+/// it, and re-emission has to stay byte-stable.
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    let mut h = seed;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 impl UniformBlockPlan {
+    /// A stable identity for this block's LAYOUT.
+    ///
+    /// The packer derives offsets from the uniform TYPE while the destination
+    /// buffer comes from the shader, and nothing in either relates the two --
+    /// `set_uniform_block(blur, HeatShimmerU { .. })` is well typed on both
+    /// sides. This is what a bind and an upload compare to agree they mean the
+    /// same block.
+    ///
+    /// Size is not enough, and neither is size plus offsets: `{float, Vec2}`
+    /// and `{Vec2, float}` agree on size, on both offsets, on leaf count and on
+    /// view sequence, differing only in the KIND at each offset. So the kind is
+    /// hashed, and the names with it -- the driver resolves members by name.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = fnv1a(0xcbf2_9ce4_8422_2325, self.struct_name.as_bytes());
+        for m in &self.members {
+            h = fnv1a(h, m.name.as_bytes());
+            h = fnv1a(h, &[m.kind as u8]);
+            h = fnv1a(h, &m.offset.to_le_bytes());
+        }
+        fnv1a(h, &self.size.to_le_bytes())
+    }
+
+    /// The primitive leaf this block expects at each slot, as a dotted field
+    /// path, in the order [`Self::leaf_stores`] writes them. Compared against
+    /// the value walker by `uniform_block_checked`.
+    pub fn leaf_paths(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .flat_map(|m| m.kind.leaf_suffixes().into_iter().map(move |s| format!("{}{s}", m.name)))
+            .collect()
+    }
+
     /// Every store in the block, member order -- one per primitive leaf of the
     /// group struct. The packer pairs this with the value's flattened leaves,
     /// and the two lengths agreeing is what keeps the expander and its

@@ -88,11 +88,130 @@ fn prelude_and_decl_arities_agree() {
     );
 }
 
+/// `extern(js)` names only -- the decls whose body the prelude still owns.
+fn extern_js_decls() -> Vec<String> {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stone/engine/web/js_ffi.rock");
+    let src = std::fs::read_to_string(path).expect("read js_ffi.rock");
+    let ast = skull_parser::parse_module(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
+    ast.items
+        .iter()
+        .filter_map(|item| {
+            let ItemKind::Function(f) = &item.kind else { return None };
+            matches!(f.body, FunctionBody::ExternJs).then(|| f.name.name.to_string())
+        })
+        .collect()
+}
+
+/// A `@nomangle inline(js)` fn emits under its BARE name, so a same-named
+/// prelude function is a second definition of that name: both emit, and which
+/// one a call reaches depends on concatenation order in `assemble_web_program`.
+/// This is the check that fails if a stage-1/2 edit rewrites a decl and forgets
+/// to delete the prelude entry.
+///
+/// A MANGLED `inline(js)` twin is the opposite -- the deliberate trampoline
+/// idiom, where the mangled Rock body delegates to the bare prelude global, so
+/// both must exist. Keyed on `@nomangle` rather than a name list so the idiom
+/// stays available without re-editing this test.
 #[test]
-fn scan_covers_a_meaningful_overlap() {
+fn a_nomangle_js_fn_has_no_prelude_twin() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stone/engine/web/js_ffi.rock");
+    let src = std::fs::read_to_string(path).expect("read js_ffi.rock");
+    let ast = skull_parser::parse_module(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
+    let prelude = prelude_arities();
+
+    let mut twins: Vec<String> = ast
+        .items
+        .iter()
+        .filter_map(|item| {
+            let ItemKind::Function(f) = &item.kind else { return None };
+            let inline_js =
+                matches!(f.body, FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _));
+            let nomangle =
+                item.annotations.iter().any(|a| a.name.name.as_str() == "nomangle");
+            let name = f.name.name.to_string();
+            (inline_js && nomangle && prelude.contains_key(&name)).then_some(name)
+        })
+        .collect();
+    twins.sort();
+    twins.dedup();
+
+    assert!(
+        twins.is_empty(),
+        "these emit a bare name that JS_WEB_RUNTIME also defines:\n  {}",
+        twins.join("\n  ")
+    );
+}
+
+/// The arity check is only worth anything while it still compares names. It
+/// weakens as stages 1-2 migrate bodies out of the prelude, so the floor tracks
+/// the REMAINING `extern(js)` surface rather than a fixed count: every extern
+/// decl the prelude defines must be compared, and most of them still should be.
+/// When this reaches zero the prelude owns no declared body and the whole file
+/// retires (plan stage 5).
+#[test]
+fn scan_covers_the_remaining_extern_surface() {
     let decls = js_decl_arities();
     let prelude = prelude_arities();
+    let externs = extern_js_decls();
     let overlap = decls.keys().filter(|n| prelude.contains_key(*n)).count();
-    eprintln!("decls={} prelude={} overlap={}", decls.len(), prelude.len(), overlap);
-    assert!(overlap > 100, "arity check only compares {overlap} names -- too weak to trust");
+    let extern_with_body = externs.iter().filter(|n| prelude.contains_key(*n)).count();
+    eprintln!(
+        "decls={} prelude={} overlap={} extern_with_prelude_body={}",
+        decls.len(),
+        prelude.len(),
+        overlap,
+        extern_with_body
+    );
+    assert!(
+        overlap >= extern_with_body,
+        "{extern_with_body} extern(js) decls have a prelude body but only {overlap} are compared"
+    );
+    assert!(
+        extern_with_body > 50,
+        "only {extern_with_body} extern(js) decls still have a prelude body -- if that is real \
+         progress, lower this floor; if the scan broke, fix the scan"
+    );
+}
+
+/// A hand-written `inline(js)` body must not implement the multi-value return
+/// ABI itself. Nine imgui stubs did -- `return [false, value];` -- which was
+/// correct under the old transport-array ABI and silently wrong under the
+/// scratch-slot one: the caller reads leaf 0 (getting the whole array) and then
+/// `__rock_ret1` (getting `undefined`). No shape assertion catches it, because
+/// the body is an opaque string to the compiler.
+///
+/// Scans every Rock source that can carry a JS body, not just js_ffi.rock.
+#[test]
+fn no_inline_js_body_hand_writes_the_array_return_abi() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut offenders = Vec::new();
+    let mut scanned = 0usize;
+    let mut stack = vec![root.join("stone"), root.join("stdlib")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("rock") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&path) else { continue };
+            scanned += 1;
+            for (i, line) in src.lines().enumerate() {
+                if line.contains("inline(js)") && line.contains("return [") {
+                    offenders.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+                }
+            }
+        }
+    }
+    assert!(scanned > 20, "scanned only {scanned} .rock files -- the walk is broken");
+    assert!(
+        offenders.is_empty(),
+        "these inline(js) bodies return an array instead of using the scratch ABI \
+         (__rock_ret1 = ..; return leaf0;):\n  {}",
+        offenders.join("\n  ")
+    );
 }

@@ -166,8 +166,19 @@ impl Builder<'_> {
             Expr::Call { callee, args } => self.lower_call(e, callee, args),
 
             // --- aggregates + projections + container reads ---
+            // A BOXED tuple slot can be observed for nil-ness (`t.0 == null`), so
+            // an absent nullable value element has to land there as `nil` rather
+            // than as the ctor `pack` builds regardless of presence. The
+            // splatting form keeps its own repr path in `lower_expr_repr`, where
+            // the presence tag stays a leaf and is never at risk.
             Expr::Tuple(elems) => {
-                let vs = self.lower_exprs(elems)?;
+                let vs = elems
+                    .into_iter()
+                    .map(|el| {
+                        let r = self.lower_expr_repr(el)?;
+                        Ok(self.pack_maybe_absent(r))
+                    })
+                    .collect::<Result<Vec<_>, CompilerError>>()?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             Expr::Array(elems) => self.lower_array_literal(e, elems),
@@ -295,32 +306,24 @@ impl Builder<'_> {
                 // node can still hold unresolved vars at this point, while the
                 // bindings carry what inference unified them WITH, i.e. the same
                 // types the call site reads off the fn type.
-                let param_shapes: Vec<Option<ValueShape>> = params
+                let param_slots: Vec<RetSlot> = params
                     .into_iter()
-                    .map(|pb| self.binding_ty(pb).and_then(|t| self.nobox_shape_of_ty(t)))
+                    .map(|pb| {
+                        self.binding_ty(pb)
+                            .map_or(RetSlot::Opaque, |t| self.nobox_param_slot_of_ty(t))
+                    })
                     .collect();
-                let mut param_cells: Vec<Idx<Cell>> = Vec::new();
+                // A lambda's params land in the SAME cell namespace as the
+                // enclosing body's, so it collects its own list off `f.params`
+                // rather than owning it -- but the binding rule itself is
+                // `bind_param_slot`, shared with the other two definition forms.
+                let before = self.f.params.len();
                 for (i, pb) in params.into_iter().enumerate() {
                     let pname = self.body.binding_arena[pb].name;
-                    match param_shapes.get(i).and_then(|s| s.clone()) {
-                        Some(shape) => {
-                            let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
-                                .map(|li| {
-                                    self.f.new_cell(Some(Ustr::from(
-                                        format!("{pname}__{li}").as_str(),
-                                    )))
-                                })
-                                .collect();
-                            param_cells.extend(cells.iter().copied());
-                            self.group_binds.insert(raw(pb), (cells, shape));
-                        }
-                        None => {
-                            let cell = self.f.new_cell(Some(pname));
-                            self.binds.insert(raw(pb), cell);
-                            param_cells.push(cell);
-                        }
-                    }
+                    let slot = param_slots.get(i).cloned().unwrap_or(RetSlot::Opaque);
+                    self.bind_param_slot(pb, pname, &slot);
                 }
+                let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
                 let entry = self.f.new_block();
                 let saved = self.cur;
                 self.cur = entry;
@@ -418,6 +421,16 @@ impl Builder<'_> {
             // result cell (mirrors rock-codegen). A numeric field is a tuple read
             // (`x?.0`), a name is a struct/enum-record field.
             Expr::SafeNav { base, field } => {
+                // A chained `?.` whose BASE is a `nobox` value: this node's own
+                // result is an ordinary scalar, so it correctly declines the
+                // per-slot path -- but that decision is about the RESULT, and
+                // lowering the base with `lower_expr` packs it (`safe_nav_field_
+                // value` -> `materialize_embed`). Take the base as a repr instead
+                // and read the field off its leaves. The presence tag replaces
+                // the `== nil` test: there is no box to compare.
+                if let Some(r) = self.safe_nav_group_base(base, field)? {
+                    return Ok(r);
+                }
                 let bv = self.lower_expr(base)?;
                 let nil = self.emit_cur(Inst::Const(Lit::Nil));
                 let is_nil = self.emit_cur(Inst::Eq(bv, nil));
@@ -742,6 +755,13 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let cur = self.nb_leaf_load(buf, checked, &addr);
+                    let rv = self.lower_expr(value)?;
+                    let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
+                    self.nb_leaf_store(buf, checked, &addr, new_v);
+                    return Ok(());
+                }
                 let (pbase, key) = self.physical_field(base, field);
                 let b = self.lower_place_base(pbase)?;
                 let cur = self.emit_cur(Inst::Field { base: b, field: key });
@@ -866,6 +886,12 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
+                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
+                    let old = self.nb_leaf_load(buf, checked, &addr);
+                    let new = bump(self, old);
+                    self.nb_leaf_store(buf, checked, &addr, new);
+                    return Ok(if postfix { old } else { new });
+                }
                 let (pbase, key) = self.physical_field(base, field);
                 let b = self.lower_place_base(pbase)?;
                 let old = self.emit_cur(Inst::Field { base: b, field: key });
@@ -921,12 +947,14 @@ impl Builder<'_> {
                     argv.push(self.lower_expr(a)?);
                 }
                 // The instantiation key travels through `?.` like it does through a
-                // plain call: a column-stored element cannot be served by the shared
-                // generic body, which reads a `_data` this storage does not have.
+                // plain call: a storage the shared generic body cannot serve --
+                // a column-stored element, or a leaf-addressed buffer element on
+                // JS -- keeps its spec binding.
                 let key = self
                     .call_spec(e, func)
                     .filter(|(k, _)| {
-                        !self.in_unspliced_ctx || spec_key_has_column_elem(self.ws, k)
+                        !self.in_unspliced_ctx
+                            || spec_key_has_target_storage(self.ws, k, self.scx.target)
                     })
                     .map(|(k, _)| k);
                 // A tuple-returning method splats N values; capture + pack into
@@ -979,6 +1007,53 @@ impl Builder<'_> {
     /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call
     /// `method(recv, args)` (cdata-everywhere: no scalar splat). Args evaluate
     /// only on the non-null path. Result flows through a cell.
+    /// Lower a safe-nav RECEIVER once, keeping whatever tells it apart from nil.
+    ///
+    /// An unboxed nullable value carries its own presence tag, and that tag is
+    /// the only honest absence test: packing the Group to compare it against nil
+    /// builds a ctor, which is statically non-nil, so the absent arm gets
+    /// const-folded away and the miss path runs the hit code on nil leaves. The
+    /// box cannot be moved into `pack` instead -- `pack` cannot see whether its
+    /// consumer needs nil-ness, and putting the ctor behind a branch there costs
+    /// SROA the forwarding that keeps `??`-at-a-ctor-field boxless.
+    pub(crate) fn lower_safe_nav_receiver(
+        &mut self,
+        receiver: Idx<Expr>,
+    ) -> Result<SafeNavRecv, CompilerError> {
+        // Asked of the REPR, not of a `nobox` shape query: this is not a nobox
+        // rule. A plain unmarked `value` read out of a `Map`/`Vec`/embed field
+        // arrives as a Group with a presence tag too, and it is the unmarked case
+        // that crashed. `lower_expr_repr` is a superset of `lower_expr` -- every
+        // form it does not special-case falls through to `Scalar(lower_expr(e))`
+        // -- so nothing outside the Group case changes shape.
+        let r = self.lower_expr_repr(receiver)?;
+        if let ValueRepr::Group { present: Some(p), .. } = &r {
+            return Ok(SafeNavRecv::Unboxed { repr: r.clone(), present: *p });
+        }
+        Ok(SafeNavRecv::Boxed(self.pack(r)))
+    }
+
+    /// The "receiver is absent" branch condition for [`SafeNavRecv`].
+    pub(crate) fn safe_nav_absent_cond(&mut self, r: &SafeNavRecv) -> Idx<Inst> {
+        match r {
+            SafeNavRecv::Boxed(v) => {
+                let nil = self.emit_cur(Inst::Const(Lit::Nil));
+                self.emit_cur(Inst::Eq(*v, nil))
+            }
+            SafeNavRecv::Unboxed { present, .. } => self.emit_cur(Inst::Not(*present)),
+        }
+    }
+
+    /// The receiver VALUE, for the PRESENT arm only. Packing an unboxed Group is
+    /// sound here and nowhere else: this arm runs only when the presence tag
+    /// said so, so the ctor stands for a value that really is there.
+    pub(crate) fn safe_nav_present_value(&mut self, r: SafeNavRecv) -> Idx<Inst> {
+        match r {
+            SafeNavRecv::Boxed(v) => v,
+            SafeNavRecv::Unboxed { repr, .. } => self.pack(repr),
+        }
+    }
+
     pub(crate) fn lower_safe_nav_call(
         &mut self,
         e: Idx<Expr>,
@@ -986,9 +1061,8 @@ impl Builder<'_> {
         method: Ustr,
         args: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let recv = self.lower_expr(receiver)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let recv = self.lower_safe_nav_receiver(receiver)?;
+        let is_nil = self.safe_nav_absent_cond(&recv);
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let call_bb = self.f.new_block();
@@ -1000,7 +1074,8 @@ impl Builder<'_> {
         self.store_and_join(result, n, join);
 
         self.cur = call_bb;
-        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv)?;
+        let recv_v = self.safe_nav_present_value(recv);
+        let cv = self.pack_safe_nav_call_value(e, receiver, method, args, recv_v)?;
         self.store_and_join(result, cv, join);
 
         self.cur = join;
@@ -1011,6 +1086,61 @@ impl Builder<'_> {
     /// `bv`. Shared by the scalar lowering and the per-slot repr twin so the two
     /// cannot drift about what a field read IS -- and so the receiver is lowered
     /// exactly once either way.
+    /// `Some` when `base` denotes a NULLABLE `nobox` value, so `base?.field` can
+    /// read the field off the base's leaves instead of a box.
+    ///
+    /// This is the chained `?.`: `h?.v?.x` where `h?.v` is `NV?`. The outer node
+    /// asks `repr_join_slot` about ITS OWN type (`int?`, no leaves) and rightly
+    /// declines the per-slot join -- but the base still has to get there, and
+    /// `lower_expr` on it takes the scalar arm, whose embed read rebuilds the box
+    /// the mark forbids. Asking the BASE the same question is what routes it
+    /// through `safe_nav_field_repr`.
+    ///
+    /// The base's presence tag replaces the `== nil` test: once the value is
+    /// leaves there is no box to compare against nil, and its leaves are nil on
+    /// the absent row whether or not the tag is.
+    fn safe_nav_group_base(
+        &mut self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        // Only a NULLABLE base: a non-nullable one has no presence tag, and `?.`
+        // on it is already dead (bone rejects the redundant form).
+        if !self.repr_join_slot(base).is_some_and(
+            |s| matches!(s, RetSlot::Leaves(sh) if sh.nullable),
+        ) {
+            return Ok(None);
+        }
+        let ValueRepr::Group { name, parts, present: Some(present) } =
+            self.lower_expr_repr(base)?
+        else {
+            return Ok(None);
+        };
+        let Some(i) = self.field_index(name, field) else {
+            return Ok(None);
+        };
+        let part = parts[i].clone();
+        let result = self.f.new_cell(None);
+        let absent_bb = self.f.new_block();
+        let val_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: val_bb, else_bb: absent_bb },
+        );
+
+        self.cur = absent_bb;
+        let n = self.emit_cur(Inst::Const(Lit::Nil));
+        self.store_and_join(result, n, join);
+
+        self.cur = val_bb;
+        let fv = self.pack(part);
+        self.store_and_join(result, fv, join);
+
+        self.cur = join;
+        Ok(Some(self.emit_cur(Inst::Load(result))))
+    }
+
     pub(crate) fn safe_nav_field_value(
         &mut self,
         e: Idx<Expr>,
@@ -1146,9 +1276,8 @@ impl Builder<'_> {
         binding: Idx<bone_semantic::hir::BindingInfo>,
         body: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let recv = self.lower_expr(receiver)?;
-        let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        let is_nil = self.emit_cur(Inst::Eq(recv, nil));
+        let recv = self.lower_safe_nav_receiver(receiver)?;
+        let is_nil = self.safe_nav_absent_cond(&recv);
         let result = self.f.new_cell(None);
         let nil_bb = self.f.new_block();
         let let_bb = self.f.new_block();
@@ -1160,8 +1289,9 @@ impl Builder<'_> {
         self.store_and_join(result, n, join);
 
         self.cur = let_bb;
+        let recv_v = self.safe_nav_present_value(recv);
         let cell = self.f.new_cell(Some(self.body.binding_arena[binding].name));
-        self.emit_cur(Inst::Store { cell, value: recv });
+        self.emit_cur(Inst::Store { cell, value: recv_v });
         self.binds.insert(raw(binding), cell);
         let bv = self.lower_expr(body)?;
         self.store_and_join(result, bv, join);

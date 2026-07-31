@@ -283,6 +283,14 @@ impl Builder<'_> {
     /// substitution, so a generic element resolves to the same slot the
     /// signature-side walker sees.
     pub(crate) fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
+        // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
+        // (see `reified_type_node`), so it is read off the substitution here --
+        // the same source `body_ret_slot` reads. Without it a specialized body's
+        // indirect call sees a bare `Generic` and declines to splat, while the
+        // fn value it calls splats from its own concrete type.
+        if let Some(ReifiedType::Tuple(parts)) = self.bound_generic_subst(ty) {
+            return Some(reified_tuple_shape(self.ws, parts));
+        }
         let ty = self.resolve_tyid(ty)?;
         let TypeExpr::Tuple { elements } = self.ty_node(ty)? else { return None };
         let slots = elements
@@ -323,25 +331,29 @@ impl Builder<'_> {
         }
     }
 
-    pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
-        // The generic this slot stands for, if the substitution names it. An
-        // element of a tuple literal's inferred type arrives as the declared
-        // generic in one `next` body and as an inference VAR in another, so both
-        // spellings are chased -- but only to answer THIS question. Resolving
-        // `ty` for the rest of the function instead is wrong: it erases a
-        // `Nullable` binding's `?` on the way through `ty_node`, which silently
-        // re-planned every nullable-column body to a non-nullable shape.
-        let bound_generic = match self.raw_ty_node(ty) {
-            Some(TypeExpr::Generic(var, _)) => Some(var),
+    /// What the substitution binds `ty` to, when `ty` is (or resolves to) a
+    /// declared generic. An element of a tuple literal's inferred type arrives as
+    /// the declared generic in one `next` body and as an inference VAR in
+    /// another, so both spellings are chased -- but only to answer THIS question.
+    /// Resolving `ty` for the rest of a caller instead is wrong: it erases a
+    /// `Nullable` binding's `?` on the way through `ty_node`, which silently
+    /// re-planned every nullable-column body to a non-nullable shape.
+    pub(crate) fn bound_generic_subst(&self, ty: TyId) -> Option<&ReifiedType> {
+        let var = match self.raw_ty_node(ty) {
+            Some(TypeExpr::Generic(var, _)) => var,
             Some(TypeExpr::Infer(..)) => match self.resolve_tyid(ty).and_then(|t| self.raw_ty_node(t)) {
-                Some(TypeExpr::Generic(var, _)) => Some(var),
-                _ => None,
+                Some(TypeExpr::Generic(var, _)) => var,
+                _ => return None,
             },
-            _ => None,
+            _ => return None,
         };
+        self.spec_subst.get(&var)
+    }
+
+    pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
         // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
         // (see `reified_type_node`), so it is read off the substitution directly.
-        if let Some(bound @ ReifiedType::Tuple(_)) = bound_generic.and_then(|v| self.spec_subst.get(&v)) {
+        if let Some(bound @ ReifiedType::Tuple(_)) = self.bound_generic_subst(ty) {
             return reified_ret_slot(self.ws, bound);
         }
         if let Some(shape) = self.body_nobox_shape(ty) {

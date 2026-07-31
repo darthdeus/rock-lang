@@ -90,6 +90,22 @@ impl Builder<'_> {
         // boxed ABI entirely, which is what this used to do, is the same
         // disagreement in the other direction: it is what made a `nobox` param
         // reject once the fn was taken by value.
+        let slot_of = |s: &Self, t: TyId| {
+            if taken_by_value {
+                s.nobox_param_slot_of_ty(t)
+            } else {
+                // A direct-only nested fn may use every scalarizable value
+                // shape, but the TUPLE rule is the same either way -- only a
+                // `nobox` element splats -- so both branches share it.
+                match s.body_sig_value_shape(t) {
+                    Some(shape) => RetSlot::Leaves(shape),
+                    None => match s.tyid_tuple_ret_shape(t) {
+                        Some(inner) if inner.splats() => RetSlot::Nested(inner),
+                        _ => RetSlot::Opaque,
+                    },
+                }
+            }
+        };
         let shape_of = |s: &Self, t: TyId| {
             if taken_by_value {
                 s.nobox_shape_of_ty(t)
@@ -102,7 +118,9 @@ impl Builder<'_> {
             param_names,
             param_shapes: params
                 .into_iter()
-                .map(|pb| self.binding_ty(pb).and_then(|t| shape_of(self, t)))
+                .map(|pb| {
+                    self.binding_ty(pb).map_or(RetSlot::Opaque, |t| slot_of(self, t))
+                })
                 .collect(),
             ret_shape: self
                 .nested_fn_ret_ty(name, ret_ty)
@@ -215,20 +233,8 @@ impl Builder<'_> {
 
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
-            match child.param_shapes.get(i).and_then(|s| s.clone()) {
-                Some(shape) => {
-                    let cells: Vec<Idx<Cell>> = (0..shape.leaf_count())
-                        .map(|li| child.f.new_cell(Some(Ustr::from(format!("{pname}__{li}").as_str()))))
-                        .collect();
-                    child.f.params.extend(cells.iter().copied());
-                    child.group_binds.insert(raw(pb), (cells, shape));
-                }
-                None => {
-                    let cell = child.f.new_cell(Some(pname));
-                    child.f.params.push(cell);
-                    child.binds.insert(raw(pb), cell);
-                }
-            }
+            let slot = child.param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            child.bind_param_slot(pb, pname, &slot);
         }
 
         child.defers.push(Vec::new());

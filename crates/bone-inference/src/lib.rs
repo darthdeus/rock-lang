@@ -423,9 +423,6 @@ pub fn check_function(
     };
 
     if let (Some(ret_ty), false) = (f.return_ty, f.is_coroutine) {
-        let body_ty = infer_expr(c, &mut gamma, body)?;
-        let body_ty = resolve(&mut gamma, body_ty, f.span);
-
         // Return-type mismatch is recorded, but not propagated, so gamma.out is well formed
         // and partial inference survives for the LSP. Anchor it at the value the body
         // actually offers -- its tail expression -- not the whole `fn { .. }` span. A body
@@ -435,10 +432,19 @@ pub fn check_function(
             _ => Some(body),
         };
         if let Some(tail) = tail {
-            if let Err(e) = coerce(&mut gamma, body_ty, ret_ty, c.body.expr_spans[tail]) {
+            // CHECKED against the declared return, like an explicit `return` and a
+            // declared `let`: a body whose tail is a lambda is otherwise inferred
+            // and merely coerced, so it records its own narrower type and the
+            // fn-value ABI disagrees at the two ends. The coerce still happens --
+            // it moved down to the tail, keeping this span.
+            if let Err(e) = check_expr(c, &mut gamma, body, ret_ty, c.body.expr_spans[tail]) {
                 gamma.body_errors.push(e);
             }
-        } else if coerce(&mut gamma, body_ty, ret_ty, f.span).is_err() {
+        } else if {
+            let body_ty = infer_expr(c, &mut gamma, body)?;
+            let body_ty = resolve(&mut gamma, body_ty, f.span);
+            coerce(&mut gamma, body_ty, ret_ty, f.span).is_err()
+        } {
             let ret_render = gamma.workspace.render(Some(&gamma.out), ret_ty);
             gamma.body_errors.push(CompilerError::new_with_label(
                 f.name_span,

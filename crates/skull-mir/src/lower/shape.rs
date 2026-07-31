@@ -308,6 +308,20 @@ pub fn leaf_addr_plan(ws: &Workspace, elem: Ustr) -> Result<Vec<LeafAddr>, Strin
         .collect()
 }
 
+/// `sizeof(elem)` as LuaJIT lays it out -- the per-element byte stride every
+/// leaf view is strided against. The JS backend sizes its ArrayBuffer with it,
+/// so the two backends' storage is the same bytes in the same places.
+pub fn value_leaf_size(ws: &Workspace, elem: Ustr) -> Result<usize, String> {
+    value_leaf_layout_checked(ws, elem).map(|(_, size, _)| size)
+}
+
+/// The C type a leaf VIEW field carries -- the inverse of [`leaf_view_field`].
+/// The JS emitter needs it to pick the TypedArray and to know a `bool` view
+/// stores 0/1 where the language wants `true`/`false`.
+pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
+    LEAF_VIEWS.iter().find(|(_, f, _)| *f == field).map(|(t, ..)| *t)
+}
+
 /// The distinct leaf view C types of `elem`, in first-use order -- the views a
 /// buffer of `elem` must carry.
 pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, String> {
@@ -605,6 +619,19 @@ pub(crate) enum ValueRepr {
         /// Same convention as `Group::present`, one level up.
         present: Option<Idx<Inst>>,
     },
+}
+
+/// A safe-nav receiver after lowering: either an ordinary boxed value, or an
+/// UNBOXED nullable value that carries its own presence tag.
+///
+/// The distinction exists because the two have different honest absence tests.
+/// A box is absent when it is nil; an unboxed value is absent when its presence
+/// tag says so, and packing it to ask the nil question instead builds a ctor
+/// that is statically non-nil -- which deletes the absent arm outright.
+#[derive(Clone)]
+pub(crate) enum SafeNavRecv {
+    Boxed(Idx<Inst>),
+    Unboxed { repr: ValueRepr, present: Idx<Inst> },
 }
 
 #[derive(Clone, Copy)]
@@ -915,6 +942,36 @@ pub(crate) fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) 
     }
 }
 
+/// [`crate::gpu_layout::uniform_block`] with the two-walker agreement enforced:
+/// the plan's leaf-path sequence must equal [`value_leaf_paths`] over the same
+/// type. The std140 side derives its members from field TYPES (matching `Vec2`
+/// and `Mat4` by nominal name), the value side flattens the struct into leaves,
+/// and the packer binds one to the other BY POSITION -- so a reordered vector or
+/// matrix keeps every count equal while writing each leaf to the wrong offset.
+///
+/// The exact twin of [`value_leaf_layout_checked`] for the uniform context, and
+/// `Err` for the same reason: a type that reached a packing site and cannot be
+/// walked consistently is an invariant failure, not a case to skip past.
+pub fn uniform_block_checked(
+    ws: &Workspace,
+    name: Ustr,
+) -> Result<crate::gpu_layout::UniformBlockPlan, String> {
+    let plan = crate::gpu_layout::uniform_block(ws, name).map_err(|e| e.message.clone())?;
+    let Some(shape) = value_shape(ws, name) else {
+        return Err(format!("`{name}` has a std140 plan but no value shape"));
+    };
+    let want: Vec<String> = value_leaf_paths(&shape).iter().map(|u| u.to_string()).collect();
+    let got = plan.leaf_paths();
+    if want != got {
+        return Err(format!(
+            "leaf walkers disagree for `{name}`: value_leaf_paths {want:?} vs std140 plan {got:?} \
+             -- leaves are matched to std140 slots by position, so this would write every leaf to \
+             the wrong offset"
+        ));
+    }
+    Ok(plan)
+}
+
 /// The value-struct name of expression `e` outside a lowering [`Builder`].
 /// Mirrors [`Builder::value_struct_name_of`] minus the specialization
 /// substitution, which the validator has no active specialization for -- an
@@ -1064,7 +1121,7 @@ pub fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
 }
 
 /// Whether `name` is a `nobox` value struct.
-pub(crate) fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
+pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
@@ -1176,6 +1233,76 @@ pub fn nobox_global_shape_paths(ws: &Workspace, ty: TyId) -> Option<(Ustr, Vec<U
     Some((shape.name, value_leaf_paths(&shape), shape.nullable))
 }
 
+/// Everything the reflection accessor for a `nobox` global decides, answered
+/// from the SAME oracles the emitter uses rather than from the leaf paths'
+/// punctuation.
+///
+/// The two questions used to be read off the path list: "is any path a proper
+/// PREFIX of another" for the presence leaf, and "does any path contain a dot"
+/// for the ctor suffix. Both are proxies, and a `nobox` child with NO data
+/// leaves defeats both -- it contributes exactly one leaf under its own name
+/// with nothing below it, so the sequence is flat and undotted while a presence
+/// tag is right there and the type is leaf-table. That is the same shape
+/// `tests/nobox_zero_leaf_child.rock` pins for the Lua ctor site.
+pub struct NoboxGlobalAccessorShape {
+    pub ty_name: Ustr,
+    pub paths: Vec<Ustr>,
+    pub nullable: bool,
+    /// From [`value_struct_is_leaf_table`] and [`value_struct_is_gc`] -- the
+    /// oracles the `_lct` ctor and the leaf-form pack site already consult.
+    pub ctor_suffix: &'static str,
+    /// The path of a leaf that is a nullable child's PRESENCE tag, if any. From
+    /// [`value_leaf_presence_flags`], positionally. Informational: a leaf-table
+    /// ctor takes tags like any other leaf, so this does NOT by itself make a
+    /// shape unbuildable.
+    pub presence_path: Option<Ustr>,
+    /// Why no accessor can be built, if so. The ctor is positional, so the
+    /// accessor is only sound when the ctor's parameter sequence IS the leaf
+    /// sequence. `_lct` is that by construction. `_ct` and `_vt` are positional
+    /// over DECLARED FIELDS, which coincides with the leaves only while every
+    /// field is primitive -- a nested value field makes the two differ in both
+    /// arity and type, and the mismatch is silent (`Held_ct` fed six floats
+    /// where it wants an `Inner` cdata and four floats).
+    pub unbuildable: Option<String>,
+}
+
+pub fn nobox_global_accessor_shape(ws: &Workspace, ty: TyId) -> Option<NoboxGlobalAccessorShape> {
+    let shape = nobox_declared_shape(ws, ty)?;
+    let paths = value_leaf_paths(&shape);
+    // The global's OWN presence leaf leads the leaves and has no path, so the
+    // flags line up with `paths` from that offset on -- the same offset the
+    // caller splits the leaves at.
+    let flags = value_leaf_presence_flags(&shape);
+    let flags = if shape.nullable { &flags[1..] } else { &flags[..] };
+    let presence_path =
+        flags.iter().zip(paths.iter()).find(|(is_tag, _)| **is_tag).map(|(_, p)| *p);
+    let ctor_suffix = if value_struct_is_leaf_table(ws, shape.name) {
+        "_lct"
+    } else if value_struct_is_gc(ws, shape.name) {
+        "_vt"
+    } else {
+        "_ct"
+    };
+    let unbuildable = (ctor_suffix != "_lct" && paths.iter().any(|p| p.contains('.'))).then(|| {
+        format!(
+            "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
+             storage is {} leaves including a nested one (`{}`), so the accessor \
+             would pass a leaf where the ctor wants a nested value",
+            shape.name,
+            paths.len(),
+            paths.iter().find(|p| p.contains('.')).expect("just found one"),
+        )
+    });
+    Some(NoboxGlobalAccessorShape {
+        ty_name: shape.name,
+        paths,
+        nullable: shape.nullable,
+        ctor_suffix,
+        presence_path,
+        unbuildable,
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ReifiedCtor {
     Array,
@@ -1245,8 +1372,9 @@ impl ReifiedType {
     }
 }
 
-/// Whether any generic in `key` binds a column-eligible element type -- i.e.
-/// whether specializing is a CORRECTNESS requirement rather than an optimization.
+/// Whether any generic in `key` binds a type whose STORAGE the shared generic
+/// body cannot serve -- i.e. whether specializing is a CORRECTNESS requirement
+/// rather than an optimization.
 ///
 /// In a context the inliner never enters, an ordinary call simply forgoes the
 /// scalar ABI (`in_unspliced_ctx`) because the shared generic body still serves a
@@ -1255,18 +1383,48 @@ impl ReifiedType {
 /// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
 /// spec binding exactly when the element is column-stored, and the post-emit
 /// validator turns that into a rejection instead of a miscompile.
-pub(crate) fn spec_key_has_column_elem(ws: &Workspace, key: &SpecKey) -> bool {
-    key.iter()
-        .flatten()
-        // Either flavour counts: the question is whether the shared boxed body
-        // would read a `_data` the storage does not have, and a nullable element
-        // is column-stored on exactly the same terms.
-        .any(|ty| {
-            ty.any_nominal(&|name| {
-                vec_column_elem(ws, name, false).is_some()
-                    || vec_column_elem(ws, name, true).is_some()
-            })
+///
+/// Two storage forms qualify, and the key cannot tell which position the type is
+/// used in -- so it over-approximates, which costs an extra specialized copy and
+/// can never cost correctness:
+///
+/// - a column-stored `Vec` element, where the shared body reads a missing `_data`
+/// - on JS ONLY, a leaf-addressed `NativeBuffer` element. luajit's `.ptr` is a
+///   `T*`, so `p[i]` yields an element reference and the shared body is right;
+///   JS backs the buffer with a TypedArray, so `ptr[i]` is a NUMBER and a whole
+///   element read from an opaque `T` silently returns a leaf. That is a
+///   miscompile, not a slowdown, so it does not wait for an annotation.
+pub(crate) fn spec_key_has_target_storage(
+    ws: &Workspace,
+    key: &SpecKey,
+    target: bone_semantic::hir::FnBackend,
+) -> bool {
+    let js = target == bone_semantic::hir::FnBackend::Js;
+    key.iter().flatten().any(|ty| {
+        ty.any_nominal(&|name| {
+            // Either flavour counts: the question is whether the shared boxed
+            // body would read a `_data` the storage does not have, and a
+            // nullable element is column-stored on exactly the same terms.
+            ((vec_column_elem(ws, name, false).is_some()
+                || vec_column_elem(ws, name, true).is_some())
+                && columns_available(ws, target, name))
+                || (js && leaf_addr_plan(ws, name).is_ok())
         })
+    })
+}
+
+/// Whether `[elem]` takes column storage when lowering for `target`.
+///
+/// Every target now serves columns, so this is unconditional. It survives as a
+/// named predicate because [`spec_key_has_target_storage`] asks the question for a
+/// DIFFERENT reason -- whether specializing a generic callee is a correctness
+/// requirement -- and that reasoning is only sound while the two agree.
+pub(crate) fn columns_available(
+    _ws: &Workspace,
+    _target: bone_semantic::hir::FnBackend,
+    _elem: Ustr,
+) -> bool {
+    true
 }
 
 /// A callee's per-generic instantiation at one call site, in declaration order.
@@ -1325,8 +1483,13 @@ pub(crate) fn reified_type_node(ty: &ReifiedType) -> Option<TypeExpr> {
 /// that position would.
 pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
     if let ReifiedType::Tuple(parts) = ty {
-        let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
-        return RetSlot::Nested(TupleRetShape { slots, nullable: false });
+        // The same collapse [`ret_slot`] makes: a tuple no part of which splats
+        // is the pre-existing boxed ABI, so it occupies ONE slot. Without it the
+        // two oracles disagree on a NESTED tuple -- the generic side counted an
+        // inner `(Entity<T>, T)` as two wire values while the concrete callee
+        // returned it as one box.
+        let shape = reified_tuple_shape(ws, parts);
+        return if shape.splats() { RetSlot::Nested(shape) } else { RetSlot::Opaque };
     }
     let (payload, nullable) = ty.peel_nullable();
     let Some(nominal) = payload.nominal().filter(|n| is_nobox_nominal(ws, *n)) else {
@@ -1340,6 +1503,14 @@ pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
     shape.map_or(RetSlot::Opaque, RetSlot::Leaves)
 }
 
+/// The per-part slots of a reified tuple, WITHOUT the collapse
+/// [`reified_ret_slot`] applies. Read where the tuple's arity is the question --
+/// a destructure, a `next`'s `(bool, E)` -- rather than what slot it occupies.
+pub(crate) fn reified_tuple_shape(ws: &Workspace, parts: &[ReifiedType]) -> TupleRetShape {
+    let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
+    TupleRetShape { slots, nullable: false }
+}
+
 pub(crate) fn reify_type(
     ws: &Workspace,
     inf: &BodyInference,
@@ -1351,6 +1522,13 @@ pub(crate) fn reify_type(
         TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedType::Prim("int")),
         TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedType::Prim("float")),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedType::Prim("bool")),
+        // A string leaf is opaque to every shape decision, but it still has to
+        // REIFY: a tuple reifies only when all its parts do, so leaving this out
+        // made `(T, string)` unreifiable and the substitution then had no entry
+        // for the generic bound to it -- which is the one thing `ty_node` cannot
+        // answer. It cannot widen specialization on its own (`any_value` gates
+        // that on a value-struct leaf, which a prim is not).
+        TypeExpr::Builtin(BuiltinTy::String) => Some(ReifiedType::Prim("string")),
         TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
         TypeExpr::Tuple { elements } => {
             let parts = elements
@@ -1393,6 +1571,7 @@ pub(crate) fn compute_call_spec(
     e: Idx<Expr>,
     func: FuncRef,
     enclosing: &SpecSubst,
+    target: bone_semantic::hir::FnBackend,
 ) -> Option<(SpecKey, SpecSubst)> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
@@ -1411,7 +1590,7 @@ pub(crate) fn compute_call_spec(
     // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
     let opted_in =
         f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
-    if !opted_in && !spec_key_has_column_elem(ws, &key) {
+    if !opted_in && !spec_key_has_target_storage(ws, &key, target) {
         return None;
     }
     Some((key, subst))
@@ -1526,7 +1705,7 @@ pub(crate) fn spec_nominal(subst: &SpecSubst, var: bone_semantic::hir::VarId) ->
 }
 
 /// The wire shape of ONE element of a tuple return.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RetSlot {
     /// One opaque value -- today's ABI, and what every element that is not a
     /// `nobox` value keeps.
@@ -1562,7 +1741,7 @@ impl RetSlot {
 /// The shape is derived from the return TYPE alone -- no callee identity -- so a
 /// direct call, an indirect call through a fn value and the definition all
 /// agree by construction, exactly as the plain multi-return arity does.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TupleRetShape {
     pub(crate) slots: Vec<RetSlot>,
     /// The DECLARED return was `(..)?`: a presence bool leads the wire, then the
@@ -1604,11 +1783,8 @@ pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Op
     // this is the sole consumer that needs a tuple's arity, and answering it
     // from the binding keeps `ty_node` honest about what it cannot mint.
     if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty) {
-        if let Some(bound @ ReifiedType::Tuple(_)) = subst.get(&var) {
-            let RetSlot::Nested(shape) = reified_ret_slot(ws, bound) else {
-                return None;
-            };
-            return Some(shape);
+        if let Some(ReifiedType::Tuple(parts)) = subst.get(&var) {
+            return Some(reified_tuple_shape(ws, parts));
         }
     }
     let (elem_ty, elements, nullable) = match static_ty(ws, ty)? {
@@ -1739,6 +1915,48 @@ pub fn bound_next_shape(
         BoundNextElem::Opaque
     };
     Some(BoundNextShape { slot_count: shape.slot_count(), elem })
+}
+
+/// The wire slot of a PARAM, under the wide (`@scalar_abi`) shape rule.
+///
+/// Same vocabulary as [`ret_slot`], and deliberately the same tuple rule: only a
+/// `nobox` element splats, so params and returns agree about what a tuple of
+/// values is on the wire. Without the `Nested` arm a param could only say
+/// "one box or one value's leaves", and a tuple carrying a `nobox` element had
+/// nowhere to go but the box the mark forbids -- a `ValueShape` is a NAMED
+/// struct shape, which a tuple is not.
+pub(crate) fn sig_param_slot_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    match sig_value_shape_spec(ws, subst, ty) {
+        Some(shape) => RetSlot::Leaves(shape),
+        None => tuple_param_slot(ws, subst, ty),
+    }
+}
+
+/// [`sig_param_slot_spec`] under the `nobox`-only rule (the ABI a fn taken by
+/// reference narrows to).
+pub(crate) fn nobox_param_slot_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    match nobox_declared_shape_spec(ws, subst, ty) {
+        Some(shape) => RetSlot::Leaves(shape),
+        None => tuple_param_slot(ws, subst, ty),
+    }
+}
+
+fn tuple_param_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
+    // A tuple the signature SPELLS, not a generic that happens to be bound to
+    // one. Both would agree between caller and callee -- they read the same
+    // substitution -- so this is a choice, and it is made on where the box ends
+    // up: a generic param's body is what decides whether the tuple can stay
+    // leaves, and a body that stores it (`Vec<T>.push` -> `vec_push`) boxes it
+    // anyway. Splatting into one only moves the materialization deeper, out of
+    // the caller's line and into the spliced stdlib body, which costs the
+    // diagnostic its span and buys nothing.
+    if !matches!(static_ty(ws, ty), Some(TypeExpr::Tuple { .. })) {
+        return RetSlot::Opaque;
+    }
+    match tuple_ret_shape(ws, subst, ty) {
+        Some(inner) if inner.splats() => RetSlot::Nested(inner),
+        _ => RetSlot::Opaque,
+    }
 }
 
 pub(crate) fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {

@@ -76,6 +76,15 @@ fn corpus() -> Vec<String> {
         // runtime (NaN reads) before `ContainerKind::NativeBufferValue`.
         "tests/flat_vec_value.rock",
         "tests/flat_vec_sugar.rock",
+        // The whole bit-op family renders on JS: LuaJIT's `bit` library and JS
+        // bitwise operators agree on int32 coercion, 5-bit shift masking and a
+        // signed result, so the negative/high-bit cases here are the pin.
+        "tests/bitwise_operators.rock",
+        // Reflection follows the LOGICAL form on JS too: an `embed` child rebuilt
+        // from its flat leaves, physical dotted keys never shown, and declared
+        // fields supplied by the per-type `__rock_inspect_ty` helper rather than
+        // by a key walk (which a null field is absent from).
+        "tests/embed_reflection.rock",
     ]
     .iter()
     .map(|p| root.join(p).to_string_lossy().into_owned())
@@ -232,7 +241,13 @@ fn js_runnable_coverage_ratchet() {
     // mag web tier (Arc 4): value-element NativeBuffer flat-slot lowering
     // (`ContainerKind::NativeBufferValue`) makes tests/flat_vec_value.rock +
     // tests/flat_vec_sugar.rock run green (were runtime-FAIL, kept out) -> 319.
-    const FLOOR: usize = 319;
+    // The floor then went stale: `field_get`/`field_set` moving to stdlib/js.rock
+    // lifted the SAME corpus to 346 without a bump. The bit-op render arms add
+    // tests/bitwise_operators.rock's 14 on top -> 360. Per-type `__rock_inspect_ty`
+    // dispatch (logical reflection over flat `embed` storage, plus the value-struct
+    // `: ` tier) adds tests/embed_reflection.rock's 8, and lets one previously
+    // physical-shaped render in the existing corpus pass -> 369.
+    const FLOOR: usize = 369;
     assert!(
         summary.tests_passed >= FLOOR,
         "JS-runnable coverage regressed: {} passed < floor {}. Skip histogram:\n{}",
