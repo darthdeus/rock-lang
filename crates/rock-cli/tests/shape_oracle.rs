@@ -1105,6 +1105,19 @@ enum Consumption {
     /// place the value was READ OUT OF. Needs a production with an upstream
     /// place; the copy invariant says the source must be untouched.
     CopyOnWriteProbe,
+    /// `let (q, n) = <(P, int)>` -- a DESTRUCTURING bind off a tuple carrying the
+    /// value, rather than binding the tuple and projecting `.0`.
+    TupleDestructure,
+    /// `if let (q, n) = <(P, int)?>` on a PRESENT tuple.
+    NullableTupleDestructure,
+    /// The same on an ABSENT one, which must take the else arm.
+    ///
+    /// This is the shape a whole class hides in: a consumer that reads presence
+    /// off a PACKED tuple instead of the wire's presence slot answers
+    /// always-present, because a `MakeTuple` is structurally never nil. The
+    /// present case above cannot see it -- it answers right for the wrong
+    /// reason -- so the absent arm is the load-bearing one.
+    NullableTupleAbsent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1114,6 +1127,13 @@ enum Nullability {
     Refined,
     /// Stored as `P?`, recovered with `??` at the use.
     Coalesced,
+    /// Stored as `P?`, recovered by `if let` at the use.
+    ///
+    /// A THIRD recovery form, not a spelling of `!= null`: it BINDS a fresh name
+    /// off the wire instead of refining the place, so a consumer that reads
+    /// presence from a packed box rather than the wire's presence slot can answer
+    /// correctly under `Refined` and wrongly here.
+    PatternBound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1167,7 +1187,7 @@ const PRODUCTIONS: [Production; 9] = [
     Production::Index,
     Production::Coalesce,
 ];
-const CONSUMPTIONS: [Consumption; 12] = [
+const CONSUMPTIONS: [Consumption; 15] = [
     Consumption::Bind,
     Consumption::DirectCallArg,
     Consumption::IndirectCallArg,
@@ -1180,11 +1200,15 @@ const CONSUMPTIONS: [Consumption; 12] = [
     Consumption::Interpolation,
     Consumption::Inspect,
     Consumption::CopyOnWriteProbe,
+    Consumption::TupleDestructure,
+    Consumption::NullableTupleDestructure,
+    Consumption::NullableTupleAbsent,
 ];
-const NULLABILITIES: [Nullability; 3] = [
+const NULLABILITIES: [Nullability; 4] = [
     Nullability::NonNull,
     Nullability::Refined,
     Nullability::Coalesced,
+    Nullability::PatternBound,
 ];
 
 /// Greedy all-pairs (pairwise) cover over axes of the given cardinalities: every
@@ -1796,6 +1820,19 @@ fn render(shape: Shape) -> Option<Program> {
                 }
                 place.clone()
             }
+            Nullability::PatternBound => {
+                // The source refines FIRST and separately: an `if let` binds one
+                // place, so there is no conjunct to hang the source test on the
+                // way `Refined` does.
+                if let (Some(src), true) = (&source_place, source_nullable) {
+                    body.push(format!("{}if {src} != null {{", ind(depth)));
+                    depth += 1;
+                    source_nullable = false;
+                }
+                body.push(format!("{}if let bound = {place} {{", ind(depth)));
+                depth += 1;
+                "bound".into()
+            }
             _ => {
                 body.push(format!("{}let got: P = {place} ?? {ctor_dead}", ind(depth)));
                 "got".into()
@@ -1898,6 +1935,42 @@ fn render(shape: Shape) -> Option<Program> {
                     format!("print(\"{{{value}.a}} {{{src_leaf}}}\")"),
                 ],
                 "99 7".into(),
+            )
+        }
+        Consumption::TupleDestructure => {
+            decls.push("fn with_tag(p: P) -> (P, int) { return (p, 1) }".into());
+            (
+                vec![
+                    format!("let (q, n) = with_tag({value})"),
+                    "print(\"{q.a} {q.b}\")".into(),
+                ],
+                "7 11".into(),
+            )
+        }
+        Consumption::NullableTupleDestructure => {
+            decls.push("fn maybe_tag(p: P) -> (P, int)? { return (p, 1) }".into());
+            (
+                vec![
+                    format!("let t = maybe_tag({value})"),
+                    "if let (q, n) = t { print(\"{q.a} {q.b}\") } else { print(\"absent\") }".into(),
+                ],
+                "7 11".into(),
+            )
+        }
+        Consumption::NullableTupleAbsent => {
+            // `seed(0) > 0` is false, but only the RUNTIME knows that -- routing
+            // it through `seed` keeps the branch from const-folding, so the
+            // absent wire is really built and really consumed.
+            decls.push(
+                "fn maybe_none(p: P) -> (P, int)? { if seed(0) > 0 { return (p, 1) } return null }"
+                    .into(),
+            );
+            (
+                vec![
+                    format!("let t = maybe_none({value})"),
+                    "if let (q, n) = t { print(\"{q.a} {q.b}\") } else { print(\"absent\") }".into(),
+                ],
+                "absent".into(),
             )
         }
         Consumption::Inspect => {
