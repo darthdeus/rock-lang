@@ -627,23 +627,22 @@ impl Builder<'_> {
             return Err(reject(u_span, uniform_expand_arg_msg(fname)));
         };
         let repr = self.lower_expr_repr(u_e)?;
-        let plan = crate::gpu_layout::uniform_block(self.ws, struct_name)
-            .map_err(|e| reject(u_span, format!("`@uniform_expand`: {}", e.message)))?;
+        let plan = uniform_block_checked(self.ws, struct_name)
+            .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
 
         let shape = value_shape(self.ws, struct_name)
             .ok_or_else(|| reject(u_span, uniform_expand_arg_msg(fname)))?;
         let leaves = self.repr_to_leaves(&repr, &shape);
         let stores = plan.leaf_stores();
-        // The one check that keeps the layout and the value side in step. Both
-        // walk the same struct, so a mismatch is a compiler bug rather than a
-        // user error -- but it would otherwise write a truncated or misaligned
-        // block, which is silent wrong pixels.
+        // `uniform_block_checked` already proved the two walkers agree on the
+        // leaf PATH sequence, so this can only differ if the repr handed back a
+        // different leaf count than the shape describes.
         if leaves.len() != stores.len() {
             return Err(reject(
                 u_span,
                 format!(
-                    "`@uniform_expand`: `{struct_name}` flattens to {} leaves but its std140 plan \
-                     has {} slots -- the layout and the value representation disagree",
+                    "`@uniform_expand`: `{struct_name}` lowered to {} leaves but its std140 plan \
+                     has {} slots",
                     leaves.len(),
                     stores.len()
                 ),

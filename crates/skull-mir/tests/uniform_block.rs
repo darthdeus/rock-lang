@@ -221,6 +221,67 @@ fn a_nested_user_struct_is_rejected_until_a_consumer_needs_it() {
     assert!(e.message.contains("Inner"), "the message must name the field's type: {}", e.message);
 }
 
+// -- Two-walker agreement. The wire side derives its members from the field
+// TYPE (`wire_kind` matches `Vec2`/`Mat4` by nominal NAME), while the value side
+// flattens the struct into leaves. Leaves are matched to std140 slots BY
+// POSITION, so equal counts are not enough: a vector whose components were
+// reordered, or a matrix whose columns were, keeps the count and permutes the
+// bytes. These pin the sequence the wire side assumes, which is what makes the
+// name match a checked claim rather than a hope.
+
+/// The leaf paths a plan claims, spelled out. A `Vec2` member contributes
+/// `.x`/`.y` in that order, which is a fact about stdlib's `Vec2` that this
+/// module asserts rather than reads.
+#[test]
+fn a_plans_leaf_paths_name_every_primitive_in_order() {
+    let p = plan_of(
+        "value BloomBlurU { radius: float, direction: Vec2, resolution: float }",
+        "BloomBlurU",
+    );
+    assert_eq!(
+        p.leaf_paths(),
+        vec!["radius", "direction.x", "direction.y", "resolution"]
+    );
+}
+
+/// A `Mat4` is four `Vec4` columns, so its sixteen leaves are `c0.x .. c3.w`.
+#[test]
+fn a_mat4_members_leaf_paths_are_its_columns_in_order() {
+    let p = plan_of("value M { m: Mat4 }", "M");
+    let want: Vec<String> = (0..4)
+        .flat_map(|c| ["x", "y", "z", "w"].map(move |k| format!("m.c{c}.{k}")))
+        .collect();
+    assert_eq!(p.leaf_paths(), want);
+}
+
+/// The agreement itself, over every std140-expressible shape: what the wire side
+/// thinks the leaves are must equal what the value side flattens to. This is the
+/// check `value_leaf_layout_checked` performs for the C/vertex context, and the
+/// reason is identical -- position is what binds a leaf to an offset.
+#[test]
+fn the_wire_and_value_walkers_agree_on_every_shape() {
+    for (src, name) in [
+        ("value A { radius: float, direction: Vec2, resolution: float }", "A"),
+        ("value B { m: Mat4, n: Mat4, tail: Vec2 }", "B"),
+        ("value C { a: Vec3, b: float, c: Vec4 }", "C"),
+        ("value D { flag: bool, count: int, scale: float }", "D"),
+    ] {
+        let ws = ws_of(src);
+        let n = Ustr::from(name);
+        let plan = skull_mir::lower::uniform_block_checked(&ws, n)
+            .unwrap_or_else(|e| panic!("`{name}` must pass the agreement check: {e}"));
+        assert_eq!(
+            plan.leaf_paths(),
+            skull_mir::lower::value_leaf_paths_of(&ws, n)
+                .expect("a value struct has leaf paths")
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>(),
+            "`{name}`"
+        );
+    }
+}
+
 // -- Layout identity. The packer derives offsets from the uniform TYPE while
 // the destination buffer comes from the shader; nothing in either relates the
 // two. A fingerprint is what lets a bind and an upload agree they are talking

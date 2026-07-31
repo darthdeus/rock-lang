@@ -915,6 +915,36 @@ pub(crate) fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) 
     }
 }
 
+/// [`crate::gpu_layout::uniform_block`] with the two-walker agreement enforced:
+/// the plan's leaf-path sequence must equal [`value_leaf_paths`] over the same
+/// type. The std140 side derives its members from field TYPES (matching `Vec2`
+/// and `Mat4` by nominal name), the value side flattens the struct into leaves,
+/// and the packer binds one to the other BY POSITION -- so a reordered vector or
+/// matrix keeps every count equal while writing each leaf to the wrong offset.
+///
+/// The exact twin of [`value_leaf_layout_checked`] for the uniform context, and
+/// `Err` for the same reason: a type that reached a packing site and cannot be
+/// walked consistently is an invariant failure, not a case to skip past.
+pub fn uniform_block_checked(
+    ws: &Workspace,
+    name: Ustr,
+) -> Result<crate::gpu_layout::UniformBlockPlan, String> {
+    let plan = crate::gpu_layout::uniform_block(ws, name).map_err(|e| e.message.clone())?;
+    let Some(shape) = value_shape(ws, name) else {
+        return Err(format!("`{name}` has a std140 plan but no value shape"));
+    };
+    let want: Vec<String> = value_leaf_paths(&shape).iter().map(|u| u.to_string()).collect();
+    let got = plan.leaf_paths();
+    if want != got {
+        return Err(format!(
+            "leaf walkers disagree for `{name}`: value_leaf_paths {want:?} vs std140 plan {got:?} \
+             -- leaves are matched to std140 slots by position, so this would write every leaf to \
+             the wrong offset"
+        ));
+    }
+    Ok(plan)
+}
+
 /// The value-struct name of expression `e` outside a lowering [`Builder`].
 /// Mirrors [`Builder::value_struct_name_of`] minus the specialization
 /// substitution, which the validator has no active specialization for -- an

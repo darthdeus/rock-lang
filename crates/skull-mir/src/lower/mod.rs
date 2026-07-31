@@ -2427,11 +2427,8 @@ pub fn uniform_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
             let Some(sname) = value_struct_name_at(ws, inf, u) else {
                 return reject(body.expr_spans[u], uniform_expand_arg_msg(fname));
             };
-            if let Err(err) = crate::gpu_layout::uniform_block(ws, sname) {
-                return reject(
-                    body.expr_spans[u],
-                    format!("`@uniform_expand`: {}", err.message),
-                );
+            if let Err(msg) = uniform_block_checked(ws, sname) {
+                return reject(body.expr_spans[u], format!("`@uniform_expand`: {msg}"));
             }
         }
     }

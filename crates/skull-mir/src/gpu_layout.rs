@@ -242,6 +242,27 @@ impl WireKind {
         }
     }
 
+    /// The field path each of this kind's primitives sits at, relative to the
+    /// member. Empty for a scalar (the member IS the leaf).
+    ///
+    /// These are a CLAIM about stdlib's types, not a reading of them:
+    /// [`wire_kind`] matches `Vec2`/`Mat4` by nominal name, so nothing stops
+    /// their fields being reordered or renamed underneath. Leaves are bound to
+    /// std140 slots positionally, so that would permute bytes while keeping
+    /// every count equal. `uniform_block_checked` compares this against the
+    /// value walker, which is what turns the claim into a checked one.
+    fn leaf_suffixes(self) -> Vec<String> {
+        match self {
+            WireKind::F32 | WireKind::I32 | WireKind::Bool32 => vec![String::new()],
+            WireKind::F32x2 => ["x", "y"].iter().map(|k| format!(".{k}")).collect(),
+            WireKind::F32x3 => ["x", "y", "z"].iter().map(|k| format!(".{k}")).collect(),
+            WireKind::F32x4 => ["x", "y", "z", "w"].iter().map(|k| format!(".{k}")).collect(),
+            WireKind::Mat4 => (0..4)
+                .flat_map(|c| ["x", "y", "z", "w"].map(move |k| format!(".c{c}.{k}")))
+                .collect(),
+        }
+    }
+
     /// The view a leaf of this kind stores through. A block `bool` is a 32-bit
     /// value, so it rides the int view alongside `int`.
     fn view(self) -> WireView {
@@ -345,6 +366,16 @@ impl UniformBlockPlan {
             h = fnv1a(h, &m.offset.to_le_bytes());
         }
         fnv1a(h, &self.size.to_le_bytes())
+    }
+
+    /// The primitive leaf this block expects at each slot, as a dotted field
+    /// path, in the order [`Self::leaf_stores`] writes them. Compared against
+    /// the value walker by `uniform_block_checked`.
+    pub fn leaf_paths(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .flat_map(|m| m.kind.leaf_suffixes().into_iter().map(move |s| format!("{}{s}", m.name)))
+            .collect()
     }
 
     /// Every store in the block, member order -- one per primitive leaf of the
