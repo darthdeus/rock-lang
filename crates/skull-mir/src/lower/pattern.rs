@@ -550,8 +550,21 @@ impl Builder<'_> {
             if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
                 return self.lower_if_let_nobox(b, value, then_branch, else_branch);
             }
+        }
+        // Any name-only pattern, `Bind` included: the presence is a WIRE slot, so
+        // it has to be the branch condition. Falling through to the general path
+        // instead tests the PACKED tuple against nil -- and a `MakeTuple` is never
+        // nil, so the test const-folds to always-present and the else arm is
+        // deleted, which is the same shape the `??` consumer hit.
+        if self.pattern_is_names_only(pattern) {
             if let Some(shape) = self.nullable_tuple_wire_shape(value) {
-                return self.lower_if_let_nullable_tuple(b, value, &shape, then_branch, else_branch);
+                return self.lower_if_let_nullable_tuple(
+                    pattern,
+                    value,
+                    &shape,
+                    then_branch,
+                    else_branch,
+                );
             }
         }
         let result = self.f.new_cell(None);
@@ -689,13 +702,63 @@ impl Builder<'_> {
         )
     }
 
+    /// Whether `pat` is names and holes only -- irrefutable, so the presence slot
+    /// is the ONLY test the match needs. Anything that carries its own test (a
+    /// literal, a variant, a record) is excluded and still matches against the
+    /// packed scrutinee.
+    fn pattern_is_names_only(&self, pat: Idx<Pattern>) -> bool {
+        match self.body.pattern_arena[pat].clone() {
+            Pattern::Bind(_) | Pattern::Wildcard => true,
+            Pattern::Tuple { elements } => {
+                elements.into_iter().all(|p| self.pattern_is_names_only(p))
+            }
+            _ => false,
+        }
+    }
+
+    /// [`Self::bind_pattern_slot`] driven by a `Pattern` instead of a
+    /// `BindingPattern`, for the `if let` forms. Only the shapes the pattern arena
+    /// can spell and the binding arena cannot are handled here -- a HOLE, which
+    /// has no `BindingInfo` to name -- and everything else delegates, so the two
+    /// cannot drift about what a slot is.
+    ///
+    /// A hole still CONSUMES its slots: the values are positional, so binding
+    /// nothing without advancing would hand the next element this one's leaves.
+    fn bind_names_slot(
+        &mut self,
+        pat: Idx<Pattern>,
+        slot: &RetSlot,
+        values: &[Idx<Inst>],
+        idx: &mut usize,
+    ) -> Result<(), CompilerError> {
+        match self.body.pattern_arena[pat].clone() {
+            Pattern::Wildcard => *idx += slot.slot_count(),
+            Pattern::Bind(b) => {
+                self.bind_pattern_slot(&BindingPattern::Leaf(b), slot, values, idx)
+            }
+            Pattern::Tuple { elements } => {
+                let RetSlot::Nested(inner) = slot else {
+                    return Err(gap("a tuple pattern against a non-tuple wire slot"));
+                };
+                if elements.len() != inner.slots.len() {
+                    return Err(gap("a tuple pattern of a different arity than its wire slot"));
+                }
+                for (p, s) in elements.into_iter().zip(inner.slots.clone()) {
+                    self.bind_names_slot(p, &s, values, idx)?;
+                }
+            }
+            _ => return Err(gap("bind_names_slot on a pattern that needs a test")),
+        }
+        Ok(())
+    }
+
     /// `if let t = <call returning (..)?>` where an element splats: the presence
-    /// SLOT is the branch condition and `t` binds the remaining slots as cells,
-    /// so nothing is packed to be tested and immediately unpacked again. The
-    /// tuple twin of [`Self::lower_if_let_nobox`].
+    /// SLOT is the branch condition and the pattern binds the remaining slots as
+    /// cells, so nothing is packed to be tested and immediately unpacked again.
+    /// The tuple twin of [`Self::lower_if_let_nobox`].
     pub(crate) fn lower_if_let_nullable_tuple(
         &mut self,
-        b: Idx<BindingInfo>,
+        pattern: Idx<Pattern>,
         value: Idx<Expr>,
         shape: &TupleRetShape,
         then_branch: Idx<Expr>,
@@ -723,15 +786,12 @@ impl Builder<'_> {
             ValueRepr::Tuple { parts, present: None },
             &bound_shape,
         );
-        let cells: Vec<Idx<Cell>> = slots
-            .iter()
-            .map(|v| {
-                let c = self.f.new_cell(None);
-                self.emit_cur(Inst::Store { cell: c, value: *v });
-                c
-            })
-            .collect();
-        self.tuple_binds.insert(raw(b), (cells, bound_shape));
+        // ONE dispatcher for every pattern shape: a single name takes the whole
+        // tuple's slot cells, a destructure takes each element's, and anything
+        // that does not line up packs -- which is where a whole-tuple use of a
+        // `nobox` element meets the guarantee's rejection.
+        let mut idx = 0;
+        self.bind_names_slot(pattern, &RetSlot::Nested(bound_shape), &slots, &mut idx)?;
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 
