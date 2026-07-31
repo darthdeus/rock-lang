@@ -1043,6 +1043,13 @@ impl InstanceGraph {
     /// because no generic `co fn` is ever specialized -- `compute_call_spec`
     /// bails on `is_coroutine` first (`shape.rs:1584`, the subject of
     /// `generic_coroutine_column_param_sentinel`).
+    ///
+    /// **That premise is branch-scoped.** It holds on `mono`, where the sentinel
+    /// stays pinned. The Stage-0f tactical slice (`mono-0f-slice`, `285853bad`)
+    /// falsifies it: it drops the `is_coroutine` bail on the column trigger, two
+    /// instantiations of one `co fn` come out correct, and the sentinel FLIPS --
+    /// on that branch only. If that slice or a successor merges, this helper
+    /// starts seeing specialized coroutines and the collisions stop being latent.
     pub fn colliding_coroutine_helpers(&self) -> BTreeMap<String, BTreeSet<String>> {
         let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for h in &self.coroutine_helpers {
