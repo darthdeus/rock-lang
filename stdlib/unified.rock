@@ -1163,19 +1163,23 @@ fn Vec<T>.swap_remove(vec, index: int) -> T? {
     return value
 }
 
-// enumerate() materializes an eager [(int, value)] Vec. In for-position
-// (`for (i, x) in enumerate(coll)`) bone keeps the builtin template lowering
-// (`builtin_enumerable`) and never calls these overloads; they serve non-`for`
-// uses (`let it = enumerate(v)`), so the declared Vec type is the real runtime
-// shape. Chains (`v.iter().enumerate()`) resolve to the EnumIter overload.
-
-fn Vec<T>.enumerate(collection) -> [(int, T)] {
-    let out: [(int, T)] = []
-    for i in 0..collection.len {
-        out.push((i, collection[i]))
-    }
-    return out
-}
+// enumerate() in for-position (`for (i, x) in enumerate(coll)`) keeps bone's
+// builtin template lowering (`builtin_enumerable`) and calls no overload at all.
+// Elsewhere: a VEC resolves to the lazy `EnumIter` below through implicit iter
+// coercion, so `enumerate(v)` is an iterator and a caller wanting the
+// materialized `[(int, T)]` spells `.collect()`.
+//
+// Arena and Map keep their EAGER overloads, and it is not a style choice --
+// neither can reach the lazy one today:
+//   - `Map` has no `iter()` at all (only Vec, RingBuffer and Arena do), so
+//     coercion has nothing to call and `enumerate(m)` would stop resolving;
+//   - `Arena` coerces fine but the resulting `EnumIter<ArenaPairIter<T>, ..>`
+//     hits a PRE-EXISTING element-split bug -- its element is a tuple inside a
+//     tuple, and `a.pairs().enumerate().collect()` fails identically with these
+//     overloads present ("the loop element was split into 4 destinations but
+//     `next` returns 2 values").
+// Finish those two when a Map iterator exists and the nested-tuple element
+// splits; until then deleting them would remove capability, not add uniformity.
 
 fn Arena<T>.enumerate(collection) -> [(int, (Entity<T>, T))] {
     let out: [(int, (Entity<T>, T))] = []
