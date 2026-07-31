@@ -610,6 +610,128 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(key))
     }
 
+    /// `@uniform_expand` -> one direct typed store per primitive leaf of `u`,
+    /// at its std140 element index. No helper call per leaf, and no pack: the
+    /// Group's leaves go straight from registers into the views.
+    pub(crate) fn expand_uniform_block(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let call_span = self.body.expr_spans[call];
+        let fname = self.ws.module(func.module).functions[func.func].name;
+        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
+
+        let [fv_e, iv_e, u_e] = arg_idxs else {
+            return Err(reject(call_span, uniform_expand_arity_msg(fname)));
+        };
+        let (fv_e, iv_e, u_e) = (*fv_e, *iv_e, *u_e);
+        let u_span = self.body.expr_spans[u_e];
+
+        let fv = self.lower_expr(fv_e)?;
+        let iv = self.lower_expr(iv_e)?;
+
+        // From the TYPE, not from the repr's variant: a group read out of a
+        // local arrives as a `Scalar` (a loaded cell), which `repr_to_leaves`
+        // handles perfectly well but which carries no struct name.
+        let Some(struct_name) = self.value_struct_name_of(u_e) else {
+            return Err(reject(u_span, uniform_expand_arg_msg(fname)));
+        };
+        let repr = self.lower_expr_repr(u_e)?;
+        let plan = uniform_block_checked(self.ws, struct_name)
+            .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
+
+        let shape = value_shape(self.ws, struct_name)
+            .ok_or_else(|| reject(u_span, uniform_expand_arg_msg(fname)))?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        let stores = plan.leaf_stores();
+        // `uniform_block_checked` already proved the two walkers agree on the
+        // leaf PATH sequence, so this can only differ if the repr handed back a
+        // different leaf count than the shape describes.
+        if leaves.len() != stores.len() {
+            return Err(reject(
+                u_span,
+                format!(
+                    "`@uniform_expand`: `{struct_name}` lowered to {} leaves but its std140 plan \
+                     has {} slots",
+                    leaves.len(),
+                    stores.len()
+                ),
+            ));
+        }
+
+        for (leaf, store) in leaves.iter().zip(stores) {
+            // `LeafStore.offset` is a BYTE offset; a leaf view indexes in units
+            // of its own primitive, and every std140 slot here is 4-byte.
+            let idx = self.emit_cur(Inst::Const(Lit::Int((store.offset / 4) as i64)));
+            let base = match store.view {
+                crate::gpu_layout::WireView::Float => fv,
+                crate::gpu_layout::WireView::Int => iv,
+            };
+            self.emit_cur(Inst::StoreIndex {
+                base,
+                index: idx,
+                value: *leaf,
+                kind: ContainerKind::NativeBufferLeaf,
+            });
+        }
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    /// `@vertex_expand` -> the element's vertex layout as a literal. The
+    /// argument is used for its TYPE only and is deliberately not lowered: the
+    /// call collapses to a constant, as `@shader_expand` does.
+    pub(crate) fn expand_vertex_layout(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let call_span = self.body.expr_spans[call];
+        let f = &self.ws.module(func.module).functions[func.func];
+        let (fname, ret) = (f.name, f.return_ty);
+        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
+
+        let [arg] = arg_idxs else {
+            return Err(reject(
+                call_span,
+                format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
+            ));
+        };
+        let arg = *arg;
+        let arg_span = self.body.expr_spans[arg];
+
+        let Some(kind) = ret.and_then(|r| vertex_expand_return(self.ws, r)) else {
+            return Err(reject(call_span, vertex_expand_ret_msg(self.ws, fname, ret)));
+        };
+        let Some(elem) = self.nb_value_elem(arg) else {
+            return Err(reject(arg_span, vertex_expand_arg_msg(fname)));
+        };
+
+        let plan = crate::vertex_plan::vertex_plan(self.ws, elem)
+            .map_err(|e| reject(arg_span, format!("`@vertex_expand`: {}", e.message)))?;
+        // `float_unit_*` carry the integer-attribute and cumulative-offset
+        // rejections, so the float-unit view is never emitted for a layout it
+        // cannot describe.
+        let bad = |m: String| reject(arg_span, format!("`@vertex_expand`: {m}"));
+        let v = match kind {
+            VertexExpandRet::Stride => {
+                let s = plan.float_unit_stride().map_err(bad)?;
+                self.emit_cur(Inst::Const(Lit::Int(s as i64)))
+            }
+            VertexExpandRet::Sizes => {
+                let sizes = plan.float_unit_sizes().map_err(bad)?;
+                let vs: Vec<Idx<Inst>> = sizes
+                    .iter()
+                    .map(|n| self.emit_cur(Inst::Const(Lit::Int(*n as i64))))
+                    .collect();
+                self.emit_cur(Inst::MakeVec(vs))
+            }
+        };
+        Ok(ValueRepr::Scalar(v))
+    }
+
     /// Construct `enum_name::variant(payload)` for a variant with a single
     /// positional payload, mirroring [`Self::lower_enum_variant`]'s
     /// representation choice (cdata `<Enum>_ct` when the enum is cdata-eligible,
