@@ -1,3 +1,10 @@
+//! The lua/js SIBLING CONTRACT: one function, two bodies, in two files, with
+//! nothing in the compiler binding them together. This file holds every check
+//! that they still agree -- where the JS body lives, its arity, and its
+//! annotations. JS reports neither a surplus argument nor a missing one, and an
+//! annotation is a compile-time shape decision, so every drift in this class is
+//! silent by construction.
+//!
 //! A stdlib function's JS body must live in the stdlib, not in the web engine.
 //!
 //! `stone/engine/web/js_ffi.rock` is staged only by `rock web`, so an
@@ -140,5 +147,103 @@ fn a_stdlib_sibling_pair_agrees_on_arity() {
         drifted.is_empty(),
         "these stdlib siblings declare different param counts, so the JS body binds \
          its params to the wrong arguments: {drifted:?}"
+    );
+}
+
+/// `name -> (arity, annotations)` for every fn in `src` whose body is
+/// `inline(<backend>)` / `extern(js)`.
+fn sibling_facts(
+    src: &str,
+    id: &str,
+    want_js: bool,
+) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
+    let ast = skull_parser::parse_module(src, Ustr::from(id)).expect("parse");
+    assert!(ast.recovery_errors.is_empty(), "{id} must parse cleanly");
+    let mut out = std::collections::HashMap::new();
+    for item in &ast.items {
+        let ItemKind::Function(f) = &item.kind else { continue };
+        let is_js = matches!(
+            f.body,
+            FunctionBody::ExternJs | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _)
+        );
+        let is_lua = matches!(f.body, FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _));
+        if is_js != want_js || (!is_js && !is_lua) {
+            continue;
+        }
+        let anns: std::collections::BTreeSet<String> = item
+            .annotations
+            .iter()
+            .map(|a| a.name.name.to_string())
+            // `@inline` is unreachable on a fn that HAS an inline body: both
+            // `classify` (skull-transform) and `compute_call_spec` (skull-mir)
+            // return early on `inline_body.is_some()` before they read it. So a
+            // sibling carrying it and one not carrying it behave identically,
+            // and gating on it would only assert a cosmetic difference.
+            .filter(|n| n != "inline")
+            .collect();
+        out.insert(f.name.name.to_string(), (f.params.len(), anns));
+    }
+    out
+}
+
+/// Every paired lua/js sibling must agree on arity AND annotations.
+///
+/// `@scalar_abi` is the one that has actually bitten: 23 imgui stubs were
+/// missing the annotation their luajit siblings carry (`a60d48aa1`), which made
+/// them boxed boundaries a marked `Vec2` could not cross -- and that is a
+/// compile-time shape decision, so nothing failed until a whole game stopped
+/// building. The check is not limited to it: any annotation that changes how a
+/// caller must emit the call has the same silent failure mode.
+#[test]
+fn a_sibling_pair_agrees_on_arity_and_annotations() {
+    // The stdlib pair is assembled from the loader (it is split across files);
+    // the engine pair is two named files that own each other's siblings.
+    let mut stdlib_lua = std::collections::HashMap::new();
+    let mut stdlib_js = std::collections::HashMap::new();
+    for f in rock_host::stdlib_loader::stdlib_files() {
+        stdlib_lua.extend(sibling_facts(f.contents, f.name, false));
+        stdlib_js.extend(sibling_facts(f.contents, f.name, true));
+    }
+    let imgui_lua_src = std::fs::read_to_string(repo("stone/engine/ui/imgui.rock")).expect("imgui.rock");
+    let imgui_js_src =
+        std::fs::read_to_string(repo("stone/engine/web/imgui_stubs.rock")).expect("imgui_stubs.rock");
+
+    let pairs: Vec<(&str, _, _)> = vec![
+        ("stdlib", stdlib_lua, stdlib_js),
+        (
+            "imgui",
+            sibling_facts(&imgui_lua_src, "<imgui>", false),
+            sibling_facts(&imgui_js_src, "<imgui_stubs>", true),
+        ),
+    ];
+
+    let mut drifted: Vec<String> = Vec::new();
+    let mut paired_total = 0usize;
+    for (label, lua, js) in &pairs {
+        let paired: Vec<&String> = js.keys().filter(|n| lua.contains_key(*n)).collect();
+        assert!(
+            paired.len() >= 10,
+            "{label}: only {} sibling pairs found -- the scan is broken, not the source",
+            paired.len()
+        );
+        paired_total += paired.len();
+        for n in paired {
+            let (la, laa) = &lua[n];
+            let (ja, jaa) = &js[n];
+            if la != ja {
+                drifted.push(format!("{label}::{n} arity lua={la} js={ja}"));
+            }
+            if laa != jaa {
+                let lua_only: Vec<&String> = laa.difference(jaa).collect();
+                let js_only: Vec<&String> = jaa.difference(laa).collect();
+                drifted.push(format!("{label}::{n} lua-only={lua_only:?} js-only={js_only:?}"));
+            }
+        }
+    }
+    assert!(paired_total >= 60, "expected both pairs to contribute; got {paired_total}");
+    assert!(
+        drifted.is_empty(),
+        "these lua/js siblings disagree, so the JS body binds its params or takes its \
+         ABI differently from its luajit twin: {drifted:#?}"
     );
 }
