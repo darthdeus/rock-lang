@@ -2090,10 +2090,14 @@ fn native_buffer_alloc_elem_ctype_spec(
 /// loop runs ZERO times: the coroutine yields nothing and the call answers 0 for
 /// a 2-element vec, compile-clean and with no diagnostic.
 ///
-/// This is a stop-gap for the silence, NOT the repair. The bail-out is artificial
-/// -- a coroutine is an ordinary CFG after `coro_transform`, so these
-/// instantiations can specialize like any other column-forced generic, and when
-/// they do this pass goes away with it.
+/// This is a stop-gap for the silence, NOT the repair -- but the repair is bigger
+/// than it looks. Deleting the `is_coroutine` bail-out does NOT let these
+/// specialize; it panics codegen with `Yield must be removed by the coroutine
+/// transform before codegen` (measured). Specialization is delivered by
+/// inline-splicing a specialized clone, and a `co fn` cannot be spliced into its
+/// caller. The repair is to emit the clone as its own top-level coroutine and put
+/// it through `coro_transform` -- monomorphization-by-cloning. This pass is
+/// deleted when that exists.
 ///
 /// NOT a `nobox` rule: column eligibility is wider than the mark, so an unmarked
 /// value element reaches it identically. Narrow on the other axis, though -- it

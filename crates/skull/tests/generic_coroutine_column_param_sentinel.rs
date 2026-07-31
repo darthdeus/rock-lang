@@ -32,8 +32,22 @@
 //! on the same terms and fails identically. Column eligibility is wider than the
 //! mark, so the blast radius is wider than nobox tests can see.
 //!
-//! A coroutine is an ordinary CFG after `coro_transform`, so nothing actually
-//! prevents specializing one -- the `is_coroutine` bail-out is artificial.
+//! THE BAIL-OUT IS NOT ARTIFICIAL, and an earlier revision of this file said it
+//! was. Measured: deleting `is_coroutine` from `compute_call_spec`'s guard does
+//! not let these specialize, it PANICS codegen with `Yield must be removed by
+//! the coroutine transform before codegen`.
+//!
+//! "A coroutine is an ordinary CFG after `coro_transform`" is true and beside
+//! the point. Specialization is not a CFG property -- it is DELIVERED by
+//! inline-splicing a specialized clone, which is why eligibility here is a
+//! deliberate subset of the inliner's `classify`, and a `co fn` cannot be
+//! spliced into its caller at all: the call constructs a coroutine object rather
+//! than running the body.
+//!
+//! So the repair is a mechanism that does not exist: emit the specialized clone
+//! as its own top-level coroutine, run `coro_transform` over it, and retarget
+//! the call. That is monomorphization-by-cloning, which is why this is mono's to
+//! make and not a guard to delete.
 //!
 //! The controls are what keep the rejection NARROW: it must fire only where
 //! `compute_call_spec` would have specialized but for that bail-out, so all three

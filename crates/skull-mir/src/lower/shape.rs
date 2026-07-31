@@ -1582,6 +1582,15 @@ pub(crate) fn compute_call_spec(
     target: bone_semantic::hir::FnBackend,
 ) -> Option<(SpecKey, SpecSubst)> {
     let f = &ws.module(func.module).functions[func.func];
+    // `is_coroutine` is NOT an arbitrary exclusion, and deleting it does not
+    // "let coroutines specialize" -- it panics codegen with `Yield must be
+    // removed by the coroutine transform before codegen` (measured). Eligibility
+    // here is deliberately a SUBSET of the inliner's `classify`, because
+    // specialization is DELIVERED by inline-splicing a specialized clone, and a
+    // `co fn` cannot be spliced into its caller: the call constructs a coroutine
+    // object rather than running the body. A specialized clone would need to be
+    // emitted as its own top-level coroutine and put through `coro_transform`,
+    // which is a mechanism that does not exist yet.
     if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
