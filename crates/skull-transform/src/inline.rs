@@ -699,9 +699,12 @@ fn resolve_cloned_bound_calls(
                         func.bound_trees.insert(new_id, grafted);
                     }
                 }
-                let spec = caller_inf.and_then(|inf| {
-                    spec_key_from_next_generics(ws, inf, concrete, next_generics, caller_subst)
-                });
+                let spec = match caller_inf {
+                    Some(inf) => {
+                        spec_key_from_next_generics(ws, inf, concrete, next_generics, caller_subst)?
+                    }
+                    None => None,
+                };
                 func.insts[new_id] = Inst::CallMulti { dests, func: concrete, args };
                 if let Some(key) = spec.clone() {
                     func.spec_bindings.insert(new_id, key);

@@ -1565,6 +1565,13 @@ pub(crate) fn reify_type(
 /// least one VALUE-struct leaf. The single source consulted by both the caller
 /// lowering ([`Builder::call_spec`]) and the site-aware rejection pass, so the two
 /// never disagree on which calls specialize.
+///
+/// `Err` is a COMPILER-state rejection, never a language boundary: bone records
+/// `call_generic_bindings` for every successfully resolved generic direct call,
+/// so its absence here means the resolution that produced this `FuncRef` and the
+/// inference that recorded the bindings disagree. The synthesized `for`-protocol
+/// `next` is not caught by that: it carries `next_generics` and never reaches
+/// this function ([`spec_key_from_next_generics`] is its entry).
 pub(crate) fn compute_call_spec(
     ws: &Workspace,
     inf: &BodyInference,
@@ -1572,13 +1579,26 @@ pub(crate) fn compute_call_spec(
     func: FuncRef,
     enclosing: &SpecSubst,
     target: bone_semantic::hir::FnBackend,
-) -> Option<(SpecKey, SpecSubst)> {
+) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
-        return None;
+        return Ok(None);
     }
-    let bindings = inf.call_generic_bindings.get(&e)?;
-    let (key, subst) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?;
+    let Some(bindings) = inf.call_generic_bindings.get(&e) else {
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "internal: no recorded generic bindings for a resolved call to generic `{}`. \
+                 Inference records a binding list for every resolved generic direct call, so \
+                 this call resolved to a callee its own instantiation was never inferred for.",
+                f.name
+            ),
+        ));
+    };
+    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?
+    else {
+        return Ok(None);
+    };
     // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
     // whether it happens is the author's call.
     //
@@ -1591,9 +1611,9 @@ pub(crate) fn compute_call_spec(
     let opted_in =
         f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
     if !opted_in && !spec_key_has_target_storage(ws, &key, target) {
-        return None;
+        return Ok(None);
     }
-    Some((key, subst))
+    Ok(Some((key, subst)))
 }
 
 /// [`compute_call_spec`] against an explicit binding list instead of a call
@@ -1602,24 +1622,43 @@ pub(crate) fn compute_call_spec(
 /// `BoundNext::Concrete::next_generics` (which bone records at resolution).
 /// Shared body so an iterator call and a direct call can never disagree on
 /// which instantiations specialize.
+///
+/// Both `Err`s are compiler-state rejections: a binding list is built per callee
+/// so it has that callee's arity, and every entry of `Function::generics` is the
+/// `TypeExpr::Generic` the declaration minted. A silent `None` here would leave
+/// the generic absent from the [`SpecSubst`] while the key still claimed the
+/// instantiation.
 pub(crate) fn compute_spec_from_bindings(
     ws: &Workspace,
     inf: &BodyInference,
     func: FuncRef,
     bindings: &[TyId],
     enclosing: &SpecSubst,
-) -> Option<(SpecKey, SpecSubst)> {
+) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
-        return None;
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "internal: `{}` declares {} generic(s) but its call site supplied {} binding(s)",
+                f.name,
+                f.generics.len(),
+                bindings.len()
+            ),
+        ));
     }
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
     let mut subst = SpecSubst::new();
     let mut any_value = false;
     for (g, b) in f.generics.iter().zip(bindings) {
         let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
-            key.push(None);
-            continue;
+            return Err(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "internal: declared generic of `{}` is not a generic type variable",
+                    f.name
+                ),
+            ));
         };
         match reify_type(ws, inf, *b, enclosing) {
             Some(ty) => {
@@ -1630,7 +1669,7 @@ pub(crate) fn compute_spec_from_bindings(
             None => key.push(None),
         }
     }
-    any_value.then_some((key, subst))
+    Ok(any_value.then_some((key, subst)))
 }
 
 pub fn spec_key_from_next_generics(
@@ -1639,17 +1678,25 @@ pub fn spec_key_from_next_generics(
     func: FuncRef,
     next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
     enclosing: &SpecSubst,
-) -> Option<SpecKey> {
+) -> Result<Option<SpecKey>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
-    let bindings: Vec<TyId> = f
-        .generics
-        .iter()
-        .map(|generic| match ty_node(ws, inf, *generic) {
-            Some(TypeExpr::Generic(var, _)) => next_generics.get(&var).copied(),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
-    compute_spec_from_bindings(ws, inf, func, &bindings, enclosing).map(|(key, _)| key)
+    let mut bindings = Vec::with_capacity(f.generics.len());
+    for generic in &f.generics {
+        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *generic) else {
+            return Err(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "internal: declared generic of `{}` is not a generic type variable",
+                    f.name
+                ),
+            ));
+        };
+        // A generic the iterator resolution left unbound is not an invariant
+        // failure -- the `next` witness binds only what its own bound names.
+        let Some(bound) = next_generics.get(&var).copied() else { return Ok(None) };
+        bindings.push(bound);
+    }
+    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
 }
 
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`

@@ -404,8 +404,13 @@ impl Builder<'_> {
     /// keeps the shared generic snapshot (byte-identical). Eligibility is a subset
     /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
     /// splice always resolves; a residual case falls to the site-aware rejection.
-    pub(crate) fn call_spec(&self, e: Idx<Expr>, func: FuncRef) -> Option<(SpecKey, SpecSubst)> {
-        compute_call_spec(self.ws, self.inf?, e, func, self.spec_subst, self.scx.target)
+    pub(crate) fn call_spec(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
+        let Some(inf) = self.inf else { return Ok(None) };
+        compute_call_spec(self.ws, inf, e, func, self.spec_subst, self.scx.target)
     }
 
     /// [`Self::call_spec`] narrowed by the target's storage filter -- the form
@@ -415,10 +420,10 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-    ) -> Option<(SpecKey, SpecSubst)> {
-        self.call_spec(e, func).filter(|(k, _)| {
+    ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
+        Ok(self.call_spec(e, func)?.filter(|(k, _)| {
             !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
-        })
+        }))
     }
 
     /// THE tuple-return shape of a call, read off the CALLEE's declared return
@@ -439,12 +444,14 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-    ) -> Option<TupleRetShape> {
-        let spec = self.call_spec_for_target(e, func);
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
+        let spec = self.call_spec_for_target(e, func)?;
         let empty = SpecSubst::new();
         let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
-        let ret = self.ws.module(func.module).functions[func.func].return_ty?;
-        tuple_ret_shape(self.ws, subst, ret)
+        let Some(ret) = self.ws.module(func.module).functions[func.func].return_ty else {
+            return Ok(None);
+        };
+        Ok(tuple_ret_shape(self.ws, subst, ret))
     }
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
@@ -454,8 +461,8 @@ impl Builder<'_> {
         &self,
         func: FuncRef,
         next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
-    ) -> Option<SpecKey> {
-        let inf = self.inf?;
+    ) -> Result<Option<SpecKey>, CompilerError> {
+        let Some(inf) = self.inf else { return Ok(None) };
         spec_key_from_next_generics(self.ws, inf, func, next_generics, self.spec_subst)
     }
 
@@ -494,13 +501,13 @@ impl Builder<'_> {
         // longer the only thing that can serve it: the call targets a standalone
         // specialized copy, lowered under this same substitution, so the two agree
         // on the ABI without an inliner ever running.
-        let spec = self.call_spec_for_target(e, func);
+        let spec = self.call_spec_for_target(e, func)?;
         // The instantiation key is recorded on the emitted call inst whenever this
         // is a specialized call -- even on the boxed (non-scalar-ABI) path, because
         // the specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
         let key = spec.as_ref().map(|(k, _)| k.clone());
-        let ret_tuple = self.call_ret_tuple_shape(e, func);
+        let ret_tuple = self.call_ret_tuple_shape(e, func)?;
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {

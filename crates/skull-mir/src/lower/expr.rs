@@ -951,7 +951,7 @@ impl Builder<'_> {
                 // a column-stored element, or a leaf-addressed buffer element on
                 // JS -- keeps its spec binding.
                 let key = self
-                    .call_spec(e, func)
+                    .call_spec(e, func)?
                     .filter(|(k, _)| {
                         !self.in_unspliced_ctx
                             || spec_key_has_target_storage(self.ws, k, self.scx.target)

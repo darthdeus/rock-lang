@@ -2137,38 +2137,44 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             else {
                 continue;
             };
-            let resolves = owner_inlined
-                && match intr_ret {
+            let resolves = if !owner_inlined {
+                false
+            } else {
+                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA) {
+                    Ok(spec) => spec,
+                    // This pass reads the same instantiation lowering does, so a
+                    // compiler-state rejection is its answer too rather than
+                    // something to score around.
+                    Err(err) => {
+                        let span =
+                            err.labels.first().map_or_else(Span::unknown, |l| l.span);
+                        return Some((err.message, span));
+                    }
+                };
+                match intr_ret {
                     // Direct: validate the intrinsic's element under this site's subst.
                     // `Lua` because column storage never changes whether a
                     // `native_buffer_alloc<T>` site RESOLVES its ctype -- it is
                     // the FFI-clean element that decides -- so this validator
                     // stays backend-agnostic by asking the column-bearing target.
-                    Some(intr_ret) => {
-                        compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA)
-                            .is_some_and(|(_, subst)| {
-                                native_buffer_alloc_elem_ctype_spec(
-                                    ws, fref_inf, intr_ret, &subst,
-                                )
-                                .is_ok()
-                            })
-                    }
+                    Some(intr_ret) => spec.is_some_and(|(_, subst)| {
+                        native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst)
+                            .is_ok()
+                    }),
                     // Transitive (the intrinsic lives deeper in the chain): the
                     // site must specialize, and conservatively every reified
                     // leaf must be allocatable (a GC-value leaf reaching the
                     // intrinsic would fail cdef resolution inside the splice,
                     // which lowering swallows -- reject it loudly here).
-                    None => compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA)
-                        .is_some_and(|(key, _)| {
-                            key.iter().all(|l| match l {
-                                Some(ReifiedType::Prim(_)) => true,
-                                Some(ty) => {
-                                    !ty.any_nominal(&|name| nominal_is_gc_value(ws, name))
-                                }
-                                None => false,
-                            })
-                        }),
-                };
+                    None => spec.is_some_and(|(key, _)| {
+                        key.iter().all(|l| match l {
+                            Some(ReifiedType::Prim(_)) => true,
+                            Some(ty) => !ty.any_nominal(&|name| nominal_is_gc_value(ws, name)),
+                            None => false,
+                        })
+                    }),
+                }
+            };
             if !resolves {
                 let fname = ws.module(fref.module).functions[fref.func].name;
                 let msg = format!(

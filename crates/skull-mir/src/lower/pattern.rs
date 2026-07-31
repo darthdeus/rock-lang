@@ -474,7 +474,7 @@ impl Builder<'_> {
             if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
                 return self.lower_if_let_nobox(b, value, then_branch, else_branch);
             }
-            if let Some(shape) = self.nullable_tuple_call_shape(value) {
+            if let Some(shape) = self.nullable_tuple_call_shape(value)? {
                 return self.lower_if_let_nullable_tuple(b, value, &shape, then_branch, else_branch);
             }
         }
@@ -562,20 +562,23 @@ impl Builder<'_> {
     /// Read off the CALLEE's return type, never off `e`'s own type: safe-nav
     /// gives `h?.pair()` the same `Nullable(Tuple)` with no presence slot, so
     /// keying on the expression type would branch on a slot that is not there.
-    pub(crate) fn nullable_tuple_call_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+    pub(crate) fn nullable_tuple_call_shape(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
         let Expr::Call {
             callee: Callee::Unresolved { name, .. },
             ..
         } = self.body.expr_arena[e]
         else {
-            return None;
+            return Ok(None);
         };
-        let func = self.resolve_funcref(e, name).ok()?;
+        let Ok(func) = self.resolve_funcref(e, name) else { return Ok(None) };
         // The CALLEE's instantiation, via the same oracle `lower_call` uses --
         // not the enclosing body's `spec_subst`, which is empty in a
         // non-generic caller and left every slot `Opaque`.
-        let shape = self.call_ret_tuple_shape(e, func)?;
-        shape.nullable.then_some(shape)
+        let Some(shape) = self.call_ret_tuple_shape(e, func)? else { return Ok(None) };
+        Ok(shape.nullable.then_some(shape))
     }
 
     /// `if let t = <call returning (..)?>` where an element splats: the presence
