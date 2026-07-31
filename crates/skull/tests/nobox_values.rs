@@ -372,29 +372,25 @@ fn main() {
 }
 "#;
 
-/// SENTINEL, inverted. A whole read of an embed field whose `nobox` child holds
-/// a `nobox` field OF ITS OWN still materializes when widened to `T?`, where
-/// the one-level shape above no longer does. Correct behaviour is that this
-/// emits like `NOBOX_FIELD_WIDEN` and prints `false`.
-///
-/// Inverted because the fix is not the one-level widening: the rejection lands
-/// on the CTOR (`Deep { n: n }`) after `from_nested_field` inlines, and it
-/// reproduces identically before the widening change, so it is a distinct
-/// pre-existing shape and not a hole in it. Pinned rather than left in a doc:
-/// nothing in tree builds a two-level `nobox` nest today, so only a test finds
-/// it.
-///
-/// When this FAILS the fix landed: swap `try_emit_module` for `emit_module`,
-/// assert the three-fn no-materialization loop and a `false` run, and delete
-/// this comment.
+/// The two-level twin of [`a_field_load_widens_to_nullable_without_materializing`]:
+/// a `nobox` child holding a `nobox` field OF ITS OWN. The rejection landed on
+/// the CTOR (`Deep { n: n }`) after `from_nested_field` inlines, and was never a
+/// hole in the widening -- the same nest rejected with no widening anywhere,
+/// because the splice walks asked how `Nest` stores `a` instead of what leaves
+/// it contributes.
 #[test]
-fn a_nested_nobox_child_still_materializes_when_widened_sentinel() {
-    let err = try_emit_module(NOBOX_NESTED_FIELD_WIDEN)
-        .expect_err("PINNED BEHAVIOR (BUG): a two-level nobox nest still rejects when widened");
-    assert!(
-        err.message.contains("survived lowering as an implicit materialization"),
-        "expected the nobox guarantee rejection, got: {}",
-        err.message
+fn a_nested_nobox_child_widens_without_materializing() {
+    let lua = emit_module(NOBOX_NESTED_FIELD_WIDEN);
+    for name in ["mk_nest", "nested_absent", "from_nested_field"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "a two-level nobox nest materialized in `{name}`:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_field_widen"),
+        "false"
     );
 }
 

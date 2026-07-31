@@ -51,6 +51,24 @@ impl Builder<'_> {
     /// value parent stores exactly like a reference parent does (dotted leaf
     /// keys, presence at the field's own name), so it takes the same path.
     pub(crate) fn embed_field_of_struct(&self, sname: Ustr, field: Ustr) -> Option<Ustr> {
+        self.embed_field_of_struct_inner(sname, field, false)
+    }
+
+    /// [`Self::embed_field_of_struct`] for a child whose leaves are ALREADY being
+    /// spliced into an enclosing table.
+    ///
+    /// The contiguous-cdata bail above answers "how does `sname` store this field
+    /// inside its own layout" -- the right question where storage is being
+    /// decided, and the wrong one inside the three splice walks: those run only
+    /// after a caller settled that `sname`'s leaves go into the ENCLOSING table,
+    /// so there is no cdata for a nested value field to sit inside. Asking the
+    /// storage question there sent an FFI-clean nested `nobox` down the one-boxed
+    /// -leaf arm, which is the box the mark forbids.
+    pub(crate) fn embed_field_of_spliced(&self, sname: Ustr, field: Ustr) -> Option<Ustr> {
+        self.embed_field_of_struct_inner(sname, field, true)
+    }
+
+    fn embed_field_of_struct_inner(&self, sname: Ustr, field: Ustr, spliced: bool) -> Option<Ustr> {
         // This runs on EVERY field access, so bail in O(1) when the workspace
         // declares no embed field at all. The flag is set while registering
         // fields and never cleared: a stale `true` costs one bool check, a
@@ -58,7 +76,7 @@ impl Builder<'_> {
         if !(self.ws.has_embed_fields || self.ws.has_nobox_types) {
             return None;
         }
-        if self.is_value_struct(sname) && !value_struct_is_leaf_table(self.ws, sname) {
+        if !spliced && self.is_value_struct(sname) && !value_struct_is_leaf_table(self.ws, sname) {
             return None;
         }
         let sid = *self.ws.struct_by_name.get(&sname)?;
@@ -103,15 +121,33 @@ impl Builder<'_> {
     /// path and returning the expression that actually HOLDS it. `t.a.b.c` with
     /// `a` and `b` embedded is the single key `"a.b.c"` on `t` -- no intermediate
     /// projection exists at any level, because no intermediate box does.
+    ///
+    /// Links are matched under the SPLICED rule and the innermost one is then
+    /// validated under the storage rule, because only the innermost link decides
+    /// whether a table is reached at all. An FFI-clean value struct one level in
+    /// (`o.m` at `struct O { m: Mid }`) splices its own nested leaves into `o`, so
+    /// `o.m.v.y` is the single key `"m.v.y"` -- while the same projection off a
+    /// standalone `Mid` local is real cdata and composes nothing. Matching every
+    /// link under the storage rule stopped at the first FFI-clean link and read a
+    /// `"m.v"` key nothing writes; matching every link under the spliced rule
+    /// would compose a dotted key on that cdata local.
     pub(crate) fn physical_field(&self, base: Idx<Expr>, field: Ustr) -> (Idx<Expr>, Ustr) {
         let mut parts = vec![field];
         let mut cur = base;
+        let mut innermost = None;
         while let Expr::FieldAccess { base: b2, field: f2 } = self.body.expr_arena[cur] {
-            if self.embed_field_of(b2, f2).is_none() {
+            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. }) = self.expr_ty(b2) else {
+                break;
+            };
+            if self.embed_field_of_spliced(sname, f2).is_none() {
                 break;
             }
             parts.push(f2);
+            innermost = Some((sname, f2));
             cur = b2;
+        }
+        if !innermost.is_some_and(|(s, f)| self.embed_field_of_struct(s, f).is_some()) {
+            return (base, field);
         }
         if parts.len() == 1 {
             return (cur, field);
@@ -270,7 +306,7 @@ impl Builder<'_> {
                 }
                 let mut out = Vec::new();
                 for f in self.struct_field_names(cname).unwrap_or_default() {
-                    let inner = self.embed_field_of_struct(cname, f);
+                    let inner = self.embed_field_of_spliced(cname, f);
                     // A flat-enum field contributes its sub-slots, never one
                     // boxed leaf -- same expansion the non-embed struct literal
                     // does via `flat_literal_slots`.
@@ -335,7 +371,7 @@ impl Builder<'_> {
     pub(crate) fn embed_leaf_paths(&self, cname: Ustr) -> Vec<Ustr> {
         let mut out = Vec::new();
         for f in self.struct_field_names(cname).unwrap_or_default() {
-            match self.embed_field_of_struct(cname, f) {
+            match self.embed_field_of_spliced(cname, f) {
                 Some(inner) => out.extend(
                     self.embed_leaf_paths(inner)
                         .into_iter()
@@ -431,7 +467,7 @@ impl Builder<'_> {
         for f in self.struct_field_names(cname).unwrap_or_default() {
             // A flat-enum field is read out sub-slot-wise; emitting the whole
             // field read first would be a dead load of a key nothing writes.
-            if self.embed_field_of_struct(cname, f).is_none() {
+            if self.embed_field_of_spliced(cname, f).is_none() {
                 if let Some(shape) = self.flat_field_of_struct(cname, f) {
                     for slot in flat_slot_names(f, &shape) {
                         let v = self.emit_cur(Inst::Field { base: value, field: slot });
@@ -441,7 +477,7 @@ impl Builder<'_> {
                 }
             }
             let part = self.emit_cur(Inst::Field { base: value, field: f });
-            match self.embed_field_of_struct(cname, f) {
+            match self.embed_field_of_spliced(cname, f) {
                 Some(inner) => out.extend(prefixed(f, self.embed_leaf_reads(inner, part))),
                 None => out.push((f, part)),
             }

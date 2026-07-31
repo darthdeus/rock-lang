@@ -1,18 +1,13 @@
 // CONTROL for `nobox_nested_nullable_embed_group`. The nested field here is
-// NON-nullable, which leaves `Outer` FFI-clean rather than leaf-table -- and
-// that tier is the discriminant: the nullable twin passes, this rejects.
+// NON-nullable, which leaves `Outer` FFI-clean rather than leaf-table. That tier
+// once decided the outcome and no longer does: the splice walks ask
+// `embed_field_of_spliced`, which does not re-apply the contiguous-cdata bail,
+// so an FFI-clean nested value field contributes its own dotted leaves like the
+// leaf-table twin always did.
 //
-// Two narrower controls place the remaining boundary: the same nesting in a
-// PLAIN global (no embed) works, and an embed of a nobox whose fields are all
-// primitive works. What fails is an FFI-CLEAN nested value field inside an embed
-// field.
-//
-// The site is not `embed_group` -- that reads, and it recurses on `Nested(sub)`
-// correctly. The rejection names the WRITES (`__skull_ginit_H` and `fill`): in
-// `embed_leaf_values`' literal walk, `embed_field_of_struct` bails on an
-// FFI-clean value struct, so a nested value field falls to the `(None, None)`
-// arm and is lowered to ONE boxed leaf instead of contributing its own dotted
-// leaves the way the embed and flat-enum arms do.
+// `embed` is not the variable either -- the same shape on a plain reference
+// struct field rejected identically, since a nobox field is spliced whether or
+// not it is spelled `embed` (`tests/nobox_nested_ctor.rock`).
 
 nobox value P { x: int, y: int }
 nobox value Outer { a: P, b: int }
