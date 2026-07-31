@@ -221,6 +221,74 @@ fn a_nested_user_struct_is_rejected_until_a_consumer_needs_it() {
     assert!(e.message.contains("Inner"), "the message must name the field's type: {}", e.message);
 }
 
+// -- Layout identity. The packer derives offsets from the uniform TYPE while
+// the destination buffer comes from the shader; nothing in either relates the
+// two. A fingerprint is what lets a bind and an upload agree they are talking
+// about the same layout, so its job is to separate blocks that a cheaper check
+// would call equal.
+
+/// The case that rules out fingerprinting on anything cheaper than the kinds:
+/// `{x: float, y: Vec2}` and `{x: Vec2, y: float}` agree on block size (16), on
+/// both member offsets (0 and 8), on leaf count (3) and on view sequence (all
+/// float). Only the KINDS at those offsets differ -- so packing one into the
+/// other's buffer writes a `Vec2` where a scalar belongs, and is silent.
+///
+/// Both are named `A` with members `x`/`y`, in separate workspaces, so neither
+/// the struct name nor a member name can be what separates them. Naming them
+/// differently is what made an earlier version of this test pass with the kind
+/// left out of the hash entirely.
+#[test]
+fn two_blocks_alike_but_for_member_kind_fingerprint_differently() {
+    let a = plan_of("value A { x: float, y: Vec2 }", "A");
+    let b = plan_of("value A { x: Vec2, y: float }", "A");
+
+    assert_eq!(a.struct_name, b.struct_name, "fixture: the names must collide");
+    assert_eq!(
+        a.members.iter().map(|m| m.name).collect::<Vec<_>>(),
+        b.members.iter().map(|m| m.name).collect::<Vec<_>>(),
+        "fixture: the member names must collide"
+    );
+    assert_eq!(a.size, b.size, "fixture: the sizes must collide");
+    assert_eq!(
+        a.members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+        b.members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+        "fixture: the offsets must collide"
+    );
+    assert_eq!(
+        a.leaf_stores().len(),
+        b.leaf_stores().len(),
+        "fixture: the leaf counts must collide"
+    );
+
+    assert_ne!(a.fingerprint(), b.fingerprint());
+}
+
+/// Two structurally identical blocks under different names are still different
+/// blocks: the driver resolves members by name, and a bind is per program.
+#[test]
+fn the_struct_name_is_part_of_the_identity() {
+    let a = plan_of("value A { x: float }", "A");
+    let b = plan_of("value B { x: float }", "B");
+    assert_ne!(a.fingerprint(), b.fingerprint());
+}
+
+/// Renaming a member changes the block the driver sees, so it changes identity.
+#[test]
+fn a_renamed_member_changes_the_fingerprint() {
+    let a = plan_of("value A { x: float, y: Vec2 }", "A");
+    let b = plan_of("value A { x: float, z: Vec2 }", "A");
+    assert_ne!(a.fingerprint(), b.fingerprint());
+}
+
+/// It has to be a FUNCTION of the layout, not of anything incidental --
+/// otherwise every reload is a spurious mismatch.
+#[test]
+fn the_same_layout_fingerprints_the_same() {
+    let a = plan_of("value A { x: float, y: Vec2 }", "A");
+    let b = plan_of("value A { x: float, y: Vec2 }", "A");
+    assert_eq!(a.fingerprint(), b.fingerprint());
+}
+
 // -- Leaf stores. The plan states member offsets; the packer emits one store
 // per PRIMITIVE, because the value side arrives as a tree of leaves (a Mat4 is
 // four Vec4s is sixteen floats). Deriving that expansion at each consumer is

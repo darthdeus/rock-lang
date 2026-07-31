@@ -312,7 +312,41 @@ impl BlockMember {
     }
 }
 
+/// FNV-1a. Written out rather than reaching for `DefaultHasher` because this
+/// value is EMITTED into the chunk: a toolchain bump must not silently change
+/// it, and re-emission has to stay byte-stable.
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    let mut h = seed;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 impl UniformBlockPlan {
+    /// A stable identity for this block's LAYOUT.
+    ///
+    /// The packer derives offsets from the uniform TYPE while the destination
+    /// buffer comes from the shader, and nothing in either relates the two --
+    /// `set_uniform_block(blur, HeatShimmerU { .. })` is well typed on both
+    /// sides. This is what a bind and an upload compare to agree they mean the
+    /// same block.
+    ///
+    /// Size is not enough, and neither is size plus offsets: `{float, Vec2}`
+    /// and `{Vec2, float}` agree on size, on both offsets, on leaf count and on
+    /// view sequence, differing only in the KIND at each offset. So the kind is
+    /// hashed, and the names with it -- the driver resolves members by name.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = fnv1a(0xcbf2_9ce4_8422_2325, self.struct_name.as_bytes());
+        for m in &self.members {
+            h = fnv1a(h, m.name.as_bytes());
+            h = fnv1a(h, &[m.kind as u8]);
+            h = fnv1a(h, &m.offset.to_le_bytes());
+        }
+        fnv1a(h, &self.size.to_le_bytes())
+    }
+
     /// Every store in the block, member order -- one per primitive leaf of the
     /// group struct. The packer pairs this with the value's flattened leaves,
     /// and the two lengths agreeing is what keeps the expander and its
