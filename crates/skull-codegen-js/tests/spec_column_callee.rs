@@ -8,9 +8,10 @@
 //! luajit emitter's `callee_name` does, and a call whose specialization was not
 //! emitted must reject rather than fall back to the boxed shared body.
 //!
-//! `sort` is the case JS cannot serve at all: luajit applies the key to the
-//! leaves through `__rock_col_sort_leaves`, which has no JS body, so JS rejects
-//! instead of running the boxed body and dying on `undefined._data`.
+//! `sort` reaches the leaves through `__rock_col_sort_leaves`, which now has a
+//! JS body too; it rejected here for as long as that body was missing, which was
+//! the correct answer -- falling back to the boxed body died on
+//! `undefined._data`.
 
 use std::process::Command;
 
@@ -26,7 +27,9 @@ nobox value NV2 { x: float, y: float }
 fn sorted() -> float {
     let a: [NV2] = [NV2 { x: 3.0, y: 1.0 }, NV2 { x: 1.0, y: 2.0 }]
     a.sort(_.x)
-    return a[0].x
+    // `y` is the column the key never reads, so returning it is what catches a
+    // reorder that moved the key column alone. Sorted: y = 2 then 1 -> 21.
+    return a[0].y * 10.0 + a[1].y
 }
 
 fn pick<T>(xs: [T], i: int, f: fn(T) -> float) -> float {
@@ -122,17 +125,39 @@ fn a_specialized_column_call_round_trips_under_node() {
     assert_eq!(s.trim(), "11", "wrong result\n{program}");
 }
 
-/// `sort` over a column element: luajit serves it by applying the key to the
-/// leaves (mechanism G, `__rock_col_sort_leaves`), which has no JS body, so JS
-/// rejects on the missing body. What this pins is that it REJECTS -- resolving
-/// to the shared boxed body instead is the soundness hole `nobox` exists to
-/// prevent, and it died at runtime on `undefined._data`. Serving it on JS is a
-/// backlog item; when that body lands this flips to a round-trip.
+/// `sort` over a column element, mechanism G: the key is applied to the LEAVES
+/// through `__rock_col_sort_leaves`. JS used to reject here for want of that
+/// body -- correctly, since resolving to the shared boxed body instead is the
+/// soundness hole `nobox` exists to prevent, and it died on `undefined._data`.
+/// The body now exists, so this is a round-trip.
+///
+/// It RUNS rather than checking emitted shape, and it returns the `y` column,
+/// which the key never reads: a sort that reorders the key column alone still
+/// emits column-shaped code and reads back as a plausible wrong number.
 #[test]
-fn an_unservable_column_sort_rejects_on_js() {
-    let e = emit_js("sorted").expect_err("column-stored nobox sort must reject on JS");
+fn a_column_sort_round_trips_on_js() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let defs = emit_js("sorted").expect("column-stored nobox sort must emit on JS");
+    let program = format!(
+        "{}{}{}{}{}\n{defs}\nconsole.log(sorted());",
+        skull_codegen_js::JS_NB_CHECK_SHIMS,
+        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        skull_codegen_js::JS_TABLE_PRIM,
+        skull_codegen_js::JS_CALL_HELPER,
+        skull_codegen_js::JS_STRUCTURAL_EQ,
+    );
+    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
     assert!(
-        e.contains("__rock_col_sort_leaves") && e.contains("Js"),
-        "expected the missing-JS-body rejection for the leaf sort helper, got: {e}"
+        out.status.success(),
+        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "21",
+        "the non-key column did not follow the sort\n{program}"
     );
 }

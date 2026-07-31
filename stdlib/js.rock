@@ -152,3 +152,33 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
     }
   }
 """
+
+// Mechanism G's leaf sort. The luajit sibling in `unified.rock` is the contract;
+// this is the same algorithm over 0-based columns and a 0-based `paths` array
+// (`MakeTuple` emits a JS array).
+//
+// The key is applied per COMPARISON rather than decorate-sort, matching the
+// luajit body deliberately: fewer calls would be a different observable for a
+// key fn with effects.
+@nomangle inline(js) fn __rock_col_sort_leaves(vec: any, key_fn: any, paths: any) = """
+  var n = vec.len || 0;
+  var width = paths.length;
+  var cols = [];
+  for (var j = 0; j < width; j++) cols.push(vec[paths[j]]);
+  var order = [];
+  for (var i = 0; i < n; i++) order.push(i);
+  function key_at(i) {
+    var args = [key_fn];
+    for (var j = 0; j < width; j++) args.push(cols[j][i]);
+    return __rock_call.apply(null, args);
+  }
+  order.sort(function(a, b) {
+    var ka = key_at(a), kb = key_at(b);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  });
+  for (var j = 0; j < width; j++) {
+    var col = cols[j], tmp = [];
+    for (var i = 0; i < n; i++) tmp.push(col[order[i]]);
+    for (var i = 0; i < n; i++) col[i] = tmp[i];
+  }
+"""
