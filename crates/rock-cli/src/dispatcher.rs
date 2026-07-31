@@ -583,6 +583,13 @@ impl CommandContext {
             let path = self.get_path_or_current()?;
             return crate::skull_backend::skull_iter_incremental(&path, self.args.iters, self.args.warmup);
         }
+        // mono-ty-census converts the closed world's inferred types to MonoTy and
+        // reports; a Stage-0 diagnostic that touches no emission, dispatched early
+        // like the other skull diagnostics.
+        if self.args.command == CliCommand::MonoTyCensus {
+            let root = self.get_path_or_current()?;
+            return crate::monoty_census::do_monoty_census(Some(&root));
+        }
         // iter-lsp is the tight-loop profiler for the per-edit LSP query path
         // (BoneWorkspace on the bone backend); dispatched early like the other
         // iter-* profilers.

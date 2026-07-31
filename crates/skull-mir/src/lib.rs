@@ -16,6 +16,7 @@ pub mod intrinsics;
 pub mod lower;
 pub mod mangle;
 pub mod mir;
+pub mod monoty;
 pub mod reach;
 pub mod verdict;
 pub mod vertex_plan;

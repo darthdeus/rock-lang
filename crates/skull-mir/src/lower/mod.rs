@@ -1761,7 +1761,7 @@ impl Builder<'_> {
 // `(ws, inf)` directly so the check runs without building a full lowering
 // context. --
 
-fn ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
+pub(crate) fn ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
     match ty {
         TyId::Static(mid, idx) => Some(ws.module(mid).ty_arena[idx]),
         TyId::Local(idx) => Some(inf.ty_arena[idx]),

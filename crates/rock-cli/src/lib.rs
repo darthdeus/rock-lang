@@ -50,8 +50,9 @@ pub mod live_project;
 pub mod web;
 mod test_protocol;
 mod lint_cmd;
-mod lint_union;
+pub(crate) mod lint_union;
 pub mod lint_pass;
+mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
@@ -169,6 +170,12 @@ pub enum CliCommand {
     /// (mean/p50/p99) + overlay size. Mirrors what `SkullStone::recompile` does on
     /// a body edit (no reassembly). See `skull_backend::skull_iter_incremental`.
     IterIncremental,
+    /// `rock mono-ty-census [root]` -- DIAGNOSTIC (Stage 0c,
+    /// `docs/monomorphization-plan.md`): convert every inferred expr/binding
+    /// type of the closed world to the total `MonoTy` and report conversions,
+    /// distinct logical types, and failures bucketed by reason. Changes no
+    /// emission. See `monoty_census::do_monoty_census`.
+    MonoTyCensus,
     /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
     /// for the per-edit LSP query path on the bone backend (the work the editor
     /// does per keystroke through `BoneWorkspace`): `update` (didChange) +
@@ -276,6 +283,7 @@ impl clap::ValueEnum for CliCommand {
             Self::SkullInlineStats,
             Self::SkullIncrementalProfile,
             Self::IterIncremental,
+            Self::MonoTyCensus,
             Self::IterLsp,
             Self::LspSurvey,
             Self::IterReinfer,
@@ -324,6 +332,7 @@ impl CliCommand {
             Self::SkullInlineStats => "skull-inline-stats",
             Self::SkullIncrementalProfile => "skull-incremental-profile",
             Self::IterIncremental => "iter-incremental",
+            Self::MonoTyCensus => "mono-ty-census",
             Self::IterLsp => "iter-lsp",
             Self::LspSurvey => "lsp-survey",
             Self::IterReinfer => "iter-reinfer",

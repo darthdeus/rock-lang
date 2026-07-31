@@ -159,7 +159,7 @@ fn unreached_in(
 
 /// Every `bin` package under `root`. Skips VCS/build dirs, and does not descend
 /// into a package once found (a package's subdirectories are its own sources).
-fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn bin_projects_under(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {

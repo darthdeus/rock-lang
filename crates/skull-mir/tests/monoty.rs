@@ -1,0 +1,401 @@
+//! Stage 0c properties for the total logical type (`docs/monomorphization-plan.md`
+//! S 0c, S 15a, S 20g.2/3/4).
+//!
+//! The generated composition is the load-bearing one: `ReifiedType` grew a
+//! `string` arm one observed symptom at a time (plan S 19b), and handwritten
+//! examples are exactly what let that happen. Every constructor is composed to a
+//! bounded depth here so a missing arm is found by the test rather than by a
+//! miscompile.
+
+use std::sync::LazyLock;
+
+use bone_semantic::hir::BodyOwner;
+use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::ModuleId;
+use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyReason};
+use ustr::Ustr;
+
+/// The stdlib, parsed once. Needed for anything that resolves real types.
+static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| {
+            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
+fn check(src: &str) -> (Workspace, ModuleId) {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("user module id");
+    (ws, mid)
+}
+
+/// Every inferred expr + binding type of every body in the user module,
+/// converted. Returns `(converted, failures)`.
+fn convert_module(
+    ws: &Workspace,
+    mid: ModuleId,
+    arena: &mut MonoArena,
+) -> (Vec<String>, Vec<MonoTyReason>) {
+    let mut ok = Vec::new();
+    let mut bad = Vec::new();
+    let Some(ir) = ws.inference(mid) else { return (ok, bad) };
+    let subst = MonoSubst::default();
+    for (_, inf) in ir.per_fn.iter() {
+        let tys = inf
+            .expr_types
+            .iter()
+            .map(|(_, t)| *t)
+            .chain(inf.binding_types.iter().map(|(_, t)| *t));
+        for t in tys {
+            match arena.convert(ws, inf, t, &subst) {
+                Ok(id) => ok.push(arena.render(id)),
+                Err(r) => bad.push(r),
+            }
+        }
+    }
+    (ok, bad)
+}
+
+// -- totality --------------------------------------------------------------
+
+/// A body naming every valid constructor converts with ZERO failures. The
+/// `unit`, `any`, `never` and `fn` arms are the ones `ReifiedType` answers
+/// `None` for, so this is the direct falsification of the partial tree.
+#[test]
+fn every_valid_constructor_converts() {
+    let (ws, mid) = check(
+        r#"
+struct Holder { n: int }
+fn takes_fn(f: fn(int) -> int) -> int { return f(1) }
+fn ret_unit() { }
+fn main() {
+    let i: int = 1
+    let f: float = 1.0
+    let b: bool = true
+    let s: string = "s"
+    let a: any = 1
+    let n: int? = 1
+    let t: (int, string) = (1, "s")
+    let v: [int] = [1]
+    let m: Map<string, int> = map_new()
+    let h: Holder = Holder { n: 1 }
+    let g: fn(int) -> int = takes_fn
+    ret_unit()
+}
+"#,
+    );
+    let mut arena = MonoArena::new();
+    let (ok, bad) = convert_module(&ws, mid, &mut arena);
+    assert!(bad.is_empty(), "expected total conversion, got failures: {bad:?}");
+    assert!(!ok.is_empty(), "nothing was converted -- the walk found no types");
+    for want in ["int", "float", "bool", "string", "any", "int?", "Vec<int>", "Holder"] {
+        assert!(ok.iter().any(|r| r == want), "missing `{want}` among {ok:?}");
+    }
+    assert!(
+        ok.iter().any(|r| r.starts_with("fn(")),
+        "no function type converted -- the `Function` arm is what ReifiedType lacks"
+    );
+}
+
+/// Unit and never reach the converter through declared positions rather than
+/// through a `let`, so they get their own body.
+#[test]
+fn unit_and_never_convert() {
+    let mut a = MonoArena::new();
+    let u = a.intern(MonoTy::Unit);
+    let n = a.intern(MonoTy::Never);
+    assert_eq!(a.render(u), "unit");
+    assert_eq!(a.render(n), "never");
+    assert_ne!(u, n, "unit and never must not share an id");
+}
+
+// -- rejection, with a reason ----------------------------------------------
+
+/// Recovery poison rejects rather than becoming a key slot. Constructed
+/// directly: a program that produces `BuiltinTy::Error` does not reach a
+/// successful `semantic_pass`.
+#[test]
+fn recovery_error_rejects_with_its_own_reason() {
+    let (ws, mid) = check("fn main() { let x: int = 1 }");
+    let ir = ws.inference(mid).expect("inference");
+    let (_, inf) = ir.per_fn.iter().next().expect("a body");
+    let mut a = MonoArena::new();
+    let err = a
+        .convert(&ws, inf, ws.builtins.error(), &MonoSubst::default())
+        .expect_err("recovery poison must reject");
+    assert_eq!(err, MonoTyReason::RecoveryError);
+    assert_eq!(err.bucket(), "recovery-error");
+}
+
+/// An unbound generic is its OWN bucket -- census data about shared generic
+/// bodies, not an error folded in with the invalid ones.
+#[test]
+fn unbound_generic_is_a_distinct_reason() {
+    let (ws, mid) = check("fn id<T>(x: T) -> T { return x }\nfn main() { let y = id(1) }");
+    let ir = ws.inference(mid).expect("inference");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "id")
+        .expect("id");
+    let inf = ir.per_fn.get(&BodyOwner::Function(fid)).expect("id body inference");
+    let generic = ws.module(mid).functions[fid].generics[0];
+    let mut a = MonoArena::new();
+    let err = a
+        .convert(&ws, inf, generic, &MonoSubst::default())
+        .expect_err("an unbound generic cannot convert");
+    assert_eq!(err.bucket(), "unbound-generic");
+    assert!(matches!(err, MonoTyReason::UnboundGeneric(n) if n.as_str() == "T"));
+}
+
+/// The same generic under a substitution converts -- the reason above is about
+/// the missing binding, not about generics being unconvertible.
+#[test]
+fn a_bound_generic_converts_to_its_binding() {
+    let (ws, mid) = check("fn id<T>(x: T) -> T { return x }\nfn main() { let y = id(1) }");
+    let ir = ws.inference(mid).expect("inference");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "id")
+        .expect("id");
+    let inf = ir.per_fn.get(&BodyOwner::Function(fid)).expect("id body inference");
+    let generic = ws.module(mid).functions[fid].generics[0];
+    let mut a = MonoArena::new();
+    let int = a.intern(MonoTy::Int);
+    let var = skull_mir::monoty::generic_var_of(&ws, inf, generic)
+        .expect("the declared generic is a Generic node");
+    let mut subst = MonoSubst::default();
+    subst.insert(var, int);
+    let got = a.convert(&ws, inf, generic, &subst).expect("bound generic converts");
+    assert_eq!(got, int);
+}
+
+// -- injectivity -----------------------------------------------------------
+
+/// S 20g.2, the same-shape nominal adversary: two structs with identical leaves
+/// keep distinct ids. A shape-kind key would merge these, which is the whole
+/// argument of plan S 4.
+#[test]
+fn same_shape_nominals_stay_distinct() {
+    let mut a = MonoArena::new();
+    let f = a.intern(MonoTy::Float);
+    let vec2 = a.intern(MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from("Vec2")),
+        params: vec![],
+    });
+    let point = a.intern(MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from("Point")),
+        params: vec![],
+    });
+    assert_ne!(vec2, point, "two same-layout nominals must not share a MonoTyId");
+    assert_ne!(a.render(vec2), a.render(point));
+    assert_ne!(a.structural_hash(vec2), a.structural_hash(point));
+
+    // ...and the container over each stays distinct too.
+    let v1 = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![vec2] });
+    let v2 = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![point] });
+    assert_ne!(v1, v2);
+    let _ = f;
+}
+
+/// Equal structure shares an id; every axis that should separate types does.
+#[test]
+fn structural_equality_is_the_identity() {
+    let mut a = MonoArena::new();
+    let i1 = a.intern(MonoTy::Int);
+    let i2 = a.intern(MonoTy::Int);
+    assert_eq!(i1, i2, "interning must share");
+
+    let f = a.intern(MonoTy::Float);
+    let nullable_int = a.intern(MonoTy::Nullable(i1));
+    let tup_if = a.intern(MonoTy::Tuple(vec![i1, f]));
+    let tup_fi = a.intern(MonoTy::Tuple(vec![f, i1]));
+    let vec_int = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![i1] });
+    let map_int = a.intern(MonoTy::App { ctor: MonoCtor::Map, params: vec![i1] });
+    let fn_i_f = a.intern(MonoTy::Function { params: vec![i1], ret: f });
+    let fn_f_i = a.intern(MonoTy::Function { params: vec![f], ret: i1 });
+
+    let all = [i1, f, nullable_int, tup_if, tup_fi, vec_int, map_int, fn_i_f, fn_f_i];
+    for (x, a_id) in all.iter().enumerate() {
+        for (y, b_id) in all.iter().enumerate() {
+            if x != y {
+                assert_ne!(a_id, b_id, "distinct types collided at {x}/{y}");
+            }
+        }
+    }
+    // Order inside a tuple and direction of a fn arrow are both identity.
+    assert_ne!(a.render(tup_if), a.render(tup_fi));
+    assert_ne!(a.render(fn_i_f), a.render(fn_f_i));
+}
+
+// -- order independence (S 20g.4) ------------------------------------------
+
+/// Insertion order changes the integer ids and NOTHING else. Built here as two
+/// arenas that intern the same composite type through opposite orders.
+#[test]
+fn insertion_order_does_not_affect_identity() {
+    // Arena A: leaves first, then the composite.
+    let mut a = MonoArena::new();
+    let ai = a.intern(MonoTy::Int);
+    let af = a.intern(MonoTy::Float);
+    let at = a.intern(MonoTy::Tuple(vec![ai, af]));
+    let acomposite = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![at] });
+
+    // Arena B: a pile of unrelated types first, then the same composite, so the
+    // ids cannot line up.
+    let mut b = MonoArena::new();
+    b.intern(MonoTy::String);
+    b.intern(MonoTy::Bool);
+    b.intern(MonoTy::Any);
+    b.intern(MonoTy::Never);
+    let bf = b.intern(MonoTy::Float);
+    let bi = b.intern(MonoTy::Int);
+    let bt = b.intern(MonoTy::Tuple(vec![bi, bf]));
+    let bcomposite = b.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![bt] });
+
+    assert_ne!(
+        acomposite.index(),
+        bcomposite.index(),
+        "the test is vacuous unless the integer ids actually differ"
+    );
+    assert_eq!(a.render(acomposite), b.render(bcomposite));
+    assert_eq!(a.structural_hash(acomposite), b.structural_hash(bcomposite));
+}
+
+// -- generated composition (S 20g.3 / S 15a) -------------------------------
+
+/// Every constructor composed to a bounded depth, converted through the arena.
+/// This is what catches a missing arm; the handwritten tests above only catch
+/// the arms someone thought of.
+#[test]
+fn generated_composition_to_depth_three_is_total() {
+    fn leaves(a: &mut MonoArena) -> Vec<skull_mir::monoty::MonoTyId> {
+        vec![
+            a.intern(MonoTy::Int),
+            a.intern(MonoTy::Float),
+            a.intern(MonoTy::Bool),
+            a.intern(MonoTy::String),
+            a.intern(MonoTy::Any),
+            a.intern(MonoTy::Unit),
+            a.intern(MonoTy::Never),
+            a.intern(MonoTy::App {
+                ctor: MonoCtor::Nominal(Ustr::from("Vec2")),
+                params: vec![],
+            }),
+        ]
+    }
+
+    /// Every one-level constructor applied over `kids`.
+    fn grow(
+        a: &mut MonoArena,
+        kids: &[skull_mir::monoty::MonoTyId],
+    ) -> Vec<skull_mir::monoty::MonoTyId> {
+        let mut out = Vec::new();
+        for &k in kids {
+            out.push(a.intern(MonoTy::Nullable(k)));
+            out.push(a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![k] }));
+            out.push(a.intern(MonoTy::Function { params: vec![k], ret: k }));
+        }
+        for &x in kids.iter().take(4) {
+            for &y in kids.iter().take(4) {
+                out.push(a.intern(MonoTy::Tuple(vec![x, y])));
+                out.push(a.intern(MonoTy::App { ctor: MonoCtor::Map, params: vec![x, y] }));
+                out.push(a.intern(MonoTy::App {
+                    ctor: MonoCtor::Nominal(Ustr::from("Pair")),
+                    params: vec![x, y],
+                }));
+                out.push(a.intern(MonoTy::Function { params: vec![x, y], ret: x }));
+            }
+        }
+        out
+    }
+
+    let mut a = MonoArena::new();
+    let mut level = leaves(&mut a);
+    let mut every = level.clone();
+    for _ in 0..3 {
+        level = grow(&mut a, &level);
+        every.extend(level.iter().copied());
+    }
+
+    // Every generated type renders, and the rendering round-trips to the same
+    // id through the arena -- i.e. rendering is injective over what we built.
+    let mut seen: std::collections::HashMap<String, skull_mir::monoty::MonoTyId> =
+        std::collections::HashMap::new();
+    for id in &every {
+        let r = a.render(*id);
+        assert!(!r.is_empty(), "a generated type rendered empty");
+        if let Some(prev) = seen.insert(r.clone(), *id) {
+            assert_eq!(prev, *id, "two distinct ids rendered identically: `{r}`");
+        }
+    }
+    // Every constructor must actually appear -- a count alone would pass while
+    // one arm silently produced nothing, which is the failure this test exists
+    // to catch.
+    let rendered: Vec<String> = every.iter().map(|id| a.render(*id)).collect();
+    for (what, hit) in [
+        ("nullable", rendered.iter().any(|r| r.ends_with('?'))),
+        ("tuple", rendered.iter().any(|r| r.starts_with('('))),
+        ("array", rendered.iter().any(|r| r.starts_with("Vec<"))),
+        ("map", rendered.iter().any(|r| r.starts_with("Map<"))),
+        ("nominal+params", rendered.iter().any(|r| r.starts_with("Pair<"))),
+        ("function", rendered.iter().any(|r| r.starts_with("fn("))),
+        ("never", rendered.iter().any(|r| r == "never")),
+        ("unit", rendered.iter().any(|r| r == "unit")),
+        ("any", rendered.iter().any(|r| r == "any")),
+    ] {
+        assert!(hit, "the generator produced no `{what}` type");
+    }
+    assert!(
+        every.len() > 1000,
+        "the generator collapsed -- only {} types",
+        every.len()
+    );
+    // Distinct renderings must mean distinct ids, which is interning's contract.
+    assert_eq!(
+        seen.len(),
+        every.iter().copied().collect::<std::collections::HashSet<_>>().len(),
+        "rendering is not injective over the generated set"
+    );
+}
+
+// -- what the corpus census found ------------------------------------------
+
+/// The whole `unresolved-infer` bucket of the closed-world census
+/// (`rock mono-ty-census`, 112 occurrences) is this construct: a bare `null`
+/// inside a `::` cast keeps its OWN inference variable, which nothing ever
+/// binds -- the cast types the surrounding expression, not the literal.
+///
+/// It is not a defect in the converter and not an invalid program: it
+/// type-checks and runs. It is a premise test for plan Stage 1, which says
+/// "resolve every `Infer` before conversion; reject any unresolved variable".
+/// A valid program reaches that rule today, so Stage 1 must either resolve this
+/// literal from its cast or carve it out -- deciding that AFTER the converter is
+/// load-bearing is how a valid program becomes a rejection.
+///
+/// Goes RED if inference starts binding the literal, which is the fix. Update
+/// the census doc and this comment together when it does.
+#[test]
+fn null_in_a_cast_leaves_an_unresolved_infer() {
+    let (ws, mid) = check(
+        "struct Prefab { n: int }\nfn main() { let e = (null :: Prefab?) }",
+    );
+    let mut arena = MonoArena::new();
+    let (_, bad) = convert_module(&ws, mid, &mut arena);
+    assert!(
+        bad.iter().any(|r| r.bucket() == "unresolved-infer"),
+        "expected an unresolved infer var from `(null :: Prefab?)`, got {bad:?}"
+    );
+    assert!(
+        bad.iter().all(|r| r.bucket() == "unresolved-infer"),
+        "only the null literal should fail here, got {bad:?}"
+    );
+}
