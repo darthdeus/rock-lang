@@ -815,26 +815,28 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::CheckedIn,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
-            flip_when: "an enum repr gains a place for a MULTI-LEAF value payload. \
-                        NOT mechanism A and not a `Nullable` arm: the non-nullable \
-                        control rejects identically, and neither repr can hold two \
-                        leaves in one slot",
+            flip_when: "`nobox_payload_shape` gains a `Nullable` arm AND the flat \
+                        slot gains a presence leaf beside its data leaves. Keyed on \
+                        a bare Nominal today, so a `P?` payload leaves the slot \
+                        `Opaque` and the ctor rejects. Matrix row 3",
         },
-        gap: Some("nobox value as an enum payload -- unsupported, nullable or not"),
+        gap: Some("a NULLABLE nobox value as an enum payload"),
     },
-    // The control that falsified the filing above. Same rejection without the `?`,
-    // so the discriminant is the multi-leaf payload, not the presence tag.
+    // The control that separated the two reasons stacked on its twin. Both used to
+    // reject for the multi-leaf reason; that one is closed, and what is left on the
+    // twin is nullability alone -- so they do NOT flip together, and the control
+    // earned its keep by making that visible.
     SeedCase {
         name: "nobox_nonnullable_enum_payload_escaping",
         file: "nobox_nonnullable_enum_payload_escaping.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "same as its nullable twin -- both flip together, which is \
-                        the point of keeping the pair",
-        },
-        gap: Some("control: proves the enum-payload gap is not nullability"),
+        expect: Expect::Correct,
+        gap: Some(
+            "FIXED: a flat enum's ctor in a BOXED context routes through the repr \
+             and `pack`, so a multi-leaf payload is stored splat in the enum box \
+             instead of each arg being packed on its own",
+        ),
     },
     SeedCase {
         name: "nobox_nullable_vec_element",

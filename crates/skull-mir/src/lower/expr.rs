@@ -239,6 +239,16 @@ impl Builder<'_> {
             Expr::StructLiteral { name, fields, bases } => {
                 self.lower_struct_literal(e, name, fields, bases)
             }
+            // A FLAT enum's payload threads as leaves, so a boxed context must
+            // build the Group and let `pack` box it -- the same repr-then-pack
+            // route the cdata-eligible enum takes inside `lower_enum_variant`.
+            // Lowering the payload args directly instead packs each one on its
+            // own, which boxes a `nobox` payload the enum would have stored
+            // splat (`tests/nobox_enum_payload_container.rock`).
+            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
+            }
             Expr::EnumVariant {
                 enum_name,
                 variant,
