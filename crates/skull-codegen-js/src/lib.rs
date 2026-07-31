@@ -1090,6 +1090,25 @@ function stone_set_canvas(h) {
   gl.viewport(0, 0, wh[0], wh[1]);
 }
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
+// mode: 0 = nearest, 1 = linear. Integer formats refuse -- a linear-filtered
+// integer texture samples zero.
+function stone_set_canvas_filter(h, mode) {
+  if (h === 0) return false;
+  var c = __SW.canvases[h];
+  if (!c) { __sw_log_once("stone_set_canvas_filter: unknown canvas " + h); return false; }
+  if (c.format === 3) {
+    __sw_log_once("stone_set_canvas_filter: canvas " + h + " is an integer format -- " +
+      "linear filtering makes it incomplete; refusing");
+    return false;
+  }
+  var gl = __SW.gl;
+  var filter = mode === 0 ? gl.NEAREST : gl.LINEAR;
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[c.tex]);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  return true;
+}
 function stone_clear_canvas(r, g, b, a) {
   var gl = __SW.gl;
   gl.clearColor(r, g, b, a);
