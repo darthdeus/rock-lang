@@ -1632,11 +1632,15 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
             )?,
         };
         dependencies.extend(emission.dependencies);
+        // Slot order is the engine's whole view of texture binding: it points
+        // each sampler at its unit once at link time, then binds by slot.
+        let slot_names: Vec<&str> = emission.texture_slots.iter().map(|n| n.as_str()).collect();
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {})",
+            "__rock_shader_register({:?}, {}, {})",
             pair.key,
-            lua_long_bracket(&emission.source)
+            lua_long_bracket(&emission.source),
+            skull_codegen_lua::lua_string_vec(&slot_names)
         );
     }
     Ok(ShaderRegistrations {
@@ -2074,6 +2078,12 @@ pub fn emit_full_in(
         return Err(err);
     }
     if let Some(err) = skull_mir::lower::shader_expand_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::lower::vertex_expand_rejection(ws, user_mid) {
+        return Err(err);
+    }
+    if let Some(err) = skull_mir::lower::uniform_expand_rejection(ws, user_mid) {
         return Err(err);
     }
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {

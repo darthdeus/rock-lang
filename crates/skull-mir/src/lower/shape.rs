@@ -854,6 +854,101 @@ pub(crate) fn pairs_return_enum(ws: &Workspace, ret: TyId) -> Option<Ustr> {
     Some(name)
 }
 
+/// Which half of the vertex layout a `@vertex_expand` fn asks for, chosen by
+/// its return type the way `@struct_expand` chooses by its pairs shape.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VertexExpandRet {
+    /// `-> int`: the element stride in floats.
+    Stride,
+    /// `-> [int]`: per-attribute component counts, in location order.
+    Sizes,
+}
+
+pub(crate) fn vertex_expand_return(ws: &Workspace, ret: TyId) -> Option<VertexExpandRet> {
+    match static_ty(ws, ret)? {
+        TypeExpr::Builtin(BuiltinTy::Int) => Some(VertexExpandRet::Stride),
+        TypeExpr::App { ctor: TypeCtor::Array, params } => {
+            let elem = ret.with_idx(params.into_iter().next()?);
+            matches!(static_ty(ws, elem)?, TypeExpr::Builtin(BuiltinTy::Int))
+                .then_some(VertexExpandRet::Sizes)
+        }
+        _ => None,
+    }
+}
+
+/// The two rejection messages, shared so the emit-time validator
+/// ([`super::vertex_expand_rejection`]) and the lowering expander cannot diverge
+/// in what they accept.
+pub(crate) fn vertex_expand_ret_msg(ws: &Workspace, fname: Ustr, ret: Option<TyId>) -> String {
+    format!(
+        "`@vertex_expand` fn `{fname}` must return `int` (the stride in floats) or `[int]` \
+         (per-attribute component counts), got `{}`",
+        ret.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
+    )
+}
+
+pub(crate) fn vertex_expand_arg_msg(fname: Ustr) -> String {
+    format!(
+        "`@vertex_expand` fn `{fname}` argument must be a `FlatVec<E>` or `NativeBuffer<E>` \
+         whose element is a concrete `value` struct -- the layout is derived from that \
+         element, so an unsubstituted generic has no layout to derive"
+    )
+}
+
+/// The `value`-struct element of a `FlatVec<E>` / `NativeBuffer<E>` expression,
+/// outside a lowering [`Builder`]. Mirrors [`Builder::nb_value_elem`] minus the
+/// specialization substitution, which the validator has no active
+/// specialization for -- an unsubstituted generic is exactly what this must
+/// reject anyway.
+pub(crate) fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, *inf.expr_types.get(arg)?)?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    if !matches!(n.as_str(), "NativeBuffer" | "FlatVec") {
+        return None;
+    }
+    let elem = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
+    match ty_node(ws, inf, elem)? {
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some(n),
+        _ => None,
+    }
+}
+
+/// The value-struct name of expression `e` outside a lowering [`Builder`].
+/// Mirrors [`Builder::value_struct_name_of`] minus the specialization
+/// substitution, which the validator has no active specialization for -- an
+/// unsubstituted generic is exactly what this must reject anyway.
+pub(crate) fn value_struct_name_at(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, *inf.expr_types.get(e)?)?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    let sid = *ws.struct_by_name.get(&name)?;
+    ws.modules[sid.module.index()].structs[sid.def].is_value.then_some(name)
+}
+
+/// The two `@uniform_expand` rejection messages, shared so the emit-time
+/// validator and the lowering expander cannot diverge in what they accept.
+pub(crate) fn uniform_expand_arity_msg(fname: Ustr) -> String {
+    format!(
+        "`@uniform_expand` fn `{fname}` takes exactly three arguments -- the float view, the \
+         int view, and the uniform group"
+    )
+}
+
+pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
+    format!(
+        "`@uniform_expand` fn `{fname}`'s third argument must be a concrete `value` struct -- the \
+         std140 layout is derived from it, so an unsubstituted generic has none. Reach this \
+         through the `set_uniform_block` macro, which expands at the call site"
+    )
+}
+
 /// Value struct `name`'s fields as `(name, ty)` in declaration order. `None` when
 /// `name` is not a `value` struct.
 pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {

@@ -305,6 +305,16 @@ impl Builder<'_> {
                 {
                     self.expand_shader_pipeline(e, &arg_idxs)
                 }
+                Ok(func)
+                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::VertexLayout)) =>
+                {
+                    self.expand_vertex_layout(e, func, &arg_idxs)
+                }
+                Ok(func)
+                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::UniformBlock)) =>
+                {
+                    self.expand_uniform_block(e, func, &arg_idxs)
+                }
                 Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
                     if !any_named {
