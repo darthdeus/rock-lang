@@ -879,24 +879,19 @@ const SEEDS: &[SeedCase] = &[
         gap: Some("A: a nullable nested field makes the outer LEAF-TABLE, so the embed \
                    splice contributes its dotted leaves"),
     },
-    // The control, and the two now differ: nullability of the nested field IS the
-    // discriminant, because it is what makes the outer GC-tier and therefore
-    // leaf-table. A non-nullable nested value field leaves the outer FFI-clean, so
-    // the embed splice still lowers it to one boxed leaf.
+    // The control, and the two no longer differ: nullability of the nested field
+    // was never the discriminant, only what happened to make the outer leaf-table
+    // and so reach the dotted leaves. The splice walks now ask the SPLICED
+    // question rather than the storage one, so an FFI-clean nested value field
+    // contributes its own leaves either way.
     SeedCase {
         name: "nobox_nonnullable_embed_nested_value",
         file: "nobox_nonnullable_embed_nested_value.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "`embed_leaf_values`' literal walk contributes an FFI-CLEAN \
-                        nested value field's own leaves instead of one boxed leaf. \
-                        Its nullable twin already passes: that outer is leaf-table, \
-                        so the same walk already reaches the dotted leaves",
-        },
-        gap: Some("FFI-clean nested value field inside an embed field -- the splice, \
-                   not the read"),
+        expect: Expect::Correct,
+        gap: Some("A FIXED: the three splice walks read `embed_field_of_spliced`, and \
+                   `physical_field` composes through the same links"),
     },
     SeedCase {
         name: "nobox_vec_combinator_element",

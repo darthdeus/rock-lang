@@ -1108,6 +1108,76 @@ pub fn nobox_global_shape_paths(ws: &Workspace, ty: TyId) -> Option<(Ustr, Vec<U
     Some((shape.name, value_leaf_paths(&shape), shape.nullable))
 }
 
+/// Everything the reflection accessor for a `nobox` global decides, answered
+/// from the SAME oracles the emitter uses rather than from the leaf paths'
+/// punctuation.
+///
+/// The two questions used to be read off the path list: "is any path a proper
+/// PREFIX of another" for the presence leaf, and "does any path contain a dot"
+/// for the ctor suffix. Both are proxies, and a `nobox` child with NO data
+/// leaves defeats both -- it contributes exactly one leaf under its own name
+/// with nothing below it, so the sequence is flat and undotted while a presence
+/// tag is right there and the type is leaf-table. That is the same shape
+/// `tests/nobox_zero_leaf_child.rock` pins for the Lua ctor site.
+pub struct NoboxGlobalAccessorShape {
+    pub ty_name: Ustr,
+    pub paths: Vec<Ustr>,
+    pub nullable: bool,
+    /// From [`value_struct_is_leaf_table`] and [`value_struct_is_gc`] -- the
+    /// oracles the `_lct` ctor and the leaf-form pack site already consult.
+    pub ctor_suffix: &'static str,
+    /// The path of a leaf that is a nullable child's PRESENCE tag, if any. From
+    /// [`value_leaf_presence_flags`], positionally. Informational: a leaf-table
+    /// ctor takes tags like any other leaf, so this does NOT by itself make a
+    /// shape unbuildable.
+    pub presence_path: Option<Ustr>,
+    /// Why no accessor can be built, if so. The ctor is positional, so the
+    /// accessor is only sound when the ctor's parameter sequence IS the leaf
+    /// sequence. `_lct` is that by construction. `_ct` and `_vt` are positional
+    /// over DECLARED FIELDS, which coincides with the leaves only while every
+    /// field is primitive -- a nested value field makes the two differ in both
+    /// arity and type, and the mismatch is silent (`Held_ct` fed six floats
+    /// where it wants an `Inner` cdata and four floats).
+    pub unbuildable: Option<String>,
+}
+
+pub fn nobox_global_accessor_shape(ws: &Workspace, ty: TyId) -> Option<NoboxGlobalAccessorShape> {
+    let shape = nobox_declared_shape(ws, ty)?;
+    let paths = value_leaf_paths(&shape);
+    // The global's OWN presence leaf leads the leaves and has no path, so the
+    // flags line up with `paths` from that offset on -- the same offset the
+    // caller splits the leaves at.
+    let flags = value_leaf_presence_flags(&shape);
+    let flags = if shape.nullable { &flags[1..] } else { &flags[..] };
+    let presence_path =
+        flags.iter().zip(paths.iter()).find(|(is_tag, _)| **is_tag).map(|(_, p)| *p);
+    let ctor_suffix = if value_struct_is_leaf_table(ws, shape.name) {
+        "_lct"
+    } else if value_struct_is_gc(ws, shape.name) {
+        "_vt"
+    } else {
+        "_ct"
+    };
+    let unbuildable = (ctor_suffix != "_lct" && paths.iter().any(|p| p.contains('.'))).then(|| {
+        format!(
+            "`{}{ctor_suffix}` is positional over DECLARED FIELDS, but this type's \
+             storage is {} leaves including a nested one (`{}`), so the accessor \
+             would pass a leaf where the ctor wants a nested value",
+            shape.name,
+            paths.len(),
+            paths.iter().find(|p| p.contains('.')).expect("just found one"),
+        )
+    });
+    Some(NoboxGlobalAccessorShape {
+        ty_name: shape.name,
+        paths,
+        nullable: shape.nullable,
+        ctor_suffix,
+        presence_path,
+        unbuildable,
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ReifiedCtor {
     Array,
@@ -1288,8 +1358,13 @@ pub(crate) fn reified_type_node(ty: &ReifiedType) -> Option<TypeExpr> {
 /// that position would.
 pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
     if let ReifiedType::Tuple(parts) = ty {
-        let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
-        return RetSlot::Nested(TupleRetShape { slots, nullable: false });
+        // The same collapse [`ret_slot`] makes: a tuple no part of which splats
+        // is the pre-existing boxed ABI, so it occupies ONE slot. Without it the
+        // two oracles disagree on a NESTED tuple -- the generic side counted an
+        // inner `(Entity<T>, T)` as two wire values while the concrete callee
+        // returned it as one box.
+        let shape = reified_tuple_shape(ws, parts);
+        return if shape.splats() { RetSlot::Nested(shape) } else { RetSlot::Opaque };
     }
     let (payload, nullable) = ty.peel_nullable();
     let Some(nominal) = payload.nominal().filter(|n| is_nobox_nominal(ws, *n)) else {
@@ -1301,6 +1376,14 @@ pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
         sig_shape_of_nominal(ws, nominal)
     };
     shape.map_or(RetSlot::Opaque, RetSlot::Leaves)
+}
+
+/// The per-part slots of a reified tuple, WITHOUT the collapse
+/// [`reified_ret_slot`] applies. Read where the tuple's arity is the question --
+/// a destructure, a `next`'s `(bool, E)` -- rather than what slot it occupies.
+pub(crate) fn reified_tuple_shape(ws: &Workspace, parts: &[ReifiedType]) -> TupleRetShape {
+    let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
+    TupleRetShape { slots, nullable: false }
 }
 
 pub(crate) fn reify_type(
@@ -1575,11 +1658,8 @@ pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Op
     // this is the sole consumer that needs a tuple's arity, and answering it
     // from the binding keeps `ty_node` honest about what it cannot mint.
     if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty) {
-        if let Some(bound @ ReifiedType::Tuple(_)) = subst.get(&var) {
-            let RetSlot::Nested(shape) = reified_ret_slot(ws, bound) else {
-                return None;
-            };
-            return Some(shape);
+        if let Some(ReifiedType::Tuple(parts)) = subst.get(&var) {
+            return Some(reified_tuple_shape(ws, parts));
         }
     }
     let (elem_ty, elements, nullable) = match static_ty(ws, ty)? {

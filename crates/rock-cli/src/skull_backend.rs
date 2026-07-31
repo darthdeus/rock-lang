@@ -1348,11 +1348,12 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some((ty_name, paths, nullable)) =
-                skull_mir::lower::nobox_global_shape_paths(ws, g.ty)
-            else {
+            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, g.ty) else {
                 continue;
             };
+            let skull_mir::lower::NoboxGlobalAccessorShape {
+                ty_name, paths, nullable, ctor_suffix: suffix, presence_path, unbuildable,
+            } = acc;
             let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
                 .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
             // A nullable global leads with a presence leaf that has no path: it is
@@ -1374,37 +1375,31 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
                 );
                 std::process::exit(1);
             }
-            // A path that is a proper PREFIX of another is a nullable nested
-            // field's presence leaf, not a readable field: `v.<path>` would hand
-            // the write side the nested value where the ctor wants the tag. No
-            // in-tree shape reaches this, and guessing is how a leak becomes a
-            // miscompile -- so reject instead of emitting a wrong accessor.
-            if let Some(p) = paths
-                .iter()
-                .find(|p| paths.iter().any(|q| q.as_str().starts_with(&format!("{p}."))))
-            {
+            // Both accessor directions are POSITIONAL over the leaf sequence, so
+            // they are sound only where the ctor is too. `nobox_global_accessor_shape`
+            // makes that call; guessing is how a leak becomes a miscompile, so an
+            // unbuildable shape rejects rather than emit a wrong accessor.
+            if let Some(why) = &unbuildable {
                 log::error!(
                     target: "SKULL",
-                    "nobox global `{}` of type `{ty_name}` has a presence leaf \
-                     (`{p}`), which reflection cannot yet rebuild: its logical \
-                     value is not addressable as `v.{p}`. Mechanism J of \
-                     docs/nobox-case-matrix.md covers the readable shapes only.",
+                    "nobox global `{}` of type `{ty_name}`: reflection cannot rebuild \
+                     it -- {why}. Mechanism J of docs/nobox-case-matrix.md covers the \
+                     rebuildable shapes only.",
                     g.name
                 );
                 std::process::exit(1);
             }
-            let suffix = if paths.iter().any(|p| p.contains('.')) {
-                "_lct"
-            } else if skull_mir::lower::value_struct_is_gc(ws, ty_name) {
-                "_vt"
-            } else {
-                "_ct"
-            };
+            let _ = presence_path;
             let args = leaves.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
             let writes = leaves
                 .iter()
                 .zip(&paths)
-                .map(|(l, p)| format!("{l} = v.{p}"))
+                // Bracketed, not `v.{p}`: a leaf-table struct's key for a nested
+                // child is the literal dotted string, so `v.m.x` reads `(v.m).x`
+                // -- a field of nil. The prefix guard above never caught it,
+                // because a NON-nullable nested child contributes `m.x`/`m.y`
+                // with no `m`, so no path is a prefix of another.
+                .map(|(l, p)| format!("{l} = v[{:?}]", p.as_str()))
                 .collect::<Vec<_>>()
                 .join("; ");
             let (get, set) = match present {

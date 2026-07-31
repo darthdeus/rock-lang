@@ -166,8 +166,19 @@ impl Builder<'_> {
             Expr::Call { callee, args } => self.lower_call(e, callee, args),
 
             // --- aggregates + projections + container reads ---
+            // A BOXED tuple slot can be observed for nil-ness (`t.0 == null`), so
+            // an absent nullable value element has to land there as `nil` rather
+            // than as the ctor `pack` builds regardless of presence. The
+            // splatting form keeps its own repr path in `lower_expr_repr`, where
+            // the presence tag stays a leaf and is never at risk.
             Expr::Tuple(elems) => {
-                let vs = self.lower_exprs(elems)?;
+                let vs = elems
+                    .into_iter()
+                    .map(|el| {
+                        let r = self.lower_expr_repr(el)?;
+                        Ok(self.pack_maybe_absent(r))
+                    })
+                    .collect::<Result<Vec<_>, CompilerError>>()?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             Expr::Array(elems) => self.lower_array_literal(e, elems),
