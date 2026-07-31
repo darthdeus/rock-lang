@@ -1,31 +1,24 @@
-//! SENTINEL -- an absent nullable VALUE placed in a tuple reads as present.
+//! An absent nullable VALUE placed in a tuple must read as absent.
 //!
-//! `let t = (m.get(k), 1)` on a MISSING key, then `t.0 == null`, answers `false`.
-//! The whole body folds to `do return (not (true)) end`.
+//! `let t = (m.get(k), 1)` on a MISSING key, then `t.0 == null`, once answered
+//! `false` -- the whole body folded to `do return (not (true)) end`, because a
+//! boxed tuple slot got the ctor `pack` builds regardless of presence.
 //!
-//! Same root as the safe-nav receiver defect fixed in
-//! `tests/safe_nav_absent_value_receiver.rock` -- a presence tag dropped on the
-//! way to a box -- but a DIFFERENT sink, and it did not fall out of that fix.
-//! There the consumer was `?.`, which now branches on the tag itself. Here the
-//! value crosses into a tuple, and both `pack`'s `ValueRepr::Tuple` arm and
-//! tuple PROJECTION discard `present` independently, so a fix has to cover both
-//! and be re-verified rather than assumed.
+//! Same root as the safe-nav receiver defect (`tests/safe_nav_absent_value_receiver.rock`)
+//! -- a presence tag dropped on the way to a box -- and the same shape of fix,
+//! at the CONSUMER rather than in `pack`. It is NOT fixable in `pack`'s Group
+//! arm, the obvious-looking move: branching there puts the ctor behind a cell,
+//! SROA stops forwarding it, the box survives to the residue check, and
+//! `nobox_coalesce_at_ctor_field` regresses CORRECT -> LOUD REJECT. Narrowing to
+//! a static presence does not help either -- at a `??` the presence is dynamic
+//! and the coalesce consumes it anyway. A boxed tuple slot is already an escape,
+//! so `pack_maybe_absent` there costs no forwarding that survived anyway.
 //!
-//! It is NOT fixable in `pack`'s Group arm, which is the obvious-looking move.
-//! Measured: branching there puts the ctor behind a cell, SROA stops forwarding
-//! it, the box survives to the residue check, and `nobox_coalesce_at_ctor_field`
-//! regresses CORRECT -> LOUD REJECT -- the cost `docs/parked/inline-lua.md`
-//! recorded for this exact attempt. Narrowing to a static presence does not help
-//! either: at a `??` the presence is dynamic and the coalesce consumes it anyway.
-//! `pack` cannot see whether its consumer needs nil-ness, so the fix belongs at
-//! the consumer, as it did for safe-nav.
+//! Tuple PROJECTION needed no separate fix: with `nil` genuinely stored in the
+//! slot, reading it back is the ordinary boxed path.
 //!
 //! Nothing here is `nobox` -- a plain unmarked `value` reproduces it, which is
-//! the wider exposure. The `struct` twin is correct and bounds the class.
-//!
-//! PINNED BEHAVIOR (BUG): asserts `false false`, where the second should be
-//! `true`. When the fix lands this goes RED -- flip to `false true`, matching the
-//! struct control, and delete this paragraph.
+//! the wider exposure. The `struct` twin bounds the class.
 
 mod common;
 
@@ -84,13 +77,11 @@ fn main() {
 "#;
 
 #[test]
-fn an_absent_value_in_a_tuple_reads_as_present_sentinel() {
-    let got = run_module(VALUE_IN_TUPLE, "nullable_value_tuple");
+fn an_absent_value_in_a_tuple_reads_as_absent() {
     assert_eq!(
-        got, "false false",
-        "PINNED BEHAVIOR (BUG): an absent nullable value in a tuple is expected \
-         to read as PRESENT, giving `false false`. It answered `{got}`, so the \
-         fix landed -- flip this to `false true`, matching the struct control."
+        run_module(VALUE_IN_TUPLE, "nullable_value_tuple"),
+        "false true",
+        "an absent nullable value in a tuple must report absence, like the struct control"
     );
 }
 

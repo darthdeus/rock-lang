@@ -899,6 +899,43 @@ impl Builder<'_> {
         }
     }
 
+    /// [`Self::pack`] for a consumer that can observe NIL-ness of the result --
+    /// a boxed slot an absent value has to reach as `nil`, not as a statically
+    /// non-nil ctor.
+    ///
+    /// `pack` itself deliberately ignores `present` (see its Group arm): it
+    /// cannot see its consumer, and branching for every consumer puts the ctor
+    /// behind a cell, which stops SROA forwarding it and costs
+    /// `nobox_coalesce_at_ctor_field`. The branch is legal HERE because the slot
+    /// is already an escape -- the ctor survives either way, so honouring
+    /// presence buys the correct `nil` for free. Same split safe-nav uses.
+    pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Idx<Inst> {
+        let ValueRepr::Group { name, parts, present: Some(present) } = r else {
+            return self.pack(r);
+        };
+        let result = self.f.new_cell(None);
+        let absent_bb = self.f.new_block();
+        let present_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: present_bb, else_bb: absent_bb },
+        );
+
+        self.cur = absent_bb;
+        let nil = self.emit_cur(Inst::Const(Lit::Nil));
+        self.emit_cur(Inst::Store { cell: result, value: nil });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = present_bb;
+        let boxed = self.pack_group_fields(name, parts);
+        self.emit_cur(Inst::Store { cell: result, value: boxed });
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
+    }
+
     /// The `<name>_ct(..)` cdata for a Group's parts, with no presence test.
     ///
     /// The parts are in declared field order (the positional ctor ABI requires
