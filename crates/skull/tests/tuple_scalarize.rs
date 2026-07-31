@@ -7,9 +7,7 @@
 //! `Iterator<T>` bound. `for (a, b) in it` construct-then-destructures the pair
 //! every iteration; the tuple must be split into scalars at codegen -- LuaJIT
 //! SINK only fires on compiled traces, and other backends have no SINK at all.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 // Straight-line pair iterator (the EnumIter/ZipIter shape): @inline `next`
 // builds a fresh 2-tuple per iteration, the `for` header destructures it.

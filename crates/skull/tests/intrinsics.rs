@@ -2,9 +2,7 @@
 //! key check catches a backend-table key that no `@intrinsic` declaration backs,
 //! and the generic-key pin fixes what a generic intrinsic's stable registry key
 //! is (the declared-signature mangle, NOT a monomorphization -- there is none).
-
-mod common;
-use common::{ws_of, ws_with_stdlib};
+use crate::common::{ws_of, ws_with_stdlib};
 
 use skull_codegen_lua::mangle_fn;
 use skull_mir::intrinsics::{

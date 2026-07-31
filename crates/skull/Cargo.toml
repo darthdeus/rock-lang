@@ -2,6 +2,7 @@
 name = "skull"
 version = "0.1.0"
 edition = "2024"
+autotests = false
 
 # skull is the Claude-managed code-generation backend for `bone`'s HIR. It
 # consumes bone as a library (parse -> semantic_pass -> Workspace) and emits
@@ -34,3 +35,7 @@ rock-host = { path = "../rock-host" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "skull_tests"
+path = "tests/main.rs"

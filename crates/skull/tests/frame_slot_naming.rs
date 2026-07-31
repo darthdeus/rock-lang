@@ -7,9 +7,7 @@
 //! body's frame reads and the ctor's stamp must move together (a stable stamp
 //! over shifted field names would silently corrupt a live coroutine), so these
 //! tests pin BOTH: the `__layout` literal AND the emitted `s.c<slot>` shape.
-
-mod common;
-use common::{emit_module, mangled_name};
+use crate::common::{emit_module, mangled_name};
 
 /// The `__layout = <int>` literal the ctor `function <ctor>(` writes.
 fn layout_stamp(lua: &str, ctor: &str) -> i64 {

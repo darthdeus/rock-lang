@@ -9,9 +9,7 @@
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use std::process::Command;
-
-mod common;
-use common::{emit_user, ws_with};
+use crate::common::{emit_user, ws_with};
 
 fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");

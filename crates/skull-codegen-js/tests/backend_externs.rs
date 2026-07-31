@@ -5,9 +5,7 @@
 //!   variant);
 //! - `extern(js)` emits a bare driver-/runtime-provided call, no definition;
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 use skull_mir::lower::ScalarCtx;
 

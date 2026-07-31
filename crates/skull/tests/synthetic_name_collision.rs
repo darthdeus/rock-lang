@@ -13,9 +13,7 @@
 //! when the emitting shape is ABSENT (no co-fn hook -> no `__on_killed`; no
 //! lambdas -> no `__lambda0`), proven by the user name surviving into emitted
 //! Lua.
-
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 /// POSITIVE CONTROL: `fn worker__on_killed` next to a co fn `worker` with NO
 /// hooks mints no `__on_killed` synthetic name -> no collision -> compiles.

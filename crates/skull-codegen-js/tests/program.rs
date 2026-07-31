@@ -8,9 +8,7 @@
 //! and application-line CONTENT in the emitted string.
 
 use skull_mir::lower::ScalarCtx;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
     let scx = ScalarCtx::new(ws);

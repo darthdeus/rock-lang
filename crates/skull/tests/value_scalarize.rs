@@ -10,9 +10,7 @@
 //! (the mag `mag.grid.floors_walls` regression). The SROA forwarding pass in
 //! `skull-transform` forwards those reads to the ctor operands so DCE drops the
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 const VALUE_FIELD_LOOP: &str = r#"
 value FixVec2 { x: float, y: float }

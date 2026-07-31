@@ -8,12 +8,10 @@
 //!
 //! The GLSL emit shape itself is pinned by the skull-codegen-glsl goldens; here
 //! we pin the driver wiring (collapse + dedup + top-level registration).
-
-mod common;
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use common::{emit_module, function_body, ws_with_stdlib};
+use crate::common::{emit_module, function_body, ws_with_stdlib};
 use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
 
 /// One shared vertex + one fragment, referenced from TWO call sites (two fns).

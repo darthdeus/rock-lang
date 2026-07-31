@@ -2,6 +2,7 @@
 name = "bone-query"
 version = "0.1.0"
 edition = "2024"
+autotests = false
 
 # IDE/LSP query layer over bone's typed HIR: protocol-agnostic queries
 # (`query`) plus the lsp_types-facing workspace facade (`backend`). bone stays
@@ -31,3 +32,7 @@ tempfile = "3.0"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "bone_query_tests"
+path = "tests/main.rs"

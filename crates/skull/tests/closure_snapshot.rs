@@ -5,9 +5,7 @@
 //! a mutable capture is BOXED and the field holds the shared box table, so a later
 //! write is observed by reference. Neither renders an inline `function(` closure
 //! at the creation site. Record mechanics in depth: `env_record_hoist.rs`.
-
-mod common;
-use common::{emit_module, function_body, mangled_name, run_luajit};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 /// True if `body` declares a box cell -- a `local c<N> = {}` line (the box-init
 /// shape). Matched precisely rather than via the bare `= {}` substring, which an

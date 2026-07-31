@@ -3,9 +3,7 @@
 //! `skipped` channel exists for known stdlib parity gaps only. Before this
 //! gate, an unemittable user fn (e.g. a caller of a recursive bounded fn)
 //! shipped as a missing global and died at runtime as a nil call.
-
-mod common;
-use common::{emit_mir, try_emit_module};
+use crate::common::{emit_mir, try_emit_module};
 
 // `rec` is self-recursive AND bounded: never inlinable, no standalone emission,
 // so `main`'s residual call can never resolve. This must be a compile error.

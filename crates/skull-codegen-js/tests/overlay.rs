@@ -1,9 +1,7 @@
 use bone_semantic::hir::BodyOwner;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     let mid = *ws

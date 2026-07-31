@@ -7,9 +7,7 @@
 //! A `value` struct holding the enum field therefore scalarizes into a C-layout
 //! cdata with an int field (NOT a Lua table) and works across the scalar ABI
 //! (by-value pass). See `docs/skull-enum-value-types.md`.
-
-mod common;
-use common::{emit_mir, emit_module};
+use crate::common::{emit_mir, emit_module};
 
 const SRC: &str = r#"
 enum BlendMode { Alpha, Additive, Multiply }

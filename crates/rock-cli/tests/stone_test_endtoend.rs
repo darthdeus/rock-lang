@@ -9,11 +9,9 @@
 //! a debouncer + LuaJIT). When this file's count grows past ~10, gate it
 //! to nextest `-P full` like `game_snapshot_tests`.
 
-mod stone_harness;
-
 use rock_host::lua_runner::run_lua_code;
 use std::time::Duration;
-use stone_harness::StoneHarness;
+use crate::stone_harness::StoneHarness;
 
 const QUIESCENT: Duration = Duration::from_millis(400);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
