@@ -91,6 +91,56 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// An OPAQUE body cannot be handed a COLUMN container.
+    ///
+    /// A column-stored `[P]` is per-leaf arrays with no `_data` at all. Codegen
+    /// routes its OWN container operations around the stdlib primitives -- a
+    /// column `push` emits stores and no call -- but that routing covers only the
+    /// hand-maintained primitive set and reaches nothing a user writes. An
+    /// `inline(lua)`/`inline(js)` body is a string to the compiler and an
+    /// `extern` has no body at all, so neither can be adapted to the
+    /// representation: `v._data` is simply `nil`, and the call silently answers
+    /// wrong or dies indexing it.
+    ///
+    /// Not a `nobox` rule, unlike its sibling: an UNMARKED value struct is
+    /// column-eligible on the same terms and fails identically. The element type
+    /// is the discriminant -- a boxed `[int]` keeps `_data` and is fine.
+    ///
+    /// Keyed on the DECLARED PARAM type, not the argument's. A param spelled
+    /// `[T]` states that the body expects the vec representation, and a column
+    /// vec is not one. A param spelled `any` states the opposite -- it claims no
+    /// representation at all -- and the column-introspection probes that read
+    /// `v["@vec"]` deliberately take `any`, so keying on the argument would
+    /// reject the bodies that handle columns CORRECTLY.
+    pub(crate) fn reject_column_container_opaque_args(
+        &self,
+        func: FuncRef,
+        args: &[Idx<Expr>],
+    ) -> Result<(), CompilerError> {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        if callee.inline_body.is_none() && !callee.is_extern {
+            return Ok(());
+        }
+        let name = callee.name;
+        for (i, &arg) in args.iter().enumerate() {
+            let Some(pty) = self.param_ty(func, i) else { continue };
+            let Some(TypeExpr::App { ctor: TypeCtor::Array, .. }) = self.ty_node(pty) else {
+                continue;
+            };
+            let Some(elem) = self.vec_column_elem_of(arg) else { continue };
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[arg],
+                format!(
+                    "column-stored `[{}]` cannot cross opaque body boundary `{name}` \
+                     (an inline/extern body has no `_data`; take `any` if the body \
+                     reads the column layout itself, else use a boxed element type)",
+                    elem.name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// The return-position companion of [`Self::reject_nobox_boxed_call_args`]:
     /// a `nobox` element only rides a tuple return as leaves if skull emits the
     /// callee's body. An `extern`, or an `inline(lua)` body that has not opted
