@@ -133,9 +133,15 @@ fn ret_slot_decls(n: usize) -> String {
 
 /// The widest multi-value wire in `bodies`: the max leaf count over every
 /// multi-value `Term::Return` and every multi-value call's dests, nested fns
-/// included. Sizes the scratch bank EXACTLY -- scanned from the same insts and
-/// terms the emitter walks, so a slot can never be written without a
-/// declaration.
+/// included.
+///
+/// MIR is not the only writer. An `inline(js)` body is an opaque STRING the
+/// emitter copies out verbatim, and the imgui stubs legitimately publish
+/// `__rock_ret1`/`__rock_ret2` by hand -- so the bank must be sized over those
+/// too, via [`max_hand_published_slot`]. Sizing from MIR alone was correct only
+/// while every such body stayed within the wire its own declared return implies,
+/// which nothing checked: the miss is silent, because the emitted program is
+/// sloppy-mode and an undeclared write just becomes an implicit global.
 fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
     fn of(mf: &MirFunc) -> usize {
         let mut n = 0usize;
@@ -155,6 +161,30 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
         n.max(mf.nested_fns.iter().map(of).max().unwrap_or(0))
     }
     bodies.iter().map(|mf| of(mf)).max().unwrap_or(0)
+}
+
+/// The widest scratch slot any reachable `inline(js)` body writes by hand, as a
+/// wire width (`__rock_ret2` means a 3-leaf wire). Zero when none does.
+///
+/// Textual on purpose: the body is a string, so there is nothing else to ask.
+/// It over-approximates -- a slot named in a comment or a string still counts --
+/// which costs one spare `var` and can never cost a missing declaration.
+fn max_hand_published_slot(ws: &Workspace, inline_js: &[FuncRef]) -> usize {
+    let mut hi = 0usize;
+    for fr in inline_js {
+        let f = &ws.module(fr.module).functions[fr.func];
+        let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else { continue };
+        let s = body.as_str();
+        let mut rest = s;
+        while let Some(at) = rest.find("__rock_ret") {
+            rest = &rest[at + "__rock_ret".len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<usize>() {
+                hi = hi.max(n + 1);
+            }
+        }
+    }
+    hi
 }
 
 /// A finite-float JS numeric literal, or a reject for inf/NaN (outside the
@@ -2234,7 +2264,9 @@ pub fn emit_with_closure(
     out.push_str(&emit_vt_eq(ws, &bodies)?);
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
     out.push_str(&emit_col_mat(ws, &bodies)?);
-    out.push_str(&ret_slot_decls(max_multi_wire(&bodies)));
+    out.push_str(&ret_slot_decls(
+        max_multi_wire(&bodies).max(max_hand_published_slot(ws, &st.inline_js)),
+    ));
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
     // program path reorders these; per-test order is pinned by the JS suite.)
