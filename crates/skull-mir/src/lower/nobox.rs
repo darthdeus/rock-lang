@@ -141,6 +141,49 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
+    ///
+    /// A definition reads [`fn_scalar_abi`]; an indirect call site has only the fn
+    /// TYPE, so it reads [`Self::fn_value_abi`]. Those agree by construction for
+    /// an ordinary body -- `fn_scalar_abi` narrows an address-taken one to exactly
+    /// the `nobox` shapes the type yields. `@scalar_abi` is the one thing that
+    /// bypasses that narrowing, because its hand-written `inline(lua)` body
+    /// literally spells the leaf params, so narrowing it would break the body
+    /// instead of the call.
+    ///
+    /// When those two disagree the program cannot be emitted correctly either way:
+    /// the definition took leaf params and the call site packed one cdata, so the
+    /// first leaf got the whole box and the rest went nil. Rejecting is the honest
+    /// answer, and it is what the fn-value ABI comment always claimed held.
+    pub(crate) fn reject_fn_value_abi_mismatch(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Result<(), CompilerError> {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        let arity = callee.param_decls.len();
+        let boxed = || (vec![RetSlot::Opaque; arity], None);
+        let (def_params, def_ret) = match fn_scalar_abi(self.ws, self.scx, func) {
+            Some(abi) => (abi.param_shapes, abi.ret_shape),
+            None => boxed(),
+        };
+        let (val_params, val_ret) = self.expr_fn_value_abi(e).unwrap_or_else(boxed);
+        if def_params == val_params && def_ret == val_ret {
+            return Ok(());
+        }
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "`{}` cannot be taken as a fn value: its `@scalar_abi` definition \
+                 takes leaf params, but an indirect call derives the ABI from the \
+                 fn TYPE alone, which boxes them -- so the first leaf would get \
+                 the whole box and the rest nil (mark the value type `nobox` so \
+                 both ends agree, or call it directly)",
+                callee.name,
+            ),
+        ))
+    }
+
     /// The return-position companion of [`Self::reject_nobox_boxed_call_args`]:
     /// a `nobox` element only rides a tuple return as leaves if skull emits the
     /// callee's body. An `extern`, or an `inline(lua)` body that has not opted

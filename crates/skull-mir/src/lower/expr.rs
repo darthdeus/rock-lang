@@ -76,6 +76,9 @@ impl Builder<'_> {
                 if self.scx.target != bone_semantic::hir::FnBackend::Js
                     && self.ws.functions_by_name.contains_key(&name) =>
             {
+                if let Ok(fref) = self.resolve_funcref(e, name) {
+                    self.reject_fn_value_abi_mismatch(e, fref)?;
+                }
                 let sym = self.fn_value_symbol(e, name)?;
                 Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
             }
