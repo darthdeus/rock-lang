@@ -1,51 +1,31 @@
-//! SENTINEL -- a lambda RETURNED as a fn value whose return type is a nullable
-//! `nobox` value reads one field too far: `f(true)?.x` yields `y`, not `x`.
+//! A lambda RETURNED as a fn value whose return type is a nullable `nobox`
+//! value: `f(true)?.x` must read `x`, not the next leaf.
 //!
-//! Two things go wrong at that boundary and both are visible in the emit for
-//! `fn mk() -> (bool) -> P? { present => ... }`:
+//! It answered `6` (the value of `y`), because the hoisted lambda returned only
+//! its LEAVES -- `do return r0, r1 end` for `P { x, y }` -- with no presence
+//! slot, while the call site read the declared fn type and bound three. Leaf
+//! count moved the symptom without changing the defect (measured at
+//! `d3cd09c7d`: 1 leaf read as absent, 2 answered 6, 3 answered `x == 6`).
 //!
-//!   1. The hoisted lambda returns only its LEAVES -- `do return r0, r1 end`,
-//!      two values for `P { x, y }` -- with no presence slot, while a named fn
-//!      of the same signature returns three (`do return (true), r0, r1 end`).
-//!   2. The call site binds three dests whose 1st and 3rd entries are the SAME
-//!      cell: `c1, c2, c1 = r0((true))`. Dest-list construction for
-//!      `Inst::CallValueMulti` (`crates/skull-mir/src/mir.rs`) does not keep the
-//!      dests distinct.
+//! What separated it from the controls was which bone path records the lambda's
+//! type. A lambda filling a hole with a known type (a declared `let`, a call
+//! argument) goes through `check_expr`, which records the EXPECTED type, so both
+//! ends read one fn type. RETURN position was inferred-then-coerced, recording
+//! the lambda's OWN narrower type (`if c { P {..} } else { null }` infers `P`,
+//! not `P?`). All three return positions now check: the fn-body TAIL, a
+//! `Statement::Return` and an `Expr::Return`.
 //!
-//! Composed, presence reads `x`(=5, truthy), `x` reads `y`(=6), so `?.x`
-//! answers 6. Leaf count moves the symptom without changing the defect --
-//! measured at `d3cd09c7d`: 1 leaf answers -1 (reads as absent), 2 leaves
-//! answer 6, 3 leaves answer `x == 6, z == -1`.
-//!
-//! The ABSENT path of the same program crashes (`attempt to index local 'r0'`),
-//! but that is a DIFFERENT defect -- the nullable-nobox phi, pinned separately
-//! in `nobox_nullable_phi_return_sentinel.rs`, where it reproduces with no
-//! lambda and no fn value anywhere. This file pins only the wrong VALUE on the
-//! present path, so a fix to either one moves exactly one of the two.
-//!
-//! The controls below bound the class to a lambda that is RETURNED: the same
-//! lambda bound to a typed LOCAL is correct, and every named-fn route through
-//! the identical fn-value type answers 5. What separates the two is which bone
-//! path records the lambda's type. A lambda filling a hole with a known type
-//! (a let with a declared type, a call argument) goes through `check_expr`,
-//! which records the EXPECTED type -- so the body and the indirect call site
-//! read one fn type and agree on the presence slot. A lambda in RETURN position
-//! never reaches `check_expr`: `Expr::Return` infers it and coerces to the
-//! declared return, so what gets recorded is the lambda's OWN type, whose return
-//! is narrower than the hole (`if c { P {..} } else { null }` infers `P`, not
-//! `P?`). Closing this means routing the return position through the same check.
-//!
-//! PINNED BEHAVIOR (BUG): the sentinel asserts the wrong field, `6`. When the
-//! fix lands this test goes RED -- flip it to assert `5`, matching the controls,
-//! and delete this paragraph. A fix that instead turns this shape into a
-//! REJECTION (the route the locally-bound control already takes) is equally
-//! correct: replace the run with the same `Err` assertion the reject control
-//! uses.
+//! The ABSENT path used to crash here too (`attempt to index local 'r0'`) and
+//! was attributed to the nullable-nobox phi. It no longer does: with the lambda
+//! emitting its presence slot, the absent arm returns `false, nil, nil` and the
+//! site reads it. The phi defect is real and still pinned in
+//! `nobox_nullable_phi_return_sentinel.rs`, where it reproduces with no lambda
+//! and no fn value anywhere -- this program was reaching it only through the
+//! missing slot.
 
 mod common;
 
-/// The repro. Only the PRESENT call is made -- the absent call crashes, and
-/// that crash belongs to the phi sentinel, not here.
+/// The repro, both arms -- the absent one no longer crashes.
 const RETURNED_LAMBDA: &str = r#"
 nobox value P { x: int, y: int }
 
@@ -53,12 +33,12 @@ fn mk() -> (bool) -> P? { present => if present { P { x: 5, y: 6 } } else { null
 
 fn main() {
     let f = mk()
-    print("{f(true)?.x ?? -1}")
+    print("{f(true)?.x ?? -1} {f(false)?.x ?? -1}")
 }
 "#;
 
 /// Control: identical fn value, return type NOT nullable. No presence slot is
-/// expected, so the dest list has one entry per leaf and nothing aliases.
+/// expected, so the dest list is one entry per leaf.
 const RETURNED_LAMBDA_NON_NULL: &str = r#"
 nobox value P { x: int, y: int }
 
@@ -71,9 +51,8 @@ fn main() {
 }
 "#;
 
-/// Control: a NAMED fn taken as that exact fn-value type. The callee emits the
-/// presence slot, so the same aliased dest list still lands `x` in the cell the
-/// site reads.
+/// Control: a NAMED fn taken as that exact fn-value type. The callee always
+/// emitted the presence slot, so this route was correct throughout.
 const NAMED_FN_AS_VALUE: &str = r#"
 nobox value P { x: int, y: int }
 
@@ -100,8 +79,8 @@ fn main() {
 "#;
 
 /// Control, and the sharp one: the SAME lambda bound to a typed local instead
-/// of returned. The materialization gate fires here and does not fire for the
-/// returned form -- which is why the returned form reaches codegen at all.
+/// of returned. This was the form that already went through `check_expr`, so it
+/// is what localized the defect to the return positions.
 const LOCALLY_BOUND_LAMBDA: &str = r#"
 nobox value P { x: int, y: int }
 
@@ -117,13 +96,58 @@ fn run(src: &str, tag: &str) -> String {
 }
 
 #[test]
-fn a_returned_lambda_at_a_nullable_nobox_return_reads_the_next_leaf_sentinel() {
-    let got = run(RETURNED_LAMBDA, "fnval_returned_lambda");
+fn a_returned_lambda_at_a_nullable_nobox_return_reads_the_right_field() {
     assert_eq!(
-        got, "6",
-        "PINNED BEHAVIOR (BUG): `f(true)?.x` through a returned lambda is \
-         expected to answer `6` (the value of `y`). It answered `{got}`, so the \
-         fix landed -- flip this to assert `5`, matching the controls."
+        run(RETURNED_LAMBDA, "fnval_returned_lambda"),
+        "5 -1",
+        "a returned lambda must read `x` when present and report absence when not"
+    );
+}
+
+/// The other two return positions the same fix had to cover. The repro above is
+/// a fn-body TAIL; these are an explicit `return` of the lambda, and the same
+/// lambda routed through a declared local first (which was always correct, and
+/// bounds the fix on the side that already worked).
+const RETURNED_LAMBDA_EXPLICIT: &str = r#"
+nobox value P { x: int, y: int }
+
+fn mk() -> (bool) -> P? { return present => if present { P { x: 5, y: 6 } } else { null } }
+
+fn main() {
+    let f = mk()
+    print("{f(true)?.x ?? -1}")
+}
+"#;
+
+const RETURNED_LAMBDA_VIA_LOCAL: &str = r#"
+nobox value P { x: int, y: int }
+
+fn mk() -> (bool) -> P? {
+    let g: (bool) -> P? = present => if present { P { x: 5, y: 6 } } else { null }
+    return g
+}
+
+fn main() {
+    let f = mk()
+    print("{f(true)?.x ?? -1}")
+}
+"#;
+
+#[test]
+fn an_explicitly_returned_lambda_reads_the_right_field() {
+    assert_eq!(
+        run(RETURNED_LAMBDA_EXPLICIT, "fnval_returned_lambda_explicit"),
+        "5",
+        "`return <lambda>` must record the declared return type, like the tail form"
+    );
+}
+
+#[test]
+fn a_lambda_returned_through_a_declared_local_is_correct() {
+    assert_eq!(
+        run(RETURNED_LAMBDA_VIA_LOCAL, "fnval_returned_lambda_via_local"),
+        "5",
+        "the declared-let route was always correct and must stay so"
     );
 }
 
@@ -159,12 +183,10 @@ fn a_named_fn_passed_as_a_fn_value_param_is_correct() {
     );
 }
 
-/// The asymmetry that localizes what is left: this form is CORRECT. A lambda in
-/// a LET is checked against the declared type and records it, so both ends of
-/// the fn value read `(bool) -> P?` and the body emits its presence slot. A
-/// lambda in RETURN position never reaches `check_expr` -- `Expr::Return` infers
-/// it and coerces -- so it records its own narrower `(bool) -> P` and emits two
-/// leaves against a three-dest call site.
+/// The form that was always correct, and the one the fix made the others match:
+/// a lambda in a LET is checked against the declared type and records it, so
+/// both ends of the fn value read `(bool) -> P?` and the body emits its presence
+/// slot.
 #[test]
 fn the_same_lambda_bound_to_a_typed_local_is_correct() {
     assert_eq!(
