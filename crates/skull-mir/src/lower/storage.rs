@@ -356,7 +356,30 @@ impl Builder<'_> {
             .map(|(module, func)| FuncRef { module: *module, func: *func })
             .collect();
         match serving.as_slice() {
-            [one] => Ok(*one),
+            [one] => {
+                // Stage-0e: a SYNTHESIZED call. It has no call expr, so it can
+                // never appear in `call_generic_bindings` and never passes
+                // through `call_spec` -- which is why round 1 saw none of these
+                // and wrongly read the population as absent. A generic entry
+                // reached this way has no instantiation record at all.
+                if crate::ablation::enabled() {
+                    let f = &self.ws.module(one.module).functions[one.func];
+                    if !f.generics.is_empty() {
+                        crate::ablation::note_examined();
+                        crate::ablation::record(
+                            crate::ablation::FatalCategory::MissingGraphEdge,
+                            f.name.as_str(),
+                            self.f.name.as_str(),
+                            f.name_span,
+                            "a COMPILER-SYNTHESIZED stdlib call (`stdlib_funcref`/`call_spine`, \
+                             the column intercept): it has no call expr, so no \
+                             `call_generic_bindings` entry can exist and the generic entry \
+                             reaches its shared body with no instantiation record",
+                        );
+                    }
+                }
+                Ok(*one)
+            }
             [] => Err(gap(format!(
                 "stdlib `{name}` has no body serving the {:?} backend",
                 self.scx.target

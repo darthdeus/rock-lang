@@ -419,6 +419,47 @@ impl Builder<'_> {
                 crate::ablation::note_examined();
             }
         }
+        // Polymorphic growth: a SUCCESSFUL specialization whose instantiation
+        // type is deep. Recorded on the `Some` side, because growth shows up as
+        // ever-deeper keys that each specialize fine, not as a decline.
+        //
+        // It also CAPS -- past the threshold `spec` becomes `None`, the call
+        // takes the shared body, and the recursion terminates. Without the cap
+        // the mode does not survive the shape it exists to measure: `depth<T>`
+        // wrapping to `[T]` specializes one level deeper per recursive call and
+        // lowering recurses until the stack overflows (measured: SIGABRT).
+        // Plan S 7 predicts exactly this -- polymorphic recursion "does not
+        // terminate under demand-driven instantiation" -- and the Stage-0d
+        // shadow graph's `MAX_INSTANTIATION_DEPTH` caps for the same reason:
+        // the cap turns divergence into a REPORT.
+        let mut spec = spec;
+        if crate::ablation::enabled() {
+            if let Some((key, _)) = &spec {
+                if let Some(d) = key
+                    .iter()
+                    .flatten()
+                    .map(crate::lower::shape::reified_depth)
+                    .max()
+                    .filter(|d| *d > crate::lower::shape::ABLATION_GROWTH_DEPTH)
+                {
+                    let callee = &self.ws.module(func.module).functions[func.func];
+                    crate::ablation::record(
+                        crate::ablation::FatalCategory::PolymorphicGrowth,
+                        callee.name.as_str(),
+                        self.f.name.as_str(),
+                        self.body.expr_spans.get(e).copied().unwrap_or(callee.name_span),
+                        format!(
+                            "instantiation type is {d} levels deep (threshold {}): the \
+                             signature of polymorphic recursion, which does not terminate \
+                             under demand-driven instantiation (plan S 7). Capped here so \
+                             the mode terminates; uncapped this overflows the stack",
+                            crate::lower::shape::ABLATION_GROWTH_DEPTH
+                        ),
+                    );
+                    spec = None;
+                }
+            }
+        }
         if crate::ablation::enabled() && spec.is_none() {
             if let Some((category, detail)) =
                 crate::lower::shape::ablation_decline(self.ws, inf, e, func, self.spec_subst)

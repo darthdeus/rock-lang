@@ -100,7 +100,11 @@ pub fn js_test(paths: &[String]) -> Result<()> {
             );
         }
     }
-    if summary.tests_failed > 0 || summary.unit_failures > 0 {
+    // Before the exit below, for the same reason `skull_test` reports here:
+    // `process::exit` runs no destructor and never returns to `main`.
+    let ablation_fatals = crate::ablation_report::report("rock test --backend js");
+
+    if summary.tests_failed > 0 || summary.unit_failures > 0 || ablation_fatals {
         std::process::exit(1);
     }
     Ok(())

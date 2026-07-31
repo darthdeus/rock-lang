@@ -1339,6 +1339,33 @@ pub enum ReifiedType {
     Tuple(Vec<ReifiedType>),
 }
 
+/// Structural depth of an instantiation type. Polymorphic recursion
+/// (`f<T> -> f<[T]>`) is exactly type GROWTH, so depth is its observable and a
+/// plain tree walk is the whole detector -- no instantiation-graph machinery.
+///
+/// The same quantity `MonoArena::depth` computes for the Stage-0d shadow graph,
+/// on the other representation. Both cap on the depth of the TYPE rather than on
+/// a path length, for the reason recorded there: a path length is a property of
+/// how the walk arrived, so capping on it makes membership depend on discovery
+/// order.
+pub fn reified_depth(t: &ReifiedType) -> u32 {
+    match t {
+        ReifiedType::Prim(_) => 1,
+        ReifiedType::Nullable(inner) => 1 + reified_depth(inner),
+        ReifiedType::App { params, .. } | ReifiedType::Tuple(params) => {
+            1 + params.iter().map(reified_depth).max().unwrap_or(0)
+        }
+    }
+}
+
+/// Depth at which the ablation calls an instantiation polymorphic growth.
+///
+/// Chosen to sit ABOVE anything the corpus produces: the deepest real
+/// instantiation measured is well under this, so a firing means genuine growth
+/// rather than an ordinarily nested container. It is a REPORTING threshold in a
+/// diagnostic mode, never a limit on what compiles.
+pub const ABLATION_GROWTH_DEPTH: u32 = 8;
+
 impl ReifiedType {
     /// The bound NOMINAL, and `None` for a nullable binding on purpose: every
     /// caller of this asks "is this generic exactly this struct", and a

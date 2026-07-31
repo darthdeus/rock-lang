@@ -191,3 +191,62 @@ fn main() {
         );
     }
 }
+
+/// The `polymorphic-growth` detector must FIRE. Round 1 reported that category
+/// as zero with no detector behind it, which is not a measurement -- so the
+/// detector exists now, and this is what makes its zero on the corpus mean
+/// something.
+///
+/// `depth<T>` wraps its own argument (`f<T> -> f<[T]>`), so each recursive call
+/// instantiates one level deeper. Plan S 7 records that this shape compiles and
+/// RUNS today, which is why rejecting it is a surface removal rather than a
+/// no-op -- and why it needs a detector rather than an assumption.
+#[test]
+fn polymorphic_growth_is_detected() {
+    let _g = ModeGuard::on();
+    let fatals = fatals_of(
+        r#"
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
+}
+fn main() { depth(1, 12) }
+"#,
+    );
+    let growth: Vec<&ablation::Fatal> = fatals
+        .iter()
+        .filter(|f| f.category == FatalCategory::PolymorphicGrowth)
+        .collect();
+    assert!(
+        !growth.is_empty(),
+        "polymorphic recursion produced no growth fatal; categories seen: {:?}",
+        fatals.iter().map(|f| f.category).collect::<std::collections::BTreeSet<_>>()
+    );
+    assert_eq!(growth[0].callee, "depth", "the growth fatal must name the growing callee");
+}
+
+/// The bounding CONTROL for the detector: an ordinary nested container must NOT
+/// trip it. Without this the growth detector could be firing on depth alone and
+/// the corpus zero would be luck rather than a property.
+#[test]
+fn ordinary_nesting_is_not_polymorphic_growth() {
+    let _g = ModeGuard::on();
+    let fatals = fatals_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn main() {
+    let xs: [[int]] = [[1, 2], [3]]
+    let a = ident(xs)
+}
+"#,
+    );
+    let growth: Vec<&ablation::Fatal> = fatals
+        .iter()
+        .filter(|f| f.category == FatalCategory::PolymorphicGrowth)
+        .collect();
+    assert!(
+        growth.is_empty(),
+        "an ordinary nested container was misfiled as polymorphic growth: {growth:?}"
+    );
+}
