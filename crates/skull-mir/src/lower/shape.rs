@@ -1958,7 +1958,20 @@ fn tuple_param_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
     // anyway. Splatting into one only moves the materialization deeper, out of
     // the caller's line and into the spliced stdlib body, which costs the
     // diagnostic its span and buys nothing.
-    if !matches!(static_ty(ws, ty), Some(TypeExpr::Tuple { .. })) {
+    //
+    // A `(A, B)?` is spelled just as much as a `(A, B)`, and its presence rides
+    // the param list the way it already rides a return -- so it is admitted
+    // here and `tuple_ret_shape` sets the tag, as the sole declared-type entry
+    // point. A generic bound to a nullable tuple is still excluded, for the
+    // reason above.
+    let spelled_tuple = match static_ty(ws, ty) {
+        Some(TypeExpr::Tuple { .. }) => true,
+        Some(TypeExpr::Nullable(inner)) => {
+            matches!(static_ty(ws, ty.with_idx(inner)), Some(TypeExpr::Tuple { .. }))
+        }
+        _ => false,
+    };
+    if !spelled_tuple {
         return RetSlot::Opaque;
     }
     match tuple_ret_shape(ws, subst, ty) {

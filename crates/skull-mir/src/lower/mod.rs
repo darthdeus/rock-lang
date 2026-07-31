@@ -529,6 +529,13 @@ fn slot_param_names(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
         RetSlot::Opaque => out.push(base.to_string()),
         RetSlot::Leaves(shape) => leaf_param_names(base, shape, out),
         RetSlot::Nested(inner) => {
+            // The presence leads the slots, so it takes the FIRST name -- the
+            // order `bind_param_slot` binds cells in and `tuple_repr_to_slots`
+            // writes values in. Skipping it emits a list one short of
+            // `slot_count`, which Lua nil-fills rather than rejects.
+            if inner.nullable {
+                out.push(format!("{base}{LEAF_PARAM_SEP}p"));
+            }
             for (i, s) in inner.slots.iter().enumerate() {
                 slot_param_names(&format!("{base}{LEAF_PARAM_SEP}{i}"), s, out);
             }
@@ -548,6 +555,9 @@ fn slot_param_origins(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
                 .map(|p| format!("the leaf `{p}` of value param `{base}`")),
         ),
         RetSlot::Nested(inner) => {
+            if inner.nullable {
+                out.push(format!("the presence of nullable tuple param `{base}`"));
+            }
             for (i, s) in inner.slots.iter().enumerate() {
                 slot_param_origins(&format!("{base}.{i}"), s, out);
             }

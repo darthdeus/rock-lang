@@ -468,10 +468,7 @@ impl Builder<'_> {
         if let Some(shape) = self.nobox_shape_of_ty(ty) {
             return RetSlot::Leaves(shape);
         }
-        match self.tyid_tuple_ret_shape(ty) {
-            Some(inner) if inner.splats() => RetSlot::Nested(inner),
-            _ => RetSlot::Opaque,
-        }
+        self.tuple_param_slot_of_ty(ty)
     }
 
     /// [`Self::fn_value_abi`] for the fn VALUE an expression denotes.

@@ -99,10 +99,7 @@ impl Builder<'_> {
                 // `nobox` element splats -- so both branches share it.
                 match s.body_sig_value_shape(t) {
                     Some(shape) => RetSlot::Leaves(shape),
-                    None => match s.tyid_tuple_ret_shape(t) {
-                        Some(inner) if inner.splats() => RetSlot::Nested(inner),
-                        _ => RetSlot::Opaque,
-                    },
+                    None => s.tuple_param_slot_of_ty(t),
                 }
             }
         };

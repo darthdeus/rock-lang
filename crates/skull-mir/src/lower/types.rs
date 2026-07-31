@@ -307,6 +307,38 @@ impl Builder<'_> {
         Some(TupleRetShape { slots, nullable: false })
     }
 
+    /// The tuple slot of a declared PARAM on the body arena -- [`tuple_param_slot`]'s
+    /// spelling for a nested fn and for a fn TYPE's params.
+    ///
+    /// Separate from [`Self::tyid_tuple_ret_shape`] because the two answer
+    /// different questions about the same `Nullable(Tuple)`: that one is the CALL
+    /// boundary, where no callee puts a presence on the wire, so it must keep
+    /// declining. A param type is a DECLARATION, which is the one source allowed
+    /// to set the tag -- so `(NV, int)?` splats here, presence first, exactly as
+    /// the matching return does.
+    pub(crate) fn tuple_param_slot_of_ty(&self, ty: TyId) -> RetSlot {
+        // The plain tuple answer FIRST, generic-bound-to-a-tuple included
+        // (`zip`'s pair reaches a combinator param that way, and it has no type
+        // node to read). Only what that declines gets the `?` peel.
+        let shape = self.tyid_tuple_ret_shape(ty).or_else(|| self.nullable_tuple_param_shape(ty));
+        match shape {
+            Some(inner) if inner.splats() => RetSlot::Nested(inner),
+            _ => RetSlot::Opaque,
+        }
+    }
+
+    /// A spelled `(A, B)?` param, with the presence leading its slots. `None`
+    /// unless an element actually splats: a nullable tuple of ordinary elements
+    /// has nothing to gain from the multi-value form and keeps its single boxed
+    /// slot, byte-for-byte the pre-existing ABI ([`tuple_ret_shape`]'s rule,
+    /// restated because this peels the `?` itself).
+    fn nullable_tuple_param_shape(&self, ty: TyId) -> Option<TupleRetShape> {
+        let ty = self.resolve_tyid(ty)?;
+        let TypeExpr::Nullable(inner) = self.ty_node(ty)? else { return None };
+        let inner = self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(inner))?)?;
+        Some(TupleRetShape { nullable: true, ..inner }).filter(TupleRetShape::splats)
+    }
+
     /// The element slot of a placeholder `next` on the `Iterator`-bounded generic
     /// at `gidx`, read from the enclosing fn's DECLARED bound under this body's
     /// specialization.
