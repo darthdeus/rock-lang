@@ -325,63 +325,34 @@ fn main() {
 }
 "#;
 
-/// SENTINEL -- an UNMARKED `value` struct reaching a `@scalar_abi` fn through a
-/// FN VALUE miscompiles: it compiles clean and dies at runtime.
+/// FIXED -- was a sentinel. An UNMARKED `value` struct reaching a `@scalar_abi`
+/// fn through a FN VALUE used to compile clean and die at runtime; it is now a
+/// spanned rejection where the fn is taken by value.
 ///
-/// THE BUG: the two ends disagree on the ABI. The definition honours the callee's
-/// own `@scalar_abi` and scalarizes to three leaf params
-/// (`probe(r__tl__x, r__tl__y, r__w)`), but an indirect call site can only derive
-/// the ABI from the fn TYPE, and for an unmarked (non-`nobox`) value that
-/// derivation says "box it" -- so `apply` re-packs its leaves into a single
-/// `Box2_ct(...)` cdata and calls the fn value with ONE argument. `r__tl__x` gets
-/// the whole cdata and the remaining leaves are nil. `nested_fn_abi`'s own comment
-/// says both ends must run the SAME predicate precisely so this cannot happen, and
-/// the arity guard in `lower.rs` (`fn_scalar_abi(..) != expected`) does not catch
-/// it. Marking both structs `nobox` makes it correct, which is what the sibling
-/// positive control uses -- so this is silently waiting for anyone who passes an
-/// unmarked value through a fn value.
+/// THE MECHANISM: the two ends derived the ABI from different sources. A
+/// definition reads `fn_scalar_abi`; an indirect call site has only the fn TYPE,
+/// so it reads `fn_value_abi`. Those agree by construction for an ordinary body
+/// -- `fn_scalar_abi` NARROWS an address-taken one (`scx.taken_by_ref`) to
+/// exactly the `nobox` shapes the type yields, which is what that narrowing
+/// exists for. `@scalar_abi` is the one thing that bypasses it, and deliberately:
+/// its hand-written `inline(lua)` body spells the leaf params (`r__tl__x`), so
+/// narrowing the definition would break the BODY instead of the call.
 ///
-/// CORRECT behavior is 321 (1 + 2*10 + 3*100), or a compile-time rejection if the
-/// narrowing genuinely cannot be reconciled.
+/// So the two cannot be reconciled by re-deriving either side, which is the case
+/// the old sentinel text named as the alternative. The definition scalarized to
+/// `probe(r__tl__x, r__tl__y, r__w)` while `apply` packed one `Box2_ct(...)`:
+/// the first leaf got the whole cdata and the rest went nil.
 ///
-/// INVERTED: these assertions encode the MISCOMPILE, so they pass today BECAUSE
-/// the bug exists. Diagnosing the narrowing is its own task; this only makes the
-/// bug impossible to lose.
-///
-/// WHEN THIS FAILS the bug was fixed (or turned into a rejection): delete the
-/// packed-call-site and runtime-failure assertions, assert the emit either
-/// rejects or produces 321 via `common::run_luajit`, and update this comment.
+/// The `nobox` sibling below is the positive control and still emits, because
+/// there both ends DO agree -- which is exactly the fix the diagnostic suggests.
 #[test]
-fn unmarked_value_through_fn_value_miscompiles_sentinel() {
-    let lua = common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
-        .expect("PINNED BEHAVIOR (BUG): the ABI disagreement is not rejected at compile time");
-
-    // The DEFINITION scalarized: three leaf params.
-    let def = function_body(&lua, "probe");
+fn unmarked_value_through_fn_value_rejects() {
+    let err = common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
+        .expect_err("an unreconcilable fn-value ABI must reject");
     assert!(
-        def.contains("r__tl__x, r__tl__y, r__w"),
-        "PINNED BEHAVIOR (BUG): the definition honours @scalar_abi and takes leaf params:\n{def}"
-    );
-    // The indirect CALL SITE disagrees -- it packs one cdata instead of splatting
-    // the three leaves. This single line IS the miscompile.
-    let apply = function_body(&lua, "apply");
-    assert!(
-        apply.contains("Box2_ct("),
-        "PINNED BEHAVIOR (BUG): the fn-value call site re-packs a cdata rather than \
-         splatting leaves, so the callee's leaf params go nil:\n{apply}"
-    );
-
-    // And it dies at runtime rather than printing 321.
-    let path = std::env::temp_dir().join(format!("skull_unmarked_fnvalue_{}.lua", std::process::id()));
-    std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success() && stderr.contains("a nil value"),
-        "PINNED BEHAVIOR (BUG): expected a nil-leaf runtime death, got status {:?}\nstdout: {}\nstderr: {stderr}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout)
+        err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"),
+        "the rejection must name the fn and the reason, got: {}",
+        err.message
     );
 }
 

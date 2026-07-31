@@ -76,6 +76,9 @@ impl Builder<'_> {
                 if self.scx.target != bone_semantic::hir::FnBackend::Js
                     && self.ws.functions_by_name.contains_key(&name) =>
             {
+                if let Ok(fref) = self.resolve_funcref(e, name) {
+                    self.reject_fn_value_abi_mismatch(e, fref)?;
+                }
                 let sym = self.fn_value_symbol(e, name)?;
                 Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
             }
@@ -575,6 +578,16 @@ impl Builder<'_> {
                     self.emit_cur(Inst::Store { cell: *c, value: lv });
                 }
             }
+            // The tuple twin: a name bound to a splatting tuple's WIRE updates its
+            // slot cells (presence included), never one boxed cell.
+            Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
+                let (cells, shape) = self.tuple_binds.get(&raw(b)).cloned().unwrap();
+                let r = self.lower_expr_repr(value)?;
+                let slots = self.tuple_repr_to_slots(r, &shape);
+                for (c, sv) in cells.iter().zip(slots) {
+                    self.emit_cur(Inst::Store { cell: *c, value: sv });
+                }
+            }
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 let name = self.static_cells[&raw(b)];
                 let v = self.lower_expr(value)?;
@@ -957,13 +970,16 @@ impl Builder<'_> {
                             || spec_key_has_target_storage(self.ws, k, self.scx.target)
                     })
                     .map(|(k, _)| k);
-                // A tuple-returning method splats N values; capture + pack into
-                // the single (boxed, nullable) safe-nav result.
+                // A tuple-returning method splats N values, and they are handed on
+                // UNPACKED: the per-slot join stores them slot-wise, so packing
+                // here would box a `nobox` element the wire just kept unboxed.
+                // A method whose own return is `(..)?` carries its presence tag in
+                // the repr, and the join forwards that tag rather than minting
+                // `true` -- `a?.m()` is absent when either link is.
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
                 match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
                     Some(shape) => {
-                        let r = self.emit_tuple_call_tree(func, argv, &shape, None, key);
-                        self.pack(r)
+                        return Ok(self.emit_tuple_call_tree(func, argv, &shape, None, key));
                     }
                     None => {
                         let call = self.emit_cur(Inst::Call { func, args: argv });

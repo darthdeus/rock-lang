@@ -283,6 +283,18 @@ impl Builder<'_> {
                             })
                             .collect();
                         self.group_binds.insert(raw(name), (cells, shape));
+                    } else if let Some(shape) = self
+                        .nullable_tuple_wire_shape(value)
+                        .or_else(|| self.expr_tuple_shape(value).filter(TupleRetShape::splats))
+                    {
+                        // A splatting tuple binds its WIRE -- one cell per slot, led
+                        // by presence when the wire carries one. Packing it instead
+                        // boxes the `nobox` element the splat exists to keep
+                        // unboxed; a packed tuple is also structurally never nil, so
+                        // a nullable one answered `t == null` as false when absent.
+                        let r = self.lower_expr_repr(value)?;
+                        let slots = self.tuple_repr_to_slots(r, &shape);
+                        self.bind_tuple_slots(name, &slots, shape);
                     } else {
                         let v = self.lower_expr(value)?;
                         let v = self.coerced_to_binding(v, value, name);

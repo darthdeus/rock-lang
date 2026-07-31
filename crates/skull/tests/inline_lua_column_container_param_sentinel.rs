@@ -1,7 +1,7 @@
-//! SENTINEL -- an `inline(lua)` body that takes a container param receives the
-//! COLUMN representation with no adaptation and no rejection. The body's
-//! `v._data` is `nil`, so a guarded body silently answers wrong and an unguarded
-//! one dies indexing nil.
+//! FIXED -- was a sentinel. An `inline(lua)` body that took a container param
+//! received the COLUMN representation with no adaptation and no rejection: the
+//! body's `v._data` was `nil`, so a guarded body silently answered wrong and an
+//! unguarded one died indexing nil. It is now a spanned rejection at the call.
 //!
 //! A column-stored `[P]` emits as
 //! `{["@vec"] = {repr = "columns", ...}, ["x"] = {}, ["y"] = {}, len = 0}` --
@@ -10,31 +10,28 @@
 //! direct column stores (which is why `xs.push(..)` works even though
 //! `vec_push<T>` is itself an `inline(lua)` writing `_data`; the emitted Lua for
 //! a column push contains no call at all). That routing covers the stdlib's own
-//! hand-maintained primitive set -- `__vec_data_sort` vs `__rock_col_sort` is
-//! the visible seam -- and reaches nothing a user writes.
+//! hand-maintained primitive set and reaches nothing a user writes, so admitting
+//! the call was the bug -- an opaque body cannot be given a representation
+//! contract.
 //!
-//! DISCRIMINANT, measured: this is NOT about genericity and NOT about the
-//! specialization bail-out. The non-generic control below fails identically, so
-//! `compute_call_spec`'s `inline_body.is_some()` arm is not the cause -- an
+//! DISCRIMINANT, measured: this was NOT about genericity and NOT about the
+//! specialization bail-out. The non-generic control fails identically, so
+//! `compute_call_spec`'s `inline_body.is_some()` arm was never the cause -- an
 //! `inline(lua)` body is an opaque string, so nothing can adapt it either way.
 //! It is also not about the `nobox` mark: an UNMARKED value struct is
-//! column-eligible on the same terms, which is why the unmarked control is here
+//! column-eligible on the same terms, which is why the unmarked case is here
 //! rather than in a nobox-specific file.
 //!
-//! The bounding control is the ELEMENT type: `[int]` is boxed, keeps `_data`,
-//! and answers correctly through the very same body.
+//! The rejection is keyed on the DECLARED PARAM type, not the argument's. A
+//! param spelled `[T]` states that the body expects the vec representation; a
+//! param spelled `any` claims no representation at all, and the
+//! column-introspection probes that read `v["@vec"]` deliberately take `any`
+//! (`tests/vec_column_stdlib_surface.rock`, `tests/nobox_nullable_column.rock`).
+//! Keying on the argument instead rejects the bodies that handle columns
+//! CORRECTLY -- measured: it turned three passing files red.
 //!
-//! The correct behavior is a spanned REJECTION at the call, the way a bare `P`
-//! at an `inline(lua)` param already rejects (`docs/nobox-case-matrix.md`
-//! line 62, F1 erasure). An `inline(lua)` body cannot be given a representation
-//! contract, so admitting the call is the bug.
-//!
-//! PINNED BEHAVIOR (BUG): these assert the wrong answers -- `-1` from the
-//! guarded probe and a `_data`-nil death from the unguarded one. When the fix
-//! lands they go RED. Replace both with the `Err` assertion the fix produces
-//! (the rejection route), and delete this paragraph. If instead the fix teaches
-//! the routing to cover user bodies, flip the guarded probe to `1` and the
-//! unguarded one to `11`.
+//! The bounding controls stay: `[int]` is boxed, keeps `_data`, and still passes
+//! through the very same body; and an `any` param still admits a column vec.
 
 mod common;
 
@@ -98,6 +95,20 @@ fn main() {
 }
 "#;
 
+/// The `any` bound: a body that reads the column layout itself is still allowed.
+const ANY_PARAM_PROBE: &str = r#"
+nobox value P { x: float, y: float }
+
+@nomangle inline(lua) fn header_repr(v: any) -> string = """
+    return v["@vec"].repr
+"""
+
+fn main() {
+    let xs: [P] = [P { x: 1.0, y: 2.0 }]
+    print("{header_repr(xs)}")
+}
+"#;
+
 /// Unguarded -- what a user actually writes.
 const UNGUARDED_GENERIC: &str = r#"
 nobox value P { x: float, y: float }
@@ -117,60 +128,42 @@ fn run(src: &str, tag: &str) -> String {
     common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
-/// `common::run_luajit` asserts a zero exit; this is the tolerant form, for the
-/// case whose whole point is that the program dies.
-fn run_expect_death(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
-    let prog = format!("{lua}\nmain()\n");
-    let path = std::env::temp_dir().join(format!("skull_test_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, &prog).expect("write program");
-    let out = std::process::Command::new("luajit").arg(&path).output().expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
+/// The rejection an opaque body over a column vec now produces.
+fn rejection(src: &str) -> String {
+    common::try_emit_module(src)
+        .expect_err("a column vec at an opaque `[T]` param must reject")
+        .message
+}
+
+#[test]
+fn a_generic_inline_lua_body_over_a_column_vec_rejects() {
+    let msg = rejection(GUARDED_GENERIC);
     assert!(
-        !out.status.success(),
-        "PINNED BEHAVIOR (BUG): the unguarded body was expected to DIE indexing \
-         a nil `_data`. It exited zero, so the fix landed -- see the header."
+        msg.contains("column-stored `[P]`") && msg.contains("probe_len"),
+        "the rejection must name the element and the callee, got: {msg}"
     );
-    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// THE discriminant. Its rejecting identically is what keeps the defect attributed
+/// to the opaque boundary rather than to `compute_call_spec`'s bail-out.
+#[test]
+fn a_non_generic_inline_lua_body_over_a_column_vec_rejects_identically() {
+    assert!(rejection(GUARDED_CONCRETE).contains("column-stored `[P]`"));
+}
+
+/// Records the blast radius: this is a column-storage rule, not a `nobox` one.
+#[test]
+fn an_unmarked_value_element_rejects_identically() {
+    assert!(rejection(GUARDED_UNMARKED).contains("column-stored `[Q]`"));
 }
 
 #[test]
-fn a_generic_inline_lua_body_over_a_column_vec_sees_no_data_sentinel() {
-    let got = run(GUARDED_GENERIC, "inline_lua_col_generic");
-    assert_eq!(
-        got, "-1",
-        "PINNED BEHAVIOR (BUG): an `inline(lua)` body over a column `[P]` is \
-         expected to find `_data` nil and answer `-1`. It answered `{got}`, so \
-         the fix landed -- see the header for both correct outcomes."
-    );
+fn an_unguarded_inline_lua_body_over_a_column_vec_rejects() {
+    assert!(rejection(UNGUARDED_GENERIC).contains("column-stored `[P]`"));
 }
 
-/// THE discriminant. Its failing identically is what proves the defect is the
-/// opaque `inline(lua)` boundary and not `compute_call_spec`'s bail-out.
-#[test]
-fn a_non_generic_inline_lua_body_over_a_column_vec_fails_identically_sentinel() {
-    let got = run(GUARDED_CONCRETE, "inline_lua_col_concrete");
-    assert_eq!(
-        got, "-1",
-        "PINNED BEHAVIOR (BUG): the NON-generic body must fail identically -- \
-         that is what rules out the specialization bail-out as the cause. It \
-         answered `{got}`; if only this one changed, the defect has been split."
-    );
-}
-
-/// Records the blast radius: this is a column-storage defect, not a `nobox` one.
-#[test]
-fn an_unmarked_value_element_fails_identically_sentinel() {
-    let got = run(GUARDED_UNMARKED, "inline_lua_col_unmarked");
-    assert_eq!(
-        got, "-1",
-        "PINNED BEHAVIOR (BUG): an UNMARKED value element is column-eligible on \
-         the same terms and must fail identically. It answered `{got}`."
-    );
-}
-
-/// Bounds the sentinel on the element type. Without this, a fix that broke every
-/// `inline(lua)` container param would leave the sentinels green and read as
+/// Bounds the rule on the element type. Without this, a change that rejected
+/// every `inline(lua)` container param would leave the others green and read as
 /// progress.
 #[test]
 fn a_boxed_element_through_the_same_body_is_correct() {
@@ -181,12 +174,13 @@ fn a_boxed_element_through_the_same_body_is_correct() {
     );
 }
 
+/// Bounds the rule on the PARAM SPELLING: a body that claims no representation
+/// still receives a column vec, which is how the introspection probes work.
 #[test]
-fn an_unguarded_inline_lua_body_over_a_column_vec_dies_sentinel() {
-    let stderr = run_expect_death(UNGUARDED_GENERIC, "inline_lua_col_unguarded");
-    assert!(
-        stderr.contains("_data"),
-        "PINNED BEHAVIOR (BUG): expected a death indexing the nil `_data`. \
-         Got a different failure, which is a separate defect:\n{stderr}"
+fn an_any_param_still_admits_a_column_vec() {
+    assert_eq!(
+        run(ANY_PARAM_PROBE, "inline_lua_col_any"),
+        "columns",
+        "an `any` param claims no representation, so it must still be admitted"
     );
 }

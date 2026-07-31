@@ -299,6 +299,11 @@ impl Builder<'_> {
             {
                 self.nullcoalesce_repr(e, lhs, rhs)
             }
+            Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs }
+                if self.nullable_tuple_wire_shape(lhs).is_some() =>
+            {
+                self.nullcoalesce_tuple_repr(lhs, rhs)
+            }
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
         }
     }
@@ -357,6 +362,66 @@ impl Builder<'_> {
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
         let mut idx = 0;
         Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
+    }
+
+    /// [`Self::nullcoalesce_repr`] for a nullable TUPLE lhs, and the same rule one
+    /// level up: the lhs presence SLOT is the condition, both arms join slot-wise.
+    ///
+    /// Without this the lhs went through `lower_expr`, which packs a `MakeTuple` --
+    /// structurally never nil, so `Eq(lv, nil)` const-folded, the rhs arm was
+    /// deleted outright, and `maybe(false) ?? fallback` evaluated to the ABSENT
+    /// wire's nil leaves. That is the same "a box is never nil" trap the `!= null`
+    /// tuple case already carries.
+    pub(crate) fn nullcoalesce_tuple_repr(
+        &mut self,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let lhs_shape = self.nullable_tuple_wire_shape(lhs).expect("caller checked");
+        // `??` always yields a value, so the result wire is the lhs wire minus its
+        // presence -- which is also what makes the rhs (non-nullable) arm fit it.
+        let shape = TupleRetShape { nullable: false, ..lhs_shape.clone() };
+
+        let lhs_repr = self.lower_expr_repr(lhs)?;
+        let lhs_slots = self.tuple_repr_to_slots(lhs_repr, &lhs_shape);
+        let (present, lhs_values) = lhs_slots
+            .split_first()
+            .expect("a nullable wire carries its presence slot first");
+        let (present, lhs_values) = (*present, lhs_values.to_vec());
+
+        let cells: Vec<Idx<Cell>> = lhs_values.iter().map(|_| self.f.new_cell(None)).collect();
+        let lhs_bb = self.f.new_block();
+        let rhs_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: lhs_bb, else_bb: rhs_bb },
+        );
+
+        self.cur = rhs_bb;
+        let rhs_repr = self.lower_expr_repr(rhs)?;
+        let rhs_slots = self.tuple_repr_to_slots(rhs_repr, &shape);
+        for (&c, &value) in cells.iter().zip(&rhs_slots) {
+            self.emit_cur(Inst::Store { cell: c, value });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        // The lhs slots were read before the branch, so their block dominates this
+        // one -- the same reason the value twin can reuse its leaves here.
+        self.cur = lhs_bb;
+        for (&c, &value) in cells.iter().zip(&lhs_values) {
+            self.emit_cur(Inst::Store { cell: c, value });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = join;
+        let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
+        let mut idx = 0;
+        Ok(self.tuple_from_slots(&shape, &loads, &mut idx))
     }
 
     /// A value-struct literal as an unboxed `Group` (declared field order, defaults

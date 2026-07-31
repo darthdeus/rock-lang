@@ -518,6 +518,7 @@ impl Builder<'_> {
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
+            self.reject_column_container_opaque_args(func, arg_idxs)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
@@ -845,12 +846,12 @@ impl Builder<'_> {
                 let shape = flat_enum_shape(self.ws, name).unwrap();
                 let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
                 let tag = packed[0];
-                let positional = packed[1..1 + shape.tuple_width].to_vec();
+                let positional = packed[1..1 + shape.tuple_width()].to_vec();
                 let named: Vec<(Ustr, Idx<Inst>)> = shape
                     .record_fields
                     .iter()
                     .enumerate()
-                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width + i]))
+                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
                     .collect();
                 // A STATIC tag names a present variant: box directly. A payload-free
                 // variant reuses its interned singleton (map-key / identity holds).

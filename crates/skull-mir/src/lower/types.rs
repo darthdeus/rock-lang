@@ -225,6 +225,13 @@ impl Builder<'_> {
         if let Some(shape) = self.expr_tuple_shape(e).filter(TupleRetShape::splats) {
             return Some(RetSlot::Nested(shape));
         }
+        // A `?.` yielding a TUPLE. `expr_tuple_shape` declines a `Nullable(Tuple)`
+        // on purpose -- it is the CALL-boundary oracle, and no callee puts that
+        // presence on the wire. This join does: it mints the tag itself, exactly
+        // as the arm-widening below mints one for a value.
+        if let Some(shape) = self.nullable_tuple_wire_shape(e) {
+            return Some(RetSlot::Nested(shape));
+        }
         let mut shape = self.nobox_value_shape_of(e)?;
         // A join's shape must represent every value that reaches it, and the
         // arms are right here. `if c { P { .. } } else { null }` infers as plain

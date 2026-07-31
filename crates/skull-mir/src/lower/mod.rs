@@ -131,7 +131,7 @@ fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
 /// `f.#`/`f.0`, the walker touches `f`).
 fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
     let mut out = vec![flat_tag_slot(field)];
-    for i in 0..shape.tuple_width {
+    for i in 0..shape.tuple_width() {
         out.push(flat_payload_slot(field, i));
     }
     for rf in &shape.record_fields {
@@ -1625,9 +1625,7 @@ impl Builder<'_> {
             }
             return Ok(self.absent_tuple_slots(shape));
         }
-        let mut out = vec![self.emit_cur(Inst::Const(Lit::Bool(true)))];
-        out.extend(self.tuple_repr_to_slots(r, shape));
-        Ok(out)
+        Ok(self.tuple_repr_to_slots(r, shape))
     }
 
     /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
@@ -1651,6 +1649,12 @@ impl Builder<'_> {
     /// forwarded straight out, or a tuple literal) yields its parts; anything
     /// else is a packed tuple, so each element is read back with `TupleIndex`
     /// and a `Leaves` slot is field-read off the box.
+    ///
+    /// This owns the leading presence at a nullable shape, both arms, so it is
+    /// the exact inverse of [`Self::tuple_from_slots`] -- one oracle for where
+    /// presence sits on the wire. A repr that carries its OWN tag forwards that
+    /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
+    /// `true` here instead reported every absent forward as present.
     fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
         // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
@@ -1658,6 +1662,11 @@ impl Builder<'_> {
                 return self.absent_tuple_slots(shape);
             }
         }
+        let present = match (shape.nullable, &r) {
+            (false, _) => None,
+            (true, ValueRepr::Tuple { present: Some(p), .. }) => Some(*p),
+            (true, _) => Some(self.emit_cur(Inst::Const(Lit::Bool(true)))),
+        };
         let parts: Vec<ValueRepr> = match r {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
@@ -1668,6 +1677,7 @@ impl Builder<'_> {
             }
         };
         let mut out = Vec::with_capacity(shape.slot_count());
+        out.extend(present);
         for (slot, part) in shape.slots.iter().zip(parts) {
             match slot {
                 RetSlot::Opaque => out.push(self.pack(part)),
