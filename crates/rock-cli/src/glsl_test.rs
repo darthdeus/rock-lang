@@ -566,7 +566,7 @@ fn runner_lib_path() -> String {
 }
 
 // --- A3: compile-validate registered render shaders on real GL contexts ---
-// (`docs/shader-mobile-port-plan.md`). The value-test corpus above proves the
+// (`docs/shaders.md`). The value-test corpus above proves the
 // EMITTER on GLES; this proves the shaders games actually register.
 
 /// One profile's tallies over a `shader-validate` run.

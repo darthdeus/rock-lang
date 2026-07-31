@@ -830,3 +830,270 @@ fn reject_isampler_return() {
     "#;
     reject_pipeline(src, "vt", "fr", "sampler");
 }
+
+// --- Attribute locations are RECORDED, not invented while printing ----------
+// (docs/shader-binding-layout-plan.md P1). Emission consumes the locations
+// classification computed; it does not re-derive them with an enumerate()
+// index, which assumes one location per field and cannot express a type that
+// consumes several.
+
+/// Locations continue ACROSS the @attr and @instance structs -- one numbering
+/// for the whole vertex stage, not per-struct. This is bitgun grass's live
+/// shape (quad at 0..1, GrassInstance at 2..5).
+#[test]
+fn instance_attr_locations_continue_after_the_per_vertex_ones() {
+    let src = r#"
+        value Quad { aPos: Vec2, aTexCoord: Vec2 }
+        value Inst { pos: Vec2, rot: float, scale: float, height: float }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad, @instance i: Inst) -> Vary {
+            return Vary { position: v(a.aPos + i.pos, 0.0, 1.0), TexCoord: a.aTexCoord, uv: a.aTexCoord }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
+    "#;
+    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
+    // The whole declaration, not location-exists + name-appears-somewhere: the
+    // split form passes even when a location binds the wrong field, and the
+    // name half matches the fn body.
+    for (loc, ty, name) in [
+        (0, "vec2", "aPos"),
+        (1, "vec2", "aTexCoord"),
+        (2, "vec2", "pos"),
+        (3, "float", "rot"),
+        (4, "float", "scale"),
+        (5, "float", "height"),
+    ] {
+        assert!(
+            glsl.contains(&format!("layout (location = {loc}) in {ty} {name};")),
+            "want `layout (location = {loc}) in {ty} {name};`:\n{glsl}"
+        );
+    }
+}
+
+/// Attribute GLSL types are the artifact's `AttrKind` spelled for this backend,
+/// so every kind maps to exactly one declaration. A wrong entry (F32x3 -> vec4)
+/// is a silent geometry corruption: the shader reads a component the buffer
+/// never supplied.
+#[test]
+fn every_attr_kind_emits_its_glsl_type() {
+    let src = r#"
+        value All { f: float, i: int, v2: Vec2, v3: Vec3, v4: Vec4 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: All) -> Vary {
+            return Vary { position: a.v4 + v(a.v3, 0.0) * float(a.i) * a.f, uv: a.v2 }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
+    "#;
+    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
+    for (loc, ty, name) in [
+        (0, "float", "f"),
+        (1, "int", "i"),
+        (2, "vec2", "v2"),
+        (3, "vec3", "v3"),
+        (4, "vec4", "v4"),
+    ] {
+        assert!(
+            glsl.contains(&format!("layout (location = {loc}) in {ty} {name};")),
+            "want `layout (location = {loc}) in {ty} {name};`:\n{glsl}"
+        );
+    }
+}
+
+/// A `mat4` attribute consumes FOUR locations in GL, so a one-location-per-field
+/// numbering silently misplaces every attribute after it. Nothing in the tree
+/// declares one today, and `struct_gl_fields` admits Mat4 in attribute position,
+/// so the shape is reachable and currently wrong. Reject it rather than emit a
+/// numbering the CPU side cannot match.
+#[test]
+fn mat4_attribute_rejects_rather_than_misnumbering_what_follows() {
+    let src = r#"
+        value Bad { m: Mat4, tail: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Bad) -> Vary {
+            return Vary { position: a.m * v(a.tail, 0.0, 1.0), uv: a.tail }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
+    "#;
+    match emit_pipeline(src, "vs", "fs") {
+        Ok(glsl) => panic!("a Mat4 attribute must reject, but emitted:\n{glsl}"),
+        Err(msg) => assert!(
+            msg.contains("m") && msg.to_lowercase().contains("attribute"),
+            "the error must name the offending attribute: {msg}"
+        ),
+    }
+}
+
+
+// --- @textures: the unit is compiler-assigned (P2) ---------------------------
+// Sampler params bound by hand-typed name AND hand-assigned unit are the
+// silent-collision class -- two bind sites sharing a number bind one texture
+// over the other with nothing to report. Grouping them makes the unit a
+// property of field order, which the CPU side reads from the artifact.
+
+#[test]
+fn textures_group_declares_each_sampler() {
+    let src = r#"
+        struct GrassTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }
+        value Quad { aPos: Vec2, aUv: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad) -> Vary {
+            return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: GrassTex) -> Vec4 {
+            return texture(t.uTexture, vary.uv) * texture(t.mask_tex, vary.uv)
+        }
+    "#;
+    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
+    for n in ["uTexture", "mask_tex", "shadowmap_tex"] {
+        assert!(glsl.contains(&format!("uniform sampler2D {n};")), "want `{n}` declared:\n{glsl}");
+    }
+    // The group param is not itself a GLSL entity -- field reads are bare globals.
+    assert!(!glsl.contains("t."), "the group param must not survive into GLSL:\n{glsl}");
+}
+
+/// An integer sampler in the group keeps its kind: `isampler2D`, not the float
+/// spelling. Reading an r32i id target through a float sampler is undefined.
+#[test]
+fn textures_group_keeps_int_sampler_kind() {
+    let src = r#"
+        struct PickTex { color: Sampler2D, ids: ISampler2D }
+        value Quad { aPos: Vec2, aUv: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad) -> Vary {
+            return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: PickTex) -> Vec4 {
+            let id = texture(t.ids, vary.uv)
+            let c = texture(t.color, vary.uv)
+            return Vec4 { x: c.x, y: c.y, z: float(id.x), w: 1.0 }
+        }
+    "#;
+    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
+    assert!(glsl.contains("uniform sampler2D color;"), "got:\n{glsl}");
+    assert!(glsl.contains("isampler2D ids;"), "got:\n{glsl}");
+}
+
+/// `@textures` is exclusive with the other roles: a group is its own binding
+/// set, not attribute or uniform-block data.
+#[test]
+fn textures_conflicting_role_rejects() {
+    let src = r#"
+        struct T { tex: Sampler2D }
+        value Quad { aPos: Vec2, aUv: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad) -> Vary {
+            return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary, @uniform @textures t: T) -> Vec4 { return texture(t.tex, vary.uv) }
+    "#;
+    reject_pipeline(src, "vs", "fs", "conflicting role markers");
+}
+
+/// A non-sampler field in the group shifts every slot after it, so it rejects
+/// at the artifact rather than emitting a silently misnumbered binding set.
+#[test]
+fn textures_group_with_a_non_sampler_field_rejects() {
+    let src = r#"
+        struct T { tex: Sampler2D, scale: float }
+        value Quad { aPos: Vec2, aUv: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad) -> Vary {
+            return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: T) -> Vec4 { return texture(t.tex, vary.uv) }
+    "#;
+    reject_pipeline(src, "vs", "fs", "scale");
+}
+
+/// A group and a bare sampler cannot coexist: the bare one keeps a CPU-assigned
+/// unit, which can land on a compiler-assigned slot and bind over it.
+#[test]
+fn textures_group_plus_bare_sampler_rejects() {
+    let src = r#"
+        struct T { tex: Sampler2D }
+        value Quad { aPos: Vec2, aUv: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad) -> Vary { return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv } }
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: T, loose: Sampler2D) -> Vec4 {
+            let a = texture(t.tex, vary.uv)
+            let b = texture(loose, vary.uv)
+            return Vec4 { x: a.x, y: b.y, z: 0.0, w: 1.0 }
+        }
+    "#;
+    reject_pipeline(src, "vs", "fs", "every sampler must join it");
+}
+
+/// Texture units are program-scoped, so two stages cannot declare different
+/// groups -- slot 0 would name two different textures.
+#[test]
+fn textures_groups_differing_across_stages_reject() {
+    let src = r#"
+        struct VT { vtex: Sampler2D }
+        struct FT { ftex: Sampler2D }
+        value Quad { aPos: Vec2, aUv: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad, @textures t: VT) -> Vary {
+            let h = texture(t.vtex, a.aUv)
+            return Vary { position: v(a.aPos, h.x, 1.0), uv: a.aUv }
+        }
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: FT) -> Vec4 { return texture(t.ftex, vary.uv) }
+    "#;
+    reject_pipeline(src, "vs", "fs", "one program has one group");
+}
+
+/// The emission hands the engine the slot order -- the whole compiler-to-engine
+/// channel for texture binding.
+#[test]
+fn emission_reports_texture_slots_in_order() {
+    let src = r#"
+        struct GrassTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }
+        value Quad { aPos: Vec2, aUv: Vec2 }
+        value Vary { position: Vec4, uv: Vec2 }
+        @shader(vertex)
+        fn vs(@attr a: Quad) -> Vary { return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv } }
+        @shader(fragment)
+        fn fs(vary: Vary, @textures t: GrassTex) -> Vec4 {
+            let a = texture(t.uTexture, vary.uv)
+            let b = texture(t.mask_tex, vary.uv)
+            let c = texture(t.shadowmap_tex, vary.uv)
+            return Vec4 { x: a.x, y: b.y, z: c.z, w: 1.0 }
+        }
+    "#;
+    let (ws, mid) = workspace(src);
+    let e = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws, mid, "vs", "fs", GlslProfile::Core330,
+    )
+    .expect("must emit");
+    let names: Vec<String> = e.texture_slots.iter().map(|n| n.to_string()).collect();
+    assert_eq!(names, vec!["uTexture", "mask_tex", "shadowmap_tex"]);
+}
+
+/// No group -> nothing for the engine to bind by slot; the bare-sampler path is
+/// unchanged.
+#[test]
+fn emission_reports_no_slots_without_a_group() {
+    let (ws, mid) = workspace(UI_SRC);
+    let e = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws, mid, "ui_vert", "ui_frag", GlslProfile::Core330,
+    )
+    .expect("must emit");
+    assert!(e.texture_slots.is_empty(), "got {:?}", e.texture_slots);
+}

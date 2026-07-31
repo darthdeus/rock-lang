@@ -391,22 +391,16 @@ fn yield_operand_ranks_coroutine_fn_first() {
 }
 
 #[test]
-fn yield_inside_a_comment_gets_no_coroutine_boost() {
+fn yield_inside_a_comment_gets_nothing() {
     // The byte scanner is comment-blind: `// yield fr|` classified as a
-    // yield operand and promoted coroutine fns. The AST classifier sees no
-    // yield expr at the cursor.
+    // yield operand and promoted coroutine fns. A comment is not code, so
+    // there is nothing to rank.
     let labels = labels_at(
         "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\n\
          fn frame() {}\n\
          fn t() {\n  // yield fr$0\n}\n",
     );
-    let co = rank_of(&labels, "frame_co");
-    let plain = rank_of(&labels, "frame");
-    assert!(co.is_some() && plain.is_some(), "both offered: {labels:?}");
-    assert!(
-        plain < co,
-        "no coroutine boost inside a comment -- `frame` (shorter, same prefix) must rank first: {labels:?}"
-    );
+    assert!(labels.is_empty(), "comment must offer nothing: {labels:?}");
 }
 
 // == Type-directed arg ranking (F2 corpus) ====================================

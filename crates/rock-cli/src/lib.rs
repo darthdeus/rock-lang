@@ -244,7 +244,7 @@ pub enum CliCommand {
     /// `rock shader-validate <project> [project...]` -- compile+link every
     /// `rock_shader` pair the project(s) register, on REAL GL contexts in both
     /// profiles (330core + 300es), via `stone-glsl-runner`'s compile-only mode
-    /// (`docs/shader-mobile-port-plan.md` A3). A driver rejection is a FAIL
+    /// (`docs/shaders.md` § Testing). A driver rejection is a FAIL
     /// carrying the compile log; a no-display environment skips-with-log
     /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
     /// See `glsl_test::shader_validate`.

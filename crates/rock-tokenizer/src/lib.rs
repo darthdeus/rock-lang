@@ -4,9 +4,13 @@
 //! stats) — deliberately independent of the AST so a new parser/AST
 //! can be built on top of it.
 
+pub mod interp;
+pub mod lexical_regions;
 pub mod token;
 pub mod tokenizer;
 
+pub use interp::{scan_string, Flavor, Piece, Scan};
+pub use lexical_regions::{region_at, LexRegion};
 pub use token::*;
 pub use tokenizer::*;
 
