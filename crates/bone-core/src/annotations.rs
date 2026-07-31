@@ -65,7 +65,8 @@ fn validate_one(
             test_args(anno)
         }
         "pure" | "nomangle" | "ignore" | "debug_impure" | "intrinsic" | "native_required"
-        | "struct_expand" | "shader_expand" | "vertex_expand" | "materialize" | "gpu_only"
+        | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
+        | "materialize" | "gpu_only"
         | "scalar_abi" | "inline" | "sim"
         | "sim_render" => {
             at(anno, pos, AnnoPos::FnItem)?;

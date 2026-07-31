@@ -2389,6 +2389,46 @@ pub fn shader_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
     None
 }
 
+/// Emit-time validation for `@uniform_expand` calls. Shares both rejection
+/// messages with the expander, so the two cannot diverge on what they accept.
+pub fn uniform_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let f = &ws.module(fmod).functions[fid];
+            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::UniformBlock)) {
+                continue;
+            }
+            let fname = f.name;
+            let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
+
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            let [_, _, u] = arg_idxs[..] else {
+                return reject(body.expr_spans[e], uniform_expand_arity_msg(fname));
+            };
+            // The validator has no active specialization, so an unsubstituted
+            // generic reads as "not a value struct" here -- which is the right
+            // answer either way: the layout is derived from a concrete type.
+            let Some(sname) = value_struct_name_at(ws, inf, u) else {
+                return reject(body.expr_spans[u], uniform_expand_arg_msg(fname));
+            };
+            if let Err(err) = crate::gpu_layout::uniform_block(ws, sname) {
+                return reject(
+                    body.expr_spans[u],
+                    format!("`@uniform_expand`: {}", err.message),
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
 pub fn vertex_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {

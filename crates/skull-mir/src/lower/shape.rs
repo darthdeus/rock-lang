@@ -915,6 +915,40 @@ pub(crate) fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) 
     }
 }
 
+/// The value-struct name of expression `e` outside a lowering [`Builder`].
+/// Mirrors [`Builder::value_struct_name_of`] minus the specialization
+/// substitution, which the validator has no active specialization for -- an
+/// unsubstituted generic is exactly what this must reject anyway.
+pub(crate) fn value_struct_name_at(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+) -> Option<Ustr> {
+    let ty = resolve_tyid(ws, inf, *inf.expr_types.get(e)?)?;
+    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ty_node(ws, inf, ty)? else {
+        return None;
+    };
+    let sid = *ws.struct_by_name.get(&name)?;
+    ws.modules[sid.module.index()].structs[sid.def].is_value.then_some(name)
+}
+
+/// The two `@uniform_expand` rejection messages, shared so the emit-time
+/// validator and the lowering expander cannot diverge in what they accept.
+pub(crate) fn uniform_expand_arity_msg(fname: Ustr) -> String {
+    format!(
+        "`@uniform_expand` fn `{fname}` takes exactly three arguments -- the float view, the \
+         int view, and the uniform group"
+    )
+}
+
+pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
+    format!(
+        "`@uniform_expand` fn `{fname}`'s third argument must be a concrete `value` struct -- the \
+         std140 layout is derived from it, so an unsubstituted generic has none. Reach this \
+         through the `set_uniform_block` macro, which expands at the call site"
+    )
+}
+
 /// Value struct `name`'s fields as `(name, ty)` in declaration order. `None` when
 /// `name` is not a `value` struct.
 pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, TyId)>> {

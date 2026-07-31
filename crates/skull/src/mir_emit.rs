@@ -2083,6 +2083,9 @@ pub fn emit_full_in(
     if let Some(err) = skull_mir::lower::vertex_expand_rejection(ws, user_mid) {
         return Err(err);
     }
+    if let Some(err) = skull_mir::lower::uniform_expand_rejection(ws, user_mid) {
+        return Err(err);
+    }
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
         return Err(err);
     }

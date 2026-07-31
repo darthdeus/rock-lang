@@ -56,6 +56,13 @@ pub enum ExpandKind {
     /// `vertex_plan`, so the two cannot drift
     /// (docs/shader-binding-layout-plan.md, P1 wiring).
     VertexLayout,
+    /// `@uniform_expand fn f<T>(fv: Ptr<float>, iv: Ptr<int>, u: T)` -> one
+    /// DIRECT typed store per primitive leaf of `u`, at the std140 offsets
+    /// `gpu_layout::uniform_block` computes. Never a per-leaf helper call. The
+    /// views are params rather than looked up here, so the compiler names no
+    /// runtime field; the `set_uniform_block` macro is what pairs them with one
+    /// scratch (docs/shader-binding-layout-plan.md).
+    UniformBlock,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -80,6 +87,9 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "vertex_expand") {
         return Some(ExpandKind::VertexLayout);
+    }
+    if has_anno(f, "uniform_expand") {
+        return Some(ExpandKind::UniformBlock);
     }
     None
 }
