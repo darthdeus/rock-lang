@@ -121,7 +121,7 @@ impl Builder<'_> {
                     // that slot is the answer. Packing instead would build a
                     // `MakeTuple` -- a table, never nil -- so `== null` would be
                     // false even on the absent arm.
-                    if self.nullable_tuple_call_shape(v).is_some() {
+                    if self.nullable_tuple_wire_shape(v).is_some() {
                         let repr = self.lower_expr_repr(v)?;
                         let present = match repr {
                             ValueRepr::Tuple {

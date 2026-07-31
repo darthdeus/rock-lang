@@ -94,7 +94,7 @@ fn pair<T>(xs: [T], k: int) -> (T, float)? {
 
 fn nullable_pair<T>(xs: [T], k: int) -> int {
     let p = pair(xs, k)
-    if p != null { return 1 }
+    print("{p}")
     return 0
 }
 
@@ -111,10 +111,12 @@ fn every_failing_specialization_is_reported_not_just_the_first() {
     let err =
         try_emit_module(TWO_FAILING_SPECIALIZATIONS).expect_err("both specializations must reject");
     let all = messages(&err);
-    // `pair` itself now SPLATS its `(T, float)?` return (presence bool then the
-    // slots), so the nobox value no longer materializes there; the rejection moved
-    // one frame out to `nullable_pair`, which packs the result to test it against
-    // null. Two failing specializations either way -- which is the property.
+    // `pair` splats its `(T, float)?` return (presence bool then the slots) and
+    // `nullable_pair` binds that wire, so neither materializes on the way. The
+    // second rejection is the whole-tuple ESCAPE into the interpolation, which is
+    // the guarantee firing by design rather than an unbuilt mechanism -- so it
+    // stays a rejection, and the property under test (BOTH specializations get
+    // reported, not just the first) keeps its two sites.
     for want in ["specialized `tuple_in_coll", "specialized `nullable_pair"] {
         assert!(
             all.iter().any(|m| m.contains(want)),

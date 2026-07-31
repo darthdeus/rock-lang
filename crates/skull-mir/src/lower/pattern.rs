@@ -474,7 +474,7 @@ impl Builder<'_> {
             if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
                 return self.lower_if_let_nobox(b, value, then_branch, else_branch);
             }
-            if let Some(shape) = self.nullable_tuple_call_shape(value) {
+            if let Some(shape) = self.nullable_tuple_wire_shape(value) {
                 return self.lower_if_let_nullable_tuple(b, value, &shape, then_branch, else_branch);
             }
         }
@@ -576,6 +576,41 @@ impl Builder<'_> {
         // non-generic caller and left every slot `Opaque`.
         let shape = self.call_ret_tuple_shape(e, func)?;
         shape.nullable.then_some(shape)
+    }
+
+    /// THE oracle for "a presence slot for this nullable tuple is really on the
+    /// wire" -- what every consumer of one (`let`, `== null`, `if let`) reads,
+    /// so none of them can branch on a slot another one did not put there.
+    ///
+    /// Each source carries its own warrant for answering, and none of them is
+    /// the expression's own type:
+    /// - a direct CALL answers from the callee's DECLARED return
+    ///   ([`Self::nullable_tuple_call_shape`]);
+    /// - a NAME answers from the shape its slot cells were bound with, which is
+    ///   whatever this oracle said at the `let`;
+    /// - a SAFE-NAV answers from its own join, which manufactures the presence
+    ///   rather than receiving it -- the sanctioned exception `repr_join_slot`
+    ///   already relies on, and the reason the shape is built here instead of
+    ///   read off a declaration.
+    pub(crate) fn nullable_tuple_wire_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        if let Expr::Var(b) = self.body.expr_arena[e] {
+            let (_, shape) = self.tuple_binds.get(&raw(b))?;
+            return shape.nullable.then(|| shape.clone());
+        }
+        if self.is_safe_nav(e) {
+            let inner = self.peeled_tuple_shape(e).filter(TupleRetShape::splats)?;
+            return Some(TupleRetShape { nullable: true, ..inner });
+        }
+        self.nullable_tuple_call_shape(e)
+    }
+
+    /// Whether `e` is one of the three `?.` forms -- the expressions whose join
+    /// mints its own presence tag.
+    pub(crate) fn is_safe_nav(&self, e: Idx<Expr>) -> bool {
+        matches!(
+            self.body.expr_arena[e],
+            Expr::SafeNav { .. } | Expr::SafeNavCall { .. } | Expr::SafeNavLet { .. }
+        )
     }
 
     /// `if let t = <call returning (..)?>` where an element splats: the presence
