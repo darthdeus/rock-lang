@@ -594,7 +594,10 @@ impl CommandContext {
         // that touches no emission, dispatched early like its 0c sibling.
         if self.args.command == CliCommand::MonoManifest {
             let root = self.get_path_or_current()?;
-            return crate::mono_manifest::do_mono_manifest(Some(&root), None);
+            // `ROCK_MONO_DUMP=<dir>` writes the per-project Lua and JS manifests
+            // there. A target disagreement is only diagnosable by diffing them.
+            let dump = std::env::var("ROCK_MONO_DUMP").ok();
+            return crate::mono_manifest::do_mono_manifest(Some(&root), dump.as_deref());
         }
         // iter-lsp is the tight-loop profiler for the per-edit LSP query path
         // (BoneWorkspace on the bone backend); dispatched early like the other

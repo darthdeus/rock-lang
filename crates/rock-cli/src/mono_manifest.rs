@@ -17,6 +17,17 @@ use skull::instance_graph::{self, InstanceGraph};
 
 use crate::Result;
 
+/// Per-target projection totals across the whole corpus. The deferred list is
+/// a property of the TARGET, not of a project, so it is copied rather than
+/// summed.
+struct ProjTotals {
+    instances: usize,
+    boundaries_available: usize,
+    boundaries_total: usize,
+    unsupported_by_class: BTreeMap<&'static str, usize>,
+    deferred: Vec<&'static str>,
+}
+
 struct ProjectRow {
     name: String,
     instances: usize,
@@ -55,27 +66,44 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut rec_rejected = 0usize;
     let mut rec_shadow_only = 0usize;
     let mut rec_unreached = 0usize;
+    let mut boundary_classes: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut boundary_max: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut boundaries_invalid = 0usize;
+    let mut erased_entries: std::collections::BTreeSet<String> = Default::default();
+    let mut coroutine_helpers = 0usize;
+    let mut coroutine_collisions = 0usize;
+    let mut always_emitted_seeds = 0usize;
+    let mut identity_disagreements: Vec<String> = Vec::new();
+    let mut shared_instances = 0usize;
+    let mut identity_conflicts = 0usize;
+    let mut variant_switches = 0usize;
+    let mut js_invalid = 0usize;
+    let mut lua_only_total = 0usize;
+    let mut js_only_total = 0usize;
+    let mut divergent_groups: std::collections::BTreeSet<String> = Default::default();
+    let mut proj_digests: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
+    let mut proj_rows: BTreeMap<&'static str, ProjTotals> = BTreeMap::new();
 
     for dir in &projects {
         let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
         match one_project(dir, &name, dump.map(|d| (d, name.as_str()))) {
-            Ok(row) => {
-                for (k, v) in &row.1 {
+            Ok(p) => {
+                for (k, v) in &p.hist {
                     *hist.entry(k).or_insert(0) += v;
                 }
-                for (k, v) in row.2 {
+                for (k, v) in p.reasons {
                     *unresolved_reasons.entry(k).or_insert(0) += v;
                 }
-                direct_rec.extend(row.3.direct_same_instance);
-                mutual_rec.extend(row.3.mutual_same_instance);
-                changing_rec.extend(row.3.changing_instance);
-                rec_today += row.4.today;
-                rec_matched += row.4.matched;
-                rec_rejected += row.4.rejected_sites;
-                rec_shadow_only += row.4.shadow_only;
-                rec_unreached += row.4.missing_unreached_caller;
-                rec_missing.extend(row.4.missing);
-                for (k, v) in row.5 {
+                direct_rec.extend(p.census.direct_same_instance);
+                mutual_rec.extend(p.census.mutual_same_instance);
+                changing_rec.extend(p.census.changing_instance);
+                rec_today += p.reconciliation.today;
+                rec_matched += p.reconciliation.matched;
+                rec_rejected += p.reconciliation.rejected_sites;
+                rec_shadow_only += p.reconciliation.shadow_only;
+                rec_unreached += p.reconciliation.missing_unreached_caller;
+                rec_missing.extend(p.reconciliation.missing);
+                for (k, v) in p.examples {
                     let e = unresolved_examples.entry(k).or_default();
                     for x in v {
                         if e.len() < 3 && !e.contains(&x) {
@@ -83,7 +111,44 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         }
                     }
                 }
-                rows.push(row.0);
+                for (k, v) in &p.boundaries {
+                    *boundary_classes.entry(*k).or_insert(0) += v;
+                    boundary_max.insert(*k, (*boundary_max.get(k).unwrap_or(&0)).max(*v));
+                }
+                boundaries_invalid += p.boundaries_invalid;
+                erased_entries.extend(p.erased_entries);
+                coroutine_helpers += p.coroutine_helpers;
+                coroutine_collisions += p.coroutine_helper_collisions;
+                always_emitted_seeds += p.always_emitted_seeds;
+                shared_instances += p.shared_instances;
+                identity_conflicts += p.identity_conflicts;
+                if p.identity_conflicts > 0 {
+                    identity_disagreements.push(p.row.name.clone());
+                }
+                variant_switches += p.target_variant_switches;
+                lua_only_total += p.lua_only;
+                js_only_total += p.js_only;
+                divergent_groups.extend(p.divergent_variant_groups);
+                js_invalid += p.js_boundaries_invalid;
+                for pr in p.projections {
+                    proj_digests.entry(pr.target).or_default().push(pr.manifest_digest);
+                    // SUMMED across projects. `insert` here reported the last
+                    // project's numbers under a whole-corpus heading.
+                    let e = proj_rows.entry(pr.target).or_insert_with(|| ProjTotals {
+                        instances: 0,
+                        boundaries_available: 0,
+                        boundaries_total: 0,
+                        unsupported_by_class: BTreeMap::new(),
+                        deferred: pr.deferred.clone(),
+                    });
+                    e.instances += pr.instances;
+                    e.boundaries_available += pr.boundaries_available;
+                    e.boundaries_total += pr.boundaries_total;
+                    for (k, v) in &pr.unsupported_by_class {
+                        *e.unsupported_by_class.entry(*k).or_insert(0) += v;
+                    }
+                }
+                rows.push(p.row);
             }
             Err(e) => skipped.push((name, e.to_string())),
         }
@@ -181,6 +246,129 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!("- call sites whose spec decision REJECTED (Stage 0b): **{rec_rejected}**");
     println!();
 
+    println!("## foreign boundaries (Lua view)");
+    println!();
+    println!("| class | total across projects | max in one project |");
+    println!("|---|---:|---:|");
+    for (k, v) in &boundary_classes {
+        println!("| `{k}` | {v} | {} |", boundary_max.get(k).unwrap_or(&0));
+    }
+    println!();
+    println!(
+        "- boundaries INVALID on the target (plan S 10: a spanned rejection, never a stub): \
+         **{boundaries_invalid}**"
+    );
+    println!(
+        "- erased runtime entries reached, of the 15 catalogued in \
+         `docs/boundary-contracts.md` S 1.4: **{}**",
+        erased_entries.len()
+    );
+    if !erased_entries.is_empty() {
+        println!(
+            "  - {}",
+            erased_entries.iter().map(|e| format!("`{e}`")).collect::<Vec<_>>().join(", ")
+        );
+    }
+    println!();
+
+    println!("## coroutine helper symbols");
+    println!();
+    println!("- helper symbols owned by coroutine instances: **{coroutine_helpers}**");
+    println!(
+        "- helper symbols claimed by MORE THAN ONE instance (a Stage-3 collision): \
+         **{coroutine_collisions}**"
+    );
+    println!();
+
+    println!("## always-emitted body seeds");
+    println!();
+    println!(
+        "- callees seeded from a decorator definition or a global initializer: \
+         **{always_emitted_seeds}**"
+    );
+    println!();
+
+    println!("## Lua vs JS target views");
+    println!();
+    println!("**IDENTITY** -- an instance reached by both targets keys on");
+    println!("`(FuncRef, args)`; its symbol must not depend on the target.");
+    println!();
+    println!("- instances reached by BOTH views: **{shared_instances}**");
+    println!(
+        "- ...whose symbol DIFFERS between the two (the failure): **{identity_conflicts}**"
+    );
+    for d in &identity_disagreements {
+        println!("  - `{d}`");
+    }
+    println!();
+    println!("**REACHABILITY** -- which bodies each target reaches. Expected to");
+    println!("differ (plan S 0d: \"roots and foreign boundaries may differ\").");
+    println!();
+    println!(
+        "- symbols reached only on Lua: **{lua_only_total}** -- a call resolving to an \
+         `inline(js)` sibling has no Rock body, so the whole subtree below it \
+         disappears from the JS walk"
+    );
+    println!("- symbols reached only on JS: **{js_only_total}**");
+    println!(
+        "- instances whose callee resolved to a different `FuncRef` on JS \
+         (the agreement is vacuous if this is 0): **{variant_switches}**"
+    );
+    println!("- boundaries invalid on the JS target: **{js_invalid}**");
+    println!(
+        "- names whose same-signature backend variants do NOT share a mangling: **{}**",
+        divergent_groups.len()
+    );
+    for d in divergent_groups.iter().take(10) {
+        println!("  - `{d}`");
+    }
+    println!();
+
+    println!("## capability projections");
+    println!();
+    println!(
+        "| target | instances | boundaries avail./total | unsupported | deferred obligations |"
+    );
+    println!("|---|---:|---:|---|---:|");
+    for (name, p) in &proj_rows {
+        let unsup = if p.unsupported_by_class.is_empty() {
+            "--".to_string()
+        } else {
+            p.unsupported_by_class
+                .iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!(
+            "| `{name}` | {} | {}/{} | {unsup} | {} |",
+            p.instances, p.boundaries_available, p.boundaries_total, p.deferred.len()
+        );
+    }
+    println!();
+    let identity_stable = proj_digests.values().all(|v| !v.is_empty())
+        && {
+            let first = proj_digests.values().next().cloned().unwrap_or_default();
+            proj_digests.values().all(|v| *v == first)
+        };
+    println!(
+        "**logical instance identity byte-stable across all {} projections: {}** \
+         (plan S 20g.1) -- the per-project manifest digests are equal for every target.",
+        proj_rows.len(),
+        if identity_stable { "YES" } else { "**NO**" }
+    );
+    println!();
+    for (name, p) in &proj_rows {
+        if p.deferred.is_empty() {
+            continue;
+        }
+        println!("`{name}` defers:");
+        for d in &p.deferred {
+            println!("- {d}");
+        }
+        println!();
+    }
+
     if !skipped.is_empty() {
         println!("## NOT analyzed");
         println!();
@@ -192,14 +380,40 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-type OneProject = (
-    ProjectRow,
-    BTreeMap<&'static str, usize>,
-    BTreeMap<String, usize>,
-    instance_graph::RecursionCensus,
-    instance_graph::Reconciliation,
-    BTreeMap<String, Vec<String>>,
-);
+/// Everything one project contributes. A named struct rather than the tuple
+/// this grew out of: at six members `row.4.missing` had stopped saying anything.
+struct OneProject {
+    row: ProjectRow,
+    hist: BTreeMap<&'static str, usize>,
+    reasons: BTreeMap<String, usize>,
+    examples: BTreeMap<String, Vec<String>>,
+    census: instance_graph::RecursionCensus,
+    reconciliation: instance_graph::Reconciliation,
+    /// Boundary counts by class, for the graph's own (Lua) target.
+    boundaries: BTreeMap<&'static str, usize>,
+    /// Boundaries the target cannot serve -- plan S 10's `Invalid boundary`.
+    boundaries_invalid: usize,
+    erased_entries: std::collections::BTreeSet<String>,
+    coroutine_helpers: usize,
+    coroutine_helper_collisions: usize,
+    always_emitted_seeds: usize,
+    /// Instances both target views reached, and how many of those took a
+    /// different SYMBOL on the two targets. The identity property.
+    shared_instances: usize,
+    identity_conflicts: usize,
+    /// Callees that resolved to a DIFFERENT `FuncRef` on JS than on Lua. If
+    /// this is 0 the agreement above is vacuous, so it is reported beside it.
+    target_variant_switches: usize,
+    /// Symbols present on Lua and absent on JS. Non-zero is the FINDING: a
+    /// logical instance was renamed or lost by changing target.
+    lua_only: usize,
+    /// Symbols present only on JS -- availability, not identity.
+    js_only: usize,
+    /// Names whose same-signature backend variants do not share a mangling.
+    divergent_variant_groups: std::collections::BTreeSet<String>,
+    js_boundaries_invalid: usize,
+    projections: Vec<skull::target_projection::Projection>,
+}
 
 fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<OneProject> {
     let spec = crate::common::path_to_source_spec(&dir.display().to_string());
@@ -214,14 +428,131 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
 
     let g = instance_graph::build(&ws, roots.clone(), false);
     // S 20g.4: perturbing discovery order may not change the manifest.
-    let g2 = instance_graph::build(&ws, roots, true);
+    let g2 = instance_graph::build(&ws, roots.clone(), true);
     let text = instance_graph::render_manifest(&ws, &g);
     let stable = text == instance_graph::render_manifest(&ws, &g2);
 
+    // The JS view. Roots are the same predicate, but every callee runs through
+    // `backend_variant`, so a same-name `inline(lua)`/`inline(js)` pair resolves
+    // to a DIFFERENT `FuncRef` here. Logical identity must survive that; the
+    // switch count is reported beside the verdict so an agreement that holds
+    // only because nothing differed cannot read as the property holding.
+    let js = instance_graph::build_for_target(
+        &ws,
+        roots,
+        false,
+        bone_semantic::hir::FnBackend::Js,
+    );
+    // Set difference, not text equality: the question is whether a logical
+    // instance KEEPS its symbol, and `lua_only` is the direction that answers
+    // it. A symbol present on Lua and absent on JS means the same logical
+    // function was renamed or lost; extra JS symbols are availability.
+    let js_text = instance_graph::render_manifest(&ws, &js);
+    let lua_syms: std::collections::BTreeSet<&str> = text.lines().collect();
+    let js_syms: std::collections::BTreeSet<&str> = js_text.lines().collect();
+    let lua_only = lua_syms.difference(&js_syms).count();
+    let js_only = js_syms.difference(&lua_syms).count();
+    // The IDENTITY property, stated directly: an instance reached by both
+    // targets keys on `(FuncRef, args)`, and its rendered symbol must not
+    // depend on the target. Set difference alone cannot test this -- a symbol
+    // missing on JS is usually an unreached body, which is availability.
+    let mut lua_by_key: BTreeMap<(u32, u32, Vec<String>), String> = BTreeMap::new();
+    for i in &g.instances {
+        let args: Vec<String> = i.args.iter().map(|a| g.arena.render(*a)).collect();
+        let key = (i.func.module.raw(), i.func.func.into_raw().into_u32(), args);
+        lua_by_key.insert(key, g.symbol(&ws, i));
+    }
+    let mut identity_conflicts = 0usize;
+    let mut shared_instances = 0usize;
+    for i in &js.instances {
+        let args: Vec<String> = i.args.iter().map(|a| js.arena.render(*a)).collect();
+        let key = (i.func.module.raw(), i.func.func.into_raw().into_u32(), args);
+        if let Some(lua_sym) = lua_by_key.get(&key) {
+            shared_instances += 1;
+            if *lua_sym != js.symbol(&ws, i) {
+                identity_conflicts += 1;
+            }
+        }
+    }
+
+    // Variant groups whose members do NOT share a mangling. `@nomangle` and
+    // `extern` are exemptions carried by a DECLARATION, and the backend
+    // variants are different declarations -- so a group can hold one bare and
+    // one mangled symbol for what is logically one function.
+    // Grouped by PARAM SIGNATURE first -- the key `collapse_backend_variants`
+    // uses. Two genuine overloads mangle differently by design; only a
+    // same-signature pair is a backend-variant group, and only there is a
+    // mangling difference a symbol divergence.
+    let mut divergent_variant_groups: std::collections::BTreeSet<String> = Default::default();
+    for (name, cands) in ws.functions_by_name.iter() {
+        if cands.len() < 2 {
+            continue;
+        }
+        // Keyed on the param signature AND requiring distinct BACKENDS. Without
+        // the backend condition this fires on same-backend overloads that
+        // happen to render one signature (`__op_eq` in the bone stdlib has six
+        // candidates, all Lua) -- which is a grouping artifact, not a target
+        // divergence, and would have been reported as one.
+        type SigGroup = (std::collections::BTreeSet<String>, std::collections::BTreeSet<String>);
+        let mut by_sig: BTreeMap<Vec<String>, SigGroup> = BTreeMap::new();
+        for &(m, fi) in cands.iter() {
+            let f = &ws.module(m).functions[fi];
+            let sig: Vec<String> =
+                f.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
+            let e = by_sig.entry(sig).or_default();
+            e.0.insert(skull_mir::mangle::mangle_fn(&ws, f));
+            e.1.insert(format!("{:?}", f.backend));
+        }
+        for (_, (manglings, _)) in
+            by_sig.iter().filter(|(_, (m, backends))| m.len() > 1 && backends.len() > 1)
+        {
+            let where_: Vec<String> = cands
+                .iter()
+                .map(|&(m, fi)| {
+                    let f = &ws.module(m).functions[fi];
+                    format!("{}[{:?}]", ws.module(m).file, f.backend)
+                })
+                .collect();
+            divergent_variant_groups.insert(format!(
+                "{name}: {} @ {}",
+                manglings.iter().cloned().collect::<Vec<_>>().join(" vs "),
+                where_.join(", ")
+            ));
+        }
+    }
+    let lua_refs: std::collections::BTreeSet<(u32, u32)> = g
+        .instances
+        .iter()
+        .map(|i| (i.func.module.raw(), i.func.func.into_raw().into_u32()))
+        .collect();
+    let target_variant_switches = js
+        .instances
+        .iter()
+        .filter(|i| !lua_refs.contains(&(i.func.module.raw(), i.func.func.into_raw().into_u32())))
+        .count();
+    let js_boundaries_invalid =
+        js.boundaries.values().filter(|b| b.invalid_on_target).count();
+
+    // Capability projections. They read `g` -- one built graph, four views --
+    // which is what makes "the projection did not change the key" checkable.
+    let projections: Vec<skull::target_projection::Projection> =
+        skull::target_projection::ALL
+            .iter()
+            .map(|spec| skull::target_projection::project(&ws, &g, *spec))
+            .collect();
+
     if let Some((path, name)) = dump {
-        let file = format!("{path}/{}.manifest", name.replace('/', "_"));
-        std::fs::write(&file, &text)
-            .map_err(|e| anyhow::anyhow!("writing {file}: {e}"))?;
+        let stem = format!("{path}/{}", name.replace('/', "_"));
+        std::fs::write(format!("{stem}.manifest"), &text)
+            .map_err(|e| anyhow::anyhow!("writing {stem}.manifest: {e}"))?;
+        // The JS view beside it: a target disagreement is only diagnosable by
+        // diffing the two manifests, and re-deriving one by hand is how a
+        // difference gets attributed to the wrong cause.
+        std::fs::write(
+            format!("{stem}.js.manifest"),
+            instance_graph::render_manifest(&ws, &js),
+        )
+        .map_err(|e| anyhow::anyhow!("writing {stem}.js.manifest: {e}"))?;
     }
 
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
@@ -229,14 +560,22 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
         *reasons.entry(u.reason.to_string()).or_insert(0) += 1;
     }
     // A few examples per reason: one can be an accident, three show a pattern.
+    // The file is relativized for the same reason the project name is -- an
+    // absolute path varies by checkout and makes the report non-comparable.
     let mut examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for u in &g.unresolved {
         let e = examples.entry(u.reason.to_string()).or_default();
         let f = &ws.module(u.callee.module).functions[u.callee.func];
-        let at = format!("`{}` at {}:{}", f.name, u.span.file, u.span.line_range.0 + 1);
+        let file = u.span.file.as_str();
+        let file = file.rsplit_once("rock-mono/").map(|(_, r)| r).unwrap_or(file);
+        let at = format!("`{}` at {}:{}", f.name, file, u.span.line_range.0 + 1);
         if e.len() < 3 && !e.contains(&at) {
             e.push(at);
         }
+    }
+    let mut boundaries: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for b in g.boundaries.values() {
+        *boundaries.entry(b.class.name()).or_insert(0) += 1;
     }
     let census = g.recursion_census(&ws);
     let row = ProjectRow {
@@ -258,7 +597,28 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
         stable,
     };
     let rec = instance_graph::reconcile(&ws, &g, bone_semantic::hir::FnBackend::Lua);
-    Ok((row, hist_of(&g), reasons, census, rec, examples))
+    Ok(OneProject {
+        row,
+        hist: hist_of(&g),
+        reasons,
+        examples,
+        census,
+        reconciliation: rec,
+        boundaries,
+        boundaries_invalid: g.boundaries.values().filter(|b| b.invalid_on_target).count(),
+        erased_entries: g.erased_entries.clone(),
+        coroutine_helpers: g.coroutine_helpers.len(),
+        coroutine_helper_collisions: g.colliding_coroutine_helpers().len(),
+        always_emitted_seeds: g.always_emitted_seeds,
+        shared_instances,
+        identity_conflicts,
+        target_variant_switches,
+        lua_only,
+        js_only,
+        divergent_variant_groups,
+        js_boundaries_invalid,
+        projections,
+    })
 }
 
 fn hist_of(g: &InstanceGraph) -> BTreeMap<&'static str, usize> {

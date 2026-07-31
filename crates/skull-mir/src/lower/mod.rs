@@ -77,6 +77,7 @@ mod loops;
 mod nobox;
 mod pattern;
 mod resolve;
+pub use resolve::{backend_variant, sibling_variant, NoServingBinding};
 mod stmt;
 mod storage;
 mod structs;

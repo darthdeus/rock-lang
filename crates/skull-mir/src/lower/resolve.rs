@@ -3,6 +3,105 @@
 //! `yield*` delegation forms, which resolve their channel the same way.
 use super::*;
 
+/// Nothing declared under `name` has a body serving the target. Whether that is
+/// a rejection or a deferral is the caller's call, so this carries no span.
+pub struct NoServingBinding;
+
+/// Pick the backend-variant of a collapsed call `rep` that serves `target`.
+/// bone typechecks one backend-agnostic HIR and records ONE representative per
+/// overload; codegen selects here:
+///
+/// - `Any` target (GLSL / generic): no filtering, `rep` as-is.
+/// - `rep` already serves the target: `rep` as-is (the common Lua path).
+/// - a same-signature sibling serves the target: use it (the JS side of a
+///   same-name pair -- the representative is the luajit variant, the sibling
+///   the `inline(js)`/`extern(js)` one).
+/// - otherwise `Err`: `Lua` rejects, `Js` defers to its own emitter's
+///   host-mapping. [`Builder::select_backend_variant`] applies that policy.
+///
+/// Free rather than a `Builder` method because the shadow instance graph
+/// (`skull::instance_graph`) selects variants per target too, and a second
+/// implementation would let the two views of "which body serves this target"
+/// drift.
+pub fn backend_variant(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    rep: FuncRef,
+    target: bone_semantic::hir::FnBackend,
+) -> Result<FuncRef, NoServingBinding> {
+    use bone_semantic::hir::FnBackend;
+    if target == FnBackend::Any {
+        return Ok(rep);
+    }
+    let rep_backend = ws.module(rep.module).functions[rep.func].backend;
+    if rep_backend == target {
+        return Ok(rep);
+    }
+    // A backend sibling can exist ONLY when the name has >=2 candidates
+    // (bone collapsed a backend-variant group to `rep`). The overwhelmingly
+    // common single-candidate call skips the sibling scan entirely, keeping
+    // the `Any`-serves-everything fast path off the hot overload-select path.
+    let has_variants = ws.functions_by_name.get(&name).is_some_and(|l| l.len() >= 2);
+    if !has_variants {
+        return if serves_target(rep_backend, target) { Ok(rep) } else { Err(NoServingBinding) };
+    }
+    // An exact-target sibling outranks an `Any` representative: backend
+    // mapping beats the portable fallback (the intrinsics precedence
+    // doctrine). Without this an `inline(js)` variant of a portable-bodied
+    // fn is unreachable, since `Any` serves every target.
+    if let Some(sib) = sibling_variant(ws, rep, target, true) {
+        return Ok(sib);
+    }
+    if rep_backend == FnBackend::Any {
+        return Ok(rep);
+    }
+    // rep is the other concrete backend (e.g. lua while target is js): an
+    // `Any` sibling can still serve as the portable fallback.
+    if let Some(sib) = sibling_variant(ws, rep, target, false) {
+        return Ok(sib);
+    }
+    Err(NoServingBinding)
+}
+
+/// A same-name, same-signature sibling of `rep` whose backend serves `target`.
+/// Signature match is param-type equality (rendered, inference-free) -- the
+/// same key bone's `collapse_backend_variants` groups on. The caller has
+/// already established the name has >=2 candidates, so `rep_sig` (a per-param
+/// render) is only built when a sibling could exist.
+pub fn sibling_variant(
+    ws: &Workspace,
+    rep: FuncRef,
+    target: bone_semantic::hir::FnBackend,
+    exact: bool,
+) -> Option<FuncRef> {
+    use bone_semantic::hir::FnBackend;
+    let rf = &ws.module(rep.module).functions[rep.func];
+    let name = rf.name;
+    let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
+    let cands = ws.functions_by_name.get(&name)?;
+    for &(mid, fid) in cands.iter() {
+        if mid == rep.module && fid == rep.func {
+            continue;
+        }
+        let f = &ws.module(mid).functions[fid];
+        let ok = if exact {
+            f.backend == target
+        } else {
+            f.backend == FnBackend::Any || f.backend == target
+        };
+        if !ok {
+            continue;
+        }
+        if f.param_decls.len() != rep_sig.len() {
+            continue;
+        }
+        if f.param_decls.iter().zip(&rep_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
+            return Some(FuncRef { module: mid, func: fid });
+        }
+    }
+    None
+}
+
 impl Builder<'_> {
     /// Lower an expression to a `ValueRepr`: a value param read / value field
     /// projection / value literal / scalar-ABI value call stays UNBOXED (a
@@ -587,47 +686,10 @@ impl Builder<'_> {
         name: ustr::Ustr,
         rep: FuncRef,
     ) -> Result<FuncRef, CompilerError> {
-        use bone_semantic::hir::FnBackend;
-        let target = self.scx.target;
-        if target == FnBackend::Any {
-            return Ok(rep);
+        match backend_variant(self.ws, name, rep, self.scx.target) {
+            Ok(f) => Ok(f),
+            Err(NoServingBinding) => self.reject_or_defer(e, name, rep, self.scx.target),
         }
-        let rep_backend = self.ws.module(rep.module).functions[rep.func].backend;
-        if rep_backend == target {
-            return Ok(rep);
-        }
-        // A backend sibling can exist ONLY when the name has >=2 candidates
-        // (bone collapsed a backend-variant group to `rep`). The overwhelmingly
-        // common single-candidate call skips the sibling scan entirely, keeping
-        // the `Any`-serves-everything fast path off the hot overload-select path.
-        let has_variants = self
-            .ws
-            .functions_by_name
-            .get(&name)
-            .is_some_and(|l| l.len() >= 2);
-        if !has_variants {
-            return if serves_target(rep_backend, target) {
-                Ok(rep)
-            } else {
-                self.reject_or_defer(e, name, rep, target)
-            };
-        }
-        // An exact-target sibling outranks an `Any` representative: backend
-        // mapping beats the portable fallback (the intrinsics precedence
-        // doctrine). Without this an `inline(js)` variant of a portable-bodied
-        // fn is unreachable, since `Any` serves every target.
-        if let Some(sib) = self.find_sibling_variant(rep, target, true) {
-            return Ok(sib);
-        }
-        if rep_backend == FnBackend::Any {
-            return Ok(rep);
-        }
-        // rep is the other concrete backend (e.g. lua while target is js): an
-        // `Any` sibling can still serve as the portable fallback.
-        if let Some(sib) = self.find_sibling_variant(rep, target, false) {
-            return Ok(sib);
-        }
-        self.reject_or_defer(e, name, rep, target)
     }
 
     /// No servable binding for `target` was found: a `Lua` target REJECTS (a
@@ -651,45 +713,6 @@ impl Builder<'_> {
             )),
             _ => Ok(rep),
         }
-    }
-
-    /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
-    /// Signature match is param-type equality (rendered, inference-free) -- the
-    /// same key bone's `collapse_backend_variants` groups on. The caller has
-    /// already established the name has >=2 candidates, so `rep_sig` (a per-param
-    /// render) is only built when a sibling could exist.
-    pub(crate) fn find_sibling_variant(
-        &self,
-        rep: FuncRef,
-        target: bone_semantic::hir::FnBackend,
-        exact: bool,
-    ) -> Option<FuncRef> {
-        use bone_semantic::hir::FnBackend;
-        let rf = &self.ws.module(rep.module).functions[rep.func];
-        let name = rf.name;
-        let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| self.ws.render(None, p.ty)).collect();
-        let cands = self.ws.functions_by_name.get(&name)?;
-        for &(mid, fid) in cands.iter() {
-            if mid == rep.module && fid == rep.func {
-                continue;
-            }
-            let f = &self.ws.module(mid).functions[fid];
-            let ok = if exact {
-                f.backend == target
-            } else {
-                f.backend == FnBackend::Any || f.backend == target
-            };
-            if !ok {
-                continue;
-            }
-            if f.param_decls.len() != rep_sig.len() {
-                continue;
-            }
-            if f.param_decls.iter().zip(&rep_sig).all(|(p, r)| self.ws.render(None, p.ty) == *r) {
-                return Some(FuncRef { module: mid, func: fid });
-            }
-        }
-        None
     }
 
     /// `await sub` — drive the inner coroutine `sub` through its `.resume()`,

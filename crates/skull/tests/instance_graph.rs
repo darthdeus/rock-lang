@@ -270,3 +270,234 @@ fn main() {
     // The expected direction: the shadow graph is strictly larger.
     assert!(r.shadow_only > 0, "shadow graph added nothing over today's specializer");
 }
+
+/// A Rock function taken as a VALUE is an edge. The known-positive fixture
+/// `bbc06d767` asked for: the first attempt at this edge kind searched
+/// `resolved_overload_calls` and measured zero, which is indistinguishable from
+/// "the corpus has none" without a fixture that MUST produce one.
+///
+/// bone records nothing in that map here -- `apply` is not overloaded -- which
+/// is why the discriminant is skull's own `Expr::Global`-names-a-function scan
+/// (`lower/expr.rs:75`).
+#[test]
+fn a_function_taken_as_a_value_is_an_edge() {
+    let (ws, g) = graph_of(
+        r#"
+fn bump(x: int) -> int { return x + 1 }
+fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
+fn main() {
+    let g = bump
+    apply(bump, 1)
+}
+"#,
+    );
+    let vals: Vec<&str> = g
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::FnValue)
+        .map(|e| g.symbol(&ws, &e.to))
+        .collect::<Vec<_>>()
+        .leak()
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    assert!(
+        vals.iter().any(|s| s.contains("bump")),
+        "`bump` is taken as a value twice and produced no fn-value edge: {vals:?}"
+    );
+}
+
+/// THE WATCH ITEM (plan S 0h). A GENERIC function taken as a value has no call
+/// site, so there are no bindings to key an instantiation on -- structurally the
+/// same gap as the `iter` witness. It must be REPORTED, not silently instantiated
+/// at some invented type and not silently dropped.
+#[test]
+fn a_generic_function_taken_as_a_value_has_no_instantiation() {
+    let (_ws, g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
+fn main() {
+    apply(ident, 1)
+}
+"#,
+    );
+    let n = g
+        .unresolved
+        .iter()
+        .filter(|u| u.reason == "fn-value-generic-no-instantiation")
+        .count();
+    assert!(n > 0, "a generic fn value was not reported as uninstantiable");
+}
+
+/// Every level of a combinator chain gets a CONCRETE witness instance.
+///
+/// HONEST SCOPE: this does not test the `bound_call_trees` walk or the nested
+/// `sub` recursion, and it was written believing it did. Disabling either one
+/// leaves it green -- measured, one mutation at a time. The inner witnesses
+/// arrive by a third route: the walk instantiates `next_FilterIter<..>`, whose
+/// BODY calls `next` on its inner iterator as an ordinary generic call, and
+/// that route already existed in round 1.
+///
+/// The corpus is the oracle for the other two routes, and it prices them small:
+/// `bound-next-witness` is 5 edges across all 23 projects, of which the `sub`
+/// recursion contributes 1 of mag's 3.
+#[test]
+fn a_chained_iterator_records_its_inner_next_witness() {
+    let (ws, g) = graph_of(
+        r#"
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    let total = 0
+    for v in xs.iter().map(_ + 1).filter(_ > 0) { total = total + v }
+}
+"#,
+    );
+    let witnesses: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| {
+            e.kind == EdgeKind::IteratorNext || e.kind == EdgeKind::BoundNextWitness
+        })
+        .map(|e| g.symbol(&ws, &e.to))
+        .collect();
+    // `next` is one overload per iterator type, so the mangling carries the
+    // receiver: `next_VecIter_T_ret_...`. The three levels of the chain must
+    // each appear, at their own concrete instantiation.
+    for want in ["next_VecIter", "next_MapIter", "next_FilterIter"] {
+        assert!(
+            witnesses.iter().any(|s| s.contains(want)),
+            "no witness edge for `{want}`; got {witnesses:?}"
+        );
+    }
+}
+
+/// Logical instance identity is target-neutral (plan S 20a): the target decides
+/// which backend VARIANT serves a call and which boundaries exist, never the
+/// key. The two views resolve genuinely different `FuncRef`s -- a same-name
+/// `inline(lua)`/`inline(js)` pair is two declarations -- and must still produce
+/// one manifest, because the variants share a `(name, signature)` and therefore
+/// one mangling.
+#[test]
+fn logical_identity_is_stable_across_targets() {
+    use bone_semantic::hir::FnBackend;
+    let ws = check(
+        r#"
+value P { x: float, y: float }
+fn ident<T>(v: T) -> T { return v }
+fn main() {
+    let a = ident(P { x: 1.0, y: 2.0 })
+    let b = ident(1)
+    let xs: [int] = [1, 2, 3]
+    for v in xs.iter().map(_ + 1) { let _ = v }
+}
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, None);
+    let lua = instance_graph::build_for_target(&ws, roots.clone(), false, FnBackend::Lua);
+    let js = instance_graph::build_for_target(&ws, roots, false, FnBackend::Js);
+    assert_eq!(
+        instance_graph::render_manifest(&ws, &lua),
+        instance_graph::render_manifest(&ws, &js),
+        "the target changed logical instance identity"
+    );
+}
+
+/// Plan S 20g.1: feed the SAME shadow graph to every capability fixture and
+/// require logical instance identity to be unchanged while realization
+/// obligations differ. The projections must not re-derive identity -- `project`
+/// takes `&InstanceGraph`, so it structurally cannot, and this asserts the
+/// consequence.
+#[test]
+fn a_projection_never_changes_logical_identity() {
+    use skull::target_projection as tp;
+    let (ws, g) = graph_of(
+        r#"
+value P { x: float, y: float }
+extern(ffi, "stone") fn host_tick(n: int) -> int
+fn ident<T>(v: T) -> T { return v }
+fn main() {
+    let a = ident(P { x: 1.0, y: 2.0 })
+    let b = ident(1)
+    host_tick(3)
+}
+"#,
+    );
+    let projections: Vec<tp::Projection> =
+        tp::ALL.iter().map(|s| tp::project(&ws, &g, *s)).collect();
+    assert_eq!(projections.len(), 4, "all four fixtures must project");
+    let first = projections[0].manifest_digest;
+    for p in &projections {
+        assert_eq!(
+            p.manifest_digest, first,
+            "projection `{}` changed the manifest digest",
+            p.target
+        );
+        assert_eq!(p.instances, projections[0].instances, "`{}`", p.target);
+    }
+    // ...while realization genuinely differs, or the equality above is vacuous.
+    let luajit = projections.iter().find(|p| p.target == "luajit").unwrap();
+    let wasm = projections.iter().find(|p| p.target == "wasm32").unwrap();
+    assert!(
+        wasm.boundaries_available < luajit.boundaries_available,
+        "wasm32 must lose boundaries luajit has, or the fixtures are not distinct"
+    );
+    assert!(
+        !wasm.deferred.is_empty() && luajit.deferred.is_empty(),
+        "the two fixtures must differ in deferred obligations"
+    );
+}
+
+/// An `extern` is available exactly where the target supplies foreign symbols.
+/// The `Invalid boundary` outcome (plan S 10) is per-target, so this is what
+/// makes a boundary's `target` field load-bearing rather than decorative.
+#[test]
+fn extern_availability_follows_the_capability_not_the_target_name() {
+    use skull::target_projection as tp;
+    let (ws, g) = graph_of(
+        r#"
+extern(ffi, "stone") fn host_tick(n: int) -> int
+fn main() { host_tick(3) }
+"#,
+    );
+    assert!(
+        g.boundaries.values().any(|b| b.class
+            == skull::instance_graph::BoundaryClass::Extern),
+        "the extern was not classified as a boundary at all"
+    );
+    let unsupported = |spec| {
+        tp::project(&ws, &g, spec)
+            .unsupported_by_class
+            .get("extern")
+            .copied()
+            .unwrap_or(0)
+    };
+    assert_eq!(unsupported(tp::LUAJIT), 0, "luajit supplies foreign symbols");
+    assert_eq!(unsupported(tp::NATIVE_C64), 0, "a C target supplies foreign symbols");
+    assert!(unsupported(tp::JAVASCRIPT) > 0, "JS has no `ffi.load`");
+    assert!(unsupported(tp::WASM32) > 0, "wasm imports are declared, not looked up");
+}
+
+/// A coroutine instance OWNS helper symbols, and today every one of them is
+/// named from the SOURCE `FuncRef` (`coroutine_emit.rs:21`). Recording the
+/// owning instance beside the name is what lets Stage 3 re-base them.
+#[test]
+fn a_coroutine_instance_owns_its_helper_symbols() {
+    let (_ws, g) = graph_of(
+        r#"
+co fn ticker(n: int) {
+    let i = 0
+    while i < n { yield; i = i + 1 }
+}
+fn main() { let c = ticker(3) }
+"#,
+    );
+    let helpers: Vec<&str> = g
+        .coroutine_helpers
+        .iter()
+        .filter(|h| h.symbol_today.contains("ticker"))
+        .map(|h| h.suffix)
+        .collect();
+    assert!(helpers.contains(&"__step"), "no `__step` helper: {helpers:?}");
+    assert!(helpers.contains(&"__resume"), "no `__resume` helper: {helpers:?}");
+}
