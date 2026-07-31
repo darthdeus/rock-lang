@@ -10,6 +10,7 @@
 
 pub mod cfg;
 pub mod decorator;
+pub mod gpu_layout;
 pub mod display;
 pub mod intrinsics;
 pub mod lower;
@@ -17,3 +18,4 @@ pub mod mangle;
 pub mod mir;
 pub mod reach;
 pub mod verdict;
+pub mod vertex_plan;

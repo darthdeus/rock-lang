@@ -2178,7 +2178,23 @@ pub fn lua_string(s: &str) -> String {
     out
 }
 
-/// Append the double-quoted, escaped Lua string literal for `s` into `out`.
+/// A Rock `[string]` value as a Lua literal.
+///
+/// The Vec representation is owned by `Inst::MakeVec` above; this is the same
+/// shape, exposed so a compiler-emitted call site (the `rock_shader`
+/// registrations in `skull::mir_emit`) cannot drift from it.
+pub fn lua_string_vec(items: &[&str]) -> String {
+    let mut out = String::from("{_data = {");
+    for (i, s) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write_lua_string(&mut out, s);
+    }
+    let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", items.len());
+    out
+}
+
 /// A field key is a Lua identifier unless it is an `embed` leaf's physical key,
 /// which is a dotted path (`"p.x"`). Lua keywords never reach here -- the
 /// tokenizer already escapes them to `__rock_<kw>` -- so anything non-identifier
@@ -2212,6 +2228,7 @@ fn write_table_key(out: &mut String, field: &str) {
     }
 }
 
+/// Append the double-quoted, escaped Lua string literal for `s` into `out`.
 fn write_lua_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {

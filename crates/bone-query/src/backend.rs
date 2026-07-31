@@ -1315,12 +1315,17 @@ impl BoneWorkspace {
         if space_triggered && line_prefix_is_blank(src, offset) {
             return Vec::new();
         }
-        // Inside a `// rock: ...` magic comment: a separate early-exit context
+        // Neither a comment nor a string literal's text is code, so generic
+        // symbol/type completion is short-circuited in both. An interpolation
+        // hole reports `Code` and completes normally. The `// rock: ...`
+        // directive is the sole comment exception -- its own early-exit context
         // (the `allow` verb / known lint names), NOT a name-gate through `admit`.
-        // A comment is not code, so generic symbol/type completion is
-        // short-circuited here.
-        if let Some(items) = magic_comment_completions(src, offset) {
-            return items;
+        match rock_tokenizer::region_at(src, offset) {
+            rock_tokenizer::LexRegion::Comment => {
+                return magic_comment_completions(src, offset).unwrap_or_default();
+            }
+            rock_tokenizer::LexRegion::StringText => return Vec::new(),
+            rock_tokenizer::LexRegion::Code => {}
         }
         let prefix_raw = ident_prefix(src, offset).to_string();
         // A token starting with a digit is a numeric literal, never an identifier

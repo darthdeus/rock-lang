@@ -1050,7 +1050,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     vec._data[vec.len] = item
 """
 
-@nomangle @inline fn vec_get<T>(vec: [T], index: int) -> T? {
+@inline fn vec_get<T>(vec: [T], index: int) -> T? {
     if index < 0 || index >= vec.len {
         return null
     }
@@ -1063,7 +1063,7 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     return vec_get(vec, index)
 }
 
-@nomangle fn vec_set<T>(vec: [T], index: int, value: T) {
+fn vec_set<T>(vec: [T], index: int, value: T) {
     if index < 0 || index >= vec.len {
         error("Vec.set index out of bounds: index {index} is outside [0, {vec.len})")
     }
@@ -1101,16 +1101,15 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
     vec._data[i + 1] = v
 """
 
-@nomangle fn vec_len<T>(vec: [T]) -> int {
+fn vec_len<T>(vec: [T]) -> int {
     return vec.len
 }
 
-// Bare-name UFCS wrappers for the 5 codegen-tied @nomangle vec_* fns.
-// Codegen emits `vec_push`/`vec_get`/`vec_set`/`vec_len`/`vec_new` by
-// literal name (Lua codegen lowers `xs[i]`, `[a,b,c]`, etc. to those
-// calls), so the underlying functions stay @nomangle with the prefix
-// name. Users still write `xs.push(x)`/`xs.len()`/etc. — these
-// wrappers are how those dot-form calls resolve.
+// Bare-name UFCS wrappers, so `xs.push(x)`/`xs.len()` resolve to the
+// prefix-named fns. Only `vec_new`/`vec_push` are @nomangle, and the reason
+// is inline(lua) BODIES that call them by name (`get_app_args`, the
+// NativeBuffer collectors) -- not codegen: `xs[i]` lowers to the
+// `__vec_checked_*` family, never to `vec_get`/`vec_set`.
 @inline fn Vec<T>.push(vec, item: T) { vec_push(vec, item) }
 @inline fn Vec<T>.set(vec, index: int, value: T) { vec_set(vec, index, value) }
 @inline fn Vec<T>.len(vec) -> int { return vec_len(vec) }
@@ -1263,7 +1262,7 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
     return phantom()
 }
 
-@nomangle fn unwrap_or<T>(value: T?, alt: T) -> T {
+fn unwrap_or<T>(value: T?, alt: T) -> T {
     return value ?? alt
 }
 

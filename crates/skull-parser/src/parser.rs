@@ -10,10 +10,10 @@
 
 use crate::ast::*;
 use rock_core::{CompilerError, Span};
-use rock_tokenizer::{Token, TokenKind, Tokenizer};
+use rock_tokenizer::{interp, Token, TokenKind, Tokenizer};
 use ustr::Ustr;
 
-pub struct Parser {
+pub struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     eof_span: Span,
@@ -44,15 +44,130 @@ pub struct Parser {
     /// expr-hole ids surface in the s-expr (`?{id}`), but type holes must still
     /// advance it so the numbering stays in lockstep with rock.
     hole_counter: u32,
+    /// Source text a span can be read back from, innermost last. Interpolated
+    /// strings are re-scanned from RAW source so each hole's sub-expression gets
+    /// a real file span; a hole whose text carried `\`-escapes is cooked into
+    /// its own frame, which maps back byte-for-byte.
+    frames: Vec<Frame<'a>>,
+}
+
+/// A source text the parser can locate a span in.
+enum Frame<'a> {
+    /// The parsed source. `base` is the file offset of its first byte
+    /// (`parse_one_item` parses a slice of a bigger file).
+    File { text: &'a str, base: usize },
+    /// A cooked interpolation hole. `map[k]` is the file offset of `text[k]`,
+    /// with a trailing entry for the end.
+    Hole { text: String, map: Vec<usize>, line: usize, column: usize },
+}
+
+/// A cooked hole (expression half or `:spec` half) awaiting its sub-parse.
+struct HoleFrame {
+    text: String,
+    /// `map[k]` is the file offset of `text[k]`, with a trailing end entry.
+    map: Vec<usize>,
+    line: usize,
+    column: usize,
+}
+
+struct Hole {
+    expr: HoleFrame,
+    spec: Option<HoleFrame>,
+}
+
+/// A literal segment, or the index of the hole that goes in this slot.
+enum Pending {
+    Literal(Ustr),
+    Hole(usize),
+}
+
+/// A cursor walking a frame's text, carrying the (line, column) of `at`.
+#[derive(Clone, Copy)]
+struct Pos {
+    at: usize,
+    line: usize,
+    column: usize,
+}
+
+impl Pos {
+    /// Move forward to byte offset `to`, counting newlines. Backwards moves are
+    /// a no-op -- pieces are visited in source order.
+    fn advance(&mut self, text: &str, to: usize) {
+        if to <= self.at {
+            return;
+        }
+        let skipped = &text[self.at..to];
+        match skipped.rfind('\n') {
+            Some(last) => {
+                self.line += skipped.matches('\n').count();
+                self.column = skipped[last + 1..].chars().count();
+            }
+            None => self.column += skipped.chars().count(),
+        }
+        self.at = to;
+    }
+}
+
+/// A no-op offset map for a fragment already laid out 1:1 from `base`.
+fn identity_map(base: usize, len: usize) -> Vec<usize> {
+    (base..=base + len).collect()
+}
+
+/// `{{` / `}}` stand for a single literal brace. The tokenizer keeps them
+/// doubled (its content is what non-interpolation consumers read); collapsing
+/// is the interpolation parse's step.
+fn collapse_brace_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if (c == '{' || c == '}') && chars.peek() == Some(&c) {
+            chars.next();
+        }
+        out.push(c);
+    }
+    out
+}
+
+impl Frame<'_> {
+    fn text(&self) -> &str {
+        match self {
+            Frame::File { text, .. } => text,
+            Frame::Hole { text, .. } => text,
+        }
+    }
+
+    /// The frame-local offset of file offset `at`, if this frame covers it.
+    fn to_local(&self, at: usize) -> Option<usize> {
+        match self {
+            Frame::File { text, base } => {
+                let l = at.checked_sub(*base)?;
+                (l <= text.len()).then_some(l)
+            }
+            Frame::Hole { map, .. } => map.iter().position(|&o| o == at),
+        }
+    }
+
+    /// The (line, column) of frame-local offset 0.
+    fn origin(&self) -> Option<(usize, usize)> {
+        match self {
+            Frame::File { .. } => None,
+            Frame::Hole { line, column, .. } => Some((*line, *column)),
+        }
+    }
 }
 
 type PResult<T> = Result<T, CompilerError>;
 
-impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+impl<'a> Parser<'a> {
+    /// `source` is the text `tokens` were produced from, and `base` the file
+    /// offset of its first byte. Interpolated strings are re-scanned from it, so
+    /// a caller that passes the wrong text gets spanned errors, not silent
+    /// drift.
+    pub fn new(tokens: Vec<Token>, source: &'a str, base: usize) -> Self {
         let eof_span = tokens.last().map(|t| t.span).unwrap_or_else(Span::unknown);
         let ast = Ast::with_capacity(tokens.len());
         Self {
+            frames: vec![Frame::File { text: source, base }],
             tokens,
             pos: 0,
             eof_span,
@@ -2539,167 +2654,86 @@ impl Parser {
     /// expression (the format spec is parsed-and-discarded — it does not
     /// affect s-exprs); a `{...}` whose body fails to parse falls back to
     /// literal text. A lone literal collapses to `ExprKind::String`.
-    fn parse_interpolated(&mut self, raw: Ustr, span: Span) -> PResult<Idx<ExprData>> {
+    fn parse_interpolated(&mut self, _raw: Ustr, span: Span) -> PResult<Idx<ExprData>> {
         let file = span.file;
-        let s = raw.as_str();
-        let mut parts: Vec<InterpolatedPart> = Vec::new();
-        let mut buf = String::new();
-        let mut chars = s.chars().peekable();
-        // Position within the string content, tracked so embedded expressions
-        // get file-relative spans (offset/line/col) rather than substring-local
-        // ones. Mirrors rock's `parse_interpolated` math exactly so the A/B
-        // matches; `offset` is byte-based (1-byte ASCII for `"`/`{`/`}`).
-        let mut char_pos = 0usize;
-        let mut byte_pos = 0usize;
+        let lit_start = span.offset_range.0;
+        let Some(fi) = self.frames.iter().rposition(|f| f.to_local(lit_start).is_some()) else {
+            return Err(CompilerError::new_with_label(
+                span,
+                "string literal span does not point into the parsed source".to_string(),
+            ));
+        };
+        // Read everything the sub-parses need off the frame first, so the
+        // borrow ends before they run. The scan is over RAW source, so hole
+        // offsets are exact rather than reconstructed from cooked content.
+        let (pending, holes) = {
+            let frame = &self.frames[fi];
+            let local = frame.to_local(lit_start).expect("checked above");
+            if interp::Flavor::at(frame.text(), local).is_none() {
+                return Err(CompilerError::new_with_label(
+                    span,
+                    "string literal span does not start a literal in the parsed source".to_string(),
+                ));
+            }
+            let scan = interp::scan_string(frame.text(), local);
+            // `pos` walks the frame text alongside the pieces, converting byte
+            // offsets to (line, column) without rescanning from the top.
+            let mut pos = Pos {
+                at: local,
+                line: frame.origin().map_or(span.line_range.0, |o| o.0),
+                column: frame.origin().map_or(span.col_range.0, |o| o.1),
+            };
+            let mut pending = Vec::new();
+            let mut holes = Vec::new();
+            for piece in &scan.pieces {
+                match piece {
+                    interp::Piece::Literal { text, .. } => {
+                        pending.push(Pending::Literal(Ustr::from(&collapse_brace_escapes(text))));
+                    }
+                    interp::Piece::Hole { range, expr, spec, .. } => {
+                        pos.advance(frame.text(), range.0);
+                        let cook = |at: (usize, usize), from: Pos| {
+                            let mut p = from;
+                            p.advance(frame.text(), at.0);
+                            let (text, map) = scan.hole_source(frame.text(), at);
+                            HoleFrame { text, map, line: p.line, column: p.column }
+                        };
+                        pending.push(Pending::Hole(holes.len()));
+                        holes.push(Hole {
+                            expr: cook(*expr, pos),
+                            spec: spec.map(|sp| cook(sp, pos)),
+                        });
+                    }
+                }
+                pos.advance(frame.text(), piece.range().1);
+            }
+            (pending, holes)
+        };
 
-        while let Some(c) = chars.next() {
-            if c == '{' && chars.peek() == Some(&'{') {
-                chars.next();
-                buf.push('{');
-                char_pos += 2;
-                byte_pos += 2;
-                continue;
-            }
-            if c == '}' && chars.peek() == Some(&'}') {
-                chars.next();
-                buf.push('}');
-                char_pos += 2;
-                byte_pos += 2;
-                continue;
-            }
-            if c == '{' {
-                if !buf.is_empty() {
-                    parts.push(InterpolatedPart::Literal(Ustr::from(&buf)));
-                    buf.clear();
-                }
-                // `+1` opening quote, `+1` the `{` itself.
-                let expr_start_pos = char_pos + 1;
-                let expr_start_offset = span.offset_range.0 + 1 + byte_pos + 1;
-                let mut expr_str = String::new();
-                let mut format_str = String::new();
-                let mut in_format = false;
-                let mut spec_depth: i32 = 0;
-                // Bracket depth WITHIN the expression half, so a `:` or `}` that
-                // belongs to a nested `(...)`/`[...]`/`{...}` (named args, struct
-                // literals) isn't mistaken for the `:spec` split or the hole
-                // terminator. The split/terminator only fire at depth 0.
-                let mut expr_depth: i32 = 0;
-                let mut inner_char_count = 0usize;
-                let mut inner_byte_count = 0usize;
-                while let Some(&nc) = chars.peek() {
-                    chars.next();
-                    inner_char_count += 1;
-                    inner_byte_count += nc.len_utf8();
-                    if in_format {
-                        if nc == '}' && spec_depth == 0 {
-                            break;
-                        }
-                        if nc == '{' {
-                            spec_depth += 1;
-                        } else if nc == '}' {
-                            spec_depth -= 1;
-                        }
-                        format_str.push(nc);
-                    } else {
-                        if nc == '}' && expr_depth == 0 {
-                            break;
-                        }
-                        if nc == ':' && expr_depth == 0 {
-                            // `::` is a path separator, not a spec split.
-                            if chars.peek() == Some(&':') {
-                                chars.next();
-                                inner_char_count += 1;
-                                inner_byte_count += 1;
-                                expr_str.push(':');
-                                expr_str.push(':');
-                                continue;
-                            }
-                            in_format = true;
-                            continue;
-                        }
-                        // A string literal inside the hole is opaque: its
-                        // brackets/colons/braces must not move `expr_depth` or
-                        // trigger the split. Skip to the closing quote, mirroring
-                        // the tokenizer's inner-string handling (`\`-escapes).
-                        if nc == '"' {
-                            expr_str.push(nc);
-                            while let Some(&q) = chars.peek() {
-                                chars.next();
-                                inner_char_count += 1;
-                                inner_byte_count += q.len_utf8();
-                                expr_str.push(q);
-                                if q == '\\' {
-                                    if let Some(&e) = chars.peek() {
-                                        chars.next();
-                                        inner_char_count += 1;
-                                        inner_byte_count += e.len_utf8();
-                                        expr_str.push(e);
-                                    }
-                                } else if q == '"' {
-                                    break;
-                                }
-                            }
-                            continue;
-                        }
-                        match nc {
-                            '(' | '[' | '{' => expr_depth += 1,
-                            ')' | ']' | '}' => expr_depth -= 1,
-                            _ => {}
-                        }
-                        expr_str.push(nc);
-                    }
-                }
-                // Line/col of the expression start: walk the content up to the
-                // `{`, counting newlines (interpolated strings may be multi-line).
-                let mut lines_seen = 0usize;
-                let mut col_in_line = 0usize;
-                for ch in s.chars().take(char_pos) {
-                    if ch == '\n' {
-                        lines_seen += 1;
-                        col_in_line = 0;
-                    } else {
-                        col_in_line += 1;
-                    }
-                }
-                let expr_line = span.line_range.0 + lines_seen;
-                let expr_col = if lines_seen == 0 {
-                    span.col_range.0 + 1 + expr_start_pos
-                } else {
-                    col_in_line + 1
-                };
-                // A hole that fails to parse is a spanned error, not literal
-                // text: silent fallback ("emit the braces verbatim") shipped
-                // wrong output for any `:`-bearing hole. Reject, don't fall back.
-                let e = self.parse_interp_subexpr(
-                    &expr_str,
-                    file,
-                    expr_start_offset,
-                    expr_line,
-                    expr_col,
-                )?;
-                // Parse the `:spec` into a FormatSpec (incl. dynamic `{w}`/`{p}`
-                // sub-expressions). The spec never renders in the s-expr, but
-                // capturing it keeps those embedded exprs from being lost.
-                // Positions are best-effort (spec spans feed diagnostics only).
-                let spec = if format_str.is_empty() {
-                    None
-                } else {
-                    let fmt_offset = expr_start_offset + expr_str.len() + 1;
-                    let fmt_col = expr_col + expr_str.chars().count() + 1;
-                    Some(self.parse_format_spec(&format_str, file, fmt_offset, expr_line, fmt_col)?)
-                };
-                parts.push(InterpolatedPart::Expr(e, spec));
-                char_pos += inner_char_count + 1; // +1 for the opening `{`
-                byte_pos += inner_byte_count + 1;
-                continue;
-            }
-            buf.push(c);
-            char_pos += 1;
-            byte_pos += c.len_utf8();
+        let mut parsed = Vec::with_capacity(holes.len());
+        for hole in &holes {
+            let e = self.in_hole_frame(&hole.expr, |p, f| {
+                p.parse_interp_subexpr(&f.text, file, &f.map, f.line, f.column)
+            })?;
+            // A hole that fails to parse is a spanned error, not literal text:
+            // silent fallback ("emit the braces verbatim") shipped wrong output
+            // for any `:`-bearing hole. Reject, don't fall back.
+            let spec = match &hole.spec {
+                None => None,
+                Some(sf) => Some(self.in_hole_frame(sf, |p, f| {
+                    p.parse_format_spec(&f.text, file, f.map[0], f.line, f.column)
+                })?),
+            };
+            parsed.push(InterpolatedPart::Expr(e, spec));
         }
-        if !buf.is_empty() {
-            parts.push(InterpolatedPart::Literal(Ustr::from(&buf)));
-        }
+
+        let parts: Vec<InterpolatedPart> = pending
+            .into_iter()
+            .map(|p| match p {
+                Pending::Literal(l) => InterpolatedPart::Literal(l),
+                Pending::Hole(i) => parsed[i].clone(),
+            })
+            .collect();
 
         let kind = if parts.is_empty() {
             ExprKind::String(Ustr::from(""))
@@ -2714,6 +2748,24 @@ impl Parser {
         Ok(self.ast.expr(span, kind))
     }
 
+    /// Run `f` with `frame` pushed, so an interpolated string nested inside the
+    /// hole resolves against the same cooked text the sub-tokenizer saw.
+    fn in_hole_frame<T>(
+        &mut self,
+        frame: &HoleFrame,
+        f: impl FnOnce(&mut Self, &HoleFrame) -> PResult<T>,
+    ) -> PResult<T> {
+        self.frames.push(Frame::Hole {
+            text: frame.text.clone(),
+            map: frame.map.clone(),
+            line: frame.line,
+            column: frame.column,
+        });
+        let r = f(self, frame);
+        self.frames.pop();
+        r
+    }
+
     /// Parse one embedded interpolation expression into the *same* arena by
     /// swapping the token stream/cursor for the sub-tokens, parsing, then
     /// restoring. Reuses the full Pratt parser so precedence is identical.
@@ -2721,14 +2773,28 @@ impl Parser {
         &mut self,
         src: &str,
         file: Ustr,
-        offset: usize,
+        map: &[usize],
         line: usize,
         column: usize,
     ) -> PResult<Idx<ExprData>> {
         // `new_with_offset` seeds the sub-tokenizer with the embedded
         // expression's position in the enclosing file, so its tokens carry
-        // file-relative spans rather than substring-local ones.
-        let tokens = Tokenizer::new_with_offset(src, file, offset, line, column).tokenize()?;
+        // file-relative spans rather than substring-local ones. `map` then
+        // corrects for the enclosing literal's escapes, which cost a source byte
+        // each: without it every span after a `\"` in the hole lands short.
+        let mut tokens =
+            Tokenizer::new_with_offset(src, file, map[0], line, column).tokenize()?;
+        if map.windows(2).any(|w| w[1] > w[0] + 1) {
+            let base = map[0];
+            for t in &mut tokens {
+                let (s, e) = t.span.offset_range;
+                let remap = |o: usize| map.get(o.saturating_sub(base)).copied().unwrap_or(o);
+                let (rs, re) = (remap(s), remap(e));
+                t.span.col_range.0 += rs - s;
+                t.span.col_range.1 += re - e;
+                t.span.offset_range = (rs, re);
+            }
+        }
         let saved_tokens = std::mem::replace(&mut self.tokens, tokens);
         let saved_pos = std::mem::replace(&mut self.pos, 0);
         let saved_eof = self.eof_span;
@@ -2801,7 +2867,8 @@ impl Parser {
             let (off, line, col) = self.dyn_expr_pos(format_str, &chars, fmt_offset, fmt_line, fmt_col);
             chars.next(); // `{`
             let src = take_balanced_brace_body(&mut chars, format_str)?;
-            spec.width_expr = Some(self.parse_interp_subexpr(&src, file, off, line, col)?);
+            let map = identity_map(off, src.len());
+            spec.width_expr = Some(self.parse_interp_subexpr(&src, file, &map, line, col)?);
         } else {
             let mut w = String::new();
             while let Some(&c) = chars.peek() {
@@ -2830,7 +2897,9 @@ impl Parser {
                 let (off, line, col) = self.dyn_expr_pos(format_str, &chars, fmt_offset, fmt_line, fmt_col);
                 chars.next(); // `{`
                 let src = take_balanced_brace_body(&mut chars, format_str)?;
-                spec.precision_expr = Some(self.parse_interp_subexpr(&src, file, off, line, col)?);
+                let map = identity_map(off, src.len());
+                spec.precision_expr =
+                    Some(self.parse_interp_subexpr(&src, file, &map, line, col)?);
             } else {
                 let mut p = String::new();
                 while let Some(&c) = chars.peek() {
