@@ -927,6 +927,10 @@ pub(crate) fn vertex_expand_arg_msg(fname: Ustr) -> String {
 /// specialization substitution, which the validator has no active
 /// specialization for -- an unsubstituted generic is exactly what this must
 /// reject anyway.
+///
+/// PREMISE (pre-monomorphization): source bodies can hold an
+/// unsubstituted generic. Under totality none exist, this rejects a now-legal
+/// program, and the validator must become instance-driven or be deleted.
 pub(crate) fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) -> Option<Ustr> {
     let ty = resolve_tyid(ws, inf, *inf.expr_types.get(arg)?)?;
     let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = ty_node(ws, inf, ty)? else {
@@ -976,6 +980,10 @@ pub fn uniform_block_checked(
 /// Mirrors [`Builder::value_struct_name_of`] minus the specialization
 /// substitution, which the validator has no active specialization for -- an
 /// unsubstituted generic is exactly what this must reject anyway.
+///
+/// PREMISE (pre-monomorphization): source bodies can hold an
+/// unsubstituted generic. Under totality none exist, this rejects a now-legal
+/// program, and the validator must become instance-driven or be deleted.
 pub(crate) fn value_struct_name_at(
     ws: &Workspace,
     inf: &BodyInference,
