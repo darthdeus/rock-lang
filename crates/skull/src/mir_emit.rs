@@ -2070,6 +2070,9 @@ pub fn emit_full_in(
     if let Some((msg, span)) = skull_mir::lower::native_buffer_alloc_reject(ws, user_mid) {
         return Err(CompilerError::new_with_label(span, msg));
     }
+    if let Some((msg, span)) = skull_mir::lower::generic_coroutine_column_reject(ws, user_mid) {
+        return Err(CompilerError::new_with_label(span, msg));
+    }
     let cg = CodegenCtx::new(ws);
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
