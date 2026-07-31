@@ -35,6 +35,11 @@ fn main() {
     // docs/logging-architecture.md). Idempotent; reads STONE_LOG.
     rock_log::init();
 
+    // `ROCK_MONO_ABLATION=1`: the Stage-0e totality ablation
+    // (`docs/monomorphization-plan.md` S 0e). Off by default and read once here
+    // so every later consult is an atomic load rather than an env lookup.
+    skull_mir::ablation::init_from_env();
+
     let args = Args::parse();
 
     // `--verbose` raises the unified logger to debug. (Pre-unification
@@ -98,8 +103,16 @@ fn main() {
     }
 
     let context = CommandContext::new(args);
-    if let Err(e) = context.run() {
+    let outcome = context.run();
+    // The ablation census prints even when the command itself failed: a build
+    // that died partway still recorded every fatal it reached, and discarding
+    // them would make the taxonomy depend on how far the build got.
+    let had_fatals = rock_cli::ablation_report::report("whole run");
+    if let Err(e) = outcome {
         log::error!(target: "CLI", "{}", e);
+        std::process::exit(1);
+    }
+    if had_fatals {
         std::process::exit(1);
     }
 

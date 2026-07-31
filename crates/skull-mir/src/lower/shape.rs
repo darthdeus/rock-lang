@@ -1581,7 +1581,10 @@ pub(crate) fn compute_call_spec(
     target: bone_semantic::hir::FnBackend,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
-    if f.generics.is_empty() || f.is_extern || f.inline_body.is_some() || f.is_coroutine {
+    if f.generics.is_empty() {
+        return Ok(None);
+    }
+    if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return Ok(None);
     }
     let Some(bindings) = inf.call_generic_bindings.get(&e) else {
@@ -1610,10 +1613,105 @@ pub(crate) fn compute_call_spec(
     // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
     let opted_in =
         f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
+    // Stage-0e: the opt-in and the storage trigger are OPTIMIZATION gates, not
+    // correctness ones, so the ablation bypasses them to hold every reachable
+    // generic call to its complete instantiation. The gates are not deleted;
+    // with the mode off this is the untouched default path.
+    if crate::ablation::enabled() {
+        return Ok(Some((key, subst)));
+    }
     if !opted_in && !spec_key_has_target_storage(ws, &key, target) {
         return Ok(None);
     }
     Ok(Some((key, subst)))
+}
+
+/// Why a generic Rock call would keep the SHARED body, classified into an S 0e
+/// category -- or `None` when the call does specialize and there is nothing to
+/// report.
+///
+/// Separate from [`compute_call_spec`] because the classification needs no
+/// context and the RECORDING needs plenty (the caller's name, the call's span),
+/// which only the `Builder` has. Keeping the discriminants here keeps them
+/// beside the gates they describe, so a gate change and its classification
+/// cannot drift apart.
+pub(crate) fn ablation_decline(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+    func: FuncRef,
+    enclosing: &SpecSubst,
+) -> Option<(crate::ablation::FatalCategory, String)> {
+    use crate::ablation::FatalCategory as C;
+    let f = &ws.module(func.module).functions[func.func];
+    if f.generics.is_empty() {
+        return None;
+    }
+    if f.is_coroutine {
+        return Some((
+            C::UnsupportedSurface,
+            "a generic `co fn` has no concrete form: `compute_call_spec` bails on \
+             `is_coroutine` before building a SpecKey, so every instantiation shares one \
+             body and one set of `__step`/`__resume` symbols"
+                .to_string(),
+        ));
+    }
+    if f.is_extern || f.inline_body.is_some() {
+        return Some((
+            C::TargetBoundary,
+            "a generic foreign body (`extern` / `inline(..)`): under totality this must be \
+             an explicit BoundaryId, never a shared generic Rock body"
+                .to_string(),
+        ));
+    }
+    // An `Iterator`-bounded body is never emitted standalone -- it exists only
+    // as an inline splice (`skull_transform::inline::classify`). With inlining
+    // disabled it has no concrete form at all, which is plan S 12's subject.
+    if f.generic_bounds.iter().any(Option::is_some) {
+        return Some((
+            C::UnsupportedSurface,
+            "an `Iterator`-bounded body exists ONLY as an inline splice: its body holds \
+             placeholder bound-calls and it is never emitted standalone (plan S 12)"
+                .to_string(),
+        ));
+    }
+    let Some(bindings) = inf.call_generic_bindings.get(&e) else {
+        return Some((
+            C::MissingGraphEdge,
+            "no recorded generic bindings at this call, so the instantiation cannot be \
+             named"
+                .to_string(),
+        ));
+    };
+    if bindings.len() != f.generics.len() {
+        return Some((
+            C::CompilerInvariant,
+            format!(
+                "declares {} generic(s) but the call site supplied {} binding(s)",
+                f.generics.len(),
+                bindings.len()
+            ),
+        ));
+    }
+    // A binding that does not reify leaves a `None` slot: the key is PARTIAL, so
+    // it names a family of instantiations rather than one.
+    for (g, b) in f.generics.iter().zip(bindings) {
+        if !matches!(ty_node(ws, inf, *g), Some(TypeExpr::Generic(..))) {
+            return Some((
+                C::CompilerInvariant,
+                "a declared generic is not a generic type variable".to_string(),
+            ));
+        }
+        if reify_type(ws, inf, *b, enclosing).is_none() {
+            return Some((
+                C::MissingGraphEdge,
+                "a generic binding does not reify, leaving a PARTIAL key that names a \
+                 family of instantiations rather than one"
+                    .to_string(),
+            ));
+        }
+    }
+    None
 }
 
 /// [`compute_call_spec`] against an explicit binding list instead of a call
@@ -1668,6 +1766,12 @@ pub(crate) fn compute_spec_from_bindings(
             }
             None => key.push(None),
         }
+    }
+    // Stage-0e: `any_value` is the conditional trigger -- specialize only when
+    // some binding names a value struct. Totality has no such condition, so the
+    // ablation keeps every key it could build.
+    if crate::ablation::enabled() {
+        return Ok(Some((key, subst)));
     }
     Ok(any_value.then_some((key, subst)))
 }

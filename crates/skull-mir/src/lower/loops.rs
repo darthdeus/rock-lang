@@ -158,7 +158,31 @@ impl Builder<'_> {
         let coll = self.lower_expr(iter_expr)?;
         let it_val = match info.iter_fn {
             Some((m, f)) => {
-                self.emit_cur(Inst::Call { func: FuncRef { module: m, func: f }, args: vec![coll] })
+                // Stage-0e: the `iter` witness is emitted with NO spec binding,
+                // so a generic one always reaches the shared generic body. bone
+                // records `next_generics` for `next` and nothing for `iter_fn`,
+                // which is the S 0d finding -- a missing RECORD, not a missing
+                // binding at a call site.
+                let iter_ref = FuncRef { module: m, func: f };
+                if crate::ablation::enabled() {
+                    let cf = &self.ws.module(m).functions[f];
+                    if !cf.generics.is_empty() {
+                        crate::ablation::record(
+                            crate::ablation::FatalCategory::MissingGraphEdge,
+                            cf.name.as_str(),
+                            self.f.name.as_str(),
+                            self.body
+                                .expr_spans
+                                .get(iter_expr)
+                                .copied()
+                                .unwrap_or(cf.name_span),
+                            "the `for`-protocol `iter` witness has no instantiation record \
+                             anywhere: bone records `next_generics` for `next` and nothing \
+                             for `iter_fn`, and this call is emitted with no spec binding",
+                        );
+                    }
+                }
+                self.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
             }
             None => coll,
         };

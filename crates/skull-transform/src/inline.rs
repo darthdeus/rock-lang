@@ -164,6 +164,13 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
     }
+    // Stage-0e disables inlining outright so no splice can hide a missing
+    // standalone instance (plan S 8: disabling inlining must only make the
+    // program slower or larger, never change whether it compiles -- the mode
+    // exists to find out where that is false today).
+    if skull_mir::ablation::enabled() {
+        return None;
+    }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
     // An `Iterator`-bounded fn exists ONLY monomorphized-by-inlining (its body
@@ -1247,6 +1254,21 @@ pub fn validate_no_residual_bound_calls(
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                     let callee = &ws.module(func.module).functions[func.func];
                     if fn_has_bounds(callee) {
+                        // Stage-0e: this rejection IS the ablation's
+                        // unsupported-surface population, and it fires from
+                        // production's own check rather than from
+                        // `ablation_decline` -- so record it here or the
+                        // taxonomy would report zero for the category with the
+                        // largest real membership.
+                        skull_mir::ablation::record(
+                            skull_mir::ablation::FatalCategory::UnsupportedSurface,
+                            callee.name.as_str(),
+                            f.name.as_str(),
+                            callee.name_span,
+                            "an `Iterator`-bounded body has no standalone emission: it exists \
+                             only as an inline splice, so with inlining disabled the call has \
+                             no concrete callee at all (plan S 12)",
+                        );
                         return Err(CompilerError::new_no_location(format!(
                             "`{}` calls `Iterator`-bounded `{}` in a context that cannot inline \
                              it (bounded fns have no standalone emission -- iterator combinators \

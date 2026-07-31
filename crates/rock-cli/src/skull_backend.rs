@@ -1793,7 +1793,18 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         err_failed += f;
     }
 
-    if tests_failed > 0 || test_fails > 0 || failed > 0 || lsp_failed > 0 || err_failed > 0 {
+    // The Stage-0e census, before the exit below: this path leaves the process
+    // with `process::exit`, which runs no destructor and never returns to
+    // `main`, so a report installed only there would silently never print.
+    let ablation_fatals = crate::ablation_report::report("rock test");
+
+    if tests_failed > 0
+        || test_fails > 0
+        || failed > 0
+        || lsp_failed > 0
+        || err_failed > 0
+        || ablation_fatals
+    {
         std::process::exit(1);
     }
     Ok(())

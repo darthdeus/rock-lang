@@ -410,7 +410,30 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
-        compute_call_spec(self.ws, inf, e, func, self.spec_subst, self.scx.target)
+        let spec = compute_call_spec(self.ws, inf, e, func, self.spec_subst, self.scx.target)?;
+        // Stage-0e census. Recorded HERE rather than inside `compute_call_spec`
+        // because the classification needs no context and the record needs the
+        // caller's name and the call's span, which only the Builder has.
+        if crate::ablation::enabled() {
+            if !self.ws.module(func.module).functions[func.func].generics.is_empty() {
+                crate::ablation::note_examined();
+            }
+        }
+        if crate::ablation::enabled() && spec.is_none() {
+            if let Some((category, detail)) =
+                crate::lower::shape::ablation_decline(self.ws, inf, e, func, self.spec_subst)
+            {
+                let callee = &self.ws.module(func.module).functions[func.func];
+                crate::ablation::record(
+                    category,
+                    callee.name.as_str(),
+                    self.f.name.as_str(),
+                    self.body.expr_spans.get(e).copied().unwrap_or(callee.name_span),
+                    detail,
+                );
+            }
+        }
+        Ok(spec)
     }
 
     /// [`Self::call_spec`] narrowed by the target's storage filter -- the form
