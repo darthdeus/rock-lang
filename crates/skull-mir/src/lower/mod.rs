@@ -131,7 +131,7 @@ fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
 /// `f.#`/`f.0`, the walker touches `f`).
 fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
     let mut out = vec![flat_tag_slot(field)];
-    for i in 0..shape.tuple_width {
+    for i in 0..shape.tuple_width() {
         out.push(flat_payload_slot(field, i));
     }
     for rf in &shape.record_fields {

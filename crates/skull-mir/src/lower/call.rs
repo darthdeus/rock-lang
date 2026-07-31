@@ -845,12 +845,12 @@ impl Builder<'_> {
                 let shape = flat_enum_shape(self.ws, name).unwrap();
                 let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
                 let tag = packed[0];
-                let positional = packed[1..1 + shape.tuple_width].to_vec();
+                let positional = packed[1..1 + shape.tuple_width()].to_vec();
                 let named: Vec<(Ustr, Idx<Inst>)> = shape
                     .record_fields
                     .iter()
                     .enumerate()
-                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width + i]))
+                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
                     .collect();
                 // A STATIC tag names a present variant: box directly. A payload-free
                 // variant reuses its interned singleton (map-key / identity holds).

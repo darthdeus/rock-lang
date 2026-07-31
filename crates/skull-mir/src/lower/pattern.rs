@@ -153,7 +153,25 @@ impl Builder<'_> {
                 // is the parent's `{prefix}__i` slot (see `scrut_payload`).
                 let cdata = en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
                 for (i, sp) in sub.into_iter().enumerate() {
-                    let payload = self.scrut_payload(scrut, i, cdata);
+                    // A payload position widened to a `nobox` value's leaves binds
+                    // THE LEAVES -- rebuilding a box here to bind one cell is the
+                    // materialization the widening exists to avoid.
+                    if let Some(vs) = self.flat_payload_leaf_shape(en, variant, i) {
+                        if let Pattern::Bind(b) = self.body.pattern_arena[sp] {
+                            let leaves = self.scrut_payload_leaves(scrut, i, &vs);
+                            self.bind_leaves(b, &leaves, vs);
+                            continue;
+                        }
+                    }
+                    // POSITION -> SLOT. They differ once any position ahead of
+                    // this one is widened: `V2(Vec2)` at position 0 spans two
+                    // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
+                    // Indexing by position read the widened value's second leaf
+                    // and handed `nil` to the count.
+                    let slot = en
+                        .and_then(|e| flat_enum_shape(self.ws, e))
+                        .map_or(i, |s| s.slot_offset(i));
+                    let payload = self.scrut_payload(scrut, slot, cdata);
                     // Thread the sub-pattern's enum (from this variant's payload
                     // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
                     // repr -- else an unqualified `J` defaults to the `.__variant`
@@ -365,6 +383,64 @@ impl Builder<'_> {
                 positional: positional.clone(),
                 named: named.clone(),
             }),
+        }
+    }
+
+    /// The leaf shape of THIS VARIANT's payload at position `i`, when the position
+    /// is widened to a `nobox` value's leaves. `None` for every ordinary position.
+    ///
+    /// Both the position AND the variant have to be asked. A position is widened
+    /// because SOME variant carries a `nobox` value there; a sibling variant with
+    /// an ordinary payload at the same position occupies only the first slot, and
+    /// reading it through the widened shape binds a float as if it were a value
+    /// struct. Read off the enum DECLARATION, the same source the ctor's placement
+    /// reads, so a write and a read of one position cannot disagree.
+    pub(crate) fn flat_payload_leaf_shape(
+        &self,
+        enum_name: Option<Ustr>,
+        variant: Ustr,
+        i: usize,
+    ) -> Option<ValueShape> {
+        use bone_semantic::hir::VariantPayload;
+        let en = enum_name?;
+        let shape = flat_enum_shape(self.ws, en)?;
+        let FlatSlot::Leaves(vs) = shape.slots.get(i)? else { return None };
+        let eid = self.ws.enums_by_name.get(&en)?;
+        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
+        let v = ed.variants.iter().find(|v| v.name == variant)?;
+        let VariantPayload::Tuple(tys) = &v.payload else { return None };
+        match static_ty(self.ws, *tys.get(i)?)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n == vs.name => Some(vs.clone()),
+            _ => None,
+        }
+    }
+
+    /// The `width` slot values of a widened payload position, in leaf order.
+    pub(crate) fn scrut_payload_leaves(
+        &mut self,
+        scrut: &Scrut,
+        i: usize,
+        vs: &ValueShape,
+    ) -> Vec<Idx<Inst>> {
+        let shape = match scrut {
+            Scrut::Cells { shape, .. } => Some(shape.clone()),
+            Scrut::Flat { shape, .. } => Some(shape.clone()),
+            Scrut::Val(_) => None,
+        };
+        let off = shape.as_ref().map_or(i, |s| s.slot_offset(i));
+        (0..vs.leaf_count())
+            .map(|k| self.scrut_slot(scrut, off + k))
+            .collect()
+    }
+
+    /// One raw positional SLOT of the scrutinee (not a position -- a slot).
+    fn scrut_slot(&mut self, scrut: &Scrut, slot: usize) -> Idx<Inst> {
+        match scrut {
+            Scrut::Cells { positional, .. } => positional[slot],
+            Scrut::Flat { parent, prefix, .. } => {
+                self.emit_cur(Inst::Field { base: *parent, field: flat_payload_slot(*prefix, slot) })
+            }
+            Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: slot }),
         }
     }
 

@@ -2251,19 +2251,59 @@ pub(crate) fn value_struct_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut
 #[derive(Clone, Debug)]
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,
-    /// Positional payload slots `f__0 .. f__{tuple_width-1}` (max tuple arity).
-    pub(crate) tuple_width: usize,
+    /// One entry per payload POSITION, widest variant first-wins. A position is
+    /// several SLOTS when it carries a `nobox` value, so this is not the slot
+    /// count -- ask [`EnumFlatShape::tuple_width`] for that and
+    /// [`EnumFlatShape::slot_offset`] for where a position starts.
+    pub(crate) slots: Vec<FlatSlot>,
     /// Named payload slots `f__<name>` (union of record-variant field names,
     /// first-seen order). A tuple position and a record field never collide --
     /// the former is a number, the latter an identifier.
     pub(crate) record_fields: Vec<Ustr>,
 }
 
+/// The wire shape of ONE positional payload of a flat enum.
+///
+/// A payload slot is a dynamically-typed Lua field, so ANY single value fits in
+/// one -- except a `nobox` value, which is several leaves and has no box to sit
+/// in. Widening the position to its leaves is the whole point: the value's
+/// leaves ARE the slots, so an enum payload never materializes one.
+#[derive(Clone, Debug)]
+pub(crate) enum FlatSlot {
+    /// One dynamic slot -- today's shape, and what every non-`nobox` payload keeps.
+    Opaque,
+    /// A `nobox` value payload, spanning its leaves.
+    Leaves(ValueShape),
+}
+
+impl FlatSlot {
+    /// Slots this position occupies.
+    pub(crate) fn width(&self) -> usize {
+        match self {
+            FlatSlot::Opaque => 1,
+            FlatSlot::Leaves(vs) => vs.leaf_count(),
+        }
+    }
+}
+
 impl EnumFlatShape {
+    /// Total positional SLOTS -- `_0 .. _{tuple_width-1}`. Distinct from the
+    /// position count (`slots.len()`): a `nobox` position spans several.
+    pub(crate) fn tuple_width(&self) -> usize {
+        self.slots.iter().map(FlatSlot::width).sum()
+    }
+
+    /// The first slot index of payload position `pos`. Positions past the end
+    /// answer with the total width, so a variant narrower than the union simply
+    /// has nothing to write.
+    pub(crate) fn slot_offset(&self, pos: usize) -> usize {
+        self.slots.iter().take(pos).map(FlatSlot::width).sum()
+    }
+
     /// The number of scalar leaves this enum threads as across a call: the
     /// discriminant + every positional slot + every record slot.
     pub(crate) fn leaf_count(&self) -> usize {
-        1 + self.tuple_width + self.record_fields.len()
+        1 + self.tuple_width() + self.record_fields.len()
     }
 
     /// The `ValueShape` the scalar ABI / SROA see: `[__tag, _0.., <rec>..]`, all
@@ -2271,7 +2311,7 @@ impl EnumFlatShape {
     /// box semantics (the leaf NAMES here are nominal -- never read structurally).
     pub(crate) fn value_shape(&self) -> ValueShape {
         let mut fields = vec![(Ustr::from("__tag"), FieldShape::Prim)];
-        for i in 0..self.tuple_width {
+        for i in 0..self.tuple_width() {
             fields.push((Ustr::from(format!("_{i}").as_str()), FieldShape::Prim));
         }
         for rf in &self.record_fields {
@@ -2293,12 +2333,30 @@ pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShap
         return None;
     }
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
-    let mut tuple_width = 0;
+    // Per position: `None` = no `nobox` payload seen (one opaque slot), `Some` =
+    // the agreed leaf shape. `conflict` marks a position where two variants want
+    // DIFFERENT nobox shapes -- there is no one layout for it, so it stays opaque
+    // and a `nobox` payload there keeps rejecting at the ctor, loudly.
+    let mut want: Vec<Option<ValueShape>> = Vec::new();
+    let mut conflict: Vec<bool> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
     for v in &ed.variants {
         match &v.payload {
             VariantPayload::Unit => {}
-            VariantPayload::Tuple(tys) => tuple_width = tuple_width.max(tys.len()),
+            VariantPayload::Tuple(tys) => {
+                if want.len() < tys.len() {
+                    want.resize(tys.len(), None);
+                    conflict.resize(tys.len(), false);
+                }
+                for (i, ty) in tys.iter().enumerate() {
+                    let Some(vs) = nobox_payload_shape(ws, *ty) else { continue };
+                    match &want[i] {
+                        Some(prev) if prev.name != vs.name => conflict[i] = true,
+                        Some(_) => {}
+                        None => want[i] = Some(vs),
+                    }
+                }
+            }
             VariantPayload::Record(fields) => {
                 for f in fields {
                     if !record_fields.contains(&f.name) {
@@ -2308,7 +2366,30 @@ pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShap
             }
         }
     }
-    Some(EnumFlatShape { name, tuple_width, record_fields })
+    let slots = want
+        .into_iter()
+        .zip(conflict)
+        .map(|(w, bad)| match w {
+            Some(vs) if !bad => FlatSlot::Leaves(vs),
+            _ => FlatSlot::Opaque,
+        })
+        .collect();
+    Some(EnumFlatShape { name, slots, record_fields })
+}
+
+/// The leaf shape of a payload type that is a `nobox` value struct, else `None`.
+///
+/// Keyed on the DECLARED payload type, like every other splat decision on this
+/// arc: both the ctor that writes the slots and the match arm that reads them
+/// derive the layout from the enum declaration, so neither has to see the other.
+fn nobox_payload_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = static_ty(ws, ty)? else {
+        return None;
+    };
+    if !is_nobox_nominal(ws, n) {
+        return None;
+    }
+    sig_shape_of_nominal(ws, n)
 }
 
 /// The frame-slot yield channel of a `co fn` whose declared return type is
@@ -2343,7 +2424,7 @@ pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldC
     let shape = flat_enum_shape(ws, n)?;
     Some(YieldChannel {
         enum_name: shape.name,
-        tuple_width: shape.tuple_width,
+        tuple_width: shape.tuple_width(),
         record_fields: shape.record_fields,
     })
 }
