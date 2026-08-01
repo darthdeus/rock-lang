@@ -1872,6 +1872,10 @@ pub(crate) fn check_expr(
 // The closed `as` conversion relation. A pair is admitted only if it is an
 // ordinary assignment-compatible one or one of the two explicit numeric
 // conversions; everything else is a spanned rejection, never a silent identity.
+//
+// `as` is not contextual: the target validates an already-inferred source, so
+// nothing here may bind an operand variable or discharge a constraint waiting on
+// one. That is `::`'s job.
 pub(crate) fn check_cast(
     gamma: &mut Gamma,
     from: TyId,
@@ -1880,6 +1884,19 @@ pub(crate) fn check_cast(
 ) -> Result<(), CompilerError> {
     let from_r = resolve(gamma, from, span);
     let to_r = resolve(gamma, to, span);
+
+    if has_unbound_infer(gamma, from_r) {
+        let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot convert `{from_str}` to `{to_str}` with `as`: the operand \
+                 is not fully inferred on its own, and `as` does not take types \
+                 from its target -- annotate the operand, or ascribe it with \
+                 `:: {to_str}`"
+            ),
+        ));
+    }
 
     // Explicit narrowing/widening between the two numeric builtins. `int -> float`
     // is also assignment-compatible; `float -> int` is admitted ONLY here, which
@@ -1897,7 +1914,13 @@ pub(crate) fn check_cast(
         return Ok(());
     }
 
-    if coerce(gamma, from, to, span).is_ok() {
+    // `coerce` decides assignment compatibility by unifying, which records
+    // bindings. Ask it against a checkpoint and roll back whatever it wrote, so
+    // the answer is a classification and not inference evidence.
+    let snap = gamma.out.checkpoint();
+    let compatible = gamma.trial(|g| coerce(g, from_r, to_r, span).is_ok());
+    gamma.out.rollback_to(snap);
+    if compatible {
         return Ok(());
     }
 
