@@ -1001,14 +1001,15 @@ pub(crate) fn value_struct_name_at(
 /// validator and the lowering expander cannot diverge in what they accept.
 pub(crate) fn uniform_expand_arity_msg(fname: Ustr) -> String {
     format!(
-        "`@uniform_expand` fn `{fname}` takes exactly three arguments -- the float view, the \
-         int view, and the uniform group"
+        "`@uniform_expand` fn `{fname}` takes either three arguments -- the float view, the \
+         int view, and the uniform group (the packer) -- or one, the uniform group alone \
+         (its layout fingerprint)"
     )
 }
 
 pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
     format!(
-        "`@uniform_expand` fn `{fname}`'s third argument must be a concrete `value` struct -- the \
+        "`@uniform_expand` fn `{fname}`'s uniform-group argument must be a concrete `value` struct -- the \
          std140 layout is derived from it, so an unsubstituted generic has none. Reach this \
          through the `set_uniform_block` macro, which expands at the call site"
     )

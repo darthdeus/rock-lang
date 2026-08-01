@@ -687,24 +687,30 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
             ),
         }
         .map_err(|e| anyhow::anyhow!(e.message))?;
-        // The `@uniform` block's std140 layout. A shader with no group sends an
-        // empty name and empty lists -- an argument either way. A SHORT call is
-        // silent on JS (the missing argument reads `undefined`), which is what
-        // rock-cli/tests/shader_register_arity_gate.rs exists to catch.
-        let b = emission.uniform_block.as_ref();
+        // The `@uniform` blocks' std140 layouts, in binding order (A1 at most
+        // one, an A2 pipeline one per stage), as PARALLEL FLAT lists -- see the
+        // Lua driver in skull/src/mir_emit.rs, which this mirrors. A SHORT call
+        // is silent on JS (the missing argument reads `undefined`), which is
+        // what rock-cli/tests/shader_register_arity_gate.rs exists to catch.
+        let blocks = &emission.uniform_blocks;
+        let names: Vec<ustr::Ustr> = blocks.iter().map(|p| p.struct_name).collect();
+        let sizes: Vec<i64> = blocks.iter().map(|p| p.size as i64).collect();
+        let fingerprints: Vec<i64> = blocks.iter().map(|p| p.fingerprint() as i64).collect();
+        let counts: Vec<i64> = blocks.iter().map(|p| p.members.len() as i64).collect();
         let member_names: Vec<ustr::Ustr> =
-            b.map(|p| p.members.iter().map(|m| m.name).collect()).unwrap_or_default();
+            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.name)).collect();
         let offsets: Vec<i64> =
-            b.map(|p| p.members.iter().map(|m| m.offset as i64).collect()).unwrap_or_default();
+            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.offset as i64)).collect();
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
             js_string_vec(&emission.texture_slots),
-            crate::js_test::js_str(b.map(|p| p.struct_name.as_str()).unwrap_or("")),
-            b.map(|p| p.size).unwrap_or(0),
-            b.map(|p| p.fingerprint()).unwrap_or(0),
+            js_string_vec(&names),
+            js_int_vec(&sizes),
+            js_int_vec(&fingerprints),
+            js_int_vec(&counts),
             js_string_vec(&member_names),
             js_int_vec(&offsets),
         );

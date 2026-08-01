@@ -2562,8 +2562,13 @@ pub fn uniform_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
             let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
 
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            let [_, _, u] = arg_idxs[..] else {
-                return reject(body.expr_spans[e], uniform_expand_arity_msg(fname));
+            // Both accepted shapes end in the uniform group: the 3-arg packer
+            // and the 1-arg fingerprint. Shares the expander's predicates so a
+            // validator cannot accept more than the expander does.
+            let u = match arg_idxs[..] {
+                [u] => u,
+                [_, _, u] => u,
+                _ => return reject(body.expr_spans[e], uniform_expand_arity_msg(fname)),
             };
             // The validator has no active specialization, so an unsubstituted
             // generic reads as "not a value struct" here -- which is the right

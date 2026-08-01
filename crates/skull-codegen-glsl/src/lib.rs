@@ -1823,10 +1823,17 @@ pub struct ShaderEmission {
     /// still needs the NAME once, to point each sampler uniform at its unit at
     /// link time; after that it binds by slot and never by name again.
     pub texture_slots: Vec<Ustr>,
-    /// The program's `@uniform` block layout, or `None` when it declares no
-    /// group. The single authority for the block's bytes: the GLSL declaration
-    /// above, the CPU packer and the link-time driver assertion all read it.
-    pub uniform_block: Option<UniformBlockPlan>,
+    /// The program's `@uniform` block layouts, in BINDING order -- slot N is
+    /// index N, the same contract `texture_slots` uses for units. Empty when
+    /// the program declares no group.
+    ///
+    /// A1 has at most one. An A2 pipeline has one PER STAGE, because the two
+    /// stages declare different types and a vertex entry is reused across
+    /// several fragment entries, so they cannot be merged into one.
+    ///
+    /// The single authority for each block's bytes: the GLSL declaration, the
+    /// CPU packer and the link-time driver assertion all read it.
+    pub uniform_blocks: Vec<UniformBlockPlan>,
 }
 
 pub fn emit_shader_entry_with_dependencies(
@@ -1921,7 +1928,12 @@ pub fn emit_shader_entry_with_dependencies(
         has_bare_sampler(&shape.samplers, &shape.global_params),
         f.name_span,
     )?;
-    Ok(ShaderEmission { source, dependencies, texture_slots, uniform_block: block_plan })
+    Ok(ShaderEmission {
+        source,
+        dependencies,
+        texture_slots,
+        uniform_blocks: block_plan.into_iter().collect(),
+    })
 }
 
 /// Emission profile (docs/shaders.md): the `#version` line and
@@ -1959,6 +1971,10 @@ struct VertexShape {
     attrs: Vec<(Ustr, GlslTy, u32)>,
     /// `@uniform` struct param indices (at most one).
     uniform_params: Vec<usize>,
+    /// The `@uniform` group's struct name, if the stage declares one. Each
+    /// stage gets its own std140 block at its own binding index -- the stages
+    /// declare DIFFERENT types and cannot be made to share one.
+    uniform_group: Option<Ustr>,
     /// `@textures` group param indices -- see the field of the same name on
     /// `FragShape`. Vertex texture fetch is legal in GL 3.3 / GLES 3.0.
     texture_params: Vec<usize>,
@@ -1985,6 +2001,9 @@ struct FragShape {
     /// The varyings-struct param index (always 0 -- the first param).
     varyings_param: usize,
     uniform_params: Vec<usize>,
+    /// The `@uniform` group's struct name, if the stage declares one. Its own
+    /// std140 block, at its own binding index -- see `VertexShape`.
+    uniform_group: Option<Ustr>,
     /// `@textures` group param indices. Their fields are already expanded into
     /// `samplers`; the params themselves render as bare globals like a uniform
     /// struct, so they belong in `global_params`.
@@ -2197,6 +2216,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut texture_params = Vec::new();
     let mut texture_group: Option<Ustr> = None;
+    let mut uniform_group: Option<Ustr> = None;
     for (i, pd) in f.param_decls.iter().enumerate() {
         if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
             let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
@@ -2227,7 +2247,10 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
             Err(_) => match (has_anno(&pd.annotations, "attr"), has_anno(&pd.annotations, "instance"), has_anno(&pd.annotations, "uniform")) {
                 (true, false, false) => per_vertex.push(i),
                 (false, true, false) => instanced.push(i),
-                (false, false, true) => uniform_params.push(i),
+                (false, false, true) => {
+                    uniform_group = nominal_name(ws, pd.ty);
+                    uniform_params.push(i);
+                }
                 (false, false, false) => {
                     return Err(err(span, format!(
                         "shader vertex: value-struct param `{}` needs a role marker -- @attr (per-vertex attributes), @instance (per-instance attributes), or @uniform (uniform block)",
@@ -2273,6 +2296,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         .return_ty
         .ok_or_else(|| err(span, "shader vertex: entry must return a varyings value struct"))?;
     Ok(VertexShape {
+        uniform_group,
         attr_params,
         attrs,
         uniform_params,
@@ -2342,6 +2366,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut texture_params = Vec::new();
     let mut texture_group: Option<Ustr> = None;
+    let mut uniform_group: Option<Ustr> = None;
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
         if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
             let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
@@ -2371,6 +2396,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
                     return Err(err(span, format!("shader fragment: value-struct param `{}` needs @uniform", pd.name)));
                 }
                 uniforms.extend(struct_gl_fields(ws, pd.ty, span, "uniform")?);
+                uniform_group = nominal_name(ws, pd.ty);
                 uniform_params.push(i);
             }
         }
@@ -2408,6 +2434,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)")),
     };
     Ok(FragShape {
+        uniform_group,
         varyings_param: 0,
         uniform_params,
         texture_params,
@@ -2515,6 +2542,7 @@ fn emit_vertex_stage(
     fref: FuncRef,
     v: &VertexShape,
     varyings: &VaryingsShape,
+    vert_block: Option<&UniformBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let shape = EntryShape {
         global_params: v
@@ -2542,13 +2570,17 @@ fn emit_vertex_stage(
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
     out.push('\n');
-    if !v.uniforms.is_empty() || !v.arrays.is_empty() {
-        for (n, t) in &v.uniforms {
-            out.push_str(&format!("uniform {} {};\n", t.name(), n));
-        }
+    if let Some(plan) = vert_block {
+        out.push_str(&uniform_block_decl(plan));
+    }
+    // `UniformArray<T>` stays LOOSE: it is a param-only phantom, and moving an
+    // array inside a block needs a host payload model that does not exist yet.
+    if !v.arrays.is_empty() {
         for (_, n, t, cap) in &v.arrays {
             out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
         }
+    }
+    if vert_block.is_some() || !v.arrays.is_empty() {
         out.push('\n');
     }
     for (n, t, flat) in &varyings.varyings {
@@ -2567,6 +2599,7 @@ fn emit_fragment_stage(
     fref: FuncRef,
     fs: &FragShape,
     varyings: &VaryingsShape,
+    frag_block: Option<&UniformBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     // MRT: the entry is emitted as `void main()` destructuring its returned
@@ -2606,9 +2639,10 @@ fn emit_fragment_stage(
             out.push('\n');
         }
     }
-    for (n, t) in &fs.uniforms {
-        out.push_str(&format!("uniform {} {};\n", t.name(), n));
+    if let Some(plan) = frag_block {
+        out.push_str(&uniform_block_decl(plan));
     }
+    // Loose for the same reason as the vertex stage's arrays.
     for (_, n, t, cap) in &fs.arrays {
         out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
     }
@@ -2703,10 +2737,24 @@ pub fn emit_shader_pipeline_with_dependencies(
     let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
     check_pipeline_collisions(&vshape, &varyings, &fshape, vf.name_span)?;
 
+    // One std140 block per STAGE, each at its own binding index. The stages
+    // declare different `@uniform` types and cannot be made to share one: a
+    // vertex entry is reused across several fragment entries (mag's `ui_vert`
+    // serves three), so a merged per-program type would need that one fn to
+    // declare a different struct per program.
+    let vert_plan = vshape
+        .uniform_group
+        .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
+        .transpose()?;
+    let frag_plan = fshape
+        .uniform_group
+        .map(|g| uniform_block(ws, g).map_err(|e| err(ff.name_span, e.message)))
+        .transpose()?;
+
     let (vertex_block, vertex_dependencies) =
-        emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings)?;
+        emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings, vert_plan.as_ref())?;
     let (pixel_block, pixel_dependencies) =
-        emit_fragment_stage(ws, &scx, ffref, &fshape, &varyings)?;
+        emit_fragment_stage(ws, &scx, ffref, &fshape, &varyings, frag_plan.as_ref())?;
 
     let (version, precision) = profile_header(profile);
     let source = format!(
@@ -2729,9 +2777,16 @@ pub fn emit_shader_pipeline_with_dependencies(
     let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
         || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
     let texture_slots = program_texture_slots(ws, group, bare, vf.name_span)?;
-    // A2 pipeline stages keep loose uniforms until the second slice, which also
-    // needs the "both stages declare the SAME @uniform type" rule.
-    Ok(ShaderEmission { source, dependencies, texture_slots, uniform_block: None })
+    // Binding order is the vertex block then the fragment block, matching the
+    // order they are declared and bound. Unlike `@textures` -- one group per
+    // PROGRAM, since texture units are program-scoped -- uniform blocks are
+    // per STAGE, so differing types here are correct rather than a collision.
+    Ok(ShaderEmission {
+        source,
+        dependencies,
+        texture_slots,
+        uniform_blocks: vert_plan.into_iter().chain(frag_plan).collect(),
+    })
 }
 
 /// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
