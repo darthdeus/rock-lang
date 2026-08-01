@@ -450,6 +450,17 @@ impl Builder<'_> {
     /// compute the same predicate from the same type, so they still agree.
     pub(crate) fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
         let ty = self.resolve_tyid(ty)?;
+        // Nullability lives on the REFERENCE, not on the call ABI: an absent fn
+        // value is never called, and a present one is a callable with exactly the
+        // leaf ABI its type spells. A LAMBDA LITERAL at a nullable param unifies
+        // its own expr type with that param, so it arrives here as
+        // `Nullable(Function(..))` while the same lambda bound to a local first
+        // arrives as `Function(..)`. Without this peel the two spellings get
+        // different ABIs and the literal packs its `nobox` return.
+        let ty = match self.ty_node(ty)? {
+            TypeExpr::Nullable(inner) => self.resolve_tyid(ty.with_idx(inner))?,
+            _ => ty,
+        };
         let TypeExpr::Function { params, ret } = self.ty_node(ty)? else { return None };
         let ps: Vec<RetSlot> =
             params.into_iter().map(|p| self.nobox_param_slot_of_ty(ty.with_idx(p))).collect();

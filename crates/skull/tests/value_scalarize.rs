@@ -307,6 +307,25 @@ fn main() {
 }
 "#;
 
+const UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE: &str = r#"
+value V2 { x: float, y: float }
+value Box2 { tl: V2, w: float }
+
+@scalar_abi inline(lua) fn probe(r: Box2) -> float = """
+    return r__tl__x + r__tl__y * 10.0 + r__w * 100.0
+"""
+
+fn apply(f: ((Box2) -> float)?, r: Box2) -> float {
+    if f != null { return f.unwrap()(r) }
+    return -1.0
+}
+
+fn main() {
+    let r = Box2 { tl: V2 { x: 1.0, y: 2.0 }, w: 3.0 }
+    print("{apply(probe, r)}")
+}
+"#;
+
 const UNMARKED_VALUE_VIA_FN_VALUE: &str = r#"
 value V2 { x: float, y: float }
 value Box2 { tl: V2, w: float }
@@ -347,6 +366,24 @@ fn main() {
 fn unmarked_value_through_fn_value_rejects() {
     let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
         .expect_err("an unreconcilable fn-value ABI must reject");
+    assert!(
+        err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"),
+        "the rejection must name the fn and the reason, got: {}",
+        err.message
+    );
+}
+
+/// The NULLABLE spelling of [`unmarked_value_through_fn_value_rejects`], and the
+/// property the `Nullable` peel in `fn_value_abi` ENDANGERED: before the peel a
+/// nullable fn-value type answered `None` and fell to the boxed ABI, so this
+/// mismatched for that reason rather than on its merits. After the peel the type
+/// answers, and it must still reject -- an UNMARKED value yields no leaves, so
+/// `fn_value_abi` returns `None` again and the `@scalar_abi` definition still
+/// disagrees with it. A peel that widened past `nobox` would turn this green.
+#[test]
+fn unmarked_value_through_a_nullable_fn_value_still_rejects() {
+    let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE)
+        .expect_err("a nullable fn-value reference must not launder an unreconcilable ABI");
     assert!(
         err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"),
         "the rejection must name the fn and the reason, got: {}",
