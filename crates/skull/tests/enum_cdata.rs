@@ -4,9 +4,7 @@
 //! value-struct machinery: `<Enum>_ct` ctor, value-struct SROA (a local construct+
 //! match scalarizes to two int locals + int-tag compare, 0 alloc), value `__eq`
 //! (byte equality so escaping enums compare correctly), scalar ABI through calls.
-
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 const SRC: &str = r#"
 enum Shape { Circle(int), Square(int), Point }

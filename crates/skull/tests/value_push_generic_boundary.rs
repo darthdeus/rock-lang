@@ -10,9 +10,7 @@
 //! `item = x` and drops `y`, storing a number. Reading `xs[0].x` then indexes a
 //! number (runtime crash). The fix: don't take the specialized-splat ABI in a
 //! context that won't be spliced -- box the value arg to match the shared body.
-
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 fn run_prog(lua: &str, tag: &str) -> String {
     let path = std::env::temp_dir().join(format!("skull_{tag}_{}.lua", std::process::id()));

@@ -12,9 +12,7 @@
 //! re-materializes each pass (`let v<k> = c<cell>` INSIDE the loop), never
 //! folding across the back-edge. Every accumulator `let v = c<acc>` below sits
 //! inside the loop braces.
-
-mod common;
-use common::{emit_user, ws_with};
+use crate::common::{emit_user, ws_with};
 
 // General `while` with a manual counter (NOT a range-for). The accumulator c1
 // and counter c2 are read+written across the back-edge; each iteration

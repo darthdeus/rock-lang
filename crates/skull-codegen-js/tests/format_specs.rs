@@ -9,9 +9,7 @@ use std::process::Command;
 
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn node_available() -> bool {
     Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)

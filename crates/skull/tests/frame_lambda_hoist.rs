@@ -10,9 +10,7 @@
 //! by-value loop-binding snapshot (body reads its own env field, never via `s`).
 //! The exact per-iteration/param VALUES are pinned on luajit by
 //! tests/closure_capture_semantics_cofn.rock; here we pin the emit SHAPE.
-
-mod common;
-use common::{emit_module, function_body, mangled_name};
+use crate::common::{emit_module, function_body, mangled_name};
 
 /// Scan for `needle` followed by one-or-more ASCII digits followed by `tail`
 /// (e.g. `= c` + digits + `.c` pins a frame-field read `= c<S>.c<slot>` without

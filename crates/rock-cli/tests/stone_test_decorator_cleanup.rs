@@ -8,12 +8,10 @@
 //! populates registries like `SHUTDOWN_SYSTEMS` — so the contract is
 //! exercisable without a graphics context.
 
-mod stone_harness;
-
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
-use stone_harness::StoneHarness;
+use crate::stone_harness::StoneHarness;
 
 /// Run LuaJIT against a script written to a tempfile. The piped-stdin path
 /// (`rock_host::lua_runner::run_lua_code`) deadlocks for large scripts (~50k lines of stone

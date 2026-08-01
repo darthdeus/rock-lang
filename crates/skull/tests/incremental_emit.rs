@@ -9,9 +9,7 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use skull::mir_emit::{emit_full, emit_incremental};
-
-mod common;
-use common::ws_of;
+use crate::common::ws_of;
 
 /// The `(ModuleId, BodyOwner)` reinferred-id for the named function in `ws`.
 fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {

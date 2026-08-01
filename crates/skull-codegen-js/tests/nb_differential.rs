@@ -17,8 +17,6 @@ use skull_codegen_js::JS_NB_CHECK_SHIMS;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
-mod common;
-
 const FIXTURE: &str = include_str!("fixtures/nb_differential.rock");
 const FIXTURE_MOD: &str = "<nb_differential>";
 

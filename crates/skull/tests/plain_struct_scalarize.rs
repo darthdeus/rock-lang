@@ -13,9 +13,7 @@
 //! (field WRITES are legal and become field-cell stores), and a whole-struct use
 //! (pass-by-value, `==`, return, store as another struct's field) must keep the
 //! table.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 // A plain struct returned from an `@inline` helper and field-read across branch
 // arms (other blocks) -- the same single-block-value limitation that forces

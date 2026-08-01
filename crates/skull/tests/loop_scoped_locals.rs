@@ -10,9 +10,7 @@
 //! ABOVE the loop control slots and get pruned, collapsing the inherited set to
 //! the genuinely-live values. Standalone repro + in-game abort sites:
 //! `benchmarks/nyicoal/`, `docs/gc-pressure-reduction-plan.md` item 1.
-
-mod common;
-use common::{emit_module, mangled_name};
+use crate::common::{emit_module, mangled_name};
 
 /// Extract the body of `function <name>...` up to its closing `end` at col 0.
 fn fn_body<'a>(lua: &'a str, name: &str) -> &'a str {

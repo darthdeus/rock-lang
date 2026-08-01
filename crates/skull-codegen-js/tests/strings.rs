@@ -4,12 +4,10 @@
 //! (`ToString` for int/bool/string, the `__rock_format_float` host port for
 //! floats). The emitted expressions are node-verified end to end by the suite
 //! runner; these pin the shape.
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn emit(ws: &bone_semantic::inference::Workspace, name: &str) -> String {
-    let mf = common::lower_test_fn(ws, name);
+    let mf = crate::common::lower_test_fn(ws, name);
     skull_codegen_js::emit::emit_fn(ws, &mf, name)
         .unwrap_or_else(|e| panic!("emit `{name}`: {}", e.message))
 }

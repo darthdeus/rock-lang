@@ -9,9 +9,7 @@
 use std::process::Command;
 
 use skull_codegen_js::{fill_template, JS_INTRINSICS};
-
-mod common;
-use common::{emit_scalar, stdlib_ws};
+use crate::common::{emit_scalar, stdlib_ws};
 
 fn node_available() -> bool {
     Command::new("node")

@@ -4,9 +4,7 @@
 //! fn-value terminal with the closure constructed in its own body. The caller
 //! must fully inline the chain (docs/nested-generic-terminal-fnparam-bug.md,
 //! Bug 1); a refusal leaves a residual bounded call and the caller cannot emit.
-
-mod common;
-use common::{emit_mir, run_luajit};
+use crate::common::{emit_mir, run_luajit};
 
 const FWD_TERMINALS: &str = r#"
 fn fwd_reduce<I: Iterator<int>>(it: I) -> int {

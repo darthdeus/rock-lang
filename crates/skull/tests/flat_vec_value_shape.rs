@@ -5,9 +5,7 @@
 //! bounds-checked slot accessor `__nb_checked_get` stays (it fetches the flat slot
 //! that a scalarized store then writes in place). Runtime correctness is
 //! `tests/flat_vec_value.rock`; this pins the emitted shape.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 const FLAT_VEC_LOOP: &str = r#"
 value V2 { x: float, y: float }

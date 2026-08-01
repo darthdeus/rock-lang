@@ -8,9 +8,7 @@
 //! chain double-walking it. The node-executed checks are the correctness oracle.
 
 use std::process::Command;
-
-mod common;
-use common::{emit_user, ws_with};
+use crate::common::{emit_user, ws_with};
 
 fn node_available() -> bool {
     Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)

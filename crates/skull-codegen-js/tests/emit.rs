@@ -9,9 +9,7 @@
 //! fallback discipline that keeps the emitter honest as the subset grows.
 
 use skull_mir::lower::{lower_function, ScalarCtx};
-
-mod common;
-use common::{emit_scalar, lower_test_fn, stdlib_ws, ws_with};
+use crate::common::{emit_scalar, lower_test_fn, stdlib_ws, ws_with};
 
 // clamp: the returning-arms diamond -- every branch arm `return`s, so the
 // post-dominator is the virtual exit and the `if` has no fall-through.
