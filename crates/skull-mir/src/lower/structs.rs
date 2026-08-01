@@ -521,7 +521,7 @@ impl Builder<'_> {
             .into_iter()
             .enumerate()
             .map(|(i, part)| {
-                let field = names.get(i).copied().unwrap_or(name);
+                let field = *names.get(i).expect("a Group's parts are its nominal's declared fields");
                 (field, self.materialize_repr(part))
             })
             .collect();

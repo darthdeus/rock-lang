@@ -1092,7 +1092,11 @@ impl Builder<'_> {
             .into_iter()
             .enumerate()
             .map(|(i, p)| {
-                let fname = names.get(i).copied().unwrap_or(name);
+                // A Group's parts are the nominal's declared fields, so the two
+                // always line up. Naming a part after its STRUCT instead would
+                // emit a ctor field the type does not have, and duplicate it for
+                // every part -- fabricated identity, not a usable fallback.
+                let fname = *names.get(i).expect("a Group's parts are its nominal's declared fields");
                 (fname, self.pack(p))
             })
             .collect();
