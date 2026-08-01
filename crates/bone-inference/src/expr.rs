@@ -1898,6 +1898,22 @@ pub(crate) fn check_cast(
         ));
     }
 
+    // The same rule on the other side. A `_` in the target is an inference hole,
+    // so there is no written type to validate against: the relation would pass
+    // vacuously and the surrounding expectation would then bind the hole, which
+    // is how `let s: string = 42 as _` laundered a rejected pair.
+    if has_unbound_infer(gamma, to_r) {
+        let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot convert `{from_str}` to `{to_str}` with `as`: the target \
+                 is not a written type, and `as` validates against one -- name \
+                 the target type, or ascribe with `::` to infer it from context"
+            ),
+        ));
+    }
+
     // Explicit narrowing/widening between the two numeric builtins. `int -> float`
     // is also assignment-compatible; `float -> int` is admitted ONLY here, which
     // is what keeps it out of `::`.
