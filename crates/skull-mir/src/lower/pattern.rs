@@ -404,15 +404,15 @@ impl Builder<'_> {
         use bone_semantic::hir::VariantPayload;
         let en = enum_name?;
         let shape = flat_enum_shape(self.ws, en)?;
-        let FlatSlot::Leaves(vs) = shape.slots.get(i)? else { return None };
         let eid = self.ws.enums_by_name.get(&en)?;
         let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
         let v = ed.variants.iter().find(|v| v.name == variant)?;
         let VariantPayload::Tuple(tys) = &v.payload else { return None };
-        match static_ty(self.ws, *tys.get(i)?)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n == vs.name => Some(vs.clone()),
-            _ => None,
-        }
+        let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = static_ty(self.ws, *tys.get(i)?)?
+        else {
+            return None;
+        };
+        shape.position_shape(i, Some(n)).cloned()
     }
 
     /// The `width` slot values of a widened payload position, in leaf order.

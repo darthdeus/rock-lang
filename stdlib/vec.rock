@@ -15,7 +15,7 @@ nobox value Vec3 {
     z: float,
 }
 
-value Vec4 {
+nobox value Vec4 {
     x: float,
     y: float,
     z: float,

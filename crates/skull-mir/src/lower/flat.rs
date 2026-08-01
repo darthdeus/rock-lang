@@ -28,21 +28,20 @@ impl Builder<'_> {
                     VariantArgs::Tuple(range) => {
                         for (pos, a) in range.into_iter().enumerate() {
                             let off = shape.slot_offset(pos);
-                            match shape.slots.get(pos) {
-                                // Widened only for the variant that actually
-                                // carries the value: a sibling variant with an
-                                // ordinary payload at the same position occupies
-                                // the first slot and nil-pads the rest.
-                                Some(FlatSlot::Leaves(vs))
-                                    if self.nobox_value_name(a) == Some(vs.name) =>
-                                {
+                            // Widened only for THIS variant's own shape: a
+                            // sibling carrying an ordinary payload, or a `nobox`
+                            // value of another shape, addresses its own leading
+                            // slots and the rest of the position nil-pads.
+                            match shape.position_shape(pos, self.nobox_value_name(a)) {
+                                Some(vs) => {
+                                    let vs = vs.clone();
                                     let r = self.lower_expr_repr(a)?;
-                                    for (k, lv) in self.repr_to_leaves(&r, vs).into_iter().enumerate()
+                                    for (k, lv) in self.repr_to_leaves(&r, &vs).into_iter().enumerate()
                                     {
                                         slots[off + k] = Some(lv);
                                     }
                                 }
-                                _ => slots[off] = Some(self.lower_expr(a)?),
+                                None => slots[off] = Some(self.lower_expr(a)?),
                             }
                         }
                         Vec::new()
