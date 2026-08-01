@@ -14,7 +14,7 @@ use bone_semantic::semantic_passes::semantic_pass;
 /// Build a checked workspace from a single source string and return it plus the
 /// (sole) user module id.
 fn ws_of(src: &str) -> (Workspace, ModuleId) {
-    let module = skull_parser::parse_module(src, Ustr::from("<query-test>")).expect("parse_rock");
+    let module = skull_parser::parse_module_clean(src, Ustr::from("<query-test>")).expect("parse_rock");
     let ws = semantic_pass(&mut [module]).expect("semantic_pass");
     let mid = ws
         .modules

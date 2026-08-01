@@ -216,6 +216,7 @@ impl<'a> Parser<'a> {
             if self.at_end() {
                 break;
             }
+            let item_start = self.pos;
             match self.parse_item() {
                 Ok(item) => self.ast.items.push(item),
                 Err(e) => {
@@ -227,7 +228,7 @@ impl<'a> Parser<'a> {
                     // supported item start has a branch in `parse_item_inner`), so
                     // this stays empty for well-formed programs.
                     self.ast.recovery_errors.push(e);
-                    self.recover_to_next_item();
+                    self.recover_to_next_item(self.pos > item_start);
                 }
             }
         }
@@ -251,10 +252,15 @@ impl<'a> Parser<'a> {
     /// Skip a balanced span of tokens up to the next top-level `fn`. Used to
     /// step over unsupported items (and malformed `fn`s) without aborting
     /// the whole module.
-    fn recover_to_next_item(&mut self) {
+    /// `made_progress` says the failed item parse consumed at least one token, so
+    /// the loop is already guaranteed to advance. Only when it consumed NOTHING
+    /// must recovery force a token, and forcing it unconditionally is how a
+    /// neighbour's error ate a valid function: an item error detected AT an item
+    /// boundary leaves the parser on the next `fn`, and consuming that `fn` sent
+    /// the scan to the one after it.
+    fn recover_to_next_item(&mut self, made_progress: bool) {
         let mut depth: i32 = 0;
-        // Always consume at least one token so recovery makes progress.
-        if !self.at_end() {
+        if !made_progress && !self.at_end() {
             self.advance_tracking_depth(&mut depth);
         }
         while !self.at_end() {
@@ -937,8 +943,9 @@ impl<'a> Parser<'a> {
     /// Generic params + `(params)` + optional `-> ret` + body, shared by
     /// `parse_fn` and `parse_operator`. The body is `Rock` for a `{ }` block,
     /// `Inline(inline_backend, ..)` for an `= "..."` inline body, else
-    /// `extern_body` (a body-less extern decl) — `None` for the non-extern
-    /// callers, who never reach it.
+    /// `extern_body` (a body-less extern decl). `extern_body` is `None` for every
+    /// non-extern caller, and a missing body then REJECTS — a fn with no body is
+    /// not a foreign declaration.
     fn finish_fn_def(
         &mut self,
         name: Ident,
@@ -1022,16 +1029,29 @@ impl<'a> Parser<'a> {
                         self.advance();
                         s
                     }
-                    // Malformed inline body (not a string literal): parse-past for
-                    // recovery and keep an empty source.
+                    // Rock has no expression-bodied fn form. Parsing past this and
+                    // keeping an empty source emitted `function f(x) return end` --
+                    // a fn that type-checks and answers nil.
                     _ => {
-                        self.with_allow_literals(true, |p| p.parse_expr(0))?;
-                        Ustr::from("")
+                        return Err(self.err(
+                            "an `= <body>` function body must be a string literal (an inline \
+                             backend body); Rock has no expression-bodied fn form, use `{ .. }`",
+                        ))
                     }
                 };
                 FunctionBody::Inline(inline_backend, src)
             } else {
-                extern_body.unwrap_or(FunctionBody::ExternC)
+                // Only `extern fn` declares a body-less foreign symbol. Every other
+                // form reaching here is missing its body, and defaulting to
+                // `ExternC` made it a call to a Lua global that does not exist --
+                // accepted by the compiler, fatal at runtime.
+                let Some(eb) = extern_body else {
+                    return Err(self.err(
+                        "this function has no body: expected a block `{ .. }` or an inline \
+                         backend body `= \"..\"` (only `extern fn` may omit one)",
+                    ));
+                };
+                eb
             };
             self.eat(TokenKind::Semicolon);
             (body, Vec::new())

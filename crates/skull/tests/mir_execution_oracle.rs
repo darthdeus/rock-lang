@@ -21,7 +21,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
@@ -146,7 +146,7 @@ fn corpus_execution_oracle() {
         // assertions, rather than a placeholder "<test>".
         let modname = file.file_name().unwrap().to_string_lossy().to_string();
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let user = skull_parser::parse_module(&src, ustr::Ustr::from(modname.as_str())).ok()?;
+            let user = skull_parser::parse_module_clean(&src, ustr::Ustr::from(modname.as_str())).ok()?;
             let mut modules = STDLIB.clone();
             modules.push(user);
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).ok()?;

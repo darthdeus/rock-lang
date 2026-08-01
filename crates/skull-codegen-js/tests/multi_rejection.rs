@@ -41,8 +41,8 @@ fn reject_messages(src: &str) -> Vec<String> {
 #[test]
 fn every_failing_definition_is_reported_not_just_the_first() {
     let all = reject_messages(
-        "inline(lua) fn lua_one(x: int) -> int \"\"\" return x \"\"\"\n\
-         inline(lua) fn lua_two(x: int) -> int \"\"\" return x \"\"\"\n\
+        "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
+         inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn a(x: int) -> int { let v = lua_one(x); v + 1 }\n\
          fn b(x: int) -> int { let v = lua_two(x); v + 2 }\n\
          fn root(y: int) -> int { a(y) + b(y) }\n",
@@ -61,8 +61,8 @@ fn every_failing_definition_is_reported_not_just_the_first() {
 #[test]
 fn every_unmapped_callee_in_one_body_is_reported() {
     let all = reject_messages(
-        "inline(lua) fn lua_one(x: int) -> int \"\"\" return x \"\"\"\n\
-         inline(lua) fn lua_two(x: int) -> int \"\"\" return x \"\"\"\n\
+        "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
+         inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn root(y: int) -> int { lua_one(y) + lua_two(y) }\n",
     );
     for want in ["lua_one", "lua_two"] {
@@ -108,8 +108,8 @@ fn root(y: float) -> int { a(y) + b(y) }
 /// primary would be flaky rather than wrong.
 #[test]
 fn the_rejection_order_is_deterministic() {
-    const SRC: &str = "inline(lua) fn lua_one(x: int) -> int \"\"\" return x \"\"\"\n\
-         inline(lua) fn lua_two(x: int) -> int \"\"\" return x \"\"\"\n\
+    const SRC: &str = "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
+         inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn a(x: int) -> int { let v = lua_one(x); v + 1 }\n\
          fn b(x: int) -> int { let v = lua_two(x); v + 2 }\n\
          fn root(y: int) -> int { a(y) + b(y) }\n";
@@ -123,7 +123,7 @@ fn the_rejection_order_is_deterministic() {
 #[test]
 fn a_lone_rejection_has_no_siblings() {
     let all = reject_messages(
-        "inline(lua) fn lua_one(x: int) -> int \"\"\" return x \"\"\"\n\
+        "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn root(y: int) -> int { lua_one(y) }\n",
     );
     assert_eq!(all.len(), 1, "expected exactly one rejection, got:\n{}", all.join("\n"));

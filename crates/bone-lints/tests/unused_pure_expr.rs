@@ -5,7 +5,7 @@ use bone_lints::{filter_suppressed, unused_pure_exprs, UnusedPureExpr};
 use bone_semantic::prelude::*;
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from("<unused_pure_expr>")).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from("<unused_pure_expr>")).expect("parse")
 }
 
 fn findings(src: &str) -> Vec<UnusedPureExpr> {

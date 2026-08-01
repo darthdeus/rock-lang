@@ -10,7 +10,7 @@ use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::semantic_pass;
 
 fn index_of(src: &str) -> ReachabilityIndex {
-    let module = skull_parser::parse_module(src, Ustr::from("<reach-test>")).expect("parse");
+    let module = skull_parser::parse_module_clean(src, Ustr::from("<reach-test>")).expect("parse");
     let ws = semantic_pass(&mut [module]).expect("semantic_pass");
     ReachabilityIndex::build(&ws)
 }

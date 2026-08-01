@@ -5,7 +5,7 @@ use bone_lints::{backend_sibling_mismatches, BackendSiblingIssue, BackendSibling
 use bone_semantic::prelude::*;
 
 fn parse_named(src: &str, name: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from(name)).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from(name)).expect("parse")
 }
 
 fn findings(srcs: &[&str]) -> Vec<BackendSiblingMismatch> {
