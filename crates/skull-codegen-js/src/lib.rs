@@ -952,7 +952,7 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     off += attr_sizes[i];
   }
   gl.drawArrays(gl.TRIANGLES, 0, count);
-  __sw_mark_drawn();
+  __sw_mark_drawn(sh);
 }
 
 var __SW_IDENTITY = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
@@ -1328,9 +1328,10 @@ function __sw_bind_blocks(h) {
     if (b) { gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer); }
   }
 }
-// Stamped at each draw, not at bind: a program going current is not a draw.
-function __sw_mark_drawn() {
-  var sh = __SW.shaders[__SW.curShader];
+// Stamped at each draw with the SHADER THAT DRAW WENT THROUGH, not at bind and
+// not from `curShader`: `stone_sprite_draw_texture` falls back to a passed
+// handle when nothing is current, and a curShader-based stamp cannot see it.
+function __sw_mark_drawn(sh) {
   if (!sh || !sh.blocks) return;
   for (var i = 0; i < sh.blocks.length; i++) {
     if (sh.blocks[i]) sh.blocks[i].drawn = true;
@@ -1547,7 +1548,7 @@ function stone_draw_fullscreen_quad() {
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
-  __sw_mark_drawn();
+  __sw_mark_drawn(sh);
 }
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
@@ -1826,7 +1827,7 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
-  __sw_mark_drawn();
+  __sw_mark_drawn(sh2);
 }
 
 // --- audio (WebAudio; silent no-op in a no-AudioContext env) ---
