@@ -6,10 +6,10 @@ use ustr::ustr;
 use bone_core::{
     annotations::{validate_annotations, AnnoPos},
     hir::{
-        BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef, Expr,
-        Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern, RecordPatField,
-        Scope, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId, VariantArgs,
-        VariantPayload,
+        AsKind, BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef,
+        Expr, Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern,
+        RecordPatField, Scope, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId,
+        VariantArgs, VariantPayload,
     },
     prelude::*,
 };
@@ -1365,6 +1365,7 @@ pub fn lower_expr_value(
         ExprKind::As(inner, ty) => Expr::As {
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            kind: AsKind::Cast,
         },
 
         ExprKind::Index(base, index) => Expr::Index {
@@ -1507,6 +1508,7 @@ pub fn lower_expr_value(
         ExprKind::TypeAscription(inner, ty) => Expr::As {
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            kind: AsKind::Ascribe,
         },
 
         ExprKind::PreIncrement(inner) => Expr::IncDec {

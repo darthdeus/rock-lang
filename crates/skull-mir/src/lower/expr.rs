@@ -432,7 +432,7 @@ impl Builder<'_> {
 
             // `as` is identity at runtime EXCEPT `float as int`, which floors
             // (Lua numbers are all doubles) — mirrors rock-codegen.
-            Expr::As { value, target } => {
+            Expr::As { value, target, .. } => {
                 let v = self.lower_expr(value)?;
                 let to_int = matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int)));
                 let from_float =

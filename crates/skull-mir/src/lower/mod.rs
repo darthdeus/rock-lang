@@ -826,9 +826,10 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
         }
         Expr::Break => tag!(21),
         Expr::Continue => tag!(22),
-        Expr::As { value, target } => {
+        Expr::As { value, target, kind } => {
             tag!(23);
             target.hash(h);
+            kind.hash(h);
             go!(value);
         }
         Expr::TupleIndex { tuple, index } => {
