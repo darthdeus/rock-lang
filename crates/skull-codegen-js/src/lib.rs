@@ -929,10 +929,6 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     if (__SW.unitInt) __SW.unitInt[0] = false;
   }
   __sw_fix_stale_int_units(gl, sh);
-  var lc = __sw_uloc(sh, "uColor");
-  if (lc) gl.uniform4f(lc, 1, 1, 1, 1);
-  var ltr = __sw_uloc(sh, "uTransform");
-  if (ltr) gl.uniformMatrix4fv(ltr, false, __SW_IDENTITY);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
   gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count * stride), gl.STREAM_DRAW);
   var sum = 0;
@@ -997,7 +993,6 @@ function stone_set_camera(shader, ox, oy, scale) {
   gl.useProgram(sh.prog);
   var lp = __sw_uloc(sh, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
   var lv = __sw_uloc(sh, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, view);
-  var lt = __sw_uloc(sh, "uTransform"); if (lt) gl.uniformMatrix4fv(lt, false, __SW_IDENTITY);
   if (prev !== 0 && __SW.shaders[prev]) gl.useProgram(__SW.shaders[prev].prog);
 }
 function stone_reset_camera(shader) { stone_set_camera(shader, 0, 0, 1.0); }
@@ -1776,9 +1771,7 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
     var proj = new Float32Array([2 / wh[0], 0, 0, 0, 0, -2 / wh[1], 0, 0, 0, 0, -1, 0, -1, 1, 0, 1]);
     var lp = __sw_uloc(sh2, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
     var lv = __sw_uloc(sh2, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, __SW_IDENTITY);
-    var ltr2 = __sw_uloc(sh2, "uTransform"); if (ltr2) gl.uniformMatrix4fv(ltr2, false, __SW_IDENTITY);
   }
-  var lc2 = __sw_uloc(sh2, "uColor"); if (lc2) gl.uniform4f(lc2, 1, 1, 1, 1);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, t);
   var ltx = __sw_uloc(sh2, "uTexture"); if (ltx) gl.uniform1i(ltx, 0);

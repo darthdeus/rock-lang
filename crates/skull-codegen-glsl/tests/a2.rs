@@ -157,14 +157,12 @@ fn pipeline_emits_one_block_per_stage() {
         glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"),
         "got:\n{glsl}"
     );
-    // The VERTEX group stays loose until `@engine`: every A2 vertex group is
-    // engine-authored (three `Mat4`s built inside `stone_set_camera` from
-    // (ox, oy, scale) plus the render-target size), so Rock holds no `Mat4` to
-    // pack. The emitter supports the two-block form -- it is driver-verified in
-    // both profiles -- and this gate is the authorship boundary, not a
-    // limitation of the emission.
+    // The VERTEX group is loose for one more step. `@engine` now carries the
+    // engine-authored half (see `engine_block_*`), and this group flips to a
+    // block when the shaders that hold engine matrices are ported to it --
+    // sequencing, not a limitation of the emission.
     assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
-    assert!(!glsl.contains("uniform UiVertU"), "vertex block is gated:\n{glsl}");
+    assert!(!glsl.contains("uniform UiVertU"), "vertex block lands with the port:\n{glsl}");
     // Unnamed instance -- members stay bare globals, so bodies are unchanged.
     assert!(!glsl.contains("u.uSize"), "got:\n{glsl}");
 }
@@ -178,8 +176,8 @@ fn pipeline_scaffold_vertex_block() {
     assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 2) in vec4 aColor;"), "got:\n{glsl}");
-    // Vertex uniforms are loose until `@engine` -- see
-    // `pipeline_emits_one_block_per_stage` for why the boundary is authorship.
+    // Vertex uniforms are loose for one more step -- see
+    // `pipeline_emits_one_block_per_stage`.
     assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
     assert!(glsl.contains("uniform mat4 uView;"), "got:\n{glsl}");
     assert!(glsl.contains("uniform mat4 uTransform;"), "got:\n{glsl}");
@@ -1137,4 +1135,90 @@ fn emission_reports_no_slots_without_a_group() {
     )
     .expect("must emit");
     assert!(e.texture_slots.is_empty(), "got {:?}", e.texture_slots);
+}
+
+// --- @engine: the engine-owned block at binding 0 ----------------------------
+
+/// `@engine` is a distinct ROLE, not a second `@uniform`: the engine produces
+/// it, its lifetime is the pass rather than the draw, and it binds at index 0 so
+/// BOTH stages of a program name the same block.
+///
+/// Shaped like the sprite batch after the port: engine-owned camera/pass state
+/// in `EngineU`, and the shader's own vertex data (`uYBounds` is engine-owned so
+/// it moves in; grass keeps `entity_count` in its own group) beside it.
+const ENGINE_SRC: &str = r#"
+    value QuadVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4 }
+    value EngineU  { uProjection: Mat4, uView: Mat4, uYBounds: Vec2, uTime: float }
+    value GrassVertU { entity_count: int }
+    value UiVary   { position: Vec4, TexCoord: Vec2, Color: Vec4 }
+    value UiFragU  { uSize: Vec2, uRatio: float }
+
+    @shader(vertex)
+    fn e_vert(@attr a: QuadVert, @engine e: EngineU, @uniform u: GrassVertU) -> UiVary {
+        let clip = e.uProjection * e.uView * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
+        let k = clamp((a.aPos.y - e.uYBounds.x) / max(e.uYBounds.y - e.uYBounds.x, 0.0001), 0.0, 1.0)
+        return UiVary {
+            position: Vec4 { x: clip.x, y: clip.y, z: k + float(u.entity_count), w: clip.w },
+            TexCoord: a.aTexCoord,
+            Color: a.aColor,
+        }
+    }
+
+    @shader(fragment)
+    fn e_frag(vary: UiVary, @engine e: EngineU, @uniform u: UiFragU) -> Vec4 {
+        return Vec4 { x: vary.Color.x, y: e.uTime, z: u.uRatio, w: vary.Color.w }
+    }
+"#;
+
+#[test]
+fn engine_block_is_declared_in_both_stages() {
+    let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
+    let decl = "layout(std140) uniform EngineU {\n    mat4 uProjection;\n    mat4 uView;\n    vec2 uYBounds;\n    float uTime;\n};\n";
+    assert_eq!(glsl.matches(decl).count(), 2, "one per stage:\n{glsl}");
+    // Unnamed instance, so members stay bare globals in both bodies.
+    assert!(glsl.contains("uProjection * uView"), "got:\n{glsl}");
+    assert!(!glsl.contains("e.uProjection"), "got:\n{glsl}");
+}
+
+/// The shader's OWN group survives beside the engine block -- the case that
+/// rules out collapsing everything into one shared camera type (bitgun's grass
+/// mixes engine-owned camera/time with a game-owned `entity_count`).
+///
+/// Asserted on the FRAGMENT stage because the vertex stage's own group is still
+/// loose for one more step (see `vert_plan` in the emitter): the engine block
+/// and a shader-owned block coexist at distinct bindings either way, which is
+/// the property here.
+#[test]
+fn engine_block_coexists_with_a_shader_owned_block() {
+    let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
+    assert!(glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"), "got:\n{glsl}");
+    assert!(glsl.contains("layout(std140) uniform EngineU {"), "got:\n{glsl}");
+    // The vertex stage's own group is the one still loose.
+    assert!(glsl.contains("uniform int entity_count;"), "got:\n{glsl}");
+    // ...but the engine block's members never fall back to loose uniforms.
+    assert!(!glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
+}
+
+/// Position in `uniform_blocks` IS the binding index, so the engine block must
+/// come first: it is the one both stages share and the one the engine fills.
+#[test]
+fn engine_block_binds_at_index_zero() {
+    let (ws, mid) = workspace(ENGINE_SRC);
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, "e_vert", "e_frag", GlslProfile::Core330)
+        .expect("emit");
+    let names: Vec<&str> = em.uniform_blocks.iter().map(|b| b.struct_name.as_str()).collect();
+    // `GrassVertU` joins between these two when the vertex gate flips.
+    assert_eq!(names, vec!["EngineU", "UiFragU"], "binding order");
+}
+
+/// One block per PROGRAM, so the stages cannot name different engine groups --
+/// unlike `@uniform`, where differing per-stage types are the correct shape.
+#[test]
+fn engine_groups_must_agree_across_stages() {
+    let src = ENGINE_SRC.replace(
+        "fn e_frag(vary: UiVary, @engine e: EngineU",
+        "fn e_frag(vary: UiVary, @engine e: UiFragU",
+    );
+    let e = emit_pipeline(&src, "e_vert", "e_frag").expect_err("must reject");
+    assert!(e.contains("different @engine groups"), "got: {e}");
 }
