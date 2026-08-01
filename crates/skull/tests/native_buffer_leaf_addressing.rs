@@ -8,8 +8,7 @@
 //!
 //! Design + measurements: docs/native-buffer-leaf-addressing-plan.md.
 
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 /// A NESTED value field is the case that forces a ctor today: `gen_leaf_stores`
 /// (skull-transform) writes immediate fields into the slot but does not descend,

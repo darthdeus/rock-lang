@@ -6,9 +6,7 @@
 use std::process::Command;
 
 use skull_codegen_js::JS_MAP_ITER_RUNTIME;
-
-mod common;
-use common::{emit_user, ws_with};
+use crate::common::{emit_user, ws_with};
 
 #[test]
 fn map_iter_emits_map_next_and_get() {

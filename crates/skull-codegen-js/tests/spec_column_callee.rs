@@ -18,8 +18,7 @@ use std::process::Command;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 const SRC: &str = r#"
 nobox value NV2 { x: float, y: float }

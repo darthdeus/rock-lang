@@ -23,7 +23,6 @@
 //! `tests/nobox_concrete_nullable_ops.rock`; the positive value coverage is
 //! `tests/nobox_nullable_merge.rock`.
 
-mod common;
 
 /// The reported repro, `materialize` and all.
 const PHI_WITH_MATERIALIZE: &str = r#"
@@ -102,8 +101,8 @@ fn main() {
 "#;
 
 fn run(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
-    common::run_luajit(&format!("{lua}\nmain()\n"), tag)
+    let lua = crate::common::try_emit_module(src).expect("must emit");
+    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
 #[test]

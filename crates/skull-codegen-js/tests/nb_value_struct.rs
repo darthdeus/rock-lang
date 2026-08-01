@@ -6,9 +6,7 @@
 //! rejected any non-float/int ctype; it now flattens an all-float value struct
 //! to `new Float32Array(n * k)` (k = flattened float leaf count). A value
 //! struct with any non-float leaf still rejects.
-
-mod common;
-use common::{emit_user, emit_user_err, ws_with};
+use crate::common::{emit_user, emit_user_err, ws_with};
 
 const VERTEX: &str = r#"
 value Vertex {

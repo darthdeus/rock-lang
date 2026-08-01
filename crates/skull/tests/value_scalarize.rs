@@ -10,9 +10,7 @@
 //! (the mag `mag.grid.floors_walls` regression). The SROA forwarding pass in
 //! `skull-transform` forwards those reads to the ctor operands so DCE drops the
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 const VALUE_FIELD_LOOP: &str = r#"
 value FixVec2 { x: float, y: float }
@@ -350,10 +348,10 @@ fn main() {
 ///
 /// WHEN THIS FAILS the bug was fixed (or turned into a rejection): delete the
 /// packed-call-site and runtime-failure assertions, assert the emit either
-/// rejects or produces 321 via `common::run_luajit`, and update this comment.
+/// rejects or produces 321 via `crate::common::run_luajit`, and update this comment.
 #[test]
 fn unmarked_value_through_fn_value_miscompiles_sentinel() {
-    let lua = common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
+    let lua = crate::common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
         .expect("PINNED BEHAVIOR (BUG): the ABI disagreement is not rejected at compile time");
 
     // The DEFINITION scalarized: three leaf params.
@@ -405,7 +403,7 @@ fn non_colliding_underscore_field_still_scalarizes() {
         "the non-colliding leaves must stay distinct:\n{f}"
     );
     assert_eq!(
-        common::run_luajit(&format!("{lua}\nmain()\n"), "underscore_no_collision"),
+        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "underscore_no_collision"),
         "217",
         "7 + 1*10 + 2*100 -- a wrong leaf order or a duplicate param would shift this"
     );

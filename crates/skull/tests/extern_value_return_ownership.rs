@@ -26,8 +26,7 @@
 //! binary was correct 5/5, which is what identified the trigger -- but the
 //! unsoundness is in this wrapper, not in the marking.
 
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 /// The `value` struct must be FFI-clean for the out-param wrapper to apply.
 const EXTERN_VALUE_RETURN: &str = r#"
@@ -100,7 +99,7 @@ collectgarbage("collect")
 io.write(tostring(freed_while_referenced), " ", tostring(ref ~= nil), " ", tostring(owning_copy().a))
 "#;
     assert_eq!(
-        common::run_luajit(probe, "extern_value_return_refprobe"),
+        crate::common::run_luajit(probe, "extern_value_return_refprobe"),
         "true true 7",
         "LuaJIT no longer collects a referenced parent -- if this flipped, re-read \
          whether the owning copy is still required"

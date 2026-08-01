@@ -1,5 +1,4 @@
-mod common;
-use common::{
+use crate::common::{
     body_of_synthetic, emit_module, function_body, run_luajit, try_emit_module,
     try_emit_with_stdlib_module,
 };

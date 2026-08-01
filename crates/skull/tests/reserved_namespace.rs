@@ -16,9 +16,7 @@
 //! large is NOT reserved: the stdlib AND stone engine define top-level
 //! `@nomangle __rock_*` fns (`__rock_create_struct`, ...), which are globals,
 //! never body locals, so a `__rock_foo` def compiles.
-
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 /// POSITIVE CONTROL: `r` alone (no digits) is not a temp form.
 #[test]

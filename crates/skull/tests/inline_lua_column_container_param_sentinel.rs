@@ -36,7 +36,6 @@
 //! the routing to cover user bodies, flip the guarded probe to `1` and the
 //! unguarded one to `11`.
 
-mod common;
 
 /// Guarded: the body probes for `_data` before touching it, so the column case
 /// is a silent wrong ANSWER rather than a death.
@@ -113,14 +112,14 @@ fn main() {
 "#;
 
 fn run(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
-    common::run_luajit(&format!("{lua}\nmain()\n"), tag)
+    let lua = crate::common::try_emit_module(src).expect("must emit");
+    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
-/// `common::run_luajit` asserts a zero exit; this is the tolerant form, for the
+/// `crate::common::run_luajit` asserts a zero exit; this is the tolerant form, for the
 /// case whose whole point is that the program dies.
 fn run_expect_death(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
+    let lua = crate::common::try_emit_module(src).expect("must emit");
     let prog = format!("{lua}\nmain()\n");
     let path = std::env::temp_dir().join(format!("skull_test_{}_{tag}.lua", std::process::id()));
     std::fs::write(&path, &prog).expect("write program");

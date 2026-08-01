@@ -6,12 +6,11 @@
 //! paths that emit a tuple call; each reached the shared body and died on `_data`
 //! before the key was threaded through.
 
-mod common;
 
 use std::process::Command;
 
 fn run_ok(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
+    let lua = crate::common::try_emit_module(src).expect("must emit");
     let path = std::env::temp_dir().join(format!("skull_speckey_{}_{tag}.lua", std::process::id()));
     std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write program");
     let out = Command::new("luajit").arg(&path).output().expect("spawn luajit");

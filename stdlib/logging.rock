@@ -82,9 +82,20 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
 // 3-arg form takes a user-supplied site key (used by tests to share a
 // dedup key across physical lines).
 //
+// Both COUNT every occurrence, not just the ones they emit, and
+// log_suppression_summary() reports the totals at shutdown. Emitting once
+// and going quiet is right for a one-shot notice and actively harmful for
+// a condition that then persists: a sprite mesh dropping every add for ten
+// minutes looked identical to one that dropped a single add, which is how
+// a fracture silently losing its heat ribbon went unexplained for a whole
+// session (57e8c55a2). The counter is what distinguishes them, and the
+// summary surfaces it without anyone having to be watching the stream.
+//
 // State (Lua globals, lazily initialized):
-//   __stone_log_dedup    — set of sites that have already fired log_once
+//   __stone_log_dedup    — site -> occurrence count (log_once)
 //   __stone_log_throttle — site -> last-fire-timestamp (seconds)
+//   __stone_log_counts   — site -> occurrence count (log_throttled)
+//   __stone_log_sites    — site -> "CATEGORY|last message", for the summary
 
 @nomangle inline(lua) fn _log_once_impl(category: string, msg: string, site: string) = """
     __stone_log_init()
@@ -95,9 +106,44 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
     -- rock-log path doesn't gate it either.
     if 0 > __stone_log_level then return end
     if __stone_log_dedup == nil then __stone_log_dedup = {} end
-    if __stone_log_dedup[site] then return end
-    __stone_log_dedup[site] = true
+    if __stone_log_sites == nil then __stone_log_sites = {} end
+    local n = (__stone_log_dedup[site] or 0) + 1
+    __stone_log_dedup[site] = n
+    __stone_log_sites[site] = (category or "") .. "|" .. msg
+    if n > 1 then return end
     __stone_emit(0, category, msg)
+"""
+
+// Report every deduped/throttled site that fired more than once, with its
+// total. This is the safety net that makes the suppression above safe: a
+// site that fired 38k times is a live bug, and without the total it looks
+// exactly like one that fired once. Emitted at error level (the same class
+// as the sites it reports) so no log level can hide it. Idempotent.
+@nomangle inline(lua) fn log_suppression_summary() = """
+    __stone_log_init()
+    if __stone_log_summary_done then return end
+    __stone_log_summary_done = true
+
+    local rows = {}
+    local function collect(tbl)
+        if tbl == nil then return end
+        for site, n in pairs(tbl) do
+            if n > 1 then rows[#rows + 1] = { site = site, n = n } end
+        end
+    end
+    collect(__stone_log_dedup)
+    collect(__stone_log_counts)
+    if #rows == 0 then return end
+
+    table.sort(rows, function(a, b) return a.n > b.n end)
+    for i = 1, #rows do
+        local r = rows[i]
+        local rec = (__stone_log_sites or {})[r.site] or "|"
+        local bar = string.find(rec, "|", 1, true)
+        local cat = string.sub(rec, 1, bar - 1)
+        local msg = string.sub(rec, bar + 1)
+        __stone_emit(0, cat, "suppressed x" .. r.n .. " at " .. r.site .. ": " .. msg)
+    end
 """
 
 macro log_once(category: expr, msg: expr) {
@@ -115,6 +161,10 @@ macro log_once(category: expr, msg: expr, site: expr) {
     -- original `0 > level` semantics + tests/log_once.rock contract).
     if 0 > __stone_log_level then return end
     if __stone_log_throttle == nil then __stone_log_throttle = {} end
+    if __stone_log_counts == nil then __stone_log_counts = {} end
+    if __stone_log_sites == nil then __stone_log_sites = {} end
+    __stone_log_counts[site] = (__stone_log_counts[site] or 0) + 1
+    __stone_log_sites[site] = (category or "") .. "|" .. msg
     local last = __stone_log_throttle[site]
     if last ~= nil and (now_sec - last) < interval_sec then return end
     __stone_log_throttle[site] = now_sec

@@ -9,8 +9,7 @@
 
 use skull_mir::lower::{leaf_addr_plan, value_struct_all_float_leaf_count};
 
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }

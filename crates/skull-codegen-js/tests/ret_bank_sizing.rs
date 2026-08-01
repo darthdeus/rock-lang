@@ -18,8 +18,7 @@
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn emit(src: &str, root: &str) -> String {
     let ws = ws_with(src);

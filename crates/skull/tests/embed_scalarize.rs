@@ -10,8 +10,7 @@
 //! Behavioral coverage is `tests/embed_projection.rock`; this file pins the
 //! LAYOUT that makes the feature real, mirroring `tuple_scalarize.rs`.
 
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 const EMBED_LEAVES: &str = r#"
 struct Pt { x: int, y: int }

@@ -37,7 +37,6 @@
 //! the fix instead makes the shape REJECT, replace the runs with the `Err`
 //! assertion it produces.
 
-mod common;
 
 /// The repro: generic `co fn`, column-stored element.
 const GENERIC_CO_COLUMN: &str = r#"
@@ -132,8 +131,8 @@ fn main() {
 "#;
 
 fn run(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
-    common::run_luajit(&format!("{lua}\nmain()\n"), tag)
+    let lua = crate::common::try_emit_module(src).expect("must emit");
+    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
 #[test]

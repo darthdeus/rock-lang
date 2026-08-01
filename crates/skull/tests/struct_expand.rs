@@ -6,9 +6,7 @@
 //! emit + emitted-Lua substrings); the runtime-value + ordering contract is
 //! `tests/pass_uniforms_expand.rock`; the spanned rejections are also pinned in
 //! `tests/errors/struct_expand.rock.err`.
-
-mod common;
-use common::{emit_module, function_body, try_emit_module};
+use crate::common::{emit_module, function_body, try_emit_module};
 
 const BOXED: &str = r#"
 value V2 { x: float, y: float }

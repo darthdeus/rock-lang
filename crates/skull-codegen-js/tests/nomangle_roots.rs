@@ -9,9 +9,7 @@
 //! discipline): every emitted inline(js) body is scanned for identifiers
 //! naming a workspace `@nomangle` fn; matches are rooted and emitted under
 //! their BARE name (plain Rock lowered normally, inline(js) verbatim).
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 use skull_mir::lower::ScalarCtx;
 

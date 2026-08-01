@@ -1,7 +1,7 @@
 //! Production game builds must exclude test-only files (anything under a
 //! `tests/` directory: sims, @test fns). A compile error in a sim must not
 //! break `rock run/stone/frame/perf <game>`. See
-//! `docs/sims-out-of-game-build-plan.md`.
+//! `docs/sim-layering.md`.
 
 use std::path::PathBuf;
 

@@ -13,8 +13,7 @@
 //! The GC-tier ctor itself (one field, no Vec) is pinned by
 //! `nobox_nested_ctor.rs`.
 
-mod common;
-use common::{run_luajit, try_emit_module};
+use crate::common::{run_luajit, try_emit_module};
 
 /// `n` float fields after `pos`, so the element carries `n + 3` leaves
 /// (presence, `pos.x`, `pos.y`, then the floats).

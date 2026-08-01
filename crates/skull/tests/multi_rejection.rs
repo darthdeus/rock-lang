@@ -9,8 +9,7 @@
 //! whole class hidden behind another). Anyone counting sinks should be able to
 //! read the count off the output instead of instrumenting the verifier.
 
-mod common;
-use common::try_emit_module;
+use crate::common::try_emit_module;
 
 /// Every reported rejection: the primary plus its siblings (the shape every
 /// renderer expands).

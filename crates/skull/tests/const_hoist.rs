@@ -16,9 +16,7 @@
 //!
 //! Emitted in the function's OWN chunk (not shared scaffolding), so an incremental
 //! body-edit overlay carries the def with the function it serves.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()

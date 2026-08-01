@@ -9,9 +9,7 @@
 //! makes hoisting to a fn taking `s` sound: the runtime tests below fire a hook
 //! that reads a frame value and assert it still observes the right value, so a
 //! dropped capture would go red.
-
-mod common;
-use common::{emit_module, mangled_name, run_luajit};
+use crate::common::{emit_module, mangled_name, run_luajit};
 
 /// A co fn whose `on_killed` hook reads a frame local (`base`), derived from the
 /// ctor param `seed`. `main` exercises worker/resume/kill so all four fns

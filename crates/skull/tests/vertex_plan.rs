@@ -14,8 +14,7 @@
 //! it passes against a hardcoded table and is kept only to pin the numbers the
 //! bitgun call site uses.
 
-mod common;
-use common::ws_of;
+use crate::common::ws_of;
 use skull_mir::gpu_layout::AttrKind;
 use skull_mir::vertex_plan::{vertex_plan, AttrSlot, VertexPlan};
 use ustr::Ustr;

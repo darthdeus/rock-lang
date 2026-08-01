@@ -11,8 +11,7 @@
 //! `nobox_column_threshold.rs`. Design + work list:
 //! `docs/nobox-nested-ctor-plan.md`.
 
-mod common;
-use common::{function_body, run_luajit, try_emit_module};
+use crate::common::{function_body, run_luajit, try_emit_module};
 
 /// A global forces the outer struct to materialize with no `Vec` in the program,
 /// which is what separates this class from the `MAX_COLUMN_LEAVES` trigger.

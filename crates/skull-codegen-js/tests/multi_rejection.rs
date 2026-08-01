@@ -11,7 +11,6 @@
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
-mod common;
 
 fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
@@ -26,7 +25,7 @@ fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef 
 /// Every reported rejection for the closure rooted at `root`: the primary plus
 /// its siblings (the shape the driver's skip channel and every renderer expand).
 fn reject_messages(src: &str) -> Vec<String> {
-    let ws = common::ws_with(src);
+    let ws = crate::common::ws_with(src);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let root = test_fn_ref(&ws, "root");
     let err = skull_codegen_js::emit::emit_with_closure(&ws, &scx, &[(root, "root".to_string())])

@@ -9,8 +9,7 @@
 //!
 //! Design: docs/native-buffer-leaf-addressing-plan.md.
 
-mod common;
-use common::ws_of;
+use crate::common::ws_of;
 use skull_mir::lower::{value_leaf_layout_checked, value_leaf_paths_of, LeafSlot};
 use ustr::Ustr;
 

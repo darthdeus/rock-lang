@@ -9,8 +9,7 @@
 //! the divergence is visible as a skipped index rather than as a number that
 //! happens to agree.
 
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 /// `radius: float, direction: Vec2, resolution: float` -> std140 offsets
 /// 0, 8, 12, 16 -> element indices 0, 2, 3, 4. Index 1 is the four-byte hole

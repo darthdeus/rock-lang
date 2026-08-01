@@ -97,6 +97,36 @@ fn level_tag(l: log::Level) -> &'static str {
     }
 }
 
+/// SGR sequence for a level, or `""` when colour is off. Only error and
+/// warn get one: colouring every line is noise, and the point is that the
+/// two that need action stand out of a stream the game and the driver both
+/// write to.
+fn level_color(l: log::Level) -> &'static str {
+    match l {
+        log::Level::Error => "\x1b[1;31m", // bold red
+        log::Level::Warn => "\x1b[33m",    // yellow
+        _ => "",
+    }
+}
+
+const SGR_RESET: &str = "\x1b[0m";
+
+/// Colour is on only when stderr is a terminal, so piped/captured output
+/// (sim harnesses, `2>` redirects, CI) stays byte-clean. `ROCK_LOG_COLOR`
+/// = `always` | `never` | `auto` overrides; `NO_COLOR` (any value) forces
+/// off, per no-color.org.
+static COLOR: Lazy<bool> = Lazy::new(|| {
+    match std::env::var("ROCK_LOG_COLOR").as_deref().map(str::trim) {
+        Ok("always") | Ok("1") => return true,
+        Ok("never") | Ok("0") => return false,
+        _ => {}
+    }
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+});
+
 /// Body (without the time/level prefix). `target` is the deliberate
 /// `[CATEGORY]` only when it's one of our short tags; a module-path
 /// target (contains "::") or empty is third-party / untargeted and
@@ -157,11 +187,17 @@ impl log::Log for Logger {
         // (zero-dep, monotonic, matches the engine's [FPS]/[T] style;
         // wall-clock would need chrono). Level so errors/warns stand
         // out in the now-unified stream.
+        // The whole line is wrapped, not just the level tag -- the body is
+        // the part you read while scrolling for what went wrong.
+        let color = if *COLOR { level_color(record.level()) } else { "" };
+        let reset = if color.is_empty() { "" } else { SGR_RESET };
         eprintln!(
-            "[{:>8.3}s {}] {}",
+            "{}[{:>8.3}s {}] {}{}",
+            color,
             elapsed_secs(),
             level_tag(record.level()),
-            fmt_body(record.target(), record.args())
+            fmt_body(record.target(), record.args()),
+            reset
         );
     }
     fn flush(&self) {}

@@ -12,8 +12,7 @@ use std::process::Command;
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::FuncRef;
 
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }

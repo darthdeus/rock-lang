@@ -8,9 +8,7 @@
 //! sibling. When a program has a rock_shader pair, emit must force that sibling
 //! into the program under its bare `@nomangle` name (so the register lines
 //! resolve), or reject loudly if none is reachable.
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 use skull_mir::lower::ScalarCtx;
 

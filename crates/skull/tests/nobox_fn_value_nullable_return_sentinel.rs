@@ -23,7 +23,6 @@
 //! and no fn value anywhere -- this program was reaching it only through the
 //! missing slot.
 
-mod common;
 
 /// The repro, both arms -- the absent one no longer crashes.
 const RETURNED_LAMBDA: &str = r#"
@@ -91,8 +90,8 @@ fn main() {
 "#;
 
 fn run(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
-    common::run_luajit(&format!("{lua}\nmain()\n"), tag)
+    let lua = crate::common::try_emit_module(src).expect("must emit");
+    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
 #[test]

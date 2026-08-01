@@ -20,7 +20,6 @@
 //! Nothing here is `nobox` -- a plain unmarked `value` reproduces it, which is
 //! the wider exposure. The `struct` twin bounds the class.
 
-mod common;
 
 use std::process::Command;
 
@@ -38,7 +37,7 @@ fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
 }
 
 fn run_module(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
+    let lua = crate::common::try_emit_module(src).expect("must emit");
     let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), tag);
     assert!(ok, "program must run:\n{out}");
     out.trim().to_string()

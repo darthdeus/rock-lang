@@ -8,8 +8,7 @@
 //! and no diagnostic. Nothing in the emit path can return a `Result`, so the
 //! rejection goes through `CodegenCtx`'s sink and surfaces at the emit boundary.
 
-mod common;
-use common::ws_with_stdlib;
+use crate::common::ws_with_stdlib;
 use ustr::Ustr;
 
 const NESTED_NOBOX: &str = r#"

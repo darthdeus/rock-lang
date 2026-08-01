@@ -130,6 +130,12 @@ pub(crate) fn check_modules(
     if !macro_dupes.is_empty() {
         return Err(macro_dupes);
     }
+    // A macro argument label must name one of that macro's parameters -- also
+    // before expansion, which is what drops the labels.
+    let macro_labels = skull_parser::check_macro_call_labels(modules);
+    if !macro_labels.is_empty() {
+        return Err(macro_labels);
+    }
     let ws = bone_semantic::semantic_passes::semantic_pass(modules).map_err(|e| vec![e])?;
     let errs = body_errors(&ws);
     if !errs.is_empty() {

@@ -9,9 +9,7 @@
 //! Pre-P2 this test pinned the BOXED status quo (`V2_ct(..)` + `__nb_checked_set`);
 //! landing the feature flipped it to the zero-box assertions below (git `c42bd06ce`
 //! is the boxed-premise revision, for the before/after diff).
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 // A generic `@inline` set/get over a `NativeBuffer<T>`, instantiated at the value
 // struct `V2`. Mirrors the FlatVec push/get shape (`buf[len] = v` / `return buf[i]`).

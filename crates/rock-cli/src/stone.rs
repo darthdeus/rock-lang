@@ -431,32 +431,27 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
     let needs_video = rock_host::engine_build::game_requests_video(game_path)?
         && std::path::Path::new("stone-video").exists();
 
-    // Two invocations are required. A single `cargo build --lib --bin rock`
-    // builds only the `rock` bin (the `--bin` filter narrows targets across
-    // the whole selection), so stone-rs's cdylib never gets compiled and the
-    // subsequent stage_cdylib trips on a missing libstone_rs.dylib in fresh
-    // checkouts / worktrees. Build the engine libs (no --bin filter) first,
-    // then the compiler bin.
+    // `--lib --bin rock` selects both halves in ONE invocation: every default
+    // member's lib/cdylib target plus rock-cli's bin. The two build in
+    // parallel, and stone-rs's cdylib lands for the stage_cdylib below.
     //
-    // Neither call passes `-p`: resolver-2 unifies features over the SELECTED
-    // packages only, so a narrower selection is a distinct feature resolution
-    // and rebuilds every shared dep plus the whole compiler stack under a
-    // second -C metadata. Keeping both on the default-member selection matches
-    // the justfile's `cargo run --bin rock` and keeps one set of artifacts.
+    // No `-p`: resolver-2 unifies features over the SELECTED packages only, so
+    // a narrower selection is a distinct feature resolution and rebuilds every
+    // shared dep plus the whole compiler stack under a second -C metadata.
+    // Staying on the default-member selection keeps one set of artifacts,
+    // shared with rock.sh's build.
     info!("Building engine + compiler (cargo)...");
 
-    rock_host::engine_build::run_cargo(&["build", "--lib"], "Failed to build engine libs")?;
+    rock_host::engine_build::run_cargo(
+        &["build", "--lib", "--bin", "rock"],
+        "Failed to build engine + compiler",
+    )?;
     if needs_video {
         rock_host::engine_build::run_cargo(
             &["build", "-p", "stone-video"],
             "Failed to build stone-video",
         )?;
     }
-
-    rock_host::engine_build::run_cargo(
-        &["build", "--bin", "rock"],
-        "Failed to build rock compiler",
-    )?;
 
     rock_host::engine_build::stage_cdylib("stone_rs", "stone")?;
     if needs_video {

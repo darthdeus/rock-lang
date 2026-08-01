@@ -34,7 +34,6 @@
 //! unmarked does no leaf splitting at all and is only opportunistically
 //! scalarized by SROA afterwards. Only the nullability QUERY was duplicated.
 
-mod common;
 
 use std::process::Command;
 
@@ -52,7 +51,7 @@ fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
 }
 
 fn run_ok(src: &str, tag: &str) -> String {
-    let lua = common::try_emit_module(src).expect("must emit");
+    let lua = crate::common::try_emit_module(src).expect("must emit");
     let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), tag);
     assert!(ok, "program must run:\n{out}");
     out.trim().to_string()
@@ -146,7 +145,7 @@ fn main() {
     print("{thru(b, 1).x}")
 }
 "#;
-    let lua = common::try_emit_module(SRC).expect("must emit");
+    let lua = crate::common::try_emit_module(SRC).expect("must emit");
     let body = lua
         .split("function thru")
         .nth(1)

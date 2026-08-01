@@ -46,7 +46,7 @@ impl SourceFiles {
     /// `<pkg>/tests/sims/`, unit tests in `<pkg>/tests/`). Game builds
     /// (`rock run/stone/frame/perf/compile <game>`) use this so a compile error
     /// in a sim/test can't break the running game. Test/sim/lint/lsp paths use
-    /// the full set. See `docs/sims-out-of-game-build-plan.md`.
+    /// the full set. See `docs/sim-layering.md`.
     pub fn production_only(&self) -> SourceFiles {
         SourceFiles {
             files: self

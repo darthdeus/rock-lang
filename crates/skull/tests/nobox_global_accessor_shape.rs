@@ -31,7 +31,6 @@
 //! is what kept this lead untested (the registry block is appended only by the
 //! game emit paths).
 
-mod common;
 
 use skull_mir::lower::{nobox_global_accessor_shape, value_struct_is_gc, NoboxGlobalAccessorShape};
 use bone_semantic::inference::Workspace;
@@ -61,7 +60,7 @@ fn main() { print("{H.a}") }
 "#;
 
 fn accessor_of(src: &str, global: &str) -> (Workspace, NoboxGlobalAccessorShape) {
-    let ws = common::ws_with_stdlib(src);
+    let ws = crate::common::ws_with_stdlib(src);
     let shape = ws
         .modules
         .iter()
