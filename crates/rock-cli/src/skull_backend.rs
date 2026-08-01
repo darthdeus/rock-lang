@@ -893,7 +893,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         };
         // Game build: drop test-only files (tests/ dirs) so a broken sim/test
         // can't break the watched game output -- parity with the rock backend's
-        // is_game gate. See `docs/sims-out-of-game-build-plan.md`.
+        // is_game gate. See `docs/sim-layering.md`.
         let path_ref = std::path::Path::new(path);
         let sources = if path_ref.is_dir()
             && rock_host::project::is_game_project(path_ref).unwrap_or(false)
@@ -1134,7 +1134,7 @@ fn skull_emit_project(dir: &str) -> String {
     };
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
     // sim/test can't break the running game. See
-    // `docs/sims-out-of-game-build-plan.md`.
+    // `docs/sim-layering.md`.
     let sources = sources.production_only();
 
     // Compile core: parse(assemble) + bone check + skull codegen. Excludes
@@ -4637,7 +4637,7 @@ impl SkullStone {
     /// Initial build: warm the Session, `emit_full` -> game-shaped `main.lua`,
     /// wipe `incremental.lua`. Errors render against the project sources.
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
-    /// can't break the running game. See `docs/sims-out-of-game-build-plan.md`.
+    /// can't break the running game. See `docs/sim-layering.md`.
     pub fn init(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path) -> Result<SkullStone> {
         Self::init_impl(dir, main_path, incremental_path, false)
     }
