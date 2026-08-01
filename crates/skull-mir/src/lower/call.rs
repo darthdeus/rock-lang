@@ -525,9 +525,32 @@ impl Builder<'_> {
         &self,
         func: FuncRef,
         next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+        span: bone_semantic::prelude::Span,
     ) -> Result<Option<SpecKey>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
-        spec_key_from_next_generics(self.ws, inf, func, next_generics, self.spec_subst)
+        let key = spec_key_from_next_generics(self.ws, inf, func, next_generics, self.spec_subst)?;
+        let callee = &self.ws.module(func.module).functions[func.func];
+        if crate::ablation::enabled() && !callee.generics.is_empty() {
+            crate::ablation::note_examined();
+            if key.is_none() {
+                if let Some((category, detail)) = crate::lower::shape::ablation_next_decline(
+                    self.ws,
+                    inf,
+                    func,
+                    next_generics,
+                    self.spec_subst,
+                ) {
+                    crate::ablation::record(
+                        category,
+                        callee.name.as_str(),
+                        self.f.name.as_str(),
+                        span,
+                        detail,
+                    );
+                }
+            }
+        }
+        Ok(key)
     }
 
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar

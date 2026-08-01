@@ -196,7 +196,15 @@ impl Builder<'_> {
         // agree about how many values come back.
         let spec = match &info.next {
             BoundNext::Concrete { func: (m, f), next_generics, .. } => self
-                .next_call_spec(FuncRef { module: *m, func: *f }, next_generics)?
+                .next_call_spec(
+                    FuncRef { module: *m, func: *f },
+                    next_generics,
+                    self.body
+                        .expr_spans
+                        .get(iter_expr)
+                        .copied()
+                        .unwrap_or(self.ws.module(*m).functions[*f].name_span),
+                )?
                 .filter(|k| {
                     !self.in_unspliced_ctx
                         || spec_key_has_target_storage(self.ws, k, self.scx.target)

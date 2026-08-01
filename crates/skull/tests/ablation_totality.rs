@@ -250,3 +250,57 @@ fn main() {
         "an ordinary nested container was misfiled as polymorphic growth: {growth:?}"
     );
 }
+
+/// A generic call whose binding is a valid type `ReifiedType` cannot represent
+/// (`unit`, a function type, `any`) must produce a classified fatal.
+///
+/// It does not today: `compute_spec_from_bindings` pushes `None` into the key
+/// for such a slot and the ablation arm returns that PARTIAL key as a successful
+/// specialization, so `call_spec` never reaches the decline classifier -- and an
+/// all-`None` key maps straight back to the shared body (`spec_fn_name`). Plan
+/// S 2a's `f<Vec2, unit>` / `f<Vec2, any>` / `f<Vec2, fn(int)->int` collision,
+/// realized INSIDE the mode whose whole job is to reject shared generic bodies.
+#[test]
+fn a_binding_absent_from_reifiedtype_is_a_classified_fatal() {
+    let _g = ModeGuard::on();
+    let fatals = fatals_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn nothing() {}
+fn twice(n: int) -> int { return n * 2 }
+fn main() {
+    let u = ident(nothing())
+    let a: any = 1
+    let b = ident(a)
+    let f: fn(int) -> int = twice
+    let g = ident(f)
+}
+"#,
+    );
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();
+    assert!(
+        !hit.is_empty(),
+        "a generic call at unit / any / a function type produced NO fatal -- it rode a \
+         partial key to the shared body; got {:?}",
+        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+    );
+    let sites: std::collections::BTreeSet<(ustr::Ustr, (usize, usize))> =
+        hit.iter().map(|f| (f.span.file, f.span.offset_range)).collect();
+    assert_eq!(sites.len(), 3, "expected one fatal SITE per unrepresentable binding; got {hit:?}");
+    for f in &hit {
+        assert_eq!(
+            f.category,
+            FatalCategory::UnsupportedSurface,
+            "a VALID type `ReifiedType` cannot represent is a surface gap, not a missing \
+             record: the graph edge exists and bone recorded the binding"
+        );
+    }
+    let rendered: std::collections::BTreeSet<&str> =
+        hit.iter().map(|f| f.detail.as_str()).collect();
+    assert_eq!(
+        rendered.len(),
+        3,
+        "the three bindings must be DISTINGUISHED by the detail -- a shared detail would \
+         mean the classifier is not reading the type; got {rendered:?}"
+    );
+}

@@ -1720,25 +1720,72 @@ pub(crate) fn ablation_decline(
             ),
         ));
     }
-    // A binding that does not reify leaves a `None` slot: the key is PARTIAL, so
-    // it names a family of instantiations rather than one.
-    for (g, b) in f.generics.iter().zip(bindings) {
+    for g in &f.generics {
         if !matches!(ty_node(ws, inf, *g), Some(TypeExpr::Generic(..))) {
             return Some((
                 C::CompilerInvariant,
                 "a declared generic is not a generic type variable".to_string(),
             ));
         }
-        if reify_type(ws, inf, *b, enclosing).is_none() {
-            return Some((
-                C::MissingGraphEdge,
-                "a generic binding does not reify, leaving a PARTIAL key that names a \
-                 family of instantiations rather than one"
-                    .to_string(),
-            ));
-        }
     }
-    None
+    ablation_partial_key_decline(ws, inf, bindings, enclosing)
+}
+
+/// Why a binding list cannot produce a COMPLETE [`SpecKey`] -- or `None` when
+/// every slot reifies and the key names exactly one instantiation.
+///
+/// A slot `reify_type` answers `None` for is not one thing. [`ReifiedType`] is
+/// PARTIAL (plan S 2a): it has no arm for valid `any`, unit, never or function
+/// types, and it also answers `None` for genuine compiler states. Reporting both
+/// as "the graph is missing a record" sends Stage 2 to add a record for a call
+/// whose record already exists, and hides that the defect is the KEY.
+///
+/// [`crate::monoty::MonoArena`] is the total converter, so it is the
+/// discriminant: a slot it CAN convert is a valid type the current identity
+/// mechanism has no name for (plan S 2b, "valid type absent from `ReifiedType`
+/// -> TOTAL `MonoTy`; never a fallback"), and one it cannot carries its own
+/// reason.
+pub(crate) fn ablation_partial_key_decline(
+    ws: &Workspace,
+    inf: &BodyInference,
+    bindings: &[TyId],
+    enclosing: &SpecSubst,
+) -> Option<(crate::ablation::FatalCategory, String)> {
+    use crate::ablation::FatalCategory as C;
+    use crate::monoty::{MonoArena, MonoSubst, MonoTyReason};
+    let b = *bindings.iter().find(|b| reify_type(ws, inf, **b, enclosing).is_none())?;
+    let mut arena = MonoArena::new();
+    let subst: MonoSubst =
+        enclosing.iter().map(|(v, t)| (*v, arena.intern_reified(t))).collect();
+    Some(match arena.convert(ws, inf, b, &subst) {
+        Ok(id) => (
+            C::UnsupportedSurface,
+            format!(
+                "a binding of `{}` is a VALID type that `ReifiedType` cannot represent \
+                 (plan S 2a), so its key slot is `None`: the call would ride a PARTIAL key \
+                 naming a family of instantiations rather than one",
+                arena.render(id)
+            ),
+        ),
+        // The enclosing instance never named this generic, so the caller itself
+        // is a shared generic body -- a graph gap, not a key gap.
+        Err(MonoTyReason::UnboundGeneric(name)) => (
+            C::MissingGraphEdge,
+            format!(
+                "the binding names generic `{name}`, absent from the enclosing \
+                 substitution: this call is being lowered inside a SHARED generic body, so \
+                 no instantiation exists to key on"
+            ),
+        ),
+        Err(r) => (
+            C::CompilerInvariant,
+            format!(
+                "a generic binding is neither reifiable nor convertible ({}): inference \
+                 state, not a language surface",
+                r.bucket()
+            ),
+        ),
+    })
 }
 
 /// [`compute_call_spec`] against an explicit binding list instead of a call
@@ -1775,6 +1822,7 @@ pub(crate) fn compute_spec_from_bindings(
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
     let mut subst = SpecSubst::new();
     let mut any_value = false;
+    let mut complete = true;
     for (g, b) in f.generics.iter().zip(bindings) {
         let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
             return Err(CompilerError::new_with_label(
@@ -1791,14 +1839,24 @@ pub(crate) fn compute_spec_from_bindings(
                 subst.insert(var, ty.clone());
                 key.push(Some(ty));
             }
-            None => key.push(None),
+            None => {
+                key.push(None);
+                complete = false;
+            }
         }
     }
     // Stage-0e: `any_value` is the conditional trigger -- specialize only when
     // some binding names a value struct. Totality has no such condition, so the
-    // ablation keeps every key it could build.
+    // ablation keeps every COMPLETE key.
+    //
+    // A partial key is not a specialization. Every `None` slot maps back to the
+    // shared body through `spec_fn_name`, so returning one here would report a
+    // shared generic body as a success and skip the decline classifier entirely
+    // -- the mode's own blind spot, and exactly the uninterpretable result plan
+    // S 0f forbids ("dropping `any_value` with partial keys"). The default path
+    // below is untouched: it still accepts a partial key when `any_value` holds.
     if crate::ablation::enabled() {
-        return Ok(Some((key, subst)));
+        return Ok(complete.then_some((key, subst)));
     }
     Ok(any_value.then_some((key, subst)))
 }
@@ -1828,6 +1886,46 @@ pub fn spec_key_from_next_generics(
         bindings.push(bound);
     }
     Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
+}
+
+/// [`ablation_decline`] for the for-protocol `next` witness, whose bindings come
+/// from `next_generics` rather than a call expr.
+///
+/// This path had NO classifier: [`spec_key_from_next_generics`] answered `None`
+/// for an unbound witness generic and the call took the shared body with nothing
+/// recorded. Under totality that is a fatal like any other, and leaving it
+/// silent is how the census under-reports the very witness gap S 0e is meant to
+/// price.
+pub(crate) fn ablation_next_decline(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+    enclosing: &SpecSubst,
+) -> Option<(crate::ablation::FatalCategory, String)> {
+    use crate::ablation::FatalCategory as C;
+    let f = &ws.module(func.module).functions[func.func];
+    let mut bindings = Vec::with_capacity(f.generics.len());
+    for generic in &f.generics {
+        let Some(TypeExpr::Generic(var, name)) = ty_node(ws, inf, *generic) else {
+            return Some((
+                C::CompilerInvariant,
+                "a declared generic is not a generic type variable".to_string(),
+            ));
+        };
+        let Some(bound) = next_generics.get(&var).copied() else {
+            return Some((
+                C::MissingGraphEdge,
+                format!(
+                    "the iterator witness records no binding for generic `{name}`: bone \
+                     records `next_generics` only for what the `next` bound itself names \
+                     (plan S 12)"
+                ),
+            ));
+        };
+        bindings.push(bound);
+    }
+    ablation_partial_key_decline(ws, inf, &bindings, enclosing)
 }
 
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`

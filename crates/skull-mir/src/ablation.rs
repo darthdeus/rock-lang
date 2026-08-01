@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use bone_semantic::prelude::Span;
+use ustr::Ustr;
 
 /// The five S 0e categories. **There is deliberately no `Other`/`Misc` variant**
 /// -- S 0g requires every fatal to land in exactly one category, and an escape
@@ -162,20 +163,55 @@ pub fn clear() {
     registry().lock().expect("ablation registry poisoned").clear();
 }
 
-/// Fatals collapsed to `(category, callee, caller)` with a count and one
-/// representative span.
+/// A record's CALL SITE: the source position, which is what makes two records
+/// the same call rather than the same kind of call.
+fn site_key(f: &Fatal) -> (Ustr, (usize, usize)) {
+    (f.span.file, f.span.offset_range)
+}
+
+/// Distinct call SITES across all categories.
 ///
-/// The corpus produces one record per CALL SITE, and a single generic stdlib fn
-/// called from 300 places is one defect, not 300. Reporting raw counts would
-/// price the taxonomy by call frequency instead of by distinct cause.
+/// The registry holds one record per QUERY, not per call: `call_spec` is
+/// consulted several times for one call site (the lowering itself, the
+/// target-storage narrowing in `call_spec_for_target`, the tuple-return shape in
+/// `call_ret_tuple_shape`), and each consultation that declines records again.
+/// Counting records prices a call site by how many consumers happen to ask about
+/// it, which is a property of the compiler's internal structure and not of the
+/// corpus.
+pub fn distinct_sites(fatals: &[Fatal]) -> usize {
+    fatals.iter().map(site_key).collect::<std::collections::BTreeSet<_>>().len()
+}
+
+/// Distinct callee NAMES per category. A category's pair count and its callee
+/// count answer different questions -- 578 pairs over 23 callees is 23 things to
+/// specify, not 578 -- and reporting only one of them is how a declarations
+/// number and a pairs number get quoted for each other.
+pub fn callees_by_category(fatals: &[Fatal]) -> std::collections::BTreeMap<FatalCategory, usize> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut by: BTreeMap<FatalCategory, BTreeSet<&str>> = BTreeMap::new();
+    for f in fatals {
+        by.entry(f.category).or_default().insert(f.callee.as_str());
+    }
+    by.into_iter().map(|(c, s)| (c, s.len())).collect()
+}
+
+/// Fatals collapsed to `(category, callee, caller)` with a distinct-SITE count
+/// and one representative span.
+///
+/// A single generic stdlib fn called from 300 places is one defect, not 300, so
+/// the taxonomy is priced by distinct cause. The count carried alongside is
+/// distinct sites (see [`distinct_sites`]) rather than raw records.
 pub fn distinct(fatals: &[Fatal]) -> Vec<(FatalCategory, String, String, usize, Span)> {
-    use std::collections::BTreeMap;
-    let mut by: BTreeMap<(FatalCategory, String, String), (usize, Span)> = BTreeMap::new();
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut by: BTreeMap<
+        (FatalCategory, String, String),
+        (BTreeSet<(Ustr, (usize, usize))>, Span),
+    > = BTreeMap::new();
     for f in fatals {
         let e = by
             .entry((f.category, f.callee.clone(), f.caller.clone()))
-            .or_insert((0, f.span));
-        e.0 += 1;
+            .or_insert_with(|| (BTreeSet::new(), f.span));
+        e.0.insert(site_key(f));
     }
-    by.into_iter().map(|((c, callee, caller), (n, s))| (c, callee, caller, n, s)).collect()
+    by.into_iter().map(|((c, callee, caller), (n, s))| (c, callee, caller, n.len(), s)).collect()
 }

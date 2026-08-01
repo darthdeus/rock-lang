@@ -1,5 +1,7 @@
 //! `MonoTy` -- the TOTAL logical type (`docs/monomorphization-plan.md` Stage 0c,
-//! Stage 1). Stage-0 probe: nothing in production emission calls this.
+//! Stage 1). Stage-0 probe: nothing in production emission calls this. The
+//! Stage-0e ablation does -- it is the discriminant for why a binding failed to
+//! reify, which is a question only a TOTAL converter can answer.
 //!
 //! It exists because [`ReifiedType`](crate::lower::shape::ReifiedType) is
 //! PARTIAL. That tree answers `None` for valid `any`, unit, never and function
@@ -252,6 +254,42 @@ impl MonoArena {
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
         h
+    }
+
+    /// Lift an already-reified binding into the arena.
+    ///
+    /// Total in this direction by construction: `ReifiedType` is a strict subset
+    /// of `MonoTy`. It exists so a classification of why `reify_type` FAILED can
+    /// run under a substitution faithful to the one `reify_type` consulted --
+    /// without it, an enclosing generic that reifies fine would come back
+    /// `UnboundGeneric` and a `(T, unit)` binding would be blamed on `T`.
+    pub fn intern_reified(&mut self, t: &crate::lower::ReifiedType) -> MonoTyId {
+        use crate::lower::{ReifiedCtor, ReifiedType};
+        let mono = match t {
+            ReifiedType::Prim("int") => MonoTy::Int,
+            ReifiedType::Prim("float") => MonoTy::Float,
+            ReifiedType::Prim("bool") => MonoTy::Bool,
+            ReifiedType::Prim("string") => MonoTy::String,
+            // `reify_type` mints exactly the four above; a fifth would be a new
+            // arm on the partial tree, which plan S 19b forbids.
+            ReifiedType::Prim(other) => MonoTy::App {
+                ctor: MonoCtor::Nominal(Ustr::from(other)),
+                params: Vec::new(),
+            },
+            ReifiedType::Nullable(inner) => MonoTy::Nullable(self.intern_reified(inner)),
+            ReifiedType::Tuple(parts) => {
+                MonoTy::Tuple(parts.iter().map(|p| self.intern_reified(p)).collect())
+            }
+            ReifiedType::App { ctor, params } => MonoTy::App {
+                ctor: match ctor {
+                    ReifiedCtor::Array => MonoCtor::Array,
+                    ReifiedCtor::Map => MonoCtor::Map,
+                    ReifiedCtor::Nominal(n) => MonoCtor::Nominal(*n),
+                },
+                params: params.iter().map(|p| self.intern_reified(p)).collect(),
+            },
+        };
+        self.intern(mono)
     }
 
     /// Convert an inferred `TyId` to its total logical type.

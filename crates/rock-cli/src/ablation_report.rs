@@ -54,13 +54,23 @@ pub fn report(label: &str) -> bool {
         e.0 += 1;
         e.1 += n;
     }
-    println!("| category | distinct (callee x caller) | call sites |");
-    println!("|---|---:|---:|");
+    // Three units, because they answer three questions and quoting one for
+    // another is how "578 pairs" became "578 declarations" in the S 0e summary:
+    // pairs price the graph, sites price the corpus, callees price the SPEC work.
+    let callees = ablation::callees_by_category(&fatals);
+    println!("| category | distinct (callee x caller) | call sites | unique callees |");
+    println!("|---|---:|---:|---:|");
     for (c, (d, n)) in &by_cat {
-        println!("| `{}` | {d} | {n} |", c.name());
+        println!("| `{}` | {d} | {n} | {} |", c.name(), callees.get(c).copied().unwrap_or(0));
     }
     println!();
-    println!("total: {} distinct, {} call sites", distinct.len(), fatals.len());
+    println!(
+        "total: {} distinct pairs, {} call sites, {} unique callees ({} raw records)",
+        distinct.len(),
+        ablation::distinct_sites(&fatals),
+        fatals.iter().map(|f| f.callee.as_str()).collect::<std::collections::BTreeSet<_>>().len(),
+        fatals.len(),
+    );
     println!();
 
     // Per category, the widest offenders first: a fn reached from 300 call sites
