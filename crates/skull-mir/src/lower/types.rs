@@ -523,10 +523,20 @@ impl Builder<'_> {
     pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         let node = self.raw_ty_node(ty)?;
         // In a specialized instantiation, a generic param resolves to its concrete
-        // leaf so all downstream type-driven lowering (field projection, container
-        // element, scalar shape) sees the real type. Synthesized leaves carry no
-        // App params -- v0 specializes leaf types only -- so no consumer indexes
-        // into `new_empty()`.
+        // type so all downstream type-driven lowering (field projection, container
+        // element, scalar shape) sees the real type.
+        //
+        // The substituted node is LOSSY and the binding is NOT restricted to
+        // leaves: 29.6% of substituted reads carry a tuple, a nullable, or an
+        // application with arguments (`Vec<Vec2>`, `Shape<Entity<Prefab>?>`),
+        // whose children `mono_type_node` erases to `new_empty()` -- measured in
+        // `docs/mono-adapter-census.md`. What holds is narrower and is the reason
+        // this is sound: every consumer that fires reads a CONSTRUCTOR or a
+        // NOMINAL from the answer, and the one site that would index an erased
+        // parameter range (`vec_column_elem_of`'s container read) is not reached.
+        // Adding a consumer that reads a substituted application's arguments, or
+        // a tuple's slots, breaks that -- read the binding directly instead, as
+        // `tyid_tuple_ret_shape` and `body_ret_slot` do.
         if let TypeExpr::Generic(var, _) = node {
             // A tuple binding has no node to stand for it, and answers `None`.
             // Falling through to the generic is exactly what this saw before
