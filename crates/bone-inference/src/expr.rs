@@ -472,8 +472,17 @@ pub fn infer_expr_used(
         }
 
         Expr::As { value, target } => {
-            infer_expr(c, gamma, *value)?;
-            resolve(gamma, *target, expr_span)
+            let value_ty = infer_expr(c, gamma, *value)?;
+            let target = resolve(gamma, *target, expr_span);
+            // A bare `null` carries its own fresh var, and a cast types the
+            // surrounding expression only -- nothing else ever binds it. Tie it
+            // to the ascribed type so the literal has a concrete type too.
+            if matches!(c.body.expr_arena[*value], Expr::Null)
+                && matches!(gamma.get(target), TypeExpr::Nullable(_))
+            {
+                unify(gamma, value_ty, target, c.body.expr_spans[*value])?;
+            }
+            target
         }
 
         Expr::Lambda { params, body } => {
