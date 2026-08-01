@@ -369,33 +369,21 @@ fn generated_composition_to_depth_three_is_total() {
 
 // -- what the corpus census found ------------------------------------------
 
-/// The whole `unresolved-infer` bucket of the closed-world census
-/// (`rock mono-ty-census`, 112 occurrences) is this construct: a bare `null`
-/// inside a `::` cast keeps its OWN inference variable, which nothing ever
-/// binds -- the cast types the surrounding expression, not the literal.
-///
-/// It is not a defect in the converter and not an invalid program: it
-/// type-checks and runs. It is a premise test for plan Stage 1, which says
-/// "resolve every `Infer` before conversion; reject any unresolved variable".
-/// A valid program reaches that rule today, so Stage 1 must either resolve this
-/// literal from its cast or carve it out -- deciding that AFTER the converter is
-/// load-bearing is how a valid program becomes a rejection.
-///
-/// Goes RED if inference starts binding the literal, which is the fix. Update
-/// the census doc and this comment together when it does.
+/// A bare `null` under a `::` ascription is bound to the ascribed type, so the
+/// literal converts like any other expression. This is the whole
+/// `unresolved-infer` bucket the closed-world census once reported; plan Stage 1
+/// ("resolve every `Infer` before conversion; reject any unresolved variable")
+/// therefore rejects no valid program on this construct.
 #[test]
-fn null_in_a_cast_leaves_an_unresolved_infer() {
+fn null_in_a_cast_binds_to_the_ascribed_type() {
     let (ws, mid) = check(
         "struct Prefab { n: int }\nfn main() { let e = (null :: Prefab?) }",
     );
     let mut arena = MonoArena::new();
-    let (_, bad) = convert_module(&ws, mid, &mut arena);
+    let (ok, bad) = convert_module(&ws, mid, &mut arena);
+    assert!(bad.is_empty(), "expected total conversion, got failures: {bad:?}");
     assert!(
-        bad.iter().any(|r| r.bucket() == "unresolved-infer"),
-        "expected an unresolved infer var from `(null :: Prefab?)`, got {bad:?}"
-    );
-    assert!(
-        bad.iter().all(|r| r.bucket() == "unresolved-infer"),
-        "only the null literal should fail here, got {bad:?}"
+        ok.iter().any(|r| r == "Prefab?"),
+        "expected the null literal to convert as `Prefab?`, got {ok:?}"
     );
 }
