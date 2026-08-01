@@ -952,6 +952,7 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     off += attr_sizes[i];
   }
   gl.drawArrays(gl.TRIANGLES, 0, count);
+  __sw_mark_drawn();
 }
 
 var __SW_IDENTITY = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
@@ -1324,7 +1325,15 @@ function __sw_bind_blocks(h) {
   if (!gl || !sh || !sh.blocks) return;
   for (var i = 0; i < sh.blocks.length; i++) {
     var b = sh.blocks[i];
-    if (b) { b.madeCurrent = true; gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer); }
+    if (b) { gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer); }
+  }
+}
+// Stamped at each draw, not at bind: a program going current is not a draw.
+function __sw_mark_drawn() {
+  var sh = __SW.shaders[__SW.curShader];
+  if (!sh || !sh.blocks) return;
+  for (var i = 0; i < sh.blocks.length; i++) {
+    if (sh.blocks[i]) sh.blocks[i].drawn = true;
   }
 }
 // A block whose program is drawn with but which nothing ever fills reads zeroes
@@ -1337,7 +1346,7 @@ function __sw_report_unfilled_blocks() {
     if (!sh || !sh.blocks) continue;
     for (var i = 0; i < sh.blocks.length; i++) {
       var b = sh.blocks[i];
-      if (!b || b.uploaded || !b.madeCurrent || b.reported) continue;
+      if (!b || b.uploaded || !b.drawn || b.reported) continue;
       b.reported = true;
       __sw_log_once("shader `" + b.key + "` was drawn with but nothing ever filled its uniform block `" +
         b.name + "` (binding " + b.binding + ") -- it is reading zeroes.");
@@ -1351,7 +1360,7 @@ function stone_unfilled_uniform_block_count() {
     if (!sh || !sh.blocks) continue;
     for (var i = 0; i < sh.blocks.length; i++) {
       var b = sh.blocks[i];
-      if (b && b.madeCurrent && !b.uploaded) n++;
+      if (b && b.drawn && !b.uploaded) n++;
     }
   }
   return n;
@@ -1377,7 +1386,7 @@ function stone_shader_bind_uniform_block(h, key, name, binding, size, fingerprin
   // program's stale tail is dropped, since registration walks bindings from 0.
   if (binding < sh.blocks.length && sh.blocks[binding]) gl.deleteBuffer(sh.blocks[binding].buffer);
   sh.blocks.length = binding;
-  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint, key: key, name: name, uploaded: false, madeCurrent: false, reported: false };
+  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint, key: key, name: name, uploaded: false, drawn: false, reported: false };
   return true;
 }
 function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
@@ -1538,6 +1547,7 @@ function stone_draw_fullscreen_quad() {
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn();
 }
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
@@ -1816,6 +1826,7 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn();
 }
 
 // --- audio (WebAudio; silent no-op in a no-AudioContext env) ---
