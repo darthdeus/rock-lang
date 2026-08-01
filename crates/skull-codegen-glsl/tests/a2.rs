@@ -152,19 +152,21 @@ const UI_SRC: &str = r#"
 #[test]
 fn pipeline_emits_one_block_per_stage() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    assert!(
-        glsl.contains(
-            "layout(std140) uniform UiVertU {\n    mat4 uProjection;\n    mat4 uView;\n    mat4 uTransform;\n};\n"
-        ),
-        "got:\n{glsl}"
-    );
+    // The FRAGMENT group is game-authored, so it is a block today.
     assert!(
         glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"),
         "got:\n{glsl}"
     );
-    assert!(!glsl.contains("uniform mat4 uProjection;"), "no loose member survives:\n{glsl}");
+    // The VERTEX group stays loose until `@engine`: every A2 vertex group is
+    // engine-authored (three `Mat4`s built inside `stone_set_camera` from
+    // (ox, oy, scale) plus the render-target size), so Rock holds no `Mat4` to
+    // pack. The emitter supports the two-block form -- it is driver-verified in
+    // both profiles -- and this gate is the authorship boundary, not a
+    // limitation of the emission.
+    assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
+    assert!(!glsl.contains("uniform UiVertU"), "vertex block is gated:\n{glsl}");
     // Unnamed instance -- members stay bare globals, so bodies are unchanged.
-    assert!(glsl.contains("u.uProjection") == false, "got:\n{glsl}");
+    assert!(!glsl.contains("u.uSize"), "got:\n{glsl}");
 }
 
 #[test]
@@ -176,11 +178,11 @@ fn pipeline_scaffold_vertex_block() {
     assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 2) in vec4 aColor;"), "got:\n{glsl}");
-    // The stage's `@uniform` group -> one std140 block, declaration order.
-    assert!(
-        glsl.contains("layout(std140) uniform UiVertU {\n    mat4 uProjection;\n    mat4 uView;\n    mat4 uTransform;\n};"),
-        "got:\n{glsl}"
-    );
+    // Vertex uniforms are loose until `@engine` -- see
+    // `pipeline_emits_one_block_per_stage` for why the boundary is authorship.
+    assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
+    assert!(glsl.contains("uniform mat4 uView;"), "got:\n{glsl}");
+    assert!(glsl.contains("uniform mat4 uTransform;"), "got:\n{glsl}");
     // Varyings out -- position is suppressed (it is gl_Position, not a varying).
     assert!(glsl.contains("out vec2 TexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("out vec4 Color;"), "got:\n{glsl}");

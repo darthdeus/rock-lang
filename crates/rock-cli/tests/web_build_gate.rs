@@ -122,23 +122,13 @@ fn main() { print("{SHADER_KEY}") }
         "registration slots drifted (field order IS the texture unit):\n{slots}"
     );
     // The `@uniform` blocks travel as parallel FLAT lists: names, sizes,
-    // fingerprints, per-block member counts, then the members and their std140
-    // offsets concatenated. This fixture's vertex stage declares `UiVertU`, so
-    // the real shape is pinned rather than the empty case -- three Mat4s at
-    // 0/64/128 in a 192-byte block, which is std140's answer and not the C
-    // layout's by coincidence (they agree here; `uniform_block.rs` carries the
-    // cases where they do not).
+    // fingerprints, per-block member counts, then members and their std140
+    // offsets concatenated. This fixture's only group is on the VERTEX stage,
+    // which stays loose until `@engine` (engine-authored matrices), so the
+    // lists are empty -- still as arguments, never as a short call, which is
+    // the silent-on-JS failure this gate exists for.
     assert!(
-        line.contains(r#"{_data: ["UiVertU"], len: 1, __ty: "Vec"}, {_data: [192], len: 1, __ty: "Vec"}"#),
-        "block name/size drifted:\n{line}"
+        line.contains(r#"{_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"});"#),
+        "registration uniform-block arguments drifted:\n{line}"
     );
-    assert!(
-        line.contains(r#"{_data: [3], len: 1, __ty: "Vec"}, {_data: ["uProjection", "uView", "uTransform"], len: 3, __ty: "Vec"}, {_data: [0, 64, 128], len: 3, __ty: "Vec"});"#),
-        "block member count/names/offsets drifted:\n{line}"
-    );
-    // The fingerprint is a hash, so its VALUE is not pinned -- but a zero would
-    // mean the driver sent no layout identity at all, which is what the bind and
-    // upload compare to agree they mean the same block.
-    let fp_absent = line.contains(r#"{_data: [0], len: 1, __ty: "Vec"}, {_data: [3]"#);
-    assert!(!fp_absent, "block fingerprint is zero -- no layout identity was sent:\n{line}");
 }

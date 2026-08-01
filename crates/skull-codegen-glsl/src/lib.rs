@@ -2570,17 +2570,22 @@ fn emit_vertex_stage(
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
     out.push('\n');
-    if let Some(plan) = vert_block {
-        out.push_str(&uniform_block_decl(plan));
-    }
-    // `UniformArray<T>` stays LOOSE: it is a param-only phantom, and moving an
-    // array inside a block needs a host payload model that does not exist yet.
-    if !v.arrays.is_empty() {
-        for (_, n, t, cap) in &v.arrays {
-            out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
+    match vert_block {
+        Some(plan) => out.push_str(&uniform_block_decl(plan)),
+        // No block for this stage -> the group's fields stay loose uniforms.
+        None => {
+            for (n, t) in &v.uniforms {
+                out.push_str(&format!("uniform {} {};\n", t.name(), n));
+            }
         }
     }
-    if vert_block.is_some() || !v.arrays.is_empty() {
+    // `UniformArray<T>` stays LOOSE either way: it is a param-only phantom, and
+    // moving an array inside a block needs a host payload model that does not
+    // exist yet.
+    for (_, n, t, cap) in &v.arrays {
+        out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
+    }
+    if vert_block.is_some() || !v.uniforms.is_empty() || !v.arrays.is_empty() {
         out.push('\n');
     }
     for (n, t, flat) in &varyings.varyings {
@@ -2639,8 +2644,13 @@ fn emit_fragment_stage(
             out.push('\n');
         }
     }
-    if let Some(plan) = frag_block {
-        out.push_str(&uniform_block_decl(plan));
+    match frag_block {
+        Some(plan) => out.push_str(&uniform_block_decl(plan)),
+        None => {
+            for (n, t) in &fs.uniforms {
+                out.push_str(&format!("uniform {} {};\n", t.name(), n));
+            }
+        }
     }
     // Loose for the same reason as the vertex stage's arrays.
     for (_, n, t, cap) in &fs.arrays {
@@ -2742,10 +2752,15 @@ pub fn emit_shader_pipeline_with_dependencies(
     // vertex entry is reused across several fragment entries (mag's `ui_vert`
     // serves three), so a merged per-program type would need that one fn to
     // declare a different struct per program.
-    let vert_plan = vshape
-        .uniform_group
-        .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
-        .transpose()?;
+    // The VERTEX stage keeps loose uniforms until `@engine` lands, and the
+    // boundary is AUTHORSHIP rather than a per-shader opt-out. Every A2 vertex
+    // group is engine-authored -- each is three `Mat4`s built inside
+    // `stone_set_camera` from (ox, oy, scale) plus the current render-target
+    // size, so Rock never holds a `Mat4` for them and cannot pack one. Filling
+    // them means moving that ownership across the FFI, which IS the `@engine`
+    // phase; the fragment groups are game-authored and port independently.
+    let vert_plan: Option<UniformBlockPlan> = None;
+    let _ = vshape.uniform_group;
     let frag_plan = fshape
         .uniform_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(ff.name_span, e.message)))
