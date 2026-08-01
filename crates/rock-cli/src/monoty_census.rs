@@ -57,7 +57,7 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
     let mut union = MonoArena::new();
     let mut union_ids = std::collections::HashSet::new();
     let mut union_converted = 0usize;
-    // Occurrences whose logical type contains a constructor ReifiedType lacks.
+    // Occurrences whose logical type a SpecKey slot cannot be keyed on.
     let mut union_gap_occurrences = 0usize;
     let mut union_failures: BTreeMap<&'static str, (usize, Vec<String>)> = BTreeMap::new();
 
@@ -109,7 +109,7 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
     println!("## what totality costs");
     println!();
     println!(
-        "- occurrences whose type contains a constructor `ReifiedType` lacks \
+        "- occurrences whose type contains a constructor specialization declines \
          (`any`, unit, `never`, `fn`): **{union_gap_occurrences}** of {union_converted} \
          ({:.2}%)",
         100.0 * union_gap_occurrences as f64 / union_converted.max(1) as f64
@@ -157,21 +157,21 @@ fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).display().to_string()
 }
 
-/// Does this logical type contain a constructor `ReifiedType` cannot represent?
+/// Does this logical type contain a constructor a `SpecKey` cannot be keyed on?
 ///
-/// `reify_type` handles int/float/bool/string, tuple, nullable and application,
+/// `reify_type` admits int/float/bool/string, tuple, nullable and application,
 /// and answers `None` for `any`, unit, never and function types -- and that
 /// `None` becomes a `SpecKey` slot rather than a rejection, so every type below
 /// is one that currently collapses distinct instantiations onto one identity.
 /// This count is the direct measurement of what totality buys.
-fn outside_reified_type(arena: &MonoArena, id: skull_mir::monoty::MonoTyId) -> bool {
+fn outside_reified_type(ty: &skull_mir::monoty::MonoTy) -> bool {
     use skull_mir::monoty::MonoTy::*;
-    match arena.get(id) {
+    match ty {
         Any | Unit | Never | Function { .. } => true,
         Int | Float | Bool | String => false,
-        Nullable(inner) => outside_reified_type(arena, *inner),
-        Tuple(parts) => parts.iter().any(|p| outside_reified_type(arena, *p)),
-        App { params, .. } => params.iter().any(|p| outside_reified_type(arena, *p)),
+        Nullable(inner) => outside_reified_type(inner),
+        Tuple(parts) => parts.iter().any(outside_reified_type),
+        App { params, .. } => params.iter().any(outside_reified_type),
     }
 }
 
@@ -207,7 +207,7 @@ fn census_project(
                 match union.convert(&ws, inf, *ty, &subst) {
                     Ok(id) => {
                         converted += 1;
-                        if outside_reified_type(union, id) {
+                        if outside_reified_type(union.get(id)) {
                             gap += 1;
                         }
                         let r = union.render(id);
@@ -226,7 +226,7 @@ fn census_project(
                 match union.convert(&ws, inf, *ty, &subst) {
                     Ok(id) => {
                         converted += 1;
-                        if outside_reified_type(union, id) {
+                        if outside_reified_type(union.get(id)) {
                             gap += 1;
                         }
                         let r = union.render(id);

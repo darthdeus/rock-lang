@@ -4,11 +4,11 @@
 //! appears in the complete graph, and every additional graph edge is
 //! classified").
 //!
-//! Lives in `skull-mir` because `compute_call_spec` and `ReifiedType` are
-//! internal to `lower::shape`; this exposes the RESULT rendered as strings
-//! rather than widening that module. The rendering matches
-//! [`MonoArena::render`](crate::monoty::MonoArena::render) exactly, so the two
-//! sides are comparable without either learning the other's type tree.
+//! Lives in `skull-mir` because `compute_call_spec` is internal to
+//! `lower::shape`; this exposes the RESULT rendered as strings rather than
+//! widening that module. The rendering is
+//! [`MonoTy::render`](crate::monoty::MonoTy::render), the one canonical
+//! spelling, so the two sides are comparable without a translation.
 //!
 //! A `None` slot is the partial key's erasure: `reify_type` answered nothing for
 //! that generic (valid `any`, unit, never or function type, plus tuples that
@@ -20,7 +20,7 @@ use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 
-use crate::lower::shape_census_support::{render_reified, specializations_in_body};
+use crate::lower::shape_census_support::specializations_in_body;
 use crate::mir::FuncRef;
 
 /// One specialization today's `compute_call_spec` decides to perform.
@@ -83,7 +83,7 @@ pub fn today_specializations(ws: &Workspace, target: FnBackend) -> (Vec<TodaySpe
                 out.push(TodaySpec {
                     caller,
                     func,
-                    slots: key.iter().map(|s| s.as_ref().map(render_reified)).collect(),
+                    slots: key.iter().map(|s| s.as_ref().map(crate::monoty::MonoTy::render)).collect(),
                 });
             }
         }

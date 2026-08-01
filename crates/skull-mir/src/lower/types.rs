@@ -2,6 +2,7 @@
 //! return shapes, spread operands, and the `TyId` -> `TypeExpr` resolution that
 //! specialization substitutes through.
 use super::*;
+use crate::monoty::MonoTy;
 
 impl Builder<'_> {
     /// Whether `e`'s static type is an enum ALL of whose variants are unit (no
@@ -291,12 +292,12 @@ impl Builder<'_> {
     /// signature-side walker sees.
     pub(crate) fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
         // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
-        // (see `reified_type_node`), so it is read off the substitution here --
+        // (see `mono_type_node`), so it is read off the substitution here --
         // the same source `body_ret_slot` reads. Without it a specialized body's
         // indirect call sees a bare `Generic` and declines to splat, while the
         // fn value it calls splats from its own concrete type.
-        if let Some(ReifiedType::Tuple(parts)) = self.bound_generic_subst(ty) {
-            return Some(reified_tuple_shape(self.ws, parts));
+        if let Some(MonoTy::Tuple(parts)) = self.bound_generic_subst(ty) {
+            return Some(mono_tuple_shape(self.ws, parts));
         }
         let ty = self.resolve_tyid(ty)?;
         let TypeExpr::Tuple { elements } = self.ty_node(ty)? else { return None };
@@ -393,7 +394,7 @@ impl Builder<'_> {
     /// Resolving `ty` for the rest of a caller instead is wrong: it erases a
     /// `Nullable` binding's `?` on the way through `ty_node`, which silently
     /// re-planned every nullable-column body to a non-nullable shape.
-    pub(crate) fn bound_generic_subst(&self, ty: TyId) -> Option<&ReifiedType> {
+    pub(crate) fn bound_generic_subst(&self, ty: TyId) -> Option<&MonoTy> {
         let var = match self.raw_ty_node(ty) {
             Some(TypeExpr::Generic(var, _)) => var,
             Some(TypeExpr::Infer(..)) => match self.resolve_tyid(ty).and_then(|t| self.raw_ty_node(t)) {
@@ -407,9 +408,9 @@ impl Builder<'_> {
 
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
         // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
-        // (see `reified_type_node`), so it is read off the substitution directly.
-        if let Some(bound @ ReifiedType::Tuple(_)) = self.bound_generic_subst(ty) {
-            return reified_ret_slot(self.ws, bound);
+        // (see `mono_type_node`), so it is read off the substitution directly.
+        if let Some(bound @ MonoTy::Tuple(_)) = self.bound_generic_subst(ty) {
+            return mono_ret_slot(self.ws, bound);
         }
         if let Some(shape) = self.body_nobox_shape(ty) {
             return RetSlot::Leaves(shape);
@@ -531,8 +532,8 @@ impl Builder<'_> {
             // Falling through to the generic is exactly what this saw before
             // tuples reified at all, so no consumer changes behaviour; the ones
             // that need a tuple's slots read the binding through
-            // `reified_ret_slot` instead.
-            if let Some(sub) = self.spec_subst.get(&var).and_then(reified_type_node) {
+            // `mono_ret_slot` instead.
+            if let Some(sub) = self.spec_subst.get(&var).and_then(mono_type_node) {
                 return Some(sub);
             }
         }

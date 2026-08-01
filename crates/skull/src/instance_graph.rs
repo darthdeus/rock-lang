@@ -738,9 +738,9 @@ fn instantiate(
         let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *g) else {
             return Err("declared-generic-not-generic");
         };
-        let id = arena.convert(ws, inf, *b, caller_subst).map_err(reason_name)?;
-        callee_subst.insert(var, id);
-        args.push(id);
+        let ty = skull_mir::monoty::convert(ws, inf, *b, caller_subst).map_err(reason_name)?;
+        args.push(arena.intern(ty.clone()));
+        callee_subst.insert(var, ty);
     }
     Ok((args, callee_subst))
 }
@@ -770,9 +770,10 @@ fn instantiate_next(
             return Err("declared-generic-not-generic");
         };
         let Some(bound) = next_generics.get(&var) else { return Err("next-generic-unbound") };
-        let id = arena.convert(ws, inf, *bound, caller_subst).map_err(reason_name)?;
-        callee_subst.insert(var, id);
-        args.push(id);
+        let ty =
+            skull_mir::monoty::convert(ws, inf, *bound, caller_subst).map_err(reason_name)?;
+        args.push(arena.intern(ty.clone()));
+        callee_subst.insert(var, ty);
     }
     Ok((args, callee_subst))
 }

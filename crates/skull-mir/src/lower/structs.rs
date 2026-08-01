@@ -295,7 +295,7 @@ impl Builder<'_> {
     /// resolved node. An earlier spelling relied on "`resolve_tyid` chases
     /// `Infer` but keeps `Nullable`", which held for a spelled-out `V?` and
     /// stopped holding once a GENERIC could be bound to one: `ty_node` applies
-    /// the substitution and `reified_type_node` erases the `?`, so a `T` bound to
+    /// the substitution and `mono_type_node` erases the `?`, so a `T` bound to
     /// `BV2?` answered as a bare `BV2` and licensed SROA to rebuild an absent row
     /// as `BV2_ct(nil, nil)`. `is_nullable_ty` reads `raw_ty_node` before the
     /// substitution erases anything and consults the binding, which is why

@@ -468,7 +468,7 @@ impl Builder<'_> {
                 if let Some(d) = key
                     .iter()
                     .flatten()
-                    .map(crate::lower::shape::reified_depth)
+                    .map(crate::lower::shape::growth_depth)
                     .max()
                     .filter(|d| *d > crate::lower::shape::ABLATION_GROWTH_DEPTH)
                 {
