@@ -124,9 +124,9 @@ fn main() { print("{SHADER_KEY}") }
     // The `@uniform` blocks travel as parallel FLAT lists: names, sizes,
     // fingerprints, per-block member counts, then members and their std140
     // offsets concatenated. This fixture's only group is on the VERTEX stage,
-    // which stays loose until `@engine` (engine-authored matrices), so the
-    // lists are empty -- still as arguments, never as a short call, which is
-    // the silent-on-JS failure this gate exists for.
+    // which is loose for one more step (the `@engine` port), so the lists are
+    // empty -- still as arguments, never as a short call, which is the
+    // silent-on-JS failure this gate exists for.
     assert!(
         line.contains(r#"{_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"});"#),
         "registration uniform-block arguments drifted:\n{line}"

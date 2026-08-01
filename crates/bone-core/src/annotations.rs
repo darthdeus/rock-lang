@@ -135,13 +135,15 @@ fn validate_one(
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
         }
-        // GLSL vertex-entry input roles (docs/shaders.md): the value-struct
-        // param they mark is per-vertex attribute data (`@attr`) or a uniform
-        // block (`@uniform`). `@instance` is the per-instance attribute divisor.
+        // GLSL entry input roles (docs/shaders.md): the value-struct param they
+        // mark is per-vertex attribute data (`@attr`) or a uniform block
+        // (`@uniform`). `@instance` is the per-instance attribute divisor.
         // `@textures` groups sampler params into one struct so the texture unit
         // is compiler-assigned by field order, not hand-numbered at the bind
-        // site where two entries can silently share a number.
-        "attr" | "uniform" | "textures" => {
+        // site where two entries can silently share a number. `@engine` is the
+        // engine-owned frame/pass block at binding 0 -- a separate ROLE from
+        // `@uniform` because it differs in producer and lifetime, not in layout.
+        "attr" | "uniform" | "textures" | "engine" => {
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
         }

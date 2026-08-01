@@ -1975,6 +1975,16 @@ struct VertexShape {
     /// stage gets its own std140 block at its own binding index -- the stages
     /// declare DIFFERENT types and cannot be made to share one.
     uniform_group: Option<Ustr>,
+    /// `@engine` struct param indices (at most one).
+    engine_params: Vec<usize>,
+    /// The `@engine` group's struct name, if the stage declares one. A separate
+    /// ROLE from `@uniform`, not a second one of them: the engine produces it,
+    /// its lifetime is the pass rather than the draw, and it binds at index 0 so
+    /// both stages of a program name the same block.
+    engine_group: Option<Ustr>,
+    /// The `@engine` group's fields, declaration order. Kept apart from
+    /// `uniforms` because the two become DIFFERENT blocks.
+    engine_uniforms: Vec<(Ustr, GlslTy)>,
     /// `@textures` group param indices -- see the field of the same name on
     /// `FragShape`. Vertex texture fetch is legal in GL 3.3 / GLES 3.0.
     texture_params: Vec<usize>,
@@ -2004,6 +2014,12 @@ struct FragShape {
     /// The `@uniform` group's struct name, if the stage declares one. Its own
     /// std140 block, at its own binding index -- see `VertexShape`.
     uniform_group: Option<Ustr>,
+    /// `@engine` struct param indices (at most one) -- see `VertexShape`.
+    engine_params: Vec<usize>,
+    /// The `@engine` group's struct name, if the stage declares one.
+    engine_group: Option<Ustr>,
+    /// The `@engine` group's fields, declaration order.
+    engine_uniforms: Vec<(Ustr, GlslTy)>,
     /// `@textures` group param indices. Their fields are already expanded into
     /// `samplers`; the params themselves render as bare globals like a uniform
     /// struct, so they belong in `global_params`.
@@ -2217,6 +2233,8 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let mut texture_params = Vec::new();
     let mut texture_group: Option<Ustr> = None;
     let mut uniform_group: Option<Ustr> = None;
+    let mut engine_group: Option<Ustr> = None;
+    let mut engine_params: Vec<usize> = Vec::new();
     for (i, pd) in f.param_decls.iter().enumerate() {
         if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
             let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
@@ -2244,16 +2262,20 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
                     pd.name, other.name()
                 )));
             }
-            Err(_) => match (has_anno(&pd.annotations, "attr"), has_anno(&pd.annotations, "instance"), has_anno(&pd.annotations, "uniform")) {
-                (true, false, false) => per_vertex.push(i),
-                (false, true, false) => instanced.push(i),
-                (false, false, true) => {
+            Err(_) => match (has_anno(&pd.annotations, "attr"), has_anno(&pd.annotations, "instance"), has_anno(&pd.annotations, "uniform"), has_anno(&pd.annotations, "engine")) {
+                (true, false, false, false) => per_vertex.push(i),
+                (false, true, false, false) => instanced.push(i),
+                (false, false, true, false) => {
                     uniform_group = nominal_name(ws, pd.ty);
                     uniform_params.push(i);
                 }
-                (false, false, false) => {
+                (false, false, false, true) => {
+                    engine_group = nominal_name(ws, pd.ty);
+                    engine_params.push(i);
+                }
+                (false, false, false, false) => {
                     return Err(err(span, format!(
-                        "shader vertex: value-struct param `{}` needs a role marker -- @attr (per-vertex attributes), @instance (per-instance attributes), or @uniform (uniform block)",
+                        "shader vertex: value-struct param `{}` needs a role marker -- @attr (per-vertex attributes), @instance (per-instance attributes), @uniform (this shader's uniform block), or @engine (the engine-owned frame/pass block)",
                         pd.name
                     )));
                 }
@@ -2263,6 +2285,9 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     }
     if uniform_params.len() > 1 {
         return Err(err(span, "shader vertex: at most one @uniform struct param is allowed"));
+    }
+    if engine_params.len() > 1 {
+        return Err(err(span, "shader vertex: at most one @engine struct param is allowed -- it is one engine-owned block"));
     }
     let mut attr_params = Vec::new();
     let mut attrs = Vec::new();
@@ -2292,11 +2317,18 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     for &i in &uniform_params {
         uniforms.extend(struct_gl_fields(ws, f.param_decls[i].ty, span, "uniform")?);
     }
+    let mut engine_uniforms = Vec::new();
+    for &i in &engine_params {
+        engine_uniforms.extend(struct_gl_fields(ws, f.param_decls[i].ty, span, "engine uniform")?);
+    }
     let varyings_ty = f
         .return_ty
         .ok_or_else(|| err(span, "shader vertex: entry must return a varyings value struct"))?;
     Ok(VertexShape {
         uniform_group,
+        engine_params,
+        engine_group,
+        engine_uniforms,
         attr_params,
         attrs,
         uniform_params,
@@ -2367,6 +2399,9 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     let mut texture_params = Vec::new();
     let mut texture_group: Option<Ustr> = None;
     let mut uniform_group: Option<Ustr> = None;
+    let mut engine_group: Option<Ustr> = None;
+    let mut engine_params: Vec<usize> = Vec::new();
+    let mut engine_uniforms: Vec<(Ustr, GlslTy)> = Vec::new();
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
         if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
             let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
@@ -2392,17 +2427,29 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
                 return Err(err(span, format!("shader fragment: param `{}` ({}) must be @uniform or a Sampler2D", pd.name, other.name())));
             }
             Err(_) => {
-                if !has_anno(&pd.annotations, "uniform") {
-                    return Err(err(span, format!("shader fragment: value-struct param `{}` needs @uniform", pd.name)));
+                if has_anno(&pd.annotations, "engine") {
+                    if has_anno(&pd.annotations, "uniform") {
+                        return Err(err(span, format!("shader fragment: param `{}` has conflicting role markers", pd.name)));
+                    }
+                    engine_uniforms.extend(struct_gl_fields(ws, pd.ty, span, "engine uniform")?);
+                    engine_group = nominal_name(ws, pd.ty);
+                    engine_params.push(i);
+                } else {
+                    if !has_anno(&pd.annotations, "uniform") {
+                        return Err(err(span, format!("shader fragment: value-struct param `{}` needs @uniform (this shader's block) or @engine (the engine-owned frame/pass block)", pd.name)));
+                    }
+                    uniforms.extend(struct_gl_fields(ws, pd.ty, span, "uniform")?);
+                    uniform_group = nominal_name(ws, pd.ty);
+                    uniform_params.push(i);
                 }
-                uniforms.extend(struct_gl_fields(ws, pd.ty, span, "uniform")?);
-                uniform_group = nominal_name(ws, pd.ty);
-                uniform_params.push(i);
             }
         }
     }
     if uniform_params.len() > 1 {
         return Err(err(span, "shader fragment: at most one @uniform struct param is allowed"));
+    }
+    if engine_params.len() > 1 {
+        return Err(err(span, "shader fragment: at most one @engine struct param is allowed -- it is one engine-owned block"));
     }
     // Return: a single Vec4 (implicit FragColor), a single int (an R32I-only
     // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
@@ -2435,6 +2482,9 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     };
     Ok(FragShape {
         uniform_group,
+        engine_params,
+        engine_group,
+        engine_uniforms,
         varyings_param: 0,
         uniform_params,
         texture_params,
@@ -2543,16 +2593,24 @@ fn emit_vertex_stage(
     v: &VertexShape,
     varyings: &VaryingsShape,
     vert_block: Option<&UniformBlockPlan>,
+    engine_block: Option<&UniformBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let shape = EntryShape {
         global_params: v
             .attr_params
             .iter()
             .copied()
+            .chain(v.engine_params.iter().copied())
             .chain(v.uniform_params.iter().copied())
             .chain(v.texture_params.iter().copied())
             .collect(),
-        uniform_fields: v.attrs.iter().map(|&(n, t, _)| (n, t)).chain(v.uniforms.iter().copied()).collect(),
+        uniform_fields: v
+            .attrs
+            .iter()
+            .map(|&(n, t, _)| (n, t))
+            .chain(v.engine_uniforms.iter().copied())
+            .chain(v.uniforms.iter().copied())
+            .collect(),
         samplers: v.samplers.clone(),
         arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
         texture_group: v.texture_group,
@@ -2570,6 +2628,11 @@ fn emit_vertex_stage(
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
     out.push('\n');
+    // The engine block first: it binds at index 0 and both stages declare the
+    // same one, so its declaration is identical in each.
+    if let Some(plan) = engine_block {
+        out.push_str(&uniform_block_decl(plan));
+    }
     match vert_block {
         Some(plan) => out.push_str(&uniform_block_decl(plan)),
         // No block for this stage -> the group's fields stay loose uniforms.
@@ -2585,7 +2648,7 @@ fn emit_vertex_stage(
     for (_, n, t, cap) in &v.arrays {
         out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
     }
-    if vert_block.is_some() || !v.uniforms.is_empty() || !v.arrays.is_empty() {
+    if vert_block.is_some() || engine_block.is_some() || !v.uniforms.is_empty() || !v.arrays.is_empty() {
         out.push('\n');
     }
     for (n, t, flat) in &varyings.varyings {
@@ -2605,6 +2668,7 @@ fn emit_fragment_stage(
     fs: &FragShape,
     varyings: &VaryingsShape,
     frag_block: Option<&UniformBlockPlan>,
+    engine_block: Option<&UniformBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     // MRT: the entry is emitted as `void main()` destructuring its returned
@@ -2616,10 +2680,17 @@ fn emit_fragment_stage(
     });
     let shape = EntryShape {
         global_params: std::iter::once(fs.varyings_param)
+            .chain(fs.engine_params.iter().copied())
             .chain(fs.uniform_params.iter().copied())
             .chain(fs.texture_params.iter().copied())
             .collect(),
-        uniform_fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).chain(fs.uniforms.iter().copied()).collect(),
+        uniform_fields: varyings
+            .varyings
+            .iter()
+            .map(|&(n, t, _)| (n, t))
+            .chain(fs.engine_uniforms.iter().copied())
+            .chain(fs.uniforms.iter().copied())
+            .collect(),
         samplers: fs.samplers.clone(),
         arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
         main_out,
@@ -2643,6 +2714,10 @@ fn emit_fragment_stage(
             }
             out.push('\n');
         }
+    }
+    // The engine block first -- same declaration the vertex stage emits.
+    if let Some(plan) = engine_block {
+        out.push_str(&uniform_block_decl(plan));
     }
     match frag_block {
         Some(plan) => out.push_str(&uniform_block_decl(plan)),
@@ -2752,13 +2827,16 @@ pub fn emit_shader_pipeline_with_dependencies(
     // vertex entry is reused across several fragment entries (mag's `ui_vert`
     // serves three), so a merged per-program type would need that one fn to
     // declare a different struct per program.
-    // The VERTEX stage keeps loose uniforms until `@engine` lands, and the
-    // boundary is AUTHORSHIP rather than a per-shader opt-out. Every A2 vertex
-    // group is engine-authored -- each is three `Mat4`s built inside
-    // `stone_set_camera` from (ox, oy, scale) plus the current render-target
-    // size, so Rock never holds a `Mat4` for them and cannot pack one. Filling
-    // them means moving that ownership across the FFI, which IS the `@engine`
-    // phase; the fragment groups are game-authored and port independently.
+    //
+    // The vertex stage's OWN group stays loose for one more step. The old
+    // rationale ("every A2 vertex group is engine-authored") was false --
+    // bitgun's grass mixes camera/time with a game-owned `entity_count` -- and
+    // `@engine` is what expresses the boundary now. But every vertex group in
+    // the tree still holds engine-authored matrices set BY NAME from
+    // `stone_set_camera`, and a block member has no location, so flipping this
+    // is only correct together with porting those shaders to `@engine`. The
+    // emitter half is done and tested (`engine_block_*` in tests/a2.rs); this
+    // is sequencing, not a limitation.
     let vert_plan: Option<UniformBlockPlan> = None;
     let _ = vshape.uniform_group;
     let frag_plan = fshape
@@ -2766,10 +2844,26 @@ pub fn emit_shader_pipeline_with_dependencies(
         .map(|g| uniform_block(ws, g).map_err(|e| err(ff.name_span, e.message)))
         .transpose()?;
 
+    // `@engine` is ONE block per program, so unlike `@uniform` the stages must
+    // agree: it is engine-owned and fixed, and both stages naming the same block
+    // at index 0 is what lets the engine fill it once per pass rather than once
+    // per stage.
+    let engine_group = match (vshape.engine_group, fshape.engine_group) {
+        (Some(v), Some(f)) if v != f => {
+            return Err(err(vf.name_span, format!(
+                "shader pipeline: the stages declare different @engine groups (`{v}` and `{f}`) -- the engine block is one per program"
+            )));
+        }
+        (v, f) => v.or(f),
+    };
+    let engine_plan = engine_group
+        .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
+        .transpose()?;
+
     let (vertex_block, vertex_dependencies) =
-        emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings, vert_plan.as_ref())?;
+        emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings, vert_plan.as_ref(), engine_plan.as_ref())?;
     let (pixel_block, pixel_dependencies) =
-        emit_fragment_stage(ws, &scx, ffref, &fshape, &varyings, frag_plan.as_ref())?;
+        emit_fragment_stage(ws, &scx, ffref, &fshape, &varyings, frag_plan.as_ref(), engine_plan.as_ref())?;
 
     let (version, precision) = profile_header(profile);
     let source = format!(
@@ -2792,15 +2886,16 @@ pub fn emit_shader_pipeline_with_dependencies(
     let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
         || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
     let texture_slots = program_texture_slots(ws, group, bare, vf.name_span)?;
-    // Binding order is the vertex block then the fragment block, matching the
-    // order they are declared and bound. Unlike `@textures` -- one group per
-    // PROGRAM, since texture units are program-scoped -- uniform blocks are
-    // per STAGE, so differing types here are correct rather than a collision.
+    // Binding order: the ENGINE block at 0 (both stages name it), then the
+    // vertex block, then the fragment block -- position in this list IS the
+    // binding index on the engine side. Unlike `@textures` -- one group per
+    // PROGRAM, since texture units are program-scoped -- `@uniform` blocks are
+    // per STAGE, so differing types there are correct rather than a collision.
     Ok(ShaderEmission {
         source,
         dependencies,
         texture_slots,
-        uniform_blocks: vert_plan.into_iter().chain(frag_plan).collect(),
+        uniform_blocks: engine_plan.into_iter().chain(vert_plan).chain(frag_plan).collect(),
     })
 }
 
