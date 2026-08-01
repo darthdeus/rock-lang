@@ -4156,6 +4156,16 @@ fn order_global_inits(
         names_by_id[v] = k;
     }
     let known: HashSet<ustr::Ustr> = ginits.iter().map(|g| g.name).collect();
+    // A `nobox` global is READ by its leaf names, which are synthesized and never
+    // appear in `global_by_name` -- so an edge to one is invisible to a filter
+    // keyed on base names, and the dependent init emits FIRST, off undefined
+    // leaves. Same blind spot as the init line itself had: the leaves are the
+    // storage, and every mechanism keyed on the base name has to be told.
+    let leaf_base: HashMap<ustr::Ustr, ustr::Ustr> = ginits
+        .iter()
+        .filter_map(|g| g.leaves.as_ref().map(|ls| (g.name, ls)))
+        .flat_map(|(base, ls)| ls.iter().map(move |&leaf| (leaf, base)))
+        .collect();
     let init_deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = ginits
         .iter()
         .map(|g| {
@@ -4163,6 +4173,7 @@ fn order_global_inits(
                 Some(&fi) => closure[fi]
                     .iter()
                     .map(|&gid| names_by_id[gid])
+                    .map(|d| leaf_base.get(&d).copied().unwrap_or(d))
                     .filter(|d| *d != g.name && known.contains(d))
                     .collect(),
                 None => HashSet::new(),
