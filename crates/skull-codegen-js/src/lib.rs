@@ -1318,6 +1318,95 @@ function stone_set_shader(h) {
   if (!sh) { __sw_log_once("stone_set_shader: unknown shader " + h); return; }
   __SW.gl.useProgram(sh.prog);
   __SW.curShader = h;
+  __sw_bind_blocks(h);
+}
+// std140 uniform blocks. `bindBufferBase` binds to a GLOBAL index, so a
+// program's blocks are re-bound whenever that program goes current -- binding
+// once at registration would leave whichever program registered last owning
+// index 0 for all of them. Mirrors stone-rs/src/uniform_block.rs.
+function __sw_bind_blocks(h) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh || !sh.blocks) return;
+  for (var i = 0; i < sh.blocks.length; i++) {
+    var b = sh.blocks[i];
+    if (b) gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer);
+  }
+}
+function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh) { __sw_log_once("bind_uniform_block: no shader " + h); return false; }
+  if (!name || size <= 0) { __sw_log_once("bind_uniform_block: null name or non-positive size " + size); return false; }
+  var idx = gl.getUniformBlockIndex(sh.prog, name);
+  if (idx === gl.INVALID_INDEX) {
+    __sw_log_once("bind_uniform_block: shader " + h + " declares no uniform block `" + name + "`");
+    return false;
+  }
+  gl.uniformBlockBinding(sh.prog, idx, binding);
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.UNIFORM_BUFFER, buf);
+  // Zero-fill, so a member the packer never writes reads 0 rather than
+  // whatever the driver handed back.
+  gl.bufferData(gl.UNIFORM_BUFFER, size, gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  if (!sh.blocks) sh.blocks = [];
+  // A re-register (hot reload) replaces the buffer at this BINDING; a shrinking
+  // program's stale tail is dropped, since registration walks bindings from 0.
+  if (binding < sh.blocks.length && sh.blocks[binding]) gl.deleteBuffer(sh.blocks[binding].buffer);
+  sh.blocks.length = binding;
+  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint };
+  return true;
+}
+function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh || !sh.blocks) { __sw_log_once("upload_uniform_block: shader " + h + " has no bound block"); return false; }
+  if (!data || size <= 0) { __sw_log_once("upload_uniform_block: null data or non-positive size " + size); return false; }
+  // Selected by FINGERPRINT: a program can have several blocks, and the packed
+  // bytes say which layout they are.
+  var b = null;
+  for (var i = 0; i < sh.blocks.length; i++) {
+    if (sh.blocks[i] && sh.blocks[i].fingerprint === fingerprint) { b = sh.blocks[i]; break; }
+  }
+  if (!b) { __sw_log_once("upload_uniform_block: shader " + h + " has no block with layout " + fingerprint); return false; }
+  if (size !== b.size) {
+    __sw_log_once("upload_uniform_block: shader " + h + " upload of " + size + " bytes does not match its " + b.size + " byte block");
+    return false;
+  }
+  gl.bindBuffer(gl.UNIFORM_BUFFER, b.buffer);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, data.subarray ? data.subarray(0, size) : data);
+  gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  return true;
+}
+function stone_shader_check_uniform_block_layout(h, name, names, names_len, offsets, count, plan_size) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh) { __sw_log_once("check_uniform_block_layout: no shader " + h); return false; }
+  var idx = gl.getUniformBlockIndex(sh.prog, name);
+  if (idx === gl.INVALID_INDEX) {
+    __sw_log_once("check_uniform_block_layout: shader " + h + " declares no block `" + name + "`");
+    return false;
+  }
+  var dataSize = gl.getActiveUniformBlockParameter(sh.prog, idx, gl.UNIFORM_BLOCK_DATA_SIZE);
+  if (dataSize > plan_size) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` needs " + dataSize + " bytes, the plan allocates " + plan_size);
+    return false;
+  }
+  var members = names.split(String.fromCharCode(0)).filter(function (x) { return x.length > 0; });
+  if (members.length !== count) {
+    __sw_log_once("check_uniform_block_layout: " + members.length + " names for " + count + " offsets");
+    return false;
+  }
+  var indices = gl.getUniformIndices(sh.prog, members);
+  var driver = gl.getActiveUniforms(sh.prog, indices, gl.UNIFORM_OFFSET);
+  var ok = true;
+  for (var i = 0; i < members.length; i++) {
+    // An INACTIVE member is optimized out and reports no index: skipped, not
+    // failed. The check is a PARTIAL oracle for that reason.
+    if (indices[i] === gl.INVALID_INDEX || indices[i] == null) continue;
+    if (driver[i] !== offsets[i]) {
+      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[i] + "` is at " + driver[i] + ", the plan says " + offsets[i]);
+      ok = false;
+    }
+  }
+  return ok;
 }
 function __sw_with_shader_uniform(h, name, f) {
   var gl = __SW.gl, sh = __SW.shaders[h];
