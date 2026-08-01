@@ -463,23 +463,10 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        // A diverging rhs (`?? return x`) yields no value: splatting it reads
-        // leaves off nil, which faults before the divergence it sits in front of.
-        if self.is_open() {
-            let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
-            for (&c, &value) in cells.iter().zip(&rhs_leaves) {
-                self.emit_cur(Inst::Store { cell: c, value });
-            }
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_repr_and_join(&cells, &RetSlot::Leaves(shape.clone()), rhs_repr, join)?;
 
         self.cur = lhs_bb;
-        for (&c, &value) in cells.iter().zip(&lhs_values) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
@@ -523,24 +510,12 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        // Same rule as the value twin: a diverging rhs has no slots to store.
-        if self.is_open() {
-            let rhs_slots = self.tuple_repr_to_slots(rhs_repr, &shape);
-            for (&c, &value) in cells.iter().zip(&rhs_slots) {
-                self.emit_cur(Inst::Store { cell: c, value });
-            }
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_repr_and_join(&cells, &RetSlot::Nested(shape.clone()), rhs_repr, join)?;
 
         // The lhs slots were read before the branch, so their block dominates this
         // one -- the same reason the value twin can reuse its leaves here.
         self.cur = lhs_bb;
-        for (&c, &value) in cells.iter().zip(&lhs_values) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
