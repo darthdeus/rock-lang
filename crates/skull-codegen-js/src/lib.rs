@@ -1324,10 +1324,39 @@ function __sw_bind_blocks(h) {
   if (!gl || !sh || !sh.blocks) return;
   for (var i = 0; i < sh.blocks.length; i++) {
     var b = sh.blocks[i];
-    if (b) gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer);
+    if (b) { b.madeCurrent = true; gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer); }
   }
 }
-function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
+// A block whose program is drawn with but which nothing ever fills reads zeroes
+// in the shader, silently. Both flags are sticky, so this fires only for a block
+// never filled across the whole run.
+function __sw_report_unfilled_blocks() {
+  var shaders = __SW.shaders;
+  for (var h in shaders) {
+    var sh = shaders[h];
+    if (!sh || !sh.blocks) continue;
+    for (var i = 0; i < sh.blocks.length; i++) {
+      var b = sh.blocks[i];
+      if (!b || b.uploaded || !b.madeCurrent || b.reported) continue;
+      b.reported = true;
+      __sw_log_once("shader `" + b.key + "` was drawn with but nothing ever filled its uniform block `" +
+        b.name + "` (binding " + b.binding + ") -- it is reading zeroes.");
+    }
+  }
+}
+function stone_unfilled_uniform_block_count() {
+  var n = 0, shaders = __SW.shaders;
+  for (var h in shaders) {
+    var sh = shaders[h];
+    if (!sh || !sh.blocks) continue;
+    for (var i = 0; i < sh.blocks.length; i++) {
+      var b = sh.blocks[i];
+      if (b && b.madeCurrent && !b.uploaded) n++;
+    }
+  }
+  return n;
+}
+function stone_shader_bind_uniform_block(h, key, name, binding, size, fingerprint) {
   var gl = __SW.gl, sh = __SW.shaders[h];
   if (!gl || !sh) { __sw_log_once("bind_uniform_block: no shader " + h); return false; }
   if (!name || size <= 0) { __sw_log_once("bind_uniform_block: null name or non-positive size " + size); return false; }
@@ -1348,7 +1377,7 @@ function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
   // program's stale tail is dropped, since registration walks bindings from 0.
   if (binding < sh.blocks.length && sh.blocks[binding]) gl.deleteBuffer(sh.blocks[binding].buffer);
   sh.blocks.length = binding;
-  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint };
+  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint, key: key, name: name, uploaded: false, madeCurrent: false, reported: false };
   return true;
 }
 function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
@@ -1369,6 +1398,7 @@ function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
   gl.bindBuffer(gl.UNIFORM_BUFFER, b.buffer);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, data.subarray ? data.subarray(0, size) : data);
   gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  b.uploaded = true;
   return true;
 }
 function stone_shader_check_uniform_block_layout(h, name, names, names_len, offsets, count, plan_size) {
