@@ -1264,7 +1264,11 @@ pub fn validate_no_residual_bound_calls(
                             skull_mir::ablation::FatalCategory::UnsupportedSurface,
                             callee.name.as_str(),
                             f.name.as_str(),
-                            callee.name_span,
+                            // The CALL's span. `callee.name_span` collapsed
+                            // every site of one bounded callee onto its
+                            // declaration, so the census reported 27 declaration
+                            // spans as though they were call sites.
+                            mf.inst_spans.get(iid).copied().unwrap_or(callee.name_span),
                             "an `Iterator`-bounded body has no standalone emission: it exists \
                              only as an inline splice, so with inlining disabled the call has \
                              no concrete callee at all (plan S 12)",

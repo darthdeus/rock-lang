@@ -81,6 +81,47 @@ pub fn report(label: &str) -> bool {
         rows.sort_by(|a, b| b.3.cmp(&a.3).then(a.1.cmp(&b.1)));
         println!("### `{}`", cat.name());
         println!();
+        // A category is not a mechanism. `unsupported-surface` holds both the
+        // `Iterator`-bounded splice gap and the partial-key gap, and pricing the
+        // retained mechanisms one by one (S 0e's verdict table) needs them apart.
+        // The detail's first clause is the discriminant it is required to state.
+        type MechRow<'a> = (
+            std::collections::BTreeSet<(&'a str, &'a str)>,
+            std::collections::BTreeSet<(ustr::Ustr, (usize, usize))>,
+            std::collections::BTreeSet<&'a str>,
+        );
+        let mut mech: std::collections::BTreeMap<String, MechRow> = Default::default();
+        let mut payloads: std::collections::BTreeMap<String, std::collections::BTreeSet<&str>> =
+            Default::default();
+        for f in fatals.iter().filter(|f| f.category == *cat) {
+            let head = f.detail.split(':').next().unwrap_or(&f.detail);
+            // A detail names the offending TYPE, so grouping on the raw text
+            // splits one mechanism into one row per instantiation. Elide the
+            // payload for the key and list the payloads separately -- both are
+            // wanted, and only one of them is the mechanism.
+            let key = elide_payloads(head);
+            for p in head.split('`').skip(1).step_by(2) {
+                payloads.entry(key.clone()).or_default().insert(p);
+            }
+            let e = mech.entry(key).or_default();
+            e.0.insert((f.callee.as_str(), f.caller.as_str()));
+            e.1.insert((f.span.file, f.span.offset_range));
+            e.2.insert(f.callee.as_str());
+        }
+        println!("| mechanism | pairs | sites | callees |");
+        println!("|---|---:|---:|---:|");
+        for (head, (pairs, sites, callees)) in &mech {
+            println!("| {head} | {} | {} | {} |", pairs.len(), sites.len(), callees.len());
+        }
+        println!();
+        for (head, (_, _, callees)) in &mech {
+            println!("- {head}");
+            println!("  callees: {}", callees.iter().copied().collect::<Vec<_>>().join(", "));
+            if let Some(ps) = payloads.get(head) {
+                println!("  payloads: {}", ps.iter().copied().collect::<Vec<_>>().join(", "));
+            }
+        }
+        println!();
         let detail = fatals
             .iter()
             .find(|f| f.category == *cat)
@@ -106,4 +147,26 @@ pub fn report(label: &str) -> bool {
         println!();
     }
     true
+}
+
+/// Replace every `` `...` `` payload with `` `_` ``. Two records of one
+/// mechanism differ only by the type they name, so the elided form is the
+/// mechanism and the payloads are its instantiations.
+fn elide_payloads(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut inside = false;
+    for c in s.chars() {
+        if c == '`' {
+            out.push('`');
+            if inside {
+                inside = false;
+            } else {
+                out.push('_');
+                inside = true;
+            }
+        } else if !inside {
+            out.push(c);
+        }
+    }
+    out
 }

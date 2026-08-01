@@ -374,10 +374,16 @@ fn main() {
 
 /// Logical instance identity is target-neutral (plan S 20a): the target decides
 /// which backend VARIANT serves a call and which boundaries exist, never the
-/// key. The two views resolve genuinely different `FuncRef`s -- a same-name
-/// `inline(lua)`/`inline(js)` pair is two declarations -- and must still produce
+/// key. Two views that resolve genuinely different `FuncRef`s must still produce
 /// one manifest, because the variants share a `(name, signature)` and therefore
 /// one mangling.
+///
+/// The fixture carries an EXPLICIT `inline(lua)`/`inline(js)` pair. It used to
+/// rely on the stdlib chain its iterator loop pulls in, and the claim that the
+/// chain resolved different `FuncRef`s was never measured -- measured, it is
+/// FALSE: 89 instances on each side and ZERO resolving differently, so the
+/// manifests agreed because nothing had forked. `variant_pairs` below is the
+/// non-vacuity assertion, and it is what makes the equality mean anything.
 #[test]
 fn logical_identity_is_stable_across_targets() {
     use bone_semantic::hir::FnBackend;
@@ -385,9 +391,12 @@ fn logical_identity_is_stable_across_targets() {
         r#"
 value P { x: float, y: float }
 fn ident<T>(v: T) -> T { return v }
+@inline inline(lua) fn variant_probe<T>(v: T) -> int = "return 1"
+@inline inline(js) fn variant_probe<T>(v: T) -> int = "return 1;"
 fn main() {
     let a = ident(P { x: 1.0, y: 2.0 })
     let b = ident(1)
+    let p = variant_probe(1)
     let xs: [int] = [1, 2, 3]
     for v in xs.iter().map(_ + 1) { let _ = v }
 }
@@ -396,6 +405,22 @@ fn main() {
     let roots = instance_graph::emission_roots(&ws, None);
     let lua = instance_graph::build_for_target(&ws, roots.clone(), false, FnBackend::Lua);
     let js = instance_graph::build_for_target(&ws, roots, false, FnBackend::Js);
+
+    let by_symbol = |g: &instance_graph::InstanceGraph| {
+        g.instances
+            .iter()
+            .map(|i| (g.symbol(&ws, i), i.func))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let (l, j) = (by_symbol(&lua), by_symbol(&js));
+    let variant_pairs =
+        l.iter().filter(|(sym, lf)| j.get(*sym).is_some_and(|jf| jf != *lf)).count();
+    assert!(
+        variant_pairs > 0,
+        "no symbol resolved to a different FuncRef across the two targets, so the manifest \
+         equality below is vacuous -- the fixture is not exercising backend variants at all"
+    );
+
     assert_eq!(
         instance_graph::render_manifest(&ws, &lua),
         instance_graph::render_manifest(&ws, &js),
