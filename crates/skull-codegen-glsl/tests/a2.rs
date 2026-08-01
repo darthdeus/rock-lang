@@ -1222,3 +1222,32 @@ fn engine_groups_must_agree_across_stages() {
     let e = emit_pipeline(&src, "e_vert", "e_frag").expect_err("must reject");
     assert!(e.contains("different @engine groups"), "got: {e}");
 }
+
+/// `@textures` is exclusive with EVERY other role, `@engine` included. Its
+/// checker enumerated the roles that existed when it was written, so adding a
+/// fourth silently widened what slips through -- a group is a binding set of
+/// its own, never engine-block data.
+#[test]
+fn textures_and_engine_conflict() {
+    let src = r#"
+        value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
+        value EngineU  { uProjection: Mat4, uView: Mat4 }
+        struct Tex     { atlas: Sampler2D }
+        value Vary     { position: Vec4, TexCoord: Vec2 }
+
+        @shader(vertex)
+        fn t_vert(@attr a: QuadVert, @textures @engine t: Tex) -> Vary {
+            return Vary {
+                position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
+                TexCoord: a.aTexCoord,
+            }
+        }
+
+        @shader(fragment)
+        fn t_frag(vary: Vary) -> Vec4 {
+            return Vec4 { x: vary.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let e = emit_pipeline(src, "t_vert", "t_frag").expect_err("must reject");
+    assert!(e.contains("@textures"), "got: {e}");
+}

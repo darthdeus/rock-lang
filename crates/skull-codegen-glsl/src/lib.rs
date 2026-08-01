@@ -2191,6 +2191,12 @@ fn texture_group_samplers(
     Ok(ts.slots.iter().map(|s| (param_index, s.name, sampler_glsl_ty(s.kind))).collect())
 }
 
+/// Every param role, so a check that means "all the others" cannot go stale by
+/// listing them. `reject_conflicting_texture_role` enumerated the three that
+/// existed when it was written, and adding `@engine` silently widened what it
+/// let through.
+const PARAM_ROLES: [&str; 4] = ["attr", "instance", "uniform", "engine"];
+
 /// `@textures` is exclusive with the other param roles -- a group is a binding
 /// set of its own, not attribute or uniform-block data.
 fn reject_conflicting_texture_role(
@@ -2199,7 +2205,7 @@ fn reject_conflicting_texture_role(
     span: Span,
     stage: &str,
 ) -> Result<(), CompilerError> {
-    for other in ["attr", "instance", "uniform"] {
+    for other in PARAM_ROLES.iter().copied() {
         if has_anno(annos, other) {
             return Err(err(
                 span,
@@ -2848,6 +2854,13 @@ pub fn emit_shader_pipeline_with_dependencies(
     // agree: it is engine-owned and fixed, and both stages naming the same block
     // at index 0 is what lets the engine fill it once per pass rather than once
     // per stage.
+    //
+    // What this does NOT check is that the type IS the engine's own `EngineU` --
+    // deliberately. A compiler that knows an engine type by name has engine
+    // policy inside the language. The fingerprint the plan ships is what the
+    // ENGINE compares at registration, which is the layer that owns the answer;
+    // a game marking its own struct `@engine` gets a block nothing fills, and
+    // that check belongs there rather than here.
     let engine_group = match (vshape.engine_group, fshape.engine_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(vf.name_span, format!(
