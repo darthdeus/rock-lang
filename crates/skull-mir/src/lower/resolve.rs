@@ -361,11 +361,13 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
-        for (&c, &value) in cells.iter().zip(&rhs_leaves) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
+        // A diverging rhs (`?? return x`) yields no value: splatting it reads
+        // leaves off nil, which faults before the divergence it sits in front of.
         if self.is_open() {
+            let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
+            for (&c, &value) in cells.iter().zip(&rhs_leaves) {
+                self.emit_cur(Inst::Store { cell: c, value });
+            }
             self.f.set_term(self.cur, Term::Goto(join));
         }
 
@@ -419,11 +421,12 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        let rhs_slots = self.tuple_repr_to_slots(rhs_repr, &shape);
-        for (&c, &value) in cells.iter().zip(&rhs_slots) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
+        // Same rule as the value twin: a diverging rhs has no slots to store.
         if self.is_open() {
+            let rhs_slots = self.tuple_repr_to_slots(rhs_repr, &shape);
+            for (&c, &value) in cells.iter().zip(&rhs_slots) {
+                self.emit_cur(Inst::Store { cell: c, value });
+            }
             self.f.set_term(self.cur, Term::Goto(join));
         }
 
