@@ -125,6 +125,17 @@ fn web_chrome_screenshot_nonblank_chess() {
 // MRT FragId write -> R32I attachment -> async PBO readback -> SELECTION ->
 // `last_click_target == ClickTarget::Player` -- and captures the screenshot
 // for the non-blank color bar.
+//
+// The click point is a FIXED viewport coordinate over mag's spawn framing, so
+// it goes stale whenever the art, sprite anchor or camera moves -- it already
+// has once (the old 950,465 sat just above the sprite after a merge window of
+// mag changes). The expectation therefore reports whether anything was picked
+// at all, so the two failures are told apart from the message alone:
+//   "nohover:None" -> the coordinate missed the sprite; re-aim it.
+//   "hover:None"   -> something was picked and the click path dropped it; that
+//                     is a real pipeline defect.
+// Without that split a missed coordinate reads exactly like a dead readback,
+// which is expensive to disambiguate after the fact.
 #[test]
 fn web_chrome_screenshot_and_click_pick_mag() {
     if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
@@ -155,9 +166,13 @@ fn web_chrome_screenshot_and_click_pick_mag() {
         .args(["--frames", "30"])
         // The player renders at ~(950, 465) in the fixed level's boot camera
         // (1280x720 window crop of the 1920x1080 canvas).
-        .args(["--click", "950", "465"])
-        .args(["--expect", "__G.last_click_target && __G.last_click_target.__variant"])
-        .args(["--value", "Player"])
+        .args(["--click", "955", "500"])
+        .args([
+            "--expect",
+            "(__G.HOVER_ENTITY_ID ? \"hover\" : \"nohover\") + \":\" + \
+             (__G.last_click_target && __G.last_click_target.__variant)",
+        ])
+        .args(["--value", "hover:Player"])
         .output()
         .expect("spawn cdp driver");
     let _ = server.kill();
