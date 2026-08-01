@@ -33,9 +33,9 @@ const THREE_SINKS: &str = r#"
 nobox value NV2 { x: float, y: float }
 global XS: [NV2] = []
 
-fn sink_one() { let ts: [(NV2, float)] = [] ts.push((XS[0], 1.0)) print("{ts.len}") }
-fn sink_two() { let ts: [(NV2, float)] = [] ts.push((XS[1], 2.0)) print("{ts.len}") }
-fn sink_three() { let ts: [(NV2, float)] = [] ts.push((XS[2], 3.0)) print("{ts.len}") }
+fn sink_one() { let t = (XS[0], 1.0) print("{t}") }
+fn sink_two() { let t = (XS[1], 2.0) print("{t}") }
+fn sink_three() { let t = (XS[2], 3.0) print("{t}") }
 
 fn main() {
     sink_one()
@@ -82,9 +82,9 @@ nobox value NV2 { x: float, y: float }
 global XS: [NV2] = []
 
 fn tuple_in_coll<T>(xs: [T], k: int) -> int {
-    let ts: [(T, float)] = []
-    ts.push((xs[k], 1.0))
-    return ts.len
+    let t = (xs[k], 1.0)
+    print("{t}")
+    return 0
 }
 
 fn pair<T>(xs: [T], k: int) -> (T, float)? {
@@ -145,11 +145,11 @@ fn a_failing_global_init_does_not_mask_a_failing_function() {
     const BOTH: &str = r#"
 nobox value NV2 { x: float, y: float }
 global XS: [NV2] = []
-global G: [(NV2, float)] = [(NV2 { x: 1.0, y: 2.0 }, 1.0)]
+global G: string = "{(NV2 { x: 1.0, y: 2.0 }, 1.0)}"
 
-fn sink_fn() { let ts: [(NV2, float)] = [] ts.push((XS[0], 1.0)) print("{ts.len}") }
+fn sink_fn() { let t = (XS[0], 1.0) print("{t}") }
 
-fn main() { sink_fn() print("{G.len}") }
+fn main() { sink_fn() print(G) }
 "#;
     let err = try_emit_module(BOTH).expect_err("both definitions must reject");
     let all = messages(&err);
@@ -169,7 +169,7 @@ fn a_lone_rejection_has_no_siblings() {
     const ONE_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
 global XS: [NV2] = []
-fn sink_one() { let ts: [(NV2, float)] = [] ts.push((XS[0], 1.0)) print("{ts.len}") }
+fn sink_one() { let t = (XS[0], 1.0) print("{t}") }
 fn main() { sink_one() }
 "#;
     let err = try_emit_module(ONE_SINK).expect_err("the nobox sink must reject");

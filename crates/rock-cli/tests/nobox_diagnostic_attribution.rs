@@ -17,16 +17,19 @@ fn rock_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_rock"))
 }
 
-// A nobox value as a TUPLE element in a collection: a tuple slot is a boxed
-// slot, so the element materializes with nowhere else to go.
+// Interpolating a WHOLE tuple that carries a nobox value: that asks for one
+// runtime-typed value, so the element materializes with nowhere else to go.
+//
+// A tuple element in a COLLECTION used to stand here; it stopped materializing
+// when the box learned to carry the leaves. This sink is F1 erasure, which is
+// permanent by design -- prefer it over any row the case matrix lists as live.
 const NOBOX_IN_A_TUPLE_ELEMENT: &str = r#"
 nobox value NB { x: float, y: float }
 global XS: [NB] = []
 fn main() {
     XS.push(NB { x: 1.0, y: 2.0 })
-    let ts: [(NB, float)] = []
-    ts.push((XS[0], 1.0))
-    print("{ts.len}")
+    let t = (XS[0], 1.0)
+    print("{t}")
 }
 "#;
 

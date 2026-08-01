@@ -307,6 +307,22 @@ impl Builder<'_> {
         Some(TupleRetShape { slots, nullable: false })
     }
 
+    /// The slot layout of a tuple's BOX: `Some` exactly when some element splats,
+    /// so its `nobox` leaves ride the box instead of a `<name>_ct` inside it.
+    ///
+    /// The SAME `TupleRetShape` the multi-return wire uses -- a boxed tuple is
+    /// that wire written into a table rather than into registers. Producer
+    /// ([`Expr::Tuple`]) and every reader (slot projection, destructure) derive
+    /// the layout here and nowhere else, so they cannot disagree about how many
+    /// table slots an element occupies. That disagreement is silent, not a
+    /// rejection: Lua reads a missing slot as nil.
+    ///
+    /// `None` for every tuple that has no `nobox` element -- which is every tuple
+    /// that compiled before this existed, so their boxes are byte-identical.
+    pub(crate) fn tuple_box_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        self.expr_tuple_shape(e).filter(|s| s.splats())
+    }
+
     /// The tuple slot of a declared PARAM on the body arena -- [`tuple_param_slot`]'s
     /// spelling for a nested fn and for a fn TYPE's params.
     ///

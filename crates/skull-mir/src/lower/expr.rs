@@ -175,13 +175,27 @@ impl Builder<'_> {
             // splatting form keeps its own repr path in `lower_expr_repr`, where
             // the presence tag stays a leaf and is never at risk.
             Expr::Tuple(elems) => {
-                let vs = elems
-                    .into_iter()
-                    .map(|el| {
-                        let r = self.lower_expr_repr(el)?;
-                        Ok(self.pack_maybe_absent(r))
-                    })
-                    .collect::<Result<Vec<_>, CompilerError>>()?;
+                // A `nobox` element rides the BOX as its leaves, on the same slot
+                // list the multi-return wire uses -- so the box is the wire put in
+                // a table, and `tuple_box_shape` is the one oracle both this
+                // producer and every reader derive the layout from. Without it a
+                // `nobox` part packs to a `<name>_ct` and the guarantee is gone the
+                // moment the tuple escapes into a container (matrix row 13).
+                //
+                // `None` when nothing splats, which is every tuple that compiled
+                // before: those keep today's one-value-per-element box exactly.
+                let shape = self.tuple_box_shape(e);
+                let mut vs = Vec::new();
+                for (i, el) in elems.into_iter().enumerate() {
+                    let r = self.lower_expr_repr(el)?;
+                    match shape.as_ref().and_then(|s| s.slots.get(i)).cloned() {
+                        Some(slot) if slot.splats() => {
+                            let vals = self.repr_to_slot_values(r, &slot);
+                            vs.extend(vals);
+                        }
+                        _ => vs.push(self.pack_maybe_absent(r)),
+                    }
+                }
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             Expr::Array(elems) => self.lower_array_literal(e, elems),

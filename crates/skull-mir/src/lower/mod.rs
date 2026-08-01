@@ -1715,7 +1715,7 @@ impl Builder<'_> {
     /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
     /// inverse of [`Self::tuple_repr_to_slots`], used at a call site to hand a
     /// destructure its elements without ever boxing a `nobox` one.
-    fn tuple_from_slots(
+    pub(crate) fn tuple_from_slots(
         &mut self,
         shape: &TupleRetShape,
         slots: &[Idx<Inst>],

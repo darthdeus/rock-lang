@@ -304,6 +304,25 @@ impl Builder<'_> {
             {
                 self.nullcoalesce_tuple_repr(lhs, rhs)
             }
+            // A BOXED tuple whose layout splats -- read from a container, a field,
+            // an opaque call. Rebuild the unboxed `Tuple` repr from the box's
+            // slots, the exact inverse of the producer in `Expr::Tuple`, so a
+            // `nobox` part comes back as leaves instead of being indexed out as a
+            // single value that no longer exists there.
+            //
+            // Rebuilding HERE rather than at each reader is what keeps the readers
+            // honest: slot projection, `let (a, b) =`, and the `for` destructure
+            // all already consume a `ValueRepr::Tuple`, so none of them needs to
+            // know the box widened. Slots the consumer ignores are DCE'd.
+            _ if self.tuple_box_shape(e).is_some() => {
+                let shape = self.tuple_box_shape(e).expect("guard matched");
+                let base = self.lower_expr(e)?;
+                let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+                    .map(|i| self.emit_cur(Inst::TupleIndex { base, index: i }))
+                    .collect();
+                let mut idx = 0;
+                Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
+            }
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
         }
     }
