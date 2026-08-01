@@ -18,10 +18,6 @@ use crate::common::emit_module;
 const BLOOM: &str = r#"
 value BloomBlurU { radius: float, direction: Vec2, resolution: float }
 
-@uniform_expand inline(lua) fn pack_uniform_block<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
-    error("pack_uniform_block is compiler-expanded")
-"""
-
 fn main() {
     let f = native_buffer_float(8)
     let i = native_buffer_int(8)
@@ -63,10 +59,6 @@ fn int_and_bool_leaves_store_through_the_other_view() {
     let body = main_body(&emit_module(
         r#"
 value Flags { scale: float, on: bool, count: int }
-
-@uniform_expand inline(lua) fn pack_uniform_block<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
-    error("pack_uniform_block is compiler-expanded")
-"""
 
 fn main() {
     let f = native_buffer_float(8)

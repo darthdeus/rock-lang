@@ -314,12 +314,13 @@ nobox value NV2 { x: float, y: float }
 fn mk(x: float, y: float) -> NV2 { return NV2 { x: x, y: y } }
 
 // Two INDEPENDENT sinks of the same class, on distinct lines, in one body.
+// Same permanent sink as `NOBOX_INDIRECT_SINK` -- read the note there.
 fn bad() -> int {
-    let xs = vec_new()
-    xs.push((mk(1.0, 2.0), 1.0))
-    let ys = vec_new()
-    ys.push((mk(3.0, 4.0), 2.0))
-    return xs.len + ys.len
+    let t = (mk(1.0, 2.0), 1.0)
+    print("{t}")
+    let u = (mk(3.0, 4.0), 2.0)
+    print("{u}")
+    return 0
 }
 
 fn main() {
@@ -482,18 +483,22 @@ fn nobox_interpolation_does_not_materialize() {
     assert!(!body.contains("NV2_ct("), "nobox interpolation materialized its operand:\n{body}");
 }
 
-// A shape that still materializes, so the gate below stays a gate. It used to
-// be an indirect `sink(v)` call; that now threads leaves (`fn_value_abi`), which
-// would have left this test asserting a rejection nothing produces. A tuple
-// pushed into a collection is an open class per
-// docs/nobox-nested-ctor-plan.md, "Sink state".
+// A shape that still materializes, so the gate below stays a gate. Twice
+// re-pointed now: an indirect `sink(v)` call started threading leaves
+// (`fn_value_abi`), then a tuple pushed into a collection started riding the box
+// as leaves. Both were OPEN GAPS when chosen, which is what made them rot.
+//
+// Interpolating a whole tuple is chosen because it is PERMANENT -- asking for one
+// runtime-typed value is F1 erasure, a justified box meant to stay a rejection
+// (`tests/errors/nobox_container_gaps.rock.err`). Do not re-point this at a sink
+// the case matrix lists as live.
 const NOBOX_INDIRECT_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
 
 fn bad(v: NV2) -> int {
-    let xs = vec_new()
-    xs.push((v, 1.0))
-    return xs.len
+    let t = (v, 1.0)
+    print("{t}")
+    return 0
 }
 
 fn main() {
@@ -750,15 +755,15 @@ fn nobox_global_reads_and_writes_leaves_at_runtime() {
     assert_eq!(out, "3\n12\n300");
 }
 
-// Re-pointed for the same reason as `NOBOX_INDIRECT_SINK`: the indirect sink it
-// used to violate through now emits.
+// Re-pointed for the same reason as `NOBOX_INDIRECT_SINK`, and to the same
+// permanent sink -- see the note there before changing either.
 const NOBOX_STDLIB_SINK_LIB: &str = r#"
 nobox value SV2 { x: float, y: float }
 
 fn stdlib_bad(v: SV2) -> int {
-    let xs = vec_new()
-    xs.push((v, 1.0))
-    return xs.len
+    let t = (v, 1.0)
+    print("{t}")
+    return 0
 }
 
 fn stdlib_entry() {

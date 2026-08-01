@@ -927,6 +927,10 @@ pub(crate) fn vertex_expand_arg_msg(fname: Ustr) -> String {
 /// specialization substitution, which the validator has no active
 /// specialization for -- an unsubstituted generic is exactly what this must
 /// reject anyway.
+///
+/// PREMISE (pre-monomorphization): source bodies can hold an
+/// unsubstituted generic. Under totality none exist, this rejects a now-legal
+/// program, and the validator must become instance-driven or be deleted.
 pub(crate) fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) -> Option<Ustr> {
     let ty = resolve_tyid(ws, inf, *inf.expr_types.get(arg)?)?;
     let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = ty_node(ws, inf, ty)? else {
@@ -976,6 +980,10 @@ pub fn uniform_block_checked(
 /// Mirrors [`Builder::value_struct_name_of`] minus the specialization
 /// substitution, which the validator has no active specialization for -- an
 /// unsubstituted generic is exactly what this must reject anyway.
+///
+/// PREMISE (pre-monomorphization): source bodies can hold an
+/// unsubstituted generic. Under totality none exist, this rejects a now-legal
+/// program, and the validator must become instance-driven or be deleted.
 pub(crate) fn value_struct_name_at(
     ws: &Workspace,
     inf: &BodyInference,
@@ -993,14 +1001,15 @@ pub(crate) fn value_struct_name_at(
 /// validator and the lowering expander cannot diverge in what they accept.
 pub(crate) fn uniform_expand_arity_msg(fname: Ustr) -> String {
     format!(
-        "`@uniform_expand` fn `{fname}` takes exactly three arguments -- the float view, the \
-         int view, and the uniform group"
+        "`@uniform_expand` fn `{fname}` takes either three arguments -- the float view, the \
+         int view, and the uniform group (the packer) -- or one, the uniform group alone \
+         (its layout fingerprint)"
     )
 }
 
 pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
     format!(
-        "`@uniform_expand` fn `{fname}`'s third argument must be a concrete `value` struct -- the \
+        "`@uniform_expand` fn `{fname}`'s uniform-group argument must be a concrete `value` struct -- the \
          std140 layout is derived from it, so an unsubstituted generic has none. Reach this \
          through the `set_uniform_block` macro, which expands at the call site"
     )
@@ -1611,6 +1620,15 @@ pub(crate) fn compute_call_spec(
     if f.generics.is_empty() {
         return Ok(None);
     }
+    // `is_coroutine` is NOT an arbitrary exclusion, and deleting it does not
+    // "let coroutines specialize" -- it panics codegen with `Yield must be
+    // removed by the coroutine transform before codegen` (measured). Eligibility
+    // here is deliberately a SUBSET of the inliner's `classify`, because
+    // specialization is DELIVERED by inline-splicing a specialized clone, and a
+    // `co fn` cannot be spliced into its caller: the call constructs a coroutine
+    // object rather than running the body. A specialized clone would need to be
+    // emitted as its own top-level coroutine and put through `coro_transform`,
+    // which is a mechanism that does not exist yet.
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return Ok(None);
     }
@@ -2226,7 +2244,20 @@ fn tuple_param_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
     // anyway. Splatting into one only moves the materialization deeper, out of
     // the caller's line and into the spliced stdlib body, which costs the
     // diagnostic its span and buys nothing.
-    if !matches!(static_ty(ws, ty), Some(TypeExpr::Tuple { .. })) {
+    //
+    // A `(A, B)?` is spelled just as much as a `(A, B)`, and its presence rides
+    // the param list the way it already rides a return -- so it is admitted
+    // here and `tuple_ret_shape` sets the tag, as the sole declared-type entry
+    // point. A generic bound to a nullable tuple is still excluded, for the
+    // reason above.
+    let spelled_tuple = match static_ty(ws, ty) {
+        Some(TypeExpr::Tuple { .. }) => true,
+        Some(TypeExpr::Nullable(inner)) => {
+            matches!(static_ty(ws, ty.with_idx(inner)), Some(TypeExpr::Tuple { .. }))
+        }
+        _ => false,
+    };
+    if !spelled_tuple {
         return RetSlot::Opaque;
     }
     match tuple_ret_shape(ws, subst, ty) {
@@ -2519,19 +2550,59 @@ pub(crate) fn value_struct_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut
 #[derive(Clone, Debug)]
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,
-    /// Positional payload slots `f__0 .. f__{tuple_width-1}` (max tuple arity).
-    pub(crate) tuple_width: usize,
+    /// One entry per payload POSITION, widest variant first-wins. A position is
+    /// several SLOTS when it carries a `nobox` value, so this is not the slot
+    /// count -- ask [`EnumFlatShape::tuple_width`] for that and
+    /// [`EnumFlatShape::slot_offset`] for where a position starts.
+    pub(crate) slots: Vec<FlatSlot>,
     /// Named payload slots `f__<name>` (union of record-variant field names,
     /// first-seen order). A tuple position and a record field never collide --
     /// the former is a number, the latter an identifier.
     pub(crate) record_fields: Vec<Ustr>,
 }
 
+/// The wire shape of ONE positional payload of a flat enum.
+///
+/// A payload slot is a dynamically-typed Lua field, so ANY single value fits in
+/// one -- except a `nobox` value, which is several leaves and has no box to sit
+/// in. Widening the position to its leaves is the whole point: the value's
+/// leaves ARE the slots, so an enum payload never materializes one.
+#[derive(Clone, Debug)]
+pub(crate) enum FlatSlot {
+    /// One dynamic slot -- today's shape, and what every non-`nobox` payload keeps.
+    Opaque,
+    /// A `nobox` value payload, spanning its leaves.
+    Leaves(ValueShape),
+}
+
+impl FlatSlot {
+    /// Slots this position occupies.
+    pub(crate) fn width(&self) -> usize {
+        match self {
+            FlatSlot::Opaque => 1,
+            FlatSlot::Leaves(vs) => vs.leaf_count(),
+        }
+    }
+}
+
 impl EnumFlatShape {
+    /// Total positional SLOTS -- `_0 .. _{tuple_width-1}`. Distinct from the
+    /// position count (`slots.len()`): a `nobox` position spans several.
+    pub(crate) fn tuple_width(&self) -> usize {
+        self.slots.iter().map(FlatSlot::width).sum()
+    }
+
+    /// The first slot index of payload position `pos`. Positions past the end
+    /// answer with the total width, so a variant narrower than the union simply
+    /// has nothing to write.
+    pub(crate) fn slot_offset(&self, pos: usize) -> usize {
+        self.slots.iter().take(pos).map(FlatSlot::width).sum()
+    }
+
     /// The number of scalar leaves this enum threads as across a call: the
     /// discriminant + every positional slot + every record slot.
     pub(crate) fn leaf_count(&self) -> usize {
-        1 + self.tuple_width + self.record_fields.len()
+        1 + self.tuple_width() + self.record_fields.len()
     }
 
     /// The `ValueShape` the scalar ABI / SROA see: `[__tag, _0.., <rec>..]`, all
@@ -2539,7 +2610,7 @@ impl EnumFlatShape {
     /// box semantics (the leaf NAMES here are nominal -- never read structurally).
     pub(crate) fn value_shape(&self) -> ValueShape {
         let mut fields = vec![(Ustr::from("__tag"), FieldShape::Prim)];
-        for i in 0..self.tuple_width {
+        for i in 0..self.tuple_width() {
             fields.push((Ustr::from(format!("_{i}").as_str()), FieldShape::Prim));
         }
         for rf in &self.record_fields {
@@ -2561,12 +2632,30 @@ pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShap
         return None;
     }
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
-    let mut tuple_width = 0;
+    // Per position: `None` = no `nobox` payload seen (one opaque slot), `Some` =
+    // the agreed leaf shape. `conflict` marks a position where two variants want
+    // DIFFERENT nobox shapes -- there is no one layout for it, so it stays opaque
+    // and a `nobox` payload there keeps rejecting at the ctor, loudly.
+    let mut want: Vec<Option<ValueShape>> = Vec::new();
+    let mut conflict: Vec<bool> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
     for v in &ed.variants {
         match &v.payload {
             VariantPayload::Unit => {}
-            VariantPayload::Tuple(tys) => tuple_width = tuple_width.max(tys.len()),
+            VariantPayload::Tuple(tys) => {
+                if want.len() < tys.len() {
+                    want.resize(tys.len(), None);
+                    conflict.resize(tys.len(), false);
+                }
+                for (i, ty) in tys.iter().enumerate() {
+                    let Some(vs) = nobox_payload_shape(ws, *ty) else { continue };
+                    match &want[i] {
+                        Some(prev) if prev.name != vs.name => conflict[i] = true,
+                        Some(_) => {}
+                        None => want[i] = Some(vs),
+                    }
+                }
+            }
             VariantPayload::Record(fields) => {
                 for f in fields {
                     if !record_fields.contains(&f.name) {
@@ -2576,7 +2665,30 @@ pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShap
             }
         }
     }
-    Some(EnumFlatShape { name, tuple_width, record_fields })
+    let slots = want
+        .into_iter()
+        .zip(conflict)
+        .map(|(w, bad)| match w {
+            Some(vs) if !bad => FlatSlot::Leaves(vs),
+            _ => FlatSlot::Opaque,
+        })
+        .collect();
+    Some(EnumFlatShape { name, slots, record_fields })
+}
+
+/// The leaf shape of a payload type that is a `nobox` value struct, else `None`.
+///
+/// Keyed on the DECLARED payload type, like every other splat decision on this
+/// arc: both the ctor that writes the slots and the match arm that reads them
+/// derive the layout from the enum declaration, so neither has to see the other.
+fn nobox_payload_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
+    let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = static_ty(ws, ty)? else {
+        return None;
+    };
+    if !is_nobox_nominal(ws, n) {
+        return None;
+    }
+    sig_shape_of_nominal(ws, n)
 }
 
 /// The frame-slot yield channel of a `co fn` whose declared return type is
@@ -2611,7 +2723,7 @@ pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldC
     let shape = flat_enum_shape(ws, n)?;
     Some(YieldChannel {
         enum_name: shape.name,
-        tuple_width: shape.tuple_width,
+        tuple_width: shape.tuple_width(),
         record_fields: shape.record_fields,
     })
 }

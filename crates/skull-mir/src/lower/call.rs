@@ -41,6 +41,36 @@ impl Builder<'_> {
                             ));
                         }
                     }
+                    // A tuple whose BOX widened: its `nobox` part rides the box as
+                    // leaves, so the table holds one slot per LEAF, not one per
+                    // element. Typed readers derive that from the declared tuple
+                    // type; `inspect` walks the table at RUNTIME and would report a
+                    // wider tuple. Interpolation lowers to `inspect`, so this one
+                    // check covers `"{t}"` too.
+                    //
+                    // Keyed by callee NAME beside its column sibling, and NOT on
+                    // the param being `any`: `any` is also how the stdlib spells
+                    // pure STORAGE (`__vec_data_set`, `push`'s primitives), which
+                    // never look inside the value and must keep working -- they are
+                    // the whole point of the widening.
+                    //
+                    // Rejecting matters more here than for a nominal nobox: this
+                    // shape leaves no `<name>_ct` behind, so the residue check
+                    // cannot catch it and an unrejected one is a SILENT wrong
+                    // answer. Escape: `(materialize(v), n)` stops that slot
+                    // splatting, so the box is one-slot-per-element again.
+                    if let Some(shape) = self.tuple_box_shape(arg) {
+                        return Err(CompilerError::new_with_label(
+                            self.body.expr_spans[e],
+                            format!(
+                                "cannot inspect a tuple carrying a nobox value: its {} \
+                                 leaves ride the box, so it would be read as a wider \
+                                 tuple (project the slots, or `materialize` the \
+                                 element deliberately)",
+                                shape.slot_count()
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -612,6 +642,7 @@ impl Builder<'_> {
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
+            self.reject_column_container_opaque_args(func, arg_idxs)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
@@ -939,12 +970,12 @@ impl Builder<'_> {
                 let shape = flat_enum_shape(self.ws, name).unwrap();
                 let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
                 let tag = packed[0];
-                let positional = packed[1..1 + shape.tuple_width].to_vec();
+                let positional = packed[1..1 + shape.tuple_width()].to_vec();
                 let named: Vec<(Ustr, Idx<Inst>)> = shape
                     .record_fields
                     .iter()
                     .enumerate()
-                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width + i]))
+                    .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
                     .collect();
                 // A STATIC tag names a present variant: box directly. A payload-free
                 // variant reuses its interned singleton (map-key / identity holds).

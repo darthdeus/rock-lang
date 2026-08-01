@@ -815,26 +815,28 @@ const SEEDS: &[SeedCase] = &[
         stdlib: StdlibVariant::CheckedIn,
         expect: Expect::SpuriousReject {
             names: "survived lowering",
-            flip_when: "an enum repr gains a place for a MULTI-LEAF value payload. \
-                        NOT mechanism A and not a `Nullable` arm: the non-nullable \
-                        control rejects identically, and neither repr can hold two \
-                        leaves in one slot",
+            flip_when: "`nobox_payload_shape` gains a `Nullable` arm AND the flat \
+                        slot gains a presence leaf beside its data leaves. Keyed on \
+                        a bare Nominal today, so a `P?` payload leaves the slot \
+                        `Opaque` and the ctor rejects. Matrix row 3",
         },
-        gap: Some("nobox value as an enum payload -- unsupported, nullable or not"),
+        gap: Some("a NULLABLE nobox value as an enum payload"),
     },
-    // The control that falsified the filing above. Same rejection without the `?`,
-    // so the discriminant is the multi-leaf payload, not the presence tag.
+    // The control that separated the two reasons stacked on its twin. Both used to
+    // reject for the multi-leaf reason; that one is closed, and what is left on the
+    // twin is nullability alone -- so they do NOT flip together, and the control
+    // earned its keep by making that visible.
     SeedCase {
         name: "nobox_nonnullable_enum_payload_escaping",
         file: "nobox_nonnullable_enum_payload_escaping.rock",
         surface: Surface::Luajit,
         stdlib: StdlibVariant::CheckedIn,
-        expect: Expect::SpuriousReject {
-            names: "survived lowering",
-            flip_when: "same as its nullable twin -- both flip together, which is \
-                        the point of keeping the pair",
-        },
-        gap: Some("control: proves the enum-payload gap is not nullability"),
+        expect: Expect::Correct,
+        gap: Some(
+            "FIXED: a flat enum's ctor in a BOXED context routes through the repr \
+             and `pack`, so a multi-leaf payload is stored splat in the enum box \
+             instead of each arg being packed on its own",
+        ),
     },
     SeedCase {
         name: "nobox_nullable_vec_element",
@@ -1105,6 +1107,19 @@ enum Consumption {
     /// place the value was READ OUT OF. Needs a production with an upstream
     /// place; the copy invariant says the source must be untouched.
     CopyOnWriteProbe,
+    /// `let (q, n) = <(P, int)>` -- a DESTRUCTURING bind off a tuple carrying the
+    /// value, rather than binding the tuple and projecting `.0`.
+    TupleDestructure,
+    /// `if let (q, n) = <(P, int)?>` on a PRESENT tuple.
+    NullableTupleDestructure,
+    /// The same on an ABSENT one, which must take the else arm.
+    ///
+    /// This is the shape a whole class hides in: a consumer that reads presence
+    /// off a PACKED tuple instead of the wire's presence slot answers
+    /// always-present, because a `MakeTuple` is structurally never nil. The
+    /// present case above cannot see it -- it answers right for the wrong
+    /// reason -- so the absent arm is the load-bearing one.
+    NullableTupleAbsent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1114,6 +1129,13 @@ enum Nullability {
     Refined,
     /// Stored as `P?`, recovered with `??` at the use.
     Coalesced,
+    /// Stored as `P?`, recovered by `if let` at the use.
+    ///
+    /// A THIRD recovery form, not a spelling of `!= null`: it BINDS a fresh name
+    /// off the wire instead of refining the place, so a consumer that reads
+    /// presence from a packed box rather than the wire's presence slot can answer
+    /// correctly under `Refined` and wrongly here.
+    PatternBound,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1167,7 +1189,7 @@ const PRODUCTIONS: [Production; 9] = [
     Production::Index,
     Production::Coalesce,
 ];
-const CONSUMPTIONS: [Consumption; 12] = [
+const CONSUMPTIONS: [Consumption; 15] = [
     Consumption::Bind,
     Consumption::DirectCallArg,
     Consumption::IndirectCallArg,
@@ -1180,11 +1202,15 @@ const CONSUMPTIONS: [Consumption; 12] = [
     Consumption::Interpolation,
     Consumption::Inspect,
     Consumption::CopyOnWriteProbe,
+    Consumption::TupleDestructure,
+    Consumption::NullableTupleDestructure,
+    Consumption::NullableTupleAbsent,
 ];
-const NULLABILITIES: [Nullability; 3] = [
+const NULLABILITIES: [Nullability; 4] = [
     Nullability::NonNull,
     Nullability::Refined,
     Nullability::Coalesced,
+    Nullability::PatternBound,
 ];
 
 /// Greedy all-pairs (pairwise) cover over axes of the given cardinalities: every
@@ -1796,6 +1822,19 @@ fn render(shape: Shape) -> Option<Program> {
                 }
                 place.clone()
             }
+            Nullability::PatternBound => {
+                // The source refines FIRST and separately: an `if let` binds one
+                // place, so there is no conjunct to hang the source test on the
+                // way `Refined` does.
+                if let (Some(src), true) = (&source_place, source_nullable) {
+                    body.push(format!("{}if {src} != null {{", ind(depth)));
+                    depth += 1;
+                    source_nullable = false;
+                }
+                body.push(format!("{}if let bound = {place} {{", ind(depth)));
+                depth += 1;
+                "bound".into()
+            }
             _ => {
                 body.push(format!("{}let got: P = {place} ?? {ctor_dead}", ind(depth)));
                 "got".into()
@@ -1898,6 +1937,42 @@ fn render(shape: Shape) -> Option<Program> {
                     format!("print(\"{{{value}.a}} {{{src_leaf}}}\")"),
                 ],
                 "99 7".into(),
+            )
+        }
+        Consumption::TupleDestructure => {
+            decls.push("fn with_tag(p: P) -> (P, int) { return (p, 1) }".into());
+            (
+                vec![
+                    format!("let (q, n) = with_tag({value})"),
+                    "print(\"{q.a} {q.b}\")".into(),
+                ],
+                "7 11".into(),
+            )
+        }
+        Consumption::NullableTupleDestructure => {
+            decls.push("fn maybe_tag(p: P) -> (P, int)? { return (p, 1) }".into());
+            (
+                vec![
+                    format!("let t = maybe_tag({value})"),
+                    "if let (q, n) = t { print(\"{q.a} {q.b}\") } else { print(\"absent\") }".into(),
+                ],
+                "7 11".into(),
+            )
+        }
+        Consumption::NullableTupleAbsent => {
+            // `seed(0) > 0` is false, but only the RUNTIME knows that -- routing
+            // it through `seed` keeps the branch from const-folding, so the
+            // absent wire is really built and really consumed.
+            decls.push(
+                "fn maybe_none(p: P) -> (P, int)? { if seed(0) > 0 { return (p, 1) } return null }"
+                    .into(),
+            );
+            (
+                vec![
+                    format!("let t = maybe_none({value})"),
+                    "if let (q, n) = t { print(\"{q.a} {q.b}\") } else { print(\"absent\") }".into(),
+                ],
+                "absent".into(),
             )
         }
         Consumption::Inspect => {

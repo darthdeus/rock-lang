@@ -153,7 +153,25 @@ impl Builder<'_> {
                 // is the parent's `{prefix}__i` slot (see `scrut_payload`).
                 let cdata = en.is_some_and(|e| enum_value_shape(self.ws, e).is_some());
                 for (i, sp) in sub.into_iter().enumerate() {
-                    let payload = self.scrut_payload(scrut, i, cdata);
+                    // A payload position widened to a `nobox` value's leaves binds
+                    // THE LEAVES -- rebuilding a box here to bind one cell is the
+                    // materialization the widening exists to avoid.
+                    if let Some(vs) = self.flat_payload_leaf_shape(en, variant, i) {
+                        if let Pattern::Bind(b) = self.body.pattern_arena[sp] {
+                            let leaves = self.scrut_payload_leaves(scrut, i, &vs);
+                            self.bind_leaves(b, &leaves, vs);
+                            continue;
+                        }
+                    }
+                    // POSITION -> SLOT. They differ once any position ahead of
+                    // this one is widened: `V2(Vec2)` at position 0 spans two
+                    // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
+                    // Indexing by position read the widened value's second leaf
+                    // and handed `nil` to the count.
+                    let slot = en
+                        .and_then(|e| flat_enum_shape(self.ws, e))
+                        .map_or(i, |s| s.slot_offset(i));
+                    let payload = self.scrut_payload(scrut, slot, cdata);
                     // Thread the sub-pattern's enum (from this variant's payload
                     // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
                     // repr -- else an unqualified `J` defaults to the `.__variant`
@@ -368,6 +386,64 @@ impl Builder<'_> {
         }
     }
 
+    /// The leaf shape of THIS VARIANT's payload at position `i`, when the position
+    /// is widened to a `nobox` value's leaves. `None` for every ordinary position.
+    ///
+    /// Both the position AND the variant have to be asked. A position is widened
+    /// because SOME variant carries a `nobox` value there; a sibling variant with
+    /// an ordinary payload at the same position occupies only the first slot, and
+    /// reading it through the widened shape binds a float as if it were a value
+    /// struct. Read off the enum DECLARATION, the same source the ctor's placement
+    /// reads, so a write and a read of one position cannot disagree.
+    pub(crate) fn flat_payload_leaf_shape(
+        &self,
+        enum_name: Option<Ustr>,
+        variant: Ustr,
+        i: usize,
+    ) -> Option<ValueShape> {
+        use bone_semantic::hir::VariantPayload;
+        let en = enum_name?;
+        let shape = flat_enum_shape(self.ws, en)?;
+        let FlatSlot::Leaves(vs) = shape.slots.get(i)? else { return None };
+        let eid = self.ws.enums_by_name.get(&en)?;
+        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
+        let v = ed.variants.iter().find(|v| v.name == variant)?;
+        let VariantPayload::Tuple(tys) = &v.payload else { return None };
+        match static_ty(self.ws, *tys.get(i)?)? {
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n == vs.name => Some(vs.clone()),
+            _ => None,
+        }
+    }
+
+    /// The `width` slot values of a widened payload position, in leaf order.
+    pub(crate) fn scrut_payload_leaves(
+        &mut self,
+        scrut: &Scrut,
+        i: usize,
+        vs: &ValueShape,
+    ) -> Vec<Idx<Inst>> {
+        let shape = match scrut {
+            Scrut::Cells { shape, .. } => Some(shape.clone()),
+            Scrut::Flat { shape, .. } => Some(shape.clone()),
+            Scrut::Val(_) => None,
+        };
+        let off = shape.as_ref().map_or(i, |s| s.slot_offset(i));
+        (0..vs.leaf_count())
+            .map(|k| self.scrut_slot(scrut, off + k))
+            .collect()
+    }
+
+    /// One raw positional SLOT of the scrutinee (not a position -- a slot).
+    fn scrut_slot(&mut self, scrut: &Scrut, slot: usize) -> Idx<Inst> {
+        match scrut {
+            Scrut::Cells { positional, .. } => positional[slot],
+            Scrut::Flat { parent, prefix, .. } => {
+                self.emit_cur(Inst::Field { base: *parent, field: flat_payload_slot(*prefix, slot) })
+            }
+            Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: slot }),
+        }
+    }
+
     /// The scrutinee's `i`th positional payload: threaded cells hold it directly; a
     /// flat field reads the parent's `{prefix}__i` slot; a cdata enum reads its
     /// `_<i>` C field; a table enum reads the positional `[i+1]` slot.
@@ -474,8 +550,21 @@ impl Builder<'_> {
             if self.expr_is_nullable(value) && self.nobox_binding_shape(b).is_some() {
                 return self.lower_if_let_nobox(b, value, then_branch, else_branch);
             }
-            if let Some(shape) = self.nullable_tuple_call_shape(value)? {
-                return self.lower_if_let_nullable_tuple(b, value, &shape, then_branch, else_branch);
+        }
+        // Any name-only pattern, `Bind` included: the presence is a WIRE slot, so
+        // it has to be the branch condition. Falling through to the general path
+        // instead tests the PACKED tuple against nil -- and a `MakeTuple` is never
+        // nil, so the test const-folds to always-present and the else arm is
+        // deleted, which is the same shape the `??` consumer hit.
+        if self.pattern_is_names_only(pattern) {
+            if let Some(shape) = self.nullable_tuple_wire_shape(value)? {
+                return self.lower_if_let_nullable_tuple(
+                    pattern,
+                    value,
+                    &shape,
+                    then_branch,
+                    else_branch,
+                );
             }
         }
         let result = self.f.new_cell(None);
@@ -581,13 +670,103 @@ impl Builder<'_> {
         Ok(shape.nullable.then_some(shape))
     }
 
+    /// THE oracle for "a presence slot for this nullable tuple is really on the
+    /// wire" -- what every consumer of one (`let`, `== null`, `if let`) reads,
+    /// so none of them can branch on a slot another one did not put there.
+    ///
+    /// Each source carries its own warrant for answering, and none of them is
+    /// the expression's own type:
+    /// - a direct CALL answers from the callee's DECLARED return
+    ///   ([`Self::nullable_tuple_call_shape`]);
+    /// - a NAME answers from the shape its slot cells were bound with, which is
+    ///   whatever this oracle said at the `let`;
+    /// - a SAFE-NAV answers from its own join, which manufactures the presence
+    ///   rather than receiving it -- the sanctioned exception `repr_join_slot`
+    ///   already relies on, and the reason the shape is built here instead of
+    ///   read off a declaration.
+    pub(crate) fn nullable_tuple_wire_shape(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
+        if let Expr::Var(b) = self.body.expr_arena[e] {
+            let Some((_, shape)) = self.tuple_binds.get(&raw(b)) else { return Ok(None) };
+            return Ok(shape.nullable.then(|| shape.clone()));
+        }
+        if self.is_safe_nav(e) {
+            let Some(inner) = self.peeled_tuple_shape(e).filter(TupleRetShape::splats) else {
+                return Ok(None);
+            };
+            return Ok(Some(TupleRetShape { nullable: true, ..inner }));
+        }
+        self.nullable_tuple_call_shape(e)
+    }
+
+    /// Whether `e` is one of the three `?.` forms -- the expressions whose join
+    /// mints its own presence tag.
+    pub(crate) fn is_safe_nav(&self, e: Idx<Expr>) -> bool {
+        matches!(
+            self.body.expr_arena[e],
+            Expr::SafeNav { .. } | Expr::SafeNavCall { .. } | Expr::SafeNavLet { .. }
+        )
+    }
+
+    /// Whether `pat` is names and holes only -- irrefutable, so the presence slot
+    /// is the ONLY test the match needs. Anything that carries its own test (a
+    /// literal, a variant, a record) is excluded and still matches against the
+    /// packed scrutinee.
+    fn pattern_is_names_only(&self, pat: Idx<Pattern>) -> bool {
+        match self.body.pattern_arena[pat].clone() {
+            Pattern::Bind(_) | Pattern::Wildcard => true,
+            Pattern::Tuple { elements } => {
+                elements.into_iter().all(|p| self.pattern_is_names_only(p))
+            }
+            _ => false,
+        }
+    }
+
+    /// [`Self::bind_pattern_slot`] driven by a `Pattern` instead of a
+    /// `BindingPattern`, for the `if let` forms. Only the shapes the pattern arena
+    /// can spell and the binding arena cannot are handled here -- a HOLE, which
+    /// has no `BindingInfo` to name -- and everything else delegates, so the two
+    /// cannot drift about what a slot is.
+    ///
+    /// A hole still CONSUMES its slots: the values are positional, so binding
+    /// nothing without advancing would hand the next element this one's leaves.
+    fn bind_names_slot(
+        &mut self,
+        pat: Idx<Pattern>,
+        slot: &RetSlot,
+        values: &[Idx<Inst>],
+        idx: &mut usize,
+    ) -> Result<(), CompilerError> {
+        match self.body.pattern_arena[pat].clone() {
+            Pattern::Wildcard => *idx += slot.slot_count(),
+            Pattern::Bind(b) => {
+                self.bind_pattern_slot(&BindingPattern::Leaf(b), slot, values, idx)
+            }
+            Pattern::Tuple { elements } => {
+                let RetSlot::Nested(inner) = slot else {
+                    return Err(gap("a tuple pattern against a non-tuple wire slot"));
+                };
+                if elements.len() != inner.slots.len() {
+                    return Err(gap("a tuple pattern of a different arity than its wire slot"));
+                }
+                for (p, s) in elements.into_iter().zip(inner.slots.clone()) {
+                    self.bind_names_slot(p, &s, values, idx)?;
+                }
+            }
+            _ => return Err(gap("bind_names_slot on a pattern that needs a test")),
+        }
+        Ok(())
+    }
+
     /// `if let t = <call returning (..)?>` where an element splats: the presence
-    /// SLOT is the branch condition and `t` binds the remaining slots as cells,
-    /// so nothing is packed to be tested and immediately unpacked again. The
-    /// tuple twin of [`Self::lower_if_let_nobox`].
+    /// SLOT is the branch condition and the pattern binds the remaining slots as
+    /// cells, so nothing is packed to be tested and immediately unpacked again.
+    /// The tuple twin of [`Self::lower_if_let_nobox`].
     pub(crate) fn lower_if_let_nullable_tuple(
         &mut self,
-        b: Idx<BindingInfo>,
+        pattern: Idx<Pattern>,
         value: Idx<Expr>,
         shape: &TupleRetShape,
         then_branch: Idx<Expr>,
@@ -615,15 +794,12 @@ impl Builder<'_> {
             ValueRepr::Tuple { parts, present: None },
             &bound_shape,
         );
-        let cells: Vec<Idx<Cell>> = slots
-            .iter()
-            .map(|v| {
-                let c = self.f.new_cell(None);
-                self.emit_cur(Inst::Store { cell: c, value: *v });
-                c
-            })
-            .collect();
-        self.tuple_binds.insert(raw(b), (cells, bound_shape));
+        // ONE dispatcher for every pattern shape: a single name takes the whole
+        // tuple's slot cells, a destructure takes each element's, and anything
+        // that does not line up packs -- which is where a whole-tuple use of a
+        // `nobox` element meets the guarantee's rejection.
+        let mut idx = 0;
+        self.bind_names_slot(pattern, &RetSlot::Nested(bound_shape), &slots, &mut idx)?;
         let tv = self.lower_expr(then_branch)?;
         self.store_and_join(result, tv, join);
 

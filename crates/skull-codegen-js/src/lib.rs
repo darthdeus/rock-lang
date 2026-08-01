@@ -547,23 +547,59 @@ function __stone_log(level, category, msg) {
   __stone_emit(level, category, msg);
 }
 function log_set_level(level) { __G.__stone_log_level = level; }
+// `__stone_log_dedup` holds a COUNT, not a flag: `log_suppression_summary`
+// reports how many times a suppressed site fired, and a site that fired 38k
+// times must not read like one that fired once.
 var __stone_log_dedup = {};
+var __stone_log_counts = {};
+var __stone_log_sites = {};
+var __stone_log_summary_done = false;
 var __stone_log_throttle = {};
 var __stone_log_now_override = null;
 function _log_once_impl(category, msg, site) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
-  if (__stone_log_dedup[site]) return;
-  __stone_log_dedup[site] = true;
+  var n = (__stone_log_dedup[site] || 0) + 1;
+  __stone_log_dedup[site] = n;
+  __stone_log_sites[site] = (category || "") + "|" + msg;
+  if (n > 1) return;
   __stone_emit(0, category, msg);
 }
 function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
+  __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
+  __stone_log_sites[site] = (category || "") + "|" + msg;
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
   __stone_emit(0, category, msg);
+}
+// Ties order differently from the luajit sibling (JS sort is stable, table.sort
+// is not); the counts themselves match.
+function log_suppression_summary() {
+  __stone_log_init();
+  if (__stone_log_summary_done) return;
+  __stone_log_summary_done = true;
+  var rows = [];
+  var collect = function(tbl) {
+    for (var site in tbl) {
+      if (Object.prototype.hasOwnProperty.call(tbl, site) && tbl[site] > 1) {
+        rows.push({ site: site, n: tbl[site] });
+      }
+    }
+  };
+  collect(__stone_log_dedup);
+  collect(__stone_log_counts);
+  if (rows.length === 0) return;
+  rows.sort(function(a, b) { return b.n - a.n; });
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var rec = __stone_log_sites[r.site] || "|";
+    var bar = rec.indexOf("|");
+    __stone_emit(0, rec.slice(0, bar),
+      "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1));
+  }
 }
 function stone_log_set_now(now_sec) { __stone_log_now_override = now_sec; }
 function stone_log_clear_now() { __stone_log_now_override = null; }
@@ -574,7 +610,10 @@ function __stone_log_now() {
 function _log_throttled_impl(category, msg, interval_sec, site) {
   _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site);
 }
-function log_reset_dedup() { __stone_log_dedup = {}; __stone_log_throttle = {}; }
+function log_reset_dedup() {
+  __stone_log_dedup = {}; __stone_log_throttle = {};
+  __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_summary_done = false;
+}
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 "#;
 
@@ -1090,6 +1129,25 @@ function stone_set_canvas(h) {
   gl.viewport(0, 0, wh[0], wh[1]);
 }
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
+// mode: 0 = nearest, 1 = linear. Integer formats refuse -- a linear-filtered
+// integer texture samples zero.
+function stone_set_canvas_filter(h, mode) {
+  if (h === 0) return false;
+  var c = __SW.canvases[h];
+  if (!c) { __sw_log_once("stone_set_canvas_filter: unknown canvas " + h); return false; }
+  if (c.format === 3) {
+    __sw_log_once("stone_set_canvas_filter: canvas " + h + " is an integer format -- " +
+      "linear filtering makes it incomplete; refusing");
+    return false;
+  }
+  var gl = __SW.gl;
+  var filter = mode === 0 ? gl.NEAREST : gl.LINEAR;
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[c.tex]);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  return true;
+}
 function stone_clear_canvas(r, g, b, a) {
   var gl = __SW.gl;
   gl.clearColor(r, g, b, a);
@@ -1260,6 +1318,95 @@ function stone_set_shader(h) {
   if (!sh) { __sw_log_once("stone_set_shader: unknown shader " + h); return; }
   __SW.gl.useProgram(sh.prog);
   __SW.curShader = h;
+  __sw_bind_blocks(h);
+}
+// std140 uniform blocks. `bindBufferBase` binds to a GLOBAL index, so a
+// program's blocks are re-bound whenever that program goes current -- binding
+// once at registration would leave whichever program registered last owning
+// index 0 for all of them. Mirrors stone-rs/src/uniform_block.rs.
+function __sw_bind_blocks(h) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh || !sh.blocks) return;
+  for (var i = 0; i < sh.blocks.length; i++) {
+    var b = sh.blocks[i];
+    if (b) gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer);
+  }
+}
+function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh) { __sw_log_once("bind_uniform_block: no shader " + h); return false; }
+  if (!name || size <= 0) { __sw_log_once("bind_uniform_block: null name or non-positive size " + size); return false; }
+  var idx = gl.getUniformBlockIndex(sh.prog, name);
+  if (idx === gl.INVALID_INDEX) {
+    __sw_log_once("bind_uniform_block: shader " + h + " declares no uniform block `" + name + "`");
+    return false;
+  }
+  gl.uniformBlockBinding(sh.prog, idx, binding);
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.UNIFORM_BUFFER, buf);
+  // Zero-fill, so a member the packer never writes reads 0 rather than
+  // whatever the driver handed back.
+  gl.bufferData(gl.UNIFORM_BUFFER, size, gl.DYNAMIC_DRAW);
+  gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  if (!sh.blocks) sh.blocks = [];
+  // A re-register (hot reload) replaces the buffer at this BINDING; a shrinking
+  // program's stale tail is dropped, since registration walks bindings from 0.
+  if (binding < sh.blocks.length && sh.blocks[binding]) gl.deleteBuffer(sh.blocks[binding].buffer);
+  sh.blocks.length = binding;
+  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint };
+  return true;
+}
+function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh || !sh.blocks) { __sw_log_once("upload_uniform_block: shader " + h + " has no bound block"); return false; }
+  if (!data || size <= 0) { __sw_log_once("upload_uniform_block: null data or non-positive size " + size); return false; }
+  // Selected by FINGERPRINT: a program can have several blocks, and the packed
+  // bytes say which layout they are.
+  var b = null;
+  for (var i = 0; i < sh.blocks.length; i++) {
+    if (sh.blocks[i] && sh.blocks[i].fingerprint === fingerprint) { b = sh.blocks[i]; break; }
+  }
+  if (!b) { __sw_log_once("upload_uniform_block: shader " + h + " has no block with layout " + fingerprint); return false; }
+  if (size !== b.size) {
+    __sw_log_once("upload_uniform_block: shader " + h + " upload of " + size + " bytes does not match its " + b.size + " byte block");
+    return false;
+  }
+  gl.bindBuffer(gl.UNIFORM_BUFFER, b.buffer);
+  gl.bufferSubData(gl.UNIFORM_BUFFER, 0, data.subarray ? data.subarray(0, size) : data);
+  gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  return true;
+}
+function stone_shader_check_uniform_block_layout(h, name, names, names_len, offsets, count, plan_size) {
+  var gl = __SW.gl, sh = __SW.shaders[h];
+  if (!gl || !sh) { __sw_log_once("check_uniform_block_layout: no shader " + h); return false; }
+  var idx = gl.getUniformBlockIndex(sh.prog, name);
+  if (idx === gl.INVALID_INDEX) {
+    __sw_log_once("check_uniform_block_layout: shader " + h + " declares no block `" + name + "`");
+    return false;
+  }
+  var dataSize = gl.getActiveUniformBlockParameter(sh.prog, idx, gl.UNIFORM_BLOCK_DATA_SIZE);
+  if (dataSize > plan_size) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` needs " + dataSize + " bytes, the plan allocates " + plan_size);
+    return false;
+  }
+  var members = names.split(String.fromCharCode(0)).filter(function (x) { return x.length > 0; });
+  if (members.length !== count) {
+    __sw_log_once("check_uniform_block_layout: " + members.length + " names for " + count + " offsets");
+    return false;
+  }
+  var indices = gl.getUniformIndices(sh.prog, members);
+  var driver = gl.getActiveUniforms(sh.prog, indices, gl.UNIFORM_OFFSET);
+  var ok = true;
+  for (var i = 0; i < members.length; i++) {
+    // An INACTIVE member is optimized out and reports no index: skipped, not
+    // failed. The check is a PARTIAL oracle for that reason.
+    if (indices[i] === gl.INVALID_INDEX || indices[i] == null) continue;
+    if (driver[i] !== offsets[i]) {
+      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[i] + "` is at " + driver[i] + ", the plan says " + offsets[i]);
+      ok = false;
+    }
+  }
+  return ok;
 }
 function __sw_with_shader_uniform(h, name, f) {
   var gl = __SW.gl, sh = __SW.shaders[h];
@@ -1659,7 +1806,10 @@ function stone_reload_sound(h, path) {
   return __sw_audio_decode(h, path) !== 0;
 }
 function stone_unload_sound(h) { delete __SW.audio.sounds[h]; return true; }
-// `bus` is accepted for sibling parity with lib.rock; the web mixer has one sfx gain.
+// `bus` is STONE_BUS_* (lib.rock): 0 master, 1 sfx, 2 music, 3 ambience, 4 ui.
+// The web mixer has only sfx and music nodes, so music routes to musicGain and
+// every other bus shares sfxGain -- the topology is coarser than native, not
+// ignored.
 function stone_play_sound(h, bus, volume, speed, decay) {
   var A = __SW.audio, s = A.sounds[h];
   if (!A.ctx || !s || !s.buffer) return;
@@ -1669,7 +1819,7 @@ function stone_play_sound(h, bus, volume, speed, decay) {
   var g = A.ctx.createGain();
   var vol = Math.max(volume, 0);
   g.gain.value = vol;
-  src.connect(g); g.connect(A.sfxGain); src.start();
+  src.connect(g); g.connect(bus === 2 ? A.musicGain : A.sfxGain); src.start();
   if (decay > 0) {
     var t = A.ctx.currentTime;
     g.gain.setValueAtTime(vol, t);

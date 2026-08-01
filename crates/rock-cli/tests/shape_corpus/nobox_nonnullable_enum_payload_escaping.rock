@@ -1,12 +1,8 @@
-// CONTROL for `nobox_nullable_enum_payload`, and it FALSIFIES that case's filing.
-// The payload here is NON-nullable, and it rejects identically -- so the `?` is
-// not the discriminant and this is not mechanism A.
-//
-// Neither enum representation has a place for a multi-leaf value payload:
-// `enum_value_shape` wants ONE scalar C type per slot (`scalar_c_type` matches
-// only Int/Float/Bool) and `EnumFlatShape` wants ONE dynamically-typed slot per
-// position. A `nobox P` is two leaves. Giving `scalar_c_type` a `Nullable` arm
-// cannot fix that, so the original `flip_when` was unachievable as written.
+// CONTROL for `nobox_nullable_enum_payload`: a NON-nullable multi-leaf payload
+// in an escaping enum. `EnumFlatShape` widens that position to the payload's
+// leaves, and a boxed context builds the Group and lets `pack` store them splat
+// in the `{__variant}` box -- so nothing materializes. What still rejects on the
+// twin is the `?` alone, which is what this control isolates.
 //
 // The enum must ESCAPE. With a local it is fully scalarized (`c0 = r1; c1 = 2`,
 // no enum box at all), so the payload machinery is never reached and the probe

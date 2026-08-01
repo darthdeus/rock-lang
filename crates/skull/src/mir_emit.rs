@@ -1596,12 +1596,33 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         // Slot order is the engine's whole view of texture binding: it points
         // each sampler at its unit once at link time, then binds by slot.
         let slot_names: Vec<&str> = emission.texture_slots.iter().map(|n| n.as_str()).collect();
+        // The `@uniform` blocks' std140 layouts, in binding order: A1 has at
+        // most one, an A2 pipeline has one per stage. Carried as PARALLEL FLAT
+        // lists -- one entry per block, plus the members concatenated with a
+        // per-block count -- so a hand-written driver never nests. A program
+        // with no group sends empty lists, which are still arguments; a short
+        // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
+        let blocks = &emission.uniform_blocks;
+        let names: Vec<&str> = blocks.iter().map(|p| p.struct_name.as_str()).collect();
+        let sizes: Vec<i64> = blocks.iter().map(|p| p.size as i64).collect();
+        let fingerprints: Vec<i64> = blocks.iter().map(|p| p.fingerprint() as i64).collect();
+        let counts: Vec<i64> = blocks.iter().map(|p| p.members.len() as i64).collect();
+        let member_names: Vec<&str> =
+            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.name.as_str())).collect();
+        let offsets: Vec<i64> =
+            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.offset as i64)).collect();
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
-            skull_codegen_lua::lua_string_vec(&slot_names)
+            skull_codegen_lua::lua_string_vec(&slot_names),
+            skull_codegen_lua::lua_string_vec(&names),
+            skull_codegen_lua::lua_int_vec(&sizes),
+            skull_codegen_lua::lua_int_vec(&fingerprints),
+            skull_codegen_lua::lua_int_vec(&counts),
+            skull_codegen_lua::lua_string_vec(&member_names),
+            skull_codegen_lua::lua_int_vec(&offsets),
         );
     }
     Ok(ShaderRegistrations {
@@ -2068,6 +2089,9 @@ pub fn emit_full_in(
         return Err(CompilerError::new_with_label(span, msg));
     }
     if let Some((msg, span)) = skull_mir::lower::native_buffer_alloc_reject(ws, user_mid) {
+        return Err(CompilerError::new_with_label(span, msg));
+    }
+    if let Some((msg, span)) = skull_mir::lower::generic_coroutine_column_reject(ws, user_mid)? {
         return Err(CompilerError::new_with_label(span, msg));
     }
     let cg = CodegenCtx::new(ws);

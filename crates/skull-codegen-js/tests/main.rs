@@ -62,6 +62,8 @@ mod prelude_decl_arity;
 mod program;
 #[path = "put.rs"]
 mod put;
+#[path = "ret_bank_no_hand_readers.rs"]
+mod ret_bank_no_hand_readers;
 #[path = "ret_bank_sizing.rs"]
 mod ret_bank_sizing;
 #[path = "rng.rs"]

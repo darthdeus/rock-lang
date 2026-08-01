@@ -24,6 +24,24 @@ impl Builder<'_> {
                         None if self.nobox_value_name(expr).is_some() => {
                             self.stringify_nobox_expr(expr)?
                         }
+                        // A tuple whose box would WIDEN is packed narrow here --
+                        // one slot per element, the nobox part materialized. The
+                        // widening exists for readers that derive the layout from
+                        // the declared type; `inspect` walks the table at runtime
+                        // and would render a wider tuple.
+                        //
+                        // Packing rather than rejecting on the spot is deliberate:
+                        // the resulting `<name>_ct` is what the post-transform
+                        // residue check already reports, so this boundary keeps the
+                        // attribution (`while emitting <fn>`) and the per-body
+                        // sibling accumulation that a fresh lowering-time error
+                        // would lose. Pinned by `multi_rejection` and
+                        // `nobox_diagnostic_attribution`.
+                        None if self.tuple_box_shape(expr).is_some() => {
+                            let r = self.lower_expr_repr(expr)?;
+                            let v = self.pack(r);
+                            self.stringify(expr, v)?
+                        }
                         None => {
                             let v = self.lower_expr(expr)?;
                             self.stringify(expr, v)?

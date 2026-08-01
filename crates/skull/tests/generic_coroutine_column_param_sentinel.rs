@@ -1,7 +1,13 @@
-//! SENTINEL -- a GENERIC `co fn` iterating a column-stored container param
-//! iterates ZERO times. The loop body never runs, so the coroutine yields
-//! nothing and the fn answers 0 for a 2-element vec. Compile-clean, no
-//! rejection, silent wrong answer.
+//! A GENERIC `co fn` iterating a column-stored container param is REJECTED.
+//!
+//! It used to iterate ZERO times: the loop body never ran, the coroutine yielded
+//! nothing, and the fn answered 0 for a 2-element vec -- compile-clean, no
+//! diagnostic, a silent wrong answer. It is now a spanned rejection at the call
+//! (`generic_coroutine_column_reject`).
+//!
+//! The rejection is a stop-gap for the SILENCE, not the repair. The right fix is
+//! to let these instantiations specialize; when that lands, the rejection goes
+//! with it and these cases become runs answering `2` like the controls.
 //!
 //! `compute_call_spec` (`crates/skull-mir/src/lower/shape.rs`) bails out for
 //! `is_coroutine` before it can build a `SpecKey`, so the generic body is
@@ -26,16 +32,27 @@
 //! on the same terms and fails identically. Column eligibility is wider than the
 //! mark, so the blast radius is wider than nobox tests can see.
 //!
-//! A coroutine is an ordinary CFG after `coro_transform`, so nothing actually
-//! prevents specializing one -- the `is_coroutine` bail-out is artificial, and
-//! the correct fix is to let these instantiations specialize like any other
-//! column-forced generic. A spanned rejection would also be correct, and is
-//! strictly better than today's silence.
+//! THE BAIL-OUT IS NOT ARTIFICIAL, and an earlier revision of this file said it
+//! was. Measured: deleting `is_coroutine` from `compute_call_spec`'s guard does
+//! not let these specialize, it PANICS codegen with `Yield must be removed by
+//! the coroutine transform before codegen`.
 //!
-//! PINNED BEHAVIOR (BUG): the sentinels assert `0`. When the fix lands they go
-//! RED -- flip them to `2`, matching the controls, and delete this paragraph. If
-//! the fix instead makes the shape REJECT, replace the runs with the `Err`
-//! assertion it produces.
+//! "A coroutine is an ordinary CFG after `coro_transform`" is true and beside
+//! the point. Specialization is not a CFG property -- it is DELIVERED by
+//! inline-splicing a specialized clone, which is why eligibility here is a
+//! deliberate subset of the inliner's `classify`, and a `co fn` cannot be
+//! spliced into its caller at all: the call constructs a coroutine object rather
+//! than running the body.
+//!
+//! So the repair is a mechanism that does not exist: emit the specialized clone
+//! as its own top-level coroutine, run `coro_transform` over it, and retarget
+//! the call. That is monomorphization-by-cloning, which is why this is mono's to
+//! make and not a guard to delete.
+//!
+//! The controls are what keep the rejection NARROW: it must fire only where
+//! `compute_call_spec` would have specialized but for that bail-out, so all three
+//! still compile and answer `2`. Without them, a rejection that swallowed every
+//! generic `co fn` would look like the same green.
 
 
 /// The repro: generic `co fn`, column-stored element.
@@ -135,25 +152,34 @@ fn run(src: &str, tag: &str) -> String {
     crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
+/// The rejection's message, or a panic naming what it emitted instead.
+fn reject(src: &str) -> String {
+    match crate::common::try_emit_module(src) {
+        Ok(_) => panic!(
+            "expected a spanned rejection for a generic `co fn` at a column element --              emitting instead means the silent zero-iteration miscompile is back"
+        ),
+        Err(e) => e.to_string(),
+    }
+}
+
 #[test]
-fn a_generic_coroutine_over_a_column_vec_iterates_zero_times_sentinel() {
-    let got = run(GENERIC_CO_COLUMN, "gen_co_col");
-    assert_eq!(
-        got, "0",
-        "PINNED BEHAVIOR (BUG): a generic `co fn` over a column `[P]` is \
-         expected to iterate zero times and answer `0`. It answered `{got}`, so \
-         the fix landed -- flip this to `2`, matching the controls."
+fn a_generic_coroutine_over_a_column_vec_is_rejected() {
+    let msg = reject(GENERIC_CO_COLUMN);
+    assert!(
+        msg.contains("GENERIC `co fn`") && msg.contains("COLUMN storage"),
+        "the rejection must name both halves of the discriminant, since either \
+         alone is a shape that works: {msg}"
     );
 }
 
-/// Records the blast radius: a column-storage defect, not a `nobox` one.
+/// Records the blast radius: a column-storage rule, not a `nobox` one.
 #[test]
-fn a_generic_coroutine_over_an_unmarked_value_column_fails_identically_sentinel() {
-    let got = run(GENERIC_CO_UNMARKED, "gen_co_unmarked");
-    assert_eq!(
-        got, "0",
-        "PINNED BEHAVIOR (BUG): an UNMARKED value element is column-eligible on \
-         the same terms and must fail identically. It answered `{got}`."
+fn a_generic_coroutine_over_an_unmarked_value_column_is_rejected_identically() {
+    let msg = reject(GENERIC_CO_UNMARKED);
+    assert!(
+        msg.contains("GENERIC `co fn`"),
+        "an UNMARKED value element is column-eligible on the same terms, so it \
+         must reject identically -- column eligibility is wider than the mark: {msg}"
     );
 }
 

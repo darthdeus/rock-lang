@@ -138,6 +138,37 @@ const UI_SRC: &str = r#"
     }
 "#;
 
+/// A2 gets ONE std140 block PER STAGE, at its own binding index -- not one
+/// block shared by both.
+///
+/// The stages declare different `@uniform` types and cannot be made to share
+/// one: `ui_vert` is a single fn consumed by three different fragment stages
+/// (ui_sim_solid / ui_sdf_bar / ui_dissolve in mag), each with its own uniform
+/// struct, so a merged per-program type would need `ui_vert` to declare a
+/// different struct per program. Two blocks is also what WGSL/Vulkan/Metal do.
+///
+/// Verified to compile and link on real drivers in both profiles before this
+/// was built (a two-block program through `stone-glsl-runner`).
+#[test]
+fn pipeline_emits_one_block_per_stage() {
+    let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
+    // The FRAGMENT group is game-authored, so it is a block today.
+    assert!(
+        glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"),
+        "got:\n{glsl}"
+    );
+    // The VERTEX group stays loose until `@engine`: every A2 vertex group is
+    // engine-authored (three `Mat4`s built inside `stone_set_camera` from
+    // (ox, oy, scale) plus the render-target size), so Rock holds no `Mat4` to
+    // pack. The emitter supports the two-block form -- it is driver-verified in
+    // both profiles -- and this gate is the authorship boundary, not a
+    // limitation of the emission.
+    assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
+    assert!(!glsl.contains("uniform UiVertU"), "vertex block is gated:\n{glsl}");
+    // Unnamed instance -- members stay bare globals, so bodies are unchanged.
+    assert!(!glsl.contains("u.uSize"), "got:\n{glsl}");
+}
+
 #[test]
 fn pipeline_scaffold_vertex_block() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
@@ -147,7 +178,8 @@ fn pipeline_scaffold_vertex_block() {
     assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 2) in vec4 aColor;"), "got:\n{glsl}");
-    // Uniform block fields -> `uniform`, declaration order.
+    // Vertex uniforms are loose until `@engine` -- see
+    // `pipeline_emits_one_block_per_stage` for why the boundary is authorship.
     assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
     assert!(glsl.contains("uniform mat4 uView;"), "got:\n{glsl}");
     assert!(glsl.contains("uniform mat4 uTransform;"), "got:\n{glsl}");
@@ -168,9 +200,11 @@ fn pipeline_scaffold_pixel_block() {
     assert!(glsl.contains("in vec2 TexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("in vec4 Color;"), "got:\n{glsl}");
     assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
-    // Fragment uniform block.
-    assert!(glsl.contains("uniform vec2 uSize;"), "got:\n{glsl}");
-    assert!(glsl.contains("uniform float uRatio;"), "got:\n{glsl}");
+    // The fragment stage's own block, separate from the vertex stage's.
+    assert!(
+        glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};"),
+        "got:\n{glsl}"
+    );
     assert!(glsl.contains("void main()"), "got:\n{glsl}");
     assert!(glsl.contains("FragColor = ui_frag("), "got:\n{glsl}");
 }
@@ -333,7 +367,11 @@ fn reject_bool_attribute() {
     reject_pipeline(src, "vt", "fr", "bool");
 }
 
-/// `uniform bool` IS legal GLSL -- the bool restriction is attrs/varyings only.
+/// A block `bool` IS legal -- the bool restriction is attrs/varyings only.
+/// Verified to compile and link on real drivers in BOTH profiles, which is what
+/// lets `SpriteFragU`'s four bools ride a block: GL reads a block bool as 32
+/// bits where Rock's C layout models one byte, and that conversion is stated in
+/// `WireKind::Bool32` rather than papered over with padding.
 #[test]
 fn bool_uniform_is_allowed() {
     let src = r#"
@@ -349,7 +387,10 @@ fn bool_uniform_is_allowed() {
         }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("uniform bool uEnabled;"), "got:\n{glsl}");
+    assert!(
+        glsl.contains("layout(std140) uniform FU {\n    bool uEnabled;\n};"),
+        "got:\n{glsl}"
+    );
 }
 
 // --- A2b: MRT fragment output (value-struct-of-Vec4 return) ------------------

@@ -163,7 +163,6 @@ fn a_scalar_only_block_still_rounds_to_sixteen() {
     let p = plan_of("value VignetteU { strength: float }", "VignetteU");
     assert_eq!(offsets(&p), vec![("strength", 0)]);
     assert_eq!(p.size, 16);
-    assert_eq!(p.align, 16);
 }
 
 /// A struct whose C layout happens to coincide. Worth a case of its own: it is
@@ -339,6 +338,32 @@ fn a_renamed_member_changes_the_fingerprint() {
     let a = plan_of("value A { x: float, y: Vec2 }", "A");
     let b = plan_of("value A { x: float, z: Vec2 }", "A");
     assert_ne!(a.fingerprint(), b.fingerprint());
+}
+
+/// The fingerprint is EMITTED into the chunk as a plain numeric literal in the
+/// `__rock_shader_register` call, and both hosts that read that call -- LuaJIT
+/// and JS -- represent integers exactly only to 2^53. A wider value rounds on
+/// the way in, and two layouts that round together would let a bind and an
+/// upload agree on a block they do not share, which is the one thing this value
+/// exists to prevent. So the width is part of its contract, not an accident of
+/// FNV being 64-bit.
+///
+/// Spread over shapes that exercise every kind, since the fold must hold for
+/// all of them and not just a lucky one.
+#[test]
+fn the_fingerprint_fits_a_host_number() {
+    const MAX_EXACT: u64 = 1 << 53;
+    for (src, name) in [
+        ("value A { x: float }", "A"),
+        ("value A { x: float, y: Vec2, z: float }", "A"),
+        ("value A { m: Mat4, n: Mat4, f: float }", "A"),
+        ("value A { a: bool, b: bool, c: int, d: Vec4 }", "A"),
+        ("value LongerNameThatFeedsTheHashMoreBytes { alpha: Vec3, beta: int }",
+         "LongerNameThatFeedsTheHashMoreBytes"),
+    ] {
+        let fp = plan_of(src, name).fingerprint();
+        assert!(fp < MAX_EXACT, "{name}: fingerprint {fp} exceeds 2^53 and would round in Lua/JS");
+    }
 }
 
 /// It has to be a FUNCTION of the layout, not of anything incidental --

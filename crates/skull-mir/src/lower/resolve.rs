@@ -108,34 +108,42 @@ impl Builder<'_> {
     /// `Group`); everything else is a `Scalar`. The ABI boundaries
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     pub(crate) fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
+        // Probed ahead of the match rather than in a guard: the wire-shape oracle
+        // is fallible, and a guard cannot propagate. Ordered after the `nobox`
+        // coalesce below, which is the narrower case.
+        if let Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs } = self.body.expr_arena[e] {
+            if self.nobox_value_name(e).is_none() && self.nullable_tuple_wire_shape(lhs)?.is_some() {
+                return self.nullcoalesce_tuple_repr(lhs, rhs);
+            }
+        }
         match self.body.expr_arena[e].clone() {
             Expr::Block { statements, tail } => self.lower_block_repr(statements, tail),
             Expr::If {
                 cond,
                 then_branch,
                 else_branch,
-            } => match self.repr_join_slot(e) {
+            } => match self.repr_join_slot(e)? {
                 Some(shape) => self.lower_if_repr(cond, then_branch, else_branch, shape),
                 None => Ok(ValueRepr::Scalar(
                     self.lower_if(cond, then_branch, else_branch)?,
                 )),
             },
-            Expr::Match { scrutinee, arms } => match self.repr_join_slot(e) {
+            Expr::Match { scrutinee, arms } => match self.repr_join_slot(e)? {
                 Some(shape) => self.lower_match_repr(scrutinee, arms, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_match(scrutinee, arms)?)),
             },
             // `?.` is a join like `if`/`match`, and takes the same multi-cell
             // path when its result splats -- otherwise a `nobox` result has
             // nowhere to live but the single packed cell.
-            Expr::SafeNav { base, field } => match self.repr_join_slot(e) {
+            Expr::SafeNav { base, field } => match self.repr_join_slot(e)? {
                 Some(shape) => self.safe_nav_field_repr(e, base, field, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
-            Expr::SafeNavCall { receiver, method, args } => match self.repr_join_slot(e) {
+            Expr::SafeNavCall { receiver, method, args } => match self.repr_join_slot(e)? {
                 Some(shape) => self.safe_nav_call_repr(e, receiver, method, args, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
-            Expr::SafeNavLet { receiver, binding, body } => match self.repr_join_slot(e) {
+            Expr::SafeNavLet { receiver, binding, body } => match self.repr_join_slot(e)? {
                 Some(shape) => self.safe_nav_let_repr(receiver, binding, body, shape),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
@@ -286,7 +294,14 @@ impl Builder<'_> {
                 // read out of a mutable place, so it copies.
                 let basev = self.pack(br);
                 let fv = self.emit_cur(Inst::Field { base: basev, field });
-                if let Some(name) = self.value_struct_of(e).filter(|_| self.is_mutable_place(base))
+                // A `nobox` field splits to leaves whatever the base is: the box
+                // is the guarantee's violation, not just a copy that would sink.
+                // It also carries presence STATICALLY -- a Group widening to `T?`
+                // supplies `true`, where a Scalar would have to ask `~= nil` at
+                // runtime, and that test pins the cell feeding it against SROA.
+                if let Some(name) = self
+                    .value_struct_of(e)
+                    .filter(|n| self.is_mutable_place(base) || self.is_nobox_struct(*n))
                 {
                     return Ok(self.boxed_value_copy_repr(fv, name));
                 }
@@ -391,6 +406,25 @@ impl Builder<'_> {
             {
                 self.nullcoalesce_repr(e, lhs, rhs)
             }
+            // A BOXED tuple whose layout splats -- read from a container, a field,
+            // an opaque call. Rebuild the unboxed `Tuple` repr from the box's
+            // slots, the exact inverse of the producer in `Expr::Tuple`, so a
+            // `nobox` part comes back as leaves instead of being indexed out as a
+            // single value that no longer exists there.
+            //
+            // Rebuilding HERE rather than at each reader is what keeps the readers
+            // honest: slot projection, `let (a, b) =`, and the `for` destructure
+            // all already consume a `ValueRepr::Tuple`, so none of them needs to
+            // know the box widened. Slots the consumer ignores are DCE'd.
+            _ if self.tuple_box_shape(e).is_some() => {
+                let shape = self.tuple_box_shape(e).expect("guard matched");
+                let base = self.lower_expr(e)?;
+                let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+                    .map(|i| self.emit_cur(Inst::TupleIndex { base, index: i }))
+                    .collect();
+                let mut idx = 0;
+                Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
+            }
             _ => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
         }
     }
@@ -429,11 +463,13 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
-        for (&c, &value) in cells.iter().zip(&rhs_leaves) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
+        // A diverging rhs (`?? return x`) yields no value: splatting it reads
+        // leaves off nil, which faults before the divergence it sits in front of.
         if self.is_open() {
+            let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
+            for (&c, &value) in cells.iter().zip(&rhs_leaves) {
+                self.emit_cur(Inst::Store { cell: c, value });
+            }
             self.f.set_term(self.cur, Term::Goto(join));
         }
 
@@ -449,6 +485,67 @@ impl Builder<'_> {
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
         let mut idx = 0;
         Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
+    }
+
+    /// [`Self::nullcoalesce_repr`] for a nullable TUPLE lhs, and the same rule one
+    /// level up: the lhs presence SLOT is the condition, both arms join slot-wise.
+    ///
+    /// Without this the lhs went through `lower_expr`, which packs a `MakeTuple` --
+    /// structurally never nil, so `Eq(lv, nil)` const-folded, the rhs arm was
+    /// deleted outright, and `maybe(false) ?? fallback` evaluated to the ABSENT
+    /// wire's nil leaves. That is the same "a box is never nil" trap the `!= null`
+    /// tuple case already carries.
+    pub(crate) fn nullcoalesce_tuple_repr(
+        &mut self,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let lhs_shape = self.nullable_tuple_wire_shape(lhs)?.expect("caller checked");
+        // `??` always yields a value, so the result wire is the lhs wire minus its
+        // presence -- which is also what makes the rhs (non-nullable) arm fit it.
+        let shape = TupleRetShape { nullable: false, ..lhs_shape.clone() };
+
+        let lhs_repr = self.lower_expr_repr(lhs)?;
+        let lhs_slots = self.tuple_repr_to_slots(lhs_repr, &lhs_shape);
+        let (present, lhs_values) = lhs_slots
+            .split_first()
+            .expect("a nullable wire carries its presence slot first");
+        let (present, lhs_values) = (*present, lhs_values.to_vec());
+
+        let cells: Vec<Idx<Cell>> = lhs_values.iter().map(|_| self.f.new_cell(None)).collect();
+        let lhs_bb = self.f.new_block();
+        let rhs_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.f.set_term(
+            self.cur,
+            Term::Branch { cond: present, then_bb: lhs_bb, else_bb: rhs_bb },
+        );
+
+        self.cur = rhs_bb;
+        let rhs_repr = self.lower_expr_repr(rhs)?;
+        // Same rule as the value twin: a diverging rhs has no slots to store.
+        if self.is_open() {
+            let rhs_slots = self.tuple_repr_to_slots(rhs_repr, &shape);
+            for (&c, &value) in cells.iter().zip(&rhs_slots) {
+                self.emit_cur(Inst::Store { cell: c, value });
+            }
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        // The lhs slots were read before the branch, so their block dominates this
+        // one -- the same reason the value twin can reuse its leaves here.
+        self.cur = lhs_bb;
+        for (&c, &value) in cells.iter().zip(&lhs_values) {
+            self.emit_cur(Inst::Store { cell: c, value });
+        }
+        if self.is_open() {
+            self.f.set_term(self.cur, Term::Goto(join));
+        }
+
+        self.cur = join;
+        let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
+        let mut idx = 0;
+        Ok(self.tuple_from_slots(&shape, &loads, &mut idx))
     }
 
     /// A value-struct literal as an unboxed `Group` (declared field order, defaults

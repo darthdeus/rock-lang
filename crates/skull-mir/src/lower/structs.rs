@@ -623,10 +623,37 @@ impl Builder<'_> {
         let fname = self.ws.module(func.module).functions[func.func].name;
         let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
 
-        let [fv_e, iv_e, u_e] = arg_idxs else {
-            return Err(reject(call_span, uniform_expand_arity_msg(fname)));
+        // TWO shapes, one annotation, because both answer the same question --
+        // what is `T`'s std140 plan. The 1-arg form yields that plan's
+        // FINGERPRINT as a constant, which is how a call site says WHICH of a
+        // program's blocks it means: with one block per stage the shader name
+        // no longer identifies one, and the value's type is what does.
+        let (fv_e, iv_e, u_e) = match arg_idxs {
+            [u_e] => {
+                // The 1-arg form is the fingerprint, so it must DECLARE `-> int`.
+                // A 1-arg fn returning unit is a malformed packer, not a
+                // fingerprint, and stays rejected (tests/errors/uniform_expand.rock.err).
+                // Same shape as `@vertex_expand`, which switches on its declared
+                // return type rather than guessing from the call.
+                let returns_int = self.ws.module(func.module).functions[func.func]
+                    .return_ty
+                    .map(|rt| self.ws.render(None, rt) == "int" )
+                    .unwrap_or(false);
+                if !returns_int {
+                    return Err(reject(call_span, uniform_expand_arity_msg(fname)));
+                }
+                let u_span = self.body.expr_spans[*u_e];
+                let Some(struct_name) = self.value_struct_name_of(*u_e) else {
+                    return Err(reject(u_span, uniform_expand_arg_msg(fname)));
+                };
+                let plan = uniform_block_checked(self.ws, struct_name)
+                    .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
+                let fp = self.emit_cur(Inst::Const(Lit::Int(plan.fingerprint() as i64)));
+                return Ok(ValueRepr::Scalar(fp));
+            }
+            [fv_e, iv_e, u_e] => (*fv_e, *iv_e, *u_e),
+            _ => return Err(reject(call_span, uniform_expand_arity_msg(fname))),
         };
-        let (fv_e, iv_e, u_e) = (*fv_e, *iv_e, *u_e);
         let u_span = self.body.expr_spans[u_e];
 
         let fv = self.lower_expr(fv_e)?;

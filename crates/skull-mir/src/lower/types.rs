@@ -221,11 +221,18 @@ impl Builder<'_> {
         self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
     }
 
-    pub(crate) fn repr_join_slot(&self, e: Idx<Expr>) -> Option<RetSlot> {
+    pub(crate) fn repr_join_slot(&self, e: Idx<Expr>) -> Result<Option<RetSlot>, CompilerError> {
         if let Some(shape) = self.expr_tuple_shape(e).filter(TupleRetShape::splats) {
-            return Some(RetSlot::Nested(shape));
+            return Ok(Some(RetSlot::Nested(shape)));
         }
-        let mut shape = self.nobox_value_shape_of(e)?;
+        // A `?.` yielding a TUPLE. `expr_tuple_shape` declines a `Nullable(Tuple)`
+        // on purpose -- it is the CALL-boundary oracle, and no callee puts that
+        // presence on the wire. This join does: it mints the tag itself, exactly
+        // as the arm-widening below mints one for a value.
+        if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
+            return Ok(Some(RetSlot::Nested(shape)));
+        }
+        let Some(mut shape) = self.nobox_value_shape_of(e) else { return Ok(None) };
         // A join's shape must represent every value that reaches it, and the
         // arms are right here. `if c { P { .. } } else { null }` infers as plain
         // `P` -- the `null` arm does not widen it -- so reading nullability off
@@ -238,7 +245,7 @@ impl Builder<'_> {
         if !shape.nullable && self.join_arm_is_nullable(e) {
             shape.nullable = true;
         }
-        Some(RetSlot::Leaves(shape))
+        Ok(Some(RetSlot::Leaves(shape)))
     }
 
     /// Whether any arm of a join expression can produce `null`. Arms are blocks,
@@ -298,6 +305,54 @@ impl Builder<'_> {
             .map(|el| self.body_ret_slot(ty.with_idx(el)))
             .collect();
         Some(TupleRetShape { slots, nullable: false })
+    }
+
+    /// The slot layout of a tuple's BOX: `Some` exactly when some element splats,
+    /// so its `nobox` leaves ride the box instead of a `<name>_ct` inside it.
+    ///
+    /// The SAME `TupleRetShape` the multi-return wire uses -- a boxed tuple is
+    /// that wire written into a table rather than into registers. Producer
+    /// ([`Expr::Tuple`]) and every reader (slot projection, destructure) derive
+    /// the layout here and nowhere else, so they cannot disagree about how many
+    /// table slots an element occupies. That disagreement is silent, not a
+    /// rejection: Lua reads a missing slot as nil.
+    ///
+    /// `None` for every tuple that has no `nobox` element -- which is every tuple
+    /// that compiled before this existed, so their boxes are byte-identical.
+    pub(crate) fn tuple_box_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        self.expr_tuple_shape(e).filter(|s| s.splats())
+    }
+
+    /// The tuple slot of a declared PARAM on the body arena -- [`tuple_param_slot`]'s
+    /// spelling for a nested fn and for a fn TYPE's params.
+    ///
+    /// Separate from [`Self::tyid_tuple_ret_shape`] because the two answer
+    /// different questions about the same `Nullable(Tuple)`: that one is the CALL
+    /// boundary, where no callee puts a presence on the wire, so it must keep
+    /// declining. A param type is a DECLARATION, which is the one source allowed
+    /// to set the tag -- so `(NV, int)?` splats here, presence first, exactly as
+    /// the matching return does.
+    pub(crate) fn tuple_param_slot_of_ty(&self, ty: TyId) -> RetSlot {
+        // The plain tuple answer FIRST, generic-bound-to-a-tuple included
+        // (`zip`'s pair reaches a combinator param that way, and it has no type
+        // node to read). Only what that declines gets the `?` peel.
+        let shape = self.tyid_tuple_ret_shape(ty).or_else(|| self.nullable_tuple_param_shape(ty));
+        match shape {
+            Some(inner) if inner.splats() => RetSlot::Nested(inner),
+            _ => RetSlot::Opaque,
+        }
+    }
+
+    /// A spelled `(A, B)?` param, with the presence leading its slots. `None`
+    /// unless an element actually splats: a nullable tuple of ordinary elements
+    /// has nothing to gain from the multi-value form and keeps its single boxed
+    /// slot, byte-for-byte the pre-existing ABI ([`tuple_ret_shape`]'s rule,
+    /// restated because this peels the `?` itself).
+    fn nullable_tuple_param_shape(&self, ty: TyId) -> Option<TupleRetShape> {
+        let ty = self.resolve_tyid(ty)?;
+        let TypeExpr::Nullable(inner) = self.ty_node(ty)? else { return None };
+        let inner = self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(inner))?)?;
+        Some(TupleRetShape { nullable: true, ..inner }).filter(TupleRetShape::splats)
     }
 
     /// The element slot of a placeholder `next` on the `Iterator`-bounded generic

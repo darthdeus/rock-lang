@@ -132,7 +132,7 @@ fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
 /// `f.#`/`f.0`, the walker touches `f`).
 fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
     let mut out = vec![flat_tag_slot(field)];
-    for i in 0..shape.tuple_width {
+    for i in 0..shape.tuple_width() {
         out.push(flat_payload_slot(field, i));
     }
     for rf in &shape.record_fields {
@@ -530,6 +530,13 @@ fn slot_param_names(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
         RetSlot::Opaque => out.push(base.to_string()),
         RetSlot::Leaves(shape) => leaf_param_names(base, shape, out),
         RetSlot::Nested(inner) => {
+            // The presence leads the slots, so it takes the FIRST name -- the
+            // order `bind_param_slot` binds cells in and `tuple_repr_to_slots`
+            // writes values in. Skipping it emits a list one short of
+            // `slot_count`, which Lua nil-fills rather than rejects.
+            if inner.nullable {
+                out.push(format!("{base}{LEAF_PARAM_SEP}p"));
+            }
             for (i, s) in inner.slots.iter().enumerate() {
                 slot_param_names(&format!("{base}{LEAF_PARAM_SEP}{i}"), s, out);
             }
@@ -549,6 +556,9 @@ fn slot_param_origins(base: &str, slot: &RetSlot, out: &mut Vec<String>) {
                 .map(|p| format!("the leaf `{p}` of value param `{base}`")),
         ),
         RetSlot::Nested(inner) => {
+            if inner.nullable {
+                out.push(format!("the presence of nullable tuple param `{base}`"));
+            }
             for (i, s) in inner.slots.iter().enumerate() {
                 slot_param_origins(&format!("{base}.{i}"), s, out);
             }
@@ -1626,9 +1636,7 @@ impl Builder<'_> {
             }
             return Ok(self.absent_tuple_slots(shape));
         }
-        let mut out = vec![self.emit_cur(Inst::Const(Lit::Bool(true)))];
-        out.extend(self.tuple_repr_to_slots(r, shape));
-        Ok(out)
+        Ok(self.tuple_repr_to_slots(r, shape))
     }
 
     /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
@@ -1652,6 +1660,12 @@ impl Builder<'_> {
     /// forwarded straight out, or a tuple literal) yields its parts; anything
     /// else is a packed tuple, so each element is read back with `TupleIndex`
     /// and a `Leaves` slot is field-read off the box.
+    ///
+    /// This owns the leading presence at a nullable shape, both arms, so it is
+    /// the exact inverse of [`Self::tuple_from_slots`] -- one oracle for where
+    /// presence sits on the wire. A repr that carries its OWN tag forwards that
+    /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
+    /// `true` here instead reported every absent forward as present.
     fn tuple_repr_to_slots(&mut self, r: ValueRepr, shape: &TupleRetShape) -> Vec<Idx<Inst>> {
         // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
@@ -1659,6 +1673,11 @@ impl Builder<'_> {
                 return self.absent_tuple_slots(shape);
             }
         }
+        let present = match (shape.nullable, &r) {
+            (false, _) => None,
+            (true, ValueRepr::Tuple { present: Some(p), .. }) => Some(*p),
+            (true, _) => Some(self.emit_cur(Inst::Const(Lit::Bool(true)))),
+        };
         let parts: Vec<ValueRepr> = match r {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
@@ -1669,6 +1688,7 @@ impl Builder<'_> {
             }
         };
         let mut out = Vec::with_capacity(shape.slot_count());
+        out.extend(present);
         for (slot, part) in shape.slots.iter().zip(parts) {
             match slot {
                 RetSlot::Opaque => out.push(self.pack(part)),
@@ -1696,7 +1716,7 @@ impl Builder<'_> {
     /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
     /// inverse of [`Self::tuple_repr_to_slots`], used at a call site to hand a
     /// destructure its elements without ever boxing a `nobox` one.
-    fn tuple_from_slots(
+    pub(crate) fn tuple_from_slots(
         &mut self,
         shape: &TupleRetShape,
         slots: &[Idx<Inst>],
@@ -2063,6 +2083,66 @@ fn native_buffer_alloc_elem_ctype_spec(
 /// An opaque-generic intrinsic that is never called un-specialized (all callers
 /// specialize, or -- a library fn -- has no callers at all) is exempt: its
 /// standalone body's lowering-gap skip is then correct. Returns the first offender.
+/// A generic `co fn` called at a COLUMN-STORED instantiation: reject.
+///
+/// [`compute_call_spec`] bails on `is_coroutine` before it can build a `SpecKey`,
+/// so the body lowers ERASED and iterates the vec as though the boxed `_data`
+/// representation were there. A column vec has per-leaf arrays instead, so the
+/// loop runs ZERO times: the coroutine yields nothing and the call answers 0 for
+/// a 2-element vec, compile-clean and with no diagnostic.
+///
+/// This is a stop-gap for the silence, NOT the repair -- but the repair is bigger
+/// than it looks. Deleting the `is_coroutine` bail-out does NOT let these
+/// specialize; it panics codegen with `Yield must be removed by the coroutine
+/// transform before codegen` (measured). Specialization is delivered by
+/// inline-splicing a specialized clone, and a `co fn` cannot be spliced into its
+/// caller. The repair is to emit the clone as its own top-level coroutine and put
+/// it through `coro_transform` -- monomorphization-by-cloning. This pass is
+/// deleted when that exists.
+///
+/// NOT a `nobox` rule: column eligibility is wider than the mark, so an unmarked
+/// value element reaches it identically. Narrow on the other axis, though -- it
+/// fires only where `compute_call_spec` WOULD have specialized but for the
+/// coroutine bail, so a generic `co fn` over a boxed element keeps its shared
+/// body and keeps working.
+pub fn generic_coroutine_column_reject(
+    ws: &Workspace,
+    mid: ModuleId,
+) -> Result<Option<(String, Span)>, CompilerError> {
+    let module = ws.module(mid);
+    let Some(ir) = ws.inference(mid) else { return Ok(None) };
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (c, resolved) in inf.resolved_overload_calls.iter() {
+            let fref = FuncRef { module: resolved.0, func: resolved.1 };
+            let f = &ws.module(fref.module).functions[fref.func];
+            if !f.is_coroutine || f.generics.is_empty() {
+                continue;
+            }
+            let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
+            let Some((key, _)) =
+                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::new())?
+            else {
+                continue;
+            };
+            if !spec_key_has_target_storage(ws, &key, bone_semantic::hir::FnBackend::Lua) {
+                continue;
+            }
+            let fname = f.name;
+            let msg = format!(
+                "`{fname}` is a GENERIC `co fn`, and this call instantiates it at an element \
+                 whose container uses COLUMN storage (per-leaf arrays, no `_data`). A generic \
+                 coroutine is never specialized, so it would run its shared body against a \
+                 representation that is not there -- the loop would iterate zero times and the \
+                 coroutine would yield nothing, with no error. Call it at a boxed element, or \
+                 make the `co fn` non-generic by spelling the element type in its signature."
+            );
+            return Ok(Some((msg, body.expr_spans[*c])));
+        }
+    }
+    Ok(None)
+}
+
 pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
     let module = ws.module(mid);
@@ -2492,8 +2572,13 @@ pub fn uniform_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
             let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
 
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            let [_, _, u] = arg_idxs[..] else {
-                return reject(body.expr_spans[e], uniform_expand_arity_msg(fname));
+            // Both accepted shapes end in the uniform group: the 3-arg packer
+            // and the 1-arg fingerprint. Shares the expander's predicates so a
+            // validator cannot accept more than the expander does.
+            let u = match arg_idxs[..] {
+                [u] => u,
+                [_, _, u] => u,
+                _ => return reject(body.expr_spans[e], uniform_expand_arity_msg(fname)),
             };
             // The validator has no active specialization, so an unsubstituted
             // generic reads as "not a value struct" here -- which is the right

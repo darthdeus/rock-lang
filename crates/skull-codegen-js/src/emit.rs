@@ -3192,12 +3192,15 @@ impl JsReach<'_> {
             self.st.reject(&init_name, e);
             return Ok(());
         }
-        let is_const = self.ws.module(site.module).globals[site.gid].is_const;
+        let gdecl = &self.ws.module(site.module).globals[site.gid];
+        let is_const = gdecl.is_const;
+        let leaves = skull_mir::lower::nobox_global_leaves(self.ws, gdecl.name, gdecl.ty);
         self.st.ginits.push(GlobalInit {
             name: gname,
             init_name,
             mf,
             is_const,
+            leaves,
             order: (site.module.index(), u32::from(site.gid.into_raw())),
         });
         Ok(())
@@ -3700,6 +3703,9 @@ struct GlobalInit {
     init_name: String,
     mf: MirFunc,
     is_const: bool,
+    /// `Some` when the global's STORAGE is leaves (`nobox`): the init assigns
+    /// these, never `name`, which no read ever looks at.
+    leaves: Option<Vec<ustr::Ustr>>,
     order: (usize, u32),
 }
 
@@ -4174,7 +4180,20 @@ fn order_global_inits(
             if init_deps[&g.name].iter().all(|d| emitted.contains(d)) {
                 lines.push(GlobalInitLine {
                     name: g.name,
-                    js: format!("__G.{} = {}();\n", g.name, g.init_name),
+                    js: match &g.leaves {
+                        // Leaf storage: the ginit splats, so the extra leaves come
+                        // back through the scratch bank and must be read off it
+                        // before anything else can call and clobber it.
+                        Some(leaves) => {
+                            let mut js = format!("__G.{} = {}();", leaves[0], g.init_name);
+                            for (i, leaf) in leaves.iter().enumerate().skip(1) {
+                                js.push_str(&format!(" __G.{leaf} = __rock_ret{i};"));
+                            }
+                            js.push('\n');
+                            js
+                        }
+                        None => format!("__G.{} = {}();\n", g.name, g.init_name),
+                    },
                 });
                 emitted.insert(g.name);
                 false
@@ -4811,6 +4830,7 @@ fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
         ("_log_throttled_impl", 4),
         ("log_reset_dedup", 0),
         ("log_dedup_count", 0),
+        ("log_suppression_summary", 0),
     ];
     (cf.is_extern || cf.inline_body.is_some())
         && LOG_FNS.iter().any(|(n, a)| *n == cf.name.as_str() && *a == cf.param_decls.len())

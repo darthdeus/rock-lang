@@ -76,6 +76,9 @@ impl Builder<'_> {
                 if self.scx.target != bone_semantic::hir::FnBackend::Js
                     && self.ws.functions_by_name.contains_key(&name) =>
             {
+                if let Ok(fref) = self.resolve_funcref(e, name) {
+                    self.reject_fn_value_abi_mismatch(e, fref)?;
+                }
                 let sym = self.fn_value_symbol(e, name)?;
                 Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
             }
@@ -172,13 +175,27 @@ impl Builder<'_> {
             // splatting form keeps its own repr path in `lower_expr_repr`, where
             // the presence tag stays a leaf and is never at risk.
             Expr::Tuple(elems) => {
-                let vs = elems
-                    .into_iter()
-                    .map(|el| {
-                        let r = self.lower_expr_repr(el)?;
-                        Ok(self.pack_maybe_absent(r))
-                    })
-                    .collect::<Result<Vec<_>, CompilerError>>()?;
+                // A `nobox` element rides the BOX as its leaves, on the same slot
+                // list the multi-return wire uses -- so the box is the wire put in
+                // a table, and `tuple_box_shape` is the one oracle both this
+                // producer and every reader derive the layout from. Without it a
+                // `nobox` part packs to a `<name>_ct` and the guarantee is gone the
+                // moment the tuple escapes into a container (matrix row 13).
+                //
+                // `None` when nothing splats, which is every tuple that compiled
+                // before: those keep today's one-value-per-element box exactly.
+                let shape = self.tuple_box_shape(e);
+                let mut vs = Vec::new();
+                for (i, el) in elems.into_iter().enumerate() {
+                    let r = self.lower_expr_repr(el)?;
+                    match shape.as_ref().and_then(|s| s.slots.get(i)).cloned() {
+                        Some(slot) if slot.splats() => {
+                            let vals = self.repr_to_slot_values(r, &slot);
+                            vs.extend(vals);
+                        }
+                        _ => vs.push(self.pack_maybe_absent(r)),
+                    }
+                }
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             Expr::Array(elems) => self.lower_array_literal(e, elems),
@@ -235,6 +252,16 @@ impl Builder<'_> {
             }
             Expr::StructLiteral { name, fields, bases } => {
                 self.lower_struct_literal(e, name, fields, bases)
+            }
+            // A FLAT enum's payload threads as leaves, so a boxed context must
+            // build the Group and let `pack` box it -- the same repr-then-pack
+            // route the cdata-eligible enum takes inside `lower_enum_variant`.
+            // Lowering the payload args directly instead packs each one on its
+            // own, which boxes a `nobox` payload the enum would have stored
+            // splat (`tests/nobox_enum_payload_container.rock`).
+            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
+                let r = self.lower_expr_repr(e)?;
+                Ok(self.pack(r))
             }
             Expr::EnumVariant {
                 enum_name,
@@ -573,6 +600,16 @@ impl Builder<'_> {
                 let leaves = self.repr_to_leaves(&r, &shape);
                 for (c, lv) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store { cell: *c, value: lv });
+                }
+            }
+            // The tuple twin: a name bound to a splatting tuple's WIRE updates its
+            // slot cells (presence included), never one boxed cell.
+            Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
+                let (cells, shape) = self.tuple_binds.get(&raw(b)).cloned().unwrap();
+                let r = self.lower_expr_repr(value)?;
+                let slots = self.tuple_repr_to_slots(r, &shape);
+                for (c, sv) in cells.iter().zip(slots) {
+                    self.emit_cur(Inst::Store { cell: *c, value: sv });
                 }
             }
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
@@ -957,13 +994,16 @@ impl Builder<'_> {
                             || spec_key_has_target_storage(self.ws, k, self.scx.target)
                     })
                     .map(|(k, _)| k);
-                // A tuple-returning method splats N values; capture + pack into
-                // the single (boxed, nullable) safe-nav result.
+                // A tuple-returning method splats N values, and they are handed on
+                // UNPACKED: the per-slot join stores them slot-wise, so packing
+                // here would box a `nobox` element the wire just kept unboxed.
+                // A method whose own return is `(..)?` carries its presence tag in
+                // the repr, and the join forwards that tag rather than minting
+                // `true` -- `a?.m()` is absent when either link is.
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
                 match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
                     Some(shape) => {
-                        let r = self.emit_tuple_call_tree(func, argv, &shape, None, key);
-                        self.pack(r)
+                        return Ok(self.emit_tuple_call_tree(func, argv, &shape, None, key));
                     }
                     None => {
                         let call = self.emit_cur(Inst::Call { func, args: argv });
@@ -1106,7 +1146,7 @@ impl Builder<'_> {
     ) -> Result<Option<Idx<Inst>>, CompilerError> {
         // Only a NULLABLE base: a non-nullable one has no presence tag, and `?.`
         // on it is already dead (bone rejects the redundant form).
-        if !self.repr_join_slot(base).is_some_and(
+        if !self.repr_join_slot(base)?.is_some_and(
             |s| matches!(s, RetSlot::Leaves(sh) if sh.nullable),
         ) {
             return Ok(None);

@@ -48,6 +48,8 @@ mod production_sources_test;
 mod run_exit_status;
 #[path = "shader_pipeline_cli.rs"]
 mod shader_pipeline_cli;
+#[path = "shader_register_arity_gate.rs"]
+mod shader_register_arity_gate;
 #[path = "shader_validate_gate.rs"]
 mod shader_validate_gate;
 #[path = "shape_oracle.rs"]
@@ -66,5 +68,7 @@ mod test_harness_truncation;
 mod watcher_tmp_project_path;
 #[path = "web_build_gate.rs"]
 mod web_build_gate;
+#[path = "web_fake_gl_tests.rs"]
+mod web_fake_gl_tests;
 #[path = "web_watch_tests.rs"]
 mod web_watch_tests;

@@ -124,3 +124,26 @@ value Bvec3 { x: bool, y: bool, z: bool }
 @shader_expand inline(lua) fn rock_shader<F>(frag: F) -> string = """
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
+
+// Pack `u` into a std140 uniform block: one direct typed store per primitive
+// leaf, at that leaf's std140 element index, through the two views the caller
+// passes. Never a per-leaf helper call and never a pack -- the leaves go from
+// registers into the views.
+//
+// The layout comes from `u`'s CONCRETE type, so this cannot be reached through
+// a generic fn (no concrete type, so no layout). The public surface is the
+// engine's `set_uniform_block` macro, which expands at the caller.
+@uniform_expand inline(lua) fn pack_uniform_block<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
+    error("pack_uniform_block is compiler-expanded (docs/shader-binding-layout-plan.md)")
+"""
+
+// The std140 layout identity of `u`'s CONCRETE type, as a compile-time
+// constant. Same annotation as the packer because it answers the same question
+// -- what is `T`'s plan -- and the arity picks the shape.
+//
+// This is how a call site says WHICH of a program's blocks it means: an A2
+// pipeline has one block per stage, so the shader name no longer identifies
+// one and the value's type is what does.
+@uniform_expand inline(lua) fn uniform_block_id<T>(u: T) -> int = """
+    error("uniform_block_id is compiler-expanded (docs/shader-binding-layout-plan.md)")
+"""

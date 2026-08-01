@@ -18,9 +18,35 @@ impl Builder<'_> {
         if let Expr::EnumVariant { enum_name, variant, args, .. } = self.body.expr_arena[value].clone() {
             if enum_name == shape.name {
                 let tag = self.emit_cur(Inst::Const(Lit::Str(variant)));
-                let (pos_args, rec_args): (Vec<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>) = match args {
-                    VariantArgs::Unit => (Vec::new(), Vec::new()),
-                    VariantArgs::Tuple(range) => (self.lower_exprs(range)?, Vec::new()),
+                // Positional args are placed at their POSITION's slot offset, and a
+                // `nobox` one spreads into its leaves there -- the layout comes
+                // from the enum declaration, so this and the match arm that reads
+                // it back agree without either seeing the other.
+                let mut slots: Vec<Option<Idx<Inst>>> = vec![None; shape.tuple_width()];
+                let rec_args: Vec<(Ustr, Idx<Inst>)> = match args {
+                    VariantArgs::Unit => Vec::new(),
+                    VariantArgs::Tuple(range) => {
+                        for (pos, a) in range.into_iter().enumerate() {
+                            let off = shape.slot_offset(pos);
+                            match shape.slots.get(pos) {
+                                // Widened only for the variant that actually
+                                // carries the value: a sibling variant with an
+                                // ordinary payload at the same position occupies
+                                // the first slot and nil-pads the rest.
+                                Some(FlatSlot::Leaves(vs))
+                                    if self.nobox_value_name(a) == Some(vs.name) =>
+                                {
+                                    let r = self.lower_expr_repr(a)?;
+                                    for (k, lv) in self.repr_to_leaves(&r, vs).into_iter().enumerate()
+                                    {
+                                        slots[off + k] = Some(lv);
+                                    }
+                                }
+                                _ => slots[off] = Some(self.lower_expr(a)?),
+                            }
+                        }
+                        Vec::new()
+                    }
                     VariantArgs::Record(fields) => {
                         let mut rec = Vec::new();
                         for fidx in fields {
@@ -28,12 +54,16 @@ impl Builder<'_> {
                             let v = self.lower_expr(lf.value)?;
                             rec.push((lf.name, v));
                         }
-                        (Vec::new(), rec)
+                        rec
                     }
                 };
                 let nil = || Inst::Const(Lit::Nil);
-                let positional = (0..shape.tuple_width)
-                    .map(|i| pos_args.get(i).copied().unwrap_or_else(|| self.emit_cur(nil())))
+                let positional = slots
+                    .into_iter()
+                    .map(|s| match s {
+                        Some(v) => v,
+                        None => self.emit_cur(nil()),
+                    })
                     .collect();
                 let named = shape
                     .record_fields
@@ -158,12 +188,12 @@ impl Builder<'_> {
     pub(crate) fn repr_group_to_cells(&mut self, shape: &EnumFlatShape, parts: Vec<ValueRepr>) -> FlatCells {
         let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
         let tag = packed[0];
-        let positional = packed[1..1 + shape.tuple_width].to_vec();
+        let positional = packed[1..1 + shape.tuple_width()].to_vec();
         let named = shape
             .record_fields
             .iter()
             .enumerate()
-            .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width + i]))
+            .map(|(i, rf)| (*rf, packed[1 + shape.tuple_width() + i]))
             .collect();
         FlatCells { tag, positional, named }
     }
@@ -186,7 +216,7 @@ impl Builder<'_> {
     /// `[i+1]` -> positional, `.field` -> named) -- the box-to-slots spread.
     pub(crate) fn spread_box_to_cells(&mut self, bv: Idx<Inst>, shape: &EnumFlatShape) -> FlatCells {
         let tag = self.emit_cur(Inst::Field { base: bv, field: Ustr::from("__variant") });
-        let positional = (0..shape.tuple_width)
+        let positional = (0..shape.tuple_width())
             .map(|i| self.emit_cur(Inst::TupleIndex { base: bv, index: i }))
             .collect();
         let named = shape
@@ -202,7 +232,7 @@ impl Builder<'_> {
     /// (`MakeEnumDyn`) at a whole-value-read boundary.
     pub(crate) fn materialize_flat(&mut self, parent: Idx<Inst>, prefix: Ustr, shape: &EnumFlatShape) -> Idx<Inst> {
         let tag = self.emit_cur(Inst::Field { base: parent, field: flat_tag_slot(prefix) });
-        let positional = (0..shape.tuple_width)
+        let positional = (0..shape.tuple_width())
             .map(|i| self.emit_cur(Inst::Field { base: parent, field: flat_payload_slot(prefix, i) }))
             .collect();
         let named = shape
