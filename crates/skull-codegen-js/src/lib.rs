@@ -863,10 +863,16 @@ function __sw_log_once(msg) {
   console.error("[STONE-WEB] " + msg);
 }
 
+function stone_set_canvas_active(h, w, hh) {
+  var c = __SW.canvases[h];
+  if (!c) return;
+  c.activeW = Math.min(Math.max(w, 1), c.w);
+  c.activeH = Math.min(Math.max(hh, 1), c.h);
+}
 function __sw_target_size() {
   if (__SW.boundCanvas !== 0) {
     var c = __SW.canvases[__SW.boundCanvas];
-    if (c) return [c.w, c.h];
+    if (c) return [c.activeW || c.w, c.activeH || c.h];
   }
   return [Math.round(__SW.logicalW * __SW.dpr), Math.round(__SW.logicalH * __SW.dpr)];
 }
@@ -1037,6 +1043,15 @@ function stone_set_canvas(h) {
   }
   var wh = __sw_target_size();
   gl.viewport(0, 0, wh[0], wh[1]);
+  // glClear ignores the viewport but respects the scissor, so the scissor is
+  // what keeps a clear (and any overdraw) off the inactive margin.
+  var cc = __SW.boundCanvas !== 0 ? __SW.canvases[__SW.boundCanvas] : null;
+  if (cc && (wh[0] < cc.w || wh[1] < cc.h)) {
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, wh[0], wh[1]);
+  } else {
+    gl.disable(gl.SCISSOR_TEST);
+  }
 }
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
 function stone_clear_canvas(r, g, b, a) {
@@ -1282,6 +1297,11 @@ function __sw_fix_stale_int_units(gl, sh) {
 // mirrored-window class can't recur.
 var __sw_fsq_identity = null;
 var __sw_fsq_present = null;
+var __sw_fsq_scaled = null;
+var __sw_fsq_uv = [1, 1];
+function stone_set_fullscreen_uv_scale(sx, sy) {
+  __sw_fsq_uv = [Math.max(sx, 0), Math.max(sy, 0)];
+}
 function __sw_fsq_buffer(gl, flipped) {
   var b = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, b);
@@ -1302,7 +1322,21 @@ function stone_draw_fullscreen_quad() {
   }
   gl.useProgram(sh.prog);
   __sw_fix_stale_int_units(gl, sh);
-  gl.bindBuffer(gl.ARRAY_BUFFER, __SW.boundCanvas === 0 ? __sw_fsq_present : __sw_fsq_identity);
+  var sx = __sw_fsq_uv[0], sy = __sw_fsq_uv[1];
+  if (sx === 1 && sy === 1) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, __SW.boundCanvas === 0 ? __sw_fsq_present : __sw_fsq_identity);
+  } else {
+    // Re-specify the scaled quad; six vertices, and it reaches custom vertex
+    // stages the way a uniform would not.
+    if (!__sw_fsq_scaled) __sw_fsq_scaled = gl.createBuffer();
+    var flipped = __SW.boundCanvas === 0;
+    var v0 = flipped ? 1 : 0, v1 = flipped ? 0 : 1;
+    gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq_scaled);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1, 0, v0 * sy,  1, -1, sx, v0 * sy,  1, 1, sx, v1 * sy,
+      -1, -1, 0, v0 * sy,  1, 1, sx, v1 * sy,  -1, 1, 0, v1 * sy,
+    ]), gl.DYNAMIC_DRAW);
+  }
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
