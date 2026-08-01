@@ -914,24 +914,32 @@ impl Builder<'_> {
             // literal operand is elided) and place each into its param slot.
             if self.body.spread_args.contains(&a) {
                 for (fname, r) in self.spread_field_reprs(a)? {
-                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
-                        slots[pidx] = Some(r);
-                    }
+                    let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
+                        gap(format!("spread field `{fname}` matches no parameter"))
+                    })?;
+                    slots[pidx] = Some(r);
                 }
                 continue;
             }
             let r = self.lower_expr_repr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
-                Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
+                Some(nm) => param_names
+                    .iter()
+                    .position(|p| p == nm)
+                    .ok_or_else(|| gap(format!("named argument `{nm}` matches no parameter")))?,
                 None => {
                     let i = next_pos;
                     next_pos += 1;
                     i
                 }
             };
-            if pidx < slots.len() {
-                slots[pidx] = Some(r);
+            if pidx >= slots.len() {
+                return Err(gap(format!(
+                    "argument lands in slot {pidx} of {} parameters",
+                    slots.len()
+                )));
             }
+            slots[pidx] = Some(r);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::new();
