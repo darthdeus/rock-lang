@@ -742,9 +742,9 @@ fn emit_entry_profile(
     skull_codegen_glsl::emit_shader_entry(&ws, mid, root, profile).map_err(|e| e.message)
 }
 
-/// The A1 scaffold: generated #version + PIXEL block (in/out, uniforms from the
-/// struct's fields + sampler params, helpers, entry fn with dropped uniform/
-/// sampler params, main) + the default fullscreen VERTEX block.
+/// The A1 scaffold: generated #version + PIXEL block (in/out, the `@uniform`
+/// group's std140 block + sampler declarations, helpers, entry fn with dropped
+/// uniform/sampler params, main) + the default fullscreen VERTEX block.
 #[test]
 fn fragment_entry_scaffold() {
     let src = r#"
@@ -767,8 +767,8 @@ fn fragment_entry_scaffold() {
     assert!(glsl.contains("#ifdef PIXEL"), "got:\n{glsl}");
     assert!(glsl.contains("in vec2 TexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
-    // Uniforms: struct fields in declaration order, then samplers.
-    assert!(glsl.contains("uniform float strength;\nuniform vec2 center;\nuniform float radius;\nuniform sampler2D scene;"), "got:\n{glsl}");
+    // Uniforms: one std140 block in field order, then the loose samplers.
+    assert!(glsl.contains("layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\nuniform sampler2D scene;"), "got:\n{glsl}");
     // Helper before entry; entry drops uniform/sampler params.
     let fi = glsl.find("float falloff_float_float_ret_float(float d, float r)").expect("helper emitted");
     let gi = glsl.find("vec4 glow(vec2 tc)").expect("entry emitted");
@@ -782,6 +782,41 @@ fn fragment_entry_scaffold() {
     assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
     assert!(glsl.contains("gl_Position = vec4(aPos, 0.0, 1.0);"), "got:\n{glsl}");
     assert!(glsl.contains("TexCoord = aTexCoord;"), "got:\n{glsl}");
+}
+
+/// `@uniform` is ONE std140 block, not a run of loose uniforms. The block is
+/// declared with no instance name, so its members stay bare GLSL globals and
+/// every body reading them is unchanged -- that is what confines this change to
+/// declaration lines (verified on real drivers in both profiles,
+/// docs/shader-binding-layout-plan.md). Samplers are opaque and cannot live in a
+/// block, so they stay loose beside it.
+#[test]
+fn fragment_entry_uniforms_are_one_std140_block() {
+    let src = r#"
+        value GlowU { strength: float, center: Vec2, radius: float }
+
+        @shader(fragment)
+        fn glow(@uniform u: GlowU, scene: Sampler2D, tc: Vec2) -> Vec4 {
+            let d = tc.distance(u.center)
+            let k = 1.0 + u.strength * (1.0 - smoothstep(0.0, u.radius, d))
+            let t = texture(scene, tc)
+            return Vec4 { x: t.x * k, y: t.y * k, z: t.z * k, w: t.w }
+        }
+    "#;
+    let glsl = emit_entry(src, "glow").expect("emit");
+    // Member order is field order -- the same contract @attr uses for locations
+    // and @textures for slots.
+    assert!(
+        glsl.contains(
+            "layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\n"
+        ),
+        "got:\n{glsl}"
+    );
+    assert!(glsl.contains("uniform sampler2D scene;"), "got:\n{glsl}");
+    assert!(!glsl.contains("uniform float strength;"), "no loose member survives:\n{glsl}");
+    // The block is UNNAMED-instance, so reads are bare globals exactly as before.
+    assert!(glsl.contains("distance(tc, center)"), "got:\n{glsl}");
+    assert!(!glsl.contains("u."), "uniform struct must not survive as a param:\n{glsl}");
 }
 
 /// ES300 fullscreen entry: the profile header replaces the hardcoded 330

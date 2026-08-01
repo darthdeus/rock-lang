@@ -109,12 +109,22 @@ fn main() { print("{SHADER_KEY}") }
         .lines()
         .find(|l| l.starts_with("__rock_shader_register("))
         .expect("a registration line in game.js");
+    // The FIRST `{_data:` on the line: texture slots are the third argument,
+    // ahead of the uniform-block ones. Located by position rather than by
+    // `rfind`, which silently started reading the block's offsets when those
+    // arguments were appended.
     let slots = line
-        .rfind("{_data:")
+        .find("{_data:")
         .map(|i| &line[i..])
         .unwrap_or_else(|| panic!("registration line has no slots argument:\n{line}"));
-    assert_eq!(
-        slots, r#"{_data: ["uTexture", "mask_tex", "shadowmap_tex"], len: 3, __ty: "Vec"});"#,
-        "registration slots drifted (field order IS the texture unit)"
+    assert!(
+        slots.starts_with(r#"{_data: ["uTexture", "mask_tex", "shadowmap_tex"], len: 3, __ty: "Vec"}"#),
+        "registration slots drifted (field order IS the texture unit):\n{slots}"
+    );
+    // This fixture is an A2 pipeline, whose uniforms stay loose, so it carries
+    // an EMPTY block -- still as arguments, never as a short call.
+    assert!(
+        line.contains(r#", "", 0, 0, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"});"#),
+        "registration uniform-block arguments drifted:\n{line}"
     );
 }

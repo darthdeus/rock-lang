@@ -1596,12 +1596,25 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         // Slot order is the engine's whole view of texture binding: it points
         // each sampler at its unit once at link time, then binds by slot.
         let slot_names: Vec<&str> = emission.texture_slots.iter().map(|n| n.as_str()).collect();
+        // The `@uniform` block's std140 layout. A shader with no group sends an
+        // empty name and empty lists -- an argument either way, never a short
+        // call (see rock-cli/tests/shader_register_arity_gate.rs).
+        let b = emission.uniform_block.as_ref();
+        let member_names: Vec<&str> =
+            b.map(|p| p.members.iter().map(|m| m.name.as_str()).collect()).unwrap_or_default();
+        let offsets: Vec<i64> =
+            b.map(|p| p.members.iter().map(|m| m.offset as i64).collect()).unwrap_or_default();
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {:?}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
-            skull_codegen_lua::lua_string_vec(&slot_names)
+            skull_codegen_lua::lua_string_vec(&slot_names),
+            b.map(|p| p.struct_name.as_str()).unwrap_or(""),
+            b.map(|p| p.size).unwrap_or(0),
+            b.map(|p| p.fingerprint()).unwrap_or(0),
+            skull_codegen_lua::lua_string_vec(&member_names),
+            skull_codegen_lua::lua_int_vec(&offsets),
         );
     }
     Ok(ShaderRegistrations {
