@@ -1784,13 +1784,13 @@ fn main() { let a = ident(1) }
 "#,
     );
     let removed = drop_generic_binding_records(&mut ws, "main");
-    assert!(removed > 0, "the fixture removed no binding record, so it proves nothing");
+    // EXACT: `main` has one generic call, so one record is dropped and one site
+    // must appear. This equality only became assertable once the helper stopped
+    // applying a module-local `BodyOwner` to every module -- before that it
+    // removed a same-index stdlib `get` record too and reported 2.
+    assert_eq!(removed, 1, "expected exactly `ident`'s binding record to be dropped");
     let roots = instance_graph::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
-    // Asserted on CONTENT, not on a count: not every removed record yields a
-    // site (`main`'s other generic-call record is `get`, whose callee the walk
-    // resolves without one), so an equality against `removed` would be a number
-    // the fixture cannot justify.
     let sites: Vec<&instance_graph::Unresolved> =
         g.unresolved.iter().filter(|u| u.reason == "no-bindings").collect();
     let callees: Vec<&str> = sites
@@ -1803,6 +1803,7 @@ fn main() { let a = ident(1) }
         "expected exactly the `ident` call to lose its instantiation, got {:?}",
         g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
     );
+    assert_eq!(sites.len(), removed, "one dropped record, one unresolved site");
     assert!(
         sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
         "a `no-bindings` unresolved call carries no span: {sites:?}"
@@ -1842,49 +1843,132 @@ fn main() {
     );
 }
 
-/// Remove every `call_generic_bindings` entry in `fn_name`'s body, returning
-/// how many were dropped. The COUNT is the denominator the caller asserts
-/// against -- a helper that silently removed nothing would make its test vacuous.
-fn drop_generic_binding_records(ws: &mut Workspace, fn_name: &str) -> usize {
-    let owner = body_owner_of(ws, fn_name);
-    let mut n = 0;
-    for inference in ws.inferences.iter_mut().flatten() {
-        if let Some(inf) = inference.per_fn.get_mut(&owner) {
-            n += inf.call_generic_bindings.len();
-            inf.call_generic_bindings.clear();
-        }
-    }
-    n
+/// `record_bound_next`'s own `Unresolved` write. The three recorders do NOT
+/// share one: `record_call`, `record_witness` and `record_bound_next` each push
+/// independently, so covering the `iter` half of a `for` protocol says nothing
+/// about the `next` half.
+#[test]
+fn a_bound_next_with_no_generic_record_is_unresolved_with_a_span() {
+    let mut ws = check(
+        r#"
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    let t = 0
+    for x in xs { t = t + x }
+}
+"#,
+    );
+    let removed = drop_bound_next_generic_records(&mut ws, "main");
+    assert_eq!(removed, 1, "expected the one `for`-protocol `next` record to be dropped");
+    let roots = instance_graph::emission_roots(&ws, None);
+    let g = instance_graph::build(&ws, roots, false);
+    let sites: Vec<&instance_graph::Unresolved> = g
+        .unresolved
+        .iter()
+        .filter(|u| u.reason == "witness-generic-unbound")
+        .collect();
+    assert!(
+        !sites.is_empty(),
+        "clearing `next_generics` produced no unresolved site: {:?}",
+        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+    );
+    assert!(
+        sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
+        "a bound-next unresolved site carries no span: {sites:?}"
+    );
+    // CONTROL: the ITER half is untouched, so its witness still resolves. This
+    // is what separates this fixture from the `record_witness` one -- without
+    // it, either mutation would satisfy both tests.
+    assert!(
+        g.edges.iter().any(|e| e.kind == EdgeKind::IteratorIter),
+        "the fixture disturbed the iter half too, so it does not isolate `record_bound_next`"
+    );
 }
 
-/// Same, for the `for`-protocol witness generics `instantiate_witness` reads.
-fn drop_witness_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
-    let owner = body_owner_of(ws, fn_name);
-    let mut n = 0;
-    for inference in ws.inferences.iter_mut().flatten() {
-        if let Some(inf) = inference.per_fn.get_mut(&owner) {
-            for info in inf.for_iter_protocol.values_mut() {
-                if let Some(w) = info.iter.as_mut() {
-                    if !w.generics.is_empty() {
-                        w.generics.clear();
-                        n += 1;
-                    }
-                }
-            }
-        }
-    }
-    n
-}
-
-fn body_owner_of(ws: &Workspace, fn_name: &str) -> bone_semantic::hir::BodyOwner {
+/// The one body to mutate, as `(module, owner)`.
+///
+/// A `BodyOwner::Function` holds a MODULE-LOCAL arena index, so applying one to
+/// every module's inference table hits whatever stdlib function happens to share
+/// that index. That is not hypothetical: it is what made
+/// `drop_generic_binding_records` report two removals for a body with one
+/// generic call, the second belonging to an unrelated stdlib `get`.
+fn body_of(
+    ws: &Workspace,
+    fn_name: &str,
+) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             if f.name.as_str() == fn_name {
-                return bone_semantic::hir::BodyOwner::Function(fid);
+                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
             }
         }
     }
     panic!("no fn named `{fn_name}`");
+}
+
+/// Run `f` over exactly one body's inference record.
+fn with_body_inference<R>(
+    ws: &mut Workspace,
+    fn_name: &str,
+    f: impl FnOnce(&mut bone_semantic::inference::BodyInference) -> R,
+) -> R {
+    let (mid, owner) = body_of(ws, fn_name);
+    let inference = ws.inferences[mid.raw() as usize]
+        .as_mut()
+        .unwrap_or_else(|| panic!("`{fn_name}`'s module has no inference result"));
+    let inf = inference
+        .per_fn
+        .get_mut(&owner)
+        .unwrap_or_else(|| panic!("no inference record for `{fn_name}`"));
+    f(inf)
+}
+
+/// Remove every `call_generic_bindings` entry in `fn_name`'s body, returning
+/// how many were dropped. The COUNT is the denominator the caller asserts
+/// against -- a helper that silently removed nothing would make its test vacuous.
+fn drop_generic_binding_records(ws: &mut Workspace, fn_name: &str) -> usize {
+    with_body_inference(ws, fn_name, |inf| {
+        let n = inf.call_generic_bindings.len();
+        inf.call_generic_bindings.clear();
+        n
+    })
+}
+
+/// Same, for the `for`-protocol witness generics `instantiate_witness` reads on
+/// the ITER half. Feeds `record_witness`.
+fn drop_witness_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
+    with_body_inference(ws, fn_name, |inf| {
+        let mut n = 0;
+        for info in inf.for_iter_protocol.values_mut() {
+            if let Some(w) = info.iter.as_mut() {
+                if !w.generics.is_empty() {
+                    w.generics.clear();
+                    n += 1;
+                }
+            }
+        }
+        n
+    })
+}
+
+/// The NEXT half: `BoundNext::Concrete::next_generics`. Feeds
+/// `record_bound_next`, which pushes its own `Unresolved` -- the three
+/// recorders do not share a write.
+fn drop_bound_next_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
+    with_body_inference(ws, fn_name, |inf| {
+        let mut n = 0;
+        for info in inf.for_iter_protocol.values_mut() {
+            if let bone_semantic::prelude::BoundNext::Concrete { next_generics, .. } =
+                &mut info.next
+            {
+                if !next_generics.is_empty() {
+                    next_generics.clear();
+                    n += 1;
+                }
+            }
+        }
+        n
+    })
 }
 
 /// The positive fixture for the `Unresolved` axis of the span census.
@@ -1896,9 +1980,12 @@ fn body_owner_of(ws: &Workspace, fn_name: &str) -> bone_semantic::hir::BodyOwner
 /// sibling, so the synthesized call resolves to nothing on that target.
 ///
 /// This covers the `compiler-generated-entry-missing-for-target` write in
-/// `walk_body_edges`. The `record_call` and witness recorders are covered by
-/// `a_call_with_no_binding_record_is_unresolved_with_a_span` and
-/// `a_witness_with_no_generic_record_is_unresolved_with_a_span`.
+/// `walk_body_edges`. The other three recorders each push their OWN
+/// `Unresolved` and are covered one fixture apiece:
+/// `a_call_with_no_binding_record_is_unresolved_with_a_span`,
+/// `a_witness_with_no_generic_record_is_unresolved_with_a_span`,
+/// `a_bound_next_with_no_generic_record_is_unresolved_with_a_span`. Mutating
+/// any one recorder's span reddens only its own fixture -- measured.
 #[test]
 fn an_unresolved_call_site_keeps_its_span() {
     use bone_semantic::hir::FnBackend;
