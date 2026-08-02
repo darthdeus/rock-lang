@@ -1585,9 +1585,17 @@ fn main() { let x = G }
         "expected exactly the one failing site: {hole:?}"
     );
     let site = &hole.always_emitted_sites[0];
-    assert!(
-        !site.reason.is_empty(),
-        "the always-emitted hole discarded its failure reason: {hole:?}"
+    // The CLASSIFICATION, not a reason string. `pick<T>()` with nothing
+    // constraining `T` is the decided `UnconstrainedTypeVar` rejection whether
+    // or not the body it appears in has an instance -- the control below is the
+    // same call from a function body, which becomes exactly that rejection.
+    // Recording only a reason forced Stage 3 to recover this by parsing it.
+    assert_eq!(
+        site.outcome,
+        instance_graph::AlwaysEmittedOutcome::Rejection(
+            instance_graph::RejectionKind::UnconstrainedTypeVar
+        ),
+        "the always-emitted record lost the rejection classification: {hole:?}"
     );
     // The SPAN is the point: this fact becomes a compile error at the Stage-3
     // cutover, and every caller already had the call-site span while the
@@ -1723,6 +1731,40 @@ fn main() { opaque_caller(1) }
     let _ = &ws;
 }
 
+/// The other rejection an always-emitted body can hold: a generic function
+/// taken as a VALUE by a global initializer. `GenericFnValue` is a decided S 0h
+/// rejection, and it stays one when there is no `from` instance to file it
+/// against.
+#[test]
+fn a_generic_fn_value_in_an_always_emitted_body_keeps_its_rejection_kind() {
+    let ws = check(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+global F: fn(int) -> int = ident
+fn main() { let y = F(1) }
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, Some("<project>"));
+    let g = instance_graph::build(&ws, roots, false);
+    let sites: Vec<&instance_graph::AlwaysEmittedFailure> = g
+        .uninstantiated_roots
+        .values()
+        .flat_map(|h| h.always_emitted_sites.iter())
+        .collect();
+    assert!(!sites.is_empty(), "the fixture recorded no always-emitted failure");
+    assert!(
+        sites.iter().any(|s| s.outcome
+            == instance_graph::AlwaysEmittedOutcome::Rejection(
+                instance_graph::RejectionKind::GenericFnValue
+            )),
+        "a generic fn value in a global initializer lost its rejection kind: {sites:?}"
+    );
+    assert!(
+        sites.iter().all(|s| !instance_graph::is_spanless(&s.span)),
+        "a generic-fn-value hole carries no span: {sites:?}"
+    );
+}
+
 /// The positive fixture for the `Unresolved` axis of the span census.
 ///
 /// The corpus's Lua view records ZERO unresolved sites, so without this the
@@ -1730,6 +1772,13 @@ fn main() { opaque_caller(1) }
 /// recorder switched to `Span::unknown` would go unnoticed. The JS view
 /// supplies the population: a column intercept's runtime entry has no JS
 /// sibling, so the synthesized call resolves to nothing on that target.
+///
+/// This covers ONE of the four `Unresolved` recorders -- the
+/// `compiler-generated-entry-missing-for-target` write in `walk_body_edges`.
+/// The writes in `record_call`, `record_witness` and `record_bound_next` need a
+/// `Fail::Unresolved`, whose reasons (`recovery-error`, `no-node`,
+/// `depth-limit`) are compiler invariants a program passing `semantic_pass`
+/// cannot produce, so no valid fixture reaches them.
 #[test]
 fn an_unresolved_call_site_keeps_its_span() {
     use bone_semantic::hir::FnBackend;
@@ -1745,11 +1794,14 @@ fn main() {
     );
     let roots = instance_graph::emission_roots(&ws, None);
     let g = instance_graph::build_for_target(&ws, roots.clone(), false, FnBackend::Js);
-    // The DENOMINATOR first: a spanless-count of zero over an empty population
-    // is what this fixture exists to prevent.
-    assert!(
-        !g.unresolved.is_empty(),
-        "the fixture produced no unresolved call site, so it asserts nothing"
+    // The EXACT denominator and reasons, not merely non-empty: a fixture that
+    // silently drops to one site still satisfies "non-zero" while covering
+    // less than it claims.
+    let reasons: Vec<&str> = g.unresolved.iter().map(|u| u.reason).collect();
+    assert_eq!(
+        reasons,
+        vec!["compiler-generated-entry-missing-for-target"; 4],
+        "the unresolved population changed shape"
     );
     let spanless: Vec<&str> = g
         .unresolved

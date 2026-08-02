@@ -533,12 +533,17 @@ impl InstanceGraph {
     /// Per SITE, not per reason: two failures of one callee are two diagnostics
     /// at two places, and a set keyed on the reason reports them as one fact
     /// with no location.
-    fn record_always_emitted_hole(&mut self, name: String, reason: &'static str, span: Span) {
+    fn record_always_emitted_hole(
+        &mut self,
+        name: String,
+        outcome: AlwaysEmittedOutcome,
+        span: Span,
+    ) {
         self.uninstantiated_roots
             .entry(name)
             .or_default()
             .always_emitted_sites
-            .push(AlwaysEmittedFailure { reason, span });
+            .push(AlwaysEmittedFailure { outcome, span });
     }
 
     /// Which recorded facts could produce a located error and which could not
@@ -567,12 +572,13 @@ impl InstanceGraph {
             k.spanless += usize::from(is_spanless(&u.span));
         }
         // An always-emitted failure is the same diagnostic as an `Unresolved`
-        // with no `from` instance to hang it on, so it is measured on the same
-        // axis. Leaving it out was how a whole population of facts stayed
-        // spanless while the census reported full coverage.
+        // or a `Rejection` with no `from` instance to hang it on, so it is
+        // measured on the same axis and keyed by which of the two it is.
+        // Leaving it out was how a whole population of facts stayed spanless
+        // while the census reported full coverage.
         for hole in self.uninstantiated_roots.values() {
             for site in &hole.always_emitted_sites {
-                let k = c.always_emitted.entry(site.reason).or_default();
+                let k = c.always_emitted.entry(site.outcome.label()).or_default();
                 k.examined += 1;
                 k.spanless += usize::from(is_spanless(&site.span));
             }
@@ -708,12 +714,38 @@ impl Closure {
     }
 }
 
+/// What the same failure WOULD have been recorded as if the body it happened in
+/// had an instance to file it against.
+///
+/// The distinction is the classification itself, not a label: an
+/// [`Unresolved`] is data the walk could not complete, a [`Rejection`] is a
+/// construction the model refuses (plan S 0h) and becomes a compile error at
+/// the Stage-3 cutover. Storing only a reason string forced Stage 3 to
+/// reconstruct which one it was by parsing that string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlwaysEmittedOutcome {
+    Unresolved(&'static str),
+    Rejection(RejectionKind),
+}
+
+impl AlwaysEmittedOutcome {
+    /// Census key. Reason bucket for the unresolved case, kind name for the
+    /// rejection case -- the two never collide because the kind names are the
+    /// `RejectionKind` catalogue.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unresolved(r) => r,
+            Self::Rejection(k) => k.name(),
+        }
+    }
+}
+
 /// One call site in an always-emitted body whose instantiation failed. Carries
 /// what a [`Rejection`] or an [`Unresolved`] at the same failure would: the
-/// reason, and the span the Stage-3 diagnostic points at.
+/// classification, and the span the Stage-3 diagnostic points at.
 #[derive(Debug, Clone)]
 pub struct AlwaysEmittedFailure {
-    pub reason: &'static str,
+    pub outcome: AlwaysEmittedOutcome,
     pub span: Span,
 }
 
@@ -738,7 +770,10 @@ pub struct AlwaysEmittedFailure {
 /// only the opaque-caller entry is not".
 #[derive(Debug, Default, Clone)]
 pub struct RootHole {
-    /// A generic function that is an emission root no call instantiates.
+    /// A generic function that is an emission root: production emits its body
+    /// regardless of any call, so its obligation is to exist under a BARE name.
+    /// Concrete instances do not discharge that, which is why this coexists
+    /// with a non-zero [`Self::instances`].
     pub generic_root: bool,
     /// Every SITE at which a call from an always-emitted body could not
     /// instantiate it, with the span the diagnostic points at. Empty when
@@ -970,7 +1005,11 @@ fn walk_body_edges(
                 });
             } else {
                 g.always_emitted_seeds += 1;
-                g.record_always_emitted_hole(mangle_fn(ws, cf), "generic-fn-value", span);
+                g.record_always_emitted_hole(
+                    mangle_fn(ws, cf),
+                    AlwaysEmittedOutcome::Rejection(RejectionKind::GenericFnValue),
+                    span,
+                );
             }
         }
 
@@ -1079,11 +1118,25 @@ fn record_call(
     let cf = &ws.module(callee.module).functions[callee.func];
     let (args, callee_subst) = match instantiate(&mut g.arena, ws, inf, cf, bindings, subst) {
         Ok(v) => v,
-        // Both failure classes reach the same place from an always-emitted
-        // body, and both keep the reason an instantiated body's call would
-        // carry. Ordered before the classifying arms so that guard wins.
+        // An always-emitted body has no `from` to file against, but the
+        // CLASSIFICATION is the same one an instantiated body's call gets:
+        // `Unconstrained` is the decided `UnconstrainedTypeVar` rejection
+        // either way. Ordered before the classifying arms so these guards win.
+
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
+                span,
+            );
+            return;
+        }
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason(), span);
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Unresolved(fail.reason()),
+                span,
+            );
             return;
         }
         Err(Fail::Unconstrained(_)) => {
@@ -1224,11 +1277,21 @@ fn record_witness(
                 work.push((to, callee_subst, depth + 1));
             }
         }
-        // Both failure classes reach the same place from an always-emitted
-        // body, and both keep the reason an instantiated body's call would
-        // carry. Ordered before the classifying arms so that guard wins.
+        // See `record_call`: the classification survives the absence of a
+        // `from` instance.
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
+                span,
+            );
+        }
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason(), span);
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Unresolved(fail.reason()),
+                span,
+            );
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {
@@ -1289,11 +1352,21 @@ fn record_bound_next(
                 work.push((to, callee_subst, depth + 1));
             }
         }
-        // Both failure classes reach the same place from an always-emitted
-        // body, and both keep the reason an instantiated body's call would
-        // carry. Ordered before the classifying arms so that guard wins.
+        // See `record_call`: the classification survives the absence of a
+        // `from` instance.
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
+                span,
+            );
+        }
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason(), span);
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Unresolved(fail.reason()),
+                span,
+            );
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {

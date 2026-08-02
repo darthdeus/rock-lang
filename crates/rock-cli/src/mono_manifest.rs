@@ -250,12 +250,19 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             if h.generic_root {
                 cause.push("generic emission root".to_string());
             }
-            let mut by_reason: BTreeMap<&'static str, usize> = BTreeMap::new();
+            // Split by what the failure WOULD have been recorded as, not by
+            // reason alone: a rejection is the stronger classification and
+            // becomes a compile error at the cutover.
+            let mut by_outcome: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
             for s in &h.always_emitted_sites {
-                *by_reason.entry(s.reason).or_insert(0) += 1;
+                let what = match s.outcome {
+                    instance_graph::AlwaysEmittedOutcome::Rejection(_) => "rejection",
+                    instance_graph::AlwaysEmittedOutcome::Unresolved(_) => "unresolved",
+                };
+                *by_outcome.entry((what, s.outcome.label())).or_insert(0) += 1;
             }
-            for (r, n) in &by_reason {
-                cause.push(format!("always-emitted call: `{r}` x{n}"));
+            for ((what, label), n) in &by_outcome {
+                cause.push(format!("always-emitted {what}: `{label}` x{n}"));
             }
             println!(
                 "| `{n}` | {} | {} |",
@@ -275,8 +282,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "`uninst. generic roots` (max over projects): **{uninst}** -- names with an \
-         UNCOVERED BARE-NAME OBLIGATION. Not \"no call instantiates them\": six of the \
+        "`uncovered bare-name obligations` (max over projects): **{uninst}**. Not \"no call instantiates them\": six of the \
          corpus's have concrete instances from Rock call sites, which discharge those \
          call sites and not the bare-name entry opaque Lua text can call."
     );
