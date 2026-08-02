@@ -2287,22 +2287,39 @@ fn function_target(
     let module = ws.modules.get(mid.index())?;
 
     if let Some(owner) = module.body_at(offset) {
-        if let Some(NodeRef::Expr(e)) = module
-            .bodies
-            .get(&owner)
-            .and_then(|body| {
-                body.node_index()
-                    .find(offset, offset + 1)
-                    .min_by_key(|x| x.stop - x.start)
-            })
-            .map(|iv| iv.val)
-        {
-            if let Some((cmid, fid)) = inf
-                .per_fn
-                .get(&owner)
-                .and_then(|bi| bi.resolved_overload_calls.get(&e))
+        if let Some(body) = module.bodies.get(&owner) {
+            if let Some(NodeRef::Expr(e)) = body
+                .node_index()
+                .find(offset, offset + 1)
+                .min_by_key(|x| x.stop - x.start)
+                .map(|iv| iv.val)
             {
-                return Some((*cmid, *fid));
+                if let Some((cmid, fid)) = inf
+                    .per_fn
+                    .get(&owner)
+                    .and_then(|bi| bi.resolved_overload_calls.get(&e))
+                {
+                    return Some((*cmid, *fid));
+                }
+
+                // A bare top-level name used as a VALUE, never called
+                // (`apply(double, ..)`, `rock_shader(card_000_frag)`): HIR
+                // lowers this to `Expr::Global(name)`, which has no entry in
+                // `resolved_overload_calls` (keyed on Call nodes only).
+                // `def_of_name` already resolves this case for
+                // go-to-definition; find-references/rename need the same case,
+                // restricted to functions.
+                if let hir::Expr::Global(name) = &body.expr_arena[e] {
+                    if !name.as_str().starts_with("__") {
+                        for m in ws.modules.iter() {
+                            if let Some((fmid, fid)) =
+                                m.functions_by_name.get(name).and_then(|l| l.first())
+                            {
+                                return Some((*fmid, *fid));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2404,6 +2421,23 @@ fn function_references_by_name<'t>(
                             }
                         }
                         _ => {}
+                    }
+                }
+            }
+
+            // A bare top-level name used as a VALUE, never called
+            // (`apply(double, ..)`, `rock_shader(card_000_frag)`): HIR lowers
+            // this to `Expr::Global(name)`, with no entry in
+            // `resolved_overload_calls` (keyed on Call nodes only). Unlike a
+            // call, a bare value reference carries no argument list to
+            // disambiguate an overload, so it's matched by name for both
+            // scopes -- there's no finer-grained target to restrict to.
+            for (e, expr) in body.expr_arena.iter() {
+                if let hir::Expr::Global(gname) = expr {
+                    if *gname == name {
+                        if let Some(sp) = body.expr_spans.get(e) {
+                            out.push(*sp);
+                        }
                     }
                 }
             }
