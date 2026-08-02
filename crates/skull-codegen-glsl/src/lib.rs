@@ -19,7 +19,9 @@
 
 mod structure;
 
-use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, StructDef, TyId, TypeCtor, TypeExpr};
+use bone_semantic::hir::{
+    AnnoValue, BodyOwner, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
+};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
@@ -127,6 +129,87 @@ fn fmt_float(f: f64) -> String {
     }
 }
 
+// --- const globals ----------------------------------------------------------
+
+/// Depth cap on `const A = B` alias chains. A cycle is impossible in a
+/// well-formed program (bone rejects one), so this only bounds a pathological
+/// chain rather than implementing cycle detection.
+const CONST_CHAIN_DEPTH: usize = 16;
+
+/// Fold a `const` global to its literal value, or `None` if it is not a `const`
+/// or its initializer is not a constant expression.
+///
+/// GLSL has no module-level mutable state, so a `global` read can never lower.
+/// A `const` is different in kind: bone enforces it read-only
+/// (`ws.const_globals`, rejected at any rebind), so baking its value into the
+/// shader cannot drift from the CPU-side value. It folds at the use site rather
+/// than emitting a GLSL `const` declaration -- a declaration would have to join
+/// the one cross-stage namespace shared by uniforms, varyings, attributes and
+/// samplers, and collide-check against it, for no gain the folded literal
+/// doesn't already give.
+///
+/// Only literals and alias chains fold today. Arithmetic (`const TAU = PI * 2`)
+/// lowers to an operator CALL in HIR, not a `BinOp`, so folding it means
+/// evaluating calls -- deliberately out of scope; such a const rejects with a
+/// message naming the real cause.
+fn const_lit(ws: &Workspace, name: Ustr) -> Option<Lit> {
+    const_lit_depth(ws, name, 0)
+}
+
+fn const_lit_depth(ws: &Workspace, name: Ustr, depth: usize) -> Option<Lit> {
+    if depth > CONST_CHAIN_DEPTH || !ws.const_globals.contains(&name) {
+        return None;
+    }
+    let (module, gid) = ws.modules.iter().find_map(|m| {
+        m.globals
+            .iter()
+            .find(|(_, g)| g.name == name && g.is_const)
+            .map(|(gid, _)| (m, gid))
+    })?;
+    let body = module.bodies.get(&BodyOwner::Global(gid))?;
+    fold_const_expr(ws, module, body, body.root?, depth)
+}
+
+fn fold_const_expr(
+    ws: &Workspace,
+    module: &bone_semantic::hir::Module,
+    body: &bone_semantic::hir::Body,
+    e: Idx<Expr>,
+    depth: usize,
+) -> Option<Lit> {
+    match body.expr_arena[e] {
+        Expr::Int(i) => Some(Lit::Int(i)),
+        Expr::Float(f) => Some(Lit::Float(f.into_inner())),
+        Expr::Bool(b) => Some(Lit::Bool(b)),
+        Expr::UnaryMinus(inner) => match fold_const_expr(ws, module, body, inner, depth)? {
+            Lit::Int(i) => Some(Lit::Int(-i)),
+            Lit::Float(f) => Some(Lit::Float(-f)),
+            _ => None,
+        },
+        Expr::Global(g) => const_lit_depth(ws, g, depth + 1),
+        _ => None,
+    }
+}
+
+/// The GLSL type a folded const literal renders at.
+fn const_lit_ty(lit: &Lit) -> GlslTy {
+    match lit {
+        Lit::Int(_) => GlslTy::Int,
+        Lit::Bool(_) => GlslTy::Bool,
+        _ => GlslTy::Float,
+    }
+}
+
+/// Render a folded const literal as a GLSL expression.
+fn render_const_lit(lit: &Lit) -> Option<String> {
+    match lit {
+        Lit::Float(f) => Some(fmt_float(*f)),
+        Lit::Int(i) => Some(i.to_string()),
+        Lit::Bool(b) => Some(b.to_string()),
+        Lit::Nil | Lit::Str(_) => None,
+    }
+}
+
 // --- reachability + profile pass --------------------------------------------
 
 struct Reach<'a> {
@@ -179,7 +262,7 @@ impl Reach<'_> {
             err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
         })?;
         let mut callees: Vec<FuncRef> = Vec::new();
-        profile_body(f, &mf, &mut callees)?;
+        profile_body(self.ws, f, &mf, &mut callees)?;
 
         for c in callees {
             self.visit(c)?;
@@ -208,6 +291,7 @@ fn check_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
 /// Walk a fn's MIR, rejecting any non-tier-0 instruction and collecting the
 /// [`FuncRef`]s it calls directly.
 fn profile_body(
+    ws: &Workspace,
     f: &Function,
     mf: &MirFunc,
     callees: &mut Vec<FuncRef>,
@@ -216,6 +300,21 @@ fn profile_body(
     for (_, inst) in mf.insts.iter() {
         match inst {
             Inst::Call { func, .. } => callees.push(*func),
+            // A `const` global folds to its literal at the use site; a mutable
+            // `global` is runtime state with no GLSL equivalent.
+            Inst::Global(name) => {
+                if const_lit(ws, *name).is_none() {
+                    if ws.const_globals.contains(name) {
+                        return Err(err(span, format!(
+                            "shader profile: const `{name}` has an initializer that is not a constant expression -- only literals and const aliases fold for GLSL"
+                        )));
+                    }
+                    return Err(err(span, format!(
+                        "shader profile: `{}` uses a non-tier-0 construct (global read) that has no GLSL lowering -- a mutable `global` has no GLSL equivalent; a `const` folds to its literal",
+                        f.name
+                    )));
+                }
+            }
             Inst::Const(Lit::Str(_)) => {
                 return Err(err(span, format!("shader profile: `{}` uses a non-tier-0 construct (string literal) that has no GLSL lowering", f.name)));
             }
@@ -912,6 +1011,9 @@ impl FnEmit<'_> {
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
             Inst::Load(c) => self.cell_ty.get(c).copied().unwrap_or(GlslTy::Float),
+            Inst::Global(name) => {
+                const_lit(self.ws, *name).as_ref().map_or(GlslTy::Float, const_lit_ty)
+            }
             Inst::Field { base, field } => {
                 if self.is_uniform_base(*base) {
                     self.uniform_fields.get(field).copied().unwrap_or(GlslTy::Float)
@@ -986,6 +1088,14 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => return Err(err(self.span(), "shader profile: null literal is not tier 0")),
             Inst::Const(Lit::Str(_)) => return Err(err(self.span(), "shader profile: string literal is not tier 0")),
+            // Admitted by `profile_body` only when it folds, so a miss here is a
+            // profile/emit divergence, not user error.
+            Inst::Global(name) => const_lit(self.ws, *name)
+                .as_ref()
+                .and_then(render_const_lit)
+                .ok_or_else(|| err(self.span(), format!(
+                    "shader profile: const `{name}` passed the profile pass but did not fold at emit -- a compiler bug"
+                )))?,
             Inst::Load(c) => {
                 // A global-base struct param has no GLSL identity -- its fields
                 // are bare globals, read via `Field` (which never renders the
@@ -1767,7 +1877,7 @@ pub fn emit_shader_entry_with_dependencies(
     let mf = lower_function(ws, &scx, fref.module, fref.func)
         .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
     let mut callees: Vec<FuncRef> = Vec::new();
-    profile_body(f, &mf, &mut callees)?;
+    profile_body(ws, f, &mf, &mut callees)?;
 
     let mut reach = Reach {
         ws,
@@ -2175,7 +2285,7 @@ fn lower_reach_helpers(
     let mf = lower_function(ws, scx, fref.module, fref.func)
         .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
     let mut callees: Vec<FuncRef> = Vec::new();
-    profile_body(f, &mf, &mut callees)?;
+    profile_body(ws, f, &mf, &mut callees)?;
 
     let mut reach = Reach {
         ws,
