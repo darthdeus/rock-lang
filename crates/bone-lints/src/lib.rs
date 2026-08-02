@@ -723,10 +723,12 @@ fn body_edges(
 }
 
 /// Every function a body's inference resolved a call/protocol edge to:
-/// overload-resolved calls (incl. operators and UFCS), the `iter`/`next` of a
-/// user `for`-loop, and bounded-generic `next` chains.
+/// overload-resolved calls (incl. operators and UFCS), implicit iterable
+/// coercions, the `iter`/`next` of a user `for`-loop, and bounded-generic `next`
+/// chains.
 fn inference_edges(bi: &BodyInference, out: &mut Vec<(ModuleId, Idx<Function>)>) {
     out.extend(bi.resolved_overload_calls.values().copied());
+    out.extend(bi.implicit_iter_args.values().map(|w| w.func));
     for info in bi.for_iter_protocol.values() {
         if let Some(w) = &info.iter {
             out.push(w.func);

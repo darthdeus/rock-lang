@@ -83,16 +83,9 @@ fn main() {
 /// The manifest must not depend on the order roots are discovered in
 /// (plan S 20g.4).
 ///
-/// HONEST SCOPE: this pins the property, and it does NOT reproduce the defect
-/// that found it. The expansion cap was originally keyed on PATH length, which
-/// made membership depend on which root reached an instance first;
-/// `games/little-knights` produced two different manifests, and re-applying the
-/// path cap still turns that project's `order-stable` column to NO. Every
-/// synthetic fixture tried here stays green under the path cap, because the
-/// orders have to diverge over a real library's transitive depth. **The corpus
-/// run (`rock mono-manifest`, the per-project `order-stable` column) is the
-/// oracle for this property; this test is a cheap lower bound.** Do not read it
-/// as coverage of the cap.
+/// This fixture is a lower bound. The per-project `order-stable` column from
+/// `rock mono-manifest` is the expansion-cap oracle because it exercises real
+/// library depth.
 #[test]
 fn manifest_is_independent_of_discovery_order() {
     // The fixture MUST reach the expansion cap, or it proves nothing: a shallow
@@ -184,9 +177,9 @@ fn main() {
     );
 }
 
-/// Plan S 15a: every specialization today's conditional machinery produces must
+/// Plan S 15a: every specialization the conditional machinery produces must
 /// appear in the shadow graph as a complete instance. Equality is NOT expected
-/// -- the shadow side is strictly larger, because the old mechanism is
+/// -- the shadow side is strictly larger, because the current mechanism is
 /// conditional -- but an absence in THAT direction means the shadow walk cannot
 /// see an edge production already takes.
 ///
@@ -256,20 +249,9 @@ fn main() {
     );
 }
 
-/// Every level of a combinator chain gets a CONCRETE witness instance.
-///
-/// HONEST SCOPE: this does not test the `bound_call_trees` walk or the nested
-/// `sub` recursion, and it was written believing it did. Disabling either one
-/// leaves it green -- measured, one mutation at a time. The inner witnesses
-/// arrive by a third route: the walk instantiates `next_FilterIter<..>`, whose
-/// BODY calls `next` on its inner iterator as an ordinary generic call, and
-/// that route already existed in round 1.
-///
-/// The corpus is the oracle for the other two routes, and it prices them small:
-/// `bound-next-witness` is 5 edges across all 23 projects, of which the `sub`
-/// recursion contributes 1 of mag's 3.
+/// Every level of a combinator chain gets a concrete `next` instance.
 #[test]
-fn a_chained_iterator_records_its_inner_next_witness() {
+fn a_chained_iterator_reaches_each_next_instance() {
     let (ws, g) = graph_of(
         r#"
 fn main() {
@@ -882,6 +864,52 @@ fn main() {
             .any(|u| u.reason == "implicit-iter-witness-no-instantiation-record"),
         "a witness was still filed as having no instantiation record"
     );
+}
+
+#[test]
+fn always_emitted_implicit_iterator_edges_are_instantiated() {
+    let (ws, g) = graph_of(
+        r#"
+global TOTAL: int = {
+    let a: Arena<int> = arena_new()
+    a.count()
+}
+fn main() { print("{TOTAL}") }
+"#,
+    );
+    let symbols: Vec<String> = g.instances.iter().map(|i| g.symbol(&ws, i)).collect();
+    for name in ["count", "iter", "next"] {
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.contains(name) && s.contains("int")),
+            "global initializer did not seed concrete `{name}` reachability: {symbols:?}"
+        );
+    }
+}
+
+#[test]
+fn always_emitted_for_protocol_edges_are_instantiated() {
+    let (ws, g) = graph_of(
+        r#"
+global TOTAL: int = {
+    let a: Arena<int> = arena_new()
+    let total = 0
+    for (_, v) in a { total += v }
+    total
+}
+fn main() { print("{TOTAL}") }
+"#,
+    );
+    let symbols: Vec<String> = g.instances.iter().map(|i| g.symbol(&ws, i)).collect();
+    for name in ["iter", "next"] {
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.contains(name) && s.contains("int")),
+            "global initializer did not seed concrete `{name}` reachability: {symbols:?}"
+        );
+    }
 }
 
 /// CONTROL: a NON-generic `iter` witness needs no record and must keep working

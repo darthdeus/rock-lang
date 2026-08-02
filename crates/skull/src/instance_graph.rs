@@ -197,11 +197,9 @@ pub struct Edge {
 /// A construction the concrete-program model REFUSES, as opposed to one it
 /// merely could not complete yet ([`Unresolved`]).
 ///
-/// The three members are the Stage-0h author calls
-/// (`docs/monomorphization-plan.md` S 0h), each measured at zero uses over the
-/// 26-project corpus before being decided. They are recorded here rather than
-/// raised as compile errors because emission still runs on the pre-mono path;
-/// Stage 3's cutover is what makes them fatal.
+/// Three variants reject author programs under
+/// `docs/monomorphization-plan.md` S 0h. `ConcreteTypeUnavailable` records a
+/// compiler invariant instead. They become fatal at Stage 3's emission cutover.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RejectionKind {
     /// A function that recurs at a DIFFERENT instantiation than it was reached
@@ -213,8 +211,8 @@ pub enum RejectionKind {
     GenericFnValue,
     /// A COMPILER INVARIANT, not a language decision: a type that should have
     /// been concrete here is recovery poison, names no node, or resolves
-    /// cyclically. Unlike the three above, no author call admits this -- the
-    /// program should have been rejected upstream. It is a rejection rather than
+    /// cyclically. Unlike the author-call variants, no valid program admits
+    /// this -- the program should have been rejected upstream. It is a rejection rather than
     /// a silent negative because the alternative is picking a representation for
     /// a type the compiler could not resolve.
     ConcreteTypeUnavailable,
@@ -299,8 +297,7 @@ pub struct InstanceGraph {
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
-    /// `extra_roots`/`extra_root_names`); round 1 walked neither body kind, so
-    /// anything reachable only from a global initializer was missing entirely.
+    /// `extra_roots`/`extra_root_names`).
     pub always_emitted_seeds: usize,
 }
 
@@ -325,13 +322,9 @@ pub enum StorageCond {
 /// `crates/skull-mir/src/lower/storage.rs`; the complete 15-name set is
 /// catalogued in `docs/boundary-contracts.md` S 1.4.
 ///
-/// The condition is checked, not assumed. It was once absent here, and the
-/// comment justifying that said the check "needs the element's concrete
-/// representation at each call, which is a lowering question, not an HIR one".
-/// That was true of the question and false of the conclusion: the decision now
-/// lives in `skull_mir::lower::shape::{vec_column_elem_mono, map_column_value_mono}`
-/// over a `MonoTy`, which the walk has for every instance, and lowering asks the
-/// SAME function. The names are the column-path ones only -- a non-column
+/// The condition uses the same
+/// `skull_mir::lower::shape::{vec_column_elem_mono, map_column_value_mono}`
+/// oracle as lowering. The names are the column-path ones only -- a non-column
 /// receiver takes a different route entirely, so `table_len` (the boxed
 /// `__vec_data_capacity` path) is not an edge this arm produces.
 ///
@@ -351,8 +344,7 @@ pub enum StorageCond {
 /// Calls made from inside an `inline(lua)` body are invisible here by design --
 /// the body is opaque (`BoundaryClass::InlineBody`). `__rock_vec_column_elements`
 /// is the corpus's example: emission calls it once per project, from the Lua
-/// text of the reflection walker, not from any lowering arm. The old
-/// name-keyed table happened to report it, for the wrong reason.
+/// text of the reflection walker, not from any lowering arm.
 pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
     ("__vec_data_capacity", StorageCond::VecColumn, &["__rock_col_capacity"]),
     ("__vec_data_insert", StorageCond::VecColumn, &["__rock_col_insert"]),
@@ -476,15 +468,8 @@ impl InstanceGraph {
     /// never entered has callees missing from the graph, and it is closed only
     /// if it has no body to enter (a boundary) or is recorded as cut.
     pub fn closure(&self, ws: &Workspace) -> Closure {
-        // Expansion is RECORDED by the walk (`expanded`), not inferred from a
-        // proxy. `body_inference(..).is_some()` was that proxy and it answered
-        // yes for every reached declaration, externs included -- so it reported
-        // 0 unexpanded and made the boundary exemption below look dead when in
-        // fact nothing was ever being asked.
-        //
-        // An instance is legitimately unexpanded when it has NO Rock body to
-        // enter: a boundary. Anything else with callees the graph never
-        // enumerated is the real hole.
+        // `expanded` records bodies the walk entered. A boundary has no Rock
+        // body to enter; every other unexpanded instance is a closure hole.
         let erased = &self.erased_entries;
         let unexpanded: BTreeSet<String> = self
             .instances
@@ -651,14 +636,7 @@ pub struct Closure {
 }
 
 impl Closure {
-    /// Every hole, including the generic emission roots no call instantiates.
-    ///
-    /// Those roots were originally excluded here as "a separate, named fact".
-    /// That was wrong: production EMITS them, as shared generic bodies, so a
-    /// graph with no instance for them does not describe the program that runs.
-    /// Excluding them let `is_closed` answer true while 23 emitted bodies had no
-    /// instance -- exactly the falsely-green Stage 2 the cutover must not
-    /// inherit.
+    /// Every hole, including generic emission roots no call instantiates.
     pub fn is_closed(&self) -> bool {
         self.unexpanded.is_empty()
             && self.depth_capped.is_empty()
@@ -737,24 +715,23 @@ pub fn build_for_target(
         }
     }
 
-    // Bodies that are ALWAYS emitted and are not functions: decorator
-    // definitions and global initializers. Production seeds their call edges as
-    // reachability roots (`mir_emit::reachable_fns`'s `extra_roots` /
-    // `extra_root_names`); the walk has no `Instance` to hang them on, so their
-    // callees are seeded as roots instead. A generic callee therefore arrives
-    // with no substitution to instantiate from and lands in
-    // `uninstantiated_roots` -- honest, and exactly what production does with it
-    // today (it emits the shared generic body).
-    for r in always_emitted_callees(ws, target) {
-        let f = &ws.module(r.module).functions[r.func];
-        g.always_emitted_seeds += 1;
-        if !f.generics.is_empty() {
-            g.uninstantiated_roots.insert(mangle_fn(ws, f));
-            continue;
-        }
-        let inst = Instance { func: r, args: Vec::new() };
-        if g.instances.insert(inst.clone()) {
-            work.push((inst, MonoSubst::default(), 0));
+    // Globals and decorators have no `Instance` origin, so their body edges
+    // seed the same worklist as function roots.
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        let Some(inference) = ws.inference(module.id) else { continue };
+        let mut owners: Vec<BodyOwner> = module
+            .bodies
+            .keys()
+            .filter(|o| matches!(o, BodyOwner::Decorator(_) | BodyOwner::Global(_)))
+            .copied()
+            .collect();
+        owners.sort_by_key(|o| format!("{o:?}"));
+        for owner in owners {
+            let Some(inf) = inference.per_fn.get(&owner) else { continue };
+            let body = module.bodies.get(&owner);
+            walk_body_edges(
+                &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(), 0, target,
+            );
         }
     }
 
@@ -782,184 +759,9 @@ pub fn build_for_target(
             g.expanded.insert(inst.clone());
         }
 
-        let record = |g: &mut InstanceGraph,
-                          work: &mut Vec<(Instance, MonoSubst, u32)>,
-                          callee: FuncRef,
-                          bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
-                          kind: EdgeKind,
-                          span: Span| {
-            let cf = &ws.module(callee.module).functions[callee.func];
-            let (args, callee_subst) =
-                match instantiate(&mut g.arena, ws, inf, cf, bindings, &subst) {
-                    Ok(v) => v,
-                    // A rejection is not also unresolved data: it is the
-                    // stronger classification, and recording it twice would
-                    // double-count the same site in two censuses.
-                    Err(Fail::Unconstrained(_)) => {
-                        let name = mangle_fn(ws, cf);
-                        g.rejections.push(Rejection {
-                            kind: RejectionKind::UnconstrainedTypeVar,
-                            at: inst.clone(),
-                            span,
-                            message: format!(
-                                "`{name}` is called with a type argument no constraint reaches, \
-                                 so there is no concrete type to instantiate it at"
-                            ),
-                        });
-                        return;
-                    }
-                    Err(fail) => {
-                        g.unresolved.push(Unresolved {
-                            from: inst.clone(),
-                            callee,
-                            reason: fail.reason(),
-                            span,
-                        });
-                        return;
-                    }
-                };
-            let to = Instance { func: callee, args };
-            g.edges.push(Edge { from: inst.clone(), to: to.clone(), kind, span });
-            if g.instances.insert(to.clone()) {
-                work.push((to, callee_subst, depth + 1));
-            }
-        };
-
-        // Direct + generic calls.
-        let mut calls: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
-            inf.resolved_overload_calls.iter().map(|(e, r)| (*e, *r)).collect();
-        calls.sort_by_key(|(e, _)| *e);
-        for (e, (m, f)) in calls {
-            let callee = variant_for(ws, FuncRef { module: m, func: f }, target);
-            let bindings = inf.call_generic_bindings.get(&e);
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            let kind =
-                if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
-            record(&mut g, &mut work, callee, bindings, kind, span);
-        }
-
-        // Rock functions taken as VALUES. Not in any inference map: skull
-        // lowers them from `Expr::Global(name)` under exactly this guard
-        // (`lower/expr.rs:75`), so the expr arena is the only place they exist.
-        if let Some(b) = body {
-            for (e, callee) in fn_value_sites(ws, inf, b, target) {
-                let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
-                let cf = &ws.module(callee.module).functions[callee.func];
-                if cf.generics.is_empty() {
-                    record(&mut g, &mut work, callee, None, EdgeKind::FnValue, span);
-                } else {
-                    // A fn value has no call site, so there are no bindings to
-                    // key an instantiation on -- structurally the same gap as
-                    // the `iter` witness, but decided the other way (plan S 0h):
-                    // the `iter` witness gets a recorded instantiation, a
-                    // generic fn value is rejected.
-                    g.rejections.push(Rejection {
-                        kind: RejectionKind::GenericFnValue,
-                        at: inst.clone(),
-                        span,
-                        message: format!(
-                            "`{}` is generic and is taken as a value rather than called, so no \
-                             call site decides its instantiation",
-                            mangle_fn(ws, cf)
-                        ),
-                    });
-                }
-            }
-
-            // Synthesized stdlib calls. Over-approximated -- see
-            // `COMPILER_GENERATED_TRIGGERS`.
-            let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
-            let sites = compiler_generated_sites(
-                ws,
-                inf,
-                b,
-                &subst,
-                target,
-                &mut g.synthesized_examined,
-                &mut failures,
-            );
-            for (e, reason) in failures {
-                g.storage_failures.push(reason.clone());
-                let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
-                // An unfinished inference variable IS the S 0h unconstrained
-                // case; poison, a missing node and a cyclic chain are not type
-                // arguments at all, so they take the invariant kind.
-                let kind = match reason {
-                    MonoTyReason::UnresolvedInfer(_) | MonoTyReason::UnboundGeneric(_) => {
-                        RejectionKind::UnconstrainedTypeVar
-                    }
-                    _ => RejectionKind::ConcreteTypeUnavailable,
-                };
-                g.rejections.push(Rejection {
-                    kind,
-                    at: inst.clone(),
-                    span,
-                    message: format!(
-                        "a synthesized-call receiver has no concrete type in an instantiated \
-                         body ({}), so its storage cannot be decided",
-                        reason.bucket()
-                    ),
-                });
-            }
-            for GeneratedSite { expr: e, name } in sites {
-                let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
-                match stdlib_entry(ws, name, target) {
-                    Some(callee) => {
-                        record(&mut g, &mut work, callee, None, EdgeKind::CompilerGenerated, span);
-                        g.erased_entries.insert(name.to_string());
-                    }
-                    // `stdlib_funcref` REJECTS here rather than falling back;
-                    // recording the same absence keeps the two in step.
-                    None => g.unresolved.push(Unresolved {
-                        from: inst.clone(),
-                        callee: inst.func,
-                        reason: "compiler-generated-entry-missing-for-target",
-                        span,
-                    }),
-                }
-            }
-        }
-
-        // Iterable args coerced through `iter()` at an `Iterator`-bounded param.
-        let mut implicit: Vec<(Idx<bone_semantic::hir::Expr>, &IterWitness)> =
-            inf.implicit_iter_args.iter().map(|(e, w)| (*e, w)).collect();
-        implicit.sort_by_key(|(e, _)| *e);
-        for (e, w) in implicit {
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            record_witness(
-                &mut g, &mut work, ws, inf, &inst, &subst, depth, w, span,
-                EdgeKind::ImplicitIter, target,
-            );
-        }
-
-        // `next` witnesses of calls to BOUNDED generic fns.
-        let mut trees: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::BoundTree)> =
-            inf.bound_call_trees.iter().map(|(e, t)| (*e, t)).collect();
-        trees.sort_by_key(|(e, _)| *e);
-        for (e, tree) in trees {
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            walk_bound_tree(
-                &mut g, &mut work, ws, inf, &inst, &subst, depth, tree, span, target,
-            );
-        }
-
-        // Synthesized iterator operations (plan S 12).
-        let mut iters: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::ForIterInfo)> =
-            inf.for_iter_protocol.iter().map(|(e, i)| (*e, i)).collect();
-        iters.sort_by_key(|(e, _)| *e);
-        for (e, info) in iters {
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            if let Some(w) = &info.iter {
-                record_witness(
-                    &mut g, &mut work, ws, inf, &inst, &subst, depth, w, span,
-                    EdgeKind::IteratorIter, target,
-                );
-            }
-            record_bound_next(
-                &mut g, &mut work, ws, inf, &inst, &subst, depth, &info.next, span,
-                EdgeKind::IteratorNext, target,
-            );
-        }
+        walk_body_edges(
+            &mut g, &mut work, ws, inf, body, Some(&inst), &subst, depth, target,
+        );
     }
 
     record_inline_body_deps(&mut g, ws);
@@ -967,6 +769,200 @@ pub fn build_for_target(
     classify_boundaries(&mut g, ws);
     record_coroutine_helpers(&mut g, ws);
     g
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_body_edges(
+    g: &mut InstanceGraph,
+    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: Option<&bone_semantic::hir::Body>,
+    from: Option<&Instance>,
+    subst: &MonoSubst,
+    depth: u32,
+    target: bone_semantic::hir::FnBackend,
+) {
+    let mut calls: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
+        inf.resolved_overload_calls.iter().map(|(e, r)| (*e, *r)).collect();
+    calls.sort_by_key(|(e, _)| *e);
+    for (e, (m, f)) in calls {
+        let callee = variant_for(ws, FuncRef { module: m, func: f }, target);
+        let bindings = inf.call_generic_bindings.get(&e);
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
+        record_call(g, work, ws, inf, from, subst, depth, callee, bindings, kind, span);
+    }
+
+    if let Some(body) = body {
+        for (e, callee) in fn_value_sites(ws, inf, body, target) {
+            let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+            let cf = &ws.module(callee.module).functions[callee.func];
+            if cf.generics.is_empty() {
+                record_call(
+                    g, work, ws, inf, from, subst, depth, callee, None, EdgeKind::FnValue, span,
+                );
+            } else if let Some(from) = from {
+                g.rejections.push(Rejection {
+                    kind: RejectionKind::GenericFnValue,
+                    at: from.clone(),
+                    span,
+                    message: format!(
+                        "`{}` is generic and is taken as a value rather than called, so no \
+                         call site decides its instantiation",
+                        mangle_fn(ws, cf)
+                    ),
+                });
+            } else {
+                g.always_emitted_seeds += 1;
+                g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+            }
+        }
+
+        let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
+        let sites = compiler_generated_sites(
+            ws, inf, body, subst, target, &mut g.synthesized_examined, &mut failures,
+        );
+        for (e, reason) in failures {
+            g.storage_failures.push(reason.clone());
+            let Some(from) = from else { continue };
+            let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+            let kind = match reason {
+                MonoTyReason::UnresolvedInfer(_) | MonoTyReason::UnboundGeneric(_) => {
+                    RejectionKind::UnconstrainedTypeVar
+                }
+                _ => RejectionKind::ConcreteTypeUnavailable,
+            };
+            g.rejections.push(Rejection {
+                kind,
+                at: from.clone(),
+                span,
+                message: format!(
+                    "a synthesized-call receiver has no concrete type in an instantiated body \
+                     ({}), so its storage cannot be decided",
+                    reason.bucket()
+                ),
+            });
+        }
+        for GeneratedSite { expr: e, name } in sites {
+            let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+            match stdlib_entry(ws, name, target) {
+                Some(callee) => {
+                    record_call(
+                        g, work, ws, inf, from, subst, depth, callee, None,
+                        EdgeKind::CompilerGenerated, span,
+                    );
+                    g.erased_entries.insert(name.to_string());
+                }
+                None => {
+                    if let Some(from) = from {
+                        g.unresolved.push(Unresolved {
+                            from: from.clone(),
+                            callee: from.func,
+                            reason: "compiler-generated-entry-missing-for-target",
+                            span,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let mut implicit: Vec<(Idx<bone_semantic::hir::Expr>, &IterWitness)> =
+        inf.implicit_iter_args.iter().map(|(e, w)| (*e, w)).collect();
+    implicit.sort_by_key(|(e, _)| *e);
+    for (e, witness) in implicit {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        record_witness(
+            g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter, target,
+        );
+    }
+
+    let mut trees: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::BoundTree)> =
+        inf.bound_call_trees.iter().map(|(e, tree)| (*e, tree)).collect();
+    trees.sort_by_key(|(e, _)| *e);
+    for (e, tree) in trees {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        walk_bound_tree(g, work, ws, inf, from, subst, depth, tree, span, target);
+    }
+
+    let mut iters: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::ForIterInfo)> =
+        inf.for_iter_protocol.iter().map(|(e, info)| (*e, info)).collect();
+    iters.sort_by_key(|(e, _)| *e);
+    for (e, info) in iters {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        if let Some(witness) = &info.iter {
+            record_witness(
+                g, work, ws, inf, from, subst, depth, witness, span,
+                EdgeKind::IteratorIter, target,
+            );
+        }
+        record_bound_next(
+            g, work, ws, inf, from, subst, depth, &info.next, span,
+            EdgeKind::IteratorNext, target,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_call(
+    g: &mut InstanceGraph,
+    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    ws: &Workspace,
+    inf: &BodyInference,
+    from: Option<&Instance>,
+    subst: &MonoSubst,
+    depth: u32,
+    callee: FuncRef,
+    bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
+    kind: EdgeKind,
+    span: Span,
+) {
+    if from.is_none() {
+        g.always_emitted_seeds += 1;
+    }
+    let cf = &ws.module(callee.module).functions[callee.func];
+    let (args, callee_subst) = match instantiate(&mut g.arena, ws, inf, cf, bindings, subst) {
+        Ok(v) => v,
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+            return;
+        }
+        Err(Fail::Unconstrained(_)) => {
+            let from = from.unwrap();
+            let name = mangle_fn(ws, cf);
+            g.rejections.push(Rejection {
+                kind: RejectionKind::UnconstrainedTypeVar,
+                at: from.clone(),
+                span,
+                message: format!(
+                    "`{name}` is called with a type argument no constraint reaches, so there is \
+                     no concrete type to instantiate it at"
+                ),
+            });
+            return;
+        }
+        Err(_) if from.is_none() => {
+            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+            return;
+        }
+        Err(fail) => {
+            g.unresolved.push(Unresolved {
+                from: from.unwrap().clone(),
+                callee,
+                reason: fail.reason(),
+                span,
+            });
+            return;
+        }
+    };
+    let to = Instance { func: callee, args };
+    if let Some(from) = from {
+        g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+    }
+    if g.instances.insert(to.clone()) {
+        work.push((to, callee_subst, depth + 1));
+    }
 }
 
 /// Plan S 7's rejection: a recursive edge must preserve its instance arguments.
@@ -1049,7 +1045,7 @@ fn record_witness(
     work: &mut Vec<(Instance, MonoSubst, u32)>,
     ws: &Workspace,
     inf: &BodyInference,
-    from: &Instance,
+    from: Option<&Instance>,
     subst: &MonoSubst,
     depth: u32,
     witness: &IterWitness,
@@ -1057,6 +1053,9 @@ fn record_witness(
     kind: EdgeKind,
     target: bone_semantic::hir::FnBackend,
 ) {
+    if from.is_none() {
+        g.always_emitted_seeds += 1;
+    }
     let rep = FuncRef { module: witness.func.0, func: witness.func.1 };
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = variant_for(ws, rep, target);
@@ -1064,43 +1063,53 @@ fn record_witness(
     match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, &witness.generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
-            g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+            if let Some(from) = from {
+                g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+            }
             if g.instances.insert(to.clone()) {
                 work.push((to, callee_subst, depth + 1));
             }
         }
-        Err(Fail::Unconstrained(_)) => g.rejections.push(Rejection {
-            kind: RejectionKind::UnconstrainedTypeVar,
-            at: from.clone(),
-            span,
-            message: format!(
-                "the `iter` witness `{}` binds a type argument no constraint reaches",
-                mangle_fn(ws, cf)
-            ),
-        }),
-        Err(fail) => g.unresolved.push(Unresolved {
-            from: from.clone(),
-            callee,
-            reason: fail.reason(),
-            span,
-        }),
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+        }
+        Err(Fail::Unconstrained(_)) => {
+            g.rejections.push(Rejection {
+                kind: RejectionKind::UnconstrainedTypeVar,
+                at: from.unwrap().clone(),
+                span,
+                message: format!(
+                    "the `iter` witness `{}` binds a type argument no constraint reaches",
+                    mangle_fn(ws, cf)
+                ),
+            });
+        }
+        Err(_) if from.is_none() => {
+            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+        }
+        Err(fail) => {
+            g.unresolved.push(Unresolved {
+                from: from.unwrap().clone(),
+                callee,
+                reason: fail.reason(),
+                span,
+            });
+        }
     }
 }
 
 /// One `next` witness plus, recursively, the witnesses of ITS bounded generics.
 ///
-/// The nested `sub` tree is why this recurses: a chained iterator resolves
-/// `next(MapIter<VecIter<..>>)` to MapIter's `next`, whose own inner bound
-/// resolves to VecIter's, and only the outermost is named in `info.next`.
-/// Round 1 stopped at the top level, so every inner witness of a combinator
-/// chain was missing from the graph.
+/// A chained iterator resolves `next(MapIter<VecIter<..>>)` to MapIter's
+/// `next`; only the outermost witness is named in `info.next`, so `sub` carries
+/// the inner witnesses.
 #[allow(clippy::too_many_arguments)]
 fn record_bound_next(
     g: &mut InstanceGraph,
     work: &mut Vec<(Instance, MonoSubst, u32)>,
     ws: &Workspace,
     inf: &BodyInference,
-    from: &Instance,
+    from: Option<&Instance>,
     subst: &MonoSubst,
     depth: u32,
     next: &BoundNext,
@@ -1113,29 +1122,44 @@ fn record_bound_next(
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = variant_for(ws, rep, target);
     let cf = &ws.module(callee.module).functions[callee.func];
+    if from.is_none() {
+        g.always_emitted_seeds += 1;
+    }
     match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, next_generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
-            g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+            if let Some(from) = from {
+                g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+            }
             if g.instances.insert(to.clone()) {
                 work.push((to, callee_subst, depth + 1));
             }
         }
-        Err(Fail::Unconstrained(_)) => g.rejections.push(Rejection {
-            kind: RejectionKind::UnconstrainedTypeVar,
-            at: from.clone(),
-            span,
-            message: format!(
-                "the `next` witness `{}` binds a type argument no constraint reaches",
-                mangle_fn(ws, cf)
-            ),
-        }),
-        Err(fail) => g.unresolved.push(Unresolved {
-            from: from.clone(),
-            callee,
-            reason: fail.reason(),
-            span,
-        }),
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+        }
+        Err(Fail::Unconstrained(_)) => {
+            g.rejections.push(Rejection {
+                kind: RejectionKind::UnconstrainedTypeVar,
+                at: from.unwrap().clone(),
+                span,
+                message: format!(
+                    "the `next` witness `{}` binds a type argument no constraint reaches",
+                    mangle_fn(ws, cf)
+                ),
+            });
+        }
+        Err(_) if from.is_none() => {
+            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+        }
+        Err(fail) => {
+            g.unresolved.push(Unresolved {
+                from: from.unwrap().clone(),
+                callee,
+                reason: fail.reason(),
+                span,
+            });
+        }
     }
     walk_bound_tree(g, work, ws, inf, from, subst, depth, sub, span, target);
 }
@@ -1146,7 +1170,7 @@ fn walk_bound_tree(
     work: &mut Vec<(Instance, MonoSubst, u32)>,
     ws: &Workspace,
     inf: &BodyInference,
-    from: &Instance,
+    from: Option<&Instance>,
     subst: &MonoSubst,
     depth: u32,
     tree: &bone_semantic::prelude::BoundTree,
@@ -1490,49 +1514,6 @@ fn serves(
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
 }
 
-/// Callees of the bodies production ALWAYS emits and that are not functions:
-/// decorator definitions and global initializers. Mirrors
-/// `mir_emit::reachable_fns`'s `extra_roots` / `extra_root_names` pair -- the
-/// inference-map edges and the fn-value name scan, which are complementary nets.
-fn always_emitted_callees(
-    ws: &Workspace,
-    target: bone_semantic::hir::FnBackend,
-) -> Vec<FuncRef> {
-    let mut out = Vec::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        let Some(inference) = ws.inference(module.id) else { continue };
-        let mut owners: Vec<&BodyOwner> = module
-            .bodies
-            .keys()
-            .filter(|o| matches!(o, BodyOwner::Decorator(_) | BodyOwner::Global(_)))
-            .collect();
-        owners.sort_by_key(|o| format!("{o:?}"));
-        for owner in owners {
-            let Some(inf) = inference.per_fn.get(owner) else { continue };
-            let mut calls: Vec<(ModuleId, Idx<Function>)> =
-                inf.resolved_overload_calls.values().copied().collect();
-            for info in inf.for_iter_protocol.values() {
-                calls.extend(info.iter.as_ref().map(|w| w.func));
-            }
-            calls.sort_by_key(|(m, f)| (m.raw(), f.into_raw().into_u32()));
-            out.extend(
-                calls
-                    .into_iter()
-                    .map(|(m, f)| variant_for(ws, FuncRef { module: m, func: f }, target)),
-            );
-            if let Some(b) = module.bodies.get(owner) {
-                out.extend(fn_value_sites(ws, inf, b, target).into_iter().map(|(_, f)| f));
-            }
-        }
-    }
-    out.sort_by_key(|r| (r.module.raw(), r.func.into_raw().into_u32()));
-    out.dedup();
-    out
-}
-
 /// Classify every reached callee that is a BOUNDARY, per
 /// `docs/boundary-contracts.md` Part 1.
 ///
@@ -1607,10 +1588,8 @@ fn has_rock_body(f: &Function) -> bool {
 /// An inline body is foreign text, so the walk cannot lower it -- but emission
 /// still has to emit every symbol it names, and "opaque by design" cannot make a
 /// required symbol vanish from the graph. The corpus's case is
-/// `__rock_vec_column_elements`: the reflection walker calls it from Lua, no
-/// lowering arm synthesizes it, and before this it appeared only as a
-/// side-effect of the name-keyed over-approximation -- i.e. for the wrong
-/// reason, and it disappeared the moment that was fixed.
+/// `__rock_vec_column_elements`: the reflection walker calls it from Lua and no
+/// lowering arm synthesizes it.
 ///
 /// The scan is over [`ERASED_RUNTIME_ENTRIES`] only. That is deliberate: a
 /// general Lua parse is not what this needs, and the catalogue is the closed set
@@ -1697,17 +1676,9 @@ impl InstanceGraph {
     ///
     /// Each is a Stage-3 collision: `emit_coroutine` names helpers from the
     /// source `FuncRef`, so every instance of one generic `co fn` produces the
-    /// same `<name>__step` / `__resume` / `__advance`. Nothing detects it today
-    /// because no generic `co fn` is ever specialized -- `compute_call_spec`
-    /// bails on `is_coroutine` first (`shape.rs:1584`, the subject of
-    /// `generic_coroutine_column_param_sentinel`).
-    ///
-    /// **That premise is branch-scoped.** It holds on `mono`, where the sentinel
-    /// stays pinned. The Stage-0f tactical slice (`mono-0f-slice`, `285853bad`)
-    /// falsifies it: it drops the `is_coroutine` bail on the column trigger, two
-    /// instantiations of one `co fn` come out correct, and the sentinel FLIPS --
-    /// on that branch only. If that slice or a successor merges, this helper
-    /// starts seeing specialized coroutines and the collisions stop being latent.
+    /// same `<name>__step` / `__resume` / `__advance`. The current specializer
+    /// does not specialize coroutines, so the graph exposes collisions that the
+    /// Stage-3 cutover must prevent.
     pub fn colliding_coroutine_helpers(&self) -> BTreeMap<String, BTreeSet<String>> {
         let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for h in &self.coroutine_helpers {
@@ -1769,8 +1740,8 @@ pub fn instance_count(g: &InstanceGraph) -> usize {
     g.instances.len()
 }
 
-/// Reconciliation of today's conditional specializer against the shadow graph
-/// (plan S 15a). Equality is NOT expected -- the old mechanism is conditional,
+/// Reconciliation of the current conditional specializer against the shadow graph
+/// (plan S 15a). Equality is NOT expected -- the current mechanism is conditional,
 /// so the shadow side is strictly larger. What must hold is that nothing today's
 /// machinery produces is MISSING from the shadow graph; an absence in that
 /// direction means the shadow walk cannot see an edge production already takes.
