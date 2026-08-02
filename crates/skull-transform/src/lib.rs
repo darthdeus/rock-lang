@@ -1170,6 +1170,16 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     // disqualified mid-analysis, so a cell escaping via a non-projection use (e.g.
     // whole-struct `==`) keeps its aggregate, and its field accesses must stay on
     // it -- rewriting them without expanding the store gives an uninit cell.
+    // Only a field the CTOR actually provides has a cell to redirect to. A
+    // nested value member is stored under its dotted LEAF names (`params.x`,
+    // `params.y`), so the immediate `.params` read names no cell, and minting
+    // one gives a load nothing ever stores -- the uninit-cell failure the
+    // comment above describes, reached the other way. Such a read stays a
+    // `Field` on the aggregate, which the `escape_loads` rebuild below
+    // reconstitutes at exactly this load.
+    let provides = |c: Idx<Cell>, f: &ustr::Ustr| {
+        cand_fields[rep[raw(c) as usize]].as_ref().is_some_and(|s| s.contains(f))
+    };
     let field_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr)> = func
         .blocks
         .iter()
@@ -1178,7 +1188,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             Inst::Field { base, field } => load_cell
                 .get(base)
                 .copied()
-                .filter(|&c| is_cand(c))
+                .filter(|&c| is_cand(c) && provides(c, field))
                 .map(|c| (i, c, *field)),
             _ => None,
         })

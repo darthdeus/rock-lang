@@ -106,9 +106,8 @@ fn the_pack_is_stores_not_a_call_and_never_boxes() {
     );
 }
 
-/// The shape that miscompiles: a value with a nested `nobox` member, bound to
-/// a local inside a lambda and packed there. Shared by the sentinel and the
-/// live assertion so they cannot drift apart.
+/// A value with a nested `nobox` member, bound to a local inside a lambda and
+/// packed there. Shared by the assertion and control 1 so they cannot drift.
 const PROBE: &str = r#"
 value ProbeU {
     scalar: float,
@@ -129,53 +128,12 @@ fn main() {
 }
 "#;
 
-/// SENTINEL (`docs/test-sentinels.md`) -- PINNED BUG, inverted assertion.
-///
-/// CORRECT behavior: this prints `1 5 6`, like both controls below. What it
-/// does today is die at runtime with `attempt to index local` -- the nested
-/// `Vec2`'s producer is eliminated while the packer still reads it BOXED out
-/// of a cell nothing ever stores to:
-///
-/// ```lua
-/// r1 = c0        -- c0 is declared and never assigned
-/// r2 = r1.x
-/// ```
-///
-/// The discriminant is all three of: a nested `nobox` member (`Vec2`), the
-/// value bound to a LOCAL, and that local living inside a LAMBDA. Each control
-/// below drops exactly one and passes. `ProbeU` is a plain `value` that merely
-/// CONTAINS a nobox member, so it never enters `group_binds` -- that path wants
-/// the value itself to be flat-enum or nobox (`lower/stmt.rs`'s
-/// `threaded_shape`) -- which is where the producer and the consumer stop
-/// agreeing.
-///
-/// WHEN THIS FAILS the fix landed: delete this test and un-`ignore` the real
-/// assertion in `a_nested_member_survives_a_local_inside_a_lambda` below,
-/// in the same commit.
+/// A nested `nobox` member reaches the packer when the value is bound to a
+/// LOCAL inside a LAMBDA. The nested member is stored under its dotted leaf
+/// names, so the immediate `.params` read names no field cell; redirecting it
+/// to one anyway produced a load with no store, and the emitted body indexed a
+/// nil local. The three controls below each drop one leg of that shape.
 #[test]
-fn sentinel_a_nested_member_in_a_lambda_local_reads_an_unassigned_cell() {
-    let lua = format!("{}\nmain()\n", emit_module(PROBE));
-    let path = std::env::temp_dir().join(format!("skull_sentinel_{}.lua", std::process::id()));
-    std::fs::write(&path, &lua).expect("write program");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(
-        !out.status.success() && stderr.contains("attempt to index local"),
-        "PINNED BEHAVIOR (BUG): packing a nested nobox member out of a lambda \
-         local indexes an unassigned cell. This now succeeds, so the fix \
-         landed -- flip per the comment above.\nstderr:\n{stderr}"
-    );
-}
-
-/// The real assertion the sentinel above is standing in for. `#[ignore]`d
-/// rather than deleted so the fix has a ready oracle: run it with
-/// `cargo test -p skull -- --ignored a_nested_member`.
-#[test]
-#[ignore = "pinned by sentinel_a_nested_member_in_a_lambda_local_reads_an_unassigned_cell"]
 fn a_nested_member_survives_a_local_inside_a_lambda() {
     let out = run_luajit(&format!("{}\nmain()\n", emit_module(PROBE)), "probe_lambda_local");
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
@@ -189,6 +147,9 @@ fn control_a_literal_packed_directly_inside_a_lambda() {
         "let u = ProbeU { scalar: 1.0, params: v(5.0, 6.0) }\n        pack_uniform_block(f.ptr, i.ptr, u)",
         "pack_uniform_block(f.ptr, i.ptr, ProbeU { scalar: 1.0, params: v(5.0, 6.0) })",
     );
+    // A `.replace` that matched nothing yields the PROBE verbatim, and this
+    // control would then silently re-run the main case instead of its own.
+    assert_ne!(src, PROBE, "the control's substitution matched nothing");
     let out = run_luajit(
         &format!("{}\nmain()\n", emit_module(&src)),
         "probe_lambda_literal",
@@ -196,7 +157,44 @@ fn control_a_literal_packed_directly_inside_a_lambda() {
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
 }
 
-/// Control 2: the same local and the same nested member, but at function scope
+/// Control 2: the same lambda AND the same local, with the nested `Vec2`
+/// replaced by the scalar fields it would peel to. Isolates the NESTING -- the
+/// leg the other controls both keep, so without it "all three legs" would be
+/// asserted rather than shown.
+#[test]
+fn control_a_flat_value_in_a_lambda_local() {
+    let out = run_luajit(
+        &format!(
+            "{}\nmain()\n",
+            emit_module(
+                r#"
+value FlatU {
+    scalar: float,
+    px: float,
+    py: float,
+}
+
+fn main() {
+    let body = () => {
+        let f = native_buffer_float(8)
+        let i = native_buffer_int(8)
+        let u = FlatU { scalar: 1.0, px: 5.0, py: 6.0 }
+        pack_uniform_block(f.ptr, i.ptr, u)
+        print(f[0])
+        print(f[1])
+        print(f[2])
+    }
+    body()
+}
+"#
+            )
+        ),
+        "probe_lambda_flat",
+    );
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
+}
+
+/// Control 3: the same local and the same nested member, but at function scope
 /// rather than in a lambda. Isolates the lambda.
 #[test]
 fn control_a_local_packed_at_function_scope() {
