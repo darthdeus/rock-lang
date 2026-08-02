@@ -1313,10 +1313,36 @@ fn engine_member_colliding_with_a_uniform_array_rejects() {
     assert!(e.contains("`tints` would collide"), "got: {e}");
 }
 
+/// An MRT output, whose names are ARBITRARY struct fields rather than the
+/// reserved `FragColor`. Using `FragColor` here would prove nothing: the
+/// single-output form pre-seeds that name as reserved, so such a test passes
+/// with `mrt_outputs` removed from the census entirely.
 #[test]
-fn engine_member_colliding_with_the_fragment_output_rejects() {
-    let e = emit_pipeline(&engine_member_named("FragColor"), "c_vert", "c_frag").unwrap_err();
-    assert!(e.contains("`FragColor` would collide"), "got: {e}");
+fn engine_member_colliding_with_an_mrt_output_rejects() {
+    let src = r#"
+    value QuadVert { aPos: Vec2 }
+    value EngineU  { uProjection: Mat4, FragId: float }
+    value Vary     { position: Vec4, @flat EntityId: float }
+    value SpriteOut { FragColor: Vec4, FragId: Vec4 }
+
+    @shader(vertex)
+    fn c_vert(@attr a: QuadVert, @engine e: EngineU) -> Vary {
+        return Vary {
+            position: e.uProjection * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
+            EntityId: e.FragId,
+        }
+    }
+
+    @shader(fragment)
+    fn c_frag(vary: Vary) -> SpriteOut {
+        return SpriteOut {
+            FragColor: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 },
+            FragId: Vec4 { x: vary.EntityId, y: 0.0, z: 0.0, w: 1.0 },
+        }
+    }
+"#;
+    let e = emit_pipeline(src, "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains("`FragId` would collide"), "got: {e}");
 }
 
 /// Both sides of admission: the same fixture with a name that collides with

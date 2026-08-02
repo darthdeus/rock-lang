@@ -2935,11 +2935,11 @@ pub fn emit_shader_pipeline_with_dependencies(
     let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
         || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
     let texture_slots = program_texture_slots(ws, group, bare, vf.name_span)?;
-    // Binding order: the ENGINE block at 0 (both stages name it), then the
-    // vertex block, then the fragment block -- position in this list IS the
-    // binding index on the engine side. Unlike `@textures` -- one group per
-    // PROGRAM, since texture units are program-scoped -- `@uniform` blocks are
-    // per STAGE, so differing types there are correct rather than a collision.
+    // Each block carries its binding, taken from the param ROLE: the engine
+    // block at 0 (both stages name it), the vertex group at 1, the fragment
+    // group at 2. Unlike `@textures` -- one group per PROGRAM, since texture
+    // units are program-scoped -- `@uniform` blocks are per STAGE, so differing
+    // types there are correct rather than a collision.
     Ok(ShaderEmission {
         source,
         dependencies,
