@@ -517,6 +517,34 @@ impl InstanceGraph {
         v
     }
 
+    /// Which recorded facts could produce a located error and which could not
+    /// (plan S 2: "retain each edge's source span, for good errors at unresolved
+    /// boundaries").
+    ///
+    /// Reported with its denominator per kind. A spanless COUNT alone cannot be
+    /// told apart from a kind the walk never produced, and the fallback that
+    /// makes an edge spanless -- `expr_spans` missing the key, or no body at all
+    /// -- is silent by construction.
+    pub fn span_census(&self) -> SpanCensus {
+        let mut c = SpanCensus::default();
+        for e in &self.edges {
+            let k = c.edges.entry(e.kind.name()).or_default();
+            k.examined += 1;
+            k.spanless += usize::from(is_spanless(&e.span));
+        }
+        for r in &self.rejections {
+            let k = c.rejections.entry(r.kind.name()).or_default();
+            k.examined += 1;
+            k.spanless += usize::from(is_spanless(&r.span));
+        }
+        for u in &self.unresolved {
+            let k = c.unresolved.entry(u.reason).or_default();
+            k.examined += 1;
+            k.spanless += usize::from(is_spanless(&u.span));
+        }
+        c
+    }
+
     pub fn edge_histogram(&self) -> BTreeMap<&'static str, usize> {
         let mut h = BTreeMap::new();
         for e in &self.edges {
@@ -643,6 +671,38 @@ impl Closure {
             && self.colliding_symbols.is_empty()
             && self.uninstantiated_roots.is_empty()
     }
+}
+
+/// A spanless population and the population it was measured over.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SpanCoverage {
+    pub examined: usize,
+    pub spanless: usize,
+}
+
+/// Span coverage of everything the graph records that a Stage-3 diagnostic would
+/// have to point at.
+#[derive(Debug, Default)]
+pub struct SpanCensus {
+    pub edges: BTreeMap<&'static str, SpanCoverage>,
+    pub rejections: BTreeMap<&'static str, SpanCoverage>,
+    pub unresolved: BTreeMap<&'static str, SpanCoverage>,
+}
+
+impl SpanCensus {
+    pub fn total_spanless(&self) -> usize {
+        let sum = |m: &BTreeMap<&'static str, SpanCoverage>| {
+            m.values().map(|c| c.spanless).sum::<usize>()
+        };
+        sum(&self.edges) + sum(&self.rejections) + sum(&self.unresolved)
+    }
+}
+
+/// A span the walk could not fill in. `Span::unknown` is the only way one is
+/// produced here, and its file sentinel is what distinguishes it -- a real span
+/// with a zero line range is line 1 of a real file.
+pub fn is_spanless(span: &Span) -> bool {
+    span.file.as_str() == "<unknown>"
 }
 
 #[derive(Debug, Default)]

@@ -557,6 +557,13 @@ fn rejections_of(
     g: &instance_graph::InstanceGraph,
     kind: instance_graph::RejectionKind,
 ) -> Vec<String> {
+    // A rejection becomes a compile error at the Stage-3 cutover, so a spanless
+    // one is an error with nowhere to point (plan S 2). Asserted HERE rather
+    // than per fixture: every rejection kind reaches the property this way, and
+    // the corpus measures 0 rejections, so these fixtures are its only evidence.
+    let spanless: Vec<&instance_graph::Rejection> =
+        g.rejections.iter().filter(|r| instance_graph::is_spanless(&r.span)).collect();
+    assert!(spanless.is_empty(), "a rejection carried no source span: {spanless:?}");
     g.rejections
         .iter()
         .filter(|r| r.kind == kind)
@@ -582,11 +589,6 @@ fn main() { depth(1, 3) }
     let r = rejections_of(&ws, &g, instance_graph::RejectionKind::ChangingInstanceRecursion);
     assert_eq!(r.len(), 1, "expected exactly one polymorphic-recursion rejection, got {r:?}");
     assert!(r[0].contains("depth"), "{r:?}");
-    assert!(
-        !g.rejections.iter().any(|x| x.span.file.as_str() == "<unknown>"),
-        "a rejection carried no span: {:?}",
-        g.rejections
-    );
     // The WALK still had to terminate to produce that rejection -- detection is
     // a post-pass, so `MAX_INSTANTIATION_DEPTH` is what stops the expansion.
     assert!(g.instances.len() < 500, "instance explosion: {}", g.instances.len());
@@ -1511,6 +1513,72 @@ fn synthesized_targets_belong_to_the_runtime_catalogue() {
         missing.extend(names.iter().filter(|n| !catalogue.contains(n)));
     }
     assert!(missing.is_empty(), "synthesized targets outside the catalogue: {missing:?}");
+}
+
+/// Plan S 2: "Retain each edge's source span, for good errors at unresolved
+/// boundaries." An edge whose span is unknown cannot produce one, so the
+/// property is per-EDGE and not per-edge-kind: one spanless edge in a kind that
+/// is otherwise well-spanned is still a rejection with no location.
+///
+/// The fixture's coverage is asserted first. Without that, a walk that emitted
+/// no edges of a kind would pass this by having nothing to check.
+#[test]
+fn every_edge_carries_a_source_span() {
+    let (ws, g) = graph_of(
+        r#"
+value P { x: float, y: float }
+struct Hold<T> { v: T }
+fn ident<T>(x: T) -> T { return x }
+fn bump(x: int) -> int { return x + 1 }
+fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
+fn total(xs: [int]) -> int {
+    let t = 0
+    for x in xs { t = t + x }
+    return t
+}
+fn main() {
+    let a = ident(1)
+    let b = bump(2)
+    let c = apply(bump, 3)
+    let xs: [int] = [1, 2, 3]
+    let s = total(xs)
+    let m = xs.map(_ * 2).sum()
+    let mp: Map<string, P> = map_new()
+    mp["a"] = P { x: 1.0, y: 2.0 }
+    let n = mp.len()
+    let h = Hold { v: 1 }
+}
+"#,
+    );
+    let kinds: std::collections::BTreeSet<&'static str> =
+        g.edges.iter().map(|e| e.kind.name()).collect();
+    for want in [
+        "direct-call",
+        "generic-call",
+        "iterator-iter",
+        "iterator-next",
+        "fn-value",
+        "implicit-iter",
+        "bound-next-witness",
+        "compiler-generated",
+    ] {
+        assert!(kinds.contains(want), "fixture produced no `{want}` edge; covered: {kinds:?}");
+    }
+    let mut spanless: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
+    for e in &g.edges {
+        if instance_graph::is_spanless(&e.span) {
+            let v = spanless.entry(e.kind.name()).or_default();
+            if v.len() < 5 {
+                v.push(format!("{} -> {}", g.symbol(&ws, &e.from), g.symbol(&ws, &e.to)));
+            }
+        }
+    }
+    assert!(
+        spanless.is_empty(),
+        "{} of {} edges carry no source span: {spanless:#?}",
+        g.edges.iter().filter(|e| instance_graph::is_spanless(&e.span)).count(),
+        g.edges.len()
+    );
 }
 
 /// HOSTILE: an opaque `inline(lua)` body that CALLS a compiler-owned runtime

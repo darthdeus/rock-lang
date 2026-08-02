@@ -86,6 +86,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut coroutine_helpers = 0usize;
     let mut coroutine_collisions = 0usize;
     let mut always_emitted_seeds = 0usize;
+    let mut span_edges: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut identity_disagreements: Vec<String> = Vec::new();
     let mut shared_instances = 0usize;
     let mut identity_conflicts = 0usize;
@@ -155,6 +158,17 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 coroutine_helpers += p.coroutine_helpers;
                 coroutine_collisions += p.coroutine_helper_collisions;
                 always_emitted_seeds += p.always_emitted_seeds;
+                for (map, from) in [
+                    (&mut span_edges, &p.span_census.edges),
+                    (&mut span_rejections, &p.span_census.rejections),
+                    (&mut span_unresolved, &p.span_census.unresolved),
+                ] {
+                    for (k, c) in from {
+                        let e = map.entry(k).or_insert((0, 0));
+                        e.0 += c.examined;
+                        e.1 += c.spanless;
+                    }
+                }
                 shared_instances += p.shared_instances;
                 identity_conflicts += p.identity_conflicts;
                 if p.identity_conflicts > 0 {
@@ -310,6 +324,42 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     for (sym, ids) in closure_collisions.iter().take(10) {
         println!("  - `{sym}` <- {}", ids.iter().map(|i| format!("`{i}`")).collect::<Vec<_>>().join(", "));
     }
+    println!();
+
+    println!("## source-span coverage (plan S 2)");
+    println!();
+    println!(
+        "A spanless fact cannot produce a located error at the Stage-3 cutover. Reported"
+    );
+    println!("with its denominator per kind: a zero over a zero is not coverage.");
+    println!();
+    println!("| what | kind | examined | spanless |");
+    println!("|---|---|---:|---:|");
+    for (what, m) in
+        [("edge", &span_edges), ("rejection", &span_rejections), ("unresolved", &span_unresolved)]
+    {
+        // An EMPTY population is stated, never left as an absent row: zero
+        // spanless out of zero facts is not span coverage, and the corpus
+        // measures no rejections and no unresolved sites at all.
+        if m.is_empty() {
+            println!("| {what} | -- | 0 | (no population; the fixtures are the evidence) |");
+            continue;
+        }
+        for (k, (examined, spanless)) in m {
+            println!(
+                "| {what} | `{k}` | {examined} | {} |",
+                if *spanless == 0 { "0".to_string() } else { format!("**{spanless}**") }
+            );
+        }
+    }
+    let spanless_total: usize = span_edges
+        .values()
+        .chain(span_rejections.values())
+        .chain(span_unresolved.values())
+        .map(|(_, s)| s)
+        .sum();
+    println!();
+    println!("- spanless facts across the corpus: **{spanless_total}**");
     println!();
 
     println!("## rejected constructions (plan S 0h)");
@@ -510,6 +560,7 @@ struct OneProject {
     /// `concrete-type-unavailable` would under-report the storage population.
     storage_failures: BTreeMap<&'static str, usize>,
     inline_dep_names: std::collections::BTreeSet<String>,
+    span_census: instance_graph::SpanCensus,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
     reconciliation: instance_graph::Reconciliation,
@@ -768,6 +819,7 @@ fn one_project(
             m
         },
         inline_dep_names: g.inline_body_deps.values().flatten().cloned().collect(),
+        span_census: g.span_census(),
         rejections,
         rejection_examples,
         reconciliation: rec,
