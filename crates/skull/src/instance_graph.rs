@@ -528,13 +528,17 @@ impl InstanceGraph {
 
     /// A call from an always-emitted body whose instantiation failed. There is
     /// no `from` instance to file an [`Unresolved`] or a [`Rejection`] against,
-    /// but the REASON is the same one those carry and is kept.
-    fn record_always_emitted_hole(&mut self, name: String, reason: &'static str) {
+    /// but the REASON and the SPAN are the same ones those carry and are kept.
+    ///
+    /// Per SITE, not per reason: two failures of one callee are two diagnostics
+    /// at two places, and a set keyed on the reason reports them as one fact
+    /// with no location.
+    fn record_always_emitted_hole(&mut self, name: String, reason: &'static str, span: Span) {
         self.uninstantiated_roots
             .entry(name)
             .or_default()
-            .always_emitted_reasons
-            .insert(reason);
+            .always_emitted_sites
+            .push(AlwaysEmittedFailure { reason, span });
     }
 
     /// Which recorded facts could produce a located error and which could not
@@ -561,6 +565,17 @@ impl InstanceGraph {
             let k = c.unresolved.entry(u.reason).or_default();
             k.examined += 1;
             k.spanless += usize::from(is_spanless(&u.span));
+        }
+        // An always-emitted failure is the same diagnostic as an `Unresolved`
+        // with no `from` instance to hang it on, so it is measured on the same
+        // axis. Leaving it out was how a whole population of facts stayed
+        // spanless while the census reported full coverage.
+        for hole in self.uninstantiated_roots.values() {
+            for site in &hole.always_emitted_sites {
+                let k = c.always_emitted.entry(site.reason).or_default();
+                k.examined += 1;
+                k.spanless += usize::from(is_spanless(&site.span));
+            }
         }
         c
     }
@@ -693,6 +708,15 @@ impl Closure {
     }
 }
 
+/// One call site in an always-emitted body whose instantiation failed. Carries
+/// what a [`Rejection`] or an [`Unresolved`] at the same failure would: the
+/// reason, and the span the Stage-3 diagnostic points at.
+#[derive(Debug, Clone)]
+pub struct AlwaysEmittedFailure {
+    pub reason: &'static str,
+    pub span: Span,
+}
+
 /// Why one name has no concrete instance covering its obligation.
 ///
 /// The two causes are genuinely different obligations and were previously one
@@ -716,9 +740,10 @@ impl Closure {
 pub struct RootHole {
     /// A generic function that is an emission root no call instantiates.
     pub generic_root: bool,
-    /// Reasons a call from an always-emitted body could not instantiate it.
-    /// Empty when [`Self::generic_root`] is the only cause.
-    pub always_emitted_reasons: BTreeSet<&'static str>,
+    /// Every SITE at which a call from an always-emitted body could not
+    /// instantiate it, with the span the diagnostic points at. Empty when
+    /// [`Self::generic_root`] is the only cause.
+    pub always_emitted_sites: Vec<AlwaysEmittedFailure>,
     /// Instances of this same function the walk created from other call sites.
     pub instances: usize,
 }
@@ -737,6 +762,9 @@ pub struct SpanCensus {
     pub edges: BTreeMap<&'static str, SpanCoverage>,
     pub rejections: BTreeMap<&'static str, SpanCoverage>,
     pub unresolved: BTreeMap<&'static str, SpanCoverage>,
+    /// Failed calls from always-emitted bodies. Same diagnostic obligation as
+    /// [`Self::unresolved`]; they differ only in having no `from` instance.
+    pub always_emitted: BTreeMap<&'static str, SpanCoverage>,
 }
 
 impl SpanCensus {
@@ -745,6 +773,7 @@ impl SpanCensus {
             m.values().map(|c| c.spanless).sum::<usize>()
         };
         sum(&self.edges) + sum(&self.rejections) + sum(&self.unresolved)
+            + sum(&self.always_emitted)
     }
 }
 
@@ -941,7 +970,7 @@ fn walk_body_edges(
                 });
             } else {
                 g.always_emitted_seeds += 1;
-                g.record_always_emitted_hole(mangle_fn(ws, cf), "generic-fn-value");
+                g.record_always_emitted_hole(mangle_fn(ws, cf), "generic-fn-value", span);
             }
         }
 
@@ -1054,7 +1083,7 @@ fn record_call(
         // body, and both keep the reason an instantiated body's call would
         // carry. Ordered before the classifying arms so that guard wins.
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason());
+            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason(), span);
             return;
         }
         Err(Fail::Unconstrained(_)) => {
@@ -1199,7 +1228,7 @@ fn record_witness(
         // body, and both keep the reason an instantiated body's call would
         // carry. Ordered before the classifying arms so that guard wins.
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason());
+            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason(), span);
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {
@@ -1264,7 +1293,7 @@ fn record_bound_next(
         // body, and both keep the reason an instantiated body's call would
         // carry. Ordered before the classifying arms so that guard wins.
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason());
+            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason(), span);
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {

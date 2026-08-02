@@ -89,6 +89,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut span_edges: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    let mut span_always_emitted: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut identity_disagreements: Vec<String> = Vec::new();
     let mut shared_instances = 0usize;
     let mut identity_conflicts = 0usize;
@@ -115,7 +116,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         instance_graph::RootHole::default,
                     );
                     e.generic_root |= hole.generic_root;
-                    e.always_emitted_reasons.extend(hole.always_emitted_reasons);
+                    e.always_emitted_sites.extend(hole.always_emitted_sites);
                     e.instances += hole.instances;
                 }
                 synth_examined += p.synthesized_examined;
@@ -169,6 +170,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     (&mut span_edges, &p.span_census.edges),
                     (&mut span_rejections, &p.span_census.rejections),
                     (&mut span_unresolved, &p.span_census.unresolved),
+                    (&mut span_always_emitted, &p.span_census.always_emitted),
                 ] {
                     for (k, c) in from {
                         let e = map.entry(k).or_insert((0, 0));
@@ -236,7 +238,10 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let uninst: usize = rows.iter().map(|r| r.uninstantiated_roots).max().unwrap_or(0);
     if !uninst_names.is_empty() {
         println!();
-        println!("uninstantiated generic roots, union over projects ({}):", uninst_names.len());
+        println!(
+            "uncovered bare-name obligations, union over projects ({}):",
+            uninst_names.len()
+        );
         println!();
         println!("| name | cause | instances elsewhere |");
         println!("|---|---|---:|");
@@ -245,8 +250,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             if h.generic_root {
                 cause.push("generic emission root".to_string());
             }
-            for r in &h.always_emitted_reasons {
-                cause.push(format!("always-emitted call: `{r}`"));
+            let mut by_reason: BTreeMap<&'static str, usize> = BTreeMap::new();
+            for s in &h.always_emitted_sites {
+                *by_reason.entry(s.reason).or_insert(0) += 1;
+            }
+            for (r, n) in &by_reason {
+                cause.push(format!("always-emitted call: `{r}` x{n}"));
             }
             println!(
                 "| `{n}` | {} | {} |",
@@ -266,8 +275,10 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "`uninst. generic roots` (max over projects): **{uninst}** -- generic fns that are \
-         emission roots but that no call instantiates."
+        "`uninst. generic roots` (max over projects): **{uninst}** -- names with an \
+         UNCOVERED BARE-NAME OBLIGATION. Not \"no call instantiates them\": six of the \
+         corpus's have concrete instances from Rock call sites, which discharge those \
+         call sites and not the bare-name entry opaque Lua text can call."
     );
     println!();
     println!("digests (manifest text, FNV-1a):");
@@ -365,14 +376,27 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!();
     println!("| what | kind | examined | spanless |");
     println!("|---|---|---:|---:|");
-    for (what, m) in
-        [("edge", &span_edges), ("rejection", &span_rejections), ("unresolved", &span_unresolved)]
-    {
+    for (what, m, evidence) in [
+        ("edge", &span_edges, ""),
+        ("rejection", &span_rejections, "`rejections_of` asserts it per fixture"),
+        (
+            "unresolved",
+            &span_unresolved,
+            "`an_unresolved_call_site_keeps_its_span` is the only evidence",
+        ),
+        (
+            "always-emitted",
+            &span_always_emitted,
+            "`an_always_emitted_call_hole_keeps_its_reason_and_span`",
+        ),
+    ] {
         // An EMPTY population is stated, never left as an absent row: zero
-        // spanless out of zero facts is not span coverage, and the corpus
-        // measures no rejections and no unresolved sites at all.
+        // spanless out of zero facts is not span coverage. Which fixture stands
+        // in for the missing population is NAMED -- "the fixtures are the
+        // evidence" asserted that a fixture existed without saying which, and
+        // for the unresolved axis none did.
         if m.is_empty() {
-            println!("| {what} | -- | 0 | (no population; the fixtures are the evidence) |");
+            println!("| {what} | -- | 0 | (no corpus population; {evidence}) |");
             continue;
         }
         for (k, (examined, spanless)) in m {
@@ -386,6 +410,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         .values()
         .chain(span_rejections.values())
         .chain(span_unresolved.values())
+        .chain(span_always_emitted.values())
         .map(|(_, s)| s)
         .sum();
     println!();

@@ -1566,7 +1566,7 @@ fn main() {
 /// project and `pick` is an emission root too, so the two causes coincide and
 /// the fixture cannot show that this one fires on its own.
 #[test]
-fn an_always_emitted_call_hole_keeps_its_reason() {
+fn an_always_emitted_call_hole_keeps_its_reason_and_span() {
     let ws = check(
         r#"
 fn pick<T>() -> int { return 1 }
@@ -1579,9 +1579,23 @@ fn main() { let x = G }
     let hole = g.uninstantiated_roots.get("pick_ret_int").unwrap_or_else(|| {
         panic!("no hole recorded for `pick`: {:?}", g.uninstantiated_roots)
     });
+    assert_eq!(
+        hole.always_emitted_sites.len(),
+        1,
+        "expected exactly the one failing site: {hole:?}"
+    );
+    let site = &hole.always_emitted_sites[0];
     assert!(
-        !hole.always_emitted_reasons.is_empty(),
+        !site.reason.is_empty(),
         "the always-emitted hole discarded its failure reason: {hole:?}"
+    );
+    // The SPAN is the point: this fact becomes a compile error at the Stage-3
+    // cutover, and every caller already had the call-site span while the
+    // recorder dropped it.
+    assert!(
+        !instance_graph::is_spanless(&site.span),
+        "the always-emitted hole carries no source span, so it can never produce a \
+         located diagnostic: {hole:?}"
     );
     assert!(
         !hole.generic_root,
@@ -1707,4 +1721,56 @@ fn main() { opaque_caller(1) }
         g.erased_entries
     );
     let _ = &ws;
+}
+
+/// The positive fixture for the `Unresolved` axis of the span census.
+///
+/// The corpus's Lua view records ZERO unresolved sites, so without this the
+/// census's "0 spanless" for that axis is zero over zero and an `Unresolved`
+/// recorder switched to `Span::unknown` would go unnoticed. The JS view
+/// supplies the population: a column intercept's runtime entry has no JS
+/// sibling, so the synthesized call resolves to nothing on that target.
+#[test]
+fn an_unresolved_call_site_keeps_its_span() {
+    use bone_semantic::hir::FnBackend;
+    let ws = check(
+        r#"
+value P { x: float, y: float }
+fn main() {
+    let m: Map<string, P> = map_new()
+    m["a"] = P { x: 1.0, y: 2.0 }
+    let n = m.len()
+}
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, None);
+    let g = instance_graph::build_for_target(&ws, roots.clone(), false, FnBackend::Js);
+    // The DENOMINATOR first: a spanless-count of zero over an empty population
+    // is what this fixture exists to prevent.
+    assert!(
+        !g.unresolved.is_empty(),
+        "the fixture produced no unresolved call site, so it asserts nothing"
+    );
+    let spanless: Vec<&str> = g
+        .unresolved
+        .iter()
+        .filter(|u| instance_graph::is_spanless(&u.span))
+        .map(|u| u.reason)
+        .collect();
+    assert!(spanless.is_empty(), "unresolved call sites with no source span: {spanless:?}");
+    let census = g.span_census();
+    assert_eq!(
+        census.unresolved.values().map(|c| c.examined).sum::<usize>(),
+        g.unresolved.len(),
+        "the census did not examine every unresolved site"
+    );
+    // CONTROL: the same program on Lua resolves those entries, so the
+    // unresolved population is a property of the TARGET and not of the fixture
+    // being malformed.
+    let lua = instance_graph::build_for_target(&ws, roots, false, FnBackend::Lua);
+    assert!(
+        lua.unresolved.is_empty(),
+        "the Lua view should resolve every synthesized entry: {:?}",
+        lua.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+    );
 }
