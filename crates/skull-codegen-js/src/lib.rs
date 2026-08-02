@@ -1287,9 +1287,18 @@ function stone_create_shader_from_combined(src) {
   __SW.shaders[h] = { prog: prog, ulocs: {}, floatSamplers: floatSamplers, samplerUnits: {} };
   return h;
 }
+// Owns the program's WHOLE resource set, mirroring the native side. A rejected
+// registration candidate is destroyed mid-registration, so it may already have
+// bound blocks and allocated their buffers; deleting only the program leaked one
+// buffer per block per reload.
 function stone_destroy_shader(h) {
   var sh = __SW.shaders[h];
   if (!sh) return;
+  if (sh.blocks) {
+    for (var i = 0; i < sh.blocks.length; i++) {
+      if (sh.blocks[i]) __SW.gl.deleteBuffer(sh.blocks[i].buffer);
+    }
+  }
   __SW.gl.deleteProgram(sh.prog);
   delete __SW.shaders[h];
 }
@@ -1352,6 +1361,14 @@ function stone_unfilled_uniform_block_count() {
       var b = sh.blocks[i];
       if (b && b.drawn && !b.uploaded) n++;
     }
+  }
+  return n;
+}
+function stone_uniform_block_buffer_count() {
+  var n = 0;
+  for (var k in __SW.shaders) {
+    var sh = __SW.shaders[k];
+    if (sh && sh.blocks) for (var i = 0; i < sh.blocks.length; i++) if (sh.blocks[i]) n++;
   }
   return n;
 }

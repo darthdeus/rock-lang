@@ -1257,10 +1257,11 @@ fn textures_and_engine_conflict() {
 
 // --- block members share the global GLSL namespace ---------------------------
 //
-// An unnamed-instance block's members are bare globals, so an `@engine` or
-// `@uniform` member collides with an attribute, sampler, array, varying or MRT
-// output exactly as two loose uniforms would -- and members LEAVE `uniforms`
-// when a group becomes a block, so the census had to grow them explicitly.
+// An unnamed-instance block's members are bare globals, so an `@engine` member
+// collides with an attribute, sampler, array, varying or MRT output exactly as
+// two loose uniforms would. A stage's own group already reaches the census
+// through `uniforms` whether or not it became a block; `@engine` is a separate
+// ROLE landing in `engine_uniforms`, so it had to be added explicitly.
 // Uncaught, each of these is a raw driver error carrying no Rock span.
 //
 // One rejection per namespace, because the census chains them separately and a

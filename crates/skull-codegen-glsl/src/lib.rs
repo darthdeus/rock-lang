@@ -2905,8 +2905,8 @@ pub fn emit_shader_pipeline_with_dependencies(
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
 
-    // Runs AFTER the plans, because a group's members are only in the namespace
-    // once it is a block -- and they are not in `uniforms` any more when it is.
+    // Runs AFTER the plans, because the `@engine` members it censuses come from
+    // the PLAN -- one list, though the block is declared in both stages.
     check_pipeline_collisions(&vshape, &varyings, &fshape, engine_plan.as_ref(), vf.name_span)?;
 
     let (vertex_block, vertex_dependencies) =
