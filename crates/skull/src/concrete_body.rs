@@ -29,12 +29,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{BindingInfo, Body, Expr};
+use bone_semantic::hir::{BindingInfo, Body, Expr, FnBackend};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Span;
 use comfy_la_arena::{ArenaMap, Idx};
 use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
+use skull_mir::mir::FuncRef;
 
 use crate::instance_graph::{
     boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
@@ -58,12 +59,16 @@ impl Slot {
     }
 }
 
-/// A callee whose body skull does not lower: the identity plan S 9 requires a
-/// non-Rock call to name. The string is the boundary's key in
-/// [`InstanceGraph::boundaries`] -- its mangled symbol -- so a consumer can
-/// reach its class and its target availability without a second classification.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct BoundaryId(pub String);
+/// A callee whose body skull does not lower. The declaration preserves its
+/// contract identity when backend siblings share a symbol; the target and
+/// class make availability part of the identity rather than a later lookup.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BoundaryId {
+    pub declaration: FuncRef,
+    pub class: BoundaryClass,
+    pub target: FnBackend,
+    pub symbol: String,
+}
 
 /// Plan S 9's `enum Callee { Rock(InstanceId), Boundary(BoundaryId) }`.
 ///
@@ -168,7 +173,6 @@ pub struct InvalidBoundaryCall {
     pub instance: Instance,
     pub site: Site,
     pub boundary: BoundaryId,
-    pub class: BoundaryClass,
     pub span: Span,
 }
 
@@ -196,6 +200,9 @@ pub enum BodyGap {
     NoBody,
     /// The body was relowered after this inference was recorded.
     StaleInference,
+    /// The same logical instance was reached with two different conformance
+    /// witness trees, so its bounded calls have no discovery-order-free answer.
+    InconsistentBounds,
 }
 
 impl BodyGap {
@@ -205,6 +212,7 @@ impl BodyGap {
             Self::NoInference => "no-inference",
             Self::NoBody => "no-body",
             Self::StaleInference => "stale-inference",
+            Self::InconsistentBounds => "inconsistent-bounds",
         }
     }
 }
@@ -351,8 +359,8 @@ impl ConcreteBodies {
                     "{} {} calls `{}` ({}), which no body serves on this target, at {}:{}",
                     g.identity(ws, &c.instance),
                     c.site.op.name(),
-                    c.boundary.0,
-                    c.class.name(),
+                    c.boundary.symbol,
+                    c.boundary.class.name(),
                     c.span.file,
                     c.span.line_range.0 + 1
                 )
@@ -578,19 +586,24 @@ fn callee_tables(
         let callee = match boundary_class_for(f, &g.erased_entries) {
             Some(class) => {
                 let symbol = mangle_fn(ws, f);
+                let boundary = BoundaryId {
+                    declaration: target.func,
+                    class,
+                    target: g.target,
+                    symbol,
+                };
                 // A boundary the target cannot serve is plan S 10's `Invalid
                 // boundary`: a located rejection, never an entry.
                 if g.boundary_invalid_on_target(f) {
                     out.invalid_boundary_calls.push(InvalidBoundaryCall {
                         instance: inst.clone(),
                         site: site.clone(),
-                        boundary: BoundaryId(symbol),
-                        class,
+                        boundary,
                         span: rec.span,
                     });
                     continue;
                 }
-                Callee::Boundary(BoundaryId(symbol))
+                Callee::Boundary(boundary)
             }
             None => {
                 if !g.instances.contains(target) {
@@ -645,6 +658,10 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
     let mut out = ConcreteBodies::default();
     let expanded: Vec<Instance> = g.expanded.iter().cloned().collect();
     for inst in expanded {
+        if g.bound_tree_disagreements.iter().any(|d| d.instance == inst) {
+            out.gaps.push(MissingBody { instance: inst, gap: BodyGap::InconsistentBounds });
+            continue;
+        }
         let Some(subst) = g.substitutions.get(&inst).cloned() else {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoSubstitution });
             continue;

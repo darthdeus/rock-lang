@@ -267,6 +267,26 @@ pub struct SiteRecord {
     pub span: Span,
 }
 
+/// One bounded generic's concrete `next` witness at an instance.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct InstanceBoundNext {
+    pub callee: Instance,
+    pub sub: InstanceBoundTree,
+}
+
+/// The concrete witnesses supplied for an instance's bounded generics.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct InstanceBoundTree {
+    pub next: BTreeMap<usize, InstanceBoundNext>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BoundTreeDisagreement {
+    pub instance: Instance,
+    pub recorded: InstanceBoundTree,
+    pub incoming: InstanceBoundTree,
+}
+
 /// Which of the two bounded-witness roots a conformance tree hangs under.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BoundRoot {
@@ -406,6 +426,14 @@ pub struct InstanceGraph {
     /// instance was reached from two callers, which is what the agreement
     /// property is about.
     pub subst_compared: BTreeMap<Instance, usize>,
+    /// Concrete conformance witnesses for each bounded instance. This replaces
+    /// the splice-time `CallerGeneric` environment for consumers of the graph.
+    pub bound_trees: BTreeMap<Instance, InstanceBoundTree>,
+    /// One logical instance reached with two different witness trees. Empty is
+    /// required: otherwise its body would depend on discovery order.
+    pub bound_tree_disagreements: Vec<BoundTreeDisagreement>,
+    /// Re-reaches whose witness trees were actually compared.
+    pub bound_tree_comparisons: usize,
     /// Per instance, the callee EACH of its source operations resolved to.
     /// `ConcreteBody`'s callee tables are this record projected per table; the
     /// walk is the one resolver (plan S 9).
@@ -714,6 +742,25 @@ impl InstanceGraph {
             .insert(site.clone(), SiteRecord { outcome, span });
         if prev.is_some() {
             self.duplicate_sites.push((from.clone(), site));
+        }
+    }
+
+    fn record_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
+        match self.bound_trees.get(instance) {
+            Some(recorded) if recorded != &incoming => {
+                self.bound_tree_comparisons += 1;
+                self.bound_tree_disagreements.push(BoundTreeDisagreement {
+                    instance: instance.clone(),
+                    recorded: recorded.clone(),
+                    incoming,
+                });
+            }
+            Some(_) => {
+                self.bound_tree_comparisons += 1;
+            }
+            None => {
+                self.bound_trees.insert(instance.clone(), incoming);
+            }
         }
     }
 
@@ -1104,6 +1151,9 @@ pub fn build_for_target(
         subst_disagreements: Vec::new(),
         subst_comparisons: 0,
         subst_compared: BTreeMap::new(),
+        bound_trees: BTreeMap::new(),
+        bound_tree_disagreements: Vec::new(),
+        bound_tree_comparisons: 0,
     };
 
     // A root that is generic has no instantiation of its own; it is a shared
@@ -1202,6 +1252,8 @@ fn walk_body_edges(
     depth: u32,
     target: bone_semantic::hir::FnBackend,
 ) {
+    let mut resolved_calls: FxHashMap<Idx<bone_semantic::hir::Expr>, Instance> =
+        FxHashMap::default();
     let mut calls: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
         inf.resolved_overload_calls.iter().map(|(e, r)| (*e, *r)).collect();
     calls.sort_by_key(|(e, _)| *e);
@@ -1210,10 +1262,12 @@ fn walk_body_edges(
         let bindings = inf.call_generic_bindings.get(&e);
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
-        record_call(
+        if let Some(to) = record_call(
             g, work, ws, inf, from, subst, depth, callee, bindings, kind, span,
             Site { expr: e, op: SiteOp::DirectCall },
-        );
+        ) {
+            resolved_calls.insert(e, to);
+        }
     }
 
     if let Some(body) = body {
@@ -1325,9 +1379,37 @@ fn walk_body_edges(
     trees.sort_by_key(|(e, _)| *e);
     for (e, tree) in trees {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-        walk_bound_tree(
+        let concrete = walk_bound_tree(
             g, work, ws, inf, from, subst, depth, tree, span, target, e, BoundRoot::Call, &[],
         );
+        if let Some(to) = resolved_calls.get(&e) {
+            g.record_bound_tree(to, concrete);
+        }
+    }
+
+    let mut bound_calls: Vec<(Idx<bone_semantic::hir::Expr>, usize)> =
+        inf.bound_calls.iter().map(|(e, idx)| (*e, *idx)).collect();
+    bound_calls.sort_by_key(|(e, _)| *e);
+    for (e, gidx) in bound_calls {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        let site = Site { expr: e, op: SiteOp::DirectCall };
+        let resolved = from
+            .and_then(|i| g.bound_trees.get(i))
+            .and_then(|tree| tree.next.get(&gidx))
+            .cloned();
+        let Some(resolved) = resolved else {
+            g.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
+            continue;
+        };
+        if let Some(from) = from {
+            g.edges.push(Edge {
+                from: from.clone(),
+                to: resolved.callee.clone(),
+                kind: EdgeKind::BoundNextWitness,
+                span,
+            });
+        }
+        g.record_site(from, site, SiteOutcome::Resolved(resolved.callee), span);
     }
 
     let mut iters: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::ForIterInfo)> =
@@ -1341,7 +1423,7 @@ fn walk_body_edges(
                 EdgeKind::IteratorIter, target, Site { expr: e, op: SiteOp::ForIter },
             );
         }
-        record_bound_next(
+        let _ = record_bound_next(
             g, work, ws, inf, from, subst, depth, &info.next, span,
             EdgeKind::IteratorNext, target, e, BoundRoot::For, &[],
         );
@@ -1362,7 +1444,7 @@ fn record_call(
     kind: EdgeKind,
     span: Span,
     site: Site,
-) {
+) -> Option<Instance> {
     if from.is_none() {
         g.always_emitted_seeds += 1;
     }
@@ -1381,7 +1463,7 @@ fn record_call(
                 span,
             );
             g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
-            return;
+            return None;
         }
         Err(fail) if from.is_none() => {
             g.record_always_emitted_hole(
@@ -1390,7 +1472,7 @@ fn record_call(
                 span,
             );
             g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
-            return;
+            return None;
         }
         Err(Fail::Unconstrained(_)) => {
             let name = mangle_fn(ws, cf);
@@ -1404,7 +1486,7 @@ fn record_call(
                 ),
             });
             g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
-            return;
+            return None;
         }
         Err(fail) => {
             g.unresolved.push(Unresolved {
@@ -1414,7 +1496,7 @@ fn record_call(
                 span,
             });
             g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
-            return;
+            return None;
         }
     };
     let to = Instance { func: callee, args };
@@ -1422,7 +1504,8 @@ fn record_call(
         g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
     }
     g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-    g.reach(work, to, callee_subst, depth + 1);
+    g.reach(work, to.clone(), callee_subst, depth + 1);
+    Some(to)
 }
 
 /// Plan S 7's rejection: a recursive edge must preserve its instance arguments.
@@ -1593,9 +1676,32 @@ fn record_bound_next(
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
     path: &[usize],
-) {
-    let BoundNext::Concrete { func: (m, f), next_generics, sub } = next else { return };
+) -> Option<InstanceBoundNext> {
     let site = root.site(expr, path.to_vec());
+    if let BoundNext::CallerGeneric(gidx) = next {
+        let resolved = from
+            .and_then(|i| g.bound_trees.get(i))
+            .and_then(|tree| tree.next.get(gidx))
+            .cloned();
+        let Some(resolved) = resolved else {
+            g.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
+            return None;
+        };
+        if let Some(from) = from {
+            g.edges.push(Edge {
+                from: from.clone(),
+                to: resolved.callee.clone(),
+                kind,
+                span,
+            });
+        }
+        g.record_site(from, site, SiteOutcome::Resolved(resolved.callee.clone()), span);
+        return Some(resolved);
+    }
+
+    let BoundNext::Concrete { func: (m, f), next_generics, sub } = next else {
+        unreachable!("CallerGeneric handled above")
+    };
     let rep = FuncRef { module: *m, func: *f };
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = variant_for(ws, rep, target);
@@ -1610,7 +1716,12 @@ fn record_bound_next(
                 g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
             }
             g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-            g.reach(work, to, callee_subst, depth + 1);
+            g.reach(work, to.clone(), callee_subst, depth + 1);
+            let concrete_sub = walk_bound_tree(
+                g, work, ws, inf, from, subst, depth, sub, span, target, expr, root, path,
+            );
+            g.record_bound_tree(&to, concrete_sub.clone());
+            Some(InstanceBoundNext { callee: to, sub: concrete_sub })
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.
@@ -1621,6 +1732,7 @@ fn record_bound_next(
                 span,
             );
             g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            None
         }
         Err(fail) if from.is_none() => {
             g.record_always_emitted_hole(
@@ -1629,6 +1741,7 @@ fn record_bound_next(
                 span,
             );
             g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            None
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {
@@ -1641,6 +1754,7 @@ fn record_bound_next(
                 ),
             });
             g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            None
         }
         Err(fail) => {
             g.unresolved.push(Unresolved {
@@ -1650,9 +1764,9 @@ fn record_bound_next(
                 span,
             });
             g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            None
         }
     }
-    walk_bound_tree(g, work, ws, inf, from, subst, depth, sub, span, target, expr, root, path);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1670,7 +1784,8 @@ fn walk_bound_tree(
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
     path: &[usize],
-) {
+) -> InstanceBoundTree {
+    let mut resolved = InstanceBoundTree::default();
     let mut keys: Vec<&usize> = tree.next.keys().collect();
     keys.sort();
     for k in keys {
@@ -1678,11 +1793,14 @@ fn walk_bound_tree(
         // different depths of one tree can carry the same key.
         let mut child = path.to_vec();
         child.push(*k);
-        record_bound_next(
+        if let Some(next) = record_bound_next(
             g, work, ws, inf, from, subst, depth, &tree.next[k], span,
             EdgeKind::BoundNextWitness, target, expr, root, &child,
-        );
+        ) {
+            resolved.next.insert(*k, next);
+        }
     }
+    resolved
 }
 
 /// The callee's instantiation: its generic bindings converted to `MonoTy` under

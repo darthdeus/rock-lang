@@ -13,6 +13,7 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx};
 use skull::concrete_body::{self, Callee, ConcreteBodies, ConcreteBody, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
+use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::{MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
@@ -410,7 +411,7 @@ fn main() {
 /// individual count still looked healthy.
 #[test]
 fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
-    let (_ws, g, bodies) = bodies_of(RICH);
+    let (ws, g, bodies) = bodies_of(RICH);
     let c = bodies.census();
     assert!(c.sites_examined > 0, "no callee sites were examined at all: {c:?}");
     assert_eq!(
@@ -471,15 +472,19 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
             h.site
         );
     }
-    // Every boundary callee names a boundary the GRAPH classified, not a
-    // symbol invented here.
+    // Every boundary id preserves the exact declaration, target, class and
+    // spelling the graph resolved, even where the symbol-only graph catalogue
+    // cannot distinguish backend siblings.
     for b in bodies.bodies.values() {
         for (site, callee) in b.callees() {
             let Callee::Boundary(id) = callee else { continue };
-            assert!(
-                g.boundaries.contains_key(&id.0),
-                "`{}` at {:?} names a boundary the graph has no record of",
-                id.0,
+            let f = &ws.module(id.declaration.module).functions[id.declaration.func];
+            assert_eq!(id.target, g.target, "wrong target at {:?}", site.op);
+            assert_eq!(id.symbol, mangle_fn(&ws, f), "wrong symbol at {:?}", site.op);
+            assert_eq!(
+                Some(id.class),
+                instance_graph::boundary_class_for(f, &g.erased_entries),
+                "wrong boundary class at {:?}",
                 site.op
             );
         }
@@ -522,6 +527,113 @@ fn one_generic_body_names_a_different_callee_per_instance() {
     );
 }
 
+/// A bounded body's placeholder is an operation in THAT body, not merely a
+/// conformance record at its caller. Both the explicit `next(it)` form and a
+/// `for` over the bounded generic must already name VecIter's concrete `next`
+/// in their own `ConcreteBody`.
+#[test]
+fn bounded_body_operations_name_the_concrete_witness() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn pull<I: Iterator<int>>(it: I) -> int {
+    let (ok, x) = next(it)
+    return if ok { x } else { 0 }
+}
+fn sum_it<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for x in it { total += x }
+    return total
+}
+fn main() {
+    let a = pull([1, 2].iter())
+    let b = sum_it([3, 4].iter())
+}
+"#,
+    );
+    assert!(
+        g.bound_tree_disagreements.is_empty(),
+        "one instance got two conformance answers: {:?}",
+        g.bound_tree_disagreements
+    );
+
+    let pull = bodies
+        .bodies
+        .keys()
+        .find(|i| g.identity(&ws, i).starts_with("pull"))
+        .expect("no concrete `pull` instance");
+    let pull_calls: Vec<String> = bodies.bodies[pull]
+        .direct_calls
+        .values()
+        .map(|c| match c {
+            Callee::Rock(i) => g.identity(&ws, i),
+            Callee::Boundary(b) => b.symbol.clone(),
+        })
+        .collect();
+    assert!(
+        pull_calls.iter().any(|n| n.starts_with("next_VecIter") && n.contains("int")),
+        "the explicit bounded call did not resolve inside `pull`: {pull_calls:?}"
+    );
+
+    let sum_it = bodies
+        .bodies
+        .keys()
+        .find(|i| g.identity(&ws, i).starts_with("sum_it"))
+        .expect("no concrete `sum_it` instance");
+    let loop_nexts: Vec<String> = bodies.bodies[sum_it]
+        .iterator_ops
+        .values()
+        .filter(|op| op.kind == IteratorOpKind::Next)
+        .map(|op| match &op.callee {
+            Callee::Rock(i) => g.identity(&ws, i),
+            Callee::Boundary(b) => b.symbol.clone(),
+        })
+        .collect();
+    assert!(
+        loop_nexts.iter().any(|n| n.starts_with("next_VecIter") && n.contains("int")),
+        "the caller-generic loop witness did not resolve inside `sum_it`: {loop_nexts:?}"
+    );
+}
+
+#[test]
+fn disagreeing_bound_trees_cannot_choose_a_body_by_discovery_order() {
+    let ws = check(
+        r#"
+fn sum_it<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for x in it { total += x }
+    return total
+}
+fn main() { let n = sum_it([1, 2].iter()) }
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, None);
+    let mut g = instance_graph::build(&ws, roots, false);
+    let inst = g
+        .expanded
+        .iter()
+        .find(|i| g.identity(&ws, i).starts_with("sum_it"))
+        .cloned()
+        .expect("no concrete `sum_it` instance");
+    let recorded = g.bound_trees[&inst].clone();
+    assert!(!recorded.next.is_empty(), "fixture has no bound witness tree");
+    g.bound_tree_disagreements.push(instance_graph::BoundTreeDisagreement {
+        instance: inst.clone(),
+        recorded,
+        incoming: instance_graph::InstanceBoundTree::default(),
+    });
+
+    let bodies = concrete_body::build(&ws, &mut g);
+    assert!(!bodies.bodies.contains_key(&inst), "an ambiguous body was still built");
+    assert!(
+        bodies
+            .gaps
+            .iter()
+            .any(|gap| gap.instance == inst && gap.gap.label() == "inconsistent-bounds"),
+        "the disagreement was not classified: {:?}",
+        bodies.census().gaps
+    );
+}
+
 /// A `for` head resolves to a concrete `iter` AND a concrete `next`, and a
 /// chained iterator's nested witnesses each get their own entry. Both live at
 /// one expression, which is why the table is keyed by SITE.
@@ -541,7 +653,7 @@ fn iterator_operations_resolve_to_concrete_witnesses() {
                 op.kind,
                 match &op.callee {
                     Callee::Rock(i) => g.identity(&ws, i),
-                    Callee::Boundary(b) => b.0.clone(),
+                    Callee::Boundary(b) => b.symbol.clone(),
                 },
             )
         })
@@ -750,7 +862,7 @@ fn main() { let a = only_lua(1) }
         lua_bodies.bodies.values().any(|b| b
             .direct_calls
             .values()
-            .any(|c| matches!(c, Callee::Boundary(id) if id.0.starts_with("only_lua")))),
+            .any(|c| matches!(c, Callee::Boundary(id) if id.symbol.starts_with("only_lua")))),
         "the Lua view did not tabulate `only_lua` as a boundary at all"
     );
 
@@ -767,7 +879,7 @@ fn main() { let a = only_lua(1) }
     let mine: Vec<&concrete_body::InvalidBoundaryCall> = js_bodies
         .invalid_boundary_calls
         .iter()
-        .filter(|c| c.boundary.0.starts_with("only_lua"))
+        .filter(|c| c.boundary.symbol.starts_with("only_lua"))
         .collect();
     assert_eq!(
         mine.len(),
@@ -775,7 +887,7 @@ fn main() { let a = only_lua(1) }
         "expected `only_lua` to be rejected once, among {:?}",
         js_bodies.render_invalid_boundary_calls(&ws, &js)
     );
-    assert_eq!(mine[0].class, skull::instance_graph::BoundaryClass::InlineBody);
+    assert_eq!(mine[0].boundary.class, skull::instance_graph::BoundaryClass::InlineBody);
     for c in &js_bodies.invalid_boundary_calls {
         assert!(
             !instance_graph::is_spanless(&c.span),
@@ -789,7 +901,59 @@ fn main() { let a = only_lua(1) }
         js_bodies.bodies.values().all(|b| b
             .callees()
             .iter()
-            .all(|(_, c)| !matches!(c, Callee::Boundary(id) if id.0.starts_with("only_lua")))),
+            .all(|(_, c)| !matches!(c, Callee::Boundary(id) if id.symbol.starts_with("only_lua")))),
         "the rejected boundary is still a callee entry on JS"
     );
+}
+
+/// Backend siblings deliberately share an emitted symbol, but they are
+/// different target contracts. Boundary identity must therefore differ across
+/// the two artifact targets even when the spelling is identical.
+#[test]
+fn backend_siblings_do_not_share_a_boundary_id() {
+    let ws = check(
+        r#"
+@nomangle
+inline(lua) fn target_op(x: int) -> int = "return x + 1"
+@nomangle
+inline(js) fn target_op(x: int) -> int = "return x + 2;"
+fn main() { let x = target_op(1) }
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, None);
+    let mut lua = instance_graph::build_for_target(
+        &ws,
+        roots.clone(),
+        false,
+        bone_semantic::hir::FnBackend::Lua,
+    );
+    let lua_bodies = concrete_body::build(&ws, &mut lua);
+    let mut js = instance_graph::build_for_target(
+        &ws,
+        roots,
+        false,
+        bone_semantic::hir::FnBackend::Js,
+    );
+    let js_bodies = concrete_body::build(&ws, &mut js);
+
+    let boundary = |bodies: &ConcreteBodies| {
+        bodies
+            .bodies
+            .values()
+            .flat_map(|b| b.direct_calls.values())
+            .find_map(|c| match c {
+                Callee::Boundary(id) if id.symbol == "target_op" => Some(id.clone()),
+                _ => None,
+            })
+            .expect("the target call did not become a boundary")
+    };
+    let lua_id = boundary(&lua_bodies);
+    let js_id = boundary(&js_bodies);
+    assert_eq!(lua_id.symbol, js_id.symbol, "fixture no longer shares an emitted symbol");
+    assert_eq!(lua_id.target, bone_semantic::hir::FnBackend::Lua);
+    assert_eq!(js_id.target, bone_semantic::hir::FnBackend::Js);
+    assert_eq!(lua_id.class, skull::instance_graph::BoundaryClass::InlineBody);
+    assert_eq!(js_id.class, skull::instance_graph::BoundaryClass::InlineBody);
+    assert_ne!(lua_id.declaration, js_id.declaration, "fixture resolved one declaration twice");
+    assert_ne!(lua_id, js_id, "target-distinct boundary contracts collapsed to one id");
 }

@@ -92,6 +92,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut subst_examples: Vec<String> = Vec::new();
     let mut substitutions_recorded = 0usize;
     let mut subst_comparisons = 0usize;
+    let mut bound_tree_disagreements = 0usize;
+    let mut bound_tree_comparisons = 0usize;
+    let mut bound_trees_recorded = 0usize;
     let mut body_count = 0usize;
     let mut body_expr_examined = 0usize;
     let mut body_binding_examined = 0usize;
@@ -211,6 +214,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 no_subst.extend(p.instances_without_substitution);
                 substitutions_recorded += p.substitutions_recorded;
                 subst_comparisons += p.subst_comparisons;
+                bound_tree_disagreements += p.bound_tree_disagreements;
+                bound_tree_comparisons += p.bound_tree_comparisons;
+                bound_trees_recorded += p.bound_trees_recorded;
                 for x in p.subst_examples {
                     if subst_examples.len() < 10 {
                         subst_examples.push(x);
@@ -651,6 +657,11 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     for x in &subst_examples {
         println!("  - `{x}`");
     }
+    println!("- concrete bounded-witness trees recorded: **{bound_trees_recorded}**");
+    println!("- re-reached trees compared: **{bound_tree_comparisons}**");
+    println!(
+        "- bounded-witness tree disagreements (must be 0): **{bound_tree_disagreements}**"
+    );
     println!();
 
     println!("## ConcreteBody type tables (plan S 9, S 15a)");
@@ -927,6 +938,9 @@ struct OneProject {
     subst_examples: Vec<String>,
     substitutions_recorded: usize,
     subst_comparisons: usize,
+    bound_tree_disagreements: usize,
+    bound_tree_comparisons: usize,
+    bound_trees_recorded: usize,
     /// Instances both target views reached, and how many of those took a
     /// different SYMBOL on the two targets. The identity property.
     body_census: skull::concrete_body::BodyCensus,
@@ -1274,8 +1288,8 @@ fn one_project(
                 "`{}` {} calls `{}` ({}) at {}:{}",
                 g.identity(&ws, &c.instance),
                 c.site.op.name(),
-                c.boundary.0,
-                c.class.name(),
+                c.boundary.symbol,
+                c.boundary.class.name(),
                 relativize(c.span.file.as_str(), root),
                 c.span.line_range.0 + 1
             )
@@ -1339,6 +1353,9 @@ fn one_project(
         instances_without_substitution: g.instances_without_substitution(&ws),
         substitutions_recorded: g.substitutions.len(),
         subst_comparisons: g.subst_comparisons,
+        bound_tree_disagreements: g.bound_tree_disagreements.len(),
+        bound_tree_comparisons: g.bound_tree_comparisons,
+        bound_trees_recorded: g.bound_trees.len(),
         subst_examples: g
             .subst_disagreements
             .iter()
