@@ -109,6 +109,23 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut body_untyped_bindings = 0usize;
     let mut body_expr_slots = 0usize;
     let mut body_binding_slots = 0usize;
+    let mut sites_examined = 0usize;
+    let mut sites_edges = 0usize;
+    let mut sites_resolved = 0usize;
+    let mut callee_direct = 0usize;
+    let mut callee_fn_values = 0usize;
+    let mut callee_synthesized = 0usize;
+    let mut callee_iterator_ops: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut callee_rock = 0usize;
+    let mut callee_boundary = 0usize;
+    let mut callee_holes: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    let mut callee_hole_examples: Vec<String> = Vec::new();
+    let mut callee_invalid = 0usize;
+    let mut callee_invalid_examples: Vec<String> = Vec::new();
+    let mut callee_unknown_rock = 0usize;
+    let mut callee_duplicate_sites = 0usize;
+    let mut untyped_as_callee_key: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut synthesized_approximated = 0usize;
     let mut span_edges: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
@@ -239,6 +256,39 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 body_untyped_bindings += p.body_census.untyped_bindings;
                 body_expr_slots += p.body_census.expr_slots;
                 body_binding_slots += p.body_census.binding_slots;
+                sites_examined += p.body_census.sites_examined;
+                sites_edges += p.sites_edges;
+                sites_resolved += p.sites_resolved;
+                callee_direct += p.body_census.direct_calls;
+                callee_fn_values += p.body_census.fn_values;
+                callee_synthesized += p.body_census.synthesized_calls;
+                for (k, v) in &p.body_census.iterator_ops {
+                    *callee_iterator_ops.entry(*k).or_insert(0) += v;
+                }
+                callee_rock += p.body_census.rock_callees;
+                callee_boundary += p.body_census.boundary_callees;
+                for (k, (n, spanless)) in &p.body_census.callee_holes {
+                    let e = callee_holes.entry(*k).or_insert((0, 0));
+                    e.0 += n;
+                    e.1 += spanless;
+                }
+                for x in p.callee_hole_examples {
+                    if callee_hole_examples.len() < 10 {
+                        callee_hole_examples.push(x);
+                    }
+                }
+                callee_invalid += p.body_census.invalid_boundary_calls;
+                for x in p.callee_invalid_examples {
+                    if callee_invalid_examples.len() < 10 {
+                        callee_invalid_examples.push(x);
+                    }
+                }
+                callee_unknown_rock += p.body_census.unknown_rock_callees;
+                callee_duplicate_sites += p.duplicate_sites;
+                for (k, v) in &p.body_census.untyped_as_callee_key {
+                    *untyped_as_callee_key.entry(*k).or_insert(0) += v;
+                }
+                synthesized_approximated += p.synthesized_approximated;
                 for x in p.body_free_examples {
                     if body_free_examples.len() < 10 {
                         body_free_examples.push(x);
@@ -660,6 +710,88 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
 
+    println!("## ConcreteBody callee tables (plan S 9)");
+    println!();
+    println!("`direct_calls` / `fn_values` / `iterator_ops` / `synthesized_calls`, each");
+    println!("naming a `Callee::Rock(instance)` or a `Callee::Boundary(id)`. These are the");
+    println!("WALK's own resolutions projected per table -- a second resolver could");
+    println!("disagree with the graph, and correlating the two by span could not detect it.");
+    println!();
+    println!("- callee sites recorded (the DENOMINATOR): **{sites_examined}**");
+    println!(
+        "- ...accounted for as entries + holes + invalid-boundary rejections: \
+         **{}** + **{}** + **{}** = **{}**",
+        callee_direct + callee_fn_values + callee_synthesized
+            + callee_iterator_ops.values().sum::<usize>(),
+        callee_holes.values().map(|(n, _)| n).sum::<usize>(),
+        callee_invalid,
+        callee_direct
+            + callee_fn_values
+            + callee_synthesized
+            + callee_iterator_ops.values().sum::<usize>()
+            + callee_holes.values().map(|(n, _)| n).sum::<usize>()
+            + callee_invalid
+    );
+    println!(
+        "- resolved sites vs EDGES (separate structures, one edge per resolved callee): \
+         **{sites_resolved}** vs **{sites_edges}**"
+    );
+    println!("- sites recorded TWICE for one instance (must be 0): **{callee_duplicate_sites}**");
+    println!("- `direct_calls`: **{callee_direct}**");
+    println!("- `fn_values`: **{callee_fn_values}**");
+    println!("- `synthesized_calls`: **{callee_synthesized}**");
+    println!(
+        "- `iterator_ops`: **{}**",
+        callee_iterator_ops.values().sum::<usize>()
+    );
+    for (k, v) in &callee_iterator_ops {
+        println!("  - `{k}`: {v}");
+    }
+    println!("- `Callee::Rock`: **{callee_rock}**, `Callee::Boundary`: **{callee_boundary}**");
+    println!(
+        "- a Rock callee naming an instance the graph does not have (must be 0): \
+         **{callee_unknown_rock}**"
+    );
+    println!(
+        "- sites with no callee, by reason (`n` / of those spanless): **{}**",
+        callee_holes.values().map(|(n, _)| n).sum::<usize>()
+    );
+    for (k, (n, spanless)) in &callee_holes {
+        println!("  - `{k}`: {n} / {spanless}");
+    }
+    for x in &callee_hole_examples {
+        println!("  - {x}");
+    }
+    println!(
+        "- calls to a boundary this target cannot serve, kept OUT of the tables as \
+         located rejections (plan S 10): **{callee_invalid}**"
+    );
+    for x in &callee_invalid_examples {
+        println!("  - {x}");
+    }
+    println!(
+        "- synthesized sites that could NOT decide their exact entry, so more than one \
+         name was kept: **{synthesized_approximated}**"
+    );
+    println!(
+        "- UNTYPED expression slots that are also a callee-table key: **{}**",
+        untyped_as_callee_key.values().sum::<usize>()
+    );
+    for (k, v) in &untyped_as_callee_key {
+        println!("  - `{k}`: {v}");
+    }
+    println!(
+        "  (zero means no table consumes an expression's own type: a direct call reads"
+    );
+    println!(
+        "  `resolved_overload_calls`, an iterator op reads `IterWitness` /"
+    );
+    println!(
+        "  `for_iter_protocol` / `bound_call_trees`, and a synthesized call reads its"
+    );
+    println!("  RECEIVER's type, whose failures are the storage failures above.)");
+    println!();
+
     println!("## always-emitted body seeds");
     println!();
     println!(
@@ -804,6 +936,16 @@ struct OneProject {
     bodies_missing_for_expanded: usize,
     body_free_examples: Vec<String>,
     body_untyped_examples: Vec<String>,
+    /// Resolved sites and edges, reported side by side. The walk pushes one
+    /// edge per resolved callee, so these must agree; they are separate
+    /// structures written by the same recorders, which is why the equality is
+    /// evidence rather than a tautology.
+    sites_resolved: usize,
+    sites_edges: usize,
+    duplicate_sites: usize,
+    callee_hole_examples: Vec<String>,
+    callee_invalid_examples: Vec<String>,
+    synthesized_approximated: usize,
     shared_instances: usize,
     identity_conflicts: usize,
     /// Callees that resolved to a DIFFERENT `FuncRef` on JS than on Lua. If
@@ -975,6 +1117,54 @@ fn one_project(
             instance_graph::render_manifest(&ws, &js),
         )
         .map_err(|e| anyhow::anyhow!("writing {stem}.js.manifest: {e}"))?;
+        // The synthesized-call name histogram. This is the artifact the
+        // "exactly the entries lowering emits" claim is checked against: the
+        // same names counted in the project's emitted Lua must agree, and a
+        // hand count of either side is not reproducible.
+        // Counted per SOURCE SITE -- `(function, expression, name)` -- not per
+        // instance. Emission today produces one body per function, so two
+        // instances of one generic body share one emitted call; counting
+        // instances would report a difference that is the conditional
+        // specializer's, not the attribution's.
+        let mut seen: std::collections::BTreeSet<(u32, u32, u32, &'static str)> =
+            Default::default();
+        let mut synth: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for (inst, sites) in &g.call_sites {
+            for site in sites.keys() {
+                let skull::instance_graph::SiteOp::Synthesized(n) = site.op else { continue };
+                let key = (
+                    inst.func.module.raw(),
+                    inst.func.func.into_raw().into_u32(),
+                    site.expr.into_raw().into(),
+                    n,
+                );
+                if seen.insert(key) {
+                    *synth.entry(n).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut synth_sites: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+        for sites in g.call_sites.values() {
+            for (site, rec) in sites {
+                let skull::instance_graph::SiteOp::Synthesized(n) = site.op else { continue };
+                synth_sites.entry(n).or_default().push(format!(
+                    "\t\t{}:{}",
+                    relativize(rec.span.file.as_str(), root),
+                    rec.span.line_range.0 + 1
+                ));
+            }
+        }
+        let synth_text: String = synth
+            .iter()
+            .map(|(n, c)| {
+                let mut lines = synth_sites.remove(*n).unwrap_or_default();
+                lines.sort();
+                lines.dedup();
+                format!("{c}\t{n}\n{}\n", lines.join("\n"))
+            })
+            .collect();
+        std::fs::write(format!("{stem}.synth"), synth_text)
+            .map_err(|e| anyhow::anyhow!("writing {stem}.synth: {e}"))?;
     }
 
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
@@ -1054,6 +1244,44 @@ fn one_project(
         })
         .collect();
 
+    let sites_resolved = g
+        .call_sites
+        .values()
+        .flat_map(|m| m.values())
+        .filter(|r| matches!(r.outcome, skull::instance_graph::SiteOutcome::Resolved(_)))
+        .count();
+    let callee_hole_examples: Vec<String> = bodies
+        .callee_holes
+        .iter()
+        .take(3)
+        .map(|h| {
+            format!(
+                "`{}` {} `{}` at {}:{}",
+                g.identity(&ws, &h.instance),
+                h.site.op.name(),
+                h.reason,
+                relativize(h.span.file.as_str(), root),
+                h.span.line_range.0 + 1
+            )
+        })
+        .collect();
+    let callee_invalid_examples: Vec<String> = bodies
+        .invalid_boundary_calls
+        .iter()
+        .take(3)
+        .map(|c| {
+            format!(
+                "`{}` {} calls `{}` ({}) at {}:{}",
+                g.identity(&ws, &c.instance),
+                c.site.op.name(),
+                c.boundary.0,
+                c.class.name(),
+                relativize(c.span.file.as_str(), root),
+                c.span.line_range.0 + 1
+            )
+        })
+        .collect();
+
     let census = g.recursion_census(&ws);
     let row = ProjectRow {
         // Relative: an absolute path varies by checkout and would make the
@@ -1117,6 +1345,12 @@ fn one_project(
             .take(3)
             .map(|d| g.identity(&ws, &d.instance))
             .collect(),
+        sites_resolved,
+        sites_edges: g.edges.len(),
+        duplicate_sites: g.duplicate_sites.len(),
+        callee_hole_examples,
+        callee_invalid_examples,
+        synthesized_approximated: g.synthesized_approximated,
         body_census,
         bodies_missing_for_expanded,
         body_free_examples,

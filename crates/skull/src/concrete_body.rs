@@ -17,17 +17,29 @@
 //! entered, recorded rather than inferred from a proxy. A boundary has no Rock
 //! body to state types for.
 //!
+//! **The callee tables come from the WALK, not from a second resolution.**
+//! `direct_calls`, `fn_values`, `iterator_ops` and `synthesized_calls` are
+//! [`InstanceGraph::call_sites`] projected per table: the walk already resolved
+//! every operation under the instance's substitution, so the substitution is
+//! consumed there and here and nowhere later. A second HIR resolver could
+//! disagree with the graph, and correlating the two by span could not detect
+//! that -- a `for` head's `iter` and `next` share one span by construction.
+//!
 //! [`MonoTy`]: skull_mir::monoty::MonoTy
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bone_semantic::hir::{BindingInfo, Body, Expr};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Span;
 use comfy_la_arena::{ArenaMap, Idx};
+use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
 
-use crate::instance_graph::{function_body, is_spanless, FunctionBody, Instance, InstanceGraph};
+use crate::instance_graph::{
+    boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
+    InstanceGraph, Site, SiteOp, SiteOutcome,
+};
 
 /// Which table a slot belongs to. Kept apart in the census because the two have
 /// independent denominators: a body with no locals still has expressions.
@@ -46,11 +58,118 @@ impl Slot {
     }
 }
 
-/// One instance's concrete type tables.
+/// A callee whose body skull does not lower: the identity plan S 9 requires a
+/// non-Rock call to name. The string is the boundary's key in
+/// [`InstanceGraph::boundaries`] -- its mangled symbol -- so a consumer can
+/// reach its class and its target availability without a second classification.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct BoundaryId(pub String);
+
+/// Plan S 9's `enum Callee { Rock(InstanceId), Boundary(BoundaryId) }`.
+///
+/// There is no third arm and no absent arm. A call that resolved to neither is
+/// a [`CalleeHole`], reported with its span, never an entry a consumer could
+/// read as callable.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Callee {
+    Rock(Instance),
+    Boundary(BoundaryId),
+}
+
+/// Which iterator operation an [`Site`] in `iterator_ops` is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IteratorOpKind {
+    /// The `for` head's `iter()`.
+    Iter,
+    /// The `for` protocol's `next`, at any depth of its conformance tree.
+    Next,
+    /// An iterable argument coerced through `iter()` at an `Iterator`-bounded
+    /// parameter.
+    ImplicitIter,
+    /// A `next` witness of a bounded CALL's conformance tree.
+    BoundNext,
+}
+
+impl IteratorOpKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Iter => "iter",
+            Self::Next => "next",
+            Self::ImplicitIter => "implicit-iter",
+            Self::BoundNext => "bound-next",
+        }
+    }
+}
+
+/// Plan S 9's `ConcreteIteratorOp`: a resolved iterator operation.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ConcreteIteratorOp {
+    pub kind: IteratorOpKind,
+    pub callee: Callee,
+}
+
+/// One instance's concrete type and callee tables.
+///
+/// The callee tables are keyed by [`Site`] rather than by `Idx<Expr>` wherever
+/// one expression carries more than one callee obligation -- a `for` head has
+/// an `iter` and a `next`, a column-Map store emits a slot AND a free. Plan S 9
+/// writes `Map<ExprId, ..>`; an expression key there would silently keep one of
+/// them.
 pub struct ConcreteBody {
     pub instance: Instance,
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
+    pub direct_calls: BTreeMap<Idx<Expr>, Callee>,
+    pub fn_values: BTreeMap<Idx<Expr>, Callee>,
+    pub iterator_ops: BTreeMap<Site, ConcreteIteratorOp>,
+    /// Calls no source expression contains. Not in `direct_calls`: the same
+    /// expression can hold a source call and a synthesized one, and they are
+    /// different obligations with different callees.
+    pub synthesized_calls: BTreeMap<Site, Callee>,
+}
+
+impl ConcreteBody {
+    /// Every callee this body names, with the site that named it.
+    pub fn callees(&self) -> Vec<(Site, &Callee)> {
+        let mut out: Vec<(Site, &Callee)> = Vec::new();
+        for (e, c) in &self.direct_calls {
+            out.push((Site { expr: *e, op: SiteOp::DirectCall }, c));
+        }
+        for (e, c) in &self.fn_values {
+            out.push((Site { expr: *e, op: SiteOp::FnValue }, c));
+        }
+        for (s, op) in &self.iterator_ops {
+            out.push((s.clone(), &op.callee));
+        }
+        for (s, c) in &self.synthesized_calls {
+            out.push((s.clone(), c));
+        }
+        out
+    }
+}
+
+/// A site the walk could not resolve to any callee. The span is where the
+/// Stage-3 compile error goes.
+#[derive(Clone, Debug)]
+pub struct CalleeHole {
+    pub instance: Instance,
+    pub site: Site,
+    pub reason: &'static str,
+    pub span: Span,
+}
+
+/// A call whose boundary the graph's target cannot serve (plan S 10's
+/// `Invalid boundary`). Kept OUT of the callee tables and reported here with a
+/// span: a table entry would be exactly the fallback the plan forbids, and a
+/// consumer reading it would emit a call to a body that does not exist on this
+/// target.
+#[derive(Clone, Debug)]
+pub struct InvalidBoundaryCall {
+    pub instance: Instance,
+    pub site: Site,
+    pub boundary: BoundaryId,
+    pub class: BoundaryClass,
+    pub span: Span,
 }
 
 /// A slot whose inferred type did not convert under the instance's
@@ -119,6 +238,20 @@ pub struct ConcreteBodies {
     /// Bodies built under a NON-EMPTY substitution. The population in which a
     /// free generic is even possible.
     pub generic_bodies: usize,
+    /// Sites the walk recorded for the instances that got a body -- the
+    /// denominator for every callee count below.
+    pub sites_examined: usize,
+    pub callee_holes: Vec<CalleeHole>,
+    pub invalid_boundary_calls: Vec<InvalidBoundaryCall>,
+    /// A `Callee::Rock` whose instance is not in the graph. Must be empty: the
+    /// walk `reach`es every callee it resolves, so a missing one means the
+    /// tables and the graph disagree about what exists.
+    pub unknown_rock_callees: Vec<(Instance, Site)>,
+    /// Untyped expression slots that are ALSO a callee-table key, by expression
+    /// kind. This is the measurement the type-table slice deferred: a kind with
+    /// a non-zero count here has a callee entry built for an expression with no
+    /// inferred type, so the entry names the oracle that answered instead.
+    pub untyped_as_callee_key: BTreeMap<&'static str, usize>,
 }
 
 impl ConcreteBodies {
@@ -133,8 +266,31 @@ impl ConcreteBodies {
             untyped_bindings: self.untyped_bindings,
             expr_slots: self.expr_slots,
             binding_slots: self.binding_slots,
+            sites_examined: self.sites_examined,
+            invalid_boundary_calls: self.invalid_boundary_calls.len(),
+            unknown_rock_callees: self.unknown_rock_callees.len(),
+            untyped_as_callee_key: self.untyped_as_callee_key.clone(),
             ..Default::default()
         };
+        for b in self.bodies.values() {
+            c.direct_calls += b.direct_calls.len();
+            c.fn_values += b.fn_values.len();
+            c.synthesized_calls += b.synthesized_calls.len();
+            for op in b.iterator_ops.values() {
+                *c.iterator_ops.entry(op.kind.label()).or_insert(0) += 1;
+            }
+            for (_, callee) in b.callees() {
+                match callee {
+                    Callee::Rock(_) => c.rock_callees += 1,
+                    Callee::Boundary(_) => c.boundary_callees += 1,
+                }
+            }
+        }
+        for h in &self.callee_holes {
+            let k = c.callee_holes.entry(h.reason).or_default();
+            k.0 += 1;
+            k.1 += usize::from(is_spanless(&h.span));
+        }
         for (_, f) in &self.free_types {
             *c.free_by_reason.entry(f.reason.bucket()).or_insert(0) += 1;
             *c.free_by_slot.entry(f.slot.kind()).or_insert(0) += 1;
@@ -160,6 +316,45 @@ impl ConcreteBodies {
                     u.kind,
                     u.span.file,
                     u.span.line_range.0 + 1
+                )
+            })
+            .collect()
+    }
+
+    /// Callee holes as `<instance> <op> <reason> at <file>:<line>`.
+    pub fn render_callee_holes(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
+        self.callee_holes
+            .iter()
+            .map(|h| {
+                format!(
+                    "{} {} {} at {}:{}",
+                    g.identity(ws, &h.instance),
+                    h.site.op.name(),
+                    h.reason,
+                    h.span.file,
+                    h.span.line_range.0 + 1
+                )
+            })
+            .collect()
+    }
+
+    /// Invalid-on-target boundary calls, as the located rejections they are.
+    pub fn render_invalid_boundary_calls(
+        &self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+    ) -> Vec<String> {
+        self.invalid_boundary_calls
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} {} calls `{}` ({}), which no body serves on this target, at {}:{}",
+                    g.identity(ws, &c.instance),
+                    c.site.op.name(),
+                    c.boundary.0,
+                    c.class.name(),
+                    c.span.file,
+                    c.span.line_range.0 + 1
                 )
             })
             .collect()
@@ -200,11 +395,37 @@ pub struct BodyCensus {
     pub free_by_slot: BTreeMap<&'static str, usize>,
     pub spanless: usize,
     pub gaps: BTreeMap<&'static str, usize>,
+    /// Sites the walk recorded for the instances that got a body. Every callee
+    /// count below is measured against this.
+    pub sites_examined: usize,
+    pub direct_calls: usize,
+    pub fn_values: usize,
+    pub synthesized_calls: usize,
+    pub iterator_ops: BTreeMap<&'static str, usize>,
+    pub rock_callees: usize,
+    pub boundary_callees: usize,
+    /// Reason -> (holes, of those with no span).
+    pub callee_holes: BTreeMap<&'static str, (usize, usize)>,
+    pub invalid_boundary_calls: usize,
+    pub unknown_rock_callees: usize,
+    pub untyped_as_callee_key: BTreeMap<&'static str, usize>,
 }
 
 impl BodyCensus {
     pub fn free_total(&self) -> usize {
         self.free_by_reason.values().sum()
+    }
+
+    /// Entries across all four callee tables.
+    pub fn callee_entries(&self) -> usize {
+        self.direct_calls
+            + self.fn_values
+            + self.synthesized_calls
+            + self.iterator_ops.values().sum::<usize>()
+    }
+
+    pub fn callee_hole_total(&self) -> usize {
+        self.callee_holes.values().map(|(n, _)| n).sum()
     }
 }
 
@@ -324,6 +545,98 @@ pub fn convert_body(
     c
 }
 
+/// One instance's callee tables, from the sites the walk recorded for it.
+///
+/// The classification is [`boundary_class_for`] -- the graph's own, and the same
+/// one `closure` asks -- so "is this callee a boundary" cannot be answered two
+/// ways. It runs here rather than in the walk because `erased_entries` is
+/// complete only after the walk, and it is the FULL classification, of which the
+/// walk's expansion test is a subset.
+fn callee_tables(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inst: &Instance,
+    body: &mut ConcreteBody,
+    out: &mut ConcreteBodies,
+) {
+    let Some(sites) = g.call_sites.get(inst) else { return };
+    for (site, rec) in sites {
+        out.sites_examined += 1;
+        let target = match &rec.outcome {
+            SiteOutcome::Resolved(t) => t,
+            SiteOutcome::Failed(reason) => {
+                out.callee_holes.push(CalleeHole {
+                    instance: inst.clone(),
+                    site: site.clone(),
+                    reason,
+                    span: rec.span,
+                });
+                continue;
+            }
+        };
+        let f = &ws.module(target.func.module).functions[target.func.func];
+        let callee = match boundary_class_for(f, &g.erased_entries) {
+            Some(class) => {
+                let symbol = mangle_fn(ws, f);
+                // A boundary the target cannot serve is plan S 10's `Invalid
+                // boundary`: a located rejection, never an entry.
+                if g.boundary_invalid_on_target(f) {
+                    out.invalid_boundary_calls.push(InvalidBoundaryCall {
+                        instance: inst.clone(),
+                        site: site.clone(),
+                        boundary: BoundaryId(symbol),
+                        class,
+                        span: rec.span,
+                    });
+                    continue;
+                }
+                Callee::Boundary(BoundaryId(symbol))
+            }
+            None => {
+                if !g.instances.contains(target) {
+                    out.unknown_rock_callees.push((inst.clone(), site.clone()));
+                }
+                Callee::Rock(target.clone())
+            }
+        };
+        match &site.op {
+            SiteOp::DirectCall => {
+                body.direct_calls.insert(site.expr, callee);
+            }
+            SiteOp::FnValue => {
+                body.fn_values.insert(site.expr, callee);
+            }
+            SiteOp::Synthesized(_) => {
+                body.synthesized_calls.insert(site.clone(), callee);
+            }
+            SiteOp::ForIter => {
+                body.iterator_ops.insert(
+                    site.clone(),
+                    ConcreteIteratorOp { kind: IteratorOpKind::Iter, callee },
+                );
+            }
+            SiteOp::ForNext(_) => {
+                body.iterator_ops.insert(
+                    site.clone(),
+                    ConcreteIteratorOp { kind: IteratorOpKind::Next, callee },
+                );
+            }
+            SiteOp::ImplicitIter => {
+                body.iterator_ops.insert(
+                    site.clone(),
+                    ConcreteIteratorOp { kind: IteratorOpKind::ImplicitIter, callee },
+                );
+            }
+            SiteOp::BoundNext(_) => {
+                body.iterator_ops.insert(
+                    site.clone(),
+                    ConcreteIteratorOp { kind: IteratorOpKind::BoundNext, callee },
+                );
+            }
+        }
+    }
+}
+
 /// Build a [`ConcreteBody`] for every instance the walk expanded.
 ///
 /// Takes the graph mutably because the tables intern into ITS arena: a second
@@ -356,23 +669,40 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
         out.binding_examined += c.binding_examined;
         out.generics_bound += c.generics_bound;
         out.generic_bodies += usize::from(!subst.is_empty());
-        for u in c.untyped_exprs {
-            out.untyped.push((inst.clone(), u));
-        }
+        let untyped = c.untyped_exprs;
         out.untyped_bindings += c.untyped_bindings.len();
         out.expr_slots += body.expr_arena.len();
         out.binding_slots += body.binding_arena.len();
         for f in c.failures {
             out.free_types.push((inst.clone(), f));
         }
-        out.bodies.insert(
-            inst.clone(),
-            ConcreteBody {
-                instance: inst,
-                expr_types: c.expr_types,
-                binding_types: c.binding_types,
-            },
-        );
+        let mut concrete = ConcreteBody {
+            instance: inst.clone(),
+            expr_types: c.expr_types,
+            binding_types: c.binding_types,
+            direct_calls: BTreeMap::new(),
+            fn_values: BTreeMap::new(),
+            iterator_ops: BTreeMap::new(),
+            synthesized_calls: BTreeMap::new(),
+        };
+        callee_tables(ws, g, &inst, &mut concrete, &mut out);
+
+        // The question the type-table slice deferred: does a callee entry need
+        // an expression type for a slot inference recorded none for? Answered by
+        // intersecting the two populations rather than by reasoning about the
+        // kinds -- a kind absent here needs no type because no table asks about
+        // it, and a kind present here is answered by the site's own oracle.
+        let keys: BTreeSet<Idx<Expr>> =
+            concrete.callees().into_iter().map(|(s, _)| s.expr).collect();
+        for u in &untyped {
+            if keys.contains(&u.expr) {
+                *out.untyped_as_callee_key.entry(u.kind).or_insert(0) += 1;
+            }
+        }
+        for u in untyped {
+            out.untyped.push((inst.clone(), u));
+        }
+        out.bodies.insert(inst, concrete);
     }
     out
 }

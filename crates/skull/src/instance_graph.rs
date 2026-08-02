@@ -194,6 +194,98 @@ pub struct Edge {
     pub span: Span,
 }
 
+/// WHICH operation of a body a callee was resolved for.
+///
+/// An [`Idx<Expr>`] alone is not a site identity: one `for` header carries both
+/// an `iter` and a `next` witness, one bounded call carries a whole conformance
+/// tree, and one column-Map index can emit two runtime entries. Each of those is
+/// a separate callee obligation at the same expression, so the operation is part
+/// of the key.
+///
+/// This exists so `ConcreteBody` can read the callee the WALK resolved instead
+/// of resolving one again. A second resolver could disagree with the graph, and
+/// correlating the two by span could not even detect that -- several of these
+/// share one span by construction.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum SiteOp {
+    /// A call expression bone resolved (`resolved_overload_calls`).
+    DirectCall,
+    /// An `Expr::Global` naming a function, taken as a value.
+    FnValue,
+    /// The `for` head's `iter()` witness.
+    ForIter,
+    /// The `for` protocol's `next` witness, and the conformance path beneath it
+    /// (`BoundNext::sub`). Empty path is the outermost witness.
+    ForNext(Vec<usize>),
+    /// An iterable argument coerced through `iter()` at an `Iterator`-bounded
+    /// parameter.
+    ImplicitIter,
+    /// A witness from a bounded CALL's conformance tree, by path. Kept apart
+    /// from [`Self::ForNext`] because a `for` over a bounded call has both, at
+    /// the same expression and with the same paths.
+    BoundNext(Vec<usize>),
+    /// A call lowering synthesizes, named EXACTLY -- see
+    /// [`COMPILER_GENERATED_TRIGGERS`].
+    Synthesized(&'static str),
+}
+
+impl SiteOp {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::DirectCall => "direct-call",
+            Self::FnValue => "fn-value",
+            Self::ForIter => "for-iter",
+            Self::ForNext(_) => "for-next",
+            Self::ImplicitIter => "implicit-iter",
+            Self::BoundNext(_) => "bound-next",
+            Self::Synthesized(_) => "synthesized",
+        }
+    }
+}
+
+/// One callee obligation of one body: an expression plus the operation at it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Site {
+    pub expr: Idx<bone_semantic::hir::Expr>,
+    pub op: SiteOp,
+}
+
+/// What the walk resolved a site to. `Failed` is kept in the SAME table as a
+/// success rather than only in [`InstanceGraph::unresolved`]: a consumer asking
+/// "what does this operation call" must be able to see that the walk tried and
+/// could not, otherwise an absent key means both "no such operation" and "the
+/// operation has no callee".
+#[derive(Clone, Debug)]
+pub enum SiteOutcome {
+    Resolved(Instance),
+    Failed(&'static str),
+}
+
+#[derive(Clone, Debug)]
+pub struct SiteRecord {
+    pub outcome: SiteOutcome,
+    pub span: Span,
+}
+
+/// Which of the two bounded-witness roots a conformance tree hangs under.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BoundRoot {
+    For,
+    Call,
+}
+
+impl BoundRoot {
+    fn site(self, expr: Idx<bone_semantic::hir::Expr>, path: Vec<usize>) -> Site {
+        Site {
+            expr,
+            op: match self {
+                Self::For => SiteOp::ForNext(path),
+                Self::Call => SiteOp::BoundNext(path),
+            },
+        }
+    }
+}
+
 /// A construction the concrete-program model REFUSES, as opposed to one it
 /// merely could not complete yet ([`Unresolved`]).
 ///
@@ -294,6 +386,10 @@ pub struct InstanceGraph {
     /// synthesized-call population. Without it a zero synthesized-edge count
     /// cannot be told apart from a walk that asked nothing.
     pub synthesized_examined: usize,
+    /// Synthesized sites whose exact entry could NOT be decided, so more than
+    /// one name was kept. The residual over-approximation, as a number rather
+    /// than a paragraph.
+    pub synthesized_approximated: usize,
     /// Each instance's substitution: callee `VarId` -> its concrete type. What
     /// a `ConcreteBody`'s type tables are built under (plan S 9). Kept because
     /// the walk computed it and then dropped it, leaving nothing able to state
@@ -310,6 +406,21 @@ pub struct InstanceGraph {
     /// instance was reached from two callers, which is what the agreement
     /// property is about.
     pub subst_compared: BTreeMap<Instance, usize>,
+    /// Per instance, the callee EACH of its source operations resolved to.
+    /// `ConcreteBody`'s callee tables are this record projected per table; the
+    /// walk is the one resolver (plan S 9).
+    ///
+    /// Keyed only for instances -- an always-emitted body has no instance for a
+    /// site to belong to, and its failures are already recorded per site in
+    /// [`RootHole::always_emitted_sites`].
+    pub call_sites: BTreeMap<Instance, BTreeMap<Site, SiteRecord>>,
+    /// Sites recorded more than once for one instance. Must be empty: a body is
+    /// walked exactly once per instance, so a repeat means two operations
+    /// collapsed onto one key and one of them is invisible.
+    pub duplicate_sites: Vec<(Instance, Site)>,
+    /// Every site the walk ATTEMPTED, including the ones with no `from`
+    /// instance to record against. The denominator for `call_sites`.
+    pub sites_attempted: usize,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
@@ -344,18 +455,11 @@ pub enum StorageCond {
 /// receiver takes a different route entirely, so `table_len` (the boxed
 /// `__vec_data_capacity` path) is not an edge this arm produces.
 ///
-/// Two residual approximations, both named, both measured against the emitted
-/// Lua per project rather than asserted:
-///
-/// - `__vec_data_sort` picks between `__rock_col_sort` and
-///   `__rock_col_sort_leaves` on `is_nobox_struct`, which reads the lowering
-///   context's `values_first_class` flag rather than the workspace, so both
-///   names are kept.
-/// - A Map INDEX site emits exactly one of `__map_col_slot` /
-///   `__map_col_slot_checked` / `__map_col_free` depending on whether it reads,
-///   writes, or writes null; all three are kept. Cross-checked against emitted
-///   Lua call sites: mag and match3 are now EXACT, bitgun over-reports these two
-///   names and nothing else.
+/// A trigger with more than one name here is one whose arm SELECTS between
+/// them; the selection is made per site, not kept as a set. `__vec_data_sort`
+/// splits on the element ([`sort_entry`]) and a Map index on the index's
+/// position and stored value ([`map_index_entries`]), so the names below are the
+/// alternatives a trigger can produce, never the ones a site does.
 ///
 /// Calls made from inside an `inline(lua)` body are invisible here by design --
 /// the body is opaque (`BoundaryClass::InlineBody`). `__rock_vec_column_elements`
@@ -592,6 +696,37 @@ impl InstanceGraph {
             .filter(|i| !self.substitutions.contains_key(*i))
             .map(|i| self.identity(ws, i))
             .collect()
+    }
+
+    /// Record what one source operation resolved to.
+    ///
+    /// Every recorder funnels through here, so a site cannot be recorded in one
+    /// place and resolved in another. A repeat key is kept as a finding rather
+    /// than overwritten: silently replacing it would make the second operation
+    /// vanish from the tables while the counts still looked total.
+    fn record_site(&mut self, from: Option<&Instance>, site: Site, outcome: SiteOutcome, span: Span) {
+        self.sites_attempted += 1;
+        let Some(from) = from else { return };
+        let prev = self
+            .call_sites
+            .entry(from.clone())
+            .or_default()
+            .insert(site.clone(), SiteRecord { outcome, span });
+        if prev.is_some() {
+            self.duplicate_sites.push((from.clone(), site));
+        }
+    }
+
+    /// Whether no body serves this DECLARATION on the graph's target -- plan
+    /// S 10's `Invalid boundary`.
+    ///
+    /// Asked of the declaration a site actually resolved to, never of
+    /// [`Self::boundaries`], which is keyed by mangled SYMBOL: two `@nomangle`
+    /// backend siblings share one key there, so one overwrites the other and
+    /// the surviving entry answers for both. Measured: reading that map made
+    /// every `__nb_checked_index` call on Lua an invalid boundary.
+    pub fn boundary_invalid_on_target(&self, f: &Function) -> bool {
+        !serves(f.backend, self.target)
     }
 
     /// A generic function production emits regardless of any call, that no call
@@ -960,7 +1095,11 @@ pub fn build_for_target(
         inline_body_deps: BTreeMap::new(),
         storage_failures: Vec::new(),
         synthesized_examined: 0,
+        synthesized_approximated: 0,
         always_emitted_seeds: 0,
+        call_sites: BTreeMap::new(),
+        duplicate_sites: Vec::new(),
+        sites_attempted: 0,
         substitutions: BTreeMap::new(),
         subst_disagreements: Vec::new(),
         subst_comparisons: 0,
@@ -1071,7 +1210,10 @@ fn walk_body_edges(
         let bindings = inf.call_generic_bindings.get(&e);
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
-        record_call(g, work, ws, inf, from, subst, depth, callee, bindings, kind, span);
+        record_call(
+            g, work, ws, inf, from, subst, depth, callee, bindings, kind, span,
+            Site { expr: e, op: SiteOp::DirectCall },
+        );
     }
 
     if let Some(body) = body {
@@ -1081,8 +1223,15 @@ fn walk_body_edges(
             if cf.generics.is_empty() {
                 record_call(
                     g, work, ws, inf, from, subst, depth, callee, None, EdgeKind::FnValue, span,
+                    Site { expr: e, op: SiteOp::FnValue },
                 );
             } else if let Some(from) = from {
+                g.record_site(
+                    Some(from),
+                    Site { expr: e, op: SiteOp::FnValue },
+                    SiteOutcome::Failed("generic-fn-value"),
+                    span,
+                );
                 g.rejections.push(Rejection {
                     kind: RejectionKind::GenericFnValue,
                     at: from.clone(),
@@ -1106,6 +1255,7 @@ fn walk_body_edges(
         let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
         let sites = compiler_generated_sites(
             ws, inf, body, subst, target, &mut g.synthesized_examined, &mut failures,
+            &mut g.synthesized_approximated,
         );
         for (e, reason) in failures {
             g.storage_failures.push(reason.clone());
@@ -1130,15 +1280,22 @@ fn walk_body_edges(
         }
         for GeneratedSite { expr: e, name } in sites {
             let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+            let site = Site { expr: e, op: SiteOp::Synthesized(name) };
             match stdlib_entry(ws, name, target) {
                 Some(callee) => {
                     record_call(
                         g, work, ws, inf, from, subst, depth, callee, None,
-                        EdgeKind::CompilerGenerated, span,
+                        EdgeKind::CompilerGenerated, span, site,
                     );
                     g.erased_entries.insert(name.to_string());
                 }
                 None => {
+                    g.record_site(
+                        from,
+                        site,
+                        SiteOutcome::Failed("compiler-generated-entry-missing-for-target"),
+                        span,
+                    );
                     if let Some(from) = from {
                         g.unresolved.push(Unresolved {
                             from: from.clone(),
@@ -1159,6 +1316,7 @@ fn walk_body_edges(
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         record_witness(
             g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter, target,
+            Site { expr: e, op: SiteOp::ImplicitIter },
         );
     }
 
@@ -1167,7 +1325,9 @@ fn walk_body_edges(
     trees.sort_by_key(|(e, _)| *e);
     for (e, tree) in trees {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-        walk_bound_tree(g, work, ws, inf, from, subst, depth, tree, span, target);
+        walk_bound_tree(
+            g, work, ws, inf, from, subst, depth, tree, span, target, e, BoundRoot::Call, &[],
+        );
     }
 
     let mut iters: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::ForIterInfo)> =
@@ -1178,12 +1338,12 @@ fn walk_body_edges(
         if let Some(witness) = &info.iter {
             record_witness(
                 g, work, ws, inf, from, subst, depth, witness, span,
-                EdgeKind::IteratorIter, target,
+                EdgeKind::IteratorIter, target, Site { expr: e, op: SiteOp::ForIter },
             );
         }
         record_bound_next(
             g, work, ws, inf, from, subst, depth, &info.next, span,
-            EdgeKind::IteratorNext, target,
+            EdgeKind::IteratorNext, target, e, BoundRoot::For, &[],
         );
     }
 }
@@ -1201,6 +1361,7 @@ fn record_call(
     bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
     kind: EdgeKind,
     span: Span,
+    site: Site,
 ) {
     if from.is_none() {
         g.always_emitted_seeds += 1;
@@ -1219,6 +1380,7 @@ fn record_call(
                 AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
                 span,
             );
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
             return;
         }
         Err(fail) if from.is_none() => {
@@ -1227,29 +1389,31 @@ fn record_call(
                 AlwaysEmittedOutcome::Unresolved(fail.reason()),
                 span,
             );
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
             return;
         }
         Err(Fail::Unconstrained(_)) => {
-            let from = from.unwrap();
             let name = mangle_fn(ws, cf);
             g.rejections.push(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
-                at: from.clone(),
+                at: from.expect("guarded above").clone(),
                 span,
                 message: format!(
                     "`{name}` is called with a type argument no constraint reaches, so there is \
                      no concrete type to instantiate it at"
                 ),
             });
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
             return;
         }
         Err(fail) => {
             g.unresolved.push(Unresolved {
-                from: from.unwrap().clone(),
+                from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
                 span,
             });
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
             return;
         }
     };
@@ -1257,6 +1421,7 @@ fn record_call(
     if let Some(from) = from {
         g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
     }
+    g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
     g.reach(work, to, callee_subst, depth + 1);
 }
 
@@ -1347,6 +1512,7 @@ fn record_witness(
     span: Span,
     kind: EdgeKind,
     target: bone_semantic::hir::FnBackend,
+    site: Site,
 ) {
     if from.is_none() {
         g.always_emitted_seeds += 1;
@@ -1361,6 +1527,7 @@ fn record_witness(
             if let Some(from) = from {
                 g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
             }
+            g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
             g.reach(work, to, callee_subst, depth + 1);
         }
         // See `record_call`: the classification survives the absence of a
@@ -1371,6 +1538,7 @@ fn record_witness(
                 AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
                 span,
             );
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
         }
         Err(fail) if from.is_none() => {
             g.record_always_emitted_hole(
@@ -1378,25 +1546,28 @@ fn record_witness(
                 AlwaysEmittedOutcome::Unresolved(fail.reason()),
                 span,
             );
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
-                at: from.unwrap().clone(),
+                at: from.expect("guarded above").clone(),
                 span,
                 message: format!(
                     "the `iter` witness `{}` binds a type argument no constraint reaches",
                     mangle_fn(ws, cf)
                 ),
             });
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
         }
         Err(fail) => {
             g.unresolved.push(Unresolved {
-                from: from.unwrap().clone(),
+                from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
                 span,
             });
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
     }
 }
@@ -1419,8 +1590,12 @@ fn record_bound_next(
     span: Span,
     kind: EdgeKind,
     target: bone_semantic::hir::FnBackend,
+    expr: Idx<bone_semantic::hir::Expr>,
+    root: BoundRoot,
+    path: &[usize],
 ) {
     let BoundNext::Concrete { func: (m, f), next_generics, sub } = next else { return };
+    let site = root.site(expr, path.to_vec());
     let rep = FuncRef { module: *m, func: *f };
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = variant_for(ws, rep, target);
@@ -1434,6 +1609,7 @@ fn record_bound_next(
             if let Some(from) = from {
                 g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
             }
+            g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
             g.reach(work, to, callee_subst, depth + 1);
         }
         // See `record_call`: the classification survives the absence of a
@@ -1444,6 +1620,7 @@ fn record_bound_next(
                 AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
                 span,
             );
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
         }
         Err(fail) if from.is_none() => {
             g.record_always_emitted_hole(
@@ -1451,28 +1628,31 @@ fn record_bound_next(
                 AlwaysEmittedOutcome::Unresolved(fail.reason()),
                 span,
             );
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
-                at: from.unwrap().clone(),
+                at: from.expect("guarded above").clone(),
                 span,
                 message: format!(
                     "the `next` witness `{}` binds a type argument no constraint reaches",
                     mangle_fn(ws, cf)
                 ),
             });
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
         }
         Err(fail) => {
             g.unresolved.push(Unresolved {
-                from: from.unwrap().clone(),
+                from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
                 span,
             });
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
     }
-    walk_bound_tree(g, work, ws, inf, from, subst, depth, sub, span, target);
+    walk_bound_tree(g, work, ws, inf, from, subst, depth, sub, span, target, expr, root, path);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1487,13 +1667,20 @@ fn walk_bound_tree(
     tree: &bone_semantic::prelude::BoundTree,
     span: Span,
     target: bone_semantic::hir::FnBackend,
+    expr: Idx<bone_semantic::hir::Expr>,
+    root: BoundRoot,
+    path: &[usize],
 ) {
     let mut keys: Vec<&usize> = tree.next.keys().collect();
     keys.sort();
     for k in keys {
+        // The conformance PATH, not the parameter index alone: two witnesses at
+        // different depths of one tree can carry the same key.
+        let mut child = path.to_vec();
+        child.push(*k);
         record_bound_next(
             g, work, ws, inf, from, subst, depth, &tree.next[k], span,
-            EdgeKind::BoundNextWitness, target,
+            EdgeKind::BoundNextWitness, target, expr, root, &child,
         );
     }
 }
@@ -1692,12 +1879,53 @@ struct GeneratedSite {
 /// than a bool. A bool made every conversion failure read as "boxed", which is
 /// only the right answer for ONE of them.
 enum CondVerdict {
-    Holds,
+    /// The column element the receiver stores, when there is one.
+    /// [`StorageCond::Always`] holds without naming an element.
+    Holds(Option<skull_mir::mir::ColumnElem>),
     /// The receiver is not column-stored -- an ordinary negative.
     DoesNot,
     /// The receiver's type could not be made concrete. In an INSTANTIATED body
     /// this is an invariant violation, not a storage answer.
     Failed(MonoTyReason),
+}
+
+/// Which of `__vec_data_sort`'s two column arms a site emits
+/// (`skull-mir/src/lower/storage.rs`, the `("__vec_data_sort", ..)` arm): a
+/// `nobox` element applies the key to the LEAVES, everything else to the
+/// materialized element.
+///
+/// Lowering asks `is_nobox_struct`, which is `is_nobox_nominal` plus the
+/// `values_first_class` gate. That flag is set only by the GLSL emitter, and
+/// GLSL is not an `FnBackend` this walk runs for, so the two agree on every
+/// target an `InstanceGraph` is built for -- and on a target where they would
+/// not, an `is_nobox_nominal` answer is the wrong one to bake in here.
+fn sort_entry(ws: &Workspace, elem: &skull_mir::mir::ColumnElem) -> &'static str {
+    if skull_mir::lower::is_nobox_nominal(ws, elem.name) {
+        "__rock_col_sort_leaves"
+    } else {
+        "__rock_col_sort"
+    }
+}
+
+/// Which runtime entries an INDEX on a column-stored `Map` emits.
+///
+/// Three arms in `storage.rs`, and the HIR says which one is taken:
+/// `m[k] = v` is `map_column_store` (`__map_col_slot`, plus `__map_col_free`
+/// on the absent arm when the stored value can be null); every other position
+/// -- an rvalue read, or the place base of `m[k].f = v` -- resolves the key
+/// through `__map_col_slot_checked`.
+///
+/// `nullable` is `None` when the stored value's type did not convert. Both
+/// names are kept then and the site is counted as approximated: dropping
+/// `__map_col_free` would drop a symbol emission requires, which is the
+/// direction that breaks a build.
+fn map_index_entries(store: Option<Option<bool>>) -> (Vec<&'static str>, bool) {
+    match store {
+        None => (vec!["__map_col_slot_checked"], false),
+        Some(Some(true)) => (vec!["__map_col_slot", "__map_col_free"], false),
+        Some(Some(false)) => (vec!["__map_col_slot"], false),
+        Some(None) => (vec!["__map_col_slot", "__map_col_free"], true),
+    }
 }
 
 /// Source operations whose lowering can SYNTHESIZE a `stdlib_funcref` /
@@ -1711,13 +1939,14 @@ fn compiler_generated_sites(
     target: bone_semantic::hir::FnBackend,
     examined: &mut usize,
     failures: &mut Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)>,
+    approximated: &mut usize,
 ) -> Vec<GeneratedSite> {
     use bone_semantic::hir::{Callee, Expr as E};
     // The receiver's CONCRETE type under this instance's substitution, which is
     // what the storage condition is asked about.
     let verdict = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> CondVerdict {
         if cond == StorageCond::Always {
-            return CondVerdict::Holds;
+            return CondVerdict::Holds(None);
         }
         let Some(ty) = inf.expr_types.get(recv) else {
             return CondVerdict::Failed(MonoTyReason::NoNode);
@@ -1726,16 +1955,15 @@ fn compiler_generated_sites(
             Ok(m) => m,
             Err(r) => return CondVerdict::Failed(r),
         };
-        let holds = match cond {
-            StorageCond::VecColumn => {
-                skull_mir::lower::vec_column_elem_mono(ws, target, &mono).is_some()
-            }
-            StorageCond::MapColumn => {
-                skull_mir::lower::map_column_value_mono(ws, target, &mono).is_some()
-            }
-            StorageCond::Always => true,
+        let elem = match cond {
+            StorageCond::VecColumn => skull_mir::lower::vec_column_elem_mono(ws, target, &mono),
+            StorageCond::MapColumn => skull_mir::lower::map_column_value_mono(ws, target, &mono),
+            StorageCond::Always => return CondVerdict::Holds(None),
         };
-        if holds { CondVerdict::Holds } else { CondVerdict::DoesNot }
+        match elem {
+            Some(elem) => CondVerdict::Holds(Some(elem)),
+            None => CondVerdict::DoesNot,
+        }
     };
     // EVERY failure is reported, including `UnboundGeneric`. The walk only ever
     // enters instantiated bodies -- a shared generic root goes to
@@ -1743,22 +1971,40 @@ fn compiler_generated_sites(
     // generic here means the substitution is incomplete, not that the element is
     // legitimately opaque. Reading any of them as "boxed" would let a zero edge
     // count mean "the sites were discarded".
-    let mut settle = |recv, cond, e: Idx<bone_semantic::hir::Expr>| -> bool {
+    let mut settle = |recv, cond, e: Idx<bone_semantic::hir::Expr>| -> Option<Option<_>> {
         *examined += 1;
         match verdict(recv, cond) {
-            CondVerdict::Holds => true,
-            CondVerdict::DoesNot => false,
+            CondVerdict::Holds(elem) => Some(elem),
+            CondVerdict::DoesNot => None,
             CondVerdict::Failed(r) => {
                 failures.push((e, r));
-                false
+                None
             }
         }
     };
+    // `m[k] = v` is the one index position that lowers through
+    // `map_column_store`; the value expression is what decides whether the
+    // absent arm (`__map_col_free`) exists at all.
+    let mut stored_through: FxHashMap<Idx<bone_semantic::hir::Expr>, Idx<bone_semantic::hir::Expr>> =
+        FxHashMap::default();
+    for (_, expr) in body.expr_arena.iter() {
+        if let E::Assign { target, value } = expr {
+            stored_through.insert(*target, *value);
+        }
+    }
+    // Whether the stored value can be null. `None` means its type did not
+    // convert, which keeps both arms -- see [`map_index_entries`].
+    let stored_nullable = |value: Idx<bone_semantic::hir::Expr>| -> Option<bool> {
+        let ty = inf.expr_types.get(value)?;
+        let mono = skull_mir::monoty::convert(ws, inf, *ty, subst).ok()?;
+        Some(mono.peel_nullable().1)
+    };
+
     let mut out: Vec<GeneratedSite> = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         match expr {
             E::Call { callee: Callee::Unresolved { name, .. }, args } => {
-                let Some((_, cond, names)) =
+                let Some((trigger, cond, names)) =
                     COMPILER_GENERATED_TRIGGERS.iter().find(|(t, _, _)| *t == name.as_str())
                 else {
                     continue;
@@ -1766,7 +2012,11 @@ fn compiler_generated_sites(
                 // The receiver is the UFCS first argument; an arm with no
                 // receiver cannot be the column form.
                 let Some(recv) = args.clone().next() else { continue };
-                if !settle(recv, *cond, e) {
+                let Some(elem) = settle(recv, *cond, e) else { continue };
+                // The one trigger with alternatives: the element decides which.
+                if *trigger == "__vec_data_sort" {
+                    let Some(elem) = elem else { continue };
+                    out.push(GeneratedSite { expr: e, name: sort_entry(ws, &elem) });
                     continue;
                 }
                 out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
@@ -1780,12 +2030,20 @@ fn compiler_generated_sites(
                 // `None` panics rather than degrading, which is how this was
                 // caught immediately.
                 let r = ws.render(Some(inf), *ty);
-                let Some((_, cond, names)) =
+                let Some((ctor, cond, names)) =
                     INDEX_TRIGGERED.iter().find(|(ctor, _, _)| r.starts_with(*ctor))
                 else {
                     continue;
                 };
-                if !settle(*base, *cond, e) {
+                if settle(*base, *cond, e).is_none() {
+                    continue;
+                }
+                if *ctor == "Map" {
+                    let (names, approx) = map_index_entries(
+                        stored_through.get(&e).map(|v| stored_nullable(*v)),
+                    );
+                    *approximated += usize::from(approx);
+                    out.extend(names.into_iter().map(|n| GeneratedSite { expr: e, name: n }));
                     continue;
                 }
                 out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));

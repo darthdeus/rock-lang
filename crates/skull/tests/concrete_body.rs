@@ -11,8 +11,8 @@ use std::sync::LazyLock;
 use bone_semantic::hir::{BindingInfo, Expr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx};
-use skull::concrete_body::{self, ConcreteBodies, ConcreteBody, Slot};
-use skull::instance_graph::{self, InstanceGraph};
+use skull::concrete_body::{self, Callee, ConcreteBodies, ConcreteBody, IteratorOpKind, Slot};
+use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
 use skull_mir::monoty::{MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
@@ -369,4 +369,427 @@ fn main() { let a = body([1, 2]) }
         "almost nothing in `body` was typed, so the pinned kinds are not what is special"
     );
     assert_eq!(bodies.free_types.len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Callee tables (plan S 9): `direct_calls`, `fn_values`, `iterator_ops`,
+// `synthesized_calls`, and the `Callee::{Rock, Boundary}` split.
+//
+// The property is not "a callee was found". It is that EVERY operation the walk
+// resolved for an instance becomes exactly one of an entry, a located hole, or a
+// located invalid-boundary rejection -- and that the entries name the walk's own
+// instances, so no consumer downstream needs a substitution to read them.
+// ---------------------------------------------------------------------------
+
+/// A fixture exercising all four tables at once: direct and generic calls, a
+/// function value, a `for` protocol, a bounded iterator chain, an operator
+/// boundary and a synthesized column-Map entry.
+const RICH: &str = r#"
+value P { x: float, y: float }
+fn ident<T>(x: T) -> T { return x }
+fn wrap<T>(x: T) -> T { return ident(x) }
+fn taker(f: fn(int) -> int) -> int { return f(1) }
+fn plain(x: int) -> int { return x + 1 }
+fn main() {
+    let a = wrap(1)
+    let b = wrap("s")
+    let t = taker(plain)
+    let v: [int] = [1, 2, 3]
+    let s = 0
+    for x in v { s = s + x }
+    let n = v.iter().map(_ * 2).sum()
+    let m: Map<string, P> = map_new()
+    m["a"] = P { x: 1.0, y: 2.0 }
+    let r = m["a"]
+}
+"#;
+
+/// Every recorded site is accounted for EXACTLY once, and the accounting is
+/// stated as an identity rather than as four independent non-zero counts: a
+/// site that silently reached no table would leave the totals short while every
+/// individual count still looked healthy.
+#[test]
+fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
+    let (_ws, g, bodies) = bodies_of(RICH);
+    let c = bodies.census();
+    assert!(c.sites_examined > 0, "no callee sites were examined at all: {c:?}");
+    assert_eq!(
+        c.callee_entries() + c.callee_hole_total() + c.invalid_boundary_calls,
+        c.sites_examined,
+        "sites went missing between the walk and the tables: {c:?}"
+    );
+    // Cross-structure, so it cannot be satisfied by both sides moving
+    // together: the walk pushes one EDGE per resolved callee, and the sites are
+    // a separate table written by the same recorders. A recorder that stopped
+    // recording sites would keep the identity above (its denominator is the
+    // sites) and break this one.
+    let resolved = g
+        .call_sites
+        .values()
+        .flat_map(|m| m.values())
+        .filter(|r| matches!(r.outcome, SiteOutcome::Resolved(_)))
+        .count();
+    assert_eq!(
+        resolved,
+        g.edges.len(),
+        "the walk recorded {} edges but {resolved} resolved sites",
+        g.edges.len()
+    );
+    assert!(bodies.gaps.is_empty(), "an expanded instance got no body: {:?}", c.gaps);
+    // Each table has a population, so the identity above is not satisfied by
+    // one table carrying everything.
+    assert!(c.direct_calls > 0, "no direct call was tabulated: {c:?}");
+    assert!(c.fn_values > 0, "no function value was tabulated: {c:?}");
+    assert!(c.synthesized_calls > 0, "no synthesized call was tabulated: {c:?}");
+    for kind in ["iter", "next", "bound-next"] {
+        assert!(
+            c.iterator_ops.contains_key(kind),
+            "no `{kind}` iterator op was tabulated: {:?}",
+            c.iterator_ops
+        );
+    }
+    // Both arms of the split are populated: a fixture that reached only Rock
+    // bodies could not tell `Callee::Boundary` from a dead variant.
+    assert!(c.rock_callees > 0, "no Rock callee: {c:?}");
+    assert!(c.boundary_callees > 0, "no boundary callee: {c:?}");
+    assert_eq!(
+        c.unknown_rock_callees, 0,
+        "a Rock callee names an instance the graph does not have: {:?}",
+        bodies.unknown_rock_callees
+    );
+    assert!(
+        g.duplicate_sites.is_empty(),
+        "two operations collapsed onto one site key: {:?}",
+        g.duplicate_sites
+    );
+    // Every hole is located -- a hole with no span cannot become a compile
+    // error at the Stage-3 cutover.
+    for h in &bodies.callee_holes {
+        assert!(
+            !instance_graph::is_spanless(&h.span),
+            "a callee hole carries no span: {:?}",
+            h.site
+        );
+    }
+    // Every boundary callee names a boundary the GRAPH classified, not a
+    // symbol invented here.
+    for b in bodies.bodies.values() {
+        for (site, callee) in b.callees() {
+            let Callee::Boundary(id) = callee else { continue };
+            assert!(
+                g.boundaries.contains_key(&id.0),
+                "`{}` at {:?} names a boundary the graph has no record of",
+                id.0,
+                site.op
+            );
+        }
+    }
+}
+
+/// The callee table is a function of the INSTANCE. `wrap<int>` and
+/// `wrap<string>` share one HIR body, so the same `Idx<Expr>` must name two
+/// DIFFERENT callee instances -- which is what makes a substitution unnecessary
+/// downstream. A table built per FUNCTION fails exactly here.
+#[test]
+fn one_generic_body_names_a_different_callee_per_instance() {
+    let (ws, g, bodies) = bodies_of(RICH);
+    let wraps: Vec<&skull::instance_graph::Instance> =
+        bodies.bodies.keys().filter(|i| g.identity(&ws, i).starts_with("wrap")).collect();
+    assert_eq!(wraps.len(), 2, "expected two `wrap` instances, got {wraps:?}");
+    let (a, b) = (&bodies.bodies[wraps[0]], &bodies.bodies[wraps[1]]);
+    let shared: Vec<(Idx<Expr>, &Callee, &Callee)> = a
+        .direct_calls
+        .iter()
+        .filter_map(|(e, x)| b.direct_calls.get(e).map(|y| (*e, x, y)))
+        .collect();
+    assert!(!shared.is_empty(), "the two `wrap` bodies share no call site");
+    let named: Vec<(String, String)> = shared
+        .iter()
+        .filter_map(|(_, x, y)| match (x, y) {
+            (Callee::Rock(x), Callee::Rock(y)) if x != y => {
+                Some((g.identity(&ws, x), g.identity(&ws, y)))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        named
+            .iter()
+            .any(|(x, y)| x.contains("p_int") && y.contains("p_string")
+                || x.contains("p_string") && y.contains("p_int")),
+        "the two instances of `wrap` call the same `ident`, so the callee table \
+         is not instance-specific: {named:?}"
+    );
+}
+
+/// A `for` head resolves to a concrete `iter` AND a concrete `next`, and a
+/// chained iterator's nested witnesses each get their own entry. Both live at
+/// one expression, which is why the table is keyed by SITE.
+#[test]
+fn iterator_operations_resolve_to_concrete_witnesses() {
+    let (ws, g, bodies) = bodies_of(RICH);
+    let main = bodies
+        .bodies
+        .keys()
+        .find(|i| g.identity(&ws, i) == "main")
+        .expect("no `main` body");
+    let ops = &bodies.bodies[main].iterator_ops;
+    let named: Vec<(IteratorOpKind, String)> = ops
+        .values()
+        .map(|op| {
+            (
+                op.kind,
+                match &op.callee {
+                    Callee::Rock(i) => g.identity(&ws, i),
+                    Callee::Boundary(b) => b.0.clone(),
+                },
+            )
+        })
+        .collect();
+    // Named, not merely present: the `for` over `[int]` resolves `next` at
+    // `VecIter<int>`, so the ELEMENT type is in the callee's identity.
+    assert!(
+        named.iter().any(|(k, n)| *k == IteratorOpKind::Iter && n.contains("p_int")),
+        "no concrete `iter` at the int element: {named:?}"
+    );
+    assert!(
+        named
+            .iter()
+            .any(|(k, n)| *k == IteratorOpKind::Next && n.starts_with("next_VecIter")),
+        "no concrete `next` for the `for` protocol: {named:?}"
+    );
+    // The chain's nested witnesses: `map(..).sum()` resolves MapIter's `next`
+    // and, one level down, VecIter's. Same expression, different paths.
+    let nested: Vec<&Site> = ops
+        .keys()
+        .filter(|s| matches!(&s.op, SiteOp::BoundNext(p) if p.len() > 1))
+        .collect();
+    assert!(!nested.is_empty(), "no nested conformance witness was recorded: {:?}", ops.keys());
+    let deep_expr = nested[0].expr;
+    let at_expr: Vec<&Site> = ops.keys().filter(|s| s.expr == deep_expr).collect();
+    assert!(
+        at_expr.len() > 1,
+        "the nested witness has no sibling at its own expression, so keying by \
+         expression alone would not have lost anything: {at_expr:?}"
+    );
+}
+
+/// A synthesized column-Map entry names ONE runtime name per site, chosen by the
+/// index's position and the stored value -- not the set of three the arm could
+/// have emitted.
+#[test]
+fn a_column_map_index_names_the_entry_its_arm_emits() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+value P { x: float, y: float }
+fn main() {
+    let m: Map<string, P> = map_new()
+    m["w"] = P { x: 1.0, y: 2.0 }
+    let r = m["r"]
+    let n: P? = null
+    m["n"] = n
+}
+"#,
+    );
+    let main = bodies.bodies.keys().find(|i| g.identity(&ws, i) == "main").expect("no `main`");
+    let mut names: Vec<&str> = bodies.bodies[main]
+        .synthesized_calls
+        .keys()
+        .filter_map(|s| match s.op {
+            SiteOp::Synthesized(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    // The write, the read, and the nullable write -- one name each, except the
+    // nullable write, whose arm genuinely emits both a slot and a free.
+    assert_eq!(
+        names,
+        vec!["__map_col_free", "__map_col_slot", "__map_col_slot", "__map_col_slot_checked"],
+        "the synthesized names are not the ones the three arms emit"
+    );
+    assert_eq!(
+        g.synthesized_approximated, 0,
+        "a Map index site could not decide its entry"
+    );
+}
+
+/// `__vec_data_sort`'s two arms split on the ELEMENT, so a site names one.
+#[test]
+fn a_column_vec_sort_names_one_of_its_two_arms() {
+    // Read off the SITES, not the table: the stdlib's `sort` synthesizes a call
+    // to a generic runtime entry with no binding record, so the site is a hole.
+    // Which NAME the arm chose is the subject here, and the site carries it
+    // either way -- that is the point of keying the operation.
+    let sorted = |src: &str| -> Vec<&'static str> {
+        let (_, g, _) = bodies_of(src);
+        let mut v: Vec<&'static str> = g
+            .call_sites
+            .values()
+            .flat_map(|sites| sites.keys())
+            .filter_map(|s| match s.op {
+                SiteOp::Synthesized(n @ ("__rock_col_sort" | "__rock_col_sort_leaves")) => Some(n),
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let boxed = sorted(
+        r#"
+value P { x: float, y: float }
+fn main() { let ps: [P] = []; ps.sort(_.x) }
+"#,
+    );
+    let leaves = sorted(
+        r#"
+nobox value Q { x: float, y: float }
+fn main() { let qs: [Q] = []; qs.sort(_.x) }
+"#,
+    );
+    assert_eq!(boxed, vec!["__rock_col_sort"], "a boxed element took the leaf arm");
+    assert_eq!(
+        leaves,
+        vec!["__rock_col_sort_leaves"],
+        "a `nobox` element did not take the leaf arm"
+    );
+}
+
+/// The requirement the type-table slice deferred, answered by MEASUREMENT
+/// rather than by reading the lowering paths: no callee or iterator entry is
+/// keyed on an expression inference recorded no type for, so no table needs one.
+///
+/// The oracles that answer instead are named by construction --
+/// `resolved_overload_calls` for a direct call, `IterWitness` /
+/// `for_iter_protocol` / `bound_call_trees` for the iterator ops, and the
+/// receiver's own type for a synthesized call (whose failures are
+/// `storage_failures`, reported against `synthesized_examined`).
+#[test]
+fn no_untyped_expression_is_a_callee_key() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn body(v: [int]) -> int {
+    let total = 0
+    for i in 0..3 { total = total + i }
+    for (i, x) in enumerate(v) { total = total + i + x }
+    let m: int? = 1
+    if let y = m { total = total + y }
+    let annotated: int = 0
+    if v.len() > 0 { annotated = 1 } else { annotated = 2 }
+    return total + annotated
+}
+fn main() { let a = body([1, 2]) }
+"#,
+    );
+    let inst = bodies
+        .bodies
+        .keys()
+        .find(|i| g.identity(&ws, i).starts_with("body"))
+        .expect("no `body` instance");
+    // The fixture can distinguish: it HAS untyped slots of every pinned kind,
+    // and it HAS callee entries. A body with neither would pass vacuously.
+    let untyped: Vec<&str> =
+        bodies.untyped.iter().filter(|(i, _)| i == inst).map(|(_, u)| u.kind).collect();
+    for kind in ["Call", "IfLet", "Range", "Var"] {
+        assert!(untyped.contains(&kind), "the fixture has no untyped `{kind}`: {untyped:?}");
+    }
+    assert!(
+        !bodies.bodies[inst].direct_calls.is_empty(),
+        "the fixture recorded no callee at all"
+    );
+    assert!(
+        bodies.census().untyped_as_callee_key.is_empty(),
+        "a callee entry is keyed on an expression with no inferred type: {:?}",
+        bodies.census().untyped_as_callee_key
+    );
+    // The untyped `Call` is a `for` header in TEMPLATE position
+    // (`lower_for_enumerate` emits a numeric loop), so it is not a call at all
+    // -- no callee names it, and neither does the iterator table.
+    let header = bodies
+        .untyped
+        .iter()
+        .find(|(i, u)| i == inst && u.kind == "Call")
+        .map(|(_, u)| u.expr)
+        .expect("no untyped `Call`");
+    assert!(
+        bodies.bodies[inst].callees().iter().all(|(s, _)| s.expr != header),
+        "the template-lowered `for` header has a callee entry after all"
+    );
+    assert_eq!(g.storage_failures.len(), 0, "a synthesized receiver had no concrete type");
+}
+
+/// A boundary the target cannot serve is a LOCATED REJECTION, not a table entry.
+/// Emitting a call to a body that does not exist on the target is exactly the
+/// fallback plan S 10 forbids.
+#[test]
+fn a_boundary_the_target_cannot_serve_is_a_located_rejection() {
+    let ws = check(
+        r#"
+inline(lua) fn only_lua(x: int) -> int = "return x + 1"
+fn main() { let a = only_lua(1) }
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, None);
+    // CONTROL: on Lua the same call is an ordinary boundary entry, so the
+    // rejection below is a property of the TARGET and not of the fixture.
+    let mut lua = instance_graph::build_for_target(
+        &ws,
+        roots.clone(),
+        false,
+        bone_semantic::hir::FnBackend::Lua,
+    );
+    let lua_bodies = concrete_body::build(&ws, &mut lua);
+    assert_eq!(
+        lua_bodies.invalid_boundary_calls.len(),
+        0,
+        "the Lua view rejected its own boundary: {:?}",
+        lua_bodies.render_invalid_boundary_calls(&ws, &lua)
+    );
+    assert!(
+        lua_bodies.bodies.values().any(|b| b
+            .direct_calls
+            .values()
+            .any(|c| matches!(c, Callee::Boundary(id) if id.0.starts_with("only_lua")))),
+        "the Lua view did not tabulate `only_lua` as a boundary at all"
+    );
+
+    let mut js = instance_graph::build_for_target(
+        &ws,
+        roots,
+        false,
+        bone_semantic::hir::FnBackend::Js,
+    );
+    let js_bodies = concrete_body::build(&ws, &mut js);
+    // The fixture's OWN call, named -- the stdlib supplies a background
+    // population of Lua-only boundaries on this target, and a total count would
+    // pass whether or not `only_lua` was among them.
+    let mine: Vec<&concrete_body::InvalidBoundaryCall> = js_bodies
+        .invalid_boundary_calls
+        .iter()
+        .filter(|c| c.boundary.0.starts_with("only_lua"))
+        .collect();
+    assert_eq!(
+        mine.len(),
+        1,
+        "expected `only_lua` to be rejected once, among {:?}",
+        js_bodies.render_invalid_boundary_calls(&ws, &js)
+    );
+    assert_eq!(mine[0].class, skull::instance_graph::BoundaryClass::InlineBody);
+    for c in &js_bodies.invalid_boundary_calls {
+        assert!(
+            !instance_graph::is_spanless(&c.span),
+            "an invalid-boundary rejection with no span cannot become a compile error: {:?}",
+            c.boundary
+        );
+    }
+    // And it is NOT in the tables: a consumer must not be able to read a
+    // callable entry for it.
+    assert!(
+        js_bodies.bodies.values().all(|b| b
+            .callees()
+            .iter()
+            .all(|(_, c)| !matches!(c, Callee::Boundary(id) if id.0.starts_with("only_lua")))),
+        "the rejected boundary is still a callee entry on JS"
+    );
 }

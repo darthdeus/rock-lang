@@ -2134,9 +2134,12 @@ fn main() {
     // silently drops to one site still satisfies "non-zero" while covering
     // less than it claims.
     let reasons: Vec<&str> = g.unresolved.iter().map(|u| u.reason).collect();
+    // Two sites, not four: the store names `__map_col_slot` alone now that the
+    // index's position and stored value decide the entry, and `m.len()` names
+    // `__map_col_len`. Both still have no JS sibling, which is the property.
     assert_eq!(
         reasons,
-        vec!["compiler-generated-entry-missing-for-target"; 4],
+        vec!["compiler-generated-entry-missing-for-target"; 2],
         "the unresolved population changed shape"
     );
     let spanless: Vec<&str> = g
