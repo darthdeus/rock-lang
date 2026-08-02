@@ -463,23 +463,10 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        // A diverging rhs (`?? return x`) yields no value: splatting it reads
-        // leaves off nil, which faults before the divergence it sits in front of.
-        if self.is_open() {
-            let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
-            for (&c, &value) in cells.iter().zip(&rhs_leaves) {
-                self.emit_cur(Inst::Store { cell: c, value });
-            }
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_repr_and_join(&cells, &RetSlot::Leaves(shape.clone()), rhs_repr, join)?;
 
         self.cur = lhs_bb;
-        for (&c, &value) in cells.iter().zip(&lhs_values) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
@@ -523,24 +510,12 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        // Same rule as the value twin: a diverging rhs has no slots to store.
-        if self.is_open() {
-            let rhs_slots = self.tuple_repr_to_slots(rhs_repr, &shape);
-            for (&c, &value) in cells.iter().zip(&rhs_slots) {
-                self.emit_cur(Inst::Store { cell: c, value });
-            }
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_repr_and_join(&cells, &RetSlot::Nested(shape.clone()), rhs_repr, join)?;
 
         // The lhs slots were read before the branch, so their block dominates this
         // one -- the same reason the value twin can reuse its leaves here.
         self.cur = lhs_bb;
-        for (&c, &value) in cells.iter().zip(&lhs_values) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
@@ -645,32 +620,42 @@ impl Builder<'_> {
         for &a in arg_idxs {
             // Struct spread `..op`: decompose the operand into per-field values
             // (a struct-literal operand is elided) and place each into the param
-            // slot of the same name. bone verified every field matches a param;
+            // slot of the same name. bone verified every field matches a param,
+            // and an unmatched one rejects here rather than being dropped -- a
+            // silent skip would pass `nil` for that parameter instead;
             // a named arg after the spread overrides via last-write-wins.
             if self.body.spread_args.contains(&a) {
                 for (fname, fv) in self.spread_field_insts(a)? {
-                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
-                        slots[pidx] = Some(fv);
-                    }
+                    let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
+                        gap(format!("spread field `{fname}` matches no parameter"))
+                    })?;
+                    slots[pidx] = Some(fv);
                 }
                 continue;
             }
             let v = self.lower_expr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
-                Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
+                Some(nm) => param_names
+                    .iter()
+                    .position(|p| p == nm)
+                    .ok_or_else(|| gap(format!("named argument `{nm}` matches no parameter")))?,
                 None => {
                     let i = next_pos;
                     next_pos += 1;
                     i
                 }
             };
-            if pidx < slots.len() {
-                let v = match self.param_ty(func, pidx) {
-                    Some(t) => self.coerced(v, a, t),
-                    None => v,
-                };
-                slots[pidx] = Some(v);
+            if pidx >= slots.len() {
+                return Err(gap(format!(
+                    "argument lands in slot {pidx} of {} parameters",
+                    slots.len()
+                )));
             }
+            let v = match self.param_ty(func, pidx) {
+                Some(t) => self.coerced(v, a, t),
+                None => v,
+            };
+            slots[pidx] = Some(v);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::with_capacity(hi);

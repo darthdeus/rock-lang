@@ -10,14 +10,14 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
 
 fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
@@ -106,7 +106,7 @@ fn reject_unknown_root() {
 
 fn reject_entry(src: &str, root: &str, needle: &str) {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
     let err = skull_codegen_glsl::emit_shader_entry(&ws, mid, root, skull_codegen_glsl::GlslProfile::Core330)

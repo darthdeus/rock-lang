@@ -13,7 +13,7 @@ use skull_mir::mir::{Inst, MirFunc};
 /// routes through a stdlib op fn). Captures are about cell access shape, not
 /// operations, so `() => x` / `n = 5` suffice.
 fn lower(src: &str, fn_name: &str) -> MirFunc {
-    let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
+    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut vec![ast]).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
     let (fid, _) = ws
@@ -179,7 +179,7 @@ fn rewrite_last_store_to_dest_write(func: &mut MirFunc, cell: comfy_la_arena::Id
 fn dest_written_capture_boxes() {
     let mut func = lower(
         "value V { a: int, b: int }\n\
-         fn g() -> V { return V { 1, 2 } }\n\
+         fn g() -> V { return V { a: 1, b: 2 } }\n\
          fn f() -> fn() -> int { let v = g() let h = () => v.a v = g() return h }",
         "f",
     );
@@ -204,7 +204,7 @@ fn dest_written_capture_boxes() {
 fn dest_written_inside_lambda_boxes() {
     let mut func = lower(
         "value V { a: int, b: int }\n\
-         fn g() -> V { return V { 1, 2 } }\n\
+         fn g() -> V { return V { a: 1, b: 2 } }\n\
          fn f() -> fn() -> int { let v = g() let h = () => { v = g() return v.a } return h }",
         "f",
     );

@@ -27,7 +27,7 @@ use ustr::Ustr;
 
 fn fn_names(path: &str, want_js: bool) -> HashSet<String> {
     let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    let ast = skull_parser::parse_module(&src, Ustr::from(path)).expect("parse");
+    let ast = skull_parser::parse_module_clean(&src, Ustr::from(path)).expect("parse");
     assert!(ast.recovery_errors.is_empty(), "{path} must parse cleanly");
     ast.items
         .iter()
@@ -58,7 +58,7 @@ fn the_web_engine_holds_no_stdlib_js_bodies() {
     let mut stdlib: HashSet<String> = HashSet::new();
     for f in rock_host::stdlib_loader::stdlib_files() {
         let src = f.contents;
-        let ast = skull_parser::parse_module(src, Ustr::from(f.name)).expect("stdlib parse");
+        let ast = skull_parser::parse_module_clean(src, Ustr::from(f.name)).expect("stdlib parse");
         for item in &ast.items {
             if let ItemKind::Function(fun) = &item.kind {
                 // A JS body in `stdlib/js.rock` is the RIGHT home, not a clash.
@@ -112,7 +112,7 @@ fn a_stdlib_sibling_pair_agrees_on_arity() {
     let mut lua: HashMap<String, usize> = HashMap::new();
     let mut js: HashMap<String, usize> = HashMap::new();
     for f in rock_host::stdlib_loader::stdlib_files() {
-        let ast = skull_parser::parse_module(f.contents, Ustr::from(f.name)).expect("stdlib parse");
+        let ast = skull_parser::parse_module_clean(f.contents, Ustr::from(f.name)).expect("stdlib parse");
         for item in &ast.items {
             let ItemKind::Function(fun) = &item.kind else { continue };
             // `@scalar_abi` params explode into leaves on the JS side, so the two
@@ -160,7 +160,7 @@ fn sibling_facts_with(
     want_js: bool,
     native_side: bool,
 ) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
-    let ast = skull_parser::parse_module(src, Ustr::from(id)).expect("parse");
+    let ast = skull_parser::parse_module_clean(src, Ustr::from(id)).expect("parse");
     assert!(ast.recovery_errors.is_empty(), "{id} must parse cleanly");
     let mut out = std::collections::HashMap::new();
     for item in &ast.items {

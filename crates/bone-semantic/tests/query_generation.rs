@@ -15,7 +15,7 @@ use bone_semantic::semantic_passes::semantic_pass;
 #[should_panic(expected = "stale inference")]
 fn stale_body_generation_panics_at_type_at() {
     let src = "fn f() -> int {\n    let a = 1\n    a\n}";
-    let module = skull_parser::parse_module(src, Ustr::from("<query_generation>")).unwrap();
+    let module = skull_parser::parse_module_clean(src, Ustr::from("<query_generation>")).unwrap();
     let mut ws = semantic_pass(&mut [module]).unwrap();
 
     let mid = ws.modules

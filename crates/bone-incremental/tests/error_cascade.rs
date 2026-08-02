@@ -40,7 +40,7 @@ fn diags(src: &str) -> Vec<String> {
 }
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from("<error_cascade>")).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from("<error_cascade>")).expect("parse")
 }
 
 // Rendered type at byte `off` in `src`, read via the same `type_at` path hover

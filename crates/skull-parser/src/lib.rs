@@ -40,6 +40,23 @@ pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
     Ok(ast)
 }
 
+/// [`parse_module`] for a caller that has NO recovery story: a recovered syntax
+/// error is an `Err` here rather than a dropped item in an otherwise-`Ok` tree.
+///
+/// Test fixtures and corpus tools want this one. `parse_module(..).expect(..)`
+/// reads like it proves the source parsed, and does not -- a malformed item is
+/// silently absent from the AST, so the test runs against a partial workspace
+/// and passes for a reason that has nothing to do with its name. That is how a
+/// `""" .. """` inline body missing its `=` sat in the JS emitter fixtures:
+/// accepted, dropped, and the rejection under test came from a different path.
+pub fn parse_module_clean(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
+    let ast = parse_module(source, file)?;
+    match ast.recovery_errors.first() {
+        Some(e) => Err(e.clone()),
+        None => Ok(ast),
+    }
+}
+
 /// Parse exactly ONE top-level item from `source` (the text of a single item),
 /// with spans anchored at `(offset, line, column)` -- the absolute position of
 /// `source[0]` within the outer file. Used by the incremental driver to re-parse
@@ -182,6 +199,24 @@ mod tests {
             .expect("parse_one_item");
         assert_eq!(mini.items[0].span.offset_range, item.span.offset_range, "annotated item span");
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
+    }
+
+    #[test]
+    fn parse_module_clean_rejects_what_parse_module_recovers_from() {
+        // A fn body-less because its inline body lost its `=`: recovered, the
+        // item dropped, and `parse_module` still Ok. The strict form is the
+        // oracle a fixture helper needs.
+        let src = "inline(lua) fn f(x: int) -> int \"\"\" return x \"\"\"\n";
+        let file = Ustr::from("<clean>");
+        let lenient = parse_module(src, file).expect("recovering parse still returns a tree");
+        assert!(!lenient.recovery_errors.is_empty(), "the dropped item is recorded");
+        assert!(
+            !lenient.items.iter().any(|i| matches!(&i.kind, ItemKind::Function(_))),
+            "the malformed fn is absent from the lenient tree, which is the trap"
+        );
+        assert!(parse_module_clean(src, file).is_err(), "strict parse rejects it");
+        // Both sides: clean source must still come back Ok.
+        assert!(parse_module_clean("fn f(x: int) -> int { return x }\n", file).is_ok());
     }
 
     fn first_fn(ast: &Ast) -> &FunctionDef {
@@ -420,6 +455,31 @@ mod tests {
         // The block must not leak into normal lambda parsing.
         let s = body_sexp("fn f() { let g = x => x + 1 }");
         assert!(s.contains("lambda") || s.contains("=>"), "bare-ident lambda still parses: {s}");
+    }
+
+    #[test]
+    fn item_recovery_does_not_swallow_the_next_fn() {
+        // An item error detected AT an item boundary leaves the parser sitting on
+        // the next `fn`. Recovery used to force-consume a token before scanning,
+        // so that `fn` was eaten and the whole following function vanished from
+        // the AST -- a valid item lost to a neighbour's error, which in the editor
+        // took hover/completion down with it.
+        let src = "fn helper(a: int) -> int { return a * 2 }\n\
+                   fn incomplete(x: int) -> int\n\
+                   fn survivor() -> int { return 7 }\n";
+        let ast = parse_module(src, Ustr::from("<recovery>")).expect("total parse");
+        assert_eq!(ast.recovery_errors.len(), 1, "exactly the one malformed item");
+        let fns: Vec<&str> = ast
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Function(f) => Some(f.name.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(fns.contains(&"helper"), "the item before survives: {fns:?}");
+        assert!(fns.contains(&"survivor"), "the item AFTER survives: {fns:?}");
+        assert!(!fns.contains(&"incomplete"), "the malformed item is the only one dropped: {fns:?}");
     }
 
     #[test]

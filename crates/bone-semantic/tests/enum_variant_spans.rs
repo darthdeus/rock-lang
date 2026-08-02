@@ -19,7 +19,7 @@
 use bone_semantic::prelude::*;
 
 fn parse_rock(src: &str) -> Result<skull_parser::Ast, CompilerError> {
-    skull_parser::parse_module(src, Ustr::from("<enum_variant_spans>"))
+    skull_parser::parse_module_clean(src, Ustr::from("<enum_variant_spans>"))
 }
 
 fn check(src: &str) -> bone_semantic::inference::Workspace {

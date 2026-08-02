@@ -20,7 +20,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
@@ -70,7 +70,7 @@ fn corpus_lowering_coverage() {
     for file in &files {
         let Ok(src) = std::fs::read_to_string(file) else { continue };
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let Ok(user) = skull_parser::parse_module(&src, ustr::Ustr::from("<test>")) else {
+            let Ok(user) = skull_parser::parse_module_clean(&src, ustr::Ustr::from("<test>")) else {
                 return None;
             };
             let mut modules = STDLIB.clone();

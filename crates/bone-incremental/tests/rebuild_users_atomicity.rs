@@ -21,7 +21,7 @@ fn __op_sub(a: int, b: int) -> int { 0 }
 ";
 
 fn warm() -> Vec<skull_parser::Ast> {
-    vec![skull_parser::parse_module(WARM, Ustr::from("<warm>")).expect("warm parses")]
+    vec![skull_parser::parse_module_clean(WARM, Ustr::from("<warm>")).expect("warm parses")]
 }
 
 #[test]

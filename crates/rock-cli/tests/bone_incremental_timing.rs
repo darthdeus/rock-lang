@@ -19,7 +19,7 @@ fn warm_stdlib() -> Vec<skull_parser::Ast> {
         .iter()
         .map(|f| {
             let id = ustr::Ustr::from(format!("<bone-stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id)
+            skull_parser::parse_module_clean(f.contents, id)
                 .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
         })
         .collect()

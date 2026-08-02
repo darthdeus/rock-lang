@@ -22,7 +22,7 @@ use ustr::Ustr;
 fn js_decl_arities() -> HashMap<String, usize> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stone/engine/web/js_ffi.rock");
     let src = std::fs::read_to_string(path).expect("read js_ffi.rock");
-    let ast = skull_parser::parse_module(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
+    let ast = skull_parser::parse_module_clean(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
     assert!(ast.recovery_errors.is_empty(), "js_ffi.rock must parse cleanly: {:?}", ast.recovery_errors);
 
     let mut out = HashMap::new();
@@ -92,7 +92,7 @@ fn prelude_and_decl_arities_agree() {
 fn extern_js_decls() -> Vec<String> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stone/engine/web/js_ffi.rock");
     let src = std::fs::read_to_string(path).expect("read js_ffi.rock");
-    let ast = skull_parser::parse_module(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
+    let ast = skull_parser::parse_module_clean(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
     ast.items
         .iter()
         .filter_map(|item| {
@@ -116,7 +116,7 @@ fn extern_js_decls() -> Vec<String> {
 fn a_nomangle_js_fn_has_no_prelude_twin() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stone/engine/web/js_ffi.rock");
     let src = std::fs::read_to_string(path).expect("read js_ffi.rock");
-    let ast = skull_parser::parse_module(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
+    let ast = skull_parser::parse_module_clean(&src, Ustr::from("<js_ffi>")).expect("parse js_ffi.rock");
     let prelude = prelude_arities();
 
     let mut twins: Vec<String> = ast

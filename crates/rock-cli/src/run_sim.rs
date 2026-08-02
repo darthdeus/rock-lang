@@ -921,6 +921,7 @@ fn prefix_with_site(site: &str, msg: &str) -> String {
     }
 }
 
+#[derive(Debug)]
 enum SnapResult {
     Pass,
     Wrote,
@@ -1038,12 +1039,25 @@ fn handle_image_snapshot(
         ));
     }
 
-    if update || !baseline.exists() {
+    if update {
         if let Some(parent) = baseline.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(produced, baseline)?;
         return Ok(SnapResult::Wrote);
+    }
+    // An assertion that cannot be evaluated is not satisfied. Bootstrapping a
+    // missing golden from the current frame and counting it as a passing expect
+    // meant a sim whose goldens are untracked -- `vfx_capture.snap/` is
+    // gitignored as display-specific -- self-passed on any machine that had
+    // never run it, proving nothing about the pixels it exists to check.
+    if !baseline.exists() {
+        return Ok(SnapResult::Fail(format!(
+            "image_snapshot `{}` has no baseline at `{}`; re-run with --update-snapshots to \
+             create it (a missing golden is not a pass)",
+            img.name,
+            baseline.display()
+        )));
     }
 
     let diff = crate::image_video::image_diff(baseline, produced)
@@ -1354,6 +1368,46 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A MISSING image golden used to bootstrap itself from the current frame
+    /// and count as a passing expect, so a sim whose goldens are untracked
+    /// (`mag/tests/sims/vfx_capture.snap/`, gitignored as display-specific)
+    /// self-passed on any machine that had never run it -- the assertion was
+    /// never evaluated. Only `--update-snapshots` may write a baseline.
+    #[test]
+    fn a_missing_image_golden_is_not_a_pass() {
+        let dir = std::env::temp_dir().join(format!(
+            "rock-golden-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let produced = dir.join("produced.png");
+        // A 1x1 PNG; the bytes never get compared on the paths under test.
+        std::fs::write(&produced, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).expect("write");
+        let baseline = dir.join("golden.png");
+        let img = ImageSnapshotOp {
+            name: "golden".into(),
+            path: produced.to_string_lossy().into_owned(),
+            tol: 0.001,
+            save_ok: true,
+            site: String::new(),
+        };
+
+        let r = handle_image_snapshot(&img, &baseline, false).expect("no hard error");
+        assert!(
+            matches!(r, SnapResult::Fail(_)),
+            "a missing golden must not pass; got {r:?}"
+        );
+        assert!(!baseline.exists(), "and it must NOT have been written behind our back");
+
+        // Both sides: with --update-snapshots, writing it is the point.
+        let r = handle_image_snapshot(&img, &baseline, true).expect("no hard error");
+        assert!(matches!(r, SnapResult::Wrote), "update writes the baseline; got {r:?}");
+        assert!(baseline.exists(), "the baseline is created under update");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn extract_str_field_basic() {
