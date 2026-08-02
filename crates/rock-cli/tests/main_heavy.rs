@@ -28,3 +28,6 @@ mod uniform_block_gate;
 mod skull_overlay_wipe;
 #[path = "web_smoke_tests.rs"]
 mod web_smoke_tests;
+
+#[path = "shader_texture_census.rs"]
+mod shader_texture_census;
